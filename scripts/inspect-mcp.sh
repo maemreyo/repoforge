@@ -10,5 +10,5 @@ if ! command -v npx >/dev/null 2>&1; then
   exit 1
 fi
 
-exec npx -y @modelcontextprotocol/inspector@latest \
+exec npx -y @modelcontextprotocol/inspector@latest -- \
   "$RF" --config "$CONFIG" serve
