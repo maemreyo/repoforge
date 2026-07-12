@@ -42,10 +42,12 @@ instead.
 ```text
 src/repoforge/config.py       TOML models, defaults, and validation
 src/repoforge/discovery.py    repository detection and config rendering
+src/repoforge/user_config.py  minimal user intent and reviewed runtime config locks
 src/repoforge/security.py     branch, path, patch, and policy enforcement
 src/repoforge/runner.py       constrained subprocess execution
 src/repoforge/state.py        workspace registry, locks, fingerprints, receipts
 src/repoforge/service.py      Git, worktree, gh, verification, and PR operations
+src/repoforge/onboarding.py   setup, repository enrollment, and tunnel startup UX
 src/repoforge/server.py       MCP tool metadata and registration
 src/repoforge/cli.py          init, doctor, smoke test, audit, and tunnel DX
 tests/                        unit, security, integration, CLI, and MCP contract tests

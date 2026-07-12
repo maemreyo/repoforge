@@ -1,0 +1,463 @@
+"""One-command setup, repository management, and secure tunnel startup."""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import getpass
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Protocol
+
+from .config import DEFAULT_CONFIG_PATH, load_config
+from .errors import ConfigError, PersonalCodingMCPError
+from .security import slugify
+from .service import CodingService
+from .user_config import (
+    TunnelSettings,
+    UserConfig,
+    UserRepository,
+    atomic_write,
+    build_lock_text,
+    config_kind,
+    detect_repository_for_setup,
+    load_user_config,
+    profile_summary,
+    read_toml,
+    resolve_runtime_config_path,
+    resolved_config_path,
+    sha256_file,
+    sha256_text,
+    write_user_and_lock,
+)
+
+
+def _json(value: Any) -> None:
+    print(json.dumps(value, indent=2, ensure_ascii=False))
+
+
+def _tunnel_state_path(config_path: Path) -> Path:
+    return resolved_config_path(config_path).with_name("tunnel-profile.json")
+
+
+class _SmokeService(Protocol):
+    def repo_status(self, repo_id: str) -> dict[str, Any]: ...
+
+    def repo_context(self, repo_id: str) -> dict[str, Any]: ...
+
+    def workspace_create(
+        self, repo_id: str, task_slug: str, base: str | None = None
+    ) -> dict[str, Any]: ...
+
+    def workspace_status(self, workspace_id: str) -> dict[str, Any]: ...
+
+    def workspace_tree(self, workspace_id: str, max_entries: int = 2000) -> dict[str, Any]: ...
+
+    def workspace_diff(self, workspace_id: str, staged: bool = False) -> dict[str, Any]: ...
+
+    def workspace_remove(
+        self, workspace_id: str, delete_local_branch: bool = False
+    ) -> dict[str, Any]: ...
+
+
+def _smoke_repository(service: _SmokeService, repo_id: str) -> dict[str, Any]:
+    service.repo_status(repo_id)
+    service.repo_context(repo_id)
+    workspace = service.workspace_create(repo_id, "repoforge-setup-smoke")
+    workspace_id = str(workspace["workspace_id"])
+    try:
+        service.workspace_status(workspace_id)
+        service.workspace_tree(workspace_id, 50)
+        service.workspace_diff(workspace_id)
+    finally:
+        service.workspace_remove(workspace_id, delete_local_branch=True)
+    return {"repo_id": repo_id, "ok": True}
+
+
+def _setup(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    if config_path.exists() and not args.force:
+        raise ConfigError(
+            f"Configuration already exists: {config_path}. Use `rf repo add`, or pass --force."
+        )
+    repositories: list[UserRepository] = []
+    seen: set[str] = set()
+    for value in args.repos:
+        repo_path = Path(value).expanduser().resolve()
+        repo_id = slugify(repo_path.name)
+        if repo_id in seen:
+            raise ConfigError(f"Duplicate detected repository id {repo_id!r}; rename one directory")
+        repositories.append(UserRepository(repo_id=repo_id, path=repo_path))
+        seen.add(repo_id)
+    user_config = UserConfig(
+        source_path=config_path,
+        tunnel=TunnelSettings(tunnel_id=args.tunnel_id, profile=args.profile),
+        repositories=tuple(repositories),
+    )
+    lock_path, detections = write_user_and_lock(user_config)
+    service = CodingService(load_config(lock_path))
+    doctor = service.doctor()
+    smoke: list[dict[str, Any]] = []
+    if not args.skip_smoke and doctor["ok"]:
+        for repository in repositories:
+            try:
+                smoke.append(_smoke_repository(service, repository.repo_id))
+            except Exception as exc:
+                smoke.append(
+                    {
+                        "repo_id": repository.repo_id,
+                        "ok": False,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+    result = {
+        "ok": bool(doctor["ok"]) and all(item["ok"] for item in smoke),
+        "config": str(config_path),
+        "resolved_config": str(lock_path),
+        "tunnel_id": args.tunnel_id,
+        "repositories": [repository.repo_id for repository in repositories],
+        "profiles": profile_summary(detections),
+        "doctor": doctor["summary"],
+        "smoke": smoke,
+        "next": "Run `rf start`.",
+    }
+    _json(result)
+    return 0 if result["ok"] else 1
+
+
+def _load_minimal_or_error(path: str | Path) -> UserConfig:
+    return load_user_config(Path(path).expanduser().resolve())
+
+
+def _repo_list(args: argparse.Namespace) -> int:
+    config = _load_minimal_or_error(args.config)
+    lock_path = resolved_config_path(config.source_path)
+    try:
+        runtime = resolve_runtime_config_path(config.source_path)
+        lock_status = "current"
+    except ConfigError as exc:
+        runtime = lock_path
+        lock_status = str(exc)
+    _json(
+        {
+            "config": str(config.source_path),
+            "resolved_config": str(runtime),
+            "lock_status": lock_status,
+            "repositories": [
+                {"repo_id": repository.repo_id, "path": str(repository.path)}
+                for repository in config.repositories
+            ],
+        }
+    )
+    return 0
+
+
+def _repo_add(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    expected_source_sha256 = sha256_file(config_path)
+    config = _load_minimal_or_error(config_path)
+    path = Path(args.path).expanduser().resolve()
+    repo_id = args.repo_id or slugify(path.name)
+    detect_repository_for_setup(path, repo_id)
+    if repo_id in {repository.repo_id for repository in config.repositories}:
+        raise ConfigError(f"Repository id already exists: {repo_id}")
+    if path in {repository.path for repository in config.repositories}:
+        raise ConfigError(f"Repository path already exists: {path}")
+    updated = replace(
+        config,
+        repositories=(*config.repositories, UserRepository(repo_id=repo_id, path=path)),
+    )
+    lock_path, detections = write_user_and_lock(
+        updated, expected_source_sha256=expected_source_sha256
+    )
+    _json(
+        {
+            "added": repo_id,
+            "path": str(path),
+            "config": str(config.source_path),
+            "resolved_config": str(lock_path),
+            "profiles": profile_summary(detections)[repo_id],
+        }
+    )
+    return 0
+
+
+def _repo_remove(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    expected_source_sha256 = sha256_file(config_path)
+    config = _load_minimal_or_error(config_path)
+    remaining = tuple(
+        repository for repository in config.repositories if repository.repo_id != args.repo_id
+    )
+    if len(remaining) == len(config.repositories):
+        raise ConfigError(f"Unknown repository id: {args.repo_id}")
+    if not remaining:
+        raise ConfigError("Cannot remove the final repository; create a replacement config instead")
+    updated = replace(config, repositories=remaining)
+    lock_path, _ = write_user_and_lock(
+        updated, expected_source_sha256=expected_source_sha256
+    )
+    _json(
+        {
+            "removed": args.repo_id,
+            "config": str(config.source_path),
+            "resolved_config": str(lock_path),
+        }
+    )
+    return 0
+
+
+def _repo_refresh(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    source_text = config_path.read_text(encoding="utf-8")
+    expected_source_sha256 = sha256_text(source_text)
+    config = _load_minimal_or_error(config_path)
+    if sha256_file(config_path) != expected_source_sha256:
+        raise ConfigError("Configuration changed while it was being read; retry refresh")
+    candidate, detections = build_lock_text(config, source_text)
+    lock_path = resolved_config_path(config.source_path)
+    current = lock_path.read_text(encoding="utf-8") if lock_path.is_file() else ""
+    if current == candidate:
+        _json({"changed": False, "resolved_config": str(lock_path), "profiles": profile_summary(detections)})
+        return 0
+    diff = "".join(
+        difflib.unified_diff(
+            current.splitlines(keepends=True),
+            candidate.splitlines(keepends=True),
+            fromfile=str(lock_path),
+            tofile=f"{lock_path} (proposed)",
+        )
+    )
+    if not args.accept:
+        print(diff, end="")
+        print("\nNo changes written. Re-run with `rf repo refresh --accept` after review.", file=sys.stderr)
+        return 2
+    if sha256_file(config_path) != expected_source_sha256:
+        raise ConfigError("Configuration changed during refresh; no lock was written")
+    atomic_write(lock_path, candidate)
+    _json(
+        {
+            "changed": True,
+            "accepted": True,
+            "resolved_config": str(lock_path),
+            "profiles": profile_summary(detections),
+        }
+    )
+    return 0
+
+
+def _repoforge_command(config_path: Path) -> list[str]:
+    executable = shutil.which("repoforge") or shutil.which("rf")
+    if executable:
+        return [executable, "--config", str(config_path), "serve"]
+    return [sys.executable, "-m", "repoforge", "--config", str(config_path), "serve"]
+
+
+def _run_checked(argv: list[str], *, env: dict[str, str], timeout: int = 60) -> None:
+    result = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+        env=env,
+    )
+    if result.returncode != 0:
+        detail = (result.stdout + result.stderr).strip()
+        raise ConfigError(f"Command failed ({shlex.join(argv)}): {detail}")
+
+
+def _start(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    runtime_path = resolve_runtime_config_path(config_path)
+    raw = read_toml(config_path)
+    if config_kind(raw) == "minimal":
+        user_config = load_user_config(config_path)
+        tunnel_id = args.tunnel_id or user_config.tunnel.tunnel_id
+        profile = args.profile or user_config.tunnel.profile
+    else:
+        tunnel_id = args.tunnel_id
+        profile = args.profile or "repoforge"
+        if not tunnel_id:
+            raise ConfigError("Legacy config requires `rf start --tunnel-id tunnel_...`")
+
+    service = CodingService(load_config(runtime_path))
+    doctor: dict[str, Any] | None = None
+    if not args.skip_doctor:
+        doctor = service.doctor()
+        if not doctor["ok"]:
+            _json({"ok": False, "doctor": doctor, "message": "Fix doctor errors before starting."})
+            return 1
+
+    tunnel_client = shutil.which("tunnel-client")
+    if not tunnel_client and not args.dry_run:
+        raise ConfigError("tunnel-client is not in PATH")
+    tunnel_client = tunnel_client or "tunnel-client"
+    mcp_argv = _repoforge_command(config_path)
+    mcp_command = shlex.join(mcp_argv)
+    init_argv = [
+        tunnel_client,
+        "init",
+        "--sample",
+        "sample_mcp_stdio_local",
+        "--profile",
+        profile,
+        "--tunnel-id",
+        tunnel_id,
+        "--mcp-command",
+        mcp_command,
+    ]
+    doctor_argv = [tunnel_client, "doctor", "--profile", profile, "--explain"]
+    run_argv = [tunnel_client, "run", "--profile", profile]
+    fingerprint = sha256_text(
+        json.dumps(
+            {
+                "tunnel_id": tunnel_id,
+                "profile": profile,
+                "mcp_command": mcp_command,
+                "runtime_config": str(runtime_path),
+            },
+            sort_keys=True,
+        )
+    )
+    state_path = _tunnel_state_path(config_path)
+    previous: dict[str, Any] = {}
+    if state_path.is_file():
+        try:
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+            previous = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+
+    if args.dry_run:
+        _json(
+            {
+                "ok": True,
+                "config": str(config_path),
+                "resolved_config": str(runtime_path),
+                "doctor": doctor["summary"] if doctor else None,
+                "would_initialize": previous.get("fingerprint") != fingerprint,
+                "init": init_argv,
+                "doctor_command": doctor_argv,
+                "run": run_argv,
+            }
+        )
+        return 0
+
+    environment = dict(os.environ)
+    key = environment.get("CONTROL_PLANE_API_KEY")
+    if not key:
+        if not sys.stdin.isatty():
+            raise ConfigError(
+                "CONTROL_PLANE_API_KEY is not set and no interactive terminal is available"
+            )
+        try:
+            key = getpass.getpass("Tunnel API key: ").strip()
+        except EOFError as exc:
+            raise ConfigError("Cannot read the tunnel API key from this terminal") from exc
+        if not key:
+            raise ConfigError("Tunnel API key cannot be empty")
+        environment["CONTROL_PLANE_API_KEY"] = key
+
+    if previous.get("fingerprint") != fingerprint:
+        _run_checked(init_argv, env=environment)
+        atomic_write(
+            state_path,
+            json.dumps(
+                {"fingerprint": fingerprint, "updated_at": datetime.now(timezone.utc).isoformat()},
+                indent=2,
+            )
+            + "\n",
+        )
+    try:
+        _run_checked(doctor_argv, env=environment)
+    except ConfigError:
+        _run_checked(init_argv, env=environment)
+        _run_checked(doctor_argv, env=environment)
+        atomic_write(
+            state_path,
+            json.dumps(
+                {"fingerprint": fingerprint, "updated_at": datetime.now(timezone.utc).isoformat()},
+                indent=2,
+            )
+            + "\n",
+        )
+    os.execvpe(run_argv[0], run_argv, environment)
+    raise AssertionError("os.execvpe returned unexpectedly")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rf", add_help=False)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    setup = subparsers.add_parser("setup", help="Configure repositories and the tunnel in one step")
+    setup.add_argument("repos", nargs="+", help="Local Git repository paths")
+    setup.add_argument("--tunnel-id", required=True)
+    setup.add_argument("--profile", default="repoforge")
+    setup.add_argument("--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH)))
+    setup.add_argument("--force", action="store_true")
+    setup.add_argument("--skip-smoke", action="store_true")
+
+    start = subparsers.add_parser("start", help="Validate configuration and start the secure tunnel")
+    start.add_argument("--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH)))
+    start.add_argument("--tunnel-id", default=os.environ.get("TUNNEL_ID"))
+    start.add_argument("--profile", default=os.environ.get("TUNNEL_PROFILE"))
+    start.add_argument("--skip-doctor", action="store_true")
+    start.add_argument("--dry-run", action="store_true")
+
+    repo = subparsers.add_parser("repo", help="Manage repositories in the minimal config")
+    repo.add_argument("--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH)))
+    repo_subparsers = repo.add_subparsers(dest="repo_command", required=True)
+    repo_subparsers.add_parser("list")
+    add = repo_subparsers.add_parser("add")
+    add.add_argument("path")
+    add.add_argument("--repo-id", default=None)
+    remove = repo_subparsers.add_parser("remove")
+    remove.add_argument("repo_id")
+    refresh = repo_subparsers.add_parser("refresh")
+    refresh.add_argument("--accept", action="store_true")
+    return parser
+
+
+def _normalize_argv(argv: list[str]) -> list[str]:
+    commands = {"setup", "start", "repo"}
+    if len(argv) >= 3 and argv[0] == "--config" and argv[2] in commands:
+        return [argv[2], "--config", argv[1], *argv[3:]]
+    if len(argv) >= 2 and argv[0].startswith("--config=") and argv[1] in commands:
+        return [argv[1], argv[0], *argv[2:]]
+    return argv
+
+
+def handle_onboarding_command(argv: list[str]) -> int | None:
+    normalized = _normalize_argv(list(argv))
+    if not normalized or normalized[0] not in {"setup", "start", "repo"}:
+        return None
+    parser = _build_parser()
+    try:
+        args = parser.parse_args(normalized)
+        if args.command == "setup":
+            return _setup(args)
+        if args.command == "start":
+            return _start(args)
+        if args.command == "repo":
+            if args.repo_command == "list":
+                return _repo_list(args)
+            if args.repo_command == "add":
+                return _repo_add(args)
+            if args.repo_command == "remove":
+                return _repo_remove(args)
+            if args.repo_command == "refresh":
+                return _repo_refresh(args)
+        parser.error("Unknown onboarding command")
+    except (PersonalCodingMCPError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 2

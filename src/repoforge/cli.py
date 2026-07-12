@@ -15,8 +15,10 @@ from typing import Any
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .discovery import detect_repository, render_config
 from .errors import PersonalCodingMCPError
+from .onboarding import handle_onboarding_command
 from .server import create_server
 from .service import CodingService
+from .user_config import resolve_runtime_config_path
 
 
 def _write_text(destination: Path, content: str, force: bool) -> None:
@@ -86,6 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument("--repo-id", default=None, help="Short model-facing repository id")
     init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
+
+    subparsers.add_parser(
+        "setup", help="Configure multiple repositories and a secure tunnel in one step"
+    )
+    subparsers.add_parser(
+        "start", help="Validate the reviewed config lock and start the secure tunnel"
+    )
+    subparsers.add_parser(
+        "repo", help="Add, remove, list, or refresh repositories in the minimal config"
+    )
 
     inspect_parser = subparsers.add_parser(
         "inspect-repo", help="Preview detected ecosystem, scripts, profiles, and instructions"
@@ -171,8 +183,13 @@ def _smoke_test(service: CodingService, repo_id: str | None) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    onboarding_result = handle_onboarding_command(raw_argv)
+    if onboarding_result is not None:
+        return onboarding_result
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     config_path = Path(args.config).expanduser().resolve()
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
@@ -230,10 +247,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "serve":
             # stdio transport reserves stdout for JSON-RPC protocol messages.
-            create_server(config_path).run(transport="stdio")
+            create_server(resolve_runtime_config_path(config_path)).run(transport="stdio")
             return 0
 
-        service = CodingService(load_config(config_path))
+        service = CodingService(load_config(resolve_runtime_config_path(config_path)))
         if args.command == "doctor":
             result = service.doctor()
             if args.fix:

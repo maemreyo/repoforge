@@ -1,99 +1,106 @@
 # Connect RepoForge to ChatGPT with Secure MCP Tunnel
 
-This guide connects a local RepoForge process to ChatGPT web. RepoForge runs on your machine and uses
-your existing local Git checkout and GitHub CLI authentication.
+RepoForge now has a two-command happy path. The user config contains only the tunnel identifier and
+local repositories; RepoForge generates a reviewed runtime lock with the full safety policy and
+allowlisted verification commands.
 
-## 1. Install RepoForge
-
-Clone the repository and synchronize the locked environment:
-
-```bash
-git clone https://github.com/maemreyo/repoforge.git
-cd repoforge
-uv sync --extra dev
-```
-
-Authenticate GitHub CLI:
+## 1. Install RepoForge and authenticate GitHub
 
 ```bash
+uv tool install git+https://github.com/maemreyo/repoforge.git
 gh auth login
 gh auth setup-git
 ```
 
-## 2. Configure repositories
-
-Generate a configuration for one repository:
-
-```bash
-uv run rf   --config "$HOME/.config/repoforge/config.toml"   init   --repo /absolute/path/to/repository   --repo-id my-repository
-```
-
-Alternatively, review and install one of the tracked examples:
-
-```bash
-mkdir -p "$HOME/.config/repoforge"
-cp config.local-dev.toml "$HOME/.config/repoforge/config.toml"
-```
-
-Tracked examples contain maintainer-specific absolute paths. Update them before use.
-
-## 3. Validate local operation
-
-Run diagnostics:
-
-```bash
-uv run rf --config "$HOME/.config/repoforge/config.toml" doctor --fix
-```
-
-Run a non-mutating smoke test:
-
-```bash
-uv run rf   --config "$HOME/.config/repoforge/config.toml"   smoke-test   --repo-id my-repository
-```
-
-The smoke test creates and removes a temporary local worktree and branch. It does not edit files,
-push a branch, or create a pull request.
-
-Inspect the MCP tool surface before connecting ChatGPT:
-
-```bash
-./scripts/inspect-mcp.sh
-```
-
-MCP Inspector should discover twenty-seven tools. Confirm that no arbitrary-shell, merge, force-push,
-protected-branch write, secret-management, or workflow-editing tool exists.
-
-## 4. Install and start Secure MCP Tunnel
+Contributors can instead clone the repository and run `uv sync --extra dev`.
 
 Download `tunnel-client` from the OpenAI Platform tunnel settings and place it on `PATH`.
 
-Preview the tunnel commands RepoForge will use:
+## 2. Configure all repositories once
 
 ```bash
-uv run rf   --config "$HOME/.config/repoforge/config.toml"   tunnel-command   --tunnel-id tunnel_...
+rf setup \
+  --tunnel-id tunnel_... \
+  /absolute/path/to/repoforge \
+  /absolute/path/to/work-frontier
 ```
 
-Set the runtime credentials in a dedicated terminal:
+`rf setup` performs repository detection, creates the minimal config, generates the reviewed runtime
+lock, runs diagnostics, and performs a safe worktree smoke test. Use `--skip-smoke` only when the
+machine is temporarily offline or a remote cannot be fetched.
+
+The generated user config is intentionally small:
+
+```toml
+version = 1
+
+[tunnel]
+id = "tunnel_..."
+
+[[repo]]
+id = "repoforge"
+path = "/absolute/path/to/repoforge"
+
+[[repo]]
+id = "work-frontier"
+path = "/absolute/path/to/work-frontier"
+```
+
+The generated resolved config lives under `~/.local/state/repoforge/config-locks/`. It contains the
+secure defaults and exact command allowlists. Do not edit it directly.
+
+## 3. Start RepoForge
 
 ```bash
-export CONTROL_PLANE_API_KEY="sk-..."
-export TUNNEL_ID="tunnel_..."
+rf start
 ```
 
-Do not place the runtime key in this repository, shell history, screenshots, issue reports, or chat
-messages.
+When `CONTROL_PLANE_API_KEY` is not already set, `rf start` requests it with a hidden terminal prompt.
+The key is passed only to `tunnel-client`; it is not written to TOML, logs, audit records, or shell
+history.
 
-Start the tunnel:
+`rf start` automatically:
+
+1. validates that the user config and generated lock still match;
+2. refuses to start when `Makefile`, `package.json`, `pyproject.toml`, or another command source changed;
+3. runs essential RepoForge diagnostics;
+4. initializes or repairs the tunnel profile only when needed; and
+5. starts `tunnel-client run`.
+
+The compatibility script now delegates to the same command:
 
 ```bash
 ./scripts/run-tunnel.sh
 ```
 
-The script runs RepoForge diagnostics, initializes the tunnel profile, runs
-`tunnel-client doctor --explain`, and keeps the tunnel process active. Leave this terminal open while
-ChatGPT scans or invokes tools.
+## Repository management
 
-## 5. Create the ChatGPT Plugin
+```bash
+rf repo list
+rf repo add /absolute/path/to/another-repository
+rf repo remove repository-id
+```
+
+When a repository changes its verification command sources, review the proposed lock diff:
+
+```bash
+rf repo refresh
+```
+
+Nothing is written until the command changes have been reviewed and explicitly accepted:
+
+```bash
+rf repo refresh --accept
+```
+
+Existing full `[server]` and `[repositories.*]` configurations remain supported. With a legacy config,
+start the tunnel using an explicit tunnel ID:
+
+```bash
+rf start --tunnel-id tunnel_...
+```
+
+## 4. Create the ChatGPT Plugin
 
 In ChatGPT developer-mode Plugin settings, create:
 
@@ -107,11 +114,9 @@ Available tunnel: select your RepoForge tunnel
 Authentication: No Authentication
 ```
 
-RepoForge does not connect ChatGPT directly to `api.githubcopilot.com`. The local process calls the
-already-authenticated `gh` executable on your machine, so the Plugin does not depend on GitHub
-Copilot OAuth or Dynamic Client Registration.
+Keep the `rf start` terminal open while ChatGPT scans or invokes tools.
 
-## 6. Run read-only discovery tests
+## 5. Run read-only discovery tests
 
 Open a new conversation with only RepoForge enabled:
 
@@ -132,61 +137,41 @@ Expected result:
 - no workspace or branch is created;
 - no write confirmation appears.
 
-Run an indirect discovery prompt in a separate conversation:
-
-```text
-Check whether my configured local repository is ready for a safe coding task. Do not modify
-anything. Explain the fast and full validation profiles and state which Plugin and tools were used.
-```
-
-Run a negative prompt in another conversation:
-
-```text
-What is the current weather in Hanoi?
-```
-
-RepoForge should not be selected for the negative case.
-
-## 7. First controlled write
-
-After read-only discovery passes, use a small documentation-only canary in an isolated workspace.
-Review the complete diff before verification, review it again before commit, and create only a draft
-pull request.
-
-Follow [FULL_FLOW_TESTING.md](FULL_FLOW_TESTING.md) and record results with
-[TEST_RUN_RECORD.md](TEST_RUN_RECORD.md).
+Then follow [FULL_FLOW_TESTING.md](FULL_FLOW_TESTING.md) for the first controlled write.
 
 ## Troubleshooting
 
-### Inspector reports that a TOML file is invalid JSON
+### RepoForge reports that the resolved config is stale
 
-Ensure the Inspector command separates Inspector arguments from MCP server arguments:
+Review and accept changes to detected commands:
 
 ```bash
-npx -y @modelcontextprotocol/inspector@latest --   "$PWD/.venv/bin/repoforge"   --config "$HOME/.config/repoforge/config.toml"   serve
+rf repo refresh
+rf repo refresh --accept
 ```
 
-The `--` delimiter is required.
+This fail-closed behavior prevents a changed project manifest or Makefile from silently expanding the
+commands available to ChatGPT.
 
 ### The tunnel is not visible in ChatGPT
 
-Confirm that:
+Run:
 
-- `tunnel-client run` is still active;
-- the tunnel belongs to the same OpenAI organization and ChatGPT workspace;
-- the runtime key has permission to read and use the tunnel;
-- `tunnel-client doctor --profile repoforge --explain` reports a healthy connection.
+```bash
+rf start --dry-run
+```
+
+Confirm that `tunnel-client` is installed, the tunnel belongs to the same OpenAI organization and
+ChatGPT workspace, and the runtime key can use that tunnel.
 
 ### GitHub operations fail
-
-Run:
 
 ```bash
 gh auth status
 gh auth setup-git
 ```
 
-Verify that the configured remote exists and that the authenticated account can push branches and
+Verify that every configured remote exists and that the authenticated account can push branches and
 create pull requests.
 
 ### RepoForge refuses to commit

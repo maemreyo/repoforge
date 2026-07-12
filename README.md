@@ -75,13 +75,13 @@ ai/* branch -> non-force push -> draft pull request
 
 ## Installation
 
-Clone the repository and create the locked development environment:
+For normal use, install the CLI directly:
 
 ```bash
-git clone https://github.com/maemreyo/repoforge.git
-cd repoforge
-uv sync --extra dev
+uv tool install git+https://github.com/maemreyo/repoforge.git
 ```
+
+Contributors can instead clone the repository and run `uv sync --extra dev`.
 
 Authenticate GitHub CLI:
 
@@ -98,78 +98,48 @@ rf
 repoforge-mcp
 ```
 
-## Configure a repository
+## Configure and start
 
-Generate a configuration for one local Git repository:
-
-```bash
-uv run rf   --config "$HOME/.config/repoforge/config.toml"   init   --repo /absolute/path/to/repository   --repo-id my-repository
-```
-
-Preview detection before writing a config:
+Configure the tunnel and every local repository once:
 
 ```bash
-uv run rf inspect-repo /absolute/path/to/repository
-uv run rf inspect-repo /absolute/path/to/repository --render-config
+rf setup \
+  --tunnel-id tunnel_... \
+  /absolute/path/to/repoforge \
+  /absolute/path/to/work-frontier
 ```
 
-Always review generated command profiles before enabling write tools. A verification profile executes
-exactly the commands stored in the TOML configuration.
+RepoForge writes a minimal user config containing only the tunnel identifier and repository paths.
+It generates the full safety policy and exact command allowlists into a reviewed lock under
+`~/.local/state/repoforge/config-locks/`. Setup also runs diagnostics and a safe worktree smoke test.
 
-### Supplied configurations
-
-This repository includes configurations for the maintainer's local development setup:
-
-- `config.repoforge.toml` — use RepoForge to develop RepoForge;
-- `config.local-dev.toml` — combined configuration for RepoForge and Work Frontier;
-- `config.work-frontier.toml` — Work Frontier-specific example.
-
-These files contain machine-specific absolute paths. Review and edit them before copying:
+After setup, start RepoForge with one command:
 
 ```bash
-mkdir -p "$HOME/.config/repoforge"
-cp config.local-dev.toml "$HOME/.config/repoforge/config.toml"
+rf start
 ```
 
-## Validate the installation
+When `CONTROL_PLANE_API_KEY` is absent, `rf start` asks for it using a hidden terminal prompt. The key
+is never written to configuration, logs, audit records, or shell history.
 
-Run diagnostics and a safe smoke test:
+Manage repositories without editing TOML:
 
 ```bash
-uv run rf --config "$HOME/.config/repoforge/config.toml" doctor --fix
-uv run rf --config "$HOME/.config/repoforge/config.toml"   smoke-test --repo-id my-repository
+rf repo list
+rf repo add /absolute/path/to/another-repository
+rf repo remove repository-id
 ```
 
-The smoke test creates and removes a temporary local worktree and branch. It does not edit repository
-files, push a branch, or create a pull request.
-
-Inspect the raw MCP contract:
+If a `Makefile`, `package.json`, `pyproject.toml`, or another command source changes, RepoForge fails
+closed. Review the proposed allowlist diff and then accept it explicitly:
 
 ```bash
-./scripts/inspect-mcp.sh
+rf repo refresh
+rf repo refresh --accept
 ```
 
-## Connect to ChatGPT
-
-Set the tunnel runtime credentials in a dedicated terminal and start the tunnel:
-
-```bash
-export CONTROL_PLANE_API_KEY="sk-..."
-export TUNNEL_ID="tunnel_..."
-./scripts/run-tunnel.sh
-```
-
-Create a developer-mode Plugin in ChatGPT with:
-
-```text
-Name: RepoForge
-Connection: Tunnel
-Authentication: No Authentication
-```
-
-Keep the tunnel process running while ChatGPT discovers or invokes RepoForge tools. Detailed setup
-and troubleshooting instructions are available in
-[docs/CHATGPT_SETUP.md](docs/CHATGPT_SETUP.md).
+Legacy full `[server]` and `[repositories.*]` configurations remain supported. Detailed setup,
+security behavior, and troubleshooting are in [docs/CHATGPT_SETUP.md](docs/CHATGPT_SETUP.md).
 
 ## Recommended workflow
 
@@ -199,7 +169,10 @@ verification profile, then stop for approval.
 ## Command-line reference
 
 ```text
-rf init               Detect one repository and generate a configuration
+rf setup              Configure tunnel and repositories in one step
+rf start              Validate and start the secure tunnel
+rf repo               List, add, remove, or refresh repositories
+rf init               Generate a legacy full configuration
 rf inspect-repo       Preview ecosystem, scripts, instructions, and profiles
 rf doctor             Validate tools, auth, paths, remotes, and profiles
 rf smoke-test         Exercise safe repository/worktree operations
