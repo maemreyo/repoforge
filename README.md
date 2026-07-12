@@ -1,114 +1,157 @@
 # RepoForge
 
-**RepoForge** là MCP server local dành cho ChatGPT web: đọc và sửa repository trong Git worktree
-cô lập, chạy verification profile được allowlist, commit, push nhánh `ai/*`, rồi tạo draft pull
-request bằng GitHub CLI `gh`.
+**Safe local Git workspaces and draft pull requests for ChatGPT.**
 
-RepoForge không expose terminal tổng quát. Không có tool merge PR, force-push, ghi trực tiếp vào
-protected branch, sửa secrets hoặc GitHub Actions workflow.
+RepoForge is a local [Model Context Protocol](https://modelcontextprotocol.io/) server that gives
+ChatGPT controlled access to allowlisted Git repositories. It creates isolated worktrees, applies
+bounded code changes, runs repository-defined verification profiles, pushes `ai/*` branches without
+force, and opens draft pull requests through the GitHub CLI.
 
-## Vì sao tên RepoForge?
+RepoForge is deliberately **not** a general-purpose terminal or filesystem bridge. It does not
+provide tools for arbitrary shell execution, protected-branch writes, force-pushes, pull-request
+merges, secret management, repository administration, or GitHub Actions workflow changes.
 
-Tên ngắn, dễ gọi trong prompt và mô tả đúng workflow: tạo một workspace an toàn để “forge” thay
-đổi code thành một draft PR. Package Python là `repoforge-mcp`; CLI chính là `repoforge`, alias
-ngắn là `rf`; tên Plugin nên dùng `RepoForge`.
+> **Project status:** Beta. RepoForge is designed as a personal developer tool for repositories and
+> machines you control. Review every diff and keep ChatGPT write confirmations enabled.
 
-## Kiến trúc
+## Why RepoForge
+
+ChatGPT web cannot directly access a local checkout, run its test suite, or use an existing `gh`
+session. RepoForge provides a constrained bridge with explicit safety boundaries:
+
+- repositories are configured by a short, model-facing ID;
+- every task runs in an isolated Git worktree;
+- writable branches must match a configured prefix, normally `ai/`;
+- file access is restricted by canonical path checks and deny patterns;
+- model-visible commands come only from predefined TOML profiles;
+- verification receipts are bound to the exact workspace fingerprint;
+- pushes are non-force and pull requests are always created as drafts;
+- local activity is recorded in a JSONL audit log without storing file bodies, patches, or secrets.
+
+See [SECURITY.md](SECURITY.md) for the complete threat model and limitations.
+
+## Architecture
 
 ```text
 ChatGPT web
-  -> Secure MCP Tunnel
-  -> RepoForge MCP (stdio trên máy Mac)
-  -> git + gh + command profiles
-  -> isolated worktree -> ai/* branch -> draft PR
+    |
+    | MCP tool calls
+    v
+OpenAI Secure MCP Tunnel
+    |
+    | local stdio process
+    v
+RepoForge
+    |-- allowlisted repositories
+    |-- isolated Git worktrees
+    |-- predefined verification profiles
+    |-- git + GitHub CLI
+    v
+ai/* branch -> non-force push -> draft pull request
 ```
 
-## DevExperience trong v2
+## Key capabilities
 
-- `rf init`: tự nhận diện package manager, scripts, base branch và tạo config.
-- `rf inspect-repo`: preview ecosystem, instruction files và profile được detect.
-- `rf doctor --fix`: kiểm tra executable, `gh` auth, remote/base, version Node/pnpm, profile và
-  quyền ghi state/workspace; có thể chạy `gh auth setup-git`.
-- `rf smoke-test`: tạo rồi xóa worktree thật mà không sửa code.
-- `rf tunnel-command`: sinh chính xác lệnh cấu hình Secure MCP Tunnel.
-- Config riêng cho Work Frontier đã được tạo sẵn tại `config.work-frontier.toml`.
-- `uv.lock` và `uv sync --extra dev` giúp môi trường phát triển lặp lại được.
-- 27 tool nhỏ, tách read/write, có annotations và structured output.
-- Batch read, repository context, default verification, restore path, change budget, PR labels /
-  reviewers, update draft PR và CI check buckets.
-- Audit log local, optimistic SHA locking, workspace fingerprint và verification receipt.
+- Repository discovery and configuration generation with `rf init` and `rf inspect-repo`.
+- Actionable environment diagnostics through `rf doctor`.
+- A non-mutating repository/worktree smoke test through `rf smoke-test`.
+- Twenty-seven focused MCP tools with separate read and write responsibilities.
+- Optimistic file locking, workspace fingerprints, verification receipts, and change budgets.
+- Bounded file reads, batch reads, literal search, exact replacement, unified patches, and path
+  restoration.
+- Draft pull-request creation and updates, plus compact CI status buckets.
+- Reproducible Python environments through `uv.lock`.
+- Unit, security, local Git integration, fake-`gh`, CLI, and in-memory MCP protocol tests.
 
-## Yêu cầu
+## Requirements
 
-- macOS hoặc Linux;
-- Python 3.10+;
+- macOS or Linux;
+- Python 3.10 or newer;
 - Git;
-- GitHub CLI `gh`, đã đăng nhập bằng `gh auth login`;
-- `tunnel-client` nếu kết nối ChatGPT web qua Secure MCP Tunnel;
-- `uv` được khuyến nghị, nhưng bootstrap có fallback sang `venv + pip`.
+- GitHub CLI (`gh`) authenticated for the repositories you intend to use;
+- [`uv`](https://docs.astral.sh/uv/) for the recommended installation path;
+- `tunnel-client` when connecting RepoForge to ChatGPT web through Secure MCP Tunnel;
+- Node.js and `npx` only when using MCP Inspector.
 
-## Cài nhanh cho Work Frontier
+## Installation
+
+Clone the repository and create the locked development environment:
 
 ```bash
-unzip repoforge-2.0.0.zip
+git clone https://github.com/maemreyo/repoforge.git
 cd repoforge
-./scripts/bootstrap-macos.sh
+uv sync --extra dev
 ```
 
-Bootstrap mặc định dùng repository:
-
-```text
-/Users/trung.ngo/Documents/zaob-dev/work-frontier
-```
-
-Config được tạo tại:
-
-```text
-~/.config/repoforge/config.toml
-```
-
-Sau đó:
+Authenticate GitHub CLI:
 
 ```bash
 gh auth login
 gh auth setup-git
-./.venv/bin/rf doctor --fix
-./.venv/bin/rf smoke-test --repo-id work-frontier
 ```
 
-Nếu config đã tồn tại và muốn dùng bản đã chuẩn bị sẵn:
-
-```bash
-mkdir -p ~/.config/repoforge
-cp config.work-frontier.toml ~/.config/repoforge/config.toml
-```
-
-## Profile của Work Frontier
-
-RepoForge đã map các root scripts thật của repository:
+The installed commands are:
 
 ```text
-quick      -> pnpm run check
-typecheck  -> pnpm run typecheck
-test       -> pnpm run test
-preflight  -> pnpm run test:preflight
-full       -> check + test + test:preflight
-fix        -> pnpm run fix
-setup      -> pnpm install --frozen-lockfile
+repoforge
+rf
+repoforge-mcp
 ```
 
-Review `config.work-frontier.toml` trước lần chạy đầu tiên, đặc biệt là các command có thể sửa file
-như profile `fix`.
+## Configure a repository
 
-## Chạy local MCP
+Generate a configuration for one local Git repository:
 
 ```bash
-./.venv/bin/rf serve
+uv run rf   --config "$HOME/.config/repoforge/config.toml"   init   --repo /absolute/path/to/repository   --repo-id my-repository
 ```
 
-`serve` dùng stdio; stdout được dành riêng cho MCP JSON-RPC.
+Preview detection before writing a config:
 
-## Chạy Secure MCP Tunnel
+```bash
+uv run rf inspect-repo /absolute/path/to/repository
+uv run rf inspect-repo /absolute/path/to/repository --render-config
+```
+
+Always review generated command profiles before enabling write tools. A verification profile executes
+exactly the commands stored in the TOML configuration.
+
+### Supplied configurations
+
+This repository includes configurations for the maintainer's local development setup:
+
+- `config.repoforge.toml` — use RepoForge to develop RepoForge;
+- `config.local-dev.toml` — combined configuration for RepoForge and Work Frontier;
+- `config.work-frontier.toml` — Work Frontier-specific example.
+
+These files contain machine-specific absolute paths. Review and edit them before copying:
+
+```bash
+mkdir -p "$HOME/.config/repoforge"
+cp config.local-dev.toml "$HOME/.config/repoforge/config.toml"
+```
+
+## Validate the installation
+
+Run diagnostics and a safe smoke test:
+
+```bash
+uv run rf --config "$HOME/.config/repoforge/config.toml" doctor --fix
+uv run rf --config "$HOME/.config/repoforge/config.toml"   smoke-test --repo-id my-repository
+```
+
+The smoke test creates and removes a temporary local worktree and branch. It does not edit repository
+files, push a branch, or create a pull request.
+
+Inspect the raw MCP contract:
+
+```bash
+./scripts/inspect-mcp.sh
+```
+
+## Connect to ChatGPT
+
+Set the tunnel runtime credentials in a dedicated terminal and start the tunnel:
 
 ```bash
 export CONTROL_PLANE_API_KEY="sk-..."
@@ -116,7 +159,7 @@ export TUNNEL_ID="tunnel_..."
 ./scripts/run-tunnel.sh
 ```
 
-Trong ChatGPT Plugin:
+Create a developer-mode Plugin in ChatGPT with:
 
 ```text
 Name: RepoForge
@@ -124,55 +167,87 @@ Connection: Tunnel
 Authentication: No Authentication
 ```
 
-Xem hướng dẫn chi tiết tại [`docs/CHATGPT_SETUP.md`](docs/CHATGPT_SETUP.md).
+Keep the tunnel process running while ChatGPT discovers or invokes RepoForge tools. Detailed setup
+and troubleshooting instructions are available in
+[docs/CHATGPT_SETUP.md](docs/CHATGPT_SETUP.md).
 
-## Workflow được khuyến nghị
+## Recommended workflow
 
-1. `repo_list`, `repo_status`, `repo_context`.
-2. `workspace_create` từ `main`.
-3. Đọc/search trước khi sửa.
-4. Sửa bằng exact replacement hoặc patch nhỏ.
-5. Xem `workspace_diff` và change metrics.
-6. `workspace_verify` chạy profile mặc định `full`.
-7. Dừng để người dùng review.
-8. Sau khi được duyệt: commit, push, tạo draft PR.
-9. Dùng `workspace_pr_checks` để theo dõi CI.
+1. Inspect the configured repository with `repo_list`, `repo_status`, and `repo_context`.
+2. Read relevant instructions, plans, issues, implementation files, and tests.
+3. Create one isolated workspace for the approved task.
+4. Make small, bounded changes with optimistic locking.
+5. Review `workspace_diff` after each meaningful change.
+6. Run narrow allowlisted profiles while iterating.
+7. Run `workspace_verify` before commit.
+8. Stop for human review of the final diff and verification receipt.
+9. Commit the exact verified tree, push without force, and create a draft pull request.
+10. Read CI status through `workspace_pr_checks`. RepoForge never marks a PR ready or merges it.
 
-## Các lớp bảo vệ
+Example planning prompt:
 
-- Repository allowlist và path canonicalization.
-- Worktree riêng, branch bắt buộc `ai/*`, protected branches bị từ chối.
-- Denied paths mặc định: `.env`, keys, secret/credential patterns và `.github/workflows/**`.
-- Không cho thay đổi symlink/submodule/gitlink.
-- Không có arbitrary shell; command chỉ đến từ profile TOML.
-- Write file dùng SHA-256; patch/restore dùng exact workspace fingerprint.
-- Verification receipt bị vô hiệu nếu tree thay đổi sau test.
-- Change budget giới hạn số file, số dòng diff và tổng bytes.
-- Push luôn không force; PR luôn draft.
-- Audit JSONL không lưu patch, file body, PR body hoặc toàn bộ environment.
+```text
+Use only RepoForge.
+
+Repository ID: my-repository.
+
+Inspect repository status, instructions, the relevant issue or plan, implementation, and tests.
+Do not change anything yet. Return the proposed scope, affected files, risks, narrow tests, and final
+verification profile, then stop for approval.
+```
+
+## Command-line reference
+
+```text
+rf init               Detect one repository and generate a configuration
+rf inspect-repo       Preview ecosystem, scripts, instructions, and profiles
+rf doctor             Validate tools, auth, paths, remotes, and profiles
+rf smoke-test         Exercise safe repository/worktree operations
+rf show-config        Print the resolved configuration
+rf list-workspaces    List registered local workspaces
+rf remove-workspace   Remove a clean local worktree
+rf audit              Read recent local audit events
+rf tunnel-command     Print tunnel-client initialization commands
+rf serve              Run the MCP server over stdio
+```
+
+Use `rf <command> --help` for complete options.
 
 ## Development
+
+Run the full local quality gate:
 
 ```bash
 uv sync --extra dev
 ./scripts/test-all.sh
 ```
 
-Hoặc:
+Equivalent Make targets are available:
 
 ```bash
+make lint
+make typecheck
+make test
+make build
 make check
 ```
 
-Test suite hiện gồm unit, negative/security, local Git worktree integration, fake-`gh` PR lifecycle,
-CLI/discovery và in-memory MCP protocol tests. Xem [`docs/TESTING.md`](docs/TESTING.md).
+The project enforces strict Mypy checks, Ruff, branch coverage of at least 80%, distribution builds,
+security regressions, real local Git/worktree integration, deterministic fake-GitHub tests, and MCP
+protocol tests.
 
-## Tài liệu
+## Documentation
 
-- [`docs/CHATGPT_SETUP.md`](docs/CHATGPT_SETUP.md)
-- [`docs/TOOL_REFERENCE.md`](docs/TOOL_REFERENCE.md)
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
-- [`docs/TESTING.md`](docs/TESTING.md)
-- [`docs/STARTER_PROMPTS.md`](docs/STARTER_PROMPTS.md)
-- [`docs/PLUGIN_TEST_CASES.md`](docs/PLUGIN_TEST_CASES.md)
-- [`SECURITY.md`](SECURITY.md)
+- [ChatGPT and tunnel setup](docs/CHATGPT_SETUP.md)
+- [Tool reference](docs/TOOL_REFERENCE.md)
+- [Development guide](docs/DEVELOPMENT.md)
+- [Testing strategy](docs/TESTING.md)
+- [Full-flow test runbook](docs/FULL_FLOW_TESTING.md)
+- [Starter prompts](docs/STARTER_PROMPTS.md)
+- [Plugin regression cases](docs/PLUGIN_TEST_CASES.md)
+- [Security model](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+
+## License
+
+RepoForge is distributed under the [MIT License](LICENSE).

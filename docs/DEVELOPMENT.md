@@ -1,15 +1,24 @@
 # Development guide
 
-## Setup
+## Environment setup
+
+Synchronize the locked development environment:
 
 ```bash
 uv sync --extra dev
 ```
 
-`uv.lock` được commit để cài đúng dependency graph. Dùng `uv run --locked ...` trong môi trường
-release/CI khi muốn fail thay vì tự cập nhật lockfile.
+`uv.lock` is committed to make the dependency graph reproducible. Use locked execution in CI and
+release validation when configuration drift must fail instead of updating the lockfile:
 
-## Quality commands
+```bash
+uv sync --extra dev --locked
+uv run --locked pytest
+```
+
+## Quality gates
+
+The supported Make targets are:
 
 ```bash
 make lint
@@ -19,7 +28,7 @@ make build
 make check
 ```
 
-Tương đương:
+Equivalent direct commands are:
 
 ```bash
 uv run ruff check .
@@ -28,38 +37,95 @@ uv run pytest --cov=repoforge --cov-report=term-missing
 uv build
 ```
 
+Run the complete project gate with:
+
+```bash
+./scripts/test-all.sh
+```
+
+A change is not complete until linting, strict typing, tests with the configured branch-coverage
+threshold, and package builds all pass.
+
 ## Local MCP debugging
+
+Launch MCP Inspector:
 
 ```bash
 ./scripts/inspect-mcp.sh
 ```
 
-Hoặc chạy server stdio:
+Run the stdio server directly:
 
 ```bash
-REPOFORGE_CONFIG=~/.config/repoforge/config.toml uv run rf serve
+REPOFORGE_CONFIG="$HOME/.config/repoforge/config.toml" uv run rf serve
 ```
 
-Không log ra stdout trong stdio mode.
+The stdio transport reserves stdout for MCP JSON-RPC messages. Send diagnostics to stderr or the
+configured audit log; never print debug output to stdout.
 
 ## Source layout
 
 ```text
-src/repoforge/config.py     TOML model + validation
-src/repoforge/discovery.py  repo auto-detection and config rendering
-src/repoforge/security.py   branch/path/patch policies
-src/repoforge/runner.py     shell-free subprocess runner
-src/repoforge/state.py      workspace registry, verification receipts, locks
-src/repoforge/service.py    Git/gh/worktree operations
+src/repoforge/config.py     TOML models, defaults, loading, and validation
+src/repoforge/discovery.py  repository detection and configuration rendering
+src/repoforge/security.py   branch, path, patch, and policy enforcement
+src/repoforge/runner.py     constrained subprocess execution
+src/repoforge/state.py      workspace registry, locks, fingerprints, and receipts
+src/repoforge/service.py    Git, worktree, GitHub CLI, verification, and PR operations
 src/repoforge/server.py     MCP metadata and tool registration
-src/repoforge/cli.py        init/doctor/smoke/tunnel DX
+src/repoforge/cli.py        setup, diagnostics, smoke testing, audit, and tunnel commands
+tests/                      unit, security, integration, CLI, and MCP protocol tests
+docs/                       operator, developer, testing, and tool documentation
+scripts/                    reproducible development and operational entry points
 ```
 
-## Adding a tool
+Keep security policy in the policy layer. MCP handlers should remain thin adapters over typed service
+methods.
 
-1. Keep it to one read or one write responsibility.
-2. Add a typed service method; never accept an arbitrary command string.
-3. Register with accurate read-only, destructive and open-world annotations.
-4. Return stable structured fields and reusable IDs.
-5. Add positive, negative and protocol-level tests.
-6. Update `docs/TOOL_REFERENCE.md` and the golden prompt set.
+## Adding or changing an MCP tool
+
+Every tool change should include:
+
+1. One clear read or write responsibility.
+2. A typed service method with constrained inputs.
+3. A precise tool name, title, description, and accurate MCP annotations.
+4. Stable structured output and actionable error messages.
+5. Server-side branch, path, state, and permission enforcement.
+6. Positive, negative, stale-state, and failure-path tests.
+7. Invocation through an actual in-memory MCP client session.
+8. Updates to [TOOL_REFERENCE.md](TOOL_REFERENCE.md) and relevant golden prompts.
+
+Do not add arbitrary command strings, generic filesystem access, merge operations, force-pushes,
+protected-branch writes, secret operations, or workflow-editing capabilities.
+
+## Configuration changes
+
+When configuration fields or defaults change:
+
+1. preserve compatibility where practical;
+2. update `config.example.toml` and relevant tracked examples;
+3. add valid and invalid configuration tests;
+4. run `rf show-config`, `rf doctor`, and `rf smoke-test`;
+5. document required operator actions;
+6. verify that permissions were not silently broadened.
+
+## Documentation changes
+
+Documentation should be written in clear professional English. Keep commands executable, avoid
+machine-specific credentials, and distinguish automated validation from checks that require a live
+GitHub account or Secure MCP Tunnel.
+
+When tool metadata changes, rerun direct, indirect, and negative Plugin prompts from
+[PLUGIN_TEST_CASES.md](PLUGIN_TEST_CASES.md).
+
+## Definition of done
+
+Before presenting a change as complete:
+
+- the requested behavior is implemented without weakening safety boundaries;
+- relevant unit, integration, security, and MCP contract tests pass;
+- `./scripts/test-all.sh` passes;
+- tool schemas, annotations, and documentation agree;
+- generated distributions build successfully;
+- the final diff contains only intended changes;
+- the completion report lists every command actually run and every live check not run.

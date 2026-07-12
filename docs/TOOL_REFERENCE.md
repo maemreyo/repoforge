@@ -1,59 +1,67 @@
 # RepoForge tool reference
 
-RepoForge đăng ký 27 MCP tools. Mỗi tool làm một nhiệm vụ rõ ràng; read và write được tách riêng.
+RepoForge exposes twenty-seven focused MCP tools. Each tool has one clear responsibility, and read
+operations are separated from write operations so ChatGPT can apply an appropriate confirmation
+flow.
 
-## Repository
+## Repository inspection
 
-| Tool | Hành vi |
+| Tool | Purpose |
 |---|---|
-| `repo_list` | Danh sách repo, profile, base/branch policy, PR defaults và change limits. |
-| `repo_status` | Git status, remotes và `gh auth status`. |
-| `repo_context` | Manifest, scripts, engines, root files và preview instruction files. |
-| `repo_recent_commits` | Commit history local, tối đa 100 commit. |
-| `repo_issue_read` | Issue GitHub qua `gh`, output được giới hạn. |
-| `repo_pr_read` | PR GitHub, files/commits/checks/reviews qua `gh`. |
+| `repo_list` | List configured repositories, profiles, branch policy, pull-request defaults, and change limits. |
+| `repo_status` | Read Git status, remotes, current branch information, and `gh auth status`. |
+| `repo_context` | Inspect manifests, scripts, engines, root files, and bounded instruction-file previews. |
+| `repo_recent_commits` | Read bounded local commit history, up to one hundred commits. |
+| `repo_issue_read` | Read a GitHub issue through `gh` with bounded output. |
+| `repo_pr_read` | Read pull-request metadata, files, commits, checks, and reviews through `gh`. |
 
 ## Workspace lifecycle
 
-| Tool | Hành vi |
+| Tool | Purpose |
 |---|---|
-| `workspace_create` | Tạo worktree và branch `ai/*` duy nhất từ base allowlist. |
-| `workspace_list` | Liệt kê workspace đang được registry quản lý. |
-| `workspace_status` | HEAD, branch, status, fingerprint, verification và change metrics. |
-| `workspace_remove` | Xóa clean local worktree; không xóa remote branch. |
+| `workspace_create` | Create one isolated worktree and unique `ai/*` branch from an allowlisted base. |
+| `workspace_list` | List workspaces managed by the local RepoForge registry. |
+| `workspace_status` | Return HEAD, branch, Git status, workspace fingerprint, verification state, and change metrics. |
+| `workspace_remove` | Remove a clean local worktree; remote branches and pull requests are untouched. |
 
-## Read/search/edit
+## Read, search, and edit
 
-| Tool | Hành vi |
+| Tool | Purpose |
 |---|---|
-| `workspace_tree` | Danh sách tracked/untracked paths hợp lệ. |
-| `workspace_read_file` | Đọc bounded UTF-8 lines và trả SHA-256. |
-| `workspace_read_files` | Batch read tối đa `max_batch_files`. |
-| `workspace_search` | Literal `git grep`, có optional path glob. |
-| `workspace_write_file` | Tạo/replace full UTF-8 file bằng optimistic SHA locking. |
-| `workspace_replace_text` | Exact replacement với SHA và expected occurrence count. |
-| `workspace_apply_patch` | Unified patch với expected HEAD và workspace fingerprint. |
-| `workspace_restore_paths` | Restore selected tracked paths hoặc xóa selected untracked files. |
-| `workspace_diff` | Diff, stat, untracked patch và change metrics. |
+| `workspace_tree` | List tracked and untracked paths permitted by repository policy. |
+| `workspace_read_file` | Read a bounded UTF-8 line range and return the file SHA-256 for optimistic locking. |
+| `workspace_read_files` | Read the same bounded range from multiple files, subject to `max_batch_files`. |
+| `workspace_search` | Run bounded literal repository search with an optional path glob. |
+| `workspace_write_file` | Create or replace a complete UTF-8 file using optimistic SHA locking. |
+| `workspace_replace_text` | Perform an exact replacement with a file SHA and expected occurrence count. |
+| `workspace_apply_patch` | Apply a validated unified patch against an expected HEAD and workspace fingerprint. |
+| `workspace_restore_paths` | Restore selected tracked paths or remove selected untracked files. |
+| `workspace_diff` | Return the diff, diff stat, untracked patch, and change-budget metrics. |
 
-## Verification/publication
+## Verification and publication
 
-| Tool | Hành vi |
+| Tool | Purpose |
 |---|---|
-| `workspace_run_profile` | Chạy profile allowlist; profile có thể không phải verification. |
-| `workspace_verify` | Chạy default hoặc explicit verification profile và lưu receipt. |
-| `workspace_commit` | Commit đúng tree đã verify; enforce path và change budget. |
-| `workspace_push` | Non-force push branch workspace và ghi pushed SHA. |
-| `workspace_create_draft_pr` | Tạo draft PR, hỗ trợ labels/reviewers/no-maintainer-edit. |
-| `workspace_update_draft_pr` | Sửa title/body của PR hiện có, không đổi draft state. |
-| `workspace_pr_status` | Draft state, mergeability, review decision và check rollup. |
-| `workspace_pr_checks` | CI buckets `pass/fail/pending/skipping/cancel`, optional required only. |
+| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. |
+| `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. |
+| `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. |
+| `workspace_push` | Push the workspace branch without force and record the pushed commit SHA. |
+| `workspace_create_draft_pr` | Create a draft pull request with configured labels, reviewers, and maintainer-edit policy. |
+| `workspace_update_draft_pr` | Update the title or body of the existing draft pull request without changing draft state. |
+| `workspace_pr_status` | Read draft state, mergeability, review decision, and rolled-up checks. |
+| `workspace_pr_checks` | Return compact `pass`, `fail`, `pending`, `skipping`, and `cancel` CI buckets. |
 
-## Cố ý không có
+## Deliberately unsupported capabilities
 
-- arbitrary shell / arbitrary filesystem;
-- merge hoặc mark-ready;
-- force-push;
-- ghi protected branch;
-- secrets, branch protection, repository admin, releases;
-- GitHub Actions workflow modification.
+RepoForge does not expose tools for:
+
+- arbitrary shell execution or unrestricted filesystem access;
+- merging a pull request, enabling auto-merge, or marking a draft ready;
+- force-pushing;
+- writing directly to protected branches;
+- reading or managing secrets;
+- changing branch protection or repository administration settings;
+- creating releases;
+- modifying GitHub Actions workflows.
+
+These omissions are part of the security model, not missing convenience features.

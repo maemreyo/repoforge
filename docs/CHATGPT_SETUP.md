@@ -1,63 +1,101 @@
-# Kết nối RepoForge với ChatGPT bằng Secure MCP Tunnel
+# Connect RepoForge to ChatGPT with Secure MCP Tunnel
 
-## 1. Cài source
+This guide connects a local RepoForge process to ChatGPT web. RepoForge runs on your machine and uses
+your existing local Git checkout and GitHub CLI authentication.
+
+## 1. Install RepoForge
+
+Clone the repository and synchronize the locked environment:
 
 ```bash
-unzip repoforge-2.0.0.zip
+git clone https://github.com/maemreyo/repoforge.git
 cd repoforge
-./scripts/bootstrap-macos.sh
+uv sync --extra dev
 ```
 
-Repository mặc định đã được đặt thành:
-
-```text
-/Users/trung.ngo/Documents/zaob-dev/work-frontier
-```
-
-Config mặc định:
-
-```text
-~/.config/repoforge/config.toml
-```
-
-## 2. Kiểm tra local
+Authenticate GitHub CLI:
 
 ```bash
 gh auth login
 gh auth setup-git
-./.venv/bin/rf doctor --fix
-./.venv/bin/rf smoke-test --repo-id work-frontier
 ```
 
-`smoke-test` tạo worktree/branch local tạm thời rồi xóa chúng, không sửa file và không push.
+## 2. Configure repositories
 
-Có thể kiểm tra raw MCP contract bằng:
+Generate a configuration for one repository:
+
+```bash
+uv run rf   --config "$HOME/.config/repoforge/config.toml"   init   --repo /absolute/path/to/repository   --repo-id my-repository
+```
+
+Alternatively, review and install one of the tracked examples:
+
+```bash
+mkdir -p "$HOME/.config/repoforge"
+cp config.local-dev.toml "$HOME/.config/repoforge/config.toml"
+```
+
+Tracked examples contain maintainer-specific absolute paths. Update them before use.
+
+## 3. Validate local operation
+
+Run diagnostics:
+
+```bash
+uv run rf --config "$HOME/.config/repoforge/config.toml" doctor --fix
+```
+
+Run a non-mutating smoke test:
+
+```bash
+uv run rf   --config "$HOME/.config/repoforge/config.toml"   smoke-test   --repo-id my-repository
+```
+
+The smoke test creates and removes a temporary local worktree and branch. It does not edit files,
+push a branch, or create a pull request.
+
+Inspect the MCP tool surface before connecting ChatGPT:
 
 ```bash
 ./scripts/inspect-mcp.sh
 ```
 
-## 3. Chạy tunnel
+MCP Inspector should discover twenty-seven tools. Confirm that no arbitrary-shell, merge, force-push,
+protected-branch write, secret-management, or workflow-editing tool exists.
 
-Đặt `tunnel-client` vào `PATH`, rồi chạy:
+## 4. Install and start Secure MCP Tunnel
+
+Download `tunnel-client` from the OpenAI Platform tunnel settings and place it on `PATH`.
+
+Preview the tunnel commands RepoForge will use:
+
+```bash
+uv run rf   --config "$HOME/.config/repoforge/config.toml"   tunnel-command   --tunnel-id tunnel_...
+```
+
+Set the runtime credentials in a dedicated terminal:
 
 ```bash
 export CONTROL_PLANE_API_KEY="sk-..."
 export TUNNEL_ID="tunnel_..."
+```
+
+Do not place the runtime key in this repository, shell history, screenshots, issue reports, or chat
+messages.
+
+Start the tunnel:
+
+```bash
 ./scripts/run-tunnel.sh
 ```
 
-Script sẽ chạy RepoForge doctor, cấu hình profile tunnel, kiểm tra tunnel và giữ tunnel hoạt động.
+The script runs RepoForge diagnostics, initializes the tunnel profile, runs
+`tunnel-client doctor --explain`, and keeps the tunnel process active. Leave this terminal open while
+ChatGPT scans or invokes tools.
 
-Có thể xem lệnh trước khi chạy:
+## 5. Create the ChatGPT Plugin
 
-```bash
-./.venv/bin/rf tunnel-command --tunnel-id tunnel_...
-```
-
-## 4. Tạo Plugin trong ChatGPT
-
-Trong form **New Plugin**:
+In ChatGPT developer-mode Plugin settings, create:
 
 ```text
 Icon: plugin-icon.png
@@ -65,43 +103,94 @@ Name: RepoForge
 Description: Safely inspect and modify allowlisted local Git repositories in isolated worktrees,
 run predefined verification profiles, push AI branches, and create draft pull requests.
 Connection: Tunnel
-Available tunnels: chọn tunnel của bạn
+Available tunnel: select your RepoForge tunnel
 Authentication: No Authentication
 ```
 
-Tick xác nhận rủi ro rồi nhấn **Create**.
+RepoForge does not connect ChatGPT directly to `api.githubcopilot.com`. The local process calls the
+already-authenticated `gh` executable on your machine, so the Plugin does not depend on GitHub
+Copilot OAuth or Dynamic Client Registration.
 
-RepoForge không kết nối `api.githubcopilot.com`; nó gọi `gh` đã đăng nhập trên máy Mac, vì vậy
-không đi qua GitHub Copilot OAuth/Dynamic Client Registration từng gây lỗi RFC 7591.
+## 6. Run read-only discovery tests
 
-## 5. Golden prompt đầu tiên
-
-```text
-Use RepoForge.
-Repository: work-frontier.
-
-Do not change code yet.
-1. Inspect repository status and context.
-2. Read the relevant plan and architecture files.
-3. Explain the implementation approach and likely verification profile.
-4. Stop for approval.
-```
-
-Sau khi duyệt plan:
+Open a new conversation with only RepoForge enabled:
 
 ```text
-Continue with RepoForge.
-Create an isolated workspace from main, implement the approved plan in small changes, inspect the
-final diff, run the default full verification profile, and stop before commit. Never merge,
-force-push, or modify denied paths.
+Use only RepoForge.
+
+Repository ID: my-repository.
+
+Do not create a workspace or modify anything. Inspect repository status, repository context, recent
+commits, instruction files, and configured verification profiles. Report every RepoForge tool called
+and whether any write confirmation appeared.
 ```
 
-Sau khi duyệt diff:
+Expected result:
+
+- RepoForge is selected;
+- only repository read tools run;
+- no workspace or branch is created;
+- no write confirmation appears.
+
+Run an indirect discovery prompt in a separate conversation:
 
 ```text
-Commit the verified changes, push the ai/* branch, and create a draft PR. Then report the PR URL and
-CI check summary. Do not mark the PR ready and do not merge it.
+Check whether my configured local repository is ready for a safe coding task. Do not modify
+anything. Explain the fast and full validation profiles and state which Plugin and tools were used.
 ```
 
-Xem thêm prompt tại `docs/STARTER_PROMPTS.md` và regression cases tại
-`docs/PLUGIN_TEST_CASES.md`.
+Run a negative prompt in another conversation:
+
+```text
+What is the current weather in Hanoi?
+```
+
+RepoForge should not be selected for the negative case.
+
+## 7. First controlled write
+
+After read-only discovery passes, use a small documentation-only canary in an isolated workspace.
+Review the complete diff before verification, review it again before commit, and create only a draft
+pull request.
+
+Follow [FULL_FLOW_TESTING.md](FULL_FLOW_TESTING.md) and record results with
+[TEST_RUN_RECORD.md](TEST_RUN_RECORD.md).
+
+## Troubleshooting
+
+### Inspector reports that a TOML file is invalid JSON
+
+Ensure the Inspector command separates Inspector arguments from MCP server arguments:
+
+```bash
+npx -y @modelcontextprotocol/inspector@latest --   "$PWD/.venv/bin/repoforge"   --config "$HOME/.config/repoforge/config.toml"   serve
+```
+
+The `--` delimiter is required.
+
+### The tunnel is not visible in ChatGPT
+
+Confirm that:
+
+- `tunnel-client run` is still active;
+- the tunnel belongs to the same OpenAI organization and ChatGPT workspace;
+- the runtime key has permission to read and use the tunnel;
+- `tunnel-client doctor --profile repoforge --explain` reports a healthy connection.
+
+### GitHub operations fail
+
+Run:
+
+```bash
+gh auth status
+gh auth setup-git
+```
+
+Verify that the configured remote exists and that the authenticated account can push branches and
+create pull requests.
+
+### RepoForge refuses to commit
+
+Refresh workspace status and inspect the diff. A commit is rejected when the workspace changed after
+verification, the verification receipt is missing, a denied path changed, or the configured change
+budget was exceeded. Restore the intended tree and rerun verification.
