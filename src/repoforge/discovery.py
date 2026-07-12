@@ -1,15 +1,41 @@
-"""Repository detection and configuration rendering for the CLI setup flow."""
+"""Repository detection, bounded local scanning, and configuration rendering."""
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .config import DEFAULT_DENIED_PATHS, DEFAULT_PATH_PREFIXES
 from .security import slugify
+
+DEFAULT_SCAN_EXCLUDES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "vendor",
+        "dist",
+        "build",
+        "target",
+        "coverage",
+        ".cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        "__pycache__",
+    }
+)
+_MAX_SCAN_DEPTH = 10
+_MAX_SCAN_REPOSITORIES = 500
+_MAKE_TARGET = re.compile(r"^([A-Za-z0-9_.-]+)\s*:(?![=])")
 
 
 @dataclass(frozen=True)
@@ -112,7 +138,7 @@ def _js_profiles(manager: str, scripts: set[str]) -> list[DetectedProfile]:
             )
         )
 
-    quick_scripts: list[str] = []
+    quick_scripts: list[str]
     if "check" in scripts:
         quick_scripts = ["check"]
     else:
@@ -153,7 +179,6 @@ def _js_profiles(manager: str, scripts: set[str]) -> list[DetectedProfile]:
     else:
         full_names.extend(name for name in ("lint", "typecheck") if name in scripts)
     full_names.extend(name for name in ("test", "test:preflight", "build") if name in scripts)
-    # Preserve order while removing duplicates.
     full_names = list(dict.fromkeys(full_names))
     if full_names:
         profiles.append(
@@ -167,21 +192,122 @@ def _js_profiles(manager: str, scripts: set[str]) -> list[DetectedProfile]:
     return profiles
 
 
+def _make_targets(path: Path) -> set[str]:
+    makefile = path / "Makefile"
+    if not makefile.is_file():
+        return set()
+    try:
+        lines = makefile.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return set()
+    targets: set[str] = set()
+    for line in lines:
+        if line.startswith((" ", "\t", ".")):
+            continue
+        match = _MAKE_TARGET.match(line)
+        if match:
+            targets.add(match.group(1))
+    return targets
+
+
+def _make_profiles(targets: set[str]) -> list[DetectedProfile]:
+    profiles: list[DetectedProfile] = []
+    setup_target = "setup" if "setup" in targets else "bootstrap" if "bootstrap" in targets else None
+    if setup_target:
+        profiles.append(
+            DetectedProfile(
+                "setup",
+                "Install or synchronize repository dependencies",
+                False,
+                (("make", setup_target),),
+            )
+        )
+    if "fix" in targets:
+        profiles.append(
+            DetectedProfile("fix", "Apply the repository's safe automatic fixes", False, (("make", "fix"),))
+        )
+
+    quick_targets = [name for name in ("lint", "typecheck") if name in targets]
+    if not quick_targets:
+        quick_targets = [name for name in ("check-static", "check") if name in targets][:1]
+    if quick_targets:
+        profiles.append(
+            DetectedProfile(
+                "quick",
+                "Fast repository checks for iterative development",
+                True,
+                tuple(("make", name) for name in quick_targets),
+            )
+        )
+
+    specialized = (
+        ("test", "Run the repository test suite", "test"),
+        ("preflight", "Run repository preflight checks", "check-preflight"),
+        ("architecture", "Run repository architecture checks", "check-architecture"),
+        ("contracts", "Check generated or executable contracts", "check-contracts"),
+        ("registry", "Check generated registry artifacts", "check-harness-registry"),
+        ("build", "Build distributable repository artifacts", "build"),
+        ("recertify", "Run repository recertification", "recertify-foundation"),
+    )
+    for profile_name, description, target in specialized:
+        if target in targets:
+            profiles.append(
+                DetectedProfile(profile_name, description, True, (("make", target),))
+            )
+
+    if "verify" in targets:
+        full_commands = (("make", "verify"),)
+    elif "check" in targets:
+        full_commands = (("make", "check"),)
+    else:
+        full_commands = tuple(
+            dict.fromkeys(
+                command
+                for profile in profiles
+                if profile.verification and profile.name not in {"recertify", "full"}
+                for command in profile.commands
+            )
+        )
+    if full_commands:
+        profiles.append(
+            DetectedProfile(
+                "full",
+                "Full repository verification gate before commit and pull request",
+                True,
+                full_commands,
+            )
+        )
+    return profiles
+
+
 def _python_profiles(path: Path) -> list[DetectedProfile]:
+    make_profiles = _make_profiles(_make_targets(path))
+    if make_profiles:
+        return make_profiles
+
     profiles: list[DetectedProfile] = []
     pyproject = (path / "pyproject.toml").read_text(encoding="utf-8", errors="ignore")
+    uses_uv = (path / "uv.lock").is_file()
+    runner = ("uv", "run") if uses_uv else ("python", "-m")
+    if uses_uv:
+        setup = ("uv", "sync", "--extra", "dev") if "[project.optional-dependencies]" in pyproject else ("uv", "sync")
+        profiles.append(DetectedProfile("setup", "Synchronize the locked Python environment", False, (setup,)))
+
     quick: list[tuple[str, ...]] = []
     if "[tool.ruff" in pyproject:
-        quick.append(("python", "-m", "ruff", "check", "."))
+        quick.append((*runner, "ruff", "check", "."))
     if "[tool.mypy" in pyproject:
-        quick.append(("python", "-m", "mypy", "."))
+        quick.append((*runner, "mypy", "."))
     if quick:
-        profiles.append(
-            DetectedProfile("quick", "Fast Python static checks", True, tuple(quick))
-        )
-    test_command = ("python", "-m", "pytest", "-q")
+        profiles.append(DetectedProfile("quick", "Fast Python static checks", True, tuple(quick)))
+
+    test_command = (*runner, "pytest", "-q")
     profiles.append(DetectedProfile("test", "Run the Python test suite", True, (test_command,)))
-    full = tuple([*quick, test_command])
+    build_commands: tuple[tuple[str, ...], ...] = ()
+    if "[build-system]" in pyproject and uses_uv:
+        build_commands = (("uv", "build"),)
+        profiles.append(DetectedProfile("build", "Build wheel and source distribution", True, build_commands))
+    full = tuple([*quick, test_command, *build_commands])
     profiles.append(DetectedProfile("full", "Full Python verification gate", True, full))
     return profiles
 
@@ -222,6 +348,11 @@ def detect_repository(path: str | Path, repo_id: str | None = None) -> Repositor
             default_base = current
 
     warnings: list[str] = []
+    if not remotes:
+        warnings.append("No Git remote was detected; configure `remote` before push or PR operations.")
+    if _run_git(root, "status", "--porcelain"):
+        warnings.append("Working tree has uncommitted changes; review them before creating a workspace.")
+
     package_manager: str | None = None
     package_manager_version: str | None = None
     scripts: tuple[str, ...] = ()
@@ -234,12 +365,13 @@ def detect_repository(path: str | Path, repo_id: str | None = None) -> Repositor
         package_manager, package_manager_version = _detect_package_manager(root, package)
         raw_scripts = package.get("scripts", {})
         scripts = tuple(sorted(raw_scripts)) if isinstance(raw_scripts, dict) else ()
-        profiles = _js_profiles(package_manager, set(scripts))
+        make_profiles = _make_profiles(_make_targets(root))
+        profiles = make_profiles or _js_profiles(package_manager, set(scripts))
         if not profiles:
             warnings.append("No supported package.json scripts were detected; add profiles manually.")
     elif (root / "pyproject.toml").exists():
         ecosystem = "python"
-        package_manager = "python"
+        package_manager = "uv" if (root / "uv.lock").exists() else "python"
         profiles = _python_profiles(root)
     elif (root / "Cargo.toml").exists():
         ecosystem = "rust"
@@ -271,8 +403,9 @@ def detect_repository(path: str | Path, repo_id: str | None = None) -> Repositor
         ]
     else:
         ecosystem = "generic"
-        profiles = []
-        warnings.append("No supported project manifest was detected; configure verification manually.")
+        profiles = _make_profiles(_make_targets(root))
+        if not profiles:
+            warnings.append("No supported project manifest was detected; configure verification manually.")
 
     return RepositoryDetection(
         path=root,
@@ -290,6 +423,96 @@ def detect_repository(path: str | Path, repo_id: str | None = None) -> Repositor
     )
 
 
+def scan_repository_paths(
+    roots: Iterable[str | Path],
+    *,
+    max_depth: int = 3,
+    max_repositories: int = 100,
+    include_hidden: bool = False,
+) -> tuple[Path, ...]:
+    """Find top-level Git repositories under explicit roots without following symlinks."""
+    if not 0 <= max_depth <= _MAX_SCAN_DEPTH:
+        raise ValueError(f"max_depth must be between 0 and {_MAX_SCAN_DEPTH}")
+    if not 1 <= max_repositories <= _MAX_SCAN_REPOSITORIES:
+        raise ValueError(f"max_repositories must be between 1 and {_MAX_SCAN_REPOSITORIES}")
+
+    queue: list[tuple[Path, int]] = []
+    for root_value in roots:
+        root = Path(root_value).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"Scan root does not exist or is not a directory: {root}")
+        queue.append((root, 0))
+    if not queue:
+        raise ValueError("At least one scan root is required")
+
+    found: list[Path] = []
+    visited: set[Path] = set()
+    while queue:
+        current, depth = queue.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+
+        git_marker = current / ".git"
+        if git_marker.exists() and _run_git(current, "rev-parse", "--show-toplevel"):
+            found.append(current)
+            if len(found) >= max_repositories:
+                break
+            continue
+        if depth >= max_depth:
+            continue
+
+        try:
+            entries = sorted(os.scandir(current), key=lambda entry: entry.name.casefold())
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            if name in DEFAULT_SCAN_EXCLUDES:
+                continue
+            if not include_hidden and name.startswith("."):
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            queue.append((Path(entry.path).resolve(), depth + 1))
+
+    return tuple(sorted(set(found), key=lambda path: str(path).casefold()))
+
+
+def _unique_repo_ids(detections: Iterable[RepositoryDetection]) -> tuple[RepositoryDetection, ...]:
+    used: set[str] = set()
+    result: list[RepositoryDetection] = []
+    for detection in sorted(detections, key=lambda item: str(item.path).casefold()):
+        base = detection.repo_id
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        used.add(candidate)
+        result.append(detection if candidate == base else replace(detection, repo_id=candidate))
+    return tuple(result)
+
+
+def scan_repositories(
+    roots: Iterable[str | Path],
+    *,
+    max_depth: int = 3,
+    max_repositories: int = 100,
+    include_hidden: bool = False,
+) -> tuple[RepositoryDetection, ...]:
+    paths = scan_repository_paths(
+        roots,
+        max_depth=max_depth,
+        max_repositories=max_repositories,
+        include_hidden=include_hidden,
+    )
+    return _unique_repo_ids(detect_repository(path) for path in paths)
+
+
 def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -298,25 +521,16 @@ def _toml_array(values: tuple[str, ...] | list[str]) -> str:
     return "[" + ", ".join(_toml_string(value) for value in values) + "]"
 
 
-def render_config(detection: RepositoryDetection) -> str:
+def _render_repository(detection: RepositoryDetection) -> list[str]:
     verification_profiles = [profile.name for profile in detection.profiles if profile.verification]
-    default_verification = "full" if "full" in verification_profiles else (
-        verification_profiles[0] if verification_profiles else None
+    default_verification = (
+        "full"
+        if "full" in verification_profiles
+        else verification_profiles[0]
+        if verification_profiles
+        else None
     )
     lines = [
-        "# Generated by RepoForge. Review commands before first use.",
-        "[server]",
-        'workspace_root = "~/.local/share/repoforge/workspaces"',
-        'state_root = "~/.local/state/repoforge"',
-        "max_file_bytes = 2000000",
-        "max_tool_output_chars = 120000",
-        "default_command_timeout_seconds = 120",
-        "verification_timeout_seconds = 1800",
-        "max_fingerprint_bytes = 52428800",
-        "max_batch_files = 20",
-        f"path_prefixes = {_toml_array(list(DEFAULT_PATH_PREFIXES))}",
-        'allowed_environment = ["HOME", "PATH", "LANG", "LC_ALL", "SSH_AUTH_SOCK", "GH_HOST", "GIT_SSH_COMMAND", "COREPACK_HOME", "PNPM_HOME"]',
-        "",
         f"[repositories.{detection.repo_id}]",
         f"path = {_toml_string(str(detection.path))}",
         f"display_name = {_toml_string(detection.display_name)}",
@@ -355,4 +569,32 @@ def render_config(detection: RepositoryDetection) -> str:
         for command in profile.commands:
             lines.append(f"  {_toml_array(list(command))},")
         lines.extend(["]", ""])
+    return lines
+
+
+def render_config_set(detections: Iterable[RepositoryDetection]) -> str:
+    normalized = _unique_repo_ids(detections)
+    if not normalized:
+        raise ValueError("At least one repository detection is required")
+    lines = [
+        "# Generated by RepoForge. Review every detected command before first use.",
+        "[server]",
+        'workspace_root = "~/.local/share/repoforge/workspaces"',
+        'state_root = "~/.local/state/repoforge"',
+        "max_file_bytes = 2000000",
+        "max_tool_output_chars = 120000",
+        "default_command_timeout_seconds = 120",
+        "verification_timeout_seconds = 1800",
+        "max_fingerprint_bytes = 52428800",
+        "max_batch_files = 20",
+        f"path_prefixes = {_toml_array(list(DEFAULT_PATH_PREFIXES))}",
+        'allowed_environment = ["HOME", "PATH", "LANG", "LC_ALL", "SSH_AUTH_SOCK", "GH_HOST", "GIT_SSH_COMMAND", "COREPACK_HOME", "PNPM_HOME", "UV_CACHE_DIR", "XDG_CACHE_HOME", "DOCKER_HOST"]',
+        "",
+    ]
+    for detection in normalized:
+        lines.extend(_render_repository(detection))
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_config(detection: RepositoryDetection) -> str:
+    return render_config_set((detection,))

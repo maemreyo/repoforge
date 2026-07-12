@@ -12,8 +12,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .config import DEFAULT_CONFIG_PATH, load_config
-from .discovery import detect_repository, render_config
+from .discovery import (
+    RepositoryDetection,
+    detect_repository,
+    render_config,
+    render_config_set,
+    scan_repositories,
+)
 from .errors import PersonalCodingMCPError
 from .server import create_server
 from .service import CodingService
@@ -63,6 +70,26 @@ def _doctor_fix() -> dict[str, Any]:
     return {"actions": actions}
 
 
+def _add_scan_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=3,
+        help="Maximum directory depth below each explicit root (default: %(default)s; max: 10)",
+    )
+    parser.add_argument(
+        "--max-repositories",
+        type=int,
+        default=100,
+        help="Stop after this many repositories (default: %(default)s; max: 500)",
+    )
+    parser.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Descend into hidden directories; symlinks and common dependency/build directories stay excluded",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repoforge",
@@ -73,19 +100,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH)),
         help="Path to config.toml (default: %(default)s; env: REPOFORGE_CONFIG)",
     )
-    parser.add_argument("--version", action="version", version="RepoForge 2.0.0")
+    parser.add_argument("--version", action="version", version=f"RepoForge {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser(
-        "init", help="Detect a repository and generate a ready-to-use configuration"
+        "init", help="Detect one repository or scan explicit roots and generate configuration"
     )
-    init_parser.add_argument(
+    init_source = init_parser.add_mutually_exclusive_group()
+    init_source.add_argument(
         "--repo",
-        default="/Users/trung.ngo/Documents/zaob-dev/work-frontier",
-        help="Local Git repository to configure",
+        default=None,
+        help="Single local Git repository to configure (default: current directory)",
     )
-    init_parser.add_argument("--repo-id", default=None, help="Short model-facing repository id")
+    init_source.add_argument(
+        "--scan-root",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="Explicit directory root to scan; repeat for multiple roots",
+    )
+    init_parser.add_argument("--repo-id", default=None, help="Short model-facing id for single-repo init")
     init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
+    _add_scan_options(init_parser)
 
     inspect_parser = subparsers.add_parser(
         "inspect-repo", help="Preview detected ecosystem, scripts, profiles, and instructions"
@@ -93,6 +129,18 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("repo", nargs="?", default=".")
     inspect_parser.add_argument("--repo-id", default=None)
     inspect_parser.add_argument("--render-config", action="store_true")
+
+    scan_parser = subparsers.add_parser(
+        "scan-repos",
+        help="Safely discover Git repositories under explicit local roots without modifying config",
+    )
+    scan_parser.add_argument("roots", nargs="+", help="Explicit directories to scan")
+    scan_parser.add_argument(
+        "--render-config",
+        action="store_true",
+        help="Print a complete multi-repository TOML config instead of JSON discovery output",
+    )
+    _add_scan_options(scan_parser)
 
     doctor_parser = subparsers.add_parser(
         "doctor", help="Validate tools, versions, auth, paths, remotes, and profiles"
@@ -124,6 +172,41 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_parser.add_argument("--profile", default="repoforge")
     tunnel_parser.add_argument("--tunnel-client", default="tunnel-client")
     return parser
+
+
+def _detection_as_dict(detection: RepositoryDetection) -> dict[str, Any]:
+    return {
+        "path": str(detection.path),
+        "repo_id": detection.repo_id,
+        "display_name": detection.display_name,
+        "remote": detection.remote,
+        "default_base": detection.default_base,
+        "ecosystem": detection.ecosystem,
+        "package_manager": detection.package_manager,
+        "package_manager_version": detection.package_manager_version,
+        "scripts": list(detection.scripts),
+        "instruction_files": list(detection.instruction_files),
+        "profiles": [
+            {
+                "name": profile.name,
+                "description": profile.description,
+                "verification": profile.verification,
+                "commands": [list(command) for command in profile.commands],
+            }
+            for profile in detection.profiles
+        ],
+        "warnings": list(detection.warnings),
+    }
+
+
+def _scan_from_args(args: argparse.Namespace) -> tuple[RepositoryDetection, ...]:
+    roots = args.scan_root if getattr(args, "scan_root", None) else args.roots
+    return scan_repositories(
+        roots,
+        max_depth=args.max_depth,
+        max_repositories=args.max_repositories,
+        include_hidden=args.include_hidden,
+    )
 
 
 def _config_as_dict(service: CodingService) -> dict[str, Any]:
@@ -178,17 +261,35 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "init":
-            detection = detect_repository(args.repo, args.repo_id)
+            if args.scan_root:
+                if args.repo_id:
+                    raise ValueError("--repo-id is only valid with single-repository --repo init")
+                detections = _scan_from_args(args)
+                if not detections:
+                    raise ValueError("No Git repositories were found under the supplied scan roots")
+                _write_text(config_path, render_config_set(detections), args.force)
+                _json(
+                    {
+                        "created": str(config_path),
+                        "mode": "scan",
+                        "repository_count": len(detections),
+                        "repositories": [_detection_as_dict(item) for item in detections],
+                        "next": [
+                            f"repoforge --config {config_path} doctor",
+                            f"repoforge --config {config_path} show-config",
+                        ],
+                    }
+                )
+                return 0
+
+            detection = detect_repository(args.repo or ".", args.repo_id)
             _write_text(config_path, render_config(detection), args.force)
             _json(
                 {
                     "created": str(config_path),
-                    "repo_id": detection.repo_id,
-                    "repo_path": str(detection.path),
-                    "ecosystem": detection.ecosystem,
-                    "package_manager": detection.package_manager,
-                    "profiles": [profile.name for profile in detection.profiles],
-                    "warnings": list(detection.warnings),
+                    "mode": "single",
+                    "repository_count": 1,
+                    "repositories": [_detection_as_dict(detection)],
                     "next": [
                         f"repoforge --config {config_path} doctor",
                         f"repoforge --config {config_path} smoke-test --repo-id {detection.repo_id}",
@@ -202,34 +303,26 @@ def main(argv: list[str] | None = None) -> int:
             if args.render_config:
                 print(render_config(detection), end="")
             else:
+                _json(_detection_as_dict(detection))
+            return 0
+
+        if args.command == "scan-repos":
+            detections = _scan_from_args(args)
+            if args.render_config:
+                print(render_config_set(detections), end="")
+            else:
                 _json(
                     {
-                        "path": str(detection.path),
-                        "repo_id": detection.repo_id,
-                        "display_name": detection.display_name,
-                        "remote": detection.remote,
-                        "default_base": detection.default_base,
-                        "ecosystem": detection.ecosystem,
-                        "package_manager": detection.package_manager,
-                        "package_manager_version": detection.package_manager_version,
-                        "scripts": list(detection.scripts),
-                        "instruction_files": list(detection.instruction_files),
-                        "profiles": [
-                            {
-                                "name": profile.name,
-                                "description": profile.description,
-                                "verification": profile.verification,
-                                "commands": [list(command) for command in profile.commands],
-                            }
-                            for profile in detection.profiles
-                        ],
-                        "warnings": list(detection.warnings),
+                        "roots": [str(Path(root).expanduser().resolve()) for root in args.roots],
+                        "repository_count": len(detections),
+                        "repositories": [_detection_as_dict(item) for item in detections],
+                        "review_required": True,
+                        "next": "Use `repoforge init --scan-root PATH ...` to write the reviewed config.",
                     }
                 )
             return 0
 
         if args.command == "serve":
-            # stdio transport reserves stdout for JSON-RPC protocol messages.
             create_server(config_path).run(transport="stdio")
             return 0
 

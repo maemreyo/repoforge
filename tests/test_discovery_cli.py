@@ -8,11 +8,16 @@ import pytest
 from conftest import ForgeEnvironment, git
 
 from repoforge.cli import main
-from repoforge.discovery import detect_repository, render_config
+from repoforge.discovery import (
+    detect_repository,
+    render_config,
+    render_config_set,
+    scan_repositories,
+)
 
 
 def init_repo(path: Path) -> Path:
-    path.mkdir()
+    path.mkdir(parents=True)
     git("init", cwd=path)
     git("config", "user.name", "Test User", cwd=path)
     git("config", "user.email", "test@example.com", cwd=path)
@@ -96,6 +101,101 @@ def test_generic_and_invalid_detection(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not a Git working tree"):
         detect_repository(plain)
 
+
+
+def test_makefile_detection_prefers_canonical_targets(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repoforge")
+    (repo / "pyproject.toml").write_text(
+        "[build-system]\nrequires=[]\n[project]\nname='demo'\n[tool.ruff]\n[tool.mypy]\n",
+        encoding="utf-8",
+    )
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (repo / "Makefile").write_text(
+        "setup:\n\tuv sync --extra dev\n"
+        "lint:\n\tuv run ruff check .\n"
+        "typecheck:\n\tuv run mypy .\n"
+        "test:\n\tuv run pytest\n"
+        "build:\n\tuv build\n"
+        "check: lint typecheck test build\n",
+        encoding="utf-8",
+    )
+    detection = detect_repository(repo)
+    profiles = {profile.name: profile for profile in detection.profiles}
+    assert detection.package_manager == "uv"
+    assert set(profiles) == {"setup", "quick", "test", "build", "full"}
+    assert profiles["quick"].commands == (("make", "lint"), ("make", "typecheck"))
+    assert profiles["full"].commands == (("make", "check"),)
+
+
+def test_bounded_repository_scan_and_multi_config(tmp_path: Path) -> None:
+    root = tmp_path / "projects"
+    first = init_repo(root / "alpha")
+    second = init_repo(root / "group" / "alpha")
+    hidden = init_repo(root / ".hidden")
+    dependency = init_repo(root / "node_modules" / "dependency")
+    (first / "pyproject.toml").write_text("[tool.ruff]\n", encoding="utf-8")
+    (second / "go.mod").write_text("module example.com/alpha\n", encoding="utf-8")
+
+    detections = scan_repositories([root], max_depth=3)
+    assert [item.path for item in detections] == [first.resolve(), second.resolve()]
+    assert [item.repo_id for item in detections] == ["alpha", "alpha-2"]
+    assert hidden.resolve() not in {item.path for item in detections}
+    assert dependency.resolve() not in {item.path for item in detections}
+
+    rendered = render_config_set(detections)
+    assert "[repositories.alpha]" in rendered
+    assert "[repositories.alpha-2]" in rendered
+    assert str(first.resolve()) in rendered
+    assert str(second.resolve()) in rendered
+
+
+def test_cli_scan_preview_and_multi_repo_init(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "projects"
+    init_repo(root / "one")
+    init_repo(root / "two")
+
+    assert main(["scan-repos", str(root), "--max-depth", "1"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["repository_count"] == 2
+    assert preview["review_required"] is True
+
+    config = tmp_path / "multi.toml"
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "init",
+                "--scan-root",
+                str(root),
+                "--max-depth",
+                "1",
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["mode"] == "scan"
+    assert result["repository_count"] == 2
+    text = config.read_text(encoding="utf-8")
+    assert "[repositories.one]" in text
+    assert "[repositories.two]" in text
+
+    invalid = main(
+        [
+            "--config",
+            str(tmp_path / "invalid.toml"),
+            "init",
+            "--scan-root",
+            str(root),
+            "--repo-id",
+            "not-allowed",
+        ]
+    )
+    assert invalid == 2
+    assert "only valid" in capsys.readouterr().err
 
 def test_cli_setup_diagnostics_and_workspace_commands(
     forge_env: ForgeEnvironment,

@@ -25,13 +25,14 @@ ChatGPT web
 
 ## DevExperience trong v2
 
-- `rf init`: tự nhận diện package manager, scripts, base branch và tạo config.
+- `rf init`: tự nhận diện package manager, Makefile/scripts, base branch và tạo config.
+- `rf scan-repos`: scan an toàn các root local được chỉ định và preview multi-repo config.
 - `rf inspect-repo`: preview ecosystem, instruction files và profile được detect.
 - `rf doctor --fix`: kiểm tra executable, `gh` auth, remote/base, version Node/pnpm, profile và
   quyền ghi state/workspace; có thể chạy `gh auth setup-git`.
 - `rf smoke-test`: tạo rồi xóa worktree thật mà không sửa code.
 - `rf tunnel-command`: sinh chính xác lệnh cấu hình Secure MCP Tunnel.
-- Config riêng cho Work Frontier đã được tạo sẵn tại `config.work-frontier.toml`.
+- Config riêng cho Work Frontier và RepoForge nằm tại `config.work-frontier.toml` và `config.repoforge.toml`.
 - `uv.lock` và `uv sync --extra dev` giúp môi trường phát triển lặp lại được.
 - 27 tool nhỏ, tách read/write, có annotations và structured output.
 - Batch read, repository context, default verification, restore path, change budget, PR labels /
@@ -50,7 +51,7 @@ ChatGPT web
 ## Cài nhanh cho Work Frontier
 
 ```bash
-unzip repoforge-2.0.0.zip
+unzip repoforge-2.0.1.zip
 cd repoforge
 ./scripts/bootstrap-macos.sh
 ```
@@ -83,22 +84,56 @@ mkdir -p ~/.config/repoforge
 cp config.work-frontier.toml ~/.config/repoforge/config.toml
 ```
 
-## Profile của Work Frontier
+## Scan repository và tự tạo multi-repo config
 
-RepoForge đã map các root scripts thật của repository:
+Preview toàn bộ repository dưới một root local, không sửa config:
 
-```text
-quick      -> pnpm run check
-typecheck  -> pnpm run typecheck
-test       -> pnpm run test
-preflight  -> pnpm run test:preflight
-full       -> check + test + test:preflight
-fix        -> pnpm run fix
-setup      -> pnpm install --frozen-lockfile
+```bash
+rf scan-repos /Users/trung.ngo/Documents/zaob-dev --max-depth 2
 ```
 
-Review `config.work-frontier.toml` trước lần chạy đầu tiên, đặc biệt là các command có thể sửa file
-như profile `fix`.
+Sau khi review command đã detect, tạo một config chứa nhiều repository:
+
+```bash
+rf --config ~/.config/repoforge/config.toml init \
+  --scan-root /Users/trung.ngo/Documents/zaob-dev \
+  --max-depth 2
+```
+
+Scanner không follow symlink, bỏ qua dependency/build/cache directories, giới hạn depth/count và
+không tạo worktree, branch hay PR. Xem [`docs/REPOSITORY_DISCOVERY.md`](docs/REPOSITORY_DISCOVERY.md).
+
+## Profile của Work Frontier
+
+Config đã review dùng các Make target canonical của repository:
+
+```text
+setup         -> make bootstrap
+fix           -> make fix
+quick         -> make check
+test          -> make test
+preflight     -> make check-preflight
+architecture  -> make check-architecture
+contracts     -> make check-contracts
+registry      -> make check-harness-registry
+full          -> make verify
+recertify     -> make recertify-foundation
+```
+
+`full` cần Docker vì `make verify` chạy PostgreSQL migration và MinIO storage smokes. Review
+`config.work-frontier.toml` trước lần chạy đầu tiên, đặc biệt là profile có thể sửa file như `fix`.
+
+## Profile của RepoForge
+
+`config.repoforge.toml` dùng chính Makefile của RepoForge:
+
+```text
+setup  -> make setup
+quick  -> make lint + make typecheck
+test   -> make test
+build  -> make build
+full   -> make check
+```
 
 ## Chạy local MCP
 
@@ -175,4 +210,6 @@ CLI/discovery và in-memory MCP protocol tests. Xem [`docs/TESTING.md`](docs/TES
 - [`docs/TESTING.md`](docs/TESTING.md)
 - [`docs/STARTER_PROMPTS.md`](docs/STARTER_PROMPTS.md)
 - [`docs/PLUGIN_TEST_CASES.md`](docs/PLUGIN_TEST_CASES.md)
+- [`docs/REPOSITORY_DISCOVERY.md`](docs/REPOSITORY_DISCOVERY.md)
+- [`docs/FULL_FLOW_TESTING.md`](docs/FULL_FLOW_TESTING.md)
 - [`SECURITY.md`](SECURITY.md)

@@ -1,47 +1,45 @@
 # Build report
 
-Version: 2.0.0  
-Packaged: 2026-07-12  
-Product name: RepoForge  
+Version: 2.0.1
+Prepared: 2026-07-12
+Product name: RepoForge
 Python package: `repoforge-mcp`
 
-## Implemented DX improvements
+## Release scope
 
-- repository auto-detection and config generation;
-- actionable doctor with optional safe fixes;
-- non-mutating smoke test;
-- tunnel command generation;
-- Work Frontier config for `/Users/trung.ngo/Documents/zaob-dev/work-frontier`;
-- `uv.lock`, Makefile and reproducible test/build scripts;
-- repository context and batch reads;
-- default verification profile;
-- path restore and change budgets;
-- configurable PR labels/reviewers/no-maintainer-edit;
-- draft PR update and compact CI check buckets;
-- richer tool descriptions, annotations and stable structured outputs;
-- golden prompt and plugin regression test documentation.
+- bounded local repository scanning through `rf scan-repos`;
+- multi-repository config generation through repeatable `init --scan-root`;
+- deterministic collision handling for duplicate repository names;
+- Makefile-aware command/profile detection;
+- safer Python/uv profile detection;
+- hand-reviewed `config.repoforge.toml` for self-hosted development;
+- GitHub Actions quality matrix for Python 3.10 and 3.13;
+- corrected Work Frontier profile documentation;
+- prior MCP Inspector and runtime-artifact fixes.
 
-## Validation in build environment
+## Safety properties of repository scanning
 
-- Ruff: passed.
-- Mypy strict: passed for 12 source modules.
-- Pytest: 24 tests passed.
-- Branch coverage: 80.74% (minimum gate: 80%).
-- MCP contract: exactly 27 tools discovered with descriptions, schemas and annotations.
-- MCP protocol lifecycle: all 27 tools invoked through an in-memory MCP client.
-- Git integration: real local bare remote, clone, worktree, edit, verify, commit, non-force push and cleanup.
-- GitHub integration: deterministic fake `gh` issue/PR/create/edit/status/check lifecycle.
-- Negative/security paths: stale locks, denied workflow paths, verification invalidation and change budgets.
-- Shell scripts: `bash -n` passed.
-- Python distribution: wheel and source archive built successfully.
-- Plugin icon: PNG, 256 × 256.
+- explicit roots only;
+- bounded depth and repository count;
+- no symlink traversal;
+- dependency, virtual-environment, cache, build, VCS, and hidden-directory exclusions;
+- read-only metadata/manifests during scanning;
+- no MCP scan tool, worktree creation, branch push, or pull-request write;
+- generated commands require operator review before config installation.
 
-## Not executed during packaging
+## Validation performed for this patch
 
-- the recipient's actual `/Users/trung.ngo/Documents/zaob-dev/work-frontier` filesystem;
-- a live OpenAI Secure MCP Tunnel session;
-- a real GitHub push or PR using the recipient's credentials;
-- Work Frontier's real `pnpm` verification commands.
+- Python compile check: passed for source and tests.
+- TOML parsing: passed for `pyproject.toml`, `config.example.toml`,
+  `config.work-frontier.toml`, and `config.repoforge.toml`.
+- Shell syntax: passed for bootstrap, test, Inspector, E2E preflight, and tunnel scripts.
+- Targeted discovery/CLI tests: 10 passed, including Makefile detection, bounded scanning,
+  exclusions, deterministic IDs, multi-repository rendering, and CLI generation.
+- The complete locked suite is configured in `.github/workflows/ci.yml` and must pass before release.
 
-Those checks require the recipient's Mac, local checkout, GitHub login and tunnel ID. Run `rf doctor`,
-`rf smoke-test`, then the golden cases in `docs/PLUGIN_TEST_CASES.md` before the first real task.
+## Environment limitation
+
+The packaging environment could not resolve external Python dependencies, so Ruff, strict Mypy,
+the complete MCP protocol suite, and distribution rebuild were not rerun here. The operator's prior
+RepoForge L0-L5 validation passed for 2.0.0; the new 2.0.1 scan/config patch still requires the new CI
+run and a local `./scripts/test-all.sh` before tagging.
