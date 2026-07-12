@@ -1,0 +1,92 @@
+# RepoForge configuration for developing RepoForge with RepoForge.
+# Install a runtime copy at ~/.config/repoforge/config.toml or merge this
+# repository table into an existing multi-repository config.
+
+[server]
+workspace_root = "~/.local/share/repoforge/workspaces"
+state_root = "~/.local/state/repoforge"
+max_file_bytes = 2000000
+max_tool_output_chars = 120000
+default_command_timeout_seconds = 120
+verification_timeout_seconds = 1800
+max_fingerprint_bytes = 52428800
+max_batch_files = 20
+path_prefixes = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+allowed_environment = [
+  "HOME",
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "SSH_AUTH_SOCK",
+  "GH_HOST",
+  "GIT_SSH_COMMAND",
+  "COREPACK_HOME",
+  "PNPM_HOME",
+  "UV_CACHE_DIR",
+  "XDG_CACHE_HOME",
+]
+
+[repositories.repoforge]
+path = "/Users/trung.ngo/Documents/zaob-dev/repoforge"
+display_name = "RepoForge"
+remote = "origin"
+default_base = "main"
+allowed_base_branches = ["main"]
+branch_prefix = "ai/"
+protected_branches = ["main", "master", "develop", "production"]
+require_verification_before_commit = true
+fetch_before_workspace = true
+default_verification_profile = "full"
+max_changed_files = 80
+max_diff_lines = 8000
+max_total_changed_bytes = 10485760
+allowed_paths = []
+denied_paths = [
+  ".git",
+  ".git/**",
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  "**/*.pem",
+  "**/*.key",
+  "**/*secret*",
+  "**/*credential*",
+  ".github/workflows/**",
+]
+pr_labels = []
+pr_reviewers = []
+no_maintainer_edit = false
+
+[repositories.repoforge.profiles.setup]
+description = "Synchronize the locked RepoForge development environment"
+verification = false
+timeout_seconds = 900
+commands = [["make", "setup"]]
+
+[repositories.repoforge.profiles.quick]
+description = "Run Ruff and strict Mypy without the full test/build gate"
+verification = true
+timeout_seconds = 600
+commands = [
+  ["make", "lint"],
+  ["make", "typecheck"],
+]
+
+[repositories.repoforge.profiles.test]
+description = "Run the RepoForge test suite with branch coverage enforcement"
+verification = true
+timeout_seconds = 900
+commands = [["make", "test"]]
+
+[repositories.repoforge.profiles.build]
+description = "Build the RepoForge wheel and source distribution"
+verification = true
+timeout_seconds = 600
+commands = [["make", "build"]]
+
+[repositories.repoforge.profiles.full]
+description = "Run lint, strict typing, tests with coverage, and package builds"
+verification = true
+timeout_seconds = 1800
+commands = [["make", "check"]]
