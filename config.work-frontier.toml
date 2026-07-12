@@ -1,0 +1,94 @@
+# RepoForge configuration for the user's work-frontier clone.
+[server]
+workspace_root = "~/.local/share/repoforge/workspaces"
+state_root = "~/.local/state/repoforge"
+max_file_bytes = 2000000
+max_tool_output_chars = 120000
+default_command_timeout_seconds = 120
+verification_timeout_seconds = 1800
+max_fingerprint_bytes = 52428800
+max_batch_files = 20
+path_prefixes = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+allowed_environment = [
+  "HOME",
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "SSH_AUTH_SOCK",
+  "GH_HOST",
+  "GIT_SSH_COMMAND",
+  "COREPACK_HOME",
+  "PNPM_HOME",
+]
+
+[repositories.work-frontier]
+path = "/Users/trung.ngo/Documents/zaob-dev/work-frontier"
+display_name = "Work Frontier"
+remote = "origin"
+default_base = "main"
+allowed_base_branches = ["main"]
+branch_prefix = "ai/"
+protected_branches = ["main", "master", "develop", "production"]
+require_verification_before_commit = true
+fetch_before_workspace = true
+default_verification_profile = "full"
+max_changed_files = 150
+max_diff_lines = 12000
+max_total_changed_bytes = 26214400
+allowed_paths = []
+denied_paths = [
+  ".git",
+  ".git/**",
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  "**/*.pem",
+  "**/*.key",
+  "**/*secret*",
+  "**/*credential*",
+  ".github/workflows/**",
+]
+pr_labels = []
+pr_reviewers = []
+no_maintainer_edit = false
+
+[repositories.work-frontier.profiles.setup]
+description = "Install dependencies exactly from pnpm-lock.yaml"
+verification = false
+commands = [["pnpm", "install", "--frozen-lockfile"]]
+
+[repositories.work-frontier.profiles.fix]
+description = "Run the repository autofix script"
+verification = false
+commands = [["pnpm", "run", "fix"]]
+
+[repositories.work-frontier.profiles.quick]
+description = "Run the root check script (Biome lint plus TypeScript typecheck)"
+verification = true
+commands = [["pnpm", "run", "check"]]
+
+[repositories.work-frontier.profiles.typecheck]
+description = "Run TypeScript type checking"
+verification = true
+commands = [["pnpm", "run", "typecheck"]]
+
+[repositories.work-frontier.profiles.test]
+description = "Run the frontend Vitest suite"
+verification = true
+commands = [["pnpm", "run", "test"]]
+
+[repositories.work-frontier.profiles.preflight]
+description = "Run ADR-006 architecture preflight validation"
+verification = true
+commands = [["pnpm", "run", "test:preflight"]]
+
+[repositories.work-frontier.profiles.full]
+description = "Full gate: checks, tests, and architecture preflight"
+verification = true
+timeout_seconds = 1800
+commands = [
+  ["pnpm", "run", "check"],
+  ["pnpm", "run", "test"],
+  ["pnpm", "run", "test:preflight"],
+]
