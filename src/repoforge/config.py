@@ -150,6 +150,65 @@ def _safe_remote(value: str, context: str) -> str:
     return value
 
 
+def _load_commands(raw: Any, context: str) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(
+            f"{context} must be a non-empty command array or an array of command arrays"
+        )
+    if all(isinstance(argument, str) and argument for argument in raw):
+        return (tuple(str(argument) for argument in raw),)
+
+    commands: list[tuple[str, ...]] = []
+    for index, command in enumerate(raw):
+        if (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(argument, str) and argument for argument in command)
+        ):
+            raise ConfigError(f"{context}[{index}] must be a non-empty string array")
+        commands.append(tuple(str(argument) for argument in command))
+    return tuple(commands)
+
+
+def _load_compact_profiles(
+    raw: Any,
+    repo_id: str,
+    *,
+    table_name: str,
+    verification: bool,
+) -> dict[str, ProfileConfig]:
+    if raw is None:
+        return {}
+    table = _expect_mapping(raw, f"repositories.{repo_id}.{table_name}")
+    profiles: dict[str, ProfileConfig] = {}
+    for name, commands_raw in table.items():
+        _safe_ref(name, f"profile name for {repo_id}")
+        profiles[name] = ProfileConfig(
+            name=name,
+            description="",
+            commands=_load_commands(
+                commands_raw, f"repositories.{repo_id}.{table_name}.{name}"
+            ),
+            verification=verification,
+        )
+    return profiles
+
+
+def _merge_profiles(
+    target: dict[str, ProfileConfig],
+    source: dict[str, ProfileConfig],
+    *,
+    repo_id: str,
+) -> None:
+    duplicates = sorted(set(target).intersection(source))
+    if duplicates:
+        raise ConfigError(
+            f"repositories.{repo_id} defines duplicate profiles: {duplicates}. "
+            "Use each profile name in only one of actions, checks, or profiles."
+        )
+    target.update(source)
+
+
 def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
     if raw is None:
         return {}
@@ -170,24 +229,14 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
             )
 
         raw_commands = profile.get("commands")
-        if not isinstance(raw_commands, list) or not raw_commands:
+        if raw_commands is None:
             raise ConfigError(f"profile {repo_id}.{name} must contain at least one command")
-        commands: list[tuple[str, ...]] = []
-        for index, command in enumerate(raw_commands):
-            if (
-                not isinstance(command, list)
-                or not command
-                or not all(isinstance(arg, str) and arg for arg in command)
-            ):
-                raise ConfigError(
-                    f"profile {repo_id}.{name}.commands[{index}] must be a non-empty string array"
-                )
-            commands.append(tuple(command))
+        commands = _load_commands(raw_commands, f"profile {repo_id}.{name}.commands")
 
         profiles[name] = ProfileConfig(
             name=name,
             description=description,
-            commands=tuple(commands),
+            commands=commands,
             verification=verification,
             timeout_seconds=timeout_seconds,
         )
@@ -293,11 +342,47 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             repo_raw.get("protected_branches", ["main", "master", "develop", "production"]),
             f"repositories.{repo_id}.protected_branches",
         )
-        profiles = _load_profiles(repo_raw.get("profiles"), repo_id)
-        default_verification_raw = repo_raw.get("default_verification_profile")
-        default_verification = (
-            str(default_verification_raw) if default_verification_raw is not None else None
+        profiles: dict[str, ProfileConfig] = {}
+        _merge_profiles(
+            profiles,
+            _load_compact_profiles(
+                repo_raw.get("actions"),
+                repo_id,
+                table_name="actions",
+                verification=False,
+            ),
+            repo_id=repo_id,
         )
+        _merge_profiles(
+            profiles,
+            _load_compact_profiles(
+                repo_raw.get("checks"),
+                repo_id,
+                table_name="checks",
+                verification=True,
+            ),
+            repo_id=repo_id,
+        )
+        _merge_profiles(
+            profiles,
+            _load_profiles(repo_raw.get("profiles"), repo_id),
+            repo_id=repo_id,
+        )
+
+        default_verification_raw = repo_raw.get("default_verification_profile")
+        default_verification: str | None
+        if default_verification_raw is not None:
+            default_verification = str(default_verification_raw)
+        else:
+            verification_profiles = [
+                name for name, profile in profiles.items() if profile.verification
+            ]
+            if "full" in verification_profiles:
+                default_verification = "full"
+            elif len(verification_profiles) == 1:
+                default_verification = verification_profiles[0]
+            else:
+                default_verification = None
         if default_verification:
             if default_verification not in profiles:
                 raise ConfigError(

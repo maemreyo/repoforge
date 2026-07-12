@@ -55,8 +55,10 @@ def test_javascript_detection_and_render_config(tmp_path: Path) -> None:
         "full",
     }
     rendered = render_config(detection)
-    assert "default_verification_profile = \"full\"" in rendered
-    assert '[repositories.modern-app.profiles.full]' in rendered
+    assert "[server]" not in rendered
+    assert '[repositories.modern-app.actions]' in rendered
+    assert '[repositories.modern-app.checks]' in rendered
+    assert '[repositories.modern-app.profiles.full]' not in rendered
     assert str(repo) in rendered
 
 
@@ -122,7 +124,26 @@ def test_cli_setup_diagnostics_and_workspace_commands(
         == 0
     )
     assert generated.exists()
-    assert "demo-init" in generated.read_text(encoding="utf-8")
+    generated_text = generated.read_text(encoding="utf-8")
+    assert "[server]" not in generated_text
+    assert "[repositories.demo-init]" in generated_text
+    assert (
+        main(
+            [
+                "--config",
+                str(generated),
+                "init",
+                "--repo",
+                str(forge_env.source),
+                "--repo-id",
+                "demo-second",
+            ]
+        )
+        == 0
+    )
+    generated_text = generated.read_text(encoding="utf-8")
+    assert "[repositories.demo-init]" in generated_text
+    assert "[repositories.demo-second]" in generated_text
     capsys.readouterr()
 
     assert main(["inspect-repo", str(forge_env.source)]) == 0
@@ -189,7 +210,10 @@ def test_cli_errors_and_existing_config(
     forge_env: ForgeEnvironment, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     existing = tmp_path / "existing.toml"
-    existing.write_text("existing\n", encoding="utf-8")
+    existing.write_text(
+        f'[repositories.seed]\npath = "{forge_env.source}"\n',
+        encoding="utf-8",
+    )
     code = main(
         [
             "--config",
@@ -197,10 +221,47 @@ def test_cli_errors_and_existing_config(
             "init",
             "--repo",
             str(forge_env.source),
+            "--repo-id",
+            "added",
+        ]
+    )
+    assert code == 0
+    updated = existing.read_text(encoding="utf-8")
+    assert "[repositories.seed]" in updated
+    assert "[repositories.added]" in updated
+    capsys.readouterr()
+
+    code = main(
+        [
+            "--config",
+            str(existing),
+            "init",
+            "--repo",
+            str(forge_env.source),
+            "--repo-id",
+            "added",
         ]
     )
     assert code == 2
-    assert "Refusing to overwrite" in capsys.readouterr().err
+    assert "already configured" in capsys.readouterr().err
+
+    code = main(
+        [
+            "--config",
+            str(existing),
+            "init",
+            "--repo",
+            str(forge_env.source),
+            "--repo-id",
+            "replacement",
+            "--force",
+        ]
+    )
+    assert code == 0
+    replaced = existing.read_text(encoding="utf-8")
+    assert "[repositories.replacement]" in replaced
+    assert "[repositories.seed]" not in replaced
+    capsys.readouterr()
 
     code = main(["--config", str(tmp_path / "missing.toml"), "show-config"])
     assert code == 2
