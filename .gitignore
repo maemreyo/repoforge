@@ -11,3 +11,4 @@ build/
 *.egg-info/
 config.toml
 .DS_Store
+.omo/run-continuation/**
