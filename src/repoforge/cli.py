@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DEFAULT_CONFIG_PATH, load_config
-from .discovery import detect_repository, merge_config, render_config
+from .discovery import detect_repository, render_config
 from .errors import PersonalCodingMCPError
 from .server import create_server
 from .service import CodingService
@@ -81,15 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument(
         "--repo",
-        default=".",
-        help="Local Git repository to add (default: current directory)",
+        default="/Users/trung.ngo/Documents/zaob-dev/work-frontier",
+        help="Local Git repository to configure",
     )
     init_parser.add_argument("--repo-id", default=None, help="Short model-facing repository id")
-    init_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Replace the entire config instead of adding this repository",
-    )
+    init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
 
     inspect_parser = subparsers.add_parser(
         "inspect-repo", help="Preview detected ecosystem, scripts, profiles, and instructions"
@@ -183,20 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             detection = detect_repository(args.repo, args.repo_id)
-            existed = config_path.exists()
-            rendered = render_config(detection)
-            action = "created"
-            if existed and not args.force:
-                existing = config_path.read_text(encoding="utf-8")
-                rendered = merge_config(existing, detection)
-                action = "added_repository"
-            elif existed:
-                action = "replaced"
-            _write_text(config_path, rendered, force=existed or args.force)
+            _write_text(config_path, render_config(detection), args.force)
             _json(
                 {
                     "created": str(config_path),
-                    "action": action,
                     "repo_id": detection.repo_id,
                     "repo_path": str(detection.path),
                     "ecosystem": detection.ecosystem,
