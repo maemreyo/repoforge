@@ -25,6 +25,11 @@ from .security import (
 )
 from .state import StateStore, VerificationReceipt, WorkspaceRecord, utc_now
 from .workspace_create import WorkspaceCreateCommand, WorkspaceCreator, WorkspaceCreatorPorts
+from .workspace_file_write import (
+    WorkspaceFileWriteCommand,
+    WorkspaceFileWritePorts,
+    WorkspaceFileWriter,
+)
 
 T = TypeVar("T")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -175,14 +180,6 @@ class CodingService:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", slug):
             raise CommandError(f"Unexpected GitHub repository name: {slug!r}")
         return slug
-
-    @staticmethod
-    def _sha256_file(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     def _fingerprint(self, path: Path) -> str:
         digest = hashlib.sha256()
@@ -864,7 +861,10 @@ class CodingService:
         expected_sha256: str,
     ) -> dict[str, Any]:
         _, repo, path = self._workspace(workspace_id)
-        file_path = resolve_workspace_path(path, relative_path, repo)
+
+        # Pre-audit input validation — errors are NOT recorded in the audit log,
+        # matching the original workspace_write_file audit boundary.
+        _ = resolve_workspace_path(path, relative_path, repo)
         if "\x00" in content:
             raise SecurityError("NUL bytes are not allowed in text files")
         encoded = content.encode("utf-8")
@@ -873,42 +873,29 @@ class CodingService:
         if expected_sha256 != "<new>" and not _SHA256_RE.fullmatch(expected_sha256):
             raise ValueError("expected_sha256 must be a lowercase SHA-256 or '<new>'")
 
+        writer = WorkspaceFileWriter(
+            WorkspaceFileWritePorts(
+                state=self.state,
+                runner=self.runner,
+                max_file_bytes=self.config.server.max_file_bytes,
+            )
+        )
+        command = WorkspaceFileWriteCommand(
+            workspace_id=workspace_id,
+            relative_path=relative_path,
+            content=content,
+            expected_sha256=expected_sha256,
+        )
+
         def operation() -> dict[str, Any]:
-            with self.state.lock(workspace_id):
-                if file_path.exists():
-                    if file_path.is_symlink() or not file_path.is_file():
-                        raise SecurityError("Only regular files can be overwritten")
-                    if expected_sha256 == "<new>":
-                        raise WorkspaceError("File already exists; supply its current SHA-256")
-                    actual = self._sha256_file(file_path)
-                    if actual != expected_sha256:
-                        raise WorkspaceError(
-                            f"File changed since it was read: expected {expected_sha256}, got {actual}"
-                        )
-                elif expected_sha256 != "<new>":
-                    raise WorkspaceError(
-                        "File does not exist; use expected_sha256='<new>' to create it"
-                    )
-                existing_mode = (
-                    stat.S_IMODE(file_path.stat().st_mode) if file_path.exists() else None
-                )
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                temporary = file_path.with_name(f".{file_path.name}.rf-{os.getpid()}")
-                try:
-                    temporary.write_bytes(encoded)
-                    if existing_mode is not None:
-                        os.chmod(temporary, existing_mode)
-                    os.replace(temporary, file_path)
-                finally:
-                    temporary.unlink(missing_ok=True)
-                new_sha = hashlib.sha256(encoded).hexdigest()
-                return {
-                    "workspace_id": workspace_id,
-                    "path": assert_path_allowed(relative_path, repo),
-                    "sha256": new_sha,
-                    "size_bytes": len(encoded),
-                    "diff_stat": self.runner.run(["git", "diff", "--stat", "--"], cwd=path).stdout,
-                }
+            result = writer.execute(repo, path, command)
+            return {
+                "workspace_id": result.workspace_id,
+                "path": result.path,
+                "sha256": result.sha256,
+                "size_bytes": result.size_bytes,
+                "diff_stat": result.diff_stat,
+            }
 
         return self._audit_call(
             "workspace_write_file",
