@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .errors import ConfigError, PersonalCodingMCPError
+from .runtime import read_runtime_state
 from .security import slugify
 from .service import CodingService
 from .user_config import (
@@ -29,6 +30,7 @@ from .user_config import (
     config_kind,
     detect_repository_for_setup,
     load_user_config,
+    lock_generation,
     profile_summary,
     read_toml,
     resolve_runtime_config_path,
@@ -45,6 +47,33 @@ def _json(value: Any) -> None:
 
 def _tunnel_state_path(config_path: Path) -> Path:
     return resolved_config_path(config_path).with_name("tunnel-profile.json")
+
+
+def _runtime_state_path(config_path: Path) -> Path:
+    return resolved_config_path(config_path).with_name("runtime.json")
+
+
+def _activation_result(config_path: Path, repo_id: str | None = None) -> dict[str, Any]:
+    generation = lock_generation(resolved_config_path(config_path))
+    active = read_runtime_state(_runtime_state_path(config_path))
+    active_generation = active.active_generation if active else None
+    restart_required = active is not None and active_generation != generation
+    result: dict[str, Any] = {
+        "config_generation": generation,
+        "active_generation": active_generation,
+        "restart_required": restart_required,
+    }
+    if restart_required:
+        target = f" repository {repo_id!r}" if repo_id else ""
+        result.update(
+            {
+                "status": "restart_required",
+                "safe_next_action": f"Restart the running `rf start` process to activate{target}.",
+            }
+        )
+    else:
+        result["status"] = "active" if active else "stopped"
+    return result
 
 
 class _SmokeService(Protocol):
@@ -186,6 +215,7 @@ def _repo_add(args: argparse.Namespace) -> int:
             "resolved_config": str(lock_path),
             "profiles": profile_summary(detections)[repo_id],
         }
+        | _activation_result(config_path, repo_id)
     )
     return 0
 
@@ -202,15 +232,14 @@ def _repo_remove(args: argparse.Namespace) -> int:
     if not remaining:
         raise ConfigError("Cannot remove the final repository; create a replacement config instead")
     updated = replace(config, repositories=remaining)
-    lock_path, _ = write_user_and_lock(
-        updated, expected_source_sha256=expected_source_sha256
-    )
+    lock_path, _ = write_user_and_lock(updated, expected_source_sha256=expected_source_sha256)
     _json(
         {
             "removed": args.repo_id,
             "config": str(config.source_path),
             "resolved_config": str(lock_path),
         }
+        | _activation_result(config_path, args.repo_id)
     )
     return 0
 
@@ -222,11 +251,24 @@ def _repo_refresh(args: argparse.Namespace) -> int:
     config = _load_minimal_or_error(config_path)
     if sha256_file(config_path) != expected_source_sha256:
         raise ConfigError("Configuration changed while it was being read; retry refresh")
-    candidate, detections = build_lock_text(config, source_text)
     lock_path = resolved_config_path(config.source_path)
+    try:
+        current_generation = lock_generation(lock_path)
+    except ConfigError:
+        current_generation = 0
+    candidate, detections = build_lock_text(
+        config, source_text, generation=max(1, current_generation)
+    )
     current = lock_path.read_text(encoding="utf-8") if lock_path.is_file() else ""
     if current == candidate:
-        _json({"changed": False, "resolved_config": str(lock_path), "profiles": profile_summary(detections)})
+        _json(
+            {
+                "changed": False,
+                "resolved_config": str(lock_path),
+                "profiles": profile_summary(detections),
+            }
+            | _activation_result(config_path)
+        )
         return 0
     diff = "".join(
         difflib.unified_diff(
@@ -238,10 +280,14 @@ def _repo_refresh(args: argparse.Namespace) -> int:
     )
     if not args.accept:
         print(diff, end="")
-        print("\nNo changes written. Re-run with `rf repo refresh --accept` after review.", file=sys.stderr)
+        print(
+            "\nNo changes written. Re-run with `rf repo refresh --accept` after review.",
+            file=sys.stderr,
+        )
         return 2
     if sha256_file(config_path) != expected_source_sha256:
         raise ConfigError("Configuration changed during refresh; no lock was written")
+    candidate, _ = build_lock_text(config, source_text, generation=current_generation + 1)
     atomic_write(lock_path, candidate)
     _json(
         {
@@ -250,6 +296,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
             "resolved_config": str(lock_path),
             "profiles": profile_summary(detections),
         }
+        | _activation_result(config_path)
     )
     return 0
 
@@ -402,19 +449,35 @@ def _build_parser() -> argparse.ArgumentParser:
     setup.add_argument("repos", nargs="+", help="Local Git repository paths")
     setup.add_argument("--tunnel-id", required=True)
     setup.add_argument("--profile", default="repoforge")
-    setup.add_argument("--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH)))
+    setup.add_argument(
+        "--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    )
     setup.add_argument("--force", action="store_true")
     setup.add_argument("--skip-smoke", action="store_true")
 
-    start = subparsers.add_parser("start", help="Validate configuration and start the secure tunnel")
-    start.add_argument("--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH)))
+    start = subparsers.add_parser(
+        "start", help="Validate configuration and start the secure tunnel"
+    )
+    start.add_argument(
+        "--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    )
     start.add_argument("--tunnel-id", default=os.environ.get("TUNNEL_ID"))
     start.add_argument("--profile", default=os.environ.get("TUNNEL_PROFILE"))
     start.add_argument("--skip-doctor", action="store_true")
     start.add_argument("--dry-run", action="store_true")
 
+    runtime = subparsers.add_parser("runtime", help="Inspect the managed runtime generation")
+    runtime.add_argument(
+        "--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    )
+    runtime_subparsers = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_status = runtime_subparsers.add_parser("status")
+    runtime_status.add_argument("--config", default=argparse.SUPPRESS)
+
     repo = subparsers.add_parser("repo", help="Manage repositories in the minimal config")
-    repo.add_argument("--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH)))
+    repo.add_argument(
+        "--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    )
     repo_subparsers = repo.add_subparsers(dest="repo_command", required=True)
     repo_subparsers.add_parser("list")
     add = repo_subparsers.add_parser("add")
@@ -428,7 +491,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
-    commands = {"setup", "start", "repo"}
+    commands = {"setup", "start", "repo", "runtime"}
     if len(argv) >= 3 and argv[0] == "--config" and argv[2] in commands:
         return [argv[2], "--config", argv[1], *argv[3:]]
     if len(argv) >= 2 and argv[0].startswith("--config=") and argv[1] in commands:
@@ -438,7 +501,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
 
 def handle_onboarding_command(argv: list[str]) -> int | None:
     normalized = _normalize_argv(list(argv))
-    if not normalized or normalized[0] not in {"setup", "start", "repo"}:
+    if not normalized or normalized[0] not in {"setup", "start", "repo", "runtime"}:
         return None
     parser = _build_parser()
     try:
@@ -456,6 +519,10 @@ def handle_onboarding_command(argv: list[str]) -> int | None:
                 return _repo_remove(args)
             if args.repo_command == "refresh":
                 return _repo_refresh(args)
+        if args.command == "runtime" and args.runtime_command == "status":
+            config_path = Path(args.config).expanduser().resolve()
+            _json(_activation_result(config_path))
+            return 0
         parser.error("Unknown onboarding command")
     except (PersonalCodingMCPError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)

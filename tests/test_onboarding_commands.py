@@ -74,7 +74,9 @@ class FakeService:
         self.calls.append(("workspace_diff", workspace_id))
         return {}
 
-    def workspace_remove(self, workspace_id: str, delete_local_branch: bool = False) -> dict[str, Any]:
+    def workspace_remove(
+        self, workspace_id: str, delete_local_branch: bool = False
+    ) -> dict[str, Any]:
         self.calls.append(("workspace_remove", workspace_id))
         return {}
 
@@ -192,9 +194,10 @@ def test_repo_add_and_remove_update_config_atomically(
 
     monkeypatch.setattr(onboarding, "write_user_and_lock", write)
     monkeypatch.setattr(onboarding, "profile_summary", lambda detections: {"second": {}})
-    assert _repo_add(
-        argparse.Namespace(config=str(config), path=str(added_path), repo_id="second")
-    ) == 0
+    assert (
+        _repo_add(argparse.Namespace(config=str(config), path=str(added_path), repo_id="second"))
+        == 0
+    )
     assert [repo.repo_id for repo in writes[-1].repositories] == ["demo", "second"]
     capsys.readouterr()
 
@@ -213,7 +216,11 @@ def test_repo_refresh_previews_then_accepts_changes(
     lock = tmp_path / "resolved.toml"
     lock.write_text("old\n", encoding="utf-8")
     monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
-    monkeypatch.setattr(onboarding, "build_lock_text", lambda config, source: ("new\n", []))
+    monkeypatch.setattr(
+        onboarding,
+        "build_lock_text",
+        lambda config, source, **_: ("[repoforge_lock]\ngeneration = 1\n", []),
+    )
     monkeypatch.setattr(onboarding, "profile_summary", lambda detections: {})
 
     assert _repo_refresh(argparse.Namespace(config=str(config), accept=False)) == 2
@@ -221,7 +228,7 @@ def test_repo_refresh_previews_then_accepts_changes(
     assert "No changes written" in capsys.readouterr().err
 
     assert _repo_refresh(argparse.Namespace(config=str(config), accept=True)) == 0
-    assert lock.read_text(encoding="utf-8") == "new\n"
+    assert lock.read_text(encoding="utf-8") == "[repoforge_lock]\ngeneration = 1\n"
     assert json.loads(capsys.readouterr().out)["accepted"] is True
 
     assert _repo_refresh(argparse.Namespace(config=str(config), accept=False)) == 0
@@ -238,18 +245,23 @@ def test_start_dry_run_uses_minimal_config_without_secret(
     monkeypatch.setattr(onboarding, "load_config", lambda path: path)
     monkeypatch.setattr(onboarding, "CodingService", lambda value: service)
     monkeypatch.setattr(onboarding.shutil, "which", lambda name: None)
-    monkeypatch.setattr(onboarding, "_repoforge_command", lambda path: ["rf", "--config", str(path), "serve"])
+    monkeypatch.setattr(
+        onboarding, "_repoforge_command", lambda path: ["rf", "--config", str(path), "serve"]
+    )
     monkeypatch.setattr(onboarding, "_tunnel_state_path", lambda path: tmp_path / "state.json")
 
-    assert _start(
-        argparse.Namespace(
-            config=str(config),
-            tunnel_id=None,
-            profile=None,
-            skip_doctor=False,
-            dry_run=True,
+    assert (
+        _start(
+            argparse.Namespace(
+                config=str(config),
+                tunnel_id=None,
+                profile=None,
+                skip_doctor=False,
+                dry_run=True,
+            )
         )
-    ) == 0
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
     assert output["would_initialize"] is True
     assert output["run"] == ["tunnel-client", "run", "--profile", "repoforge"]
@@ -259,18 +271,23 @@ def test_start_returns_when_doctor_has_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = write_minimal_config(tmp_path)
-    monkeypatch.setattr(onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved")
+    monkeypatch.setattr(
+        onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved"
+    )
     monkeypatch.setattr(onboarding, "load_config", lambda path: path)
     monkeypatch.setattr(onboarding, "CodingService", lambda value: FakeService(doctor_ok=False))
-    assert _start(
-        argparse.Namespace(
-            config=str(config),
-            tunnel_id=None,
-            profile=None,
-            skip_doctor=False,
-            dry_run=True,
+    assert (
+        _start(
+            argparse.Namespace(
+                config=str(config),
+                tunnel_id=None,
+                profile=None,
+                skip_doctor=False,
+                dry_run=True,
+            )
         )
-    ) == 1
+        == 1
+    )
     assert json.loads(capsys.readouterr().out)["ok"] is False
 
 
@@ -280,7 +297,9 @@ def test_start_initializes_doctors_and_executes_tunnel(
     config = write_minimal_config(tmp_path)
     state = tmp_path / "state.json"
     calls: list[list[str]] = []
-    monkeypatch.setattr(onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved")
+    monkeypatch.setattr(
+        onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved"
+    )
     monkeypatch.setattr(onboarding, "load_config", lambda path: path)
     monkeypatch.setattr(onboarding, "CodingService", lambda value: FakeService())
     monkeypatch.setattr(onboarding.shutil, "which", lambda name: f"/bin/{name}")
@@ -323,7 +342,9 @@ def test_start_repairs_profile_when_tunnel_doctor_fails(
 ) -> None:
     config = write_minimal_config(tmp_path)
     state = tmp_path / "state.json"
-    monkeypatch.setattr(onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved")
+    monkeypatch.setattr(
+        onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved"
+    )
     monkeypatch.setattr(onboarding, "load_config", lambda path: path)
     monkeypatch.setattr(onboarding, "CodingService", lambda value: FakeService())
     monkeypatch.setattr(onboarding.shutil, "which", lambda name: f"/bin/{name}")
@@ -339,7 +360,9 @@ def test_start_repairs_profile_when_tunnel_doctor_fails(
                 raise ConfigError("profile missing")
 
     monkeypatch.setattr(onboarding, "_run_checked", run)
-    monkeypatch.setattr(onboarding.os, "execvpe", lambda *args: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(
+        onboarding.os, "execvpe", lambda *args: (_ for _ in ()).throw(RuntimeError())
+    )
     with pytest.raises(RuntimeError):
         _start(
             argparse.Namespace(
@@ -379,6 +402,21 @@ def test_onboarding_router_handles_errors(
     assert handle_onboarding_command(["doctor"]) is None
 
 
+def test_runtime_status_accepts_config_after_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    lock = tmp_path / "resolved.toml"
+    lock.write_text("[repoforge_lock]\ngeneration = 1\n", encoding="utf-8")
+    monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
+
+    assert handle_onboarding_command(["runtime", "status", "--config", str(config)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "stopped"
+    assert output["config_generation"] == 1
+
+
 def test_smoke_repository_always_removes_workspace() -> None:
     service = FakeService()
     result = onboarding._smoke_repository(service, "demo")
@@ -389,7 +427,9 @@ def test_smoke_repository_always_removes_workspace() -> None:
 def test_repoforge_command_prefers_installed_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(onboarding.shutil, "which", lambda name: "/bin/rf" if name == "rf" else None)
+    monkeypatch.setattr(
+        onboarding.shutil, "which", lambda name: "/bin/rf" if name == "rf" else None
+    )
     assert onboarding._repoforge_command(tmp_path / "config.toml") == [
         "/bin/rf",
         "--config",
@@ -416,7 +456,9 @@ def test_start_requires_tunnel_client_outside_dry_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = write_minimal_config(tmp_path)
-    monkeypatch.setattr(onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved")
+    monkeypatch.setattr(
+        onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved"
+    )
     monkeypatch.setattr(onboarding, "load_config", lambda path: path)
     monkeypatch.setattr(onboarding, "CodingService", lambda value: FakeService())
     monkeypatch.setattr(onboarding.shutil, "which", lambda name: None)
@@ -436,13 +478,16 @@ def test_start_prompts_for_missing_runtime_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = write_minimal_config(tmp_path)
-    monkeypatch.setattr(onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved")
+    monkeypatch.setattr(
+        onboarding, "resolve_runtime_config_path", lambda path: tmp_path / "resolved"
+    )
     monkeypatch.setattr(onboarding, "load_config", lambda path: path)
     monkeypatch.setattr(onboarding, "CodingService", lambda value: FakeService())
     monkeypatch.setattr(onboarding.shutil, "which", lambda name: f"/bin/{name}")
     monkeypatch.setattr(onboarding, "_repoforge_command", lambda path: ["rf", "serve"])
     monkeypatch.setattr(onboarding, "_tunnel_state_path", lambda path: tmp_path / "state.json")
     monkeypatch.delenv("CONTROL_PLANE_API_KEY", raising=False)
+
     class TtyInput:
         @staticmethod
         def isatty() -> bool:

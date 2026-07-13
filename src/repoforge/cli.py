@@ -16,9 +16,10 @@ from .config import DEFAULT_CONFIG_PATH, load_config
 from .discovery import detect_repository, render_config
 from .errors import PersonalCodingMCPError
 from .onboarding import handle_onboarding_command
+from .runtime import clear_runtime_state, write_runtime_state
 from .server import create_server
 from .service import CodingService
-from .user_config import resolve_runtime_config_path
+from .user_config import lock_generation, resolve_runtime_config_path
 
 
 def _write_text(destination: Path, content: str, force: bool) -> None:
@@ -118,7 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("list-workspaces", help="Print registered workspaces as JSON")
 
     smoke_parser = subparsers.add_parser(
-        "smoke-test", help="Exercise repository and isolated-worktree operations without editing code"
+        "smoke-test",
+        help="Exercise repository and isolated-worktree operations without editing code",
     )
     smoke_parser.add_argument("--repo-id", default=None)
 
@@ -247,7 +249,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "serve":
             # stdio transport reserves stdout for JSON-RPC protocol messages.
-            create_server(resolve_runtime_config_path(config_path)).run(transport="stdio")
+            runtime_path = resolve_runtime_config_path(config_path)
+            state_path = runtime_path.with_name("runtime.json")
+            state = write_runtime_state(state_path, lock_generation(runtime_path))
+            try:
+                create_server(runtime_path).run(transport="stdio")
+            finally:
+                clear_runtime_state(state_path, state.pid)
             return 0
 
         service = CodingService(load_config(resolve_runtime_config_path(config_path)))
@@ -295,7 +303,13 @@ def main(argv: list[str] | None = None) -> int:
                         "--mcp-command",
                         mcp_command,
                     ],
-                    "doctor": [args.tunnel_client, "doctor", "--profile", args.profile, "--explain"],
+                    "doctor": [
+                        args.tunnel_client,
+                        "doctor",
+                        "--profile",
+                        args.profile,
+                        "--explain",
+                    ],
                     "run": [args.tunnel_client, "run", "--profile", args.profile],
                 }
             )

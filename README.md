@@ -128,7 +128,11 @@ Manage repositories without editing TOML:
 rf repo list
 rf repo add /absolute/path/to/another-repository
 rf repo remove repository-id
+rf runtime status
 ```
+
+Repository changes report the reviewed configuration generation and whether an existing MCP process
+must restart before it can use the change. `rf runtime status` makes that comparison explicit.
 
 If a `Makefile`, `package.json`, `pyproject.toml`, or another command source changes, RepoForge fails
 closed. Review the proposed allowlist diff and then accept it explicitly:

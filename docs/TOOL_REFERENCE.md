@@ -4,6 +4,14 @@ RepoForge exposes twenty-seven focused MCP tools. Each tool has one clear respon
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
+## Local runtime commands
+
+`rf runtime status` is a local operator command, not an MCP tool. It compares the reviewed lock
+generation on disk with the generation loaded by the live MCP process. Repository mutations include
+the same `config_generation`, `active_generation`, and `restart_required` fields. When restart is
+required, RepoForge continues to fail closed on stale resolved locks and reports the exact next
+action; this release does not yet supervise or restart the tunnel process automatically.
+
 ## Repository inspection
 
 | Tool | Purpose |
