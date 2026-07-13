@@ -138,6 +138,7 @@ rf runtime reload
 rf runtime logs --tail 100
 rf config history
 rf config rollback 3
+rf diagnostics bundle
 ```
 
 Managed runtime changes auto-restart after a successful repository add or accepted refresh; failed
@@ -153,6 +154,10 @@ not make network requests or expose tunnel credentials.
 When the MCP child is live, runtime status also includes a deterministic `tool_surface_hash` derived
 from public MCP metadata, so an upgrade that changes tool names, signatures, titles, or annotations
 can be detected independently of a configuration generation.
+
+`rf diagnostics bundle` writes a local JSON artifact containing only config fingerprints, retained
+generation numbers, and runtime metadata. It explicitly excludes configuration/file/patch/PR bodies,
+runtime logs, the process environment, and tunnel credentials.
 `rf runtime reload` is the Stage-A supervisor-managed reload: it performs the same controlled
 process-group restart as `restart`, then starts the latest reviewed configuration generation.
 

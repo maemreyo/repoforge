@@ -101,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser("runtime", help="Manage the local tunnel runtime lifecycle")
     subparsers.add_parser("config", help="Inspect or restore reviewed config generations")
+    subparsers.add_parser("diagnostics", help="Create a bounded local diagnostics bundle")
 
     inspect_parser = subparsers.add_parser(
         "inspect-repo", help="Preview detected ecosystem, scripts, profiles, and instructions"

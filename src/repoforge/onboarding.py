@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import difflib
 import getpass
 import hashlib
@@ -521,6 +522,51 @@ def _config_rollback(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnostics_bundle(args: argparse.Namespace) -> int:
+    """Write a bounded local diagnostic artifact without sensitive operational payloads."""
+    config_path = Path(args.config).expanduser().resolve()
+    lock_path = resolved_config_path(config_path)
+    managed = read_managed_runtime(_managed_runtime_path(config_path))
+    active = read_runtime_state(_runtime_state_path(config_path))
+    output = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else lock_path.parent
+        / "diagnostics"
+        / f"bundle-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    )
+    payload = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "path": str(config_path),
+            "source_sha256": sha256_file(config_path),
+            "resolved_config": str(lock_path),
+            "resolved_sha256": sha256_file(lock_path) if lock_path.is_file() else None,
+            "generations": config_history(config_path),
+        },
+        "runtime": {
+            "managed": dataclasses.asdict(managed) if managed else None,
+            "active": dataclasses.asdict(active) if active else None,
+        },
+        "exclusions": [
+            "configuration file bodies",
+            "file bodies and patches",
+            "pull request bodies",
+            "runtime logs",
+            "process environment",
+            "tunnel credentials",
+        ],
+    }
+    atomic_write(output, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    _json(
+        {
+            "path": str(output),
+            "included": ["config_fingerprints", "generations", "runtime_metadata"],
+        }
+    )
+    return 0
+
+
 def _repoforge_command(config_path: Path) -> list[str]:
     executable = shutil.which("repoforge") or shutil.which("rf")
     if executable:
@@ -761,6 +807,17 @@ def _build_parser() -> argparse.ArgumentParser:
     config_rollback_parser.add_argument("generation", type=int)
     config_rollback_parser.add_argument("--config", default=argparse.SUPPRESS)
 
+    diagnostics = subparsers.add_parser(
+        "diagnostics", help="Create a bounded local diagnostics bundle"
+    )
+    diagnostics.add_argument(
+        "--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    )
+    diagnostics_subparsers = diagnostics.add_subparsers(dest="diagnostics_command", required=True)
+    diagnostics_bundle = diagnostics_subparsers.add_parser("bundle")
+    diagnostics_bundle.add_argument("--config", default=argparse.SUPPRESS)
+    diagnostics_bundle.add_argument("--output", default=None)
+
     repo = subparsers.add_parser("repo", help="Manage repositories in the minimal config")
     repo.add_argument(
         "--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
@@ -785,7 +842,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
-    commands = {"setup", "start", "repo", "runtime", "config"}
+    commands = {"setup", "start", "repo", "runtime", "config", "diagnostics"}
     if len(argv) >= 3 and argv[0] == "--config" and argv[2] in commands:
         return [argv[2], "--config", argv[1], *argv[3:]]
     if len(argv) >= 2 and argv[0].startswith("--config=") and argv[1] in commands:
@@ -795,7 +852,14 @@ def _normalize_argv(argv: list[str]) -> list[str]:
 
 def handle_onboarding_command(argv: list[str]) -> int | None:
     normalized = _normalize_argv(list(argv))
-    if not normalized or normalized[0] not in {"setup", "start", "repo", "runtime", "config"}:
+    if not normalized or normalized[0] not in {
+        "setup",
+        "start",
+        "repo",
+        "runtime",
+        "config",
+        "diagnostics",
+    }:
         return None
     parser = _build_parser()
     try:
@@ -864,6 +928,8 @@ def handle_onboarding_command(argv: list[str]) -> int | None:
             return _config_history(args)
         if args.command == "config" and args.config_command == "rollback":
             return _config_rollback(args)
+        if args.command == "diagnostics" and args.diagnostics_command == "bundle":
+            return _diagnostics_bundle(args)
         parser.error("Unknown onboarding command")
     except (PersonalCodingMCPError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -29,6 +29,13 @@ health request and therefore cannot disclose tunnel credentials.
 the recorded managed process group before starting the latest reviewed configuration; it does not
 mutate a live MCP container in place.
 
+## Diagnostics command
+
+`rf diagnostics bundle` writes a bounded local JSON artifact for support and incident triage. It
+contains config hashes, retained generation numbers, and non-secret runtime metadata only. It excludes
+configuration bodies, repository file bodies, patches, PR bodies, runtime logs, the full environment,
+and tunnel credentials.
+
 When a managed runtime is active, accepted repository additions and refreshes restart it automatically;
 a failed expansion restores the prior validated generation. A repository removal is restrictive: failed
 activation leaves the restricted configuration on disk and never restores removed repository access.

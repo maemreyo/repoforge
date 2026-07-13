@@ -676,6 +676,28 @@ def test_runtime_logs_returns_bounded_lines(
     assert output["lines"] == ["two"]
 
 
+def test_diagnostics_bundle_excludes_sensitive_configuration_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    lock = tmp_path / "resolved.toml"
+    lock.write_text("[repoforge_lock]\ngeneration = 1\n", encoding="utf-8")
+    output = tmp_path / "bundle.json"
+    monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
+
+    assert (
+        handle_onboarding_command(
+            ["diagnostics", "bundle", "--config", str(config), "--output", str(output)]
+        )
+        == 0
+    )
+
+    bundle = json.loads(output.read_text(encoding="utf-8"))
+    assert bundle["config"]["source_sha256"]
+    assert "configuration file bodies" in bundle["exclusions"]
+    assert "tunnel_test" not in output.read_text(encoding="utf-8")
+
+
 def test_repo_add_restarts_an_active_managed_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
