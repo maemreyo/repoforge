@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ class RuntimeState:
     active_generation: int
     started_at: str
     tool_surface_hash: str = ""
+    executable: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,8 +46,34 @@ class ManagedRuntime:
     started_at: str
 
 
+def _read_process_command(pid: int) -> str | None:
+    """Return the bounded process command used to validate a persisted PID."""
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    command = completed.stdout.strip()
+    if completed.returncode != 0 or not command:
+        return None
+    return command
+
+
+def _process_matches_executable(pid: int, executable: str) -> bool:
+    """Reject dead, reused, or forged PIDs that do not match the recorded executable."""
+    command = _read_process_command(pid)
+    if command is None:
+        return False
+    return command == executable or command.startswith(f"{executable} ")
+
+
 def read_runtime_state(path: Path) -> RuntimeState | None:
-    """Return a valid live runtime record, ignoring a stale process record."""
+    """Return a live identity-validated MCP runtime record, cleaning stale state."""
     if not path.is_file():
         return None
     try:
@@ -58,6 +86,11 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
     generation = raw.get("active_generation")
     started_at = raw.get("started_at")
     tool_surface_hash = raw.get("tool_surface_hash", "")
+    executable = raw.get("executable", "")
+    if executable == "":
+        # State written before executable identity support cannot safely distinguish PID reuse.
+        path.unlink(missing_ok=True)
+        return None
     if (
         not isinstance(pid, int)
         or isinstance(pid, bool)
@@ -67,25 +100,23 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
         or generation <= 0
         or not isinstance(started_at, str)
         or not isinstance(tool_surface_hash, str)
+        or not isinstance(executable, str)
     ):
         raise ConfigError(f"Runtime state {path} is invalid")
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    if not _process_matches_executable(pid, executable):
         path.unlink(missing_ok=True)
         return None
-    except PermissionError:
-        pass
     return RuntimeState(
         pid=pid,
         active_generation=generation,
         started_at=started_at,
         tool_surface_hash=tool_surface_hash,
+        executable=executable,
     )
 
 
 def write_runtime_state(path: Path, generation: int, tool_surface_hash: str = "") -> RuntimeState:
-    """Atomically record the generation loaded by the current local process."""
+    """Atomically record the generation and identity loaded by the current local process."""
     if generation <= 0:
         raise ConfigError("Runtime generation must be positive")
     state = RuntimeState(
@@ -93,6 +124,7 @@ def write_runtime_state(path: Path, generation: int, tool_surface_hash: str = ""
         active_generation=generation,
         started_at=datetime.now(timezone.utc).isoformat(),
         tool_surface_hash=tool_surface_hash,
+        executable=sys.executable,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -145,19 +177,11 @@ def read_managed_runtime(path: Path) -> ManagedRuntime | None:
     ):
         raise ConfigError(f"Managed runtime state {path} is invalid")
     try:
-        completed = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=5,
-        )
         process_group = os.getpgid(pid)
-    except (OSError, subprocess.SubprocessError, ProcessLookupError):
+    except (OSError, ProcessLookupError):
         path.unlink(missing_ok=True)
         return None
-    command = completed.stdout.strip()
-    if completed.returncode != 0 or process_group != pid or not command.startswith(executable):
+    if process_group != pid or not _process_matches_executable(pid, executable):
         path.unlink(missing_ok=True)
         return None
     return ManagedRuntime(pid, generation, profile, executable, started_at)
