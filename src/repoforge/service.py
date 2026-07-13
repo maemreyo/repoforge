@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -34,6 +33,11 @@ from .workspace_file_write import (
     WorkspaceFileWriteCommand,
     WorkspaceFileWritePorts,
     WorkspaceFileWriter,
+)
+from .workspace_replace_text import (
+    WorkspaceReplaceTextCommand,
+    WorkspaceReplaceTextPorts,
+    WorkspaceTextReplacer,
 )
 
 T = TypeVar("T")
@@ -910,6 +914,8 @@ class CodingService:
         expected_sha256: str,
         expected_occurrences: int = 1,
     ) -> dict[str, Any]:
+        # Pre-audit input validation — errors are NOT recorded in the audit log,
+        # matching the original workspace_replace_text audit boundary.
         if not old_text:
             raise ValueError("old_text must be non-empty")
         if "\x00" in old_text or "\x00" in new_text:
@@ -917,49 +923,35 @@ class CodingService:
         if expected_occurrences <= 0 or expected_occurrences > 1000:
             raise ValueError("expected_occurrences must be between 1 and 1000")
         _, repo, path = self._workspace(workspace_id)
-        file_path = resolve_workspace_path(path, relative_path, repo)
+        _ = resolve_workspace_path(path, relative_path, repo)
         if not _SHA256_RE.fullmatch(expected_sha256):
             raise ValueError("expected_sha256 must be a lowercase SHA-256")
 
+        replacer = WorkspaceTextReplacer(
+            WorkspaceReplaceTextPorts(
+                state=self.state,
+                runner=self.runner,
+                max_file_bytes=self.config.server.max_file_bytes,
+            )
+        )
+        command = WorkspaceReplaceTextCommand(
+            workspace_id=workspace_id,
+            relative_path=relative_path,
+            old_text=old_text,
+            new_text=new_text,
+            expected_sha256=expected_sha256,
+            expected_occurrences=expected_occurrences,
+        )
+
         def operation() -> dict[str, Any]:
-            with self.state.lock(workspace_id):
-                if not file_path.is_file() or file_path.is_symlink():
-                    raise WorkspaceError("Target must be an existing regular file")
-                data = file_path.read_bytes()
-                if b"\x00" in data:
-                    raise SecurityError("Binary files are not supported by this tool")
-                if len(data) > self.config.server.max_file_bytes:
-                    raise SecurityError("File exceeds max_file_bytes")
-                actual_sha = hashlib.sha256(data).hexdigest()
-                if actual_sha != expected_sha256:
-                    raise WorkspaceError(
-                        f"File changed since it was read: expected {expected_sha256}, got {actual_sha}"
-                    )
-                text = data.decode("utf-8")
-                count = text.count(old_text)
-                if count != expected_occurrences:
-                    raise WorkspaceError(
-                        f"Expected {expected_occurrences} occurrences, found {count}; no changes applied"
-                    )
-                updated = text.replace(old_text, new_text, expected_occurrences)
-                encoded = updated.encode("utf-8")
-                if len(encoded) > self.config.server.max_file_bytes:
-                    raise SecurityError("Updated content exceeds max_file_bytes")
-                existing_mode = stat.S_IMODE(file_path.stat().st_mode)
-                temporary = file_path.with_name(f".{file_path.name}.rf-{os.getpid()}")
-                try:
-                    temporary.write_bytes(encoded)
-                    os.chmod(temporary, existing_mode)
-                    os.replace(temporary, file_path)
-                finally:
-                    temporary.unlink(missing_ok=True)
-                return {
-                    "workspace_id": workspace_id,
-                    "path": assert_path_allowed(relative_path, repo),
-                    "sha256": hashlib.sha256(encoded).hexdigest(),
-                    "replacements": expected_occurrences,
-                    "diff_stat": self.runner.run(["git", "diff", "--stat", "--"], cwd=path).stdout,
-                }
+            result = replacer.execute(repo, path, command)
+            return {
+                "workspace_id": result.workspace_id,
+                "path": result.path,
+                "sha256": result.sha256,
+                "replacements": result.replacements,
+                "diff_stat": result.diff_stat,
+            }
 
         return self._audit_call(
             "workspace_replace_text",
