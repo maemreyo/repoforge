@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
 from ..config import AppConfig, RepositoryConfig
-from ..domain.errors import ConfigError, SecurityError, WorkspaceError
+from ..domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
+from ..domain.operations import automatic_retry_allowed, unchanged_state_for
 from ..domain.policy import validate_branch
 from ..domain.workspace import WorkspaceRecord
 from ..ports import (
@@ -17,12 +20,15 @@ from ..ports import (
     ExecutableLocator,
     FileSystem,
     GitRepository,
+    IdempotencyStore,
     IdGenerator,
     LockManager,
+    MetricsSink,
     OperationGate,
     PullRequestGateway,
     WorkspaceStore,
 )
+from .idempotency import execute_idempotent
 
 T = TypeVar("T")
 _MUTATING_ACTIONS = {
@@ -74,6 +80,14 @@ class ApplicationContext:
     clock: Clock
     ids: IdGenerator
     executables: ExecutableLocator
+    metrics: MetricsSink | None = None
+    idempotency: IdempotencyStore | None = None
+
+    def now_epoch(self) -> float:
+        try:
+            return datetime.fromisoformat(self.clock.now_iso()).timestamp()
+        except ValueError as exc:
+            raise ConfigError("Clock returned a non-ISO timestamp") from exc
 
     def repo(self, repo_id: str) -> RepositoryConfig:
         try:
@@ -103,6 +117,19 @@ class ApplicationContext:
         validate_branch(branch, repo)
         return (record, repo, path)
 
+    def record_metric(
+        self, action: str, *, success: bool, duration_ms: float, error_code: str | None
+    ) -> None:
+        if self.metrics is None:
+            return
+        with contextlib.suppress(Exception):
+            self.metrics.record(
+                action,
+                success=success,
+                duration_ms=duration_ms,
+                error_code=error_code,
+            )
+
     def audited(
         self,
         action: str,
@@ -110,12 +137,13 @@ class ApplicationContext:
         operation: Callable[[], T],
         *,
         mutating: bool | None = None,
+        correlation_id: str | None = None,
     ) -> T:
-        correlation_id = self.ids.new_hex(24)
+        correlation = correlation_id or self.ids.new_hex(24)
         is_mutating = action in _MUTATING_ACTIONS if mutating is None else mutating
         started = time.monotonic()
         try:
-            with self.gate.operation(correlation_id, mutating=is_mutating):
+            with self.gate.operation(correlation, mutating=is_mutating):
                 if action in _POLICY_WRITE_ACTIONS:
                     repo_id = details.get("repo_id")
                     if not isinstance(repo_id, str):
@@ -135,32 +163,78 @@ class ApplicationContext:
                             )
                 result = operation()
         except Exception as exc:
-            self.audit.record(
-                action,
-                success=False,
-                details={
-                    **details,
-                    "correlation_id": correlation_id,
-                    "duration_ms": round((time.monotonic() - started) * 1000, 3),
-                    "error_type": type(exc).__name__,
-                    "error_code": str(
-                        getattr(
-                            getattr(exc, "code", None),
-                            "value",
-                            getattr(exc, "code", "INTERNAL_ERROR"),
-                        )
-                    ),
-                    "retryable": bool(getattr(exc, "retryable", False)),
-                },
+            duration = round((time.monotonic() - started) * 1000, 3)
+            code = str(
+                getattr(
+                    getattr(exc, "code", None),
+                    "value",
+                    getattr(exc, "code", "INTERNAL_ERROR"),
+                )
             )
+            if isinstance(exc, RepoForgeError):
+                if exc.correlation_id is None:
+                    exc.correlation_id = correlation
+                if is_mutating and not exc.unchanged_state:
+                    exc.unchanged_state = unchanged_state_for(action)
+            try:
+                normalized_code = ErrorCode(code)
+            except ValueError:
+                normalized_code = ErrorCode.INTERNAL_ERROR
+            try:
+                self.audit.record(
+                    action,
+                    success=False,
+                    details={
+                        **details,
+                        "correlation_id": correlation,
+                        "duration_ms": duration,
+                        "error_type": type(exc).__name__,
+                        "error_code": code,
+                        "retryable": bool(getattr(exc, "retryable", False)),
+                        "automatic_retry_allowed": automatic_retry_allowed(
+                            action,
+                            normalized_code,
+                            has_idempotency_key="idempotency_key_hash" in details,
+                        ),
+                    },
+                )
+            except Exception as audit_exc:
+                add_note = getattr(exc, "add_note", None)
+                if callable(add_note):
+                    add_note(f"Audit append also failed: {type(audit_exc).__name__}")
+            self.record_metric(action, success=False, duration_ms=duration, error_code=code)
             raise
+        duration = round((time.monotonic() - started) * 1000, 3)
         self.audit.record(
             action,
             success=True,
             details={
                 **details,
-                "correlation_id": correlation_id,
-                "duration_ms": round((time.monotonic() - started) * 1000, 3),
+                "correlation_id": correlation,
+                "duration_ms": duration,
             },
         )
+        self.record_metric(action, success=True, duration_ms=duration, error_code=None)
         return result
+
+    def idempotent(
+        self,
+        action: str,
+        key: str | None,
+        request: Any,
+        operation: Callable[[], T],
+        *,
+        details: dict[str, Any] | None = None,
+        serialize: Callable[[T], Any] | None = None,
+        deserialize: Callable[[Any], T] | None = None,
+    ) -> T:
+        return execute_idempotent(
+            self,
+            action,
+            key,
+            request,
+            operation,
+            details=details,
+            serialize=serialize,
+            deserialize=deserialize,
+        )

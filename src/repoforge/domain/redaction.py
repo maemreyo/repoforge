@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable
 
@@ -25,3 +26,69 @@ def redact_text(value: str, *, secrets: Iterable[str] = (), limit: int = 8_000) 
     half = max(1, limit // 2)
     omitted = len(result) - (half * 2)
     return f"{result[:half]}\n... <{omitted} characters omitted> ...\n{result[-half:]}"
+
+
+_SENSITIVE_KEYS = {
+    "authorization",
+    "control_plane_api_key",
+    "api_key",
+    "apikey",
+    "access_token",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "credentials",
+}
+
+
+def redact_data(value: object, *, secrets: Iterable[str] = ()) -> object:
+    """Recursively redact structured diagnostic/audit data without stringifying safe scalars."""
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            result[str(key)] = (
+                "<redacted>"
+                if normalized in _SENSITIVE_KEYS
+                else redact_data(item, secrets=secrets)
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        return [redact_data(item, secrets=secrets) for item in value]
+    if isinstance(value, str):
+        return redact_text(value, secrets=secrets)
+    return value
+
+
+_OMITTED_CONTENT_KEYS = {
+    "body",
+    "content",
+    "patch",
+    "diff",
+    "stdout",
+    "stderr",
+    "environment",
+}
+
+
+def sanitize_persisted_data(value: object, *, secrets: Iterable[str] = ()) -> object:
+    """Redact secrets and omit high-risk content from durable operational receipts."""
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in _SENSITIVE_KEYS:
+                result[str(key)] = "<redacted>"
+            elif normalized in _OMITTED_CONTENT_KEYS:
+                encoded = repr(item).encode("utf-8", errors="replace")
+                result[f"{key}_omitted"] = True
+                result[f"{key}_sha256"] = hashlib.sha256(encoded).hexdigest()
+            else:
+                result[str(key)] = sanitize_persisted_data(item, secrets=secrets)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [sanitize_persisted_data(item, secrets=secrets) for item in value]
+    if isinstance(value, str):
+        return redact_text(value, secrets=secrets)
+    return value

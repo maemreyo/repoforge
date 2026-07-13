@@ -27,6 +27,7 @@ from ...application.configuration.source import (
     remove_source_repository,
     render_source,
 )
+from ...application.diagnostics import build_diagnostics_bundle
 from ...application.repository_admin.proposals import RepositoryProposalService
 from ...application.runtime.activation import GenerationActivator
 from ...application.service import CodingService
@@ -35,6 +36,7 @@ from ...bootstrap import (
     build_application,
     build_configuration_store,
     build_lock_manager,
+    build_metrics_sink,
     build_operation_gate,
     build_repository_probe,
     build_runtime_control_client,
@@ -1320,22 +1322,36 @@ def main(argv: list[str] | None = None) -> int:
         store = _ensure_generation(config_path)
         if args.command == "diagnostics":
             runtime = _runtime_status(store)
-            payload = {
-                "created_at": system_clock().now_iso(),
-                "config": {
-                    "source_path": str(config_path),
-                    "accepted": asdict(accepted) if (accepted := store.current()) else None,
-                    "active": asdict(active_item) if (active_item := store.active()) else None,
-                },
-                "runtime": runtime,
-                "exclusions": [
-                    "configuration bodies",
-                    "repository file content",
-                    "patches and pull request bodies",
-                    "process environment and credentials",
-                    "runtime log content",
-                ],
-            }
+            accepted = store.current()
+            active_item = store.active()
+            selected = active_item or accepted
+            capabilities: dict[str, Any] | None = None
+            metrics: dict[str, Any] = {"version": 1, "operations": {}}
+            if selected is not None:
+                try:
+                    diagnostic_config = load_config(store.resolved_path(selected.generation))
+                    diagnostic_service = CodingService(diagnostic_config)
+                    capabilities = diagnostic_service.doctor()
+                    metrics_sink = getattr(diagnostic_service, "metrics", None)
+                    if metrics_sink is not None:
+                        metrics = metrics_sink.snapshot()
+                except Exception as exc:
+                    capabilities = {
+                        "status": "unavailable",
+                        "error_code": _error_code(exc),
+                        "detail": redact_text(str(exc)),
+                    }
+            else:
+                metrics = build_metrics_sink(store.root).snapshot()
+            payload = build_diagnostics_bundle(
+                created_at=system_clock().now_iso(),
+                config_path=config_path,
+                accepted=asdict(accepted) if accepted else None,
+                active=asdict(active_item) if active_item else None,
+                runtime=runtime,
+                capabilities=capabilities,
+                metrics=metrics,
+            )
             output = (
                 Path(args.bundle_output).expanduser().resolve()
                 if args.bundle_output
@@ -1348,7 +1364,13 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "status": "created",
                     "path": str(output),
-                    "included": ["hashes", "generation_metadata", "runtime_metadata"],
+                    "included": [
+                        "hashes",
+                        "generation_metadata",
+                        "runtime_metadata",
+                        "capability_summary",
+                        "operation_metrics",
+                    ],
                 }
             )
             return 0
@@ -1387,11 +1409,12 @@ def main(argv: list[str] | None = None) -> int:
                     secrets=(os.environ.get("CONTROL_PLANE_API_KEY", ""),),
                 ),
                 "why": envelope.why,
-                "correlation_id": envelope.correlation_id,
+                "correlation_id": envelope.correlation_id or id_generator().new_hex(24),
                 "unchanged_state": list(envelope.unchanged_state)
                 or ["active runtime generation unless explicitly reported otherwise"],
                 "safe_next_action": envelope.safe_next_action,
                 "retryable": envelope.retryable,
+                "automatic_retry_allowed": False,
             }
         )
         return 2

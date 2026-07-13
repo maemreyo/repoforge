@@ -1,8 +1,13 @@
 # RepoForge Production Architecture, Smart Repository Onboarding, and Tunnel Lifecycle Plan
 
-Status: Proposed  
-Repository reviewed: `maemreyo/repoforge`  
-Baseline commit: `984680f32db22a3828ab4740fcde1a753ba4c17e`  
+Status: In progress — Phases 0–6 implemented; Phase 7 remains optional
+
+Repository reviewed: `maemreyo/repoforge`
+
+Original baseline commit: `984680f32db22a3828ab4740fcde1a753ba4c17e`
+
+Phase 6 implementation baseline: `9c98ceb350b7d8dc6cad033d7d0bf9d9059be4a1`
+
 Date: 2026-07-13
 
 ## 1. Executive summary
@@ -611,25 +616,32 @@ Acceptance:
 
 ### Phase 6 — Structured UX, observability, and operational hardening
 
+Implementation status: **Complete** on the implementation branch based on
+`9c98ceb350b7d8dc6cad033d7d0bf9d9059be4a1`. The implementation contract and operator behavior are
+documented in `docs/architecture/phase6-operational-hardening.md`.
+
 Goal: make failures actionable and production operation diagnosable.
 
 Tasks:
 
-- Add stable error codes, retryability, remediation, and unchanged-state fields.
-- Add structured logging with secret redaction and correlation IDs.
-- Add operation duration and failure-category metrics.
-- Add bounded local log retention.
-- Add `rf diagnostics bundle` that excludes secrets, file content, patches, PR bodies, and full env.
-- Add startup capability discovery for Git, `gh`, authentication, tunnel client, toolchains, and
+- [x] Add stable error codes, retryability, remediation, and unchanged-state fields.
+- [x] Add structured logging with secret redaction and correlation IDs.
+- [x] Add operation duration and failure-category metrics.
+- [x] Add bounded local log retention, including redaction and rotation while the tunnel child runs.
+- [x] Add `rf diagnostics bundle` that excludes secrets, file content, patches, PR bodies, runtime log
+  content, and full env.
+- [x] Add startup capability discovery for Git, `gh`, authentication, tunnel client, toolchains, and
   filesystem features.
-- Add idempotency keys to create/push/PR workflows.
-- Define retry policy only for proven idempotent operations.
+- [x] Add cross-process idempotency keys to create/push/create-draft-PR/update-draft-PR workflows.
+- [x] Define automatic retry policy only for keyed, reconciliable operations and transient failures.
 
 Acceptance:
 
-- No raw subprocess noise is the primary user error.
-- Every failed write states what remained unchanged.
-- Audit and diagnostic fixtures prove secret redaction.
+- [x] CLI and MCP boundaries return stable redacted error envelopes instead of raw subprocess noise.
+- [x] Every failed user-facing write reports unchanged state and a safe next action.
+- [x] Audit, diagnostics, idempotency receipt, and live tunnel-log fixtures prove secret redaction.
+- [x] Cross-process concurrency proves a keyed external effect executes once.
+- [x] Ruff, strict Mypy, full pytest with branch coverage, and package build pass.
 
 ### Phase 7 — Optional atomic hot reload
 

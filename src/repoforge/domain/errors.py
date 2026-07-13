@@ -22,6 +22,9 @@ class ErrorCode(str, Enum):
     RUNTIME_FAIL_CLOSED = "RUNTIME_FAIL_CLOSED"
     ALREADY_RUNNING = "ALREADY_RUNNING"
     ALREADY_EXISTS = "ALREADY_EXISTS"
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
+    STATE_PERSISTENCE_FAILED = "STATE_PERSISTENCE_FAILED"
     NOT_FOUND = "NOT_FOUND"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -52,6 +55,9 @@ _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
     ("APPROVAL_REQUIRED", ErrorCode.APPROVAL_REQUIRED, False),
     ("ROLLBACK_APPROVAL_REQUIRED", ErrorCode.APPROVAL_REQUIRED, False),
     ("INPUT_REQUIRED", ErrorCode.INPUT_REQUIRED, False),
+    ("IDEMPOTENCY_CONFLICT", ErrorCode.IDEMPOTENCY_CONFLICT, False),
+    ("IDEMPOTENCY_IN_PROGRESS", ErrorCode.IDEMPOTENCY_IN_PROGRESS, True),
+    ("STATE_PERSISTENCE_FAILED", ErrorCode.STATE_PERSISTENCE_FAILED, True),
     ("COMMAND_TIMEOUT", ErrorCode.COMMAND_TIMEOUT, True),
 )
 
@@ -135,6 +141,9 @@ def operation_error_from_exception(
         ErrorCode.RUNTIME_RELOADING: "The runtime is draining and rejects new work until activation completes.",
         ErrorCode.RUNTIME_FAIL_CLOSED: "A restrictive transition failed and revoked capability remains blocked.",
         ErrorCode.ALREADY_RUNNING: "An identity-validated runtime already owns the supervisor lock.",
+        ErrorCode.IDEMPOTENCY_CONFLICT: "The same idempotency key was already bound to different reviewed input.",
+        ErrorCode.IDEMPOTENCY_IN_PROGRESS: "Another process is still executing the same keyed operation.",
+        ErrorCode.STATE_PERSISTENCE_FAILED: "RepoForge could not durably record required local operational state.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

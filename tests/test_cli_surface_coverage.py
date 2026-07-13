@@ -192,6 +192,11 @@ def test_main_dispatches_all_command_families(
     output = tmp_path / "bundle.json"
     assert cli.main(["--config", config, "diagnostics", "bundle", "--output", str(output)]) == 0
     assert output.is_file()
+    bundle = json.loads(output.read_text(encoding="utf-8"))
+    assert bundle["schema_version"] == 1
+    assert bundle["capabilities"]["ok"] is True
+    assert bundle["metrics"]["operations"] == {}
+    assert "runtime log content" in bundle["exclusions"]
     capsys.readouterr()
     assert cli.main(["--config", config, "show-config"]) == 0
     assert cli.main(["--config", config, "doctor"]) == 0

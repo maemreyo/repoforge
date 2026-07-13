@@ -16,6 +16,8 @@ from .adapters.filesystem import LocalFileSystem
 from .adapters.git import GitCliRepository
 from .adapters.github import GhCliGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
+from .adapters.observability import JsonMetricsSink
+from .adapters.persistence import JsonIdempotencyStore
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.runtime import (
@@ -64,7 +66,7 @@ from .adapters.system import UuidGenerator
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
 from .application.runtime.supervisor import RuntimeSupervisor
-from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig
+from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
 from .ports import (
@@ -75,8 +77,10 @@ from .ports import (
     ExecutableLocator,
     FileSystem,
     GitRepository,
+    IdempotencyStore,
     IdGenerator,
     LockManager,
+    MetricsSink,
     OperationGate,
     ProcessInspector,
     PullRequestGateway,
@@ -104,6 +108,8 @@ class AdapterOverrides:
     git: GitRepository | None = None
     github: PullRequestGateway | None = None
     executables: ExecutableLocator | None = None
+    metrics: MetricsSink | None = None
+    idempotency: IdempotencyStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +175,25 @@ def build_process_inspector() -> ProcessInspector:
     return SystemProcessInspector()
 
 
-def build_tunnel_client(executable: str) -> TunnelClient:
-    return TunnelCliClient(executable)
+def build_tunnel_client(
+    executable: str,
+    *,
+    log_max_bytes: int = 5_000_000,
+    log_backup_count: int = 3,
+) -> TunnelClient:
+    return TunnelCliClient(
+        executable,
+        log_max_bytes=log_max_bytes,
+        log_backup_count=log_backup_count,
+    )
+
+
+def build_metrics_sink(state_root: Path, locks: LockManager | None = None) -> MetricsSink:
+    return JsonMetricsSink(state_root, locks or build_lock_manager(state_root))
+
+
+def build_idempotency_store(state_root: Path) -> IdempotencyStore:
+    return JsonIdempotencyStore(state_root)
 
 
 def write_private_file(path: Path, data: bytes, *, mode: int = 0o600) -> None:
@@ -188,12 +211,19 @@ def build_application(
     store = o.store or JsonWorkspaceStore(config.server.state_root)
     locks = o.locks or FcntlLockManager(config.server.state_root / "locks")
     gate = o.gate or InProcessOperationGate()
-    audit = o.audit or JsonlAuditSink(config.server.state_root, clock)
+    audit = o.audit or JsonlAuditSink(
+        config.server.state_root,
+        clock,
+        max_bytes=config.server.audit_max_bytes,
+        backup_count=config.server.audit_backup_count,
+    )
     filesystem = o.filesystem or LocalFileSystem()
     git = o.git or GitCliRepository(command, config.server)
     github = o.github or GhCliGateway(command, config.server)
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
+    metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks)
+    idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     return Application(
         ApplicationContext(
             config,
@@ -208,6 +238,8 @@ def build_application(
             clock,
             ids,
             executables,
+            metrics,
+            idempotency,
         )
     )
 
@@ -236,7 +268,12 @@ def run_runtime_worker(config_path: Path) -> int:
     tunnel_executable = shutil.which("tunnel-client")
     if tunnel_executable is None:
         raise ConfigError("tunnel-client is not in PATH")
-    tunnel = build_tunnel_client(tunnel_executable)
+    runtime_config = load_config(configs.resolved_path(target.generation))
+    tunnel = build_tunnel_client(
+        tunnel_executable,
+        log_max_bytes=runtime_config.server.runtime_log_max_bytes,
+        log_backup_count=runtime_config.server.runtime_log_backup_count,
+    )
     tunnel_version = tunnel.executable_version()
     if not tunnel_version:
         raise ConfigError("Cannot determine tunnel-client version")

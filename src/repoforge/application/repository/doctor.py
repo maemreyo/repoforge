@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...domain.redaction import redact_text
 from ..context import ApplicationContext
 
 
@@ -28,6 +29,8 @@ class Doctor:
 
     def execute(self, c: DoctorCommand) -> DoctorResult:
         checks = []
+        environment = self.ctx.commands.environment()
+        secrets = tuple(value for value in (environment.get("CONTROL_PLANE_API_KEY", ""),) if value)
 
         def add(
             name: str,
@@ -37,25 +40,33 @@ class Doctor:
             severity: str = "error",
             remediation: str | None = None,
         ) -> None:
-            item = {"name": name, "ok": ok, "severity": severity, "detail": detail}
+            item = {
+                "name": name,
+                "ok": ok,
+                "severity": severity,
+                "detail": redact_text(str(detail), secrets=secrets),
+            }
             if remediation:
-                item["remediation"] = remediation
+                item["remediation"] = redact_text(remediation, secrets=secrets)
             checks.append(item)
 
         add("config", True, str(self.ctx.config.source_path), severity="info")
         paths = {}
-        environment = self.ctx.commands.environment()
         search_path = environment.get("PATH")
-        for executable in ("git", "gh"):
+        remediation_by_executable = {
+            "git": "Install Git with Xcode Command Line Tools or Homebrew.",
+            "gh": "Install GitHub CLI with `brew install gh`.",
+            "tunnel-client": "Install and authenticate the supported tunnel client before runtime start.",
+        }
+        for executable in ("git", "gh", "tunnel-client"):
             found = self.ctx.executables.which(executable, path=search_path)
             paths[executable] = found
             add(
                 f"executable:{executable}",
                 bool(found),
                 found or "not found",
-                remediation="Install Git with Xcode Command Line Tools or Homebrew."
-                if executable == "git"
-                else "Install GitHub CLI with `brew install gh`.",
+                severity="warning" if executable == "tunnel-client" else "error",
+                remediation=remediation_by_executable[executable],
             )
             if found:
                 try:

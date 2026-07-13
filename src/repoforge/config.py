@@ -90,6 +90,12 @@ class ServerConfig:
     verification_timeout_seconds: int = 1_800
     max_fingerprint_bytes: int = 50 * 1024 * 1024
     max_batch_files: int = 20
+    audit_max_bytes: int = 5_000_000
+    audit_backup_count: int = 3
+    runtime_log_max_bytes: int = 5_000_000
+    runtime_log_backup_count: int = 3
+    idempotency_stale_seconds: int = 900
+    idempotency_lock_timeout_seconds: int = 2
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
 
@@ -256,6 +262,32 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ),
         max_batch_files=_positive_int(
             server_raw.get("max_batch_files"), 20, "server.max_batch_files"
+        ),
+        audit_max_bytes=_positive_int(
+            server_raw.get("audit_max_bytes"), 5_000_000, "server.audit_max_bytes"
+        ),
+        audit_backup_count=_positive_int(
+            server_raw.get("audit_backup_count"), 3, "server.audit_backup_count"
+        ),
+        runtime_log_max_bytes=_positive_int(
+            server_raw.get("runtime_log_max_bytes"),
+            5_000_000,
+            "server.runtime_log_max_bytes",
+        ),
+        runtime_log_backup_count=_positive_int(
+            server_raw.get("runtime_log_backup_count"),
+            3,
+            "server.runtime_log_backup_count",
+        ),
+        idempotency_stale_seconds=_positive_int(
+            server_raw.get("idempotency_stale_seconds"),
+            900,
+            "server.idempotency_stale_seconds",
+        ),
+        idempotency_lock_timeout_seconds=_positive_int(
+            server_raw.get("idempotency_lock_timeout_seconds"),
+            2,
+            "server.idempotency_lock_timeout_seconds",
         ),
         path_prefixes=_tuple_of_strings(server_raw.get("path_prefixes"), "server.path_prefixes")
         or DEFAULT_PATH_PREFIXES,

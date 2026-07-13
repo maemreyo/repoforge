@@ -6,7 +6,15 @@ from typing import Any
 
 from ..bootstrap import AdapterOverrides, Application, build_application
 from ..config import AppConfig
-from ..ports import AuditSink, CommandExecutor, LockManager, OperationGate, WorkspaceStore
+from ..ports import (
+    AuditSink,
+    CommandExecutor,
+    IdempotencyStore,
+    LockManager,
+    MetricsSink,
+    OperationGate,
+    WorkspaceStore,
+)
 from .dto import to_data
 from .repository.context import (
     RepositoryContextCommand,
@@ -108,12 +116,20 @@ class CodingService:
         audit: AuditSink | None = None,
         locks: LockManager | None = None,
         gate: OperationGate | None = None,
+        metrics: MetricsSink | None = None,
+        idempotency: IdempotencyStore | None = None,
         application: Application | None = None,
     ):
         self.application = application or build_application(
             config,
             overrides=AdapterOverrides(
-                command=runner, store=state, audit=audit, locks=locks, gate=gate
+                command=runner,
+                store=state,
+                audit=audit,
+                locks=locks,
+                gate=gate,
+                metrics=metrics,
+                idempotency=idempotency,
             ),
         )
         self.config = self.application.context.config
@@ -122,6 +138,8 @@ class CodingService:
         self.audit = self.application.context.audit
         self.locks = self.application.context.locks
         self.gate = self.application.context.gate
+        self.metrics = self.application.context.metrics
+        self.idempotency = self.application.context.idempotency
         ctx = self.application.context
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
@@ -171,9 +189,15 @@ class CodingService:
         return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number)))
 
     def workspace_create(
-        self, repo_id: str, task_slug: str, base: str | None = None
+        self,
+        repo_id: str,
+        task_slug: str,
+        base: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        return _result(self._create.execute(WorkspaceCreateCommand(repo_id, task_slug, base)))
+        return _result(
+            self._create.execute(WorkspaceCreateCommand(repo_id, task_slug, base, idempotency_key))
+        )
 
     def workspace_list(self) -> dict[str, Any]:
         return _result(self._list.execute(WorkspaceListCommand()))
@@ -302,19 +326,35 @@ class CodingService:
     def workspace_commit(self, workspace_id: str, message: str) -> dict[str, Any]:
         return _result(self._commit.execute(WorkspaceCommitCommand(workspace_id, message)))
 
-    def workspace_push(self, workspace_id: str) -> dict[str, Any]:
-        return _result(self._push.execute(WorkspacePushCommand(workspace_id)))
+    def workspace_push(
+        self, workspace_id: str, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
+        return _result(self._push.execute(WorkspacePushCommand(workspace_id, idempotency_key)))
 
-    def workspace_create_draft_pr(self, workspace_id: str, title: str, body: str) -> dict[str, Any]:
+    def workspace_create_draft_pr(
+        self,
+        workspace_id: str,
+        title: str,
+        body: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         return _result(
-            self._create_pr.execute(WorkspaceCreateDraftPrCommand(workspace_id, title, body))
+            self._create_pr.execute(
+                WorkspaceCreateDraftPrCommand(workspace_id, title, body, idempotency_key)
+            )
         )
 
     def workspace_update_draft_pr(
-        self, workspace_id: str, title: str | None = None, body: str | None = None
+        self,
+        workspace_id: str,
+        title: str | None = None,
+        body: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return _result(
-            self._update_pr.execute(WorkspaceUpdateDraftPrCommand(workspace_id, title, body))
+            self._update_pr.execute(
+                WorkspaceUpdateDraftPrCommand(workspace_id, title, body, idempotency_key)
+            )
         )
 
     def workspace_pr_status(self, workspace_id: str) -> dict[str, Any]:

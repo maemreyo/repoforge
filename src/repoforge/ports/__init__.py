@@ -8,8 +8,10 @@ from .configuration import ConfigurationStore
 from .filesystem import FileSystem
 from .git import GitRepository
 from .github import PullRequestGateway
+from .idempotency import IdempotencyStore
 from .ids import IdGenerator
 from .locking import LockManager
+from .metrics import MetricsSink
 from .operation_gate import GateState, OperationGate
 from .process import ProcessInspector
 from .repository_probe import RepositoryProbe
@@ -33,7 +35,9 @@ __all__ = [
     "GateState",
     "GitRepository",
     "IdGenerator",
+    "IdempotencyStore",
     "LockManager",
+    "MetricsSink",
     "OperationGate",
     "ProcessInspector",
     "PullRequestGateway",

@@ -180,8 +180,15 @@ def test_complete_service_lifecycle_and_adapters(tmp_path: Path) -> None:
     assert service.repo_pr_read("demo", 8)["number"] == 8
     doctor = service.doctor()
     assert "checks" in doctor and doctor["summary"]["total"] >= 1
+    assert any(check["name"] == "executable:tunnel-client" for check in doctor["checks"])
 
-    created = service.workspace_create("demo", "Improve developer experience")
+    created = service.workspace_create(
+        "demo", "Improve developer experience", idempotency_key="create-workspace-0001"
+    )
+    replayed_create = service.workspace_create(
+        "demo", "Improve developer experience", idempotency_key="create-workspace-0001"
+    )
+    assert replayed_create == created
     workspace_id = created["workspace_id"]
     workspace_path = Path(created["path"])
     assert service.workspace_list()["workspaces"][0]["workspace_id"] == workspace_id
@@ -227,13 +234,31 @@ def test_complete_service_lifecycle_and_adapters(tmp_path: Path) -> None:
     assert service.workspace_run_profile(workspace_id, "quick")["satisfies_commit_gate"] is False
     assert service.workspace_verify(workspace_id)["satisfies_commit_gate"] is True
     committed = service.workspace_commit(workspace_id, "Improve developer experience")
-    assert service.workspace_push(workspace_id)["head_sha"] == committed["head_sha"]
+    pushed = service.workspace_push(workspace_id, idempotency_key="push-workspace-0001")
+    assert pushed["head_sha"] == committed["head_sha"]
+    assert service.workspace_push(workspace_id, idempotency_key="push-workspace-0001") == pushed
     pr = service.workspace_create_draft_pr(
-        workspace_id, "Improve developer experience", "## Summary\n\nSafer workflow."
+        workspace_id,
+        "Improve developer experience",
+        "## Summary\n\nSafer workflow.",
+        idempotency_key="create-pr-00000001",
+    )
+    assert (
+        service.workspace_create_draft_pr(
+            workspace_id,
+            "Improve developer experience",
+            "## Summary\n\nSafer workflow.",
+            idempotency_key="create-pr-00000001",
+        )
+        == pr
     )
     assert pr["draft"] is True and pr["labels"] == ["agent"]
     assert (
-        service.workspace_update_draft_pr(workspace_id, title="Improve DX safely")["title"]
+        service.workspace_update_draft_pr(
+            workspace_id,
+            title="Improve DX safely",
+            idempotency_key="update-pr-00000001",
+        )["title"]
         == "Improve DX safely"
     )
     assert service.workspace_pr_status(workspace_id)["number"] == 42

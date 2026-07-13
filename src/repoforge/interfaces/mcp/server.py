@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import json
+import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,50 @@ from mcp.types import ToolAnnotations
 
 from ...application.service import CodingService
 from ...config import load_config
+from ...domain.errors import operation_error_from_exception
+from ...domain.operations import automatic_retry_allowed
+from ...domain.redaction import redact_text
+
+
+class _ServiceErrorBoundary:
+    """Convert known application failures into the stable structured MCP envelope."""
+
+    def __init__(self, service: Any):
+        self._service = service
+
+    def call(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        target = getattr(self._service, name)
+        has_idempotency_key = False
+        try:
+            bound = inspect.signature(target).bind_partial(*args, **kwargs)
+            has_idempotency_key = bool(bound.arguments.get("idempotency_key"))
+            result = target(*args, **kwargs)
+            if not isinstance(result, dict):
+                raise TypeError("MCP service operation must return an object")
+            return result
+        except Exception as exc:
+            envelope = operation_error_from_exception(exc)
+            correlation_id = envelope.correlation_id or secrets.token_hex(12)
+            return {
+                "status": "failed",
+                "error_code": envelope.code.value,
+                "what_happened": redact_text(
+                    envelope.what_happened,
+                    secrets=(os.environ.get("CONTROL_PLANE_API_KEY", ""),),
+                ),
+                "why": envelope.why,
+                "correlation_id": correlation_id,
+                "unchanged_state": list(envelope.unchanged_state)
+                or ["No unreported state transition was committed."],
+                "safe_next_action": envelope.safe_next_action,
+                "retryable": envelope.retryable,
+                "automatic_retry_allowed": automatic_retry_allowed(
+                    name,
+                    envelope.code,
+                    has_idempotency_key=has_idempotency_key,
+                ),
+            }
+
 
 SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nPrefer exact text replacement or a small validated patch. Review workspace_diff after every meaningful\nchange. Run workspace_verify before commit; never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status.".strip()
 READ_ONLY = ToolAnnotations(
@@ -75,7 +122,8 @@ def tool_surface_hash() -> str:
 def create_server(
     config_path: str | Path | None = None, *, service: CodingService | None = None
 ) -> FastMCP:
-    service = service or CodingService(load_config(config_path))
+    raw_service = service or CodingService(load_config(config_path))
+    bounded_service = _ServiceErrorBoundary(raw_service)
     mcp = FastMCP("RepoForge", instructions=SERVER_INSTRUCTIONS, log_level="WARNING")
 
     @mcp.tool(
@@ -85,7 +133,9 @@ def create_server(
     )
     def repo_list() -> dict[str, Any]:
         """Use this when choosing a repository or discovering its profiles and safety policy."""
-        return service.repo_list()
+        return bounded_service.call(
+            "repo_list",
+        )
 
     @mcp.tool(
         title="Inspect repository status",
@@ -94,22 +144,22 @@ def create_server(
     )
     def repo_status(repo_id: str) -> dict[str, Any]:
         """Use this when checking the source clone, remotes, branch state, and gh authentication."""
-        return service.repo_status(repo_id)
+        return bounded_service.call("repo_status", repo_id)
 
     @mcp.tool(title="Read repository context", annotations=READ_ONLY, structured_output=True)
     def repo_context(repo_id: str) -> dict[str, Any]:
         """Use this before planning to inspect manifests, scripts, root files, and instruction previews."""
-        return service.repo_context(repo_id)
+        return bounded_service.call("repo_context", repo_id)
 
     @mcp.tool(title="Read recent commits", annotations=READ_ONLY, structured_output=True)
     def repo_recent_commits(repo_id: str, limit: int = 20) -> dict[str, Any]:
         """Use this when recent history or commit conventions are relevant to the task."""
-        return service.repo_recent_commits(repo_id, limit)
+        return bounded_service.call("repo_recent_commits", repo_id, limit)
 
     @mcp.tool(title="Read GitHub issue", annotations=EXTERNAL_READ, structured_output=True)
     def repo_issue_read(repo_id: str, issue_number: int) -> dict[str, Any]:
         """Use this when implementation requirements are defined by a GitHub issue."""
-        return service.repo_issue_read(repo_id, issue_number)
+        return bounded_service.call("repo_issue_read", repo_id, issue_number)
 
     @mcp.tool(
         title="Read GitHub pull request",
@@ -118,38 +168,50 @@ def create_server(
     )
     def repo_pr_read(repo_id: str, pr_number: int) -> dict[str, Any]:
         """Use this when reviewing an existing pull request, checks, commits, files, or reviews."""
-        return service.repo_pr_read(repo_id, pr_number)
+        return bounded_service.call("repo_pr_read", repo_id, pr_number)
 
     @mcp.tool(
         title="Create isolated coding workspace",
         annotations=LOCAL_CREATE,
         structured_output=True,
     )
-    def workspace_create(repo_id: str, task_slug: str, base: str | None = None) -> dict[str, Any]:
-        """Use this before editing to create a new ai/* branch in an isolated Git worktree."""
-        return service.workspace_create(repo_id, task_slug, base)
+    def workspace_create(
+        repo_id: str,
+        task_slug: str,
+        base: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this before editing to create a new ai/* branch in an isolated Git worktree.
+
+        Supply a stable idempotency key when an automated caller may retry the request.
+        """
+        return bounded_service.call("workspace_create", repo_id, task_slug, base, idempotency_key)
 
     @mcp.tool(title="List coding workspaces", annotations=READ_ONLY, structured_output=True)
     def workspace_list() -> dict[str, Any]:
         """Use this when resuming work or finding active RepoForge workspaces."""
-        return service.workspace_list()
+        return bounded_service.call(
+            "workspace_list",
+        )
 
     @mcp.tool(title="Inspect workspace status", annotations=READ_ONLY, structured_output=True)
     def workspace_status(workspace_id: str) -> dict[str, Any]:
         """Use this before writes to refresh HEAD, fingerprint, change budget, and verification state."""
-        return service.workspace_status(workspace_id)
+        return bounded_service.call("workspace_status", workspace_id)
 
     @mcp.tool(title="List workspace files", annotations=READ_ONLY, structured_output=True)
     def workspace_tree(workspace_id: str, max_entries: int = 2000) -> dict[str, Any]:
         """Use this when exploring tracked and untracked files allowed by repository policy."""
-        return service.workspace_tree(workspace_id, max_entries)
+        return bounded_service.call("workspace_tree", workspace_id, max_entries)
 
     @mcp.tool(title="Read workspace file", annotations=READ_ONLY, structured_output=True)
     def workspace_read_file(
         workspace_id: str, relative_path: str, start_line: int = 1, end_line: int = 500
     ) -> dict[str, Any]:
         """Use this when reading one UTF-8 file and obtaining its optimistic-lock SHA-256."""
-        return service.workspace_read_file(workspace_id, relative_path, start_line, end_line)
+        return bounded_service.call(
+            "workspace_read_file", workspace_id, relative_path, start_line, end_line
+        )
 
     @mcp.tool(
         title="Read multiple workspace files",
@@ -163,7 +225,9 @@ def create_server(
         end_line: int = 500,
     ) -> dict[str, Any]:
         """Use this when the same bounded line range is needed from several related files."""
-        return service.workspace_read_files(workspace_id, relative_paths, start_line, end_line)
+        return bounded_service.call(
+            "workspace_read_files", workspace_id, relative_paths, start_line, end_line
+        )
 
     @mcp.tool(title="Search workspace code", annotations=READ_ONLY, structured_output=True)
     def workspace_search(
@@ -173,7 +237,7 @@ def create_server(
         max_results: int = 200,
     ) -> dict[str, Any]:
         """Use this when locating literal text in allowed workspace files; it is not a shell tool."""
-        return service.workspace_search(workspace_id, query, path_glob, max_results)
+        return bounded_service.call("workspace_search", workspace_id, query, path_glob, max_results)
 
     @mcp.tool(
         title="Write complete file",
@@ -184,7 +248,9 @@ def create_server(
         workspace_id: str, relative_path: str, content: str, expected_sha256: str
     ) -> dict[str, Any]:
         """Use this to create or fully replace one UTF-8 file with optimistic locking."""
-        return service.workspace_write_file(workspace_id, relative_path, content, expected_sha256)
+        return bounded_service.call(
+            "workspace_write_file", workspace_id, relative_path, content, expected_sha256
+        )
 
     @mcp.tool(
         title="Replace exact text",
@@ -200,7 +266,8 @@ def create_server(
         expected_occurrences: int = 1,
     ) -> dict[str, Any]:
         """Use this for a precise replacement after validating the file SHA and occurrence count."""
-        return service.workspace_replace_text(
+        return bounded_service.call(
+            "workspace_replace_text",
             workspace_id,
             relative_path,
             old_text,
@@ -221,8 +288,12 @@ def create_server(
         expected_workspace_fingerprint: str,
     ) -> dict[str, Any]:
         """Use this for a validated multi-file unified patch against an unchanged workspace snapshot."""
-        return service.workspace_apply_patch(
-            workspace_id, patch, expected_head_sha, expected_workspace_fingerprint
+        return bounded_service.call(
+            "workspace_apply_patch",
+            workspace_id,
+            patch,
+            expected_head_sha,
+            expected_workspace_fingerprint,
         )
 
     @mcp.tool(
@@ -236,14 +307,14 @@ def create_server(
         expected_workspace_fingerprint: str,
     ) -> dict[str, Any]:
         """Use this to undo selected uncommitted tracked changes or remove selected untracked files."""
-        return service.workspace_restore_paths(
-            workspace_id, relative_paths, expected_workspace_fingerprint
+        return bounded_service.call(
+            "workspace_restore_paths", workspace_id, relative_paths, expected_workspace_fingerprint
         )
 
     @mcp.tool(title="Inspect workspace diff", annotations=READ_ONLY, structured_output=True)
     def workspace_diff(workspace_id: str, staged: bool = False) -> dict[str, Any]:
         """Use this after edits and before verification, commit, or publishing to review exact changes."""
-        return service.workspace_diff(workspace_id, staged)
+        return bounded_service.call("workspace_diff", workspace_id, staged)
 
     @mcp.tool(
         title="Run configured command profile",
@@ -252,12 +323,12 @@ def create_server(
     )
     def workspace_run_profile(workspace_id: str, profile_name: str) -> dict[str, Any]:
         """Use this for an explicitly named allowlisted setup, fix, build, or verification profile."""
-        return service.workspace_run_profile(workspace_id, profile_name)
+        return bounded_service.call("workspace_run_profile", workspace_id, profile_name)
 
     @mcp.tool(title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True)
     def workspace_verify(workspace_id: str, profile_name: str | None = None) -> dict[str, Any]:
         """Use this before commit to run the repository-default or explicitly named verification gate."""
-        return service.workspace_verify(workspace_id, profile_name)
+        return bounded_service.call("workspace_verify", workspace_id, profile_name)
 
     @mcp.tool(
         title="Commit verified changes",
@@ -266,21 +337,28 @@ def create_server(
     )
     def workspace_commit(workspace_id: str, message: str) -> dict[str, Any]:
         """Use this after successful verification to stage and commit the exact verified tree."""
-        return service.workspace_commit(workspace_id, message)
+        return bounded_service.call("workspace_commit", workspace_id, message)
 
     @mcp.tool(title="Push AI branch", annotations=EXTERNAL_WRITE, structured_output=True)
-    def workspace_push(workspace_id: str) -> dict[str, Any]:
+    def workspace_push(workspace_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
         """Use this after commit to push the allowlisted ai/* branch without force."""
-        return service.workspace_push(workspace_id)
+        return bounded_service.call("workspace_push", workspace_id, idempotency_key)
 
     @mcp.tool(
         title="Create draft pull request",
         annotations=EXTERNAL_WRITE,
         structured_output=True,
     )
-    def workspace_create_draft_pr(workspace_id: str, title: str, body: str) -> dict[str, Any]:
+    def workspace_create_draft_pr(
+        workspace_id: str,
+        title: str,
+        body: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         """Use this after push to create a draft PR with configured labels and reviewers."""
-        return service.workspace_create_draft_pr(workspace_id, title, body)
+        return bounded_service.call(
+            "workspace_create_draft_pr", workspace_id, title, body, idempotency_key
+        )
 
     @mcp.tool(
         title="Update draft pull request",
@@ -288,10 +366,15 @@ def create_server(
         structured_output=True,
     )
     def workspace_update_draft_pr(
-        workspace_id: str, title: str | None = None, body: str | None = None
+        workspace_id: str,
+        title: str | None = None,
+        body: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Use this to update the existing workspace PR title or body; it does not mark it ready or merge."""
-        return service.workspace_update_draft_pr(workspace_id, title, body)
+        return bounded_service.call(
+            "workspace_update_draft_pr", workspace_id, title, body, idempotency_key
+        )
 
     @mcp.tool(
         title="Read workspace PR status",
@@ -300,7 +383,7 @@ def create_server(
     )
     def workspace_pr_status(workspace_id: str) -> dict[str, Any]:
         """Use this to read draft state, mergeability, review decision, and rolled-up checks."""
-        return service.workspace_pr_status(workspace_id)
+        return bounded_service.call("workspace_pr_status", workspace_id)
 
     @mcp.tool(
         title="Read workspace PR checks",
@@ -309,7 +392,7 @@ def create_server(
     )
     def workspace_pr_checks(workspace_id: str, required_only: bool = False) -> dict[str, Any]:
         """Use this to get compact pass, fail, pending, and skipped CI check buckets."""
-        return service.workspace_pr_checks(workspace_id, required_only)
+        return bounded_service.call("workspace_pr_checks", workspace_id, required_only)
 
     @mcp.tool(
         title="Remove local workspace",
@@ -318,6 +401,6 @@ def create_server(
     )
     def workspace_remove(workspace_id: str, delete_local_branch: bool = False) -> dict[str, Any]:
         """Use this only after work is complete to remove a clean local worktree; remote data is untouched."""
-        return service.workspace_remove(workspace_id, delete_local_branch)
+        return bounded_service.call("workspace_remove", workspace_id, delete_local_branch)
 
     return mcp

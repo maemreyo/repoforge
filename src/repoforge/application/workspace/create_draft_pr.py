@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+from typing import cast
 
 from ...domain.errors import WorkspaceError
 from ...domain.policy import validate_branch
 from ...domain.publishing import render_pr_body, validate_pr_create
 from ..context import ApplicationContext
+from ..dto import to_data
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +13,7 @@ class WorkspaceCreateDraftPrCommand:
     workspace_id: str
     title: str
     body: str
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,12 +96,19 @@ class DraftPullRequestCreator:
                     False,
                 )
 
-        return self.ctx.audited(
-            "workspace_create_draft_pr",
-            {
-                "workspace_id": c.workspace_id,
-                "branch": record.branch,
-                "base": record.base,
-            },
-            op,
+        return cast(
+            WorkspaceCreateDraftPrResult,
+            self.ctx.idempotent(
+                "workspace_create_draft_pr",
+                c.idempotency_key,
+                {"workspace_id": c.workspace_id, "title": title, "body": body},
+                op,
+                details={
+                    "workspace_id": c.workspace_id,
+                    "branch": record.branch,
+                    "base": record.base,
+                },
+                serialize=to_data,
+                deserialize=lambda value: WorkspaceCreateDraftPrResult(**value),
+            ),
         )

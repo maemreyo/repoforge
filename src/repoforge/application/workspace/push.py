@@ -1,13 +1,17 @@
 from dataclasses import dataclass
+from typing import cast
 
 from ...domain.errors import WorkspaceError
 from ...domain.policy import validate_branch
+from ...domain.redaction import redact_text
 from ..context import ApplicationContext
+from ..dto import to_data
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspacePushCommand:
     workspace_id: str
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +44,17 @@ class WorkspacePusher:
                     raise WorkspaceError(
                         "Current HEAD was not committed through the verified commit gate"
                     )
+                if (
+                    fresh.metadata.get("last_pushed_sha") == head
+                    and self.ctx.git.upstream_sha(path) == head
+                ):
+                    return WorkspacePushResult(
+                        c.workspace_id,
+                        fresh.branch,
+                        fresh.remote,
+                        head,
+                        "already synchronized with upstream",
+                    )
                 result = self.ctx.git.push(
                     path,
                     fresh.remote,
@@ -54,15 +69,22 @@ class WorkspacePusher:
                         f"Push of {head} succeeded but workspace registry update failed; retry workspace_push to reconcile state"
                     ) from exc
                 return WorkspacePushResult(
-                    c.workspace_id, fresh.branch, fresh.remote, head, result.combined
+                    c.workspace_id, fresh.branch, fresh.remote, head, redact_text(result.combined)
                 )
 
-        return self.ctx.audited(
-            "workspace_push",
-            {
-                "workspace_id": c.workspace_id,
-                "branch": record.branch,
-                "remote": record.remote,
-            },
-            op,
+        return cast(
+            WorkspacePushResult,
+            self.ctx.idempotent(
+                "workspace_push",
+                c.idempotency_key,
+                {"workspace_id": c.workspace_id},
+                op,
+                details={
+                    "workspace_id": c.workspace_id,
+                    "branch": record.branch,
+                    "remote": record.remote,
+                },
+                serialize=to_data,
+                deserialize=lambda value: WorkspacePushResult(**value),
+            ),
         )
