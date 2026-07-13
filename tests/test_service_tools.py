@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment
 
-from repoforge.errors import SecurityError, WorkspaceError
+from repoforge.domain.errors import SecurityError, WorkspaceError
 
 
 def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:

@@ -40,7 +40,7 @@ def test_application_depends_on_ports_not_adapters() -> None:
 
 
 def test_service_is_a_delegating_facade() -> None:
-    text = (PACKAGE / "service.py").read_text(encoding="utf-8")
+    text = (PACKAGE / "application" / "service.py").read_text(encoding="utf-8")
     for forbidden in (
         "subprocess",
         "fcntl",

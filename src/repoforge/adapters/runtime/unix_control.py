@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
 import struct
+import tempfile
 import threading
 from collections.abc import Callable
 from dataclasses import asdict
@@ -18,6 +20,21 @@ from ...domain.runtime import ControlCommand, ControlRequest, ControlResponse
 
 _MAX_MESSAGE = 64 * 1024
 _PROTOCOL = 1
+_MAX_SOCKET_PATH_BYTES = 100
+
+
+def resolve_unix_socket_path(path: Path) -> Path:
+    """Return a deterministic portable bind path for a logical Unix socket path.
+
+    Darwin and Linux impose small ``sockaddr_un.sun_path`` limits. Long state roots are mapped into
+    a user-private temporary directory, while clients independently derive the same path.
+    """
+    logical = path.expanduser().absolute()
+    if len(os.fsencode(str(logical))) <= _MAX_SOCKET_PATH_BYTES:
+        return logical
+    digest = hashlib.sha256(os.fsencode(str(logical))).hexdigest()[:32]
+    root = Path(tempfile.gettempdir()) / f"repoforge-runtime-{os.getuid()}"
+    return root / f"{digest}.sock"
 
 
 def _peer_uid(connection: socket.socket) -> int | None:
@@ -75,20 +92,25 @@ def _decode_request(data: bytes) -> ControlRequest:
 
 class UnixRuntimeControlServer:
     def __init__(self, path: Path):
-        self.path = path
+        self.path = path.expanduser().absolute()
+        self._bound_path = resolve_unix_socket_path(self.path)
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
+    @property
+    def bound_path(self) -> Path:
+        return self._bound_path
+
     def start(self, handler: Callable[[ControlRequest], ControlResponse]) -> None:
         if self._socket is not None:
             raise ConfigError("Runtime control server is already started")
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.path.parent, 0o700)
-        self.path.unlink(missing_ok=True)
+        self.bound_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.bound_path.parent, 0o700)
+        self.bound_path.unlink(missing_ok=True)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(self.path))
-        os.chmod(self.path, 0o600)
+        listener.bind(str(self.bound_path))
+        os.chmod(self.bound_path, 0o600)
         listener.listen(8)
         listener.settimeout(0.25)
         self._socket = listener
@@ -146,14 +168,15 @@ class UnixRuntimeControlServer:
             self._socket.close()
         if self._thread is not None:
             self._thread.join(timeout=2)
-        self.path.unlink(missing_ok=True)
+        self.bound_path.unlink(missing_ok=True)
         self._socket = None
         self._thread = None
 
 
 class UnixRuntimeControlClient:
     def __init__(self, path: Path):
-        self.path = path
+        self.path = path.expanduser().absolute()
+        self._bound_path = resolve_unix_socket_path(self.path)
 
     def request(self, request: ControlRequest, *, timeout_seconds: float = 10.0) -> ControlResponse:
         payload = {
@@ -168,7 +191,7 @@ class UnixRuntimeControlClient:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(timeout_seconds)
             try:
-                connection.connect(str(self.path))
+                connection.connect(str(self._bound_path))
             except OSError as exc:
                 raise ConfigError(f"RUNTIME_CONTROL_UNAVAILABLE: {exc}") from exc
             connection.sendall(data)

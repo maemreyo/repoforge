@@ -6,8 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from repoforge.application.service import CodingService
 from repoforge.config import load_config
-from repoforge.service import CodingService
 
 
 def _git(*args: str, cwd: Path) -> str:

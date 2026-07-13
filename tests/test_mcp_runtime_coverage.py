@@ -9,9 +9,7 @@ from typing import Any
 
 import pytest
 
-from repoforge.errors import ConfigError
-from repoforge.interfaces.mcp.server import create_server, tool_surface_hash
-from repoforge.runtime import (
+from repoforge.adapters.runtime.local_runtime import (
     clear_runtime_state,
     managed_start_claim,
     read_managed_runtime,
@@ -21,6 +19,8 @@ from repoforge.runtime import (
     write_managed_runtime,
     write_runtime_state,
 )
+from repoforge.domain.errors import ConfigError
+from repoforge.interfaces.mcp.server import create_server, tool_surface_hash
 
 
 class FakeService:

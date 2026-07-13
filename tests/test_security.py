@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from repoforge.config import RepositoryConfig
-from repoforge.errors import SecurityError
-from repoforge.security import (
+from repoforge.domain.errors import SecurityError
+from repoforge.domain.policy import (
     assert_path_allowed,
     extract_patch_paths,
     resolve_workspace_path,

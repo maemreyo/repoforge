@@ -4,80 +4,80 @@ from __future__ import annotations
 
 from typing import Any
 
-from .application.dto import to_data
-from .application.repository.context import (
+from ..bootstrap import AdapterOverrides, Application, build_application
+from ..config import AppConfig
+from ..ports import AuditSink, CommandExecutor, LockManager, OperationGate, WorkspaceStore
+from .dto import to_data
+from .repository.context import (
     RepositoryContextCommand,
     RepositoryContextReader,
 )
-from .application.repository.doctor import Doctor, DoctorCommand
-from .application.repository.issue_read import IssueReadCommand, IssueReader
-from .application.repository.list import RepositoryListCommand, RepositoryLister
-from .application.repository.pr_read import PullRequestReadCommand, PullRequestReader
-from .application.repository.recent_commits import (
+from .repository.doctor import Doctor, DoctorCommand
+from .repository.issue_read import IssueReadCommand, IssueReader
+from .repository.list import RepositoryListCommand, RepositoryLister
+from .repository.pr_read import PullRequestReadCommand, PullRequestReader
+from .repository.recent_commits import (
     RecentCommitsCommand,
     RecentCommitsReader,
 )
-from .application.repository.status import (
+from .repository.status import (
     RepositoryStatusCommand,
     RepositoryStatusReader,
 )
-from .application.workspace.apply_patch import (
+from .workspace.apply_patch import (
     WorkspaceApplyPatchCommand,
     WorkspacePatchApplier,
 )
-from .application.workspace.commit import WorkspaceCommitCommand, WorkspaceCommitter
-from .application.workspace.create import WorkspaceCreateCommand, WorkspaceCreator
-from .application.workspace.create_draft_pr import (
+from .workspace.commit import WorkspaceCommitCommand, WorkspaceCommitter
+from .workspace.create import WorkspaceCreateCommand, WorkspaceCreator
+from .workspace.create_draft_pr import (
     DraftPullRequestCreator,
     WorkspaceCreateDraftPrCommand,
 )
-from .application.workspace.diff import WorkspaceDiffCommand, WorkspaceDiffReader
-from .application.workspace.file_read import (
+from .workspace.diff import WorkspaceDiffCommand, WorkspaceDiffReader
+from .workspace.file_read import (
     WorkspaceFileReadCommand,
     WorkspaceFileReader,
 )
-from .application.workspace.file_write import (
+from .workspace.file_write import (
     WorkspaceFileWriteCommand,
     WorkspaceFileWriter,
 )
-from .application.workspace.files_read import (
+from .workspace.files_read import (
     WorkspaceFilesReadCommand,
     WorkspaceFilesReader,
 )
-from .application.workspace.list import WorkspaceListCommand, WorkspaceLister
-from .application.workspace.pr_checks import (
+from .workspace.list import WorkspaceListCommand, WorkspaceLister
+from .workspace.pr_checks import (
     WorkspacePrChecksCommand,
     WorkspacePrChecksReader,
 )
-from .application.workspace.pr_status import (
+from .workspace.pr_status import (
     WorkspacePrStatusCommand,
     WorkspacePrStatusReader,
 )
-from .application.workspace.push import WorkspacePushCommand, WorkspacePusher
-from .application.workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
-from .application.workspace.replace_text import (
+from .workspace.push import WorkspacePushCommand, WorkspacePusher
+from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
+from .workspace.replace_text import (
     WorkspaceReplaceTextCommand,
     WorkspaceTextReplacer,
 )
-from .application.workspace.restore_paths import (
+from .workspace.restore_paths import (
     WorkspacePathsRestorer,
     WorkspaceRestorePathsCommand,
 )
-from .application.workspace.run_profile import (
+from .workspace.run_profile import (
     WorkspaceProfileRunner,
     WorkspaceRunProfileCommand,
 )
-from .application.workspace.search import WorkspaceSearchCommand, WorkspaceSearcher
-from .application.workspace.status import WorkspaceStatusCommand, WorkspaceStatusReader
-from .application.workspace.tree import WorkspaceTreeCommand, WorkspaceTreeReader
-from .application.workspace.update_draft_pr import (
+from .workspace.search import WorkspaceSearchCommand, WorkspaceSearcher
+from .workspace.status import WorkspaceStatusCommand, WorkspaceStatusReader
+from .workspace.tree import WorkspaceTreeCommand, WorkspaceTreeReader
+from .workspace.update_draft_pr import (
     DraftPullRequestUpdater,
     WorkspaceUpdateDraftPrCommand,
 )
-from .application.workspace.verify import WorkspaceVerifier, WorkspaceVerifyCommand
-from .bootstrap import AdapterOverrides, Application, build_application
-from .config import AppConfig
-from .ports import AuditSink, CommandExecutor, LockManager, OperationGate, WorkspaceStore
+from .workspace.verify import WorkspaceVerifier, WorkspaceVerifyCommand
 
 
 def _result(value: object) -> dict[str, Any]:

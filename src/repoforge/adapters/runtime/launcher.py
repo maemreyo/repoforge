@@ -16,7 +16,13 @@ from .state_store import process_identity
 
 class SubprocessRuntimeLauncher:
     def start(self, config_path: Path, *, foreground: bool, extra_env: dict[str, str]) -> int:
-        argv = [sys.executable, "-m", "repoforge.runtime_worker", "--config", str(config_path)]
+        argv = [
+            sys.executable,
+            "-m",
+            "repoforge.interfaces.runtime.worker",
+            "--config",
+            str(config_path),
+        ]
         inherited = (
             "HOME",
             "PATH",

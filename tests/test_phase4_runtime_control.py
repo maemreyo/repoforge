@@ -97,6 +97,25 @@ def test_unix_control_protocol_is_owner_only_versioned_and_allowlisted(tmp_path:
     assert not path.exists()
 
 
+def test_unix_control_hashes_long_logical_socket_paths(tmp_path: Path) -> None:
+    logical = tmp_path / ("nested-" + "x" * 160) / "control.sock"
+    server = UnixRuntimeControlServer(logical)
+
+    server.start(lambda request: ControlResponse(1, True, request.correlation_id, "ok"))
+    try:
+        response = UnixRuntimeControlClient(logical).request(
+            ControlRequest(1, ControlCommand.PING, "long-path")
+        )
+        assert response.ok
+        assert server.bound_path != logical
+        assert len(os.fsencode(server.bound_path)) <= 100
+        assert not logical.exists()
+    finally:
+        bound = server.bound_path
+        server.close()
+    assert not bound.exists()
+
+
 def test_gate_waits_for_inflight_read_and_rejects_new_write() -> None:
     gate = InProcessOperationGate()
     entered = threading.Event()

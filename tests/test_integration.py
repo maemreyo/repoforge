@@ -3,8 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from repoforge.application.service import CodingService
 from repoforge.config import load_config
-from repoforge.service import CodingService
 
 
 def run(*args: str, cwd: Path) -> None:

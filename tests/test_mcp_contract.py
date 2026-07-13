@@ -4,7 +4,7 @@ import pytest
 from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from repoforge.server import create_server, tool_surface_hash
+from repoforge.interfaces.mcp.server import create_server, tool_surface_hash
 
 
 def test_tool_surface_hash_is_deterministic() -> None:

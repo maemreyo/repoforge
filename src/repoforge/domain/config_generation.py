@@ -160,38 +160,79 @@ def _set(value: object) -> set[str]:
     return {str(item) for item in value}
 
 
-def _profile_capabilities(repo: dict[str, Any]) -> set[str]:
+def _profile_map(repo: dict[str, Any]) -> dict[str, dict[str, Any]]:
     profiles = repo.get("profiles", {})
     if not isinstance(profiles, dict):
+        return {}
+    return {str(name): raw for name, raw in profiles.items() if isinstance(raw, dict)}
+
+
+def _profile_commands(profile: dict[str, Any]) -> set[str]:
+    commands = profile.get("commands", [])
+    if not isinstance(commands, list):
         return set()
-    capabilities: set[str] = set()
-    for name, raw in profiles.items():
-        if not isinstance(raw, dict):
-            continue
-        commands = raw.get("commands", [])
-        normalized_commands = (
-            [
-                [str(item) for item in command]
-                for command in commands
-                if isinstance(command, list) and all(isinstance(item, str) for item in command)
-            ]
-            if isinstance(commands, list)
-            else []
+    return {
+        json.dumps([str(item) for item in command], separators=(",", ":"))
+        for command in commands
+        if isinstance(command, list) and all(isinstance(item, str) for item in command)
+    }
+
+
+def _record_profile_changes(
+    changes: list[CapabilityChange],
+    prefix: str,
+    before_repo: dict[str, Any],
+    after_repo: dict[str, Any],
+) -> None:
+    before = _profile_map(before_repo)
+    after = _profile_map(after_repo)
+    _record_set_change(
+        changes,
+        prefix,
+        set(before),
+        set(after),
+        additions=CapabilityDeltaKind.EXPANSION,
+        removals=CapabilityDeltaKind.RESTRICTION,
+        reason="executable profile availability changed",
+    )
+    for name in sorted(set(before) & set(after)):
+        left = before[name]
+        right = after[name]
+        profile_prefix = f"{prefix}.{name}"
+        _record_set_change(
+            changes,
+            profile_prefix + ".commands",
+            _profile_commands(left),
+            _profile_commands(right),
+            additions=CapabilityDeltaKind.EXPANSION,
+            removals=CapabilityDeltaKind.RESTRICTION,
+            reason="executable command capability changed",
         )
-        capabilities.add(
-            json.dumps(
-                {
-                    "name": str(name),
-                    "verification": bool(raw.get("verification", False)),
-                    "timeout_seconds": raw.get("timeout_seconds"),
-                    "working_directory": raw.get("working_directory"),
-                    "commands": normalized_commands,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
+        _record_bool(
+            changes,
+            profile_prefix + ".verification",
+            bool(left.get("verification", False)),
+            bool(right.get("verification", False)),
+            true_is_restriction=False,
+            reason="verification profile eligibility changed",
+        )
+        _record_number(
+            changes,
+            profile_prefix + ".timeout_seconds",
+            left.get("timeout_seconds", 0),
+            right.get("timeout_seconds", 0),
+            reason="profile process duration",
+        )
+        if left.get("working_directory") != right.get("working_directory"):
+            changes.append(
+                CapabilityChange(
+                    profile_prefix + ".working_directory",
+                    left.get("working_directory"),
+                    right.get("working_directory"),
+                    CapabilityDeltaKind.INCOMPATIBLE,
+                    "profile execution scope changed",
+                )
             )
-        )
-    return capabilities
 
 
 def _record_set_change(
@@ -510,15 +551,7 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
                 removals=remove_direction,
                 reason=reason,
             )
-        _record_set_change(
-            changes,
-            prefix + ".profiles",
-            _profile_capabilities(left),
-            _profile_capabilities(right),
-            additions=CapabilityDeltaKind.EXPANSION,
-            removals=CapabilityDeltaKind.RESTRICTION,
-            reason="executable profile capability changed",
-        )
+        _record_profile_changes(changes, prefix + ".profiles", left, right)
         for field, reason in (
             ("max_changed_files", "changed-file budget"),
             ("max_diff_lines", "diff-line budget"),

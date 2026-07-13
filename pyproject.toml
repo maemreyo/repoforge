@@ -38,9 +38,9 @@ dev = [
 ]
 
 [project.scripts]
-repoforge = "repoforge.cli:main"
-rf = "repoforge.cli:main"
-repoforge-mcp = "repoforge.cli:main"
+repoforge = "repoforge.interfaces.cli.main:main"
+rf = "repoforge.interfaces.cli.main:main"
+repoforge-mcp = "repoforge.interfaces.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/repoforge"]

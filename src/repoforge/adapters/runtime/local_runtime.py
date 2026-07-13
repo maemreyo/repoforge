@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
-from ...errors import ConfigError
 
 _LOG_READ_LIMIT = 1_000_000
 _PROCESS_IDENTITY = re.compile(r"^[a-f0-9]{64}$")

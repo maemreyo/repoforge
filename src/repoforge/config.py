@@ -10,7 +10,7 @@ from typing import Any
 
 import tomli as tomllib
 
-from .errors import ConfigError
+from .domain.errors import ConfigError
 
 DEFAULT_CONFIG_PATH = Path("~/.config/repoforge/config.toml").expanduser()
 DEFAULT_WORKSPACE_ROOT = "~/.local/share/repoforge/workspaces"

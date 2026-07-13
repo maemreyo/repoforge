@@ -11,8 +11,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from ...application.service import CodingService
 from ...config import load_config
-from ...service import CodingService
 
 SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nPrefer exact text replacement or a small validated patch. Review workspace_diff after every meaningful\nchange. Run workspace_verify before commit; never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status.".strip()
 READ_ONLY = ToolAnnotations(

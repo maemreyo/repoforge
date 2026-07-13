@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from repoforge.config import DEFAULT_DENIED_PATHS, load_config
-from repoforge.errors import ConfigError
+from repoforge.domain.errors import ConfigError
 
 
 def test_load_minimal_config(tmp_path: Path) -> None:

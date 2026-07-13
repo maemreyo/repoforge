@@ -29,6 +29,7 @@ from ...application.configuration.source import (
 )
 from ...application.repository_admin.proposals import RepositoryProposalService
 from ...application.runtime.activation import GenerationActivator
+from ...application.service import CodingService
 from ...bootstrap import (
     AdapterOverrides,
     build_application,
@@ -40,10 +41,13 @@ from ...bootstrap import (
     build_runtime_control_server,
     build_runtime_launcher,
     build_runtime_store,
+    clear_runtime_state,
     default_state_root,
     id_generator,
+    read_runtime_log,
     system_clock,
     write_private_file,
+    write_runtime_state,
 )
 from ...config import DEFAULT_CONFIG_PATH, load_config
 from ...domain.config_generation import (
@@ -62,8 +66,6 @@ from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, ControlResponse, RuntimePhase
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
-from ...runtime import clear_runtime_state, read_runtime_log, write_runtime_state
-from ...service import CodingService
 
 _OUTPUT_FORMAT = "json"
 

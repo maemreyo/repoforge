@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from repoforge.config_delta import CapabilityDeltaKind, classify_capability_delta
+from repoforge.domain.config_generation import CapabilityDeltaKind, classify_capability_delta
 
 
 def _lock(*, command: str, profile: str = "test", generation: int = 1) -> str:

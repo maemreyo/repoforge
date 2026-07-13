@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from repoforge.errors import ConfigError
-from repoforge.runtime import (
+from repoforge.adapters.runtime.local_runtime import (
     clear_runtime_state,
     managed_start_claim,
     read_managed_runtime,
@@ -20,6 +19,7 @@ from repoforge.runtime import (
     write_managed_runtime,
     write_runtime_state,
 )
+from repoforge.domain.errors import ConfigError
 
 
 def test_runtime_state_records_the_current_process_and_generation(tmp_path: Path) -> None:
