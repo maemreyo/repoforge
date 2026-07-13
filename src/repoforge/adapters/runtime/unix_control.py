@@ -33,8 +33,13 @@ def resolve_unix_socket_path(path: Path) -> Path:
     if len(os.fsencode(str(logical))) <= _MAX_SOCKET_PATH_BYTES:
         return logical
     digest = hashlib.sha256(os.fsencode(str(logical))).hexdigest()[:32]
-    root = Path(tempfile.gettempdir()) / f"repoforge-runtime-{os.getuid()}"
-    return root / f"{digest}.sock"
+    filename = f"{digest}.sock"
+    roots = (
+        Path("/tmp") / f"rf-{os.getuid()}",
+        Path(tempfile.gettempdir()).expanduser().absolute() / f"rf-{os.getuid()}",
+    )
+    candidates = tuple(root / filename for root in roots)
+    return min(candidates, key=lambda candidate: len(os.fsencode(str(candidate))))
 
 
 def _peer_uid(connection: socket.socket) -> int | None:
