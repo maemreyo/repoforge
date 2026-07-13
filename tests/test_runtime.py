@@ -31,6 +31,7 @@ def test_runtime_state_records_the_current_process_and_generation(tmp_path: Path
 
     # Then: status reports the same live process and generation.
     assert state.pid == os.getpid()
+    assert state.process_identity
     assert read_runtime_state(state_path) == state
     assert state.tool_surface_hash == "surface"
 
@@ -39,7 +40,14 @@ def test_runtime_state_ignores_and_removes_a_dead_process_record(tmp_path: Path)
     # Given: a state file for a process that cannot exist.
     state_path = tmp_path / "runtime.json"
     state_path.write_text(
-        json.dumps({"pid": 999_999, "active_generation": 2, "started_at": "now"}),
+        json.dumps(
+            {
+                "pid": 999_999,
+                "active_generation": 2,
+                "started_at": "now",
+                "process_identity": "0" * 64,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -47,6 +55,45 @@ def test_runtime_state_ignores_and_removes_a_dead_process_record(tmp_path: Path)
     state = read_runtime_state(state_path)
 
     # Then: it is considered stopped and the stale record is removed.
+    assert state is None
+    assert not state_path.exists()
+
+
+def test_runtime_state_rejects_a_reused_pid_with_another_identity(tmp_path: Path) -> None:
+    # Given: a live PID is paired with identity facts from another process instance.
+    state_path = tmp_path / "runtime.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "active_generation": 2,
+                "started_at": "now",
+                "process_identity": "0" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # When: runtime status validates the persisted process identity.
+    state = read_runtime_state(state_path)
+
+    # Then: PID reuse or forged state cannot impersonate the MCP runtime.
+    assert state is None
+    assert not state_path.exists()
+
+
+def test_runtime_state_discards_legacy_pid_only_record(tmp_path: Path) -> None:
+    # Given: a live state record written before process identity was persisted.
+    state_path = tmp_path / "runtime.json"
+    state_path.write_text(
+        json.dumps({"pid": os.getpid(), "active_generation": 2, "started_at": "now"}),
+        encoding="utf-8",
+    )
+
+    # When: the upgraded runtime reads the PID-only record.
+    state = read_runtime_state(state_path)
+
+    # Then: it fails closed until the live process republishes identity-bound state.
     assert state is None
     assert not state_path.exists()
 

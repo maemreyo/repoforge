@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from typing import Any
 from .errors import ConfigError
 
 _LOG_READ_LIMIT = 1_000_000
+_PROCESS_IDENTITY = re.compile(r"^[a-f0-9]{64}$")
 _SECRET_VALUE = re.compile(
     r"(?i)\b(control_plane_api_key|authorization|token|secret|password)\b(\s*[:=]\s*)([^\s]+)"
 )
@@ -31,6 +33,7 @@ class RuntimeState:
     active_generation: int
     started_at: str
     tool_surface_hash: str = ""
+    process_identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,8 +47,26 @@ class ManagedRuntime:
     started_at: str
 
 
+def _read_process_identity(pid: int) -> str | None:
+    """Hash stable local process facts so a reused PID cannot impersonate the MCP runtime."""
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    facts = completed.stdout.strip()
+    if completed.returncode != 0 or not facts:
+        return None
+    return hashlib.sha256(facts.encode("utf-8")).hexdigest()
+
+
 def read_runtime_state(path: Path) -> RuntimeState | None:
-    """Return a valid live runtime record, ignoring a stale process record."""
+    """Return a live identity-validated runtime record, cleaning stale state."""
     if not path.is_file():
         return None
     try:
@@ -58,6 +79,11 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
     generation = raw.get("active_generation")
     started_at = raw.get("started_at")
     tool_surface_hash = raw.get("tool_surface_hash", "")
+    process_identity = raw.get("process_identity", "")
+    if process_identity == "":
+        # PID-only records cannot distinguish a live process from a reused PID.
+        path.unlink(missing_ok=True)
+        return None
     if (
         not isinstance(pid, int)
         or isinstance(pid, bool)
@@ -67,32 +93,35 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
         or generation <= 0
         or not isinstance(started_at, str)
         or not isinstance(tool_surface_hash, str)
+        or not isinstance(process_identity, str)
+        or not _PROCESS_IDENTITY.fullmatch(process_identity)
     ):
         raise ConfigError(f"Runtime state {path} is invalid")
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    if _read_process_identity(pid) != process_identity:
         path.unlink(missing_ok=True)
         return None
-    except PermissionError:
-        pass
     return RuntimeState(
         pid=pid,
         active_generation=generation,
         started_at=started_at,
         tool_surface_hash=tool_surface_hash,
+        process_identity=process_identity,
     )
 
 
 def write_runtime_state(path: Path, generation: int, tool_surface_hash: str = "") -> RuntimeState:
-    """Atomically record the generation loaded by the current local process."""
+    """Atomically record the generation and identity loaded by the current process."""
     if generation <= 0:
         raise ConfigError("Runtime generation must be positive")
+    process_identity = _read_process_identity(os.getpid())
+    if process_identity is None:
+        raise ConfigError("Cannot determine the current runtime process identity")
     state = RuntimeState(
         pid=os.getpid(),
         active_generation=generation,
         started_at=datetime.now(timezone.utc).isoformat(),
         tool_surface_hash=tool_surface_hash,
+        process_identity=process_identity,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
