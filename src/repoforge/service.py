@@ -23,6 +23,11 @@ from .security import (
     validate_patch,
 )
 from .state import StateStore, VerificationReceipt, WorkspaceRecord, utc_now
+from .workspace_apply_patch import (
+    WorkspaceApplyPatchCommand,
+    WorkspaceApplyPatchPorts,
+    WorkspacePatchApplier,
+)
 from .workspace_create import WorkspaceCreateCommand, WorkspaceCreator, WorkspaceCreatorPorts
 from .workspace_file_read import (
     WorkspaceFileReadCommand,
@@ -975,44 +980,29 @@ class CodingService:
             patch, repo, max_chars=self.config.server.max_tool_output_chars * 4
         )
 
+        applier = WorkspacePatchApplier(
+            WorkspaceApplyPatchPorts(
+                state=self.state,
+                runner=self.runner,
+                max_fingerprint_bytes=self.config.server.max_fingerprint_bytes,
+                verification_timeout_seconds=self.config.server.verification_timeout_seconds,
+            )
+        )
+        command = WorkspaceApplyPatchCommand(
+            workspace_id=workspace_id,
+            patch=patch,
+            expected_head_sha=expected_head_sha,
+            expected_workspace_fingerprint=expected_workspace_fingerprint,
+        )
+
         def operation() -> dict[str, Any]:
-            with self.state.lock(workspace_id):
-                actual_head = self._head_sha(path)
-                if actual_head != expected_head_sha:
-                    raise WorkspaceError(
-                        f"HEAD changed: expected {expected_head_sha}, got {actual_head}"
-                    )
-                actual_fingerprint = self._fingerprint(path)
-                if actual_fingerprint != expected_workspace_fingerprint:
-                    raise WorkspaceError(
-                        "Workspace changed since it was inspected; refresh status before applying patch"
-                    )
-                self.runner.run(
-                    ["git", "apply", "--check", "--whitespace=error-all", "-"],
-                    cwd=path,
-                    input_text=patch,
-                )
-                self.runner.run(
-                    ["git", "apply", "--whitespace=fix", "-"], cwd=path, input_text=patch
-                )
-                try:
-                    self._assert_changed_paths_allowed(path, repo)
-                except Exception:
-                    # Best-effort rollback: a patch that violates post-apply policy must not
-                    # leave the workspace in a partially unsafe state.
-                    self.runner.run(
-                        ["git", "apply", "-R", "--whitespace=nowarn", "-"],
-                        cwd=path,
-                        input_text=patch,
-                        check=False,
-                    )
-                    raise
-                return {
-                    "workspace_id": workspace_id,
-                    "changed_paths": list(changed_paths),
-                    "workspace_fingerprint": self._fingerprint(path),
-                    "diff_stat": self.runner.run(["git", "diff", "--stat", "--"], cwd=path).stdout,
-                }
+            result = applier.execute(repo, path, command, changed_paths)
+            return {
+                "workspace_id": result.workspace_id,
+                "changed_paths": list(result.changed_paths),
+                "workspace_fingerprint": result.workspace_fingerprint,
+                "diff_stat": result.diff_stat,
+            }
 
         return self._audit_call(
             "workspace_apply_patch",
