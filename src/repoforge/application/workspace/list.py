@@ -30,6 +30,11 @@ class WorkspaceLister:
                     "base": r.base,
                     "created_at": r.created_at,
                     "exists": Path(r.path).is_dir(),
+                    "lifecycle": (
+                        "active"
+                        if r.repo_id in self.ctx.config.repositories
+                        else "orphaned_read_only"
+                    ),
                     "last_verification": {
                         "profile": r.last_verification.profile,
                         "completed_at": r.last_verification.completed_at,

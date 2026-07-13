@@ -13,6 +13,7 @@ from ...domain.redaction import redact_text
 from ...domain.runtime import (
     ControlCommand,
     ControlRequest,
+    ControlResponse,
     RuntimePhase,
     RuntimeRecord,
     transition,
@@ -59,6 +60,21 @@ class GenerationActivator:
         self._health_timeout = health_timeout_seconds
         self._drain_timeout = drain_timeout_seconds
 
+    def _request_response(
+        self,
+        client: RuntimeControlClient,
+        command: ControlCommand,
+        correlation_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> ControlResponse | None:
+        try:
+            return client.request(
+                ControlRequest(1, command, correlation_id, tuple(sorted((payload or {}).items()))),
+                timeout_seconds=max(5.0, self._drain_timeout),
+            )
+        except ConfigError:
+            return None
+
     def _request(
         self,
         client: RuntimeControlClient,
@@ -66,14 +82,8 @@ class GenerationActivator:
         correlation_id: str,
         payload: dict[str, object] | None = None,
     ) -> bool:
-        try:
-            response = client.request(
-                ControlRequest(1, command, correlation_id, tuple(sorted((payload or {}).items()))),
-                timeout_seconds=max(5.0, self._drain_timeout),
-            )
-            return response.ok
-        except ConfigError:
-            return False
+        response = self._request_response(client, command, correlation_id, payload)
+        return bool(response and response.ok)
 
     def _wait_stopped(self, timeout: float = 20.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -189,6 +199,54 @@ class GenerationActivator:
         correlation_id = self._ids.new_hex(24)
         previous = self._configs.active()
         running = self._runtime.read()
+        if (
+            running
+            and running.phase in {RuntimePhase.HEALTHY, RuntimePhase.DEGRADED}
+            and generation.delta is not CapabilityDeltaKind.INCOMPATIBLE
+        ):
+            expected_active = previous.generation if previous else None
+            self._configs.stage_activation(generation.generation, expected_active=expected_active)
+            response = self._request_response(
+                self._mcp_control,
+                ControlCommand.RELOAD,
+                correlation_id,
+                {
+                    "generation": generation.generation,
+                    "expected_active": expected_active or 0,
+                },
+            )
+            committed = self._configs.active()
+            response_generation = (
+                dict(response.payload).get("active_generation") if response is not None else None
+            )
+            if (
+                committed is not None
+                and committed.generation == generation.generation
+                and (
+                    response is None
+                    or (response.ok and response_generation == generation.generation)
+                )
+            ):
+                self._runtime.write(
+                    replace(
+                        running,
+                        phase=RuntimePhase.HEALTHY,
+                        active_generation=generation.generation,
+                        accepted_generation=generation.generation,
+                        updated_at=self._clock.now_iso(),
+                        correlation_id=correlation_id,
+                        last_error_code=None,
+                        last_error=None,
+                    )
+                )
+                return ActivationResult(
+                    "hot_reloaded",
+                    generation.generation,
+                    generation.generation,
+                    None,
+                    correlation_id,
+                    "The new immutable service container is active; the tunnel process was preserved.",
+                )
         if running and running.phase not in {RuntimePhase.STOPPED, RuntimePhase.FAILED}:
             observable = running
             if running.phase in {RuntimePhase.HEALTHY, RuntimePhase.DEGRADED}:
@@ -292,9 +350,11 @@ class GenerationActivator:
                         message="Supervisor did not stop after drain and forced termination",
                     )
                     raise ConfigError("RUNTIME_STOP_TIMEOUT: supervisor did not stop after drain")
-        self._configs.stage_activation(
-            generation.generation, expected_active=previous.generation if previous else None
-        )
+        staged = self._configs.activation_target()
+        if staged is None or staged.generation != generation.generation:
+            self._configs.stage_activation(
+                generation.generation, expected_active=previous.generation if previous else None
+            )
         startup_error: Exception | None = None
         try:
             self._launcher.start(self._config_path, foreground=False, extra_env=extra_env)

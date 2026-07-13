@@ -7,7 +7,7 @@ from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
 from ...domain.policy import slugify, validate_branch
 from ...domain.workspace import WorkspaceRecord
-from ..context import ApplicationContext
+from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
 
 
@@ -111,7 +111,11 @@ class WorkspaceCreator:
                     ),
                 )
             head = self.ctx.git.create_worktree(repo, destination, branch, base)
-            metadata = {"workspace_create_idempotency": key_hash} if key_hash else {}
+            metadata: dict[str, object] = {
+                "repository_policy_snapshot": repository_policy_snapshot(repo),
+            }
+            if key_hash:
+                metadata["workspace_create_idempotency"] = key_hash
             record = WorkspaceRecord(
                 workspace_id,
                 repo.repo_id,

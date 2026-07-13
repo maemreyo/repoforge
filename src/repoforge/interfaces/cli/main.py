@@ -30,6 +30,11 @@ from ...application.configuration.source import (
 from ...application.diagnostics import build_diagnostics_bundle
 from ...application.repository_admin.proposals import RepositoryProposalService
 from ...application.runtime.activation import GenerationActivator
+from ...application.runtime.hot_reload import (
+    AtomicServiceRouter,
+    GenerationServiceContainer,
+    HotReloadCoordinator,
+)
 from ...application.service import CodingService
 from ...bootstrap import (
     AdapterOverrides,
@@ -54,6 +59,7 @@ from ...bootstrap import (
 from ...config import DEFAULT_CONFIG_PATH, load_config
 from ...domain.config_generation import (
     ApprovalEvent,
+    CapabilityDeltaKind,
     ConfigGeneration,
     ConfigMutation,
     classify_capability_delta,
@@ -66,8 +72,9 @@ from ...domain.errors import (
 )
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
-from ...domain.runtime import ControlCommand, ControlRequest, ControlResponse, RuntimePhase
+from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
+from ..runtime.host import McpRuntimeHost
 
 _OUTPUT_FORMAT = "json"
 
@@ -1013,103 +1020,96 @@ def _serve(config_path: Path) -> int:
     from ..mcp.server import create_server, tool_surface_hash
 
     store = _ensure_generation(config_path)
-    active = store.activation_target() or store.active()
-    if active is None:
+    initial_generation = store.activation_target() or store.active()
+    if initial_generation is None:
         raise ConfigError("No staged or active configuration generation")
-    config = load_config(store.resolved_path(active.generation))
-    gate = build_operation_gate()
-    app = build_application(config, overrides=AdapterOverrides(gate=gate))
-    service = CodingService(config, application=app)
-    _, _, mcp_socket = _runtime_paths(store)
-    control = build_runtime_control_server(mcp_socket)
 
-    def handler(request: ControlRequest) -> ControlResponse:
-        if request.command in {ControlCommand.PING, ControlCommand.STATUS}:
-            return ControlResponse(
-                1,
-                True,
-                request.correlation_id,
-                str(gate.snapshot()["state"]),
-                tuple(sorted(gate.snapshot().items())),
+    def build_container(
+        generation: int, *, allow_incompatible: bool = False
+    ) -> GenerationServiceContainer:
+        candidates = (store.activation_target(), store.active())
+        selected = next(
+            (item for item in candidates if item is not None and item.generation == generation),
+            None,
+        )
+        if selected is None:
+            selected = next(
+                (item for item in store.history() if item.generation == generation),
+                None,
             )
-        if request.command is ControlCommand.HEALTH:
-            try:
-                repositories = service.repo_list().get("repositories", [])
-                snapshot = gate.snapshot()
-                healthy = snapshot["state"] == "open"
-                payload = {
-                    "gate": snapshot,
-                    "repository_count": len(repositories),
-                    "generation": active.generation,
-                }
-                return ControlResponse(
-                    1,
-                    healthy,
-                    request.correlation_id,
-                    "healthy" if healthy else str(snapshot["state"]),
-                    tuple(sorted(payload.items())),
-                    None if healthy else "MCP_GATE_NOT_OPEN",
-                )
-            except Exception as exc:
-                return ControlResponse(
-                    1,
-                    False,
-                    request.correlation_id,
-                    "unhealthy",
-                    error_code="MCP_SELF_CHECK_FAILED",
-                    message=f"{type(exc).__name__}: {exc}",
-                )
-        if request.command is ControlCommand.DRAIN:
-            payload = dict(request.payload)
-            timeout_value = payload.get("timeout_seconds", 30.0)
-            timeout = float(timeout_value) if isinstance(timeout_value, (str, int, float)) else 30.0
-            if not 0.0 <= timeout <= 120.0:
-                return ControlResponse(
-                    1,
-                    False,
-                    request.correlation_id,
-                    "invalid",
-                    error_code="INVALID_DRAIN_TIMEOUT",
-                )
-            gate.begin_drain(
-                reason="runtime generation activation", correlation_id=request.correlation_id
+        if selected is None:
+            raise ConfigError(f"Unknown configuration generation: {generation}")
+        if (
+            getattr(selected, "delta", CapabilityDeltaKind.EQUIVALENT)
+            is CapabilityDeltaKind.INCOMPATIBLE
+            and not allow_incompatible
+        ):
+            raise ConfigError(
+                "HOT_RELOAD_RESTART_REQUIRED: incompatible generation requires supervisor restart"
             )
-            idle = gate.wait_for_idle(timeout)
-            return ControlResponse(
-                1,
-                idle,
-                request.correlation_id,
-                "drained" if idle else "drain_timeout",
-                tuple(sorted(gate.snapshot().items())),
-                None if idle else "DRAIN_TIMEOUT",
-            )
-        if request.command is ControlCommand.RESUME:
-            gate.reopen()
-            return ControlResponse(1, True, request.correlation_id, "open")
-        if request.command is ControlCommand.FAIL_CLOSED:
+        config = load_config(store.resolved_path(generation))
+        gate = build_operation_gate()
+        app = build_application(config, overrides=AdapterOverrides(gate=gate))
+        service = CodingService(config, application=app)
+
+        def dispose() -> None:
             gate.fail_closed(
-                reason=str(dict(request.payload).get("reason", "runtime safety transition")),
-                correlation_id=request.correlation_id,
+                reason=f"generation {generation} retired",
+                correlation_id=f"retired-{generation}",
             )
-            return ControlResponse(1, True, request.correlation_id, "fail_closed")
-        return ControlResponse(
-            1,
-            False,
-            request.correlation_id,
-            "unsupported",
-            error_code="UNSUPPORTED_CONTROL_COMMAND",
+
+        repositories = service.repo_list().get("repositories", [])
+        repository_ids = frozenset(
+            str(item["repo_id"])
+            for item in repositories
+            if isinstance(item, dict) and "repo_id" in item
+        )
+        return GenerationServiceContainer(
+            generation=generation,
+            service=service,
+            gate=gate,
+            repository_ids=repository_ids,
+            dispose=dispose,
         )
 
-    control.start(handler)
+    initial = build_container(initial_generation.generation, allow_incompatible=True)
+    # The initial process startup performs the same self-check as a hot-reload candidate.
+    initial.service.repo_list()
+    router = AtomicServiceRouter(initial)
+    reloader = HotReloadCoordinator(
+        router=router,
+        build_candidate=lambda generation: build_container(generation),
+        commit_activation=lambda generation, expected: store.activate(
+            generation, expected_active=expected
+        ),
+    )
+    _, _, mcp_socket = _runtime_paths(store)
     runtime_state_path = store.root / "runtime.json"
-    state = write_runtime_state(runtime_state_path, active.generation, tool_surface_hash())
-    try:
-        create_server(store.resolved_path(active.generation), service=service).run(
-            transport="stdio"
+    state_holder: dict[str, object] = {}
+
+    def record_activation(generation: int) -> None:
+        state_holder["state"] = write_runtime_state(
+            runtime_state_path, generation, tool_surface_hash()
         )
+
+    host = McpRuntimeHost(
+        router=router,
+        reloader=reloader,
+        on_activated=record_activation,
+    )
+    control = build_runtime_control_server(mcp_socket)
+    control.start(host.handle)
+    state = write_runtime_state(
+        runtime_state_path, initial_generation.generation, tool_surface_hash()
+    )
+    state_holder["state"] = state
+    try:
+        create_server(router=router).run(transport="stdio")
     finally:
+        router.close(timeout_seconds=30.0)
         control.close()
-        clear_runtime_state(runtime_state_path, state.pid)
+        latest_state = state_holder.get("state", state)
+        clear_runtime_state(runtime_state_path, int(getattr(latest_state, "pid", state.pid)))
     return 0
 
 

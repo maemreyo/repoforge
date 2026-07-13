@@ -18,6 +18,7 @@ from ...domain.runtime import ChildProcess, TunnelProfile
 from .state_store import process_identity
 
 _STREAM_BUFFER_LIMIT = 64 * 1024
+_LOG_PUMP_FINALIZE_TIMEOUT_SECONDS = 30.0
 
 
 class TunnelCliClient:
@@ -135,9 +136,16 @@ class TunnelCliClient:
             stream.close()
 
     def _finalize_child(self, pid: int) -> None:
-        thread = self._log_threads.pop(pid, None)
+        thread = self._log_threads.get(pid)
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2)
+            # Once the child has exited, its pipe will reach EOF. Do not report lifecycle completion
+            # until the bounded log pump has consumed that EOF and persisted its final marker.
+            thread.join(timeout=_LOG_PUMP_FINALIZE_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                # A descendant may still own the inherited pipe. Preserve tracking and retry the
+                # finalization later rather than falsely reporting a fully drained child.
+                return
+        self._log_threads.pop(pid, None)
         self._children.pop(pid, None)
 
     @staticmethod

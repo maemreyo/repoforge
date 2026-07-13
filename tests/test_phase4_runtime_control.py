@@ -360,7 +360,11 @@ def test_expansion_drain_timeout_keeps_old_runtime_and_never_launches() -> None:
         activator.activate(_generation(2, CapabilityDeltaKind.EXPANSION), extra_env={})
     assert launcher.started == []
     assert ControlCommand.SHUTDOWN not in supervisor.commands
-    assert mcp.commands == [ControlCommand.DRAIN, ControlCommand.RESUME]
+    assert mcp.commands == [
+        ControlCommand.RELOAD,
+        ControlCommand.DRAIN,
+        ControlCommand.RESUME,
+    ]
     assert runtime.record is not None and runtime.record.phase is RuntimePhase.HEALTHY
     assert runtime.record.active_generation == 1
 
@@ -403,7 +407,11 @@ def test_restriction_drain_timeout_enters_fail_closed_without_interrupting_infli
         activator.activate(_generation(2, CapabilityDeltaKind.RESTRICTION), extra_env={})
     assert launcher.started == []
     assert ControlCommand.SHUTDOWN not in supervisor.commands
-    assert mcp.commands == [ControlCommand.DRAIN, ControlCommand.FAIL_CLOSED]
+    assert mcp.commands == [
+        ControlCommand.RELOAD,
+        ControlCommand.DRAIN,
+        ControlCommand.FAIL_CLOSED,
+    ]
     assert runtime.record is not None and runtime.record.phase is RuntimePhase.FAIL_CLOSED
     assert runtime.record.accepted_generation == 2
 
@@ -581,3 +589,31 @@ def test_supervisor_health_command_fails_when_child_is_not_healthy() -> None:
     response = supervisor._control_handler(ControlRequest(1, ControlCommand.HEALTH, "c"))
     assert not response.ok
     assert response.error_code == "RUNTIME_UNHEALTHY"
+
+
+def test_incompatible_generation_uses_supervisor_restart_without_hot_reload() -> None:
+    previous = _generation(1, CapabilityDeltaKind.EQUIVALENT)
+    configs = FakeConfigStore(previous)
+    runtime = FakeRuntimeStore(_record(RuntimePhase.HEALTHY, 1))
+    launcher = FakeLauncher(runtime)
+    launcher.configs = configs
+    control = FakeControl(runtime)
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=launcher,
+        ids=SequenceIdGenerator(("correlation",)),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        config_path=Path("/config"),
+        health_timeout_seconds=0.1,
+        drain_timeout_seconds=0.1,
+    )
+
+    result = activator.activate(_generation(2, CapabilityDeltaKind.INCOMPATIBLE), extra_env={})
+
+    assert result.status == "active"
+    assert ControlCommand.RELOAD not in control.commands
+    assert control.commands[:2] == [ControlCommand.DRAIN, ControlCommand.SHUTDOWN]
+    assert launcher.started == [2]

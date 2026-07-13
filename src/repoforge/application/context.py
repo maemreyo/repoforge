@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import hmac
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,6 +34,116 @@ from ..ports import (
 from .idempotency import execute_idempotent
 
 T = TypeVar("T")
+
+
+_POLICY_SNAPSHOT_FIELDS = (
+    "branch_prefix",
+    "protected_branches",
+    "allowed_paths",
+    "denied_paths",
+    "max_changed_files",
+    "max_diff_lines",
+    "max_total_changed_bytes",
+)
+
+
+def _policy_snapshot_digest(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def repository_policy_snapshot(repo: RepositoryConfig) -> dict[str, object]:
+    """Persist an integrity-protected read boundary for an orphaned workspace.
+
+    Executable profiles and publishing capability are deliberately excluded.
+    """
+    payload: dict[str, object] = {
+        "branch_prefix": repo.branch_prefix,
+        "protected_branches": list(repo.protected_branches),
+        "allowed_paths": list(repo.allowed_paths),
+        "denied_paths": list(repo.denied_paths),
+        "max_changed_files": repo.max_changed_files,
+        "max_diff_lines": repo.max_diff_lines,
+        "max_total_changed_bytes": repo.max_total_changed_bytes,
+    }
+    return {**payload, "sha256": _policy_snapshot_digest(payload)}
+
+
+def _verified_policy_snapshot(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    expected_keys = {*_POLICY_SNAPSHOT_FIELDS, "sha256"}
+    if set(raw) != expected_keys:
+        return {}
+    digest = raw.get("sha256")
+    if not isinstance(digest, str) or len(digest) != 64:
+        return {}
+    payload = {field: raw[field] for field in _POLICY_SNAPSHOT_FIELDS}
+    if not hmac.compare_digest(digest, _policy_snapshot_digest(payload)):
+        return {}
+    return payload
+
+
+def _snapshot_strings(raw: object, key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        return default
+    value = raw.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return default
+    return tuple(value)
+
+
+def orphaned_repository_config(record: WorkspaceRecord) -> RepositoryConfig:
+    """Return a fail-closed read-only policy for a workspace whose repository was removed."""
+    raw = record.metadata.get("repository_policy_snapshot")
+    snapshot = _verified_policy_snapshot(raw)
+    branch_prefix = snapshot.get("branch_prefix")
+    if not isinstance(branch_prefix, str) or not branch_prefix:
+        branch_prefix = record.branch.rsplit("/", 1)[0] + "/" if "/" in record.branch else "ai/"
+    allowed_paths = _snapshot_strings(
+        snapshot,
+        "allowed_paths",
+        ("__repoforge_orphaned_metadata_only__",),
+    )
+    denied_paths = _snapshot_strings(snapshot, "denied_paths", ("**",))
+
+    def positive(name: str, default: int) -> int:
+        value = snapshot.get(name)
+        return (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            else default
+        )
+
+    return RepositoryConfig(
+        repo_id=record.repo_id,
+        path=Path(record.path).resolve(),
+        display_name=f"{record.repo_id} (orphaned read-only)",
+        remote=record.remote,
+        default_base=record.base,
+        allowed_base_branches=(record.base,),
+        branch_prefix=branch_prefix,
+        protected_branches=_snapshot_strings(
+            snapshot, "protected_branches", ("main", "master", "develop", "production")
+        ),
+        read_only=True,
+        publish_enabled=False,
+        require_verification_before_commit=True,
+        fetch_before_workspace=False,
+        max_changed_files=positive("max_changed_files", 1),
+        max_diff_lines=positive("max_diff_lines", 1),
+        max_total_changed_bytes=positive("max_total_changed_bytes", 1),
+        allowed_paths=allowed_paths,
+        denied_paths=denied_paths,
+        profiles={},
+    )
+
+
 _MUTATING_ACTIONS = {
     "workspace_create",
     "workspace_write_file",
@@ -98,9 +211,17 @@ class ApplicationContext:
             raise ConfigError(f"Configured path is not a Git working tree: {repo.path}")
         return repo
 
+    def repository_for_workspace(self, record: WorkspaceRecord) -> RepositoryConfig:
+        repo = self.config.repositories.get(record.repo_id)
+        if repo is not None:
+            if not repo.path.is_dir() or not (repo.path / ".git").exists():
+                raise ConfigError(f"Configured path is not a Git working tree: {repo.path}")
+            return repo
+        return orphaned_repository_config(record)
+
     def workspace(self, workspace_id: str) -> tuple[WorkspaceRecord, RepositoryConfig, Path]:
         record = self.store.load(workspace_id)
-        repo = self.repo(record.repo_id)
+        repo = self.repository_for_workspace(record)
         path = Path(record.path).resolve()
         root = self.config.server.workspace_root.resolve()
         try:
@@ -151,11 +272,26 @@ class ApplicationContext:
                         if isinstance(workspace_id, str):
                             repo_id = self.store.load(workspace_id).repo_id
                     if isinstance(repo_id, str):
-                        repo = self.repo(repo_id)
+                        workspace_id = details.get("workspace_id")
+                        if repo_id in self.config.repositories:
+                            repo = self.repo(repo_id)
+                            orphaned = False
+                        elif isinstance(workspace_id, str):
+                            record = self.store.load(workspace_id)
+                            repo = self.repository_for_workspace(record)
+                            orphaned = True
+                        else:
+                            repo = self.repo(repo_id)
+                            orphaned = False
                         if repo.read_only:
+                            reason = (
+                                "orphaned_read_only: the repository was removed from the active "
+                                "generation; only policy-bounded reads remain available"
+                                if orphaned
+                                else "choose and approve a writable policy before mutation"
+                            )
                             raise SecurityError(
-                                f"Repository {repo_id!r} is enrolled read-only; choose and approve "
-                                "a writable policy before mutation"
+                                f"Repository {repo_id!r} is enrolled read-only; {reason}"
                             )
                         if action in _PUBLISH_ACTIONS and not repo.publish_enabled:
                             raise SecurityError(

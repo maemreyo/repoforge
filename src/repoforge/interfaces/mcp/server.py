@@ -8,12 +8,15 @@ import inspect
 import json
 import os
 import secrets
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from ...application.runtime.hot_reload import AtomicServiceRouter
 from ...application.service import CodingService
 from ...config import load_config
 from ...domain.errors import operation_error_from_exception
@@ -21,26 +24,47 @@ from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
 
 
+class _StructuredMcpToolError(RuntimeError):
+    """Signal a stable structured failure while preserving MCP isError semantics."""
+
+
 class _ServiceErrorBoundary:
     """Convert known application failures into the stable structured MCP envelope."""
 
-    def __init__(self, service: Any):
+    def __init__(
+        self,
+        service: Any | None = None,
+        *,
+        router: AtomicServiceRouter | None = None,
+    ) -> None:
+        if (service is None) == (router is None):
+            raise ValueError("Exactly one of service or router must be provided")
         self._service = service
+        self._router = router
+
+    @contextmanager
+    def _selected_service(self) -> Iterator[Any]:
+        if self._router is None:
+            yield self._service
+            return
+        with self._router.acquire() as container:
+            yield container.service
 
     def call(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        target = getattr(self._service, name)
         has_idempotency_key = False
         try:
-            bound = inspect.signature(target).bind_partial(*args, **kwargs)
-            has_idempotency_key = bool(bound.arguments.get("idempotency_key"))
-            result = target(*args, **kwargs)
+            with self._selected_service() as service:
+                target = getattr(service, name)
+                bound = inspect.signature(target).bind_partial(*args, **kwargs)
+                has_idempotency_key = bool(bound.arguments.get("idempotency_key"))
+                result = target(*args, **kwargs)
             if not isinstance(result, dict):
                 raise TypeError("MCP service operation must return an object")
             return result
         except Exception as exc:
             envelope = operation_error_from_exception(exc)
             correlation_id = envelope.correlation_id or secrets.token_hex(12)
-            return {
+            payload = {
                 "status": "failed",
                 "error_code": envelope.code.value,
                 "what_happened": redact_text(
@@ -59,6 +83,9 @@ class _ServiceErrorBoundary:
                     has_idempotency_key=has_idempotency_key,
                 ),
             }
+            raise _StructuredMcpToolError(
+                json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            ) from exc
 
 
 SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nPrefer exact text replacement or a small validated patch. Review workspace_diff after every meaningful\nchange. Run workspace_verify before commit; never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status.".strip()
@@ -120,10 +147,17 @@ def tool_surface_hash() -> str:
 
 
 def create_server(
-    config_path: str | Path | None = None, *, service: CodingService | None = None
+    config_path: str | Path | None = None,
+    *,
+    service: CodingService | None = None,
+    router: AtomicServiceRouter | None = None,
 ) -> FastMCP:
-    raw_service = service or CodingService(load_config(config_path))
-    bounded_service = _ServiceErrorBoundary(raw_service)
+    if service is not None and router is not None:
+        raise ValueError("create_server accepts either service or router, not both")
+    raw_service = service or (
+        None if router is not None else CodingService(load_config(config_path))
+    )
+    bounded_service = _ServiceErrorBoundary(raw_service, router=router)
     mcp = FastMCP("RepoForge", instructions=SERVER_INSTRUCTIONS, log_level="WARNING")
 
     @mcp.tool(

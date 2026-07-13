@@ -572,9 +572,11 @@ def test_mcp_error_boundary_returns_stable_redacted_write_failure(
             )
 
     monkeypatch.setenv("CONTROL_PLANE_API_KEY", "bare-process-secret")
-    payload = _ServiceErrorBoundary(Service()).call(
-        "workspace_push", "demo", idempotency_key="retry-key-0001"
-    )
+    with pytest.raises(RuntimeError) as error:
+        _ServiceErrorBoundary(Service()).call(
+            "workspace_push", "demo", idempotency_key="retry-key-0001"
+        )
+    payload = json.loads(str(error.value))
     assert payload["status"] == "failed"
     assert payload["error_code"] == "COMMAND_TIMEOUT"
     assert isinstance(payload["correlation_id"], str) and payload["correlation_id"]

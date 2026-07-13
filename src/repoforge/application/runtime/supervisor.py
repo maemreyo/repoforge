@@ -73,6 +73,19 @@ class RuntimeSupervisor:
         with contextlib.suppress(ConfigError):
             self._configs.clear_activation_target(expected_generation=generation)
 
+    def _adopt_committed_runtime_generation(self, fallback: int) -> int:
+        """Adopt a hot-reloaded generation only when disk and runtime state agree."""
+        active = self._configs.active()
+        record = self._store.read()
+        if (
+            active is not None
+            and record is not None
+            and record.active_generation == active.generation
+            and record.accepted_generation == active.generation
+        ):
+            return active.generation
+        return fallback
+
     def _mcp_generation(self) -> int | None:
         if not self._mcp_runtime_path.is_file():
             return None
@@ -275,6 +288,7 @@ class RuntimeSupervisor:
                     return 2
 
                 while not self._stop.is_set():
+                    generation = self._adopt_committed_runtime_generation(generation)
                     self._store.write(
                         self._record(
                             RuntimePhase.STARTING,
@@ -341,10 +355,11 @@ class RuntimeSupervisor:
 
                     previous = self._configs.active()
                     try:
-                        self._configs.activate(
-                            generation,
-                            expected_active=previous.generation if previous else None,
-                        )
+                        if previous is None or previous.generation != generation:
+                            self._configs.activate(
+                                generation,
+                                expected_active=previous.generation if previous else None,
+                            )
                     except Exception as exc:
                         self._tunnel.terminate(child, grace_seconds=3)
                         self._child = None
@@ -384,6 +399,7 @@ class RuntimeSupervisor:
                     if self._stop.is_set():
                         break
                     self._child = None
+                    generation = self._adopt_committed_runtime_generation(generation)
                     restart_count += 1
                     if restart_count > self._max_restarts:
                         self._store.write(

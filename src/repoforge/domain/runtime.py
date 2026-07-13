@@ -187,6 +187,7 @@ class ControlCommand(str, Enum):
     PING = "ping"
     STATUS = "status"
     HEALTH = "health"
+    RELOAD = "reload"
     DRAIN = "drain"
     RESUME = "resume"
     FAIL_CLOSED = "fail_closed"

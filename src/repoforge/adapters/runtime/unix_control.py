@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -42,24 +43,48 @@ def resolve_unix_socket_path(path: Path) -> Path:
     return min(candidates, key=lambda candidate: len(os.fsencode(str(candidate))))
 
 
+def _native_getpeereid_uid(descriptor: int) -> int | None:
+    """Read BSD/Darwin peer credentials through libc when Python exposes no wrapper."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        getpeereid = libc.getpeereid
+    except (AttributeError, OSError):
+        return None
+    uid = ctypes.c_uint()
+    gid = ctypes.c_uint()
+    getpeereid.argtypes = [
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+    ]
+    getpeereid.restype = ctypes.c_int
+    if getpeereid(descriptor, ctypes.byref(uid), ctypes.byref(gid)) != 0:
+        return None
+    return int(uid.value)
+
+
 def _peer_uid(connection: socket.socket) -> int | None:
-    if hasattr(socket, "SO_PEERCRED"):
+    peercred = getattr(socket, "SO_PEERCRED", None)
+    if peercred is not None:
         try:
-            credentials = connection.getsockopt(
-                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-            )
+            credentials = connection.getsockopt(socket.SOL_SOCKET, peercred, struct.calcsize("3i"))
             _, uid, _ = struct.unpack("3i", credentials)
             return int(uid)
-        except OSError:
-            return None
+        except (OSError, struct.error):
+            # Darwin may expose a similarly named constant with a different ABI. Fall through to
+            # the BSD credential APIs rather than denying a same-owner local connection.
+            pass
     getpeereid = getattr(connection, "getpeereid", None)
-    if getpeereid is not None:
+    if callable(getpeereid):
         try:
             uid, _ = getpeereid()
             return int(uid)
         except OSError:
-            return None
-    return None
+            pass
+    try:
+        return _native_getpeereid_uid(connection.fileno())
+    except OSError:
+        return None
 
 
 def _encode(response: ControlResponse) -> bytes:

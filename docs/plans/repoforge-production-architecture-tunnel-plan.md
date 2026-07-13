@@ -1,12 +1,14 @@
 # RepoForge Production Architecture, Smart Repository Onboarding, and Tunnel Lifecycle Plan
 
-Status: In progress — Phases 0–6 implemented; Phase 7 remains optional
+Status: Implemented — Phases 0–7 complete; supervisor restart remains the production fallback
 
 Repository reviewed: `maemreyo/repoforge`
 
 Original baseline commit: `984680f32db22a3828ab4740fcde1a753ba4c17e`
 
 Phase 6 implementation baseline: `9c98ceb350b7d8dc6cad033d7d0bf9d9059be4a1`
+
+Phase 7 implementation baseline: `ada5d6fca145f66a690cbe851268a65cd127cc76`
 
 Date: 2026-07-13
 
@@ -645,22 +647,32 @@ Acceptance:
 
 ### Phase 7 — Optional atomic hot reload
 
+Implementation status: **Complete** based on
+`ada5d6fca145f66a690cbe851268a65cd127cc76`. The runtime transaction, fallback behavior, and
+removed-repository policy are documented in `docs/architecture/phase7-atomic-hot-reload.md`.
+
 Goal: reduce restart interruption after Stage A is stable.
 
 Tasks:
 
-- Build immutable generation-scoped service containers.
-- Atomically swap active container for new requests.
-- Track active request counts per generation.
-- Drain and dispose obsolete containers safely.
-- Define removed-repository workspace behavior.
-- Keep supervisor restart as fallback.
+- [x] Build immutable generation-scoped service containers.
+- [x] Atomically commit the active generation and swap the container for new requests.
+- [x] Track and pin active request counts per generation.
+- [x] Drain and dispose obsolete containers only after their last request completes.
+- [x] Define integrity-protected `orphaned_read_only` behavior for removed-repository workspaces.
+- [x] Keep supervisor restart as the fallback for incompatible or unsupported reloads.
+- [x] Reconcile supervisor child restarts to a successfully hot-reloaded generation.
+- [x] Preserve MCP schemas while adding a versioned, allowlisted `RELOAD` control command.
 
 Acceptance:
 
-- Concurrent requests see one complete generation, never a partial mixture.
-- Removed repositories are unavailable to new requests immediately.
-- Failed container construction leaves active runtime untouched.
+- [x] Concurrent requests see one complete generation, never a partial mixture.
+- [x] Removed repositories are unavailable to new requests immediately.
+- [x] Failed candidate construction or activation commit leaves active runtime untouched.
+- [x] Existing requests complete on their pinned generation while new requests use the candidate.
+- [x] Repository-only reload preserves the tunnel process and tunnel profile.
+- [x] Child crash after hot reload restarts against the new committed generation.
+- [x] Supervisor-managed restart remains available for incompatible generations and recovery.
 
 ## 9. Test plan
 
