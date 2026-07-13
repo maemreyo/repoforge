@@ -253,9 +253,20 @@ class TunnelCliClient:
         process = self._children.get(child.pid)
         if process is not None:
             if process.poll() is None:
-                return process_identity(child.pid) == child.process_identity
+                observed_identity = process_identity(child.pid)
+                if observed_identity == child.process_identity:
+                    return True
+                if observed_identity is None:
+                    # The owned Popen handle is authoritative while its child has not been reaped.
+                    # Identity inspection can temporarily lose the process during a fast exit on
+                    # Darwin; recheck before deciding whether lifecycle finalization is required.
+                    if process.poll() is None:
+                        return True
+                else:
+                    # A different live process identity is never treated as our managed child.
+                    return False
             self._finalize_child(child.pid)
-            return False
+            return child.pid in self._children
         return process_identity(child.pid) == child.process_identity
 
     def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None:

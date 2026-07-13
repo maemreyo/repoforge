@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, replace
 from enum import Enum
 
+RUNTIME_CONTROL_PROTOCOL_VERSION = 1
+
 
 class RuntimePhase(str, Enum):
     STOPPED = "stopped"
@@ -141,7 +143,10 @@ class RuntimeRecord:
     health: tuple[tuple[str, bool, str], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.protocol_version != 1 or self.accepted_generation <= 0:
+        if (
+            self.protocol_version != RUNTIME_CONTROL_PROTOCOL_VERSION
+            or self.accepted_generation <= 0
+        ):
             raise ValueError("Runtime record protocol or accepted generation is invalid")
         for pid, identity in (
             (self.pid, self.process_identity),

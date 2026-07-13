@@ -1,0 +1,22 @@
+[server]
+workspace_root = "./workspaces"
+state_root = "./state"
+
+[repositories.demo]
+path = "./demo-repository"
+display_name = "Demo"
+remote = "origin"
+default_base = "main"
+allowed_base_branches = ["main"]
+branch_prefix = "ai/"
+protected_branches = ["main"]
+publish_enabled = true
+require_verification_before_commit = true
+fetch_before_workspace = false
+default_verification_profile = "quick"
+
+[repositories.demo.profiles.quick]
+description = "Run the deterministic compatibility fixture"
+verification = true
+timeout_seconds = 120
+commands = [["python", "-m", "pytest"]]

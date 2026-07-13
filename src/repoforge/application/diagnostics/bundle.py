@@ -7,6 +7,9 @@ from typing import Any
 
 from ...domain.redaction import redact_data
 
+DIAGNOSTICS_SCHEMA_VERSION = 1
+
+
 _EXCLUSIONS = (
     "configuration bodies",
     "repository file content",
@@ -28,7 +31,7 @@ def build_diagnostics_bundle(
 ) -> dict[str, Any]:
     """Return bounded diagnostic metadata with recursive credential redaction."""
     payload = {
-        "schema_version": 1,
+        "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "created_at": created_at,
         "config": {
             "source_path": str(config_path),

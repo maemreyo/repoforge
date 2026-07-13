@@ -17,10 +17,15 @@ from typing import Any
 
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
-from ...domain.runtime import ControlCommand, ControlRequest, ControlResponse
+from ...domain.runtime import (
+    RUNTIME_CONTROL_PROTOCOL_VERSION,
+    ControlCommand,
+    ControlRequest,
+    ControlResponse,
+)
 
 _MAX_MESSAGE = 64 * 1024
-_PROTOCOL = 1
+_PROTOCOL = RUNTIME_CONTROL_PROTOCOL_VERSION
 _MAX_SOCKET_PATH_BYTES = 100
 
 

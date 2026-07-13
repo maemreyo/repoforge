@@ -1,0 +1,1064 @@
+{
+  "configuration": {
+    "resolved_format_version": 3,
+    "source_version": 2
+  },
+  "contract_version": 1,
+  "mcp": {
+    "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
+    "tool_surface_hash": "1c8548cf5b6b9b9006aa6f821df37c73c84f96457d8205b9432b5241721716cf",
+    "tools": [
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this before planning to inspect manifests, scripts, root files, and instruction previews.",
+        "inputSchema": {
+          "properties": {
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id"
+          ],
+          "title": "repo_contextArguments",
+          "type": "object"
+        },
+        "name": "repo_context",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_contextDictOutput",
+          "type": "object"
+        },
+        "title": "Read repository context"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this when implementation requirements are defined by a GitHub issue.",
+        "inputSchema": {
+          "properties": {
+            "issue_number": {
+              "title": "Issue Number",
+              "type": "integer"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "issue_number"
+          ],
+          "title": "repo_issue_readArguments",
+          "type": "object"
+        },
+        "name": "repo_issue_read",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_issue_readDictOutput",
+          "type": "object"
+        },
+        "title": "Read GitHub issue"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this when choosing a repository or discovering its profiles and safety policy.",
+        "inputSchema": {
+          "properties": {},
+          "title": "repo_listArguments",
+          "type": "object"
+        },
+        "name": "repo_list",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_listDictOutput",
+          "type": "object"
+        },
+        "title": "List configured repositories"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this when reviewing an existing pull request, checks, commits, files, or reviews.",
+        "inputSchema": {
+          "properties": {
+            "pr_number": {
+              "title": "Pr Number",
+              "type": "integer"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "pr_number"
+          ],
+          "title": "repo_pr_readArguments",
+          "type": "object"
+        },
+        "name": "repo_pr_read",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_pr_readDictOutput",
+          "type": "object"
+        },
+        "title": "Read GitHub pull request"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this when recent history or commit conventions are relevant to the task.",
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id"
+          ],
+          "title": "repo_recent_commitsArguments",
+          "type": "object"
+        },
+        "name": "repo_recent_commits",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_recent_commitsDictOutput",
+          "type": "object"
+        },
+        "title": "Read recent commits"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this when checking the source clone, remotes, branch state, and gh authentication.",
+        "inputSchema": {
+          "properties": {
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id"
+          ],
+          "title": "repo_statusArguments",
+          "type": "object"
+        },
+        "name": "repo_status",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_statusDictOutput",
+          "type": "object"
+        },
+        "title": "Inspect repository status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this for a validated multi-file unified patch against an unchanged workspace snapshot.",
+        "inputSchema": {
+          "properties": {
+            "expected_head_sha": {
+              "title": "Expected Head Sha",
+              "type": "string"
+            },
+            "expected_workspace_fingerprint": {
+              "title": "Expected Workspace Fingerprint",
+              "type": "string"
+            },
+            "patch": {
+              "title": "Patch",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "patch",
+            "expected_head_sha",
+            "expected_workspace_fingerprint"
+          ],
+          "title": "workspace_apply_patchArguments",
+          "type": "object"
+        },
+        "name": "workspace_apply_patch",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_apply_patchDictOutput",
+          "type": "object"
+        },
+        "title": "Apply unified patch"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this after successful verification to stage and commit the exact verified tree.",
+        "inputSchema": {
+          "properties": {
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "message"
+          ],
+          "title": "workspace_commitArguments",
+          "type": "object"
+        },
+        "name": "workspace_commit",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_commitDictOutput",
+          "type": "object"
+        },
+        "title": "Commit verified changes"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this before editing to create a new ai/* branch in an isolated Git worktree.\n\nSupply a stable idempotency key when an automated caller may retry the request.\n",
+        "inputSchema": {
+          "properties": {
+            "base": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Base"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            },
+            "task_slug": {
+              "title": "Task Slug",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "task_slug"
+          ],
+          "title": "workspace_createArguments",
+          "type": "object"
+        },
+        "name": "workspace_create",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_createDictOutput",
+          "type": "object"
+        },
+        "title": "Create isolated coding workspace"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "Use this after push to create a draft PR with configured labels and reviewers.",
+        "inputSchema": {
+          "properties": {
+            "body": {
+              "title": "Body",
+              "type": "string"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "title",
+            "body"
+          ],
+          "title": "workspace_create_draft_prArguments",
+          "type": "object"
+        },
+        "name": "workspace_create_draft_pr",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_create_draft_prDictOutput",
+          "type": "object"
+        },
+        "title": "Create draft pull request"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this after edits and before verification, commit, or publishing to review exact changes.",
+        "inputSchema": {
+          "properties": {
+            "staged": {
+              "default": false,
+              "title": "Staged",
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_diffArguments",
+          "type": "object"
+        },
+        "name": "workspace_diff",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_diffDictOutput",
+          "type": "object"
+        },
+        "title": "Inspect workspace diff"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this when resuming work or finding active RepoForge workspaces.",
+        "inputSchema": {
+          "properties": {},
+          "title": "workspace_listArguments",
+          "type": "object"
+        },
+        "name": "workspace_list",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_listDictOutput",
+          "type": "object"
+        },
+        "title": "List coding workspaces"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this to get compact pass, fail, pending, and skipped CI check buckets.",
+        "inputSchema": {
+          "properties": {
+            "required_only": {
+              "default": false,
+              "title": "Required Only",
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_pr_checksArguments",
+          "type": "object"
+        },
+        "name": "workspace_pr_checks",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_pr_checksDictOutput",
+          "type": "object"
+        },
+        "title": "Read workspace PR checks"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this to read draft state, mergeability, review decision, and rolled-up checks.",
+        "inputSchema": {
+          "properties": {
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_pr_statusArguments",
+          "type": "object"
+        },
+        "name": "workspace_pr_status",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_pr_statusDictOutput",
+          "type": "object"
+        },
+        "title": "Read workspace PR status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "Use this after commit to push the allowlisted ai/* branch without force.",
+        "inputSchema": {
+          "properties": {
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_pushArguments",
+          "type": "object"
+        },
+        "name": "workspace_push",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_pushDictOutput",
+          "type": "object"
+        },
+        "title": "Push AI branch"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this when reading one UTF-8 file and obtaining its optimistic-lock SHA-256.",
+        "inputSchema": {
+          "properties": {
+            "end_line": {
+              "default": 500,
+              "title": "End Line",
+              "type": "integer"
+            },
+            "relative_path": {
+              "title": "Relative Path",
+              "type": "string"
+            },
+            "start_line": {
+              "default": 1,
+              "title": "Start Line",
+              "type": "integer"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "relative_path"
+          ],
+          "title": "workspace_read_fileArguments",
+          "type": "object"
+        },
+        "name": "workspace_read_file",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_read_fileDictOutput",
+          "type": "object"
+        },
+        "title": "Read workspace file"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this when the same bounded line range is needed from several related files.",
+        "inputSchema": {
+          "properties": {
+            "end_line": {
+              "default": 500,
+              "title": "End Line",
+              "type": "integer"
+            },
+            "relative_paths": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Relative Paths",
+              "type": "array"
+            },
+            "start_line": {
+              "default": 1,
+              "title": "Start Line",
+              "type": "integer"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "relative_paths"
+          ],
+          "title": "workspace_read_filesArguments",
+          "type": "object"
+        },
+        "name": "workspace_read_files",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_read_filesDictOutput",
+          "type": "object"
+        },
+        "title": "Read multiple workspace files"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this only after work is complete to remove a clean local worktree; remote data is untouched.",
+        "inputSchema": {
+          "properties": {
+            "delete_local_branch": {
+              "default": false,
+              "title": "Delete Local Branch",
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_removeArguments",
+          "type": "object"
+        },
+        "name": "workspace_remove",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_removeDictOutput",
+          "type": "object"
+        },
+        "title": "Remove local workspace"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this for a precise replacement after validating the file SHA and occurrence count.",
+        "inputSchema": {
+          "properties": {
+            "expected_occurrences": {
+              "default": 1,
+              "title": "Expected Occurrences",
+              "type": "integer"
+            },
+            "expected_sha256": {
+              "title": "Expected Sha256",
+              "type": "string"
+            },
+            "new_text": {
+              "title": "New Text",
+              "type": "string"
+            },
+            "old_text": {
+              "title": "Old Text",
+              "type": "string"
+            },
+            "relative_path": {
+              "title": "Relative Path",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "relative_path",
+            "old_text",
+            "new_text",
+            "expected_sha256"
+          ],
+          "title": "workspace_replace_textArguments",
+          "type": "object"
+        },
+        "name": "workspace_replace_text",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_replace_textDictOutput",
+          "type": "object"
+        },
+        "title": "Replace exact text"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this to undo selected uncommitted tracked changes or remove selected untracked files.",
+        "inputSchema": {
+          "properties": {
+            "expected_workspace_fingerprint": {
+              "title": "Expected Workspace Fingerprint",
+              "type": "string"
+            },
+            "relative_paths": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Relative Paths",
+              "type": "array"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "relative_paths",
+            "expected_workspace_fingerprint"
+          ],
+          "title": "workspace_restore_pathsArguments",
+          "type": "object"
+        },
+        "name": "workspace_restore_paths",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_restore_pathsDictOutput",
+          "type": "object"
+        },
+        "title": "Restore selected workspace paths"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile.",
+        "inputSchema": {
+          "properties": {
+            "profile_name": {
+              "title": "Profile Name",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "profile_name"
+          ],
+          "title": "workspace_run_profileArguments",
+          "type": "object"
+        },
+        "name": "workspace_run_profile",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_run_profileDictOutput",
+          "type": "object"
+        },
+        "title": "Run configured command profile"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this when locating literal text in allowed workspace files; it is not a shell tool.",
+        "inputSchema": {
+          "properties": {
+            "max_results": {
+              "default": 200,
+              "title": "Max Results",
+              "type": "integer"
+            },
+            "path_glob": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Path Glob"
+            },
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "query"
+          ],
+          "title": "workspace_searchArguments",
+          "type": "object"
+        },
+        "name": "workspace_search",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_searchDictOutput",
+          "type": "object"
+        },
+        "title": "Search workspace code"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this before writes to refresh HEAD, fingerprint, change budget, and verification state.",
+        "inputSchema": {
+          "properties": {
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_statusArguments",
+          "type": "object"
+        },
+        "name": "workspace_status",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_statusDictOutput",
+          "type": "object"
+        },
+        "title": "Inspect workspace status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this when exploring tracked and untracked files allowed by repository policy.",
+        "inputSchema": {
+          "properties": {
+            "max_entries": {
+              "default": 2000,
+              "title": "Max Entries",
+              "type": "integer"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_treeArguments",
+          "type": "object"
+        },
+        "name": "workspace_tree",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_treeDictOutput",
+          "type": "object"
+        },
+        "title": "List workspace files"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "Use this to update the existing workspace PR title or body; it does not mark it ready or merge.",
+        "inputSchema": {
+          "properties": {
+            "body": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Body"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_update_draft_prArguments",
+          "type": "object"
+        },
+        "name": "workspace_update_draft_pr",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_update_draft_prDictOutput",
+          "type": "object"
+        },
+        "title": "Update draft pull request"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this before commit to run the repository-default or explicitly named verification gate.",
+        "inputSchema": {
+          "properties": {
+            "profile_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Profile Name"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_verifyArguments",
+          "type": "object"
+        },
+        "name": "workspace_verify",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_verifyDictOutput",
+          "type": "object"
+        },
+        "title": "Verify workspace"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this to create or fully replace one UTF-8 file with optimistic locking.",
+        "inputSchema": {
+          "properties": {
+            "content": {
+              "title": "Content",
+              "type": "string"
+            },
+            "expected_sha256": {
+              "title": "Expected Sha256",
+              "type": "string"
+            },
+            "relative_path": {
+              "title": "Relative Path",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "relative_path",
+            "content",
+            "expected_sha256"
+          ],
+          "title": "workspace_write_fileArguments",
+          "type": "object"
+        },
+        "name": "workspace_write_file",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_write_fileDictOutput",
+          "type": "object"
+        },
+        "title": "Write complete file"
+      }
+    ]
+  },
+  "package_version": "2.0.0",
+  "runtime": {
+    "control_protocol_version": 1,
+    "diagnostics_schema_version": 1
+  }
+}

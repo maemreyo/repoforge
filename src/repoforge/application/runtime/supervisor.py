@@ -13,6 +13,7 @@ from pathlib import Path
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
 from ...domain.runtime import (
+    RUNTIME_CONTROL_PROTOCOL_VERSION,
     ChildProcess,
     ControlCommand,
     ControlRequest,
@@ -32,7 +33,7 @@ from ...ports.tunnel import TunnelClient, TunnelProfileStore
 
 
 class RuntimeSupervisor:
-    PROTOCOL_VERSION = 1
+    PROTOCOL_VERSION = RUNTIME_CONTROL_PROTOCOL_VERSION
 
     def __init__(
         self,

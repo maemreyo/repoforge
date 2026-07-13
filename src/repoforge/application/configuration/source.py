@@ -9,6 +9,8 @@ from typing import Any
 
 import tomli as tomllib
 
+SOURCE_CONFIG_VERSION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class SourceRepository:
@@ -75,7 +77,7 @@ def parse_source(text: str) -> SourceConfiguration:
 def render_source(config: SourceConfiguration) -> str:
     lines = [
         "# RepoForge user configuration. Approved policy is stored in immutable generations.",
-        "version = 2",
+        f"version = {SOURCE_CONFIG_VERSION}",
         "",
         "[tunnel]",
         f"id = {json.dumps(config.tunnel_id)}",

@@ -7,7 +7,12 @@ from collections.abc import Callable
 from ...application.runtime.hot_reload import AtomicServiceRouter, HotReloadCoordinator
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
-from ...domain.runtime import ControlCommand, ControlRequest, ControlResponse
+from ...domain.runtime import (
+    RUNTIME_CONTROL_PROTOCOL_VERSION,
+    ControlCommand,
+    ControlRequest,
+    ControlResponse,
+)
 
 
 class McpRuntimeHost:
@@ -37,7 +42,7 @@ class McpRuntimeHost:
             "expected_active",
         }:
             return ControlResponse(
-                1,
+                RUNTIME_CONTROL_PROTOCOL_VERSION,
                 False,
                 request.correlation_id,
                 "invalid",
@@ -72,7 +77,7 @@ class McpRuntimeHost:
                 else "HOT_RELOAD_FAILED"
             )
             return ControlResponse(
-                1,
+                RUNTIME_CONTROL_PROTOCOL_VERSION,
                 False,
                 request.correlation_id,
                 "reload_failed",
@@ -95,7 +100,7 @@ class McpRuntimeHost:
         if warning is not None:
             response_payload["warning"] = warning
         return ControlResponse(
-            1,
+            RUNTIME_CONTROL_PROTOCOL_VERSION,
             True,
             request.correlation_id,
             result.status,
@@ -111,7 +116,7 @@ class McpRuntimeHost:
                 "router": self.router.snapshot(),
             }
             return ControlResponse(
-                1,
+                RUNTIME_CONTROL_PROTOCOL_VERSION,
                 True,
                 request.correlation_id,
                 str(container.gate.snapshot()["state"]),
@@ -183,7 +188,7 @@ class McpRuntimeHost:
             )
             idle = container.gate.wait_for_idle(timeout)
             return ControlResponse(
-                1,
+                RUNTIME_CONTROL_PROTOCOL_VERSION,
                 idle,
                 request.correlation_id,
                 "drained" if idle else "drain_timeout",
@@ -192,15 +197,19 @@ class McpRuntimeHost:
             )
         if request.command is ControlCommand.RESUME:
             container.gate.reopen()
-            return ControlResponse(1, True, request.correlation_id, "open")
+            return ControlResponse(
+                RUNTIME_CONTROL_PROTOCOL_VERSION, True, request.correlation_id, "open"
+            )
         if request.command is ControlCommand.FAIL_CLOSED:
             container.gate.fail_closed(
                 reason=str(dict(request.payload).get("reason", "runtime safety transition")),
                 correlation_id=request.correlation_id,
             )
-            return ControlResponse(1, True, request.correlation_id, "fail_closed")
+            return ControlResponse(
+                RUNTIME_CONTROL_PROTOCOL_VERSION, True, request.correlation_id, "fail_closed"
+            )
         return ControlResponse(
-            1,
+            RUNTIME_CONTROL_PROTOCOL_VERSION,
             False,
             request.correlation_id,
             "unsupported",

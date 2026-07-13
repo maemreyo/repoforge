@@ -1,0 +1,13 @@
+version = 2
+
+[tunnel]
+id = "fixture-tunnel"
+profile = "repoforge"
+
+[[repo]]
+id = "demo"
+path = "./demo-repository"
+policy_template = "standard"
+decisions = ["REMOTE=origin", "BASE_BRANCH=main"]
+policy_overrides = []
+proposal_id = "fixture-proposal"

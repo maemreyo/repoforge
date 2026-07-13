@@ -1,0 +1,73 @@
+name: production-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - run: uv run python scripts/check_release_contracts.py
+      - run: uv run ruff format --check src tests scripts
+      - run: uv run ruff check src tests scripts
+      - run: uv run mypy --strict src/repoforge
+      - name: Record exact HEAD and require tracked cleanliness
+        run: |
+          git rev-parse HEAD
+          git diff --exit-code
+          git diff --cached --exit-code
+
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: macos-latest
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
+
+  package:
+    needs: [static-contracts, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - run: uv build
+      - run: scripts/verify-wheel-install.sh dist
+      - name: Ensure build did not rewrite tracked files
+        run: git diff --exit-code

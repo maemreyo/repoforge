@@ -12,6 +12,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from repoforge.adapters.runtime import unix_control
 from repoforge.adapters.runtime.tunnel_cli import TunnelCliClient
 from repoforge.domain.errors import ConfigError
+from repoforge.domain.runtime import ChildProcess
 from repoforge.interfaces.mcp.server import create_server
 
 
@@ -92,3 +93,70 @@ def test_child_finalization_waits_until_log_pump_has_drained(tmp_path: Path) -> 
     assert not finalized.is_alive()
     assert 123 not in client._log_threads
     assert 123 not in client._children
+
+
+def test_is_alive_rechecks_fast_exit_before_reporting_log_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TunnelCliClient("unused")
+    pid = 456
+    release = threading.Event()
+    log_path = tmp_path / "managed-runtime.log"
+
+    class FastExitProcess:
+        def __init__(self) -> None:
+            self.poll_calls = 0
+
+        def poll(self) -> int | None:
+            self.poll_calls += 1
+            return None if self.poll_calls == 1 else 0
+
+    def delayed_pump() -> None:
+        release.wait(5)
+        log_path.write_text("drained\n", encoding="utf-8")
+
+    pump = threading.Thread(target=delayed_pump)
+    pump.start()
+    client._children[pid] = FastExitProcess()  # type: ignore[assignment]
+    client._log_threads[pid] = pump
+    monkeypatch.setattr(
+        "repoforge.adapters.runtime.tunnel_cli.process_identity",
+        lambda _pid: None,
+    )
+
+    child = ChildProcess(pid, "a" * 64, "now")
+    observed: list[bool] = []
+    checker = threading.Thread(target=lambda: observed.append(client.is_alive(child)))
+    checker.start()
+    time.sleep(0.1)
+    try:
+        assert checker.is_alive(), "is_alive reported completion before the log pump drained"
+        assert not log_path.exists()
+    finally:
+        release.set()
+        checker.join(3)
+        pump.join(3)
+
+    assert observed == [False]
+    assert log_path.read_text(encoding="utf-8") == "drained\n"
+    assert pid not in client._children
+    assert pid not in client._log_threads
+
+
+def test_is_alive_keeps_owned_running_process_when_identity_lookup_is_temporarily_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TunnelCliClient("unused")
+    pid = 457
+
+    class RunningProcess:
+        def poll(self) -> None:
+            return None
+
+    client._children[pid] = RunningProcess()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        "repoforge.adapters.runtime.tunnel_cli.process_identity",
+        lambda _pid: None,
+    )
+
+    assert client.is_alive(ChildProcess(pid, "b" * 64, "now")) is True

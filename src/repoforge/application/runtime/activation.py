@@ -11,6 +11,7 @@ from ...domain.config_generation import CapabilityDeltaKind, ConfigGeneration
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
 from ...domain.runtime import (
+    RUNTIME_CONTROL_PROTOCOL_VERSION,
     ControlCommand,
     ControlRequest,
     ControlResponse,
@@ -69,7 +70,12 @@ class GenerationActivator:
     ) -> ControlResponse | None:
         try:
             return client.request(
-                ControlRequest(1, command, correlation_id, tuple(sorted((payload or {}).items()))),
+                ControlRequest(
+                    RUNTIME_CONTROL_PROTOCOL_VERSION,
+                    command,
+                    correlation_id,
+                    tuple(sorted((payload or {}).items())),
+                ),
                 timeout_seconds=max(5.0, self._drain_timeout),
             )
         except ConfigError:
@@ -136,7 +142,7 @@ class GenerationActivator:
             )
         else:
             record = RuntimeRecord(
-                protocol_version=1,
+                protocol_version=RUNTIME_CONTROL_PROTOCOL_VERSION,
                 phase=phase,
                 pid=None,
                 process_identity=None,

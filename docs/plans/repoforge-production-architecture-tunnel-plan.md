@@ -1,6 +1,6 @@
 # RepoForge Production Architecture, Smart Repository Onboarding, and Tunnel Lifecycle Plan
 
-Status: Implemented — Phases 0–7 complete; supervisor restart remains the production fallback
+Status: Implemented — Phases 0–8 complete; required production gate must pass before release
 
 Repository reviewed: `maemreyo/repoforge`
 
@@ -482,23 +482,28 @@ Track a deterministic `tool_surface_hash` in runtime state.
 
 ### Phase 0 — Baseline, CI, and characterization
 
+Implementation status: **Complete** through the Phase 8 release-gate closure. The required workflow,
+frozen contracts, compatibility fixtures, and local clean-wheel gate are now versioned with the code.
+
 Goal: make every later refactor measurable and reversible.
 
 Tasks:
 
-- Add CI for Python 3.10–3.13 running Ruff, mypy, pytest with branch coverage, package build, and
-  install-from-wheel smoke test.
-- Record current MCP tool list, annotations, input schemas, and structured output golden fixtures.
-- Add config compatibility fixtures for minimal and legacy formats.
-- Add tests documenting current restart behavior after repo add/remove/refresh.
-- Add a release gate that fails when docs, MCP contract, and implementation disagree.
-- Split overly broad commits and enforce Conventional Commit scope in contribution guidance.
+- [x] Add CI for Python 3.10–3.13 running Ruff, mypy, pytest with branch coverage, package build, and
+  install-from-wheel smoke and real Git/worktree lifecycle tests, including a macOS Python 3.13 runtime lane.
+- [x] Record the MCP tool list, descriptions, annotations, input/output schemas, server instruction
+  hash, and tool-surface hash in `docs/contracts/release-contract-v1.json`.
+- [x] Add deterministic minimal-v2 and legacy-v1 config compatibility fixtures.
+- [x] Preserve characterization tests for restart/reload behavior after repository mutation.
+- [x] Add a release gate that fails when documentation, MCP/runtime/config contracts, and
+  implementation disagree.
+- [x] Require narrow scoped Conventional Commits in `CONTRIBUTING.md`.
 
 Acceptance:
 
-- Clean clone passes the complete gate.
-- HEAD status is visible and required before merge.
-- Current behavior is captured without functional changes.
+- [x] A clean checkout can run the complete source, contract, coverage, package, and wheel-smoke gate.
+- [x] The exact HEAD is printed; tracked, staged, and untracked cleanliness is required and the gate must leave no artifacts behind.
+- [x] Characterization remains explicit while later phases add behavior behind versioned contracts.
 
 ### Phase 1 — Deterministic harness and injectable foundations
 
@@ -674,7 +679,44 @@ Acceptance:
 - [x] Child crash after hot reload restarts against the new committed generation.
 - [x] Supervisor-managed restart remains available for incompatible generations and recovery.
 
+### Phase 8 — Program completion and release gates
+
+Implementation status: **Complete** based on
+`1a9043ab2a926ca69d005cb459879a64b39d7e44`. This phase closes the remaining plan-wide release,
+compatibility, CI, and verification gaps without adding a new runtime capability.
+
+Goal: make the complete program reproducible from a clean checkout and prevent undocumented public
+contract drift.
+
+Tasks:
+
+- [x] Close the fast-child-exit race so lifecycle completion is not reported before the bounded tunnel
+  log pump reaches EOF and persists output.
+- [x] Add required Linux Python 3.10–3.13 and macOS Python 3.13 CI lanes.
+- [x] Freeze MCP schemas/annotations and configuration/runtime/diagnostics versions in one reviewed
+  machine-readable release contract.
+- [x] Add deterministic minimal and legacy configuration fixtures.
+- [x] Add `scripts/verify-production.sh` for exact-HEAD, contract, Ruff, strict Mypy, coverage, build,
+  and clean-wheel verification.
+- [x] Add isolated wheel-install smoke plus a real temporary Git/worktree lifecycle and retain `scripts/run-tunnel.sh` as a foreground
+  compatibility entry point.
+- [x] Add scoped Conventional Commit and contract-update contribution guidance.
+- [x] Replace stale rollout instructions with the actual release-candidate procedure.
+
+Acceptance:
+
+- [x] Fast child exit cannot produce a false `is_alive() == false` before log finalization.
+- [x] Public MCP or protocol/config schema drift fails locally and in CI until explicitly reviewed.
+- [x] Supported Python versions run the complete test gate; Darwin-specific runtime behavior runs on
+  macOS CI.
+- [x] The built wheel installs in a fresh environment, exposes the expected CLI/MCP contract, and completes a real create/modify/verify/commit/push/cleanup lifecycle.
+- [x] The full plan has a traceable test/requirement completion matrix.
+
 ## 9. Test plan
+
+Implementation coverage for every category below is mapped in
+`docs/testing/program-completion-matrix.md`. The release workflow runs the complete suite rather than
+selecting only phase-specific tests.
 
 ### 9.1 Unit tests
 
@@ -759,25 +801,30 @@ Use real subprocesses/processes where locking semantics matter; threads alone ar
 
 ## 11. Migration and compatibility
 
-- Continue accepting legacy `[repositories.*]` configs during a documented deprecation window.
-- Generate an import preview before converting legacy config to minimal generations.
-- Preserve existing MCP tool names and parameters.
-- Preserve workspace registry records and verification semantics.
-- Keep `rf start` and `./scripts/run-tunnel.sh` working as compatibility entry points.
-- Add new CLI commands without changing existing defaults unexpectedly.
-- Version runtime-control protocol and configuration snapshots independently.
-- Provide `rf config rollback <generation>` and `rf config history` after generation support lands.
+- [x] Continue accepting legacy `[repositories.*]` configs during the documented compatibility
+  window, with a frozen legacy fixture.
+- [x] Generate an import preview before converting legacy config to minimal generations.
+- [x] Preserve existing MCP tool names and parameters through a frozen release contract.
+- [x] Preserve workspace registry records and verification semantics.
+- [x] Keep `rf start` and `./scripts/run-tunnel.sh` working as compatibility entry points.
+- [x] Add new CLI commands without changing existing defaults unexpectedly.
+- [x] Version runtime-control protocol and configuration snapshots independently.
+- [x] Provide `rf config rollback <generation>` and `rf config history`.
 
 ## 12. Rollout strategy
 
-1. Ship Phase 0–2 behind no behavior change.
-2. Introduce proposal commands as opt-in; compare their output with existing detection.
-3. Make `repo add` use proposal workflow while retaining `--legacy-detection` for one release.
-4. Introduce supervisor as opt-in `rf runtime start`.
-5. Make `rf start` delegate to the supervisor after soak testing.
-6. Enable automatic activation for interactive CLI only.
-7. Enable non-interactive auto-activation only with explicit flags and approved proposals.
-8. Consider hot reload only after restart/rollback telemetry is stable.
+Implementation state:
+
+1. [x] Phases 0–2 landed behind versioned compatibility boundaries.
+2. [x] Proposal commands are explicit and deterministic.
+3. [x] `repo add` delegates to the proposal/enrollment workflow.
+4. [x] The supervisor is available through `rf runtime start`.
+5. [x] `rf start` delegates to foreground supervisor start.
+6. [x] Interactive repository mutations default to managed `--activate=auto` behavior.
+7. [x] Non-interactive capability expansion still requires explicit approval and activation flags.
+8. [x] Atomic hot reload is implemented with supervisor restart as the compatibility/recovery fallback.
+9. [ ] Require the first green `production-gate` run on `dev` before tagging a release; this remote
+   confirmation occurs only after the implementation commit is pushed.
 
 ## 13. Suggested pull-request sequence
 
@@ -800,35 +847,35 @@ Each PR should remain independently deployable and preserve the safety invariant
 
 ## 14. Definition of done
 
-The program is complete when:
+The implementation is complete when:
 
-- A repository can be inspected, proposed, approved, enrolled, smoke-tested, and activated without
+- [x] A repository can be inspected, proposed, approved, enrolled, smoke-tested, and activated without
   manual tunnel process discovery.
-- Every config mutation reports disk generation, active generation, and restart/reload status.
-- Removal revokes access promptly and safely.
-- Repository-only changes do not unnecessarily reinitialize the tunnel profile.
-- Activation failure rolls back without losing the previous healthy runtime.
-- MCP public contracts remain compatible unless an explicit versioned migration is approved.
-- `CodingService` is a thin compatibility facade rather than the architectural center.
-- Domain and application tests do not require real GitHub or user repositories.
-- Adapter contracts, integration, concurrency, crash, and end-to-end suites pass in CI.
-- No secrets, arbitrary shell capability, force push, non-draft PR, protected-path write, or verified
-  tree bypass is introduced.
-- User-facing errors always explain what happened, what remained unchanged, and the safe next action.
+- [x] Every config mutation reports disk generation, active generation, and restart/reload status.
+- [x] Removal revokes access promptly and safely.
+- [x] Repository-only changes do not unnecessarily reinitialize the tunnel profile.
+- [x] Activation failure rolls back without losing the previous healthy runtime.
+- [x] MCP public contracts remain compatible unless an explicit versioned migration is approved.
+- [x] `CodingService` is a compatibility facade over application use cases rather than the
+  architectural center.
+- [x] Domain and application tests do not require real GitHub or user repositories.
+- [x] Adapter contracts, integration, concurrency, crash, and end-to-end suites are part of the
+  required production workflow.
+- [x] No secrets, arbitrary shell capability, force push, non-draft PR, protected-path write, or
+  verified-tree bypass is introduced.
+- [x] User-facing errors explain what happened, what remained unchanged, and the safe next action.
+- [ ] The remote `production-gate` workflow passes on the pushed implementation commit before release.
 
 ## 15. Immediate next action
 
-Start with PR 1 and PR 2 from the sequence above. Do not begin with a large directory move. The first
-behavioral change should be explicit restart-state reporting:
+Apply the Phase 8 completion change, then run the exact local release gate:
 
-```json
-{
-  "status": "restart_required",
-  "config_generation": 2,
-  "active_generation": 1,
-  "safe_next_action": "Run `rf runtime restart` to activate repository 'repoforge'."
-}
+```bash
+scripts/verify-production.sh --allow-dirty
 ```
 
-Once that state is measurable, implement supervisor-managed activation and rollback. This closes the
-current tunnel-management gap while providing a stable foundation for later hot reload.
+After committing, run it again without `--allow-dirty`, push to `dev`, and require the GitHub
+`production-gate` workflow to pass on Linux Python 3.10–3.13 and macOS Python 3.13 before tagging or
+promoting a release. Public contract changes require an explicit review of
+`docs/contracts/release-contract-v1.json`; the golden file must never be regenerated merely to make
+CI green.
