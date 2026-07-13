@@ -126,15 +126,33 @@ Manage repositories without editing TOML:
 
 ```bash
 rf repo list
+rf repo inspect /absolute/path/to/another-repository
+rf repo add /absolute/path/to/another-repository --preview
 rf repo add /absolute/path/to/another-repository
 rf repo remove repository-id
 rf runtime status
+rf runtime start
+rf runtime stop
+rf runtime restart
+rf config history
+rf config rollback 3
 ```
 
-Repository changes report the reviewed configuration generation and whether an existing MCP process
-must restart before it can use the change. `rf runtime status` makes that comparison explicit.
+Managed runtime changes auto-restart after a successful repository add or accepted refresh; failed
+expansions roll back to the previous retained generation. Repository removals are restrictive and
+never roll back removed access if activation fails. Foreground runtimes report the reviewed generation
+and restart requirement; `rf runtime status` makes that comparison explicit.
+`rf runtime start` manages its tunnel-client child as a local process group; `stop` and `restart`
+only affect that identity-validated managed child. `rf start` remains the foreground compatibility
+entry point.
 
-If a `Makefile`, `package.json`, `pyproject.toml`, or another command source changes, RepoForge fails
+Every accepted minimal configuration is retained as a paired source and resolved-lock snapshot.
+`rf config history` lists complete retained generations; `rf config rollback N` validates and restores
+the exact source/lock pair for generation `N`, then reports whether the running process needs restart.
+
+`rf repo inspect` and `rf repo add --preview` never write configuration. They return a reviewed
+proposal for the detected command profiles before enrollment expands capability. If a `Makefile`,
+`package.json`, `pyproject.toml`, or another command source changes, RepoForge fails
 closed. Review the proposed allowlist diff and then accept it explicitly:
 
 ```bash

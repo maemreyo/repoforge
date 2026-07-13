@@ -14,10 +14,14 @@ from repoforge.user_config import (
     UserConfig,
     UserRepository,
     build_lock_text,
+    config_history,
     detect_repository_for_setup,
+    generation_snapshot_path,
     render_user_config,
     resolve_runtime_config_path,
     resolved_config_path,
+    rollback_generation,
+    write_user_and_lock,
 )
 
 
@@ -75,9 +79,7 @@ def test_minimal_config_resolves_multiple_repositories_and_make_profiles(
         ("make", "typecheck"),
     )
     assert loaded.repositories["repoforge"].profiles["full"].commands == (("make", "check"),)
-    assert loaded.repositories["work-frontier"].profiles["full"].commands == (
-        ("make", "verify"),
-    )
+    assert loaded.repositories["work-frontier"].profiles["full"].commands == (("make", "verify"),)
 
 
 def test_manifest_change_invalidates_resolved_lock(
@@ -213,14 +215,14 @@ path = "{repo}"
 def test_mixed_minimal_and_legacy_formats_are_rejected(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
-        '''version = 1
+        """version = 1
 [tunnel]
 id = "tunnel_test"
 [[repo]]
 path = "/tmp/demo"
 [repositories.demo]
 path = "/tmp/demo"
-''',
+""",
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="Do not mix"):
@@ -232,14 +234,18 @@ path = "/tmp/demo"
     [
         ('version = 1\n[tunnel]\n[[repo]]\npath = "/tmp/x"\n', "tunnel.id"),
         ('version = 1\n[tunnel]\nid = "bad tunnel"\n[[repo]]\npath = "/tmp/x"\n', "tunnel.id"),
-        ('version = 1\n[tunnel]\nid = "tunnel_x"\nprofile = "bad/profile"\n[[repo]]\npath = "/tmp/x"\n', "tunnel.profile"),
+        (
+            'version = 1\n[tunnel]\nid = "tunnel_x"\nprofile = "bad/profile"\n[[repo]]\npath = "/tmp/x"\n',
+            "tunnel.profile",
+        ),
         ('version = 1\n[tunnel]\nid = "tunnel_x"\n', "At least one"),
-        ('version = 1\n[tunnel]\nid = "tunnel_x"\n[[repo]]\nid = 42\npath = "/tmp/x"\n', "id must be a string"),
+        (
+            'version = 1\n[tunnel]\nid = "tunnel_x"\n[[repo]]\nid = 42\npath = "/tmp/x"\n',
+            "id must be a string",
+        ),
     ],
 )
-def test_invalid_minimal_config_is_rejected(
-    tmp_path: Path, content: str, message: str
-) -> None:
+def test_invalid_minimal_config_is_rejected(tmp_path: Path, content: str, message: str) -> None:
     config = tmp_path / "config.toml"
     config.write_text(content, encoding="utf-8")
     with pytest.raises(ConfigError, match=message):
@@ -297,6 +303,49 @@ def test_concurrent_user_config_update_is_rejected(
     config_path.write_text(render_user_config(user), encoding="utf-8")
     with pytest.raises(ConfigError, match="concurrently"):
         user_config.write_user_and_lock(user, expected_source_sha256="0" * 64)
+
+
+def test_config_history_retains_complete_generations_and_rollback_restores_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(user_config, "DEFAULT_STATE_ROOT", str(tmp_path / "state"))
+    repo = init_repo(tmp_path / "demo", "check:\n\t@true\n")
+    config_path = tmp_path / "config.toml"
+    first = UserConfig(
+        source_path=config_path,
+        tunnel=TunnelSettings("tunnel_test"),
+        repositories=(UserRepository("demo", repo),),
+    )
+    config_path.write_text(render_user_config(first), encoding="utf-8")
+    write_user_and_lock(first)
+    second = UserConfig(
+        source_path=config_path,
+        tunnel=TunnelSettings("tunnel_next"),
+        repositories=(UserRepository("demo", repo),),
+    )
+    write_user_and_lock(second, expected_source_sha256=user_config.sha256_file(config_path))
+
+    assert config_history(config_path) == [2, 1]
+
+    rollback_generation(config_path, 1)
+
+    assert user_config.load_user_config(config_path).tunnel.tunnel_id == "tunnel_test"
+    assert user_config.lock_generation(resolved_config_path(config_path)) == 1
+    snapshot = generation_snapshot_path(config_path, 1)
+    assert snapshot.joinpath("config.toml").is_file()
+    assert snapshot.joinpath("resolved.toml").is_file()
+
+
+def test_rollback_rejects_incomplete_generation_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(user_config, "DEFAULT_STATE_ROOT", str(tmp_path / "state"))
+    config = tmp_path / "config.toml"
+    config.write_text("version = 1\n", encoding="utf-8")
+    generation_snapshot_path(config, 7).mkdir(parents=True)
+
+    with pytest.raises(ConfigError, match="Unknown complete"):
+        rollback_generation(config, 7)
 
 
 def test_missing_and_invalid_toml_are_reported(tmp_path: Path) -> None:

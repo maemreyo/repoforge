@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import repoforge.onboarding as onboarding
 from repoforge.errors import ConfigError
 from repoforge.onboarding import (
     _repo_add,
+    _repo_inspect,
     _repo_list,
     _repo_refresh,
     _repo_remove,
@@ -18,6 +20,7 @@ from repoforge.onboarding import (
     _start,
     handle_onboarding_command,
 )
+from repoforge.runtime import ManagedRuntime
 from repoforge.user_config import TunnelSettings, UserConfig, UserRepository, render_user_config
 
 
@@ -207,6 +210,64 @@ def test_repo_add_and_remove_update_config_atomically(
 
     with pytest.raises(ConfigError, match="final repository"):
         _repo_remove(argparse.Namespace(config=str(config), repo_id="demo"))
+
+
+def test_repo_add_preview_does_not_write_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
+    monkeypatch.setattr(
+        onboarding, "profile_summary", lambda detections: {"candidate": {"test": {}}}
+    )
+    monkeypatch.setattr(
+        onboarding, "write_user_and_lock", lambda *args, **kwargs: pytest.fail("wrote")
+    )
+
+    assert (
+        _repo_add(
+            argparse.Namespace(
+                config=str(config), path=str(candidate), repo_id="candidate", preview=True
+            )
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "pending_approval"
+    assert output["capability_delta"] == "expansion"
+    assert "candidate" not in config.read_text(encoding="utf-8")
+
+
+def test_repo_inspect_returns_a_no_write_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    detection = type(
+        "Detection",
+        (),
+        {
+            "repo_id": "candidate",
+            "path": candidate,
+            "ecosystem": "python",
+            "package_manager": "uv",
+            "instruction_files": ("AGENTS.md",),
+            "warnings": (),
+        },
+    )()
+    monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: detection)
+    monkeypatch.setattr(
+        onboarding, "profile_summary", lambda detections: {"candidate": {"test": {}}}
+    )
+
+    assert _repo_inspect(argparse.Namespace(path=str(candidate), repo_id=None)) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "pending_approval"
+    assert output["instruction_files"] == ["AGENTS.md"]
 
 
 def test_repo_refresh_previews_then_accepts_changes(
@@ -415,6 +476,145 @@ def test_runtime_status_accepts_config_after_status(
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "stopped"
     assert output["config_generation"] == 1
+
+
+def test_runtime_status_reports_starting_for_managed_tunnel_without_mcp_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    lock = tmp_path / "resolved.toml"
+    lock.write_text("[repoforge_lock]\ngeneration = 1\n", encoding="utf-8")
+    monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
+    monkeypatch.setattr(
+        onboarding,
+        "read_managed_runtime",
+        lambda path: ManagedRuntime(os.getpid(), 1, "repoforge", "tunnel-client", "now"),
+    )
+
+    assert handle_onboarding_command(["runtime", "status", "--config", str(config)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "starting"
+    assert output["managed_pid"] == os.getpid()
+
+
+def test_runtime_start_routes_to_managed_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write_minimal_config(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def start(args: argparse.Namespace) -> int:
+        captured["managed"] = args.managed
+        captured["dry_run"] = args.dry_run
+        return 0
+
+    monkeypatch.setattr(onboarding, "_start", start)
+
+    assert handle_onboarding_command(["runtime", "start", "--config", str(config)]) == 0
+    assert captured == {"managed": True, "dry_run": False}
+
+
+def test_runtime_stop_is_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config = write_minimal_config(tmp_path)
+
+    assert handle_onboarding_command(["runtime", "stop", "--config", str(config)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "stopped"
+    assert output["pid"] is None
+
+
+def test_repo_add_restarts_an_active_managed_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    lock = tmp_path / "resolved.toml"
+    lock.write_text("[repoforge_lock]\ngeneration = 1\n", encoding="utf-8")
+    monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
+    monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
+    monkeypatch.setattr(onboarding, "profile_summary", lambda detections: {"candidate": {}})
+    monkeypatch.setattr(
+        onboarding,
+        "read_managed_runtime",
+        lambda path: ManagedRuntime(os.getpid(), 1, "repoforge", "tunnel-client", "now"),
+    )
+    monkeypatch.setattr(onboarding, "stop_managed_runtime", lambda path: None)
+    starts: list[bool] = []
+
+    def start(args: argparse.Namespace, *, emit: bool = True) -> int:
+        starts.append(args.managed)
+        return 0
+
+    monkeypatch.setattr(onboarding, "_start", start)
+
+    def write(updated: UserConfig, **_: Any) -> tuple[Path, list[Any]]:
+        updated.source_path.write_text(render_user_config(updated), encoding="utf-8")
+        lock.write_text("[repoforge_lock]\ngeneration = 2\n", encoding="utf-8")
+        return lock, []
+
+    monkeypatch.setattr(onboarding, "write_user_and_lock", write)
+
+    assert (
+        _repo_add(
+            argparse.Namespace(
+                config=str(config), path=str(candidate), repo_id="candidate", preview=False
+            )
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert starts == [True]
+    assert output["status"] == "active"
+    assert output["config_generation"] == 2
+
+
+def test_managed_activation_rolls_back_when_replacement_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write_minimal_config(tmp_path)
+    lock = tmp_path / "resolved.toml"
+    lock.write_text("[repoforge_lock]\ngeneration = 2\n", encoding="utf-8")
+    monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
+    monkeypatch.setattr(
+        onboarding,
+        "read_managed_runtime",
+        lambda path: ManagedRuntime(os.getpid(), 1, "repoforge", "tunnel-client", "now"),
+    )
+    monkeypatch.setattr(onboarding, "stop_managed_runtime", lambda path: None)
+    monkeypatch.setattr(onboarding, "rollback_generation", lambda path, generation: lock)
+    starts = iter([1, 0])
+    monkeypatch.setattr(onboarding, "_start", lambda args, *, emit=True: next(starts))
+
+    result = onboarding._activate_managed_runtime(config, 1, rollback_allowed=True)
+
+    assert result["status"] == "rolled_back"
+    assert result["config_generation"] == 1
+
+
+def test_restrictive_activation_failure_does_not_roll_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write_minimal_config(tmp_path)
+    lock = tmp_path / "resolved.toml"
+    lock.write_text("[repoforge_lock]\ngeneration = 2\n", encoding="utf-8")
+    monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
+    monkeypatch.setattr(
+        onboarding,
+        "read_managed_runtime",
+        lambda path: ManagedRuntime(os.getpid(), 1, "repoforge", "tunnel-client", "now"),
+    )
+    monkeypatch.setattr(onboarding, "stop_managed_runtime", lambda path: None)
+    monkeypatch.setattr(onboarding, "_start", lambda args, *, emit=True: 1)
+    monkeypatch.setattr(
+        onboarding, "rollback_generation", lambda path, generation: pytest.fail("rolled back")
+    )
+
+    with pytest.raises(ConfigError, match="restrictive configuration"):
+        onboarding._activate_managed_runtime(config, 1, rollback_allowed=False)
 
 
 def test_smoke_repository_always_removes_workspace() -> None:

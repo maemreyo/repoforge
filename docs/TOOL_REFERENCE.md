@@ -10,7 +10,29 @@ flow.
 generation on disk with the generation loaded by the live MCP process. Repository mutations include
 the same `config_generation`, `active_generation`, and `restart_required` fields. When restart is
 required, RepoForge continues to fail closed on stale resolved locks and reports the exact next
-action; this release does not yet supervise or restart the tunnel process automatically.
+action. `rf runtime start` creates a new tunnel-client session leader, records its PID and generation
+in a private local state file, and refuses a duplicate managed start. `rf runtime stop` validates the
+recorded process identity and process group before sending termination signals; it cannot execute
+arbitrary commands or target an unrecorded process. `rf runtime restart` performs that controlled
+stop then starts the reviewed runtime again. This stage does not yet provide request draining,
+health-check rollback, or in-process hot reload.
+
+When a managed runtime is active, accepted repository additions and refreshes restart it automatically;
+a failed expansion restores the prior validated generation. A repository removal is restrictive: failed
+activation leaves the restricted configuration on disk and never restores removed repository access.
+
+## Repository proposal commands
+
+`rf repo inspect PATH` and `rf repo add PATH --preview` inspect local repository facts and return a
+structured `pending_approval` proposal without changing configuration or running discovered commands.
+Detected verification profiles are classified as an `expansion`, so `rf repo add PATH` remains the
+explicit operator action that enrolls the repository and grants its reviewed command profiles.
+
+## Configuration generation commands
+
+`rf config history` lists only complete paired source/lock snapshots. `rf config rollback N` validates
+the requested snapshot against its source before atomically restoring both files; it never accepts a
+partial, stale, or modified snapshot and reports the activation impact after restoration.
 
 ## Repository inspection
 

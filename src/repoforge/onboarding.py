@@ -18,7 +18,12 @@ from typing import Any, Protocol
 
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .errors import ConfigError, PersonalCodingMCPError
-from .runtime import read_runtime_state
+from .runtime import (
+    read_managed_runtime,
+    read_runtime_state,
+    stop_managed_runtime,
+    write_managed_runtime,
+)
 from .security import slugify
 from .service import CodingService
 from .user_config import (
@@ -27,14 +32,17 @@ from .user_config import (
     UserRepository,
     atomic_write,
     build_lock_text,
+    config_history,
     config_kind,
     detect_repository_for_setup,
+    generation_snapshot_path,
     load_user_config,
     lock_generation,
     profile_summary,
     read_toml,
     resolve_runtime_config_path,
     resolved_config_path,
+    rollback_generation,
     sha256_file,
     sha256_text,
     write_user_and_lock,
@@ -51,6 +59,10 @@ def _tunnel_state_path(config_path: Path) -> Path:
 
 def _runtime_state_path(config_path: Path) -> Path:
     return resolved_config_path(config_path).with_name("runtime.json")
+
+
+def _managed_runtime_path(config_path: Path) -> Path:
+    return resolved_config_path(config_path).with_name("managed-runtime.json")
 
 
 def _activation_result(config_path: Path, repo_id: str | None = None) -> dict[str, Any]:
@@ -74,6 +86,49 @@ def _activation_result(config_path: Path, repo_id: str | None = None) -> dict[st
     else:
         result["status"] = "active" if active else "stopped"
     return result
+
+
+def _activate_managed_runtime(
+    config_path: Path, previous_generation: int, *, rollback_allowed: bool
+) -> dict[str, Any]:
+    """Restart a supervisor-owned runtime, restoring its prior generation on failure."""
+    managed_path = _managed_runtime_path(config_path)
+    if read_managed_runtime(managed_path) is None:
+        return _activation_result(config_path)
+    stop_managed_runtime(managed_path)
+    args = argparse.Namespace(
+        config=str(config_path),
+        tunnel_id=None,
+        profile=None,
+        skip_doctor=False,
+        dry_run=False,
+        managed=True,
+    )
+    try:
+        if _start(args, emit=False) != 0:
+            raise ConfigError("Managed runtime restart failed")
+    except ConfigError:
+        if not rollback_allowed:
+            raise ConfigError(
+                "Managed runtime activation failed; restrictive configuration remains active on disk"
+            ) from None
+        rollback_generation(config_path, previous_generation)
+        if _start(args, emit=False) != 0:
+            raise ConfigError("Managed runtime rollback restart failed") from None
+        return {
+            "status": "rolled_back",
+            "config_generation": previous_generation,
+            "active_generation": previous_generation,
+            "restart_required": False,
+            "safe_next_action": "Review the failed generation before accepting it again.",
+        }
+    return {
+        "status": "active",
+        "config_generation": lock_generation(resolved_config_path(config_path)),
+        "active_generation": lock_generation(resolved_config_path(config_path)),
+        "restart_required": False,
+        "safe_next_action": "Repository changes are active in the managed runtime.",
+    }
 
 
 class _SmokeService(Protocol):
@@ -193,13 +248,26 @@ def _repo_add(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
     expected_source_sha256 = sha256_file(config_path)
     config = _load_minimal_or_error(config_path)
+    previous_generation = lock_generation(resolved_config_path(config_path))
     path = Path(args.path).expanduser().resolve()
     repo_id = args.repo_id or slugify(path.name)
-    detect_repository_for_setup(path, repo_id)
+    detection = detect_repository_for_setup(path, repo_id)
     if repo_id in {repository.repo_id for repository in config.repositories}:
         raise ConfigError(f"Repository id already exists: {repo_id}")
     if path in {repository.path for repository in config.repositories}:
         raise ConfigError(f"Repository path already exists: {path}")
+    if getattr(args, "preview", False):
+        _json(
+            {
+                "status": "pending_approval",
+                "repo_id": repo_id,
+                "path": str(path),
+                "capability_delta": "expansion",
+                "profiles": profile_summary([detection])[repo_id],
+                "safe_next_action": "Re-run without `--preview` to enroll the reviewed repository.",
+            }
+        )
+        return 0
     updated = replace(
         config,
         repositories=(*config.repositories, UserRepository(repo_id=repo_id, path=path)),
@@ -215,7 +283,29 @@ def _repo_add(args: argparse.Namespace) -> int:
             "resolved_config": str(lock_path),
             "profiles": profile_summary(detections)[repo_id],
         }
-        | _activation_result(config_path, repo_id)
+        | _activate_managed_runtime(config_path, previous_generation, rollback_allowed=True)
+    )
+    return 0
+
+
+def _repo_inspect(args: argparse.Namespace) -> int:
+    """Return detected repository capability without writing configuration."""
+    path = Path(args.path).expanduser().resolve()
+    repo_id = args.repo_id or slugify(path.name)
+    detection = detect_repository_for_setup(path, repo_id)
+    _json(
+        {
+            "status": "pending_approval",
+            "repo_id": detection.repo_id,
+            "path": str(detection.path),
+            "ecosystem": detection.ecosystem,
+            "package_manager": detection.package_manager,
+            "instruction_files": list(detection.instruction_files),
+            "warnings": list(detection.warnings),
+            "capability_delta": "expansion",
+            "profiles": profile_summary([detection])[detection.repo_id],
+            "safe_next_action": "Review profiles, then run `rf repo add PATH` to enroll.",
+        }
     )
     return 0
 
@@ -224,6 +314,7 @@ def _repo_remove(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
     expected_source_sha256 = sha256_file(config_path)
     config = _load_minimal_or_error(config_path)
+    previous_generation = lock_generation(resolved_config_path(config_path))
     remaining = tuple(
         repository for repository in config.repositories if repository.repo_id != args.repo_id
     )
@@ -239,7 +330,7 @@ def _repo_remove(args: argparse.Namespace) -> int:
             "config": str(config.source_path),
             "resolved_config": str(lock_path),
         }
-        | _activation_result(config_path, args.repo_id)
+        | _activate_managed_runtime(config_path, previous_generation, rollback_allowed=False)
     )
     return 0
 
@@ -289,12 +380,41 @@ def _repo_refresh(args: argparse.Namespace) -> int:
         raise ConfigError("Configuration changed during refresh; no lock was written")
     candidate, _ = build_lock_text(config, source_text, generation=current_generation + 1)
     atomic_write(lock_path, candidate)
+    snapshot = generation_snapshot_path(config.source_path, current_generation + 1)
+    atomic_write(snapshot / "config.toml", source_text)
+    atomic_write(snapshot / "resolved.toml", candidate)
     _json(
         {
             "changed": True,
             "accepted": True,
             "resolved_config": str(lock_path),
             "profiles": profile_summary(detections),
+        }
+        | _activate_managed_runtime(config_path, current_generation, rollback_allowed=True)
+    )
+    return 0
+
+
+def _config_history(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    _json(
+        {
+            "generations": config_history(config_path),
+            "current_generation": lock_generation(resolved_config_path(config_path)),
+        }
+    )
+    return 0
+
+
+def _config_rollback(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    lock_path = rollback_generation(config_path, args.generation)
+    _json(
+        {
+            "status": "restart_required",
+            "restored_generation": args.generation,
+            "resolved_config": str(lock_path),
+            "safe_next_action": "Restart the running `rf start` process to activate this generation.",
         }
         | _activation_result(config_path)
     )
@@ -322,7 +442,7 @@ def _run_checked(argv: list[str], *, env: dict[str, str], timeout: int = 60) -> 
         raise ConfigError(f"Command failed ({shlex.join(argv)}): {detail}")
 
 
-def _start(args: argparse.Namespace) -> int:
+def _start(args: argparse.Namespace, *, emit: bool = True) -> int:
     config_path = Path(args.config).expanduser().resolve()
     runtime_path = resolve_runtime_config_path(config_path)
     raw = read_toml(config_path)
@@ -341,7 +461,10 @@ def _start(args: argparse.Namespace) -> int:
     if not args.skip_doctor:
         doctor = service.doctor()
         if not doctor["ok"]:
-            _json({"ok": False, "doctor": doctor, "message": "Fix doctor errors before starting."})
+            if emit:
+                _json(
+                    {"ok": False, "doctor": doctor, "message": "Fix doctor errors before starting."}
+                )
             return 1
 
     tunnel_client = shutil.which("tunnel-client")
@@ -437,6 +560,30 @@ def _start(args: argparse.Namespace) -> int:
             )
             + "\n",
         )
+    if getattr(args, "managed", False):
+        managed_path = _managed_runtime_path(config_path)
+        if read_managed_runtime(managed_path) is not None:
+            raise ConfigError("ALREADY_RUNNING: run `rf runtime status` or `rf runtime stop`")
+        process = subprocess.Popen(run_argv, env=environment, start_new_session=True)
+        managed = write_managed_runtime(
+            managed_path,
+            pid=process.pid,
+            generation=lock_generation(runtime_path),
+            profile=profile,
+            executable=run_argv[0],
+        )
+        if emit:
+            _json(
+                {
+                    "status": "starting",
+                    "pid": managed.pid,
+                    "config_generation": managed.active_generation,
+                    "active_generation": managed.active_generation,
+                    "restart_required": False,
+                    "safe_next_action": "Run `rf runtime status` to observe tunnel health.",
+                }
+            )
+        return 0
     os.execvpe(run_argv[0], run_argv, environment)
     raise AssertionError("os.execvpe returned unexpectedly")
 
@@ -473,6 +620,29 @@ def _build_parser() -> argparse.ArgumentParser:
     runtime_subparsers = runtime.add_subparsers(dest="runtime_command", required=True)
     runtime_status = runtime_subparsers.add_parser("status")
     runtime_status.add_argument("--config", default=argparse.SUPPRESS)
+    runtime_start = runtime_subparsers.add_parser("start")
+    runtime_start.add_argument("--config", default=argparse.SUPPRESS)
+    runtime_start.add_argument("--tunnel-id", default=os.environ.get("TUNNEL_ID"))
+    runtime_start.add_argument("--profile", default=os.environ.get("TUNNEL_PROFILE"))
+    runtime_start.add_argument("--skip-doctor", action="store_true")
+    runtime_stop = runtime_subparsers.add_parser("stop")
+    runtime_stop.add_argument("--config", default=argparse.SUPPRESS)
+    runtime_restart = runtime_subparsers.add_parser("restart")
+    runtime_restart.add_argument("--config", default=argparse.SUPPRESS)
+    runtime_restart.add_argument("--tunnel-id", default=os.environ.get("TUNNEL_ID"))
+    runtime_restart.add_argument("--profile", default=os.environ.get("TUNNEL_PROFILE"))
+    runtime_restart.add_argument("--skip-doctor", action="store_true")
+
+    config = subparsers.add_parser("config", help="Inspect or restore reviewed config generations")
+    config.add_argument(
+        "--config", default=os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    )
+    config_subparsers = config.add_subparsers(dest="config_command", required=True)
+    config_history_parser = config_subparsers.add_parser("history")
+    config_history_parser.add_argument("--config", default=argparse.SUPPRESS)
+    config_rollback_parser = config_subparsers.add_parser("rollback")
+    config_rollback_parser.add_argument("generation", type=int)
+    config_rollback_parser.add_argument("--config", default=argparse.SUPPRESS)
 
     repo = subparsers.add_parser("repo", help="Manage repositories in the minimal config")
     repo.add_argument(
@@ -480,9 +650,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     repo_subparsers = repo.add_subparsers(dest="repo_command", required=True)
     repo_subparsers.add_parser("list")
+    inspect = repo_subparsers.add_parser(
+        "inspect", help="Preview a repository proposal without writes"
+    )
+    inspect.add_argument("path")
+    inspect.add_argument("--repo-id", default=None)
     add = repo_subparsers.add_parser("add")
     add.add_argument("path")
     add.add_argument("--repo-id", default=None)
+    add.add_argument("--preview", action="store_true")
     remove = repo_subparsers.add_parser("remove")
     remove.add_argument("repo_id")
     refresh = repo_subparsers.add_parser("refresh")
@@ -491,7 +667,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
-    commands = {"setup", "start", "repo", "runtime"}
+    commands = {"setup", "start", "repo", "runtime", "config"}
     if len(argv) >= 3 and argv[0] == "--config" and argv[2] in commands:
         return [argv[2], "--config", argv[1], *argv[3:]]
     if len(argv) >= 2 and argv[0].startswith("--config=") and argv[1] in commands:
@@ -501,7 +677,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
 
 def handle_onboarding_command(argv: list[str]) -> int | None:
     normalized = _normalize_argv(list(argv))
-    if not normalized or normalized[0] not in {"setup", "start", "repo", "runtime"}:
+    if not normalized or normalized[0] not in {"setup", "start", "repo", "runtime", "config"}:
         return None
     parser = _build_parser()
     try:
@@ -515,14 +691,53 @@ def handle_onboarding_command(argv: list[str]) -> int | None:
                 return _repo_list(args)
             if args.repo_command == "add":
                 return _repo_add(args)
+            if args.repo_command == "inspect":
+                return _repo_inspect(args)
             if args.repo_command == "remove":
                 return _repo_remove(args)
             if args.repo_command == "refresh":
                 return _repo_refresh(args)
         if args.command == "runtime" and args.runtime_command == "status":
             config_path = Path(args.config).expanduser().resolve()
-            _json(_activation_result(config_path))
+            managed = read_managed_runtime(_managed_runtime_path(config_path))
+            result = _activation_result(config_path) | {
+                "managed_pid": managed.pid if managed else None
+            }
+            if managed is not None and result["status"] == "stopped":
+                result["status"] = "starting"
+                result["safe_next_action"] = (
+                    "Wait for the MCP child to report its active generation."
+                )
+            _json(result)
             return 0
+        if args.command == "runtime" and args.runtime_command == "start":
+            args.managed = True
+            args.dry_run = False
+            return _start(args)
+        if args.command == "runtime" and args.runtime_command == "stop":
+            config_path = Path(args.config).expanduser().resolve()
+            stopped = stop_managed_runtime(_managed_runtime_path(config_path))
+            _json(
+                {
+                    "status": "stopped",
+                    "pid": stopped.pid if stopped else None,
+                    "what_happened": "Stopped managed runtime"
+                    if stopped
+                    else "No managed runtime was active",
+                    "safe_next_action": "Run `rf runtime start` when ready.",
+                }
+            )
+            return 0
+        if args.command == "runtime" and args.runtime_command == "restart":
+            config_path = Path(args.config).expanduser().resolve()
+            stop_managed_runtime(_managed_runtime_path(config_path))
+            args.managed = True
+            args.dry_run = False
+            return _start(args)
+        if args.command == "config" and args.config_command == "history":
+            return _config_history(args)
+        if args.command == "config" and args.config_command == "rollback":
+            return _config_rollback(args)
         parser.error("Unknown onboarding command")
     except (PersonalCodingMCPError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)

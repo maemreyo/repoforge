@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
-from repoforge.runtime import clear_runtime_state, read_runtime_state, write_runtime_state
+from repoforge.runtime import (
+    clear_runtime_state,
+    read_managed_runtime,
+    read_runtime_state,
+    stop_managed_runtime,
+    write_managed_runtime,
+    write_runtime_state,
+)
 
 
 def test_runtime_state_records_the_current_process_and_generation(tmp_path: Path) -> None:
@@ -45,3 +54,27 @@ def test_runtime_state_cleanup_preserves_a_replacement_record(tmp_path: Path) ->
 
     # Then: the live record remains available.
     assert read_runtime_state(state_path) is not None
+
+
+def test_managed_runtime_stops_only_the_recorded_process_group(tmp_path: Path) -> None:
+    # Given: a child process owns its own process group.
+    state_path = tmp_path / "managed-runtime.json"
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    write_managed_runtime(
+        state_path,
+        pid=process.pid,
+        generation=2,
+        profile="repoforge",
+        executable=sys.executable,
+    )
+
+    # When: the managed runtime is stopped.
+    stopped = stop_managed_runtime(state_path)
+    process.wait(timeout=5)
+
+    # Then: only the recorded child is stopped and its record is removed.
+    assert stopped is not None
+    assert stopped.pid == process.pid
+    assert read_managed_runtime(state_path) is None

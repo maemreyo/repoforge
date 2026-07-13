@@ -211,6 +211,13 @@ def resolved_config_path(config_path: str | Path) -> Path:
     )
 
 
+def generation_snapshot_path(config_path: str | Path, generation: int) -> Path:
+    """Return the immutable snapshot directory for an accepted generation."""
+    if generation <= 0:
+        raise ConfigError("Config generation must be positive")
+    return resolved_config_path(config_path).parent / "generations" / str(generation)
+
+
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -454,6 +461,45 @@ def atomic_write(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def config_history(config_path: str | Path) -> list[int]:
+    """List complete accepted generations in descending order."""
+    root = resolved_config_path(config_path).parent / "generations"
+    generations: list[int] = []
+    for candidate in root.iterdir() if root.is_dir() else ():
+        if not candidate.is_dir() or not candidate.name.isdigit():
+            continue
+        generation = int(candidate.name)
+        if (
+            generation > 0
+            and (candidate / "config.toml").is_file()
+            and (candidate / "resolved.toml").is_file()
+        ):
+            generations.append(generation)
+    return sorted(generations, reverse=True)
+
+
+def rollback_generation(config_path: str | Path, generation: int) -> Path:
+    """Restore a validated paired source and lock snapshot for one generation."""
+    source_path = Path(config_path).expanduser().resolve()
+    snapshot = generation_snapshot_path(source_path, generation)
+    source_snapshot = snapshot / "config.toml"
+    lock_snapshot = snapshot / "resolved.toml"
+    if not source_snapshot.is_file() or not lock_snapshot.is_file():
+        raise ConfigError(f"Unknown complete config generation: {generation}")
+    source_text = source_snapshot.read_text(encoding="utf-8")
+    lock_text = lock_snapshot.read_text(encoding="utf-8")
+    if lock_generation(lock_snapshot) != generation:
+        raise ConfigError(f"Config generation snapshot is invalid: {generation}")
+    user_config = replace(load_user_config(source_snapshot), source_path=source_path)
+    expected_lock, _ = build_lock_text(user_config, source_text, generation=generation)
+    if lock_text != expected_lock:
+        raise ConfigError(f"Config generation snapshot is stale or modified: {generation}")
+    atomic_write(source_path, source_text)
+    lock_path = resolved_config_path(source_path)
+    atomic_write(lock_path, lock_text)
+    return lock_path
+
+
 def write_user_and_lock(
     config: UserConfig, *, expected_source_sha256: str | None = None
 ) -> tuple[Path, list[RepositoryDetection]]:
@@ -469,6 +515,9 @@ def write_user_and_lock(
     lock_text, detections = build_lock_text(config, source_text, generation=current_generation + 1)
     atomic_write(config.source_path, source_text)
     atomic_write(lock_path, lock_text)
+    snapshot = generation_snapshot_path(config.source_path, current_generation + 1)
+    atomic_write(snapshot / "config.toml", source_text)
+    atomic_write(snapshot / "resolved.toml", lock_text)
     return lock_path, detections
 
 
