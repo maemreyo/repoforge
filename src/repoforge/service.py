@@ -25,6 +25,11 @@ from .security import (
 )
 from .state import StateStore, VerificationReceipt, WorkspaceRecord, utc_now
 from .workspace_create import WorkspaceCreateCommand, WorkspaceCreator, WorkspaceCreatorPorts
+from .workspace_file_read import (
+    WorkspaceFileReadCommand,
+    WorkspaceFileReader,
+    WorkspaceFileReadPorts,
+)
 from .workspace_file_write import (
     WorkspaceFileWriteCommand,
     WorkspaceFileWritePorts,
@@ -714,44 +719,37 @@ class CodingService:
         end_line: int = 500,
     ) -> dict[str, Any]:
         _, repo, path = self._workspace(workspace_id)
-        file_path = resolve_workspace_path(path, relative_path, repo)
+
+        # Pre-audit path validation and line clamping.
+        _ = resolve_workspace_path(path, relative_path, repo)
         start_line = max(1, start_line)
         end_line = max(start_line, min(end_line, start_line + 2000))
 
-        def operation() -> dict[str, Any]:
-            if not file_path.is_file():
-                raise WorkspaceError(f"File not found: {relative_path}")
-            if file_path.is_symlink():
-                raise SecurityError("Reading symlink files is not allowed")
-            size = file_path.stat().st_size
-            if size > self.config.server.max_file_bytes:
-                raise SecurityError(
-                    f"File size {size} exceeds max_file_bytes={self.config.server.max_file_bytes}"
-                )
-            data = file_path.read_bytes()
-            if b"\x00" in data:
-                raise SecurityError("Binary files are not supported by this tool")
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise SecurityError("File is not valid UTF-8") from exc
-            lines = text.splitlines()
-            selected = lines[start_line - 1 : end_line]
-            numbered = "\n".join(
-                f"{line_number}: {line}"
-                for line_number, line in enumerate(selected, start=start_line)
+        reader = WorkspaceFileReader(
+            WorkspaceFileReadPorts(
+                max_file_bytes=self.config.server.max_file_bytes,
+                max_tool_output_chars=self.config.server.max_tool_output_chars,
             )
-            bounded_content, truncated = self._bounded_text(numbered)
+        )
+        command = WorkspaceFileReadCommand(
+            workspace_id=workspace_id,
+            relative_path=relative_path,
+            start_line=start_line,
+            end_line=end_line,
+        )
+
+        def operation() -> dict[str, Any]:
+            result = reader.execute(repo, path, command)
             return {
-                "workspace_id": workspace_id,
-                "path": assert_path_allowed(relative_path, repo),
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "size_bytes": size,
-                "total_lines": len(lines),
-                "start_line": start_line,
-                "end_line": min(end_line, len(lines)),
-                "content": bounded_content,
-                "truncated": truncated,
+                "workspace_id": result.workspace_id,
+                "path": result.path,
+                "sha256": result.sha256,
+                "size_bytes": result.size_bytes,
+                "total_lines": result.total_lines,
+                "start_line": result.start_line,
+                "end_line": result.end_line,
+                "content": result.content,
+                "truncated": result.truncated,
             }
 
         return self._audit_call(
