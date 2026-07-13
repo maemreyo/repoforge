@@ -494,3 +494,15 @@ A RepoForge release candidate passes the full flow only when:
 
 Store a copy of the completed record outside the source archive or in a private operational evidence
 location. Do not commit tunnel credentials or raw environment dumps.
+
+## Guided onboarding full flow
+
+1. Create at least two local Git repositories, one linked worktree, and optionally two repositories with the same basename.
+2. Run `rf repo discover ROOT` and confirm the primary checkouts are eligible while the linked worktree is excluded.
+3. Run `rf onboard ROOT --plan-only`. Confirm no source config, accepted generation, or runtime state changes.
+4. Resolve every displayed decision and duplicate ID, then provide each exact approval token.
+5. Resume the session and confirm all selected repositories appear in one accepted generation.
+6. Confirm candidate smoke failure leaves configuration and runtime unchanged.
+7. Start the runtime and add another repository with `--activate auto`; confirm one hot reload or supervisor fallback.
+8. Inspect the session file permissions (`0700` directory, `0600` file) and verify it contains no API key, raw approval token, repository body, patch, diff, stdout, or stderr.
+9. Build and install the wheel, then run `scripts/verify-wheel-install.sh dist`; the installed-wheel test repeats onboarding without importing the source checkout.

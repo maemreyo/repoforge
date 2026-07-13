@@ -17,9 +17,11 @@ from .adapters.git import GitCliRepository
 from .adapters.github import GhCliGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
-from .adapters.persistence import JsonIdempotencyStore
+from .adapters.onboarding_environment import SystemOnboardingEnvironment
+from .adapters.persistence import JsonIdempotencyStore, JsonOnboardingStore
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
 from .adapters.repository import LocalRepositoryProbe
+from .adapters.repository.discovery import LocalRepositoryDiscovery
 from .adapters.runtime import (
     InProcessOperationGate,
     JsonRuntimeStore,
@@ -65,6 +67,14 @@ from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
+from .application.onboarding.activation import ConfigurationActivator
+from .application.onboarding.candidate import smoke_candidate
+from .application.onboarding.coordinator import OnboardingCoordinator
+from .application.onboarding.discover import OnboardingDiscoveryService
+from .application.onboarding.planner import OnboardingPlanner
+from .application.onboarding.preflight import OnboardingPreflightService
+from .application.repository_admin.proposals import RepositoryProposalService
+from .application.runtime.activation import GenerationActivator
 from .application.runtime.supervisor import RuntimeSupervisor
 from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
 from .domain.errors import ConfigError
@@ -81,9 +91,12 @@ from .ports import (
     IdGenerator,
     LockManager,
     MetricsSink,
+    OnboardingEnvironment,
+    OnboardingStore,
     OperationGate,
     ProcessInspector,
     PullRequestGateway,
+    RepositoryDiscovery,
     RepositoryProbe,
     RuntimeControlClient,
     RuntimeControlServer,
@@ -145,6 +158,59 @@ def build_repository_probe(state_root: Path | None = None) -> RepositoryProbe:
     root = (state_root or default_state_root()).expanduser().resolve()
     server = ServerConfig(root / "probe-workspaces", root)
     return LocalRepositoryProbe(SubprocessCommandExecutor(server))
+
+
+def build_onboarding_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> OnboardingStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonOnboardingStore(root, locks or build_lock_manager(root))
+
+
+def build_repository_discovery(state_root: Path | None = None) -> RepositoryDiscovery:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    server = ServerConfig(root / "discovery-workspaces", root)
+    return LocalRepositoryDiscovery(SubprocessCommandExecutor(server))
+
+
+def build_onboarding_environment() -> OnboardingEnvironment:
+    return SystemOnboardingEnvironment()
+
+
+def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
+    config_path = config_path.expanduser().resolve()
+    root = default_state_root()
+    locks = build_lock_manager(root)
+    configs = build_configuration_store(config_path, state_root=root, locks=locks)
+    runtime_path = configs.root / "managed-runtime-v3.json"
+    runtime = build_runtime_store(runtime_path)
+    activator = ConfigurationActivator(
+        configs=configs,
+        runtime=runtime,
+        activator=GenerationActivator(
+            configs=configs,
+            runtime=runtime,
+            mcp_control=build_runtime_control_client(configs.root / "mcp.sock"),
+            supervisor_control=build_runtime_control_client(configs.root / "supervisor.sock"),
+            launcher=build_runtime_launcher(),
+            ids=id_generator(),
+            clock=system_clock(),
+            config_path=config_path,
+        ),
+    )
+    return OnboardingCoordinator(
+        sessions=build_onboarding_store(root, locks=locks),
+        discovery=OnboardingDiscoveryService(build_repository_discovery(root)),
+        preflight=OnboardingPreflightService(build_onboarding_environment()),
+        planner=OnboardingPlanner(RepositoryProposalService(build_repository_probe(root))),
+        configs=configs,
+        clock=system_clock(),
+        ids=id_generator(),
+        smoke=lambda resolved, repo_ids: smoke_candidate(resolved, repo_ids, state_root=root),
+        activate=lambda generation, mode, wait, rollback: activator.activate(
+            generation, mode=mode, wait=wait, rollback_on_failure=rollback
+        ),
+    )
 
 
 def build_operation_gate() -> OperationGate:

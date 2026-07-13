@@ -13,12 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_release_contract_matches_frozen_golden() -> None:
+    from repoforge.interfaces.cli.contract import build_cli_release_contract
     from repoforge.interfaces.mcp.contract import build_release_contract
 
     expected = json.loads(
         (ROOT / "docs/contracts/release-contract-v1.json").read_text(encoding="utf-8")
     )
-    assert asyncio.run(build_release_contract()) == expected
+    actual = asyncio.run(build_release_contract())
+    actual["cli"] = build_cli_release_contract()
+    assert actual == expected
+    assert "onboard" in expected["cli"]["commands"]
+    assert expected["cli"]["commands"]["repo discover"]["read_only"] is True
 
 
 def test_minimal_and_legacy_config_fixtures_remain_compatible() -> None:
@@ -66,6 +71,7 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
         "ruff check src tests",
         "mypy --strict src/repoforge",
         "pytest --timeout=60 --cov=repoforge --cov-branch",
+        "test_onboarding_real_git.py",
         "scripts/check_release_contracts.py",
         "uv build",
         "scripts/verify-wheel-install.sh",

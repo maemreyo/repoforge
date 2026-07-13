@@ -1,6 +1,6 @@
 # Guided Local Repository Onboarding Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add a safe, resumable `rf onboard ROOT...` workflow that discovers eligible local Git repositories, guides repository-specific decisions and approvals, accepts the selected batch as one immutable configuration generation, and activates it at most once.
 
@@ -124,7 +124,7 @@
   - `ACTIVATION_FAILED`
   - `EXECUTABLE_SHADOWED`
 
-- [ ] **Step 1: Write failing domain tests**
+- [x] **Step 1: Write failing domain tests**
 
 ```python
 from dataclasses import replace
@@ -200,7 +200,7 @@ def test_summary_counts_repository_progress() -> None:
     assert summarize_session(session).skipped == 1
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -210,7 +210,7 @@ uv run pytest tests/test_onboarding_domain.py -v
 
 Expected: collection fails because `repoforge.domain.onboarding` does not exist.
 
-- [ ] **Step 3: Implement immutable models and transition table**
+- [x] **Step 3: Implement immutable models and transition table**
 
 Create enums with string values:
 
@@ -271,7 +271,7 @@ _ALLOWED_TRANSITIONS = {
 
 `OnboardingSession` must include `schema_version=1`, `revision`, timestamps, expected source/generation guards, repositories, exclusions, warning codes, accepted/active generations, and a redacted last-error dictionary.
 
-- [ ] **Step 4: Add stable onboarding error codes**
+- [x] **Step 4: Add stable onboarding error codes**
 
 Extend the existing `OperationErrorCode` enum and the exception-to-envelope mapping. Do not introduce a parallel error hierarchy. Each code must map to a concrete `safe_next_action`; for example:
 
@@ -282,7 +282,7 @@ OperationErrorCode.DUPLICATE_REPOSITORY_ID: (
 )
 ```
 
-- [ ] **Step 5: Run domain tests**
+- [x] **Step 5: Run domain tests**
 
 ```bash
 uv run pytest tests/test_onboarding_domain.py -v
@@ -290,7 +290,7 @@ uv run pytest tests/test_onboarding_domain.py -v
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Run architecture tests**
+- [x] **Step 6: Run architecture tests**
 
 ```bash
 uv run pytest tests/test_phase5_architecture.py -v
@@ -298,7 +298,7 @@ uv run pytest tests/test_phase5_architecture.py -v
 
 Expected: pass; domain imports only standard library and other domain modules.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/repoforge/domain/onboarding.py src/repoforge/domain/errors.py \
@@ -371,7 +371,7 @@ class OperatorIO(Protocol):
     def confirm(self, *, prompt: str, default: bool = False) -> bool: ...
 ```
 
-- [ ] **Step 1: Write protocol-shape tests**
+- [x] **Step 1: Write protocol-shape tests**
 
 ```python
 from pathlib import Path
@@ -397,7 +397,7 @@ def test_onboarding_store_exposes_optimistic_save() -> None:
     assert "expected_revision" in hints
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_ports.py -v
@@ -405,15 +405,15 @@ uv run pytest tests/test_onboarding_ports.py -v
 
 Expected: import failures for the new ports.
 
-- [ ] **Step 3: Implement the protocols without adapter imports**
+- [x] **Step 3: Implement the protocols without adapter imports**
 
 Use `typing.Protocol`, immutable dataclasses, `Path`, and the Task 1 domain types only.
 
-- [ ] **Step 4: Export ports**
+- [x] **Step 4: Export ports**
 
 Add explicit exports in `src/repoforge/ports/__init__.py`; do not use wildcard imports.
 
-- [ ] **Step 5: Verify ports and architecture**
+- [x] **Step 5: Verify ports and architecture**
 
 ```bash
 uv run pytest tests/test_onboarding_ports.py tests/test_phase5_architecture.py -v
@@ -422,7 +422,7 @@ uv run mypy --strict src/repoforge/ports src/repoforge/domain
 
 Expected: pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/repoforge/ports tests/test_onboarding_ports.py tests/test_phase5_architecture.py
@@ -446,7 +446,7 @@ git commit -m "feat(onboarding): define orchestration ports"
   - `JsonOnboardingStore(root: Path, locks: LockManager)`
   - `build_onboarding_store(state_root: Path | None = None, locks: LockManager | None = None) -> OnboardingStore`
 
-- [ ] **Step 1: Write failing persistence tests**
+- [x] **Step 1: Write failing persistence tests**
 
 ```python
 import json
@@ -492,7 +492,7 @@ def test_store_rejects_secret_fields_and_corrupt_payload(tmp_path, lock_manager)
         store.read(created.session_id)
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_session_store.py -v
@@ -500,7 +500,7 @@ uv run pytest tests/test_onboarding_session_store.py -v
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement canonical serialization**
+- [x] **Step 3: Implement canonical serialization**
 
 Write explicit `to_dict`/`from_dict` helpers for every domain dataclass. Reject:
 
@@ -514,7 +514,7 @@ Write explicit `to_dict`/`from_dict` helpers for every domain dataclass. Reject:
 
 Store only approval-token SHA-256 hashes.
 
-- [ ] **Step 4: Implement atomic private write**
+- [x] **Step 4: Implement atomic private write**
 
 Follow the repository's existing atomic write/fsync pattern:
 
@@ -528,7 +528,7 @@ Follow the repository's existing atomic write/fsync pattern:
 
 Raise `SESSION_STALE` if the stored revision differs from `expected_revision`.
 
-- [ ] **Step 5: Add bootstrap factory**
+- [x] **Step 5: Add bootstrap factory**
 
 ```python
 def build_onboarding_store(
@@ -539,7 +539,7 @@ def build_onboarding_store(
     return JsonOnboardingStore(root, locks or build_lock_manager(root))
 ```
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 ```bash
 uv run pytest tests/test_onboarding_session_store.py tests/test_bootstrap_factories.py -v
@@ -548,7 +548,7 @@ uv run mypy --strict src/repoforge/adapters/persistence/json_onboarding_store.py
 
 Expected: pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/repoforge/adapters/persistence/json_onboarding_store.py \
@@ -574,7 +574,7 @@ git commit -m "feat(onboarding): persist resumable private sessions"
   - `LocalRepositoryDiscovery(command: CommandExecutor)`
   - `build_repository_discovery(state_root: Path | None = None) -> RepositoryDiscovery`
 
-- [ ] **Step 1: Write real-Git RED tests**
+- [x] **Step 1: Write real-Git RED tests**
 
 Create helpers that initialize normal repositories, a bare repository, a nested distinct repository, and a linked worktree.
 
@@ -610,7 +610,7 @@ Also add:
 - unreadable directories produce an identity-level error/exclusion input rather than aborting the whole scan;
 - `max_depth` is enforced.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_repository_discovery.py tests/test_onboarding_real_git.py -v
@@ -618,7 +618,7 @@ uv run pytest tests/test_repository_discovery.py tests/test_onboarding_real_git.
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement bounded traversal**
+- [x] **Step 3: Implement bounded traversal**
 
 Use `os.scandir` with an explicit queue of `(path, depth)`. Never call `Path.rglob`. For each directory:
 
@@ -638,7 +638,7 @@ Resolve relative Git paths against the worktree root. Determine `primary` by com
 
 Do not inspect repository contents beyond Git metadata.
 
-- [ ] **Step 4: Implement stable ordering and de-duplication**
+- [x] **Step 4: Implement stable ordering and de-duplication**
 
 Sort identities by canonical path. Collapse repeated traversal hits with the tuple:
 
@@ -648,7 +648,7 @@ Sort identities by canonical path. Collapse repeated traversal hits with the tup
 
 Keep distinct nested repositories because their common dirs differ.
 
-- [ ] **Step 5: Add factory and run tests**
+- [x] **Step 5: Add factory and run tests**
 
 ```bash
 uv run pytest tests/test_repository_discovery.py tests/test_onboarding_real_git.py \
@@ -658,7 +658,7 @@ uv run mypy --strict src/repoforge/adapters/repository/discovery.py
 
 Expected: pass on Linux and macOS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/repoforge/adapters/repository/discovery.py \
@@ -705,7 +705,7 @@ class OnboardingDiscoveryService:
     ) -> DiscoveryResult: ...
 ```
 
-- [ ] **Step 1: Write classification RED tests**
+- [x] **Step 1: Write classification RED tests**
 
 Use a fake `RepositoryDiscovery` returning identities for:
 
@@ -719,7 +719,7 @@ Use a fake `RepositoryDiscovery` returning identities for:
 
 Assert exact stable exclusion reasons.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_discovery_service.py -v
@@ -727,7 +727,7 @@ uv run pytest tests/test_onboarding_discovery_service.py -v
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement classification**
+- [x] **Step 3: Implement classification**
 
 Rules, in order:
 
@@ -742,11 +742,11 @@ Rules, in order:
 
 Derive repository ID using the existing safe slug function; do not duplicate slug behavior.
 
-- [ ] **Step 4: Preserve parent/child relation**
+- [x] **Step 4: Preserve parent/child relation**
 
 For each eligible candidate, set `parent_repo_id` when its canonical path is contained by another eligible repository path with a distinct common dir.
 
-- [ ] **Step 5: Run tests and typecheck**
+- [x] **Step 5: Run tests and typecheck**
 
 ```bash
 uv run pytest tests/test_onboarding_discovery_service.py -v
@@ -755,7 +755,7 @@ uv run mypy --strict src/repoforge/application/onboarding/discover.py
 
 Expected: pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/repoforge/application/onboarding \
@@ -780,7 +780,7 @@ git commit -m "feat(onboarding): classify discovered repositories"
   - `OnboardingPreflightService`
   - `build_onboarding_environment() -> OnboardingEnvironment`
 
-- [ ] **Step 1: Write RED tests**
+- [x] **Step 1: Write RED tests**
 
 ```python
 def test_preflight_warns_when_virtualenv_rf_shadows_uv_tool(tmp_path, monkeypatch) -> None:
@@ -804,7 +804,7 @@ def test_preflight_warns_when_virtualenv_rf_shadows_uv_tool(tmp_path, monkeypatc
 
 Also test missing `git`, unauthenticated `gh`, missing tunnel client, absent API key with `activate=never` versus `activate=always`, and that no environment values are returned.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_preflight.py -v
@@ -812,7 +812,7 @@ uv run pytest tests/test_onboarding_preflight.py -v
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement adapter with bounded commands**
+- [x] **Step 3: Implement adapter with bounded commands**
 
 The adapter may run only:
 
@@ -826,7 +826,7 @@ uv tool dir --bin
 
 Each command uses `subprocess.run` with argv, `capture_output=True`, `check=False`, and a 10-second timeout. Return booleans and version first lines only; never return token-bearing output.
 
-- [ ] **Step 4: Implement shadowing logic**
+- [x] **Step 4: Implement shadowing logic**
 
 Warn when:
 
@@ -836,7 +836,7 @@ Warn when:
 
 Do not fail merely because of shadowing. Mark incompatible only when `rf --version` cannot report the running package's expected major version; use the package version constant rather than a hard-coded string.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 ```bash
 uv run pytest tests/test_onboarding_preflight.py tests/test_bootstrap_factories.py -v
@@ -846,7 +846,7 @@ uv run mypy --strict src/repoforge/application/onboarding/preflight.py \
 
 Expected: pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/repoforge/application/onboarding/preflight.py \
@@ -895,7 +895,7 @@ class OnboardingPlanner:
     ) -> tuple[OnboardingSession, OnboardingBatchPlan | None]: ...
 ```
 
-- [ ] **Step 1: Write RED tests**
+- [x] **Step 1: Write RED tests**
 
 Cases:
 
@@ -908,7 +908,7 @@ Cases:
 - duplicate repo IDs stop planning before proposals are accepted;
 - changing template from `standard` to `read_only` regenerates proposal ID.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_planner.py -v
@@ -916,7 +916,7 @@ uv run pytest tests/test_onboarding_planner.py -v
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement repository-scoped inputs**
+- [x] **Step 3: Implement repository-scoped inputs**
 
 Reuse the current CLI's semantics:
 
@@ -926,7 +926,7 @@ Reuse the current CLI's semantics:
 
 Move `_parse_decisions`, `_decisions_for_repo`, `_parse_overrides`, and `_overrides_for_repo` from `interfaces/cli/main.py` into `application/onboarding/inputs.py`. Keep same-name compatibility wrappers in `main.py` that delegate to the new functions until all existing CLI tests pass.
 
-- [ ] **Step 4: Implement exact approval verification**
+- [x] **Step 4: Implement exact approval verification**
 
 For each proposal, require `approve:<proposal_id>`. Call the existing verification helper; persist only:
 
@@ -936,7 +936,7 @@ hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 The batch plan may carry proposal IDs and approval hashes but never raw approval tokens.
 
-- [ ] **Step 5: Build one candidate configuration**
+- [x] **Step 5: Build one candidate configuration**
 
 Starting from existing or empty source/resolved documents:
 
@@ -949,7 +949,7 @@ Starting from existing or empty source/resolved documents:
 7. calculate capability delta against current resolved text;
 8. return one `OnboardingBatchPlan`.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 uv run pytest tests/test_onboarding_planner.py \
@@ -961,7 +961,7 @@ uv run mypy --strict src/repoforge/application/onboarding/inputs.py \
 
 Expected: pass and no change to existing proposal IDs for unchanged inputs.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/repoforge/application/onboarding/inputs.py \
@@ -1032,7 +1032,7 @@ def __init__(
 ) -> None: ...
 ```
 
-- [ ] **Step 1: Write RED coordinator tests**
+- [x] **Step 1: Write RED coordinator tests**
 
 Use fakes and assert:
 
@@ -1051,7 +1051,7 @@ Use fakes and assert:
 - activation failure with rollback enabled records recoverable failure and the exact activator result;
 - no raw approval token is present in stored session.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_coordinator.py -v
@@ -1059,7 +1059,7 @@ uv run pytest tests/test_onboarding_coordinator.py -v
 
 Expected: import failure.
 
-- [ ] **Step 3: Extract reusable candidate smoke helper**
+- [x] **Step 3: Extract reusable candidate smoke helper**
 
 Move `_smoke_resolved` out of `interfaces/cli/main.py` into an application or bootstrap-owned callable with signature:
 
@@ -1074,7 +1074,7 @@ def smoke_candidate(
 
 It must use one temporary candidate file and isolated state/workspace roots, then smoke each repo. Existing `setup` and `repo enroll` tests must continue to pass through the extracted helper.
 
-- [ ] **Step 4: Extract reusable activation façade**
+- [x] **Step 4: Extract reusable activation façade**
 
 Move `_activate` behavior behind:
 
@@ -1092,7 +1092,7 @@ class ConfigurationActivator:
 
 Keep runtime semantics unchanged. Existing CLI commands call this façade.
 
-- [ ] **Step 5: Implement coordinator transaction**
+- [x] **Step 5: Implement coordinator transaction**
 
 Ordered behavior:
 
@@ -1113,7 +1113,7 @@ Ordered behavior:
 
 The config accept call must carry one `ApprovalEvent` whose digest is computed from sorted per-repository approval hashes.
 
-- [ ] **Step 6: Add composition factory**
+- [x] **Step 6: Add composition factory**
 
 ```python
 def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
@@ -1122,7 +1122,7 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
 
 Use one lock manager and one state root for all persistence/runtime collaborators.
 
-- [ ] **Step 7: Run focused and compatibility tests**
+- [x] **Step 7: Run focused and compatibility tests**
 
 ```bash
 uv run pytest tests/test_onboarding_coordinator.py \
@@ -1137,7 +1137,7 @@ uv run mypy --strict src/repoforge/application/onboarding/candidate.py \
 
 Expected: pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/repoforge/application/onboarding/candidate.py \
@@ -1168,7 +1168,7 @@ git commit -m "feat(onboarding): accept and activate repository batches"
   - exit code `2` for stable operation failure
   - exit code `0` for a deliberately paused resumable session with `"status": "paused"`
 
-- [ ] **Step 1: Write parser and non-interactive RED tests**
+- [x] **Step 1: Write parser and non-interactive RED tests**
 
 ```python
 def test_repo_discover_is_read_only(cli, tmp_path) -> None:
@@ -1189,7 +1189,7 @@ def test_non_interactive_onboard_returns_three_when_approval_missing(cli, repo_r
 
 Also test all options from the spec, config option normalization before/after command, existing config branch, duplicate IDs, `--plan-only`, and JSON error envelopes.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_cli.py tests/test_cli_surface_coverage.py -v
@@ -1197,7 +1197,7 @@ uv run pytest tests/test_onboarding_cli.py tests/test_cli_surface_coverage.py -v
 
 Expected: parser rejects `onboard` and `repo discover`.
 
-- [ ] **Step 3: Implement parser in focused module**
+- [x] **Step 3: Implement parser in focused module**
 
 `main.py` calls:
 
@@ -1213,7 +1213,7 @@ if handled is not None:
 
 Do not import concrete adapters in `interfaces/cli/onboarding.py`; receive a coordinator factory from bootstrap or a small composition function.
 
-- [ ] **Step 4: Implement structured output**
+- [x] **Step 4: Implement structured output**
 
 Required keys for incomplete onboarding:
 
@@ -1233,7 +1233,7 @@ Required keys for incomplete onboarding:
 
 For security, approval tokens may be emitted to the operator because they are challenge tokens, but they must not be persisted. Never include API-key availability beyond a boolean.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 ```bash
 uv run pytest tests/test_onboarding_cli.py tests/test_cli_surface_coverage.py \
@@ -1243,7 +1243,7 @@ uv run mypy --strict src/repoforge/interfaces/cli
 
 Expected: pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/repoforge/interfaces/cli/onboarding.py \
@@ -1271,7 +1271,7 @@ git commit -m "feat(cli): add non-interactive guided onboarding"
   - `ScriptedOperatorIO` only in tests, not production
   - guided actions `approve`, `strict`, `read_only`, `details`, `skip`, `pause`
 
-- [ ] **Step 1: Write RED interaction tests**
+- [x] **Step 1: Write RED interaction tests**
 
 Use `io.StringIO` and scripted choices. Test:
 
@@ -1286,7 +1286,7 @@ Use `io.StringIO` and scripted choices. Test:
 - EOF or non-TTY while input is required returns `INTERACTION_REQUIRED`;
 - no secret environment values appear in stdout/stderr.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_terminal_operator_io.py \
@@ -1295,7 +1295,7 @@ uv run pytest tests/test_terminal_operator_io.py \
 
 Expected: failures because terminal adapter does not exist.
 
-- [ ] **Step 3: Implement terminal adapter**
+- [x] **Step 3: Implement terminal adapter**
 
 Use plain standard-library I/O. Do not add Rich, Click, Prompt Toolkit, or curses.
 
@@ -1308,7 +1308,7 @@ Use plain standard-library I/O. Do not add Rich, Click, Prompt Toolkit, or curse
 
 `ask(secret=True)` uses `getpass.getpass` only when needed; this onboarding feature must not ask for the control-plane key because runtime startup already requires it in the environment.
 
-- [ ] **Step 4: Implement wizard loop in interface**
+- [x] **Step 4: Implement wizard loop in interface**
 
 The loop asks the coordinator/planner to regenerate session state after each decision. It does not edit proposal objects itself.
 
@@ -1320,7 +1320,7 @@ Apply this reviewed batch as one configuration generation? [y/N]
 
 No “approve all unseen” command exists.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 ```bash
 uv run pytest tests/test_terminal_operator_io.py tests/test_onboarding_cli.py -v
@@ -1330,7 +1330,7 @@ uv run mypy --strict src/repoforge/adapters/operator \
 
 Expected: pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/repoforge/adapters/operator src/repoforge/bootstrap.py \
@@ -1357,7 +1357,7 @@ git commit -m "feat(cli): add interactive onboarding wizard"
   - `rf onboard status SESSION_ID`
   - `rf onboard cancel SESSION_ID`
 
-- [ ] **Step 1: Write RED resume tests**
+- [x] **Step 1: Write RED resume tests**
 
 Cases:
 
@@ -1372,7 +1372,7 @@ Cases:
 - completed session status is read-only;
 - raw approval token is not required to resume when the persisted hash equals `sha256(f"approve:{proposal_id}")`; a changed proposal ID clears the hash and returns `APPROVAL_REQUIRED`.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_onboarding_resume.py -v
@@ -1380,11 +1380,11 @@ uv run pytest tests/test_onboarding_resume.py -v
 
 Expected: failures for missing resume methods.
 
-- [ ] **Step 3: Implement session action-state memory**
+- [x] **Step 3: Implement session action-state memory**
 
 Add `resume_target: OnboardingStatus | None` to the domain session if not already included. When pausing or failing recoverably, persist the previous actionable state. Transition from `paused` or `failed_recoverable` only to that state after validation.
 
-- [ ] **Step 4: Implement revalidation order**
+- [x] **Step 4: Implement revalidation order**
 
 1. load and schema-check session;
 2. ensure not cancelled/invalid;
@@ -1398,13 +1398,13 @@ Add `resume_target: OnboardingStatus | None` to the domain session if not alread
 10. persist the revalidated session;
 11. continue planning/apply.
 
-- [ ] **Step 5: Implement status and cancel CLI**
+- [x] **Step 5: Implement status and cancel CLI**
 
 `status` never probes repository contents; it reads session metadata and current config/runtime generation only.
 
 `cancel` sets status to `cancelled`, increments revision, and reports any already accepted generation. It does not roll back configuration.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 uv run pytest tests/test_onboarding_resume.py tests/test_onboarding_cli.py \
@@ -1415,7 +1415,7 @@ uv run mypy --strict src/repoforge/application/onboarding/coordinator.py \
 
 Expected: pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/repoforge/domain/onboarding.py \
@@ -1450,7 +1450,7 @@ git commit -m "feat(onboarding): resume and manage onboarding sessions"
   - `rf repo discover`
   - options, defaults, exit codes, stable error codes, session schema version
 
-- [ ] **Step 1: Write release-contract RED test**
+- [x] **Step 1: Write release-contract RED test**
 
 Extend the contract test to assert:
 
@@ -1462,7 +1462,7 @@ assert contract["onboarding_session_schema"] == 1
 assert "DUPLICATE_REPOSITORY_ID" in contract["stable_error_codes"]
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 uv run pytest tests/test_phase8_program_completion.py -v
@@ -1470,7 +1470,7 @@ uv run pytest tests/test_phase8_program_completion.py -v
 
 Expected: frozen contract mismatch.
 
-- [ ] **Step 3: Update contract generator/checker**
+- [x] **Step 3: Update contract generator/checker**
 
 Generate parser metadata from `build_parser()` and compare:
 
@@ -1484,7 +1484,7 @@ Generate parser metadata from `build_parser()` and compare:
 
 Do not hand-maintain parser metadata in two Python files.
 
-- [ ] **Step 4: Add installed-wheel E2E**
+- [x] **Step 4: Add installed-wheel E2E**
 
 From a fresh wheel-only venv:
 
@@ -1505,7 +1505,7 @@ From a fresh wheel-only venv:
 
 The E2E test must import RepoForge only from the installed wheel, never from the source tree.
 
-- [ ] **Step 5: Update CI**
+- [x] **Step 5: Update CI**
 
 Ensure Linux and macOS jobs run:
 
@@ -1521,7 +1521,7 @@ bash scripts/verify-wheel-install.sh
 
 Keep per-test timeout `60` seconds.
 
-- [ ] **Step 6: Update operator documentation**
+- [x] **Step 6: Update operator documentation**
 
 Replace manual `find`, `jq`, and shell loops with:
 
@@ -1542,7 +1542,7 @@ Document:
 - executable-shadow warning;
 - API key still belongs in the runtime environment, not onboarding state.
 
-- [ ] **Step 7: Run the full production gate**
+- [x] **Step 7: Run the full production gate**
 
 ```bash
 uv sync --extra dev --frozen
@@ -1576,7 +1576,9 @@ uv run pytest tests/test_repository_discovery.py \
 
 Expected: pass, including linked-worktree discovery and tunnel-child lifecycle regressions.
 
-- [ ] **Step 9: Commit**
+Pending external evidence: run after pushing this branch; this Linux environment cannot certify the macOS runner.
+
+- [x] **Step 9: Commit**
 
 ```bash
 git add docs README.md scripts .github/workflows/production-gate.yml \
@@ -1588,22 +1590,22 @@ git commit -m "docs(onboarding): publish guided onboarding workflow"
 
 ## Final Verification Checklist
 
-- [ ] `git status --short` shows only intended changes before the final commit and is empty after commit.
-- [ ] `git diff --check` passes.
-- [ ] `uv run python scripts/check_release_contracts.py` passes.
-- [ ] Ruff format and lint pass.
-- [ ] Strict Mypy passes for all `src/repoforge`.
-- [ ] Full pytest suite passes with branch coverage `>=80%`.
-- [ ] Existing setup/proposal/enroll/refresh tests remain green.
-- [ ] Existing runtime hot-reload/restart/rollback tests remain green.
-- [ ] Real Git discovery excludes linked worktrees and retains real nested repositories.
-- [ ] Private session permissions are `0700`/`0600`.
-- [ ] Session artifacts contain no seeded token, secret, body, patch, diff, stdout, or stderr.
-- [ ] Missing decisions/approvals exit with code `3` and no config mutation.
-- [ ] Candidate smoke failure leaves config and runtime unchanged.
-- [ ] Complete batch accepts exactly one generation and performs at most one activation.
-- [ ] Resume detects config and repository-facts drift.
-- [ ] Installed-wheel E2E passes without source imports.
+- [x] `git status --short` shows only intended changes before the final commit and is empty after commit.
+- [x] `git diff --check` passes.
+- [x] `uv run python scripts/check_release_contracts.py` passes.
+- [x] Ruff format and lint pass.
+- [x] Strict Mypy passes for all `src/repoforge`.
+- [x] Full pytest suite passes with branch coverage `>=80%`.
+- [x] Existing setup/proposal/enroll/refresh tests remain green.
+- [x] Existing runtime hot-reload/restart/rollback tests remain green.
+- [x] Real Git discovery excludes linked worktrees and retains real nested repositories.
+- [x] Private session permissions are `0700`/`0600`.
+- [x] Session artifacts contain no seeded token, secret, body, patch, diff, stdout, or stderr.
+- [x] Missing decisions/approvals exit with code `3` and no config mutation.
+- [x] Candidate smoke failure leaves config and runtime unchanged.
+- [x] Complete batch accepts exactly one generation and performs at most one activation.
+- [x] Resume detects config and repository-facts drift.
+- [x] Installed-wheel E2E passes without source imports.
 - [ ] Linux and macOS production-gate jobs pass.
 
 ## Recommended Execution Order and Review Gates
@@ -1622,3 +1624,20 @@ git diff HEAD^ --check
 ```
 
 Request review against the task's interfaces and invariants before starting the next task. Do not combine Task 8 with CLI work; transaction semantics must be reviewable independently from presentation.
+
+
+## Implementation Evidence
+
+Completed on 2026-07-14 against `main@8cb93ba46be980a414d58865aeec052d9061de02` (the approved implementation plan still records its code baseline as `85b809a90aba43f1dd6630438aed792ef08736c2`).
+
+- Release contract: PASS, 27 MCP tools plus frozen guided-onboarding CLI contract.
+- Ruff format/lint: PASS.
+- Strict Mypy: PASS for 143 source files.
+- Pytest: PASS, 161 tests.
+- Branch coverage: PASS, 81.04% (required 80%).
+- Wheel and source distribution build: PASS.
+- Fresh wheel install and guided-onboarding real-Git E2E: PASS.
+- Session permission and secret-omission checks: PASS.
+- Atomic batch acceptance and single-activation tests: PASS.
+
+The remote Linux/macOS GitHub Actions matrix remains a post-push observation gate; the workflow contains the explicit real-Git onboarding regression step on both supported operating systems.

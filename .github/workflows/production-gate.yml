@@ -55,6 +55,8 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
       - run: uv sync --extra dev --frozen
+      - name: Guided onboarding real-Git regressions
+        run: uv run pytest tests/test_onboarding_real_git.py tests/test_repository_discovery.py
       - run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
 
   package:

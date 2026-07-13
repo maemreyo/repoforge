@@ -116,3 +116,24 @@ RepoForge does not expose tools for:
 - modifying GitHub Actions workflows.
 
 These omissions are part of the security model, not missing convenience features.
+
+## Guided onboarding CLI
+
+### `rf repo discover ROOT [ROOT ...]`
+
+Read-only Git-aware discovery. Reports eligible and excluded repositories with stable reasons. It never creates proposals, sessions, configuration generations, workspaces, or runtime changes.
+
+### `rf onboard ROOT [ROOT ...]`
+
+Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. Important options include `--template`, `--activate`, `--plan-only`, `--non-interactive`, `--decision`, `--policy-override`, `--approve`, `--repo-id PATH=ID`, `--wait`, and `--rollback-on-failure`.
+
+### Session actions
+
+```bash
+rf onboard status SESSION_ID
+rf onboard resume SESSION_ID
+rf onboard cancel SESSION_ID
+rf onboard --resume SESSION_ID
+```
+
+Exit codes are stable: `0` for completion/read-only success, `2` for validation or operation failure, and `3` when decisions or exact approvals remain. Session files are private metadata with schema version 1.

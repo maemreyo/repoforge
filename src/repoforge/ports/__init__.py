@@ -12,8 +12,12 @@ from .idempotency import IdempotencyStore
 from .ids import IdGenerator
 from .locking import LockManager
 from .metrics import MetricsSink
+from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
+from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
+from .operator_io import OperatorIO
 from .process import ProcessInspector
+from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
 from .runtime_control import (
     RuntimeControlClient,
@@ -30,6 +34,8 @@ __all__ = [
     "CommandExecutor",
     "CommandResult",
     "ConfigurationStore",
+    "DiscoveryRequest",
+    "EnvironmentPreflight",
     "ExecutableLocator",
     "FileSystem",
     "GateState",
@@ -38,9 +44,13 @@ __all__ = [
     "IdempotencyStore",
     "LockManager",
     "MetricsSink",
+    "OnboardingEnvironment",
+    "OnboardingStore",
     "OperationGate",
+    "OperatorIO",
     "ProcessInspector",
     "PullRequestGateway",
+    "RepositoryDiscovery",
     "RepositoryProbe",
     "RuntimeControlClient",
     "RuntimeControlServer",

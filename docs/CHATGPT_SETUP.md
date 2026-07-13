@@ -179,3 +179,33 @@ create pull requests.
 Refresh workspace status and inspect the diff. A commit is rejected when the workspace changed after
 verification, the verification receipt is missing, a denied path changed, or the configured change
 budget was exceeded. Restore the intended tree and rerun verification.
+
+## Guided multi-repository onboarding
+
+Prefer the guided workflow over manually assembling JSON and approval-token loops:
+
+```bash
+rf onboard /Users/you/Documents/projects
+```
+
+RepoForge performs environment preflight, discovers real Git worktrees, excludes linked worktrees such as `.claude/worktrees/*`, detects an existing configuration, skips already enrolled paths, and reviews each proposal in the terminal. It accepts the selected batch as one immutable generation and performs at most one runtime activation.
+
+For automation, first request a non-mutating plan:
+
+```bash
+rf onboard /Users/you/Documents/projects \
+  --non-interactive \
+  --tunnel-id tunnel_... \
+  --activate never \
+  --plan-only
+```
+
+Re-run with the exact decisions and `--approve approve:PROPOSAL_ID` values shown. Exit code `3` means operator input is still required and no unsafe capability was silently approved. Resume interrupted work with `rf onboard resume SESSION_ID`; inspect or cancel it with `status` and `cancel`.
+
+When two repositories have the same directory name, resolve the conflict explicitly:
+
+```bash
+rf onboard /Users/you/Documents/projects \
+  --repo-id /Users/you/Documents/projects/client/api=client-api \
+  --repo-id /Users/you/Documents/projects/legacy/api=legacy-api
+```

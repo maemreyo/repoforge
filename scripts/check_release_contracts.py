@@ -15,6 +15,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from repoforge.interfaces.cli.contract import build_cli_release_contract  # noqa: E402
 from repoforge.interfaces.mcp.contract import build_release_contract  # noqa: E402
 
 CONTRACT_PATH = ROOT / "docs/contracts/release-contract-v1.json"
@@ -35,6 +36,7 @@ def main() -> int:
     args = parser.parse_args()
 
     actual = asyncio.run(build_release_contract())
+    actual["cli"] = build_cli_release_contract()
     rendered = _encoded(actual)
     if args.write:
         CONTRACT_PATH.parent.mkdir(parents=True, exist_ok=True)

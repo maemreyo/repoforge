@@ -263,3 +263,24 @@ protocol tests.
 ## License
 
 RepoForge is distributed under the [MIT License](LICENSE).
+
+## Guided onboarding for all local repositories
+
+The production happy path is now Git-aware and config-aware. Point RepoForge at the directory that contains your local repositories; it excludes linked worktrees and generated directories, skips paths already enrolled, and guides each required policy decision and exact approval without `find`, `jq`, or shell loops.
+
+```bash
+uv tool install --force 'git+https://github.com/maemreyo/repoforge.git@main'
+rf onboard /absolute/root/containing/repos
+rf runtime start
+```
+
+Useful supporting commands:
+
+```bash
+rf repo discover /absolute/root/containing/repos
+rf onboard status SESSION_ID
+rf onboard resume SESSION_ID
+rf onboard cancel SESSION_ID
+```
+
+Use `--non-interactive` only when every decision, exact `approve:PROPOSAL_ID`, and duplicate-path ID override is supplied explicitly. For duplicate directory names, pass `--repo-id /canonical/path=unique-id`. Interrupted interactive sessions are private, resumable metadata under `~/.local/state/repoforge/onboarding/`; they never store API keys, raw approval tokens, repository contents, patches, or command output.

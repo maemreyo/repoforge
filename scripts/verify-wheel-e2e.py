@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,80 @@ def _toml(value: str) -> str:
     return json.dumps(value)
 
 
+def _rf(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "repoforge", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _verify_guided_onboarding(root: Path, source: Path) -> dict[str, object]:
+    home = root / "onboarding-home"
+    home.mkdir()
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env.pop("VIRTUAL_ENV", None)
+    env["PATH"] = os.pathsep.join((str(Path(sys.executable).parent), env.get("PATH", "")))
+    config = home / ".config/repoforge/config.toml"
+    preview = _rf(
+        "--config",
+        str(config),
+        "onboard",
+        str(source.parent),
+        "--non-interactive",
+        "--tunnel-id",
+        "wheel-e2e-tunnel",
+        "--activate",
+        "never",
+        "--plan-only",
+        env=env,
+    )
+    assert preview.returncode == 3, preview.stdout + preview.stderr
+    payload = json.loads(preview.stdout)
+    session_id = str(payload["session_id"])
+    repositories = payload["session"]["repositories"]
+    selected = next(
+        item for item in repositories if item["candidate"]["identity"]["path"] == str(source)
+    )
+    proposal_id = str(selected["proposal_id"])
+    token = f"approve:{proposal_id}"
+    completed = _rf(
+        "--config",
+        str(config),
+        "onboard",
+        "resume",
+        session_id,
+        "--non-interactive",
+        "--tunnel-id",
+        "wheel-e2e-tunnel",
+        "--activate",
+        "never",
+        "--approve",
+        token,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    completed_payload = json.loads(completed.stdout)
+    assert completed_payload["status"] == "completed"
+    listed = _rf("--config", str(config), "repo", "list", env=env)
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    listed_payload = json.loads(listed.stdout)
+    assert any(item["path"] == str(source) for item in listed_payload["repositories"])
+    session_path = home / ".local/state/repoforge/onboarding" / f"{session_id}.json"
+    persisted = session_path.read_text(encoding="utf-8")
+    assert token not in persisted
+    assert "CONTROL_PLANE_API_KEY" not in persisted
+    assert session_path.stat().st_mode & 0o777 == 0o600
+    assert session_path.parent.stat().st_mode & 0o777 == 0o700
+    return {
+        "session_id": session_id,
+        "generation": completed_payload["session"]["accepted_generation"],
+    }
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="repoforge-wheel-e2e-") as raw_root:
         root = Path(raw_root)
@@ -43,6 +118,8 @@ def main() -> int:
         _git("commit", "-m", "initial", cwd=source)
         _git("branch", "-M", "main", cwd=source)
         _git("push", "-u", "origin", "main", cwd=source)
+
+        onboarding = _verify_guided_onboarding(root, source)
 
         config_path = root / "resolved.toml"
         config_path.write_text(
@@ -117,6 +194,7 @@ commands = [[{_toml(sys.executable)}, "-c", "from pathlib import Path; assert Pa
                     "workspace_id": workspace_id,
                     "head_sha": committed["head_sha"],
                     "remote_branch": created["branch"],
+                    "onboarding": onboarding,
                 },
                 sort_keys=True,
             )

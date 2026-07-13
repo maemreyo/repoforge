@@ -28,6 +28,7 @@ from ...application.configuration.source import (
     render_source,
 )
 from ...application.diagnostics import build_diagnostics_bundle
+from ...application.onboarding.inputs import for_repository, parse_assignments
 from ...application.repository_admin.proposals import RepositoryProposalService
 from ...application.runtime.activation import GenerationActivator
 from ...application.runtime.hot_reload import (
@@ -75,6 +76,7 @@ from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
 from ..runtime.host import McpRuntimeHost
+from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
 
 _OUTPUT_FORMAT = "json"
 
@@ -187,35 +189,19 @@ def _runtime_environment(args: argparse.Namespace) -> dict[str, str]:
 
 
 def _parse_decisions(values: list[str]) -> dict[str, str]:
-    decisions: dict[str, str] = {}
-    for value in values:
-        key, separator, selected = value.partition("=")
-        if not separator or not key or not selected:
-            raise ValueError("--decision must use CODE=CHOICE or REPO_ID.CODE=CHOICE")
-        decisions[key] = selected
-    return decisions
+    return parse_assignments(values, option="--decision")
 
 
 def _decisions_for_repo(decisions: dict[str, str], repo_id: str) -> dict[str, str]:
-    """Return global decisions plus repository-scoped overrides for multi-repo setup."""
-    selected = {key: value for key, value in decisions.items() if "." not in key}
-    prefix = f"{repo_id}."
-    selected.update(
-        {
-            key.removeprefix(prefix): value
-            for key, value in decisions.items()
-            if key.startswith(prefix)
-        }
-    )
-    return selected
+    return for_repository(decisions, repo_id)
 
 
 def _parse_overrides(values: list[str]) -> dict[str, str]:
-    return _parse_decisions(values)
+    return parse_assignments(values, option="--policy-override")
 
 
 def _overrides_for_repo(overrides: dict[str, str], repo_id: str) -> dict[str, str]:
-    return _decisions_for_repo(overrides, repo_id)
+    return for_repository(overrides, repo_id)
 
 
 def _proposal_data(proposal: RepositoryProposal) -> dict[str, Any]:
@@ -1177,6 +1163,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--rollback-on-failure", action=argparse.BooleanOptionalAction, default=True)
     repo = commands.add_parser("repo")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True)
+    add_onboarding_parsers(commands, repo_sub)
     for name in ("inspect", "propose", "enroll", "add"):
         item = repo_sub.add_parser(name)
         item.add_argument("path")
@@ -1259,9 +1246,13 @@ def main(argv: list[str] | None = None) -> int:
             args.runtime_command = "start"
             args.foreground = not args.background
             return _runtime_command(args)
+        if args.command == "onboard":
+            return run_onboarding_command(args, render=_json)
         if args.command == "setup":
             return _setup(args)
         if args.command == "repo":
+            if args.repo_command == "discover":
+                return run_repo_discover(args, render=_json)
             if args.repo_command == "inspect":
                 return _repo_inspect(args)
             if args.repo_command == "propose":
