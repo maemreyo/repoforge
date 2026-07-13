@@ -20,6 +20,7 @@ from repoforge.onboarding import (
     _start,
     handle_onboarding_command,
 )
+from repoforge.proposal import ProposalAssessment, ProposalConfidence
 from repoforge.runtime import ManagedRuntime
 from repoforge.user_config import TunnelSettings, UserConfig, UserRepository, render_user_config
 
@@ -38,6 +39,10 @@ def write_minimal_config(tmp_path: Path, *, repo_ids: tuple[str, ...] = ("demo",
     )
     config_path.write_text(render_user_config(config), encoding="utf-8")
     return config_path
+
+
+def high_confidence_assessment() -> ProposalAssessment:
+    return ProposalAssessment(ProposalConfidence.HIGH, (), ())
 
 
 class FakeService:
@@ -95,6 +100,9 @@ def test_setup_writes_minimal_config_runs_doctor_and_smoke(
     captured: dict[str, UserConfig] = {}
 
     monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
+    monkeypatch.setattr(
+        onboarding, "assess_repository_proposal", lambda detection: high_confidence_assessment()
+    )
 
     def write(config: UserConfig, **_: Any) -> tuple[Path, list[Any]]:
         captured["config"] = config
@@ -189,6 +197,9 @@ def test_repo_add_and_remove_update_config_atomically(
     added_path.mkdir()
     writes: list[UserConfig] = []
     monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
+    monkeypatch.setattr(
+        onboarding, "assess_repository_proposal", lambda detection: high_confidence_assessment()
+    )
 
     def write(updated: UserConfig, **_: Any) -> tuple[Path, list[Any]]:
         writes.append(updated)
@@ -220,6 +231,12 @@ def test_repo_add_preview_does_not_write_configuration(
     candidate.mkdir()
     monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
     monkeypatch.setattr(
+        onboarding, "assess_repository_proposal", lambda detection: high_confidence_assessment()
+    )
+    monkeypatch.setattr(
+        onboarding, "assess_repository_proposal", lambda detection: high_confidence_assessment()
+    )
+    monkeypatch.setattr(
         onboarding, "profile_summary", lambda detections: {"candidate": {"test": {}}}
     )
     monkeypatch.setattr(
@@ -249,6 +266,9 @@ def test_repo_add_requires_exact_proposal_approval(
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
+    monkeypatch.setattr(
+        onboarding, "assess_repository_proposal", lambda detection: high_confidence_assessment()
+    )
     monkeypatch.setattr(
         onboarding, "profile_summary", lambda detections: {"candidate": {"test": {}}}
     )
@@ -293,6 +313,9 @@ def test_repo_inspect_returns_a_no_write_proposal(
     )()
     monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: detection)
     monkeypatch.setattr(
+        onboarding, "assess_repository_proposal", lambda detected: high_confidence_assessment()
+    )
+    monkeypatch.setattr(
         onboarding, "profile_summary", lambda detections: {"candidate": {"test": {}}}
     )
 
@@ -301,6 +324,46 @@ def test_repo_inspect_returns_a_no_write_proposal(
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "pending_approval"
     assert output["instruction_files"] == ["AGENTS.md"]
+
+
+def test_blocked_proposal_cannot_enroll_even_with_matching_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    detection = type(
+        "Detection",
+        (),
+        {
+            "repo_id": "candidate",
+            "profiles": (),
+            "warnings": ("No manifest",),
+            "ecosystem": "generic",
+        },
+    )()
+    monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: detection)
+    monkeypatch.setattr(onboarding, "profile_summary", lambda detections: {"candidate": {}})
+    monkeypatch.setattr(
+        onboarding, "write_user_and_lock", lambda *args, **kwargs: pytest.fail("wrote")
+    )
+
+    assert (
+        _repo_add(
+            argparse.Namespace(
+                config=str(config),
+                path=str(candidate),
+                repo_id="candidate",
+                preview=False,
+                approve="anything",
+            )
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["confidence"] == "blocked"
+    assert output["required_decisions"][0]["code"] == "verification_profiles"
 
 
 def test_repo_refresh_previews_then_accepts_changes(
@@ -518,6 +581,14 @@ def test_runtime_status_accepts_config_after_status(
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "stopped"
     assert output["config_generation"] == 1
+    assert output["health"] == [
+        {"name": "managed_tunnel", "ok": False, "detail": "no managed tunnel process"},
+        {
+            "name": "mcp_process",
+            "ok": False,
+            "detail": "MCP child has not reported an active generation",
+        },
+    ]
 
 
 def test_runtime_status_reports_starting_for_managed_tunnel_without_mcp_state(
@@ -538,6 +609,8 @@ def test_runtime_status_reports_starting_for_managed_tunnel_without_mcp_state(
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "starting"
     assert output["managed_pid"] == os.getpid()
+    assert output["health"][0]["ok"] is True
+    assert output["health"][1]["ok"] is False
 
 
 def test_runtime_start_routes_to_managed_start(
@@ -554,6 +627,26 @@ def test_runtime_start_routes_to_managed_start(
     monkeypatch.setattr(onboarding, "_start", start)
 
     assert handle_onboarding_command(["runtime", "start", "--config", str(config)]) == 0
+    assert captured == {"managed": True, "dry_run": False}
+
+
+def test_runtime_reload_routes_to_managed_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write_minimal_config(tmp_path)
+    stopped: list[Path] = []
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(onboarding, "stop_managed_runtime", lambda path: stopped.append(path))
+
+    def start(args: argparse.Namespace, *, emit: bool = True) -> int:
+        captured["managed"] = args.managed
+        captured["dry_run"] = args.dry_run
+        return 0
+
+    monkeypatch.setattr(onboarding, "_start", start)
+
+    assert handle_onboarding_command(["runtime", "reload", "--config", str(config)]) == 0
+    assert len(stopped) == 1
     assert captured == {"managed": True, "dry_run": False}
 
 
@@ -593,6 +686,9 @@ def test_repo_add_restarts_an_active_managed_runtime(
     lock.write_text("[repoforge_lock]\ngeneration = 1\n", encoding="utf-8")
     monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
     monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
+    monkeypatch.setattr(
+        onboarding, "assess_repository_proposal", lambda detection: high_confidence_assessment()
+    )
     monkeypatch.setattr(onboarding, "profile_summary", lambda detections: {"candidate": {}})
     monkeypatch.setattr(
         onboarding,

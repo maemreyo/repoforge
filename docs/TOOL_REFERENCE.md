@@ -21,6 +21,14 @@ health-check rollback, or in-process hot reload.
 reader bounds file access to one megabyte and redacts credential-shaped `token`, `secret`, password,
 authorization, and control-plane-key values before printing; log bodies never enter the audit log.
 
+`rf runtime status` includes two bounded local checks: whether the identity-validated managed tunnel
+process is live and whether its MCP child has published an active generation. It performs no network
+health request and therefore cannot disclose tunnel credentials.
+
+`rf runtime reload` is currently the supervisor-managed restart strategy. It validates and stops only
+the recorded managed process group before starting the latest reviewed configuration; it does not
+mutate a live MCP container in place.
+
 When a managed runtime is active, accepted repository additions and refreshes restart it automatically;
 a failed expansion restores the prior validated generation. A repository removal is restrictive: failed
 activation leaves the restricted configuration on disk and never restores removed repository access.

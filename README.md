@@ -134,6 +134,7 @@ rf runtime status
 rf runtime start
 rf runtime stop
 rf runtime restart
+rf runtime reload
 rf runtime logs --tail 100
 rf config history
 rf config rollback 3
@@ -147,6 +148,10 @@ and restart requirement; `rf runtime status` makes that comparison explicit.
 only affect that identity-validated managed child. `rf start` remains the foreground compatibility
 entry point.
 `rf runtime logs` reads a bounded, redacted tail from the managed tunnel child only.
+`rf runtime status` includes local health evidence for the managed tunnel and its MCP child; it does
+not make network requests or expose tunnel credentials.
+`rf runtime reload` is the Stage-A supervisor-managed reload: it performs the same controlled
+process-group restart as `restart`, then starts the latest reviewed configuration generation.
 
 Every accepted minimal configuration is retained as a paired source and resolved-lock snapshot.
 `rf config history` lists complete retained generations; `rf config rollback N` validates and restores

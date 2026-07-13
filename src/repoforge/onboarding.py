@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .config_delta import classify_capability_delta
 from .errors import ConfigError, PersonalCodingMCPError
+from .proposal import assess_repository_proposal
 from .runtime import (
     read_managed_runtime,
     read_runtime_log,
@@ -108,6 +109,24 @@ def _activation_result(config_path: Path, repo_id: str | None = None) -> dict[st
     else:
         result["status"] = "active" if active else "stopped"
     return result
+
+
+def _runtime_health(managed: Any, active: Any) -> list[dict[str, Any]]:
+    """Return bounded local runtime health evidence without invoking external commands."""
+    return [
+        {
+            "name": "managed_tunnel",
+            "ok": managed is not None,
+            "detail": "managed tunnel process is live" if managed else "no managed tunnel process",
+        },
+        {
+            "name": "mcp_process",
+            "ok": active is not None,
+            "detail": "MCP child reported an active generation"
+            if active
+            else "MCP child has not reported an active generation",
+        },
+    ]
 
 
 def _activate_managed_runtime(
@@ -279,6 +298,7 @@ def _repo_add(args: argparse.Namespace) -> int:
     if path in {repository.path for repository in config.repositories}:
         raise ConfigError(f"Repository path already exists: {path}")
     profiles = profile_summary([detection])[repo_id]
+    assessment = assess_repository_proposal(detection)
     proposal_id = _proposal_id(
         config_sha256=expected_source_sha256,
         repo_id=repo_id,
@@ -286,13 +306,23 @@ def _repo_add(args: argparse.Namespace) -> int:
         profiles=profiles,
     )
     requires_approval = hasattr(args, "approve") and args.approve != proposal_id
-    if getattr(args, "preview", False) or requires_approval:
+    if getattr(args, "preview", False) or requires_approval or assessment.decisions:
         _json(
             {
                 "status": "pending_approval",
                 "repo_id": repo_id,
                 "path": str(path),
                 "proposal_id": proposal_id,
+                "confidence": assessment.confidence.value,
+                "findings": list(assessment.findings),
+                "required_decisions": [
+                    {
+                        "code": decision.code,
+                        "prompt": decision.prompt,
+                        "choices": list(decision.choices),
+                    }
+                    for decision in assessment.decisions
+                ],
                 "capability_delta": "expansion",
                 "profiles": profiles,
                 "safe_next_action": (
@@ -329,6 +359,7 @@ def _repo_inspect(args: argparse.Namespace) -> int:
     repo_id = args.repo_id or slugify(path.name)
     detection = detect_repository_for_setup(path, repo_id)
     profiles = profile_summary([detection])[detection.repo_id]
+    assessment = assess_repository_proposal(detection)
     _json(
         {
             "status": "pending_approval",
@@ -338,6 +369,16 @@ def _repo_inspect(args: argparse.Namespace) -> int:
             "package_manager": detection.package_manager,
             "instruction_files": list(detection.instruction_files),
             "warnings": list(detection.warnings),
+            "confidence": assessment.confidence.value,
+            "findings": list(assessment.findings),
+            "required_decisions": [
+                {
+                    "code": decision.code,
+                    "prompt": decision.prompt,
+                    "choices": list(decision.choices),
+                }
+                for decision in assessment.decisions
+            ],
             "proposal_id": _proposal_id(
                 config_sha256="inspection",
                 repo_id=detection.repo_id,
@@ -698,6 +739,11 @@ def _build_parser() -> argparse.ArgumentParser:
     runtime_logs = runtime_subparsers.add_parser("logs")
     runtime_logs.add_argument("--config", default=argparse.SUPPRESS)
     runtime_logs.add_argument("--tail", type=int, default=100)
+    runtime_reload = runtime_subparsers.add_parser("reload")
+    runtime_reload.add_argument("--config", default=argparse.SUPPRESS)
+    runtime_reload.add_argument("--tunnel-id", default=os.environ.get("TUNNEL_ID"))
+    runtime_reload.add_argument("--profile", default=os.environ.get("TUNNEL_PROFILE"))
+    runtime_reload.add_argument("--skip-doctor", action="store_true")
     runtime_restart = runtime_subparsers.add_parser("restart")
     runtime_restart.add_argument("--config", default=argparse.SUPPRESS)
     runtime_restart.add_argument("--tunnel-id", default=os.environ.get("TUNNEL_ID"))
@@ -772,8 +818,10 @@ def handle_onboarding_command(argv: list[str]) -> int | None:
         if args.command == "runtime" and args.runtime_command == "status":
             config_path = Path(args.config).expanduser().resolve()
             managed = read_managed_runtime(_managed_runtime_path(config_path))
+            active = read_runtime_state(_runtime_state_path(config_path))
             result = _activation_result(config_path) | {
-                "managed_pid": managed.pid if managed else None
+                "managed_pid": managed.pid if managed else None,
+                "health": _runtime_health(managed, active),
             }
             if managed is not None and result["status"] == "stopped":
                 result["status"] = "starting"
@@ -805,7 +853,7 @@ def handle_onboarding_command(argv: list[str]) -> int | None:
             lines = read_runtime_log(_managed_runtime_log_path(config_path), args.tail)
             _json({"path": str(_managed_runtime_log_path(config_path)), "lines": lines})
             return 0
-        if args.command == "runtime" and args.runtime_command == "restart":
+        if args.command == "runtime" and args.runtime_command in {"reload", "restart"}:
             config_path = Path(args.config).expanduser().resolve()
             stop_managed_runtime(_managed_runtime_path(config_path))
             args.managed = True
