@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 from repoforge.audit import AuditLogger
 from repoforge.config import load_config
 from repoforge.runner import CommandRunner
 from repoforge.service import CodingService
 from repoforge.state import StateStore
+from repoforge.workspace_create import (
+    WorkspaceCreateCommand,
+    WorkspaceCreator,
+    WorkspaceCreatorPorts,
+)
+
+
+class WorkspaceCreatorEnvironment(Protocol):
+    config_path: Path
 
 
 def test_coding_service_uses_explicit_dependencies(tmp_path: Path) -> None:
@@ -37,3 +47,31 @@ path = "{repo}"
     assert service.runner is runner
     assert service.state is state
     assert service.audit is audit
+
+
+def test_workspace_creator_creates_and_registers_isolated_worktree(
+    forge_env: WorkspaceCreatorEnvironment,
+) -> None:
+    # Given: a configured local Git repository and injected production adapters.
+    config = load_config(forge_env.config_path)
+    runner = CommandRunner(config.server)
+    state = StateStore(config.server.state_root)
+    creator = WorkspaceCreator(
+        WorkspaceCreatorPorts(
+            runner=runner,
+            state=state,
+            workspace_root=config.server.workspace_root,
+            verification_timeout_seconds=config.server.verification_timeout_seconds,
+        )
+    )
+
+    # When: the typed application command creates a workspace.
+    repository = config.repositories["demo"]
+    plan = creator.plan(repository, WorkspaceCreateCommand("demo", "Improve developer experience"))
+    created = creator.execute(repository, plan)
+
+    # Then: the branch and persistent registry agree on the isolated workspace.
+    record = state.load(created.workspace_id)
+    assert created.branch.startswith("ai/improve-developer-experience-")
+    assert record.path == str(created.path)
+    assert record.branch == created.branch

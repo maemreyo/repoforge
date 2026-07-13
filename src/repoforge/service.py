@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import stat
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -21,11 +20,11 @@ from .runner import CommandResult, CommandRunner
 from .security import (
     assert_path_allowed,
     resolve_workspace_path,
-    slugify,
     validate_branch,
     validate_patch,
 )
 from .state import StateStore, VerificationReceipt, WorkspaceRecord, utc_now
+from .workspace_create import WorkspaceCreateCommand, WorkspaceCreator, WorkspaceCreatorPorts
 
 T = TypeVar("T")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -582,58 +581,36 @@ class CodingService:
         self, repo_id: str, task_slug: str, base: str | None = None
     ) -> dict[str, Any]:
         repo = self._repo(repo_id)
-        base = base or repo.default_base
-        if base not in repo.allowed_base_branches:
-            raise SecurityError(
-                f"Base branch {base!r} is not allowlisted: {repo.allowed_base_branches}"
+        creator = WorkspaceCreator(
+            WorkspaceCreatorPorts(
+                runner=self.runner,
+                state=self.state,
+                workspace_root=self.config.server.workspace_root,
+                verification_timeout_seconds=self.config.server.verification_timeout_seconds,
             )
-        slug = slugify(task_slug)
-        suffix = uuid.uuid4().hex[:10]
-        workspace_id = f"{slug[:24]}-{suffix}"
-        branch = f"{repo.branch_prefix}{slug}-{suffix}"
-        validate_branch(branch, repo)
-        destination = (self.config.server.workspace_root / repo_id / workspace_id).resolve()
-        root = self.config.server.workspace_root.resolve()
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            destination.relative_to(root)
-        except ValueError as exc:
-            raise SecurityError("Generated workspace path escaped workspace_root") from exc
+        )
+        plan = creator.plan(repo, WorkspaceCreateCommand(repo_id, task_slug, base))
 
         def operation() -> dict[str, Any]:
-            if destination.exists():
-                raise WorkspaceError(f"Workspace destination already exists: {destination}")
-            if repo.fetch_before_workspace:
-                self.runner.run(["git", "fetch", "--prune", repo.remote, base], cwd=repo.path)
-            base_ref = f"{repo.remote}/{base}"
-            self.runner.run(
-                ["git", "worktree", "add", "-b", branch, str(destination), base_ref],
-                cwd=repo.path,
-                timeout=self.config.server.verification_timeout_seconds,
-            )
-            record = WorkspaceRecord(
-                workspace_id=workspace_id,
-                repo_id=repo_id,
-                path=str(destination),
-                branch=branch,
-                base=base,
-                remote=repo.remote,
-                created_at=utc_now(),
-            )
-            self.state.save(record)
+            created = creator.execute(repo, plan)
             return {
-                "workspace_id": workspace_id,
-                "repo_id": repo_id,
-                "path": str(destination),
-                "branch": branch,
-                "base": base,
-                "head_sha": self._head_sha(destination),
+                "workspace_id": created.workspace_id,
+                "repo_id": created.repo_id,
+                "path": str(created.path),
+                "branch": created.branch,
+                "base": created.base,
+                "head_sha": created.head_sha,
                 "next_step": "Inspect files, make changes, run a verification profile, then review the diff.",
             }
 
         return self._audit_call(
             "workspace_create",
-            {"repo_id": repo_id, "base": base, "branch": branch, "workspace_id": workspace_id},
+            {
+                "repo_id": repo_id,
+                "base": plan.base,
+                "branch": plan.branch,
+                "workspace_id": plan.workspace_id,
+            },
             operation,
         )
 
