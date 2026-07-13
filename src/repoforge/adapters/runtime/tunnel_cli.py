@@ -262,9 +262,12 @@ class TunnelCliClient:
                     # Darwin; recheck before deciding whether lifecycle finalization is required.
                     if process.poll() is None:
                         return True
-                else:
-                    # A different live process identity is never treated as our managed child.
-                    return False
+                elif process.poll() is None:
+                    # Identity mismatch while poll() says child is alive.  On Darwin a
+                    # short-lived zombie (<defunct>) can briefly occupy the PID while
+                    # the owned Popen handle is not yet reaped.  Recheck Popen before
+                    # treating the child as gone.
+                    return True
             self._finalize_child(child.pid)
             return child.pid in self._children
         return process_identity(child.pid) == child.process_identity

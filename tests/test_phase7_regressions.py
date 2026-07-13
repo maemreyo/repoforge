@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -160,3 +162,23 @@ def test_is_alive_keeps_owned_running_process_when_identity_lookup_is_temporaril
     )
 
     assert client.is_alive(ChildProcess(pid, "b" * 64, "now")) is True
+
+
+def test_is_alive_keeps_owned_running_process_when_identity_temporarily_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep an owned child alive until Popen confirms an identity mismatch exited."""
+    client = TunnelCliClient("unused")
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    client._children[process.pid] = process
+    monkeypatch.setattr(
+        "repoforge.adapters.runtime.tunnel_cli.process_identity", lambda _pid: "z" * 64
+    )
+    try:
+        child = ChildProcess(process.pid, "b" * 64, "now")
+        assert client.is_alive(child) is True
+        assert process.pid in client._children
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+        client._children.pop(process.pid, None)
