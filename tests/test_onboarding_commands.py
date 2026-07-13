@@ -238,7 +238,40 @@ def test_repo_add_preview_does_not_write_configuration(
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "pending_approval"
     assert output["capability_delta"] == "expansion"
+    assert len(output["proposal_id"]) == 64
     assert "candidate" not in config.read_text(encoding="utf-8")
+
+
+def test_repo_add_requires_exact_proposal_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    monkeypatch.setattr(onboarding, "detect_repository_for_setup", lambda path, repo_id: object())
+    monkeypatch.setattr(
+        onboarding, "profile_summary", lambda detections: {"candidate": {"test": {}}}
+    )
+    monkeypatch.setattr(
+        onboarding, "write_user_and_lock", lambda *args, **kwargs: pytest.fail("wrote")
+    )
+
+    assert (
+        _repo_add(
+            argparse.Namespace(
+                config=str(config),
+                path=str(candidate),
+                repo_id="candidate",
+                preview=False,
+                approve="wrong",
+            )
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "pending_approval"
+    assert output["proposal_id"] != "wrong"
 
 
 def test_repo_inspect_returns_a_no_write_proposal(
@@ -277,20 +310,29 @@ def test_repo_refresh_previews_then_accepts_changes(
     lock = tmp_path / "resolved.toml"
     lock.write_text("old\n", encoding="utf-8")
     monkeypatch.setattr(onboarding, "resolved_config_path", lambda path: lock)
-    monkeypatch.setattr(
-        onboarding,
-        "build_lock_text",
-        lambda config, source, **_: ("[repoforge_lock]\ngeneration = 1\n", []),
-    )
+    candidate = """[repoforge_lock]
+generation = 1
+
+[repositories.demo]
+path = \"/tmp/demo\"
+"""
+    monkeypatch.setattr(onboarding, "build_lock_text", lambda config, source, **_: (candidate, []))
     monkeypatch.setattr(onboarding, "profile_summary", lambda detections: {})
 
     assert _repo_refresh(argparse.Namespace(config=str(config), accept=False)) == 2
+    preview_output = capsys.readouterr()
+    preview = json.loads(preview_output.out)
+    assert preview["status"] == "pending_approval"
+    assert preview["capability_delta"] == "incompatible"
     assert lock.read_text(encoding="utf-8") == "old\n"
-    assert "No changes written" in capsys.readouterr().err
+    assert "No changes written" in preview_output.err
+    assert "@@" in preview_output.err
 
     assert _repo_refresh(argparse.Namespace(config=str(config), accept=True)) == 0
-    assert lock.read_text(encoding="utf-8") == "[repoforge_lock]\ngeneration = 1\n"
-    assert json.loads(capsys.readouterr().out)["accepted"] is True
+    assert lock.read_text(encoding="utf-8") == candidate
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["accepted"] is True
+    assert accepted["capability_delta"] == "incompatible"
 
     assert _repo_refresh(argparse.Namespace(config=str(config), accept=False)) == 0
     assert json.loads(capsys.readouterr().out)["changed"] is False

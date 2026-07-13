@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 from .audit import AuditLogger
 from .config import AppConfig, ProfileConfig, RepositoryConfig
 from .errors import CommandError, ConfigError, SecurityError, WorkspaceError
+from .ports import AuditSink, CommandExecutor, WorkspaceStore
 from .runner import CommandResult, CommandRunner
 from .security import (
     assert_path_allowed,
@@ -32,13 +33,20 @@ _GIT_OID_RE = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 
 
 class CodingService:
-    def __init__(self, config: AppConfig):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        runner: CommandExecutor | None = None,
+        state: WorkspaceStore | None = None,
+        audit: AuditSink | None = None,
+    ):
         self.config = config
         self.config.server.workspace_root.mkdir(parents=True, exist_ok=True)
         self.config.server.state_root.mkdir(parents=True, exist_ok=True)
-        self.runner = CommandRunner(config.server)
-        self.state = StateStore(config.server.state_root)
-        self.audit = AuditLogger(config.server.state_root)
+        self.runner: CommandExecutor = runner or CommandRunner(config.server)
+        self.state: WorkspaceStore = state or StateStore(config.server.state_root)
+        self.audit: AuditSink = audit or AuditLogger(config.server.state_root)
 
     def _audit_call(self, action: str, details: dict[str, Any], operation: Callable[[], T]) -> T:
         try:
@@ -404,7 +412,10 @@ class CodingService:
         def operation() -> dict[str, Any]:
             package: dict[str, Any] | None = None
             package_path = repo.path / "package.json"
-            if package_path.is_file() and package_path.stat().st_size <= self.config.server.max_file_bytes:
+            if (
+                package_path.is_file()
+                and package_path.stat().st_size <= self.config.server.max_file_bytes
+            ):
                 try:
                     loaded = json.loads(package_path.read_text(encoding="utf-8"))
                     package = loaded if isinstance(loaded, dict) else None
@@ -1084,14 +1095,25 @@ class CodingService:
                 removed_untracked: list[str] = []
                 for relative in normalized:
                     candidate = resolve_workspace_path(path, relative, repo)
-                    tracked = self.runner.run(
-                        ["git", "ls-files", "--error-unmatch", "--", relative],
-                        cwd=path,
-                        check=False,
-                    ).returncode == 0
+                    tracked = (
+                        self.runner.run(
+                            ["git", "ls-files", "--error-unmatch", "--", relative],
+                            cwd=path,
+                            check=False,
+                        ).returncode
+                        == 0
+                    )
                     if tracked:
                         self.runner.run(
-                            ["git", "restore", "--source=HEAD", "--staged", "--worktree", "--", relative],
+                            [
+                                "git",
+                                "restore",
+                                "--source=HEAD",
+                                "--staged",
+                                "--worktree",
+                                "--",
+                                relative,
+                            ],
                             cwd=path,
                         )
                         restored.append(relative)
@@ -1419,9 +1441,7 @@ class CodingService:
                     return payload
 
                 verification_profile = fresh_record.metadata.get("verification_profile")
-                verification_completed_at = fresh_record.metadata.get(
-                    "verification_completed_at"
-                )
+                verification_completed_at = fresh_record.metadata.get("verification_completed_at")
                 footer = (
                     "\n\n<!-- repoforge -->\n"
                     "---\n"
@@ -1748,7 +1768,9 @@ class CodingService:
                             ),
                         )
                         if found:
-                            actual = self.runner.run([manager, "--version"], cwd=repo.path).stdout.strip()
+                            actual = self.runner.run(
+                                [manager, "--version"], cwd=repo.path
+                            ).stdout.strip()
                             add(
                                 f"package_manager_version:{repo_id}:{manager}",
                                 actual == expected_version,
@@ -1766,7 +1788,11 @@ class CodingService:
                             remediation=f"Install Node {engines['node']}.",
                         )
                         if node:
-                            actual_node = self.runner.run(["node", "--version"], cwd=repo.path).stdout.strip().lstrip("v")
+                            actual_node = (
+                                self.runner.run(["node", "--version"], cwd=repo.path)
+                                .stdout.strip()
+                                .lstrip("v")
+                            )
                             expected_node = str(engines["node"])
                             add(
                                 f"runtime_version:{repo_id}:node",
@@ -1818,4 +1844,3 @@ class CodingService:
             "checks": checks,
             "audit_log": str(self.audit.path),
         }
-

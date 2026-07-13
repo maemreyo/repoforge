@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import getpass
+import hashlib
 import json
 import os
 import shlex
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .config import DEFAULT_CONFIG_PATH, load_config
+from .config_delta import classify_capability_delta
 from .errors import ConfigError, PersonalCodingMCPError
 from .runtime import (
     read_managed_runtime,
@@ -51,6 +53,21 @@ from .user_config import (
 
 def _json(value: Any) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=False))
+
+
+def _proposal_id(*, config_sha256: str, repo_id: str, path: Path, profiles: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "config_sha256": config_sha256,
+            "repo_id": repo_id,
+            "path": str(path),
+            "profiles": profiles,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _tunnel_state_path(config_path: Path) -> Path:
@@ -256,15 +273,27 @@ def _repo_add(args: argparse.Namespace) -> int:
         raise ConfigError(f"Repository id already exists: {repo_id}")
     if path in {repository.path for repository in config.repositories}:
         raise ConfigError(f"Repository path already exists: {path}")
-    if getattr(args, "preview", False):
+    profiles = profile_summary([detection])[repo_id]
+    proposal_id = _proposal_id(
+        config_sha256=expected_source_sha256,
+        repo_id=repo_id,
+        path=path,
+        profiles=profiles,
+    )
+    requires_approval = hasattr(args, "approve") and args.approve != proposal_id
+    if getattr(args, "preview", False) or requires_approval:
         _json(
             {
                 "status": "pending_approval",
                 "repo_id": repo_id,
                 "path": str(path),
+                "proposal_id": proposal_id,
                 "capability_delta": "expansion",
-                "profiles": profile_summary([detection])[repo_id],
-                "safe_next_action": "Re-run without `--preview` to enroll the reviewed repository.",
+                "profiles": profiles,
+                "safe_next_action": (
+                    f"Re-run `rf repo add {path} --repo-id {repo_id} --approve {proposal_id}` "
+                    "to enroll this exact reviewed proposal."
+                ),
             }
         )
         return 0
@@ -282,6 +311,7 @@ def _repo_add(args: argparse.Namespace) -> int:
             "config": str(config.source_path),
             "resolved_config": str(lock_path),
             "profiles": profile_summary(detections)[repo_id],
+            "proposal_id": proposal_id,
         }
         | _activate_managed_runtime(config_path, previous_generation, rollback_allowed=True)
     )
@@ -293,6 +323,7 @@ def _repo_inspect(args: argparse.Namespace) -> int:
     path = Path(args.path).expanduser().resolve()
     repo_id = args.repo_id or slugify(path.name)
     detection = detect_repository_for_setup(path, repo_id)
+    profiles = profile_summary([detection])[detection.repo_id]
     _json(
         {
             "status": "pending_approval",
@@ -302,8 +333,14 @@ def _repo_inspect(args: argparse.Namespace) -> int:
             "package_manager": detection.package_manager,
             "instruction_files": list(detection.instruction_files),
             "warnings": list(detection.warnings),
+            "proposal_id": _proposal_id(
+                config_sha256="inspection",
+                repo_id=detection.repo_id,
+                path=detection.path,
+                profiles=profiles,
+            ),
             "capability_delta": "expansion",
-            "profiles": profile_summary([detection])[detection.repo_id],
+            "profiles": profiles,
             "safe_next_action": "Review profiles, then run `rf repo add PATH` to enroll.",
         }
     )
@@ -351,10 +388,18 @@ def _repo_refresh(args: argparse.Namespace) -> int:
         config, source_text, generation=max(1, current_generation)
     )
     current = lock_path.read_text(encoding="utf-8") if lock_path.is_file() else ""
+    if current:
+        try:
+            delta = classify_capability_delta(current, candidate).kind.value
+        except ConfigError:
+            delta = "incompatible"
+    else:
+        delta = "expansion"
     if current == candidate:
         _json(
             {
                 "changed": False,
+                "capability_delta": "equivalent",
                 "resolved_config": str(lock_path),
                 "profiles": profile_summary(detections),
             }
@@ -370,7 +415,15 @@ def _repo_refresh(args: argparse.Namespace) -> int:
         )
     )
     if not args.accept:
-        print(diff, end="")
+        _json(
+            {
+                "status": "pending_approval",
+                "capability_delta": delta,
+                "resolved_config": str(lock_path),
+                "safe_next_action": "Review the diff, then re-run with `rf repo refresh --accept`.",
+            }
+        )
+        print(diff, end="", file=sys.stderr)
         print(
             "\nNo changes written. Re-run with `rf repo refresh --accept` after review.",
             file=sys.stderr,
@@ -387,6 +440,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
         {
             "changed": True,
             "accepted": True,
+            "capability_delta": delta,
             "resolved_config": str(lock_path),
             "profiles": profile_summary(detections),
         }
@@ -659,6 +713,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add.add_argument("path")
     add.add_argument("--repo-id", default=None)
     add.add_argument("--preview", action="store_true")
+    add.add_argument("--approve", default=None, metavar="PROPOSAL_ID")
     remove = repo_subparsers.add_parser("remove")
     remove.add_argument("repo_id")
     refresh = repo_subparsers.add_parser("refresh")

@@ -128,7 +128,7 @@ Manage repositories without editing TOML:
 rf repo list
 rf repo inspect /absolute/path/to/another-repository
 rf repo add /absolute/path/to/another-repository --preview
-rf repo add /absolute/path/to/another-repository
+rf repo add /absolute/path/to/another-repository --approve PROPOSAL_ID
 rf repo remove repository-id
 rf runtime status
 rf runtime start
@@ -150,8 +150,9 @@ Every accepted minimal configuration is retained as a paired source and resolved
 `rf config history` lists complete retained generations; `rf config rollback N` validates and restores
 the exact source/lock pair for generation `N`, then reports whether the running process needs restart.
 
-`rf repo inspect` and `rf repo add --preview` never write configuration. They return a reviewed
-proposal for the detected command profiles before enrollment expands capability. If a `Makefile`,
+`rf repo inspect` and `rf repo add --preview` never write configuration. `rf repo add --preview`
+returns a deterministic proposal ID bound to the current config, repository path, ID, and detected
+profiles; enrollment requires supplying that exact ID via `--approve`. If a `Makefile`,
 `package.json`, `pyproject.toml`, or another command source changes, RepoForge fails
 closed. Review the proposed allowlist diff and then accept it explicitly:
 

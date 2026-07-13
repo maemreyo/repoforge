@@ -25,8 +25,9 @@ activation leaves the restricted configuration on disk and never restores remove
 
 `rf repo inspect PATH` and `rf repo add PATH --preview` inspect local repository facts and return a
 structured `pending_approval` proposal without changing configuration or running discovered commands.
-Detected verification profiles are classified as an `expansion`, so `rf repo add PATH` remains the
-explicit operator action that enrolls the repository and grants its reviewed command profiles.
+Detected verification profiles are classified as an `expansion`. The `repo add --preview` proposal ID
+binds the current configuration, path, repository ID, and profiles, so `rf repo add PATH --approve ID`
+is the explicit operator action that enrolls exactly the reviewed capability.
 
 ## Configuration generation commands
 

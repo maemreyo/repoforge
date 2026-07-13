@@ -99,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "repo", help="Add, remove, list, or refresh repositories in the minimal config"
     )
+    subparsers.add_parser("runtime", help="Manage the local tunnel runtime lifecycle")
+    subparsers.add_parser("config", help="Inspect or restore reviewed config generations")
 
     inspect_parser = subparsers.add_parser(
         "inspect-repo", help="Preview detected ecosystem, scripts, profiles, and instructions"
