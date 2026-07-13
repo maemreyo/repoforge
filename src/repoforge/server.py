@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +62,51 @@ EXTERNAL_WRITE = ToolAnnotations(
 )
 
 
+def tool_surface_hash() -> str:
+    """Hash public MCP tool names, input signatures, titles, and annotations only."""
+    module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    create = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "create_server"
+    )
+    tools: list[dict[str, str]] = []
+    for node in create.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        decorator = next(
+            (
+                item
+                for item in node.decorator_list
+                if isinstance(item, ast.Call)
+                and isinstance(item.func, ast.Attribute)
+                and item.func.attr == "tool"
+            ),
+            None,
+        )
+        if decorator is None:
+            continue
+        keywords = {
+            keyword.arg: ast.unparse(keyword.value)
+            for keyword in decorator.keywords
+            if keyword.arg is not None
+        }
+        tools.append(
+            {
+                "name": node.name,
+                "arguments": ast.unparse(node.args),
+                "returns": ast.unparse(node.returns) if node.returns else "",
+                "title": keywords.get("title", ""),
+                "annotations": keywords.get("annotations", ""),
+                "structured_output": keywords.get("structured_output", ""),
+            }
+        )
+    encoded = json.dumps(sorted(tools, key=lambda item: item["name"]), sort_keys=True).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def create_server(config_path: str | Path | None = None) -> FastMCP:
     service = CodingService(load_config(config_path))
     mcp = FastMCP("RepoForge", instructions=SERVER_INSTRUCTIONS, log_level="WARNING")
@@ -93,7 +141,9 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         """Use this when reviewing an existing pull request, checks, commits, files, or reviews."""
         return service.repo_pr_read(repo_id, pr_number)
 
-    @mcp.tool(title="Create isolated coding workspace", annotations=LOCAL_CREATE, structured_output=True)
+    @mcp.tool(
+        title="Create isolated coding workspace", annotations=LOCAL_CREATE, structured_output=True
+    )
     def workspace_create(repo_id: str, task_slug: str, base: str | None = None) -> dict[str, Any]:
         """Use this before editing to create a new ai/* branch in an isolated Git worktree."""
         return service.workspace_create(repo_id, task_slug, base)
@@ -184,7 +234,11 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
             workspace_id, patch, expected_head_sha, expected_workspace_fingerprint
         )
 
-    @mcp.tool(title="Restore selected workspace paths", annotations=LOCAL_DESTRUCTIVE, structured_output=True)
+    @mcp.tool(
+        title="Restore selected workspace paths",
+        annotations=LOCAL_DESTRUCTIVE,
+        structured_output=True,
+    )
     def workspace_restore_paths(
         workspace_id: str,
         relative_paths: list[str],
@@ -200,7 +254,9 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         """Use this after edits and before verification, commit, or publishing to review exact changes."""
         return service.workspace_diff(workspace_id, staged)
 
-    @mcp.tool(title="Run configured command profile", annotations=LOCAL_MUTATE, structured_output=True)
+    @mcp.tool(
+        title="Run configured command profile", annotations=LOCAL_MUTATE, structured_output=True
+    )
     def workspace_run_profile(workspace_id: str, profile_name: str) -> dict[str, Any]:
         """Use this for an explicitly named allowlisted setup, fix, build, or verification profile."""
         return service.workspace_run_profile(workspace_id, profile_name)

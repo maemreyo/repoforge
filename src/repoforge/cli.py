@@ -17,7 +17,7 @@ from .discovery import detect_repository, render_config
 from .errors import PersonalCodingMCPError
 from .onboarding import handle_onboarding_command
 from .runtime import clear_runtime_state, write_runtime_state
-from .server import create_server
+from .server import create_server, tool_surface_hash
 from .service import CodingService
 from .user_config import lock_generation, resolve_runtime_config_path
 
@@ -253,7 +253,9 @@ def main(argv: list[str] | None = None) -> int:
             # stdio transport reserves stdout for JSON-RPC protocol messages.
             runtime_path = resolve_runtime_config_path(config_path)
             state_path = runtime_path.with_name("runtime.json")
-            state = write_runtime_state(state_path, lock_generation(runtime_path))
+            state = write_runtime_state(
+                state_path, lock_generation(runtime_path), tool_surface_hash()
+            )
             try:
                 create_server(runtime_path).run(transport="stdio")
             finally:

@@ -150,6 +150,9 @@ entry point.
 `rf runtime logs` reads a bounded, redacted tail from the managed tunnel child only.
 `rf runtime status` includes local health evidence for the managed tunnel and its MCP child; it does
 not make network requests or expose tunnel credentials.
+When the MCP child is live, runtime status also includes a deterministic `tool_surface_hash` derived
+from public MCP metadata, so an upgrade that changes tool names, signatures, titles, or annotations
+can be detected independently of a configuration generation.
 `rf runtime reload` is the Stage-A supervisor-managed reload: it performs the same controlled
 process-group restart as `restart`, then starts the latest reviewed configuration generation.
 

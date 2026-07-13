@@ -22,11 +22,12 @@ def test_runtime_state_records_the_current_process_and_generation(tmp_path: Path
     state_path = tmp_path / "runtime.json"
 
     # When: the MCP process records its loaded generation.
-    state = write_runtime_state(state_path, 3)
+    state = write_runtime_state(state_path, 3, "surface")
 
     # Then: status reports the same live process and generation.
     assert state.pid == os.getpid()
     assert read_runtime_state(state_path) == state
+    assert state.tool_surface_hash == "surface"
 
 
 def test_runtime_state_ignores_and_removes_a_dead_process_record(tmp_path: Path) -> None:

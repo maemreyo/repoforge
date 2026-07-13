@@ -821,6 +821,7 @@ def handle_onboarding_command(argv: list[str]) -> int | None:
             active = read_runtime_state(_runtime_state_path(config_path))
             result = _activation_result(config_path) | {
                 "managed_pid": managed.pid if managed else None,
+                "tool_surface_hash": active.tool_surface_hash if active else None,
                 "health": _runtime_health(managed, active),
             }
             if managed is not None and result["status"] == "stopped":

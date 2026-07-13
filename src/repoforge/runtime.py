@@ -28,6 +28,7 @@ class RuntimeState:
     pid: int
     active_generation: int
     started_at: str
+    tool_surface_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
     pid = raw.get("pid")
     generation = raw.get("active_generation")
     started_at = raw.get("started_at")
+    tool_surface_hash = raw.get("tool_surface_hash", "")
     if (
         not isinstance(pid, int)
         or isinstance(pid, bool)
@@ -62,6 +64,7 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
         or isinstance(generation, bool)
         or generation <= 0
         or not isinstance(started_at, str)
+        or not isinstance(tool_surface_hash, str)
     ):
         raise ConfigError(f"Runtime state {path} is invalid")
     try:
@@ -71,10 +74,15 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
         return None
     except PermissionError:
         pass
-    return RuntimeState(pid=pid, active_generation=generation, started_at=started_at)
+    return RuntimeState(
+        pid=pid,
+        active_generation=generation,
+        started_at=started_at,
+        tool_surface_hash=tool_surface_hash,
+    )
 
 
-def write_runtime_state(path: Path, generation: int) -> RuntimeState:
+def write_runtime_state(path: Path, generation: int, tool_surface_hash: str = "") -> RuntimeState:
     """Atomically record the generation loaded by the current local process."""
     if generation <= 0:
         raise ConfigError("Runtime generation must be positive")
@@ -82,6 +90,7 @@ def write_runtime_state(path: Path, generation: int) -> RuntimeState:
         pid=os.getpid(),
         active_generation=generation,
         started_at=datetime.now(timezone.utc).isoformat(),
+        tool_surface_hash=tool_surface_hash,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")

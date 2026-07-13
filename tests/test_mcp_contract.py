@@ -4,7 +4,12 @@ import pytest
 from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from repoforge.server import create_server
+from repoforge.server import create_server, tool_surface_hash
+
+
+def test_tool_surface_hash_is_deterministic() -> None:
+    assert tool_surface_hash() == tool_surface_hash()
+    assert len(tool_surface_hash()) == 64
 
 
 @pytest.mark.anyio
@@ -82,6 +87,7 @@ async def test_mcp_error_is_returned_as_tool_error(forge_env: ForgeEnvironment) 
 async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> None:
     server = create_server(forge_env.config_path)
     async with create_connected_server_and_client_session(server) as session:
+
         async def call(name: str, arguments: dict[str, object]) -> dict[str, object]:
             result = await session.call_tool(name, arguments)
             assert result.isError is False, (name, result.content)
@@ -95,9 +101,7 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         await call("repo_issue_read", {"repo_id": "demo", "issue_number": 1})
         await call("repo_pr_read", {"repo_id": "demo", "pr_number": 2})
 
-        created = await call(
-            "workspace_create", {"repo_id": "demo", "task_slug": "MCP contract"}
-        )
+        created = await call("workspace_create", {"repo_id": "demo", "task_slug": "MCP contract"})
         workspace_id = str(created["workspace_id"])
         await call("workspace_list", {})
         await call("workspace_status", {"workspace_id": workspace_id})
@@ -176,9 +180,7 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             {"workspace_id": workspace_id, "title": "MCP contract updated"},
         )
         await call("workspace_pr_status", {"workspace_id": workspace_id})
-        await call(
-            "workspace_pr_checks", {"workspace_id": workspace_id, "required_only": True}
-        )
+        await call("workspace_pr_checks", {"workspace_id": workspace_id, "required_only": True})
         assert committed["head_sha"]
         await call(
             "workspace_remove",
