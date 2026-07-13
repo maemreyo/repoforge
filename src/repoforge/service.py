@@ -1,7 +1,9 @@
 """Compatibility facade delegating every public operation to one typed application use case."""
 
 from __future__ import annotations
+
 from typing import Any
+
 from .application.dto import to_data
 from .application.repository.context import (
     RepositoryContextCommand,
@@ -58,8 +60,8 @@ from .application.workspace.replace_text import (
     WorkspaceTextReplacer,
 )
 from .application.workspace.restore_paths import (
-    WorkspaceRestorePathsCommand,
     WorkspacePathsRestorer,
+    WorkspaceRestorePathsCommand,
 )
 from .application.workspace.run_profile import (
     WorkspaceProfileRunner,
@@ -75,16 +77,12 @@ from .application.workspace.update_draft_pr import (
 from .application.workspace.verify import WorkspaceVerifier, WorkspaceVerifyCommand
 from .bootstrap import AdapterOverrides, Application, build_application
 from .config import AppConfig
-from .ports import AuditSink, CommandExecutor, WorkspaceStore
+from .ports import AuditSink, CommandExecutor, LockManager, OperationGate, WorkspaceStore
 
 
 def _result(value: object) -> dict[str, Any]:
     data = to_data(value)
-    if (
-        isinstance(data, dict)
-        and set(data) == {"payload"}
-        and isinstance(data["payload"], dict)
-    ):
+    if isinstance(data, dict) and set(data) == {"payload"} and isinstance(data["payload"], dict):
         return data["payload"]
     if (
         isinstance(data, dict)
@@ -108,15 +106,22 @@ class CodingService:
         runner: CommandExecutor | None = None,
         state: WorkspaceStore | None = None,
         audit: AuditSink | None = None,
+        locks: LockManager | None = None,
+        gate: OperationGate | None = None,
         application: Application | None = None,
     ):
         self.application = application or build_application(
-            config, overrides=AdapterOverrides(command=runner, store=state, audit=audit)
+            config,
+            overrides=AdapterOverrides(
+                command=runner, store=state, audit=audit, locks=locks, gate=gate
+            ),
         )
         self.config = self.application.context.config
         self.runner = self.application.context.commands
         self.state = self.application.context.store
         self.audit = self.application.context.audit
+        self.locks = self.application.context.locks
+        self.gate = self.application.context.gate
         ctx = self.application.context
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
@@ -163,16 +168,12 @@ class CodingService:
         return _result(self._issue.execute(IssueReadCommand(repo_id, issue_number)))
 
     def repo_pr_read(self, repo_id: str, pr_number: int) -> dict[str, Any]:
-        return _result(
-            self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number))
-        )
+        return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number)))
 
     def workspace_create(
         self, repo_id: str, task_slug: str, base: str | None = None
     ) -> dict[str, Any]:
-        return _result(
-            self._create.execute(WorkspaceCreateCommand(repo_id, task_slug, base))
-        )
+        return _result(self._create.execute(WorkspaceCreateCommand(repo_id, task_slug, base)))
 
     def workspace_list(self) -> dict[str, Any]:
         return _result(self._list.execute(WorkspaceListCommand()))
@@ -180,12 +181,8 @@ class CodingService:
     def workspace_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._status.execute(WorkspaceStatusCommand(workspace_id)))
 
-    def workspace_tree(
-        self, workspace_id: str, max_entries: int = 2000
-    ) -> dict[str, Any]:
-        return _result(
-            self._tree.execute(WorkspaceTreeCommand(workspace_id, max_entries))
-        )
+    def workspace_tree(self, workspace_id: str, max_entries: int = 2000) -> dict[str, Any]:
+        return _result(self._tree.execute(WorkspaceTreeCommand(workspace_id, max_entries)))
 
     def workspace_read_file(
         self,
@@ -196,9 +193,7 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._read.execute(
-                WorkspaceFileReadCommand(
-                    workspace_id, relative_path, start_line, end_line
-                )
+                WorkspaceFileReadCommand(workspace_id, relative_path, start_line, end_line)
             )
         )
 
@@ -211,9 +206,7 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._reads.execute(
-                WorkspaceFilesReadCommand(
-                    workspace_id, relative_paths, start_line, end_line
-                )
+                WorkspaceFilesReadCommand(workspace_id, relative_paths, start_line, end_line)
             )
         )
 
@@ -235,9 +228,7 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._write.execute(
-                WorkspaceFileWriteCommand(
-                    workspace_id, relative_path, content, expected_sha256
-                )
+                WorkspaceFileWriteCommand(workspace_id, relative_path, content, expected_sha256)
             )
         )
 
@@ -298,65 +289,45 @@ class CodingService:
     def workspace_diff(self, workspace_id: str, staged: bool = False) -> dict[str, Any]:
         return _result(self._diff.execute(WorkspaceDiffCommand(workspace_id, staged)))
 
-    def workspace_run_profile(
-        self, workspace_id: str, profile_name: str
-    ) -> dict[str, Any]:
+    def workspace_run_profile(self, workspace_id: str, profile_name: str) -> dict[str, Any]:
         return _result(
-            self._profile.execute(
-                WorkspaceRunProfileCommand(workspace_id, profile_name)
-            )
+            self._profile.execute(WorkspaceRunProfileCommand(workspace_id, profile_name))
         )
 
     def workspace_verify(
         self, workspace_id: str, profile_name: str | None = None
     ) -> dict[str, Any]:
-        return _result(
-            self._verify.execute(WorkspaceVerifyCommand(workspace_id, profile_name))
-        )
+        return _result(self._verify.execute(WorkspaceVerifyCommand(workspace_id, profile_name)))
 
     def workspace_commit(self, workspace_id: str, message: str) -> dict[str, Any]:
-        return _result(
-            self._commit.execute(WorkspaceCommitCommand(workspace_id, message))
-        )
+        return _result(self._commit.execute(WorkspaceCommitCommand(workspace_id, message)))
 
     def workspace_push(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._push.execute(WorkspacePushCommand(workspace_id)))
 
-    def workspace_create_draft_pr(
-        self, workspace_id: str, title: str, body: str
-    ) -> dict[str, Any]:
+    def workspace_create_draft_pr(self, workspace_id: str, title: str, body: str) -> dict[str, Any]:
         return _result(
-            self._create_pr.execute(
-                WorkspaceCreateDraftPrCommand(workspace_id, title, body)
-            )
+            self._create_pr.execute(WorkspaceCreateDraftPrCommand(workspace_id, title, body))
         )
 
     def workspace_update_draft_pr(
         self, workspace_id: str, title: str | None = None, body: str | None = None
     ) -> dict[str, Any]:
         return _result(
-            self._update_pr.execute(
-                WorkspaceUpdateDraftPrCommand(workspace_id, title, body)
-            )
+            self._update_pr.execute(WorkspaceUpdateDraftPrCommand(workspace_id, title, body))
         )
 
     def workspace_pr_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._pr_status.execute(WorkspacePrStatusCommand(workspace_id)))
 
-    def workspace_pr_checks(
-        self, workspace_id: str, required_only: bool = False
-    ) -> dict[str, Any]:
-        return _result(
-            self._checks.execute(WorkspacePrChecksCommand(workspace_id, required_only))
-        )
+    def workspace_pr_checks(self, workspace_id: str, required_only: bool = False) -> dict[str, Any]:
+        return _result(self._checks.execute(WorkspacePrChecksCommand(workspace_id, required_only)))
 
     def workspace_remove(
         self, workspace_id: str, delete_local_branch: bool = False
     ) -> dict[str, Any]:
         return _result(
-            self._remove.execute(
-                WorkspaceRemoveCommand(workspace_id, delete_local_branch)
-            )
+            self._remove.execute(WorkspaceRemoveCommand(workspace_id, delete_local_branch))
         )
 
     def doctor(self) -> dict[str, Any]:

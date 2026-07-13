@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 import hashlib
 import re
 from dataclasses import dataclass
-from ..context import ApplicationContext
+
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
+from ..context import ApplicationContext
 
 _SHA = re.compile("^[a-f0-9]{64}$")
 
@@ -48,10 +50,8 @@ class WorkspaceTextReplacer:
             raise SecurityError("Reading through symlinks is not allowed")
 
         def op() -> WorkspaceReplaceTextResult:
-            with self.ctx.store.lock(c.workspace_id):
-                if not self.ctx.filesystem.is_file(
-                    path
-                ) or self.ctx.filesystem.is_symlink(path):
+            with self.ctx.locks.lock(c.workspace_id):
+                if not self.ctx.filesystem.is_file(path) or self.ctx.filesystem.is_symlink(path):
                     raise WorkspaceError("Target must be an existing regular file")
                 data = self.ctx.filesystem.read_bytes(path)
                 if b"\x00" in data:
@@ -72,14 +72,12 @@ class WorkspaceTextReplacer:
                     raise WorkspaceError(
                         f"Expected {c.expected_occurrences} occurrences, found {count}; no changes applied"
                     )
-                encoded = text.replace(
-                    c.old_text, c.new_text, c.expected_occurrences
-                ).encode("utf-8")
+                encoded = text.replace(c.old_text, c.new_text, c.expected_occurrences).encode(
+                    "utf-8"
+                )
                 if len(encoded) > self.ctx.config.server.max_file_bytes:
                     raise SecurityError("Updated content exceeds max_file_bytes")
-                self.ctx.filesystem.write_bytes_atomic(
-                    path, encoded, preserve_mode=True
-                )
+                self.ctx.filesystem.write_bytes_atomic(path, encoded, preserve_mode=True)
                 sha = hashlib.sha256(encoded).hexdigest()
                 stat = self.ctx.git.diff_stat(workspace)
                 return WorkspaceReplaceTextResult(

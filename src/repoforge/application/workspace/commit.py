@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from typing import Any
-from ..context import ApplicationContext
+
 from ...domain.errors import WorkspaceError
 from ...domain.publishing import validate_commit_message
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +31,7 @@ class WorkspaceCommitter:
         message = validate_commit_message(c.message)
 
         def op() -> WorkspaceCommitResult:
-            with self.ctx.store.lock(c.workspace_id):
+            with self.ctx.locks.lock(c.workspace_id):
                 fresh = self.ctx.store.load(c.workspace_id)
                 self.ctx.git.changed_paths(path, repo)
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
@@ -41,20 +42,13 @@ class WorkspaceCommitter:
                         raise WorkspaceError(
                             "A successful verification profile is required before commit"
                         )
-                    if (
-                        self.ctx.git.fingerprint(path)
-                        != fresh.last_verification.fingerprint
-                    ):
+                    if self.ctx.git.fingerprint(path) != fresh.last_verification.fingerprint:
                         raise WorkspaceError(
                             "Working tree changed after verification; run a verification profile again"
                         )
-                profile = (
-                    fresh.last_verification.profile if fresh.last_verification else None
-                )
+                profile = fresh.last_verification.profile if fresh.last_verification else None
                 completed = (
-                    fresh.last_verification.completed_at
-                    if fresh.last_verification
-                    else None
+                    fresh.last_verification.completed_at if fresh.last_verification else None
                 )
                 head, show = self.ctx.git.commit(path, message)
                 if repo.require_verification_before_commit:

@@ -12,9 +12,7 @@ from repoforge.service import CodingService
 
 
 def git(*args: str, cwd: Path) -> str:
-    completed = subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
-    )
+    completed = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
     return completed.stdout.strip()
 
 
@@ -32,7 +30,7 @@ class ForgeEnvironment:
 def _write_fake_gh(fake_bin: Path, state_path: Path) -> None:
     script = fake_bin / "gh"
     script.write_text(
-        f'''#!/usr/bin/env python3
+        f"""#!/usr/bin/env python3
 from __future__ import annotations
 import json
 import subprocess
@@ -161,7 +159,7 @@ if args[:2] == ["pr", "view"]:
 
 print("unsupported fake gh invocation: " + " ".join(args), file=sys.stderr)
 raise SystemExit(2)
-''',
+""",
         encoding="utf-8",
     )
     script.chmod(0o755)
@@ -210,8 +208,8 @@ def create_forge_environment(
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         f'''[server]
-workspace_root = "{tmp_path / 'workspaces'}"
-state_root = "{tmp_path / 'state'}"
+workspace_root = "{tmp_path / "workspaces"}"
+state_root = "{tmp_path / "state"}"
 max_batch_files = {max_batch_files}
 path_prefixes = ["{fake_bin}", "/usr/local/bin", "/usr/bin", "/bin"]
 

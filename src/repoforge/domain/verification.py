@@ -1,6 +1,7 @@
 """Pure verification-profile selection decisions."""
 
 from __future__ import annotations
+
 from ..config import ProfileConfig, RepositoryConfig
 from .errors import ConfigError
 
@@ -19,9 +20,7 @@ def select_verification_profile(
 ) -> tuple[ProfileConfig, bool]:
     selected = profile_name or repo.default_verification_profile
     if not selected:
-        candidates = [
-            name for name, profile in repo.profiles.items() if profile.verification
-        ]
+        candidates = [name for name, profile in repo.profiles.items() if profile.verification]
         if len(candidates) == 1:
             selected = candidates[0]
         else:

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+
 from ..context import ApplicationContext
 
 
@@ -28,9 +29,7 @@ class WorkspacePrChecksReader:
         record, _, path = self.ctx.workspace(c.workspace_id)
 
         def op() -> WorkspacePrChecksResult:
-            checks = self.ctx.github.checks(
-                path, record.branch, required_only=c.required_only
-            )
+            checks = self.ctx.github.checks(path, record.branch, required_only=c.required_only)
             buckets: dict[str, int] = {}
             for item in checks:
                 bucket = str(item.get("bucket", "unknown"))

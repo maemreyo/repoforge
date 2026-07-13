@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 from ..context import ApplicationContext
 
 
@@ -24,7 +25,5 @@ class RecentCommitsReader:
         return self.ctx.audited(
             "repo_recent_commits",
             {"repo_id": c.repo_id, "limit": limit},
-            lambda: RecentCommitsResult(
-                c.repo_id, self.ctx.git.recent_commits(repo.path, limit)
-            ),
+            lambda: RecentCommitsResult(c.repo_id, self.ctx.git.recent_commits(repo.path, limit)),
         )

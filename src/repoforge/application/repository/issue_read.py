@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+
 from ..context import ApplicationContext
 
 
@@ -25,7 +26,5 @@ class IssueReader:
         return self.ctx.audited(
             "repo_issue_read",
             {"repo_id": c.repo_id, "issue_number": c.issue_number},
-            lambda: IssueReadResult(
-                self.ctx.github.issue_read(repo.path, c.issue_number)
-            ),
+            lambda: IssueReadResult(self.ctx.github.issue_read(repo.path, c.issue_number)),
         )

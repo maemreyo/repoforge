@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+
 from ..context import ApplicationContext
 
 
@@ -22,7 +23,5 @@ class WorkspacePrStatusReader:
         return self.ctx.audited(
             "workspace_pr_status",
             {"workspace_id": c.workspace_id},
-            lambda: WorkspacePrStatusResult(
-                self.ctx.github.status(path, record.branch)
-            ),
+            lambda: WorkspacePrStatusResult(self.ctx.github.status(path, record.branch)),
         )

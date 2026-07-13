@@ -1,6 +1,8 @@
-"""Backward-compatible command adapter imports."""
+"""Backward-compatible command adapter imports through the composition root."""
 
-from .adapters.subprocess import CommandRunner, SubprocessCommandExecutor
+from .bootstrap import SubprocessCommandExecutor
 from .ports.command import CommandResult
+
+CommandRunner = SubprocessCommandExecutor
 
 __all__ = ["CommandResult", "CommandRunner", "SubprocessCommandExecutor"]

@@ -1,7 +1,8 @@
 from dataclasses import dataclass
-from ..context import ApplicationContext
+
 from ...domain.errors import WorkspaceError
 from ...domain.policy import validate_branch
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +28,7 @@ class WorkspacePusher:
         validate_branch(record.branch, repo)
 
         def op() -> WorkspacePushResult:
-            with self.ctx.store.lock(c.workspace_id):
+            with self.ctx.locks.lock(c.workspace_id):
                 fresh = self.ctx.store.load(c.workspace_id)
                 self.ctx.git.changed_paths(path, repo)
                 self.ctx.git.ensure_clean(path, context="push")

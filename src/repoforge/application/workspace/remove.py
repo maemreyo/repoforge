@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 from ..context import ApplicationContext
 
 
@@ -24,7 +25,7 @@ class WorkspaceRemover:
         record, repo, path = self.ctx.workspace(c.workspace_id)
 
         def op() -> WorkspaceRemoveResult:
-            with self.ctx.store.lock(c.workspace_id):
+            with self.ctx.locks.lock(c.workspace_id):
                 self.ctx.git.ensure_clean(path, context="workspace removal")
                 deleted = self.ctx.git.remove_worktree(
                     repo, path, record.branch, c.delete_local_branch

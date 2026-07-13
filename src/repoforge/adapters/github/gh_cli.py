@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 import json
 import re
 from pathlib import Path
 from typing import Any, cast
+
 from ...config import RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError
 from ...ports.command import CommandExecutor, CommandResult
@@ -65,9 +67,7 @@ class GhCliGateway:
         if isinstance(comments, list):
             p["comment_count"] = len(comments)
             p["comments"] = [
-                dict(x, body=self._trim(x.get("body"), 8000))
-                if isinstance(x, dict)
-                else x
+                dict(x, body=self._trim(x.get("body"), 8000)) if isinstance(x, dict) else x
                 for x in comments[-20:]
             ]
             p["comments_truncated"] = len(comments) > 20
@@ -201,9 +201,7 @@ class GhCliGateway:
         )
         return self._trim_pr(self._object(r, "gh pr view"))
 
-    def checks(
-        self, cwd: Path, branch: str, *, required_only: bool
-    ) -> list[dict[str, Any]]:
+    def checks(self, cwd: Path, branch: str, *, required_only: bool) -> list[dict[str, Any]]:
         argv = [
             "gh",
             "pr",

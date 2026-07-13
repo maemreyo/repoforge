@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import Any
-from ..context import ApplicationContext
+
 from ...domain.errors import SecurityError, WorkspaceError
+from ..context import ApplicationContext
 from .file_read import WorkspaceFileReadCommand, WorkspaceFileReader
 
 
@@ -42,9 +43,7 @@ class WorkspaceFilesReader:
             for path in unique:
                 try:
                     r = self.reader.execute(
-                        WorkspaceFileReadCommand(
-                            c.workspace_id, path, c.start_line, c.end_line
-                        )
+                        WorkspaceFileReadCommand(c.workspace_id, path, c.start_line, c.end_line)
                     )
                     files.append(
                         {
@@ -67,9 +66,7 @@ class WorkspaceFilesReader:
                             "message": str(exc),
                         }
                     )
-            return WorkspaceFilesReadResult(
-                c.workspace_id, files, errors, len(unique), len(files)
-            )
+            return WorkspaceFilesReadResult(c.workspace_id, files, errors, len(unique), len(files))
 
         return self.ctx.audited(
             "workspace_read_files",

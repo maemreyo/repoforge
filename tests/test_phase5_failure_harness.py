@@ -1,14 +1,18 @@
 from __future__ import annotations
+
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+
 import pytest
+
 from repoforge.application.context import ApplicationContext
 from repoforge.application.workspace.create import (
     WorkspaceCreateCommand,
     WorkspaceCreator,
 )
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig
+from repoforge.testing import InMemoryLockManager, InMemoryOperationGate
 
 
 class FixedClock:
@@ -126,9 +130,7 @@ def test_workspace_creation_compensates_when_registry_save_fails(
     (repo_path / ".git").mkdir()
     workspace_root = tmp_path / "workspaces"
     state_root = tmp_path / "state"
-    repo = RepositoryConfig(
-        repo_id="demo", path=repo_path, fetch_before_workspace=False
-    )
+    repo = RepositoryConfig(repo_id="demo", path=repo_path, fetch_before_workspace=False)
     config = AppConfig(
         tmp_path / "config.toml",
         ServerConfig(workspace_root, state_root),
@@ -142,6 +144,8 @@ def test_workspace_creation_compensates_when_registry_save_fails(
         NullGithub(),
         NullFiles(),
         FailingStore(),
+        InMemoryLockManager(),
+        InMemoryOperationGate(),
         NullAudit(),
         FixedClock(),
         FixedIds(),

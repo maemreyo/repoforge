@@ -9,6 +9,7 @@ from .domain.errors import (
     RepoForgeError,
     SecurityError,
     WorkspaceError,
+    operation_error_from_exception,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "RepoForgeError",
     "SecurityError",
     "WorkspaceError",
+    "operation_error_from_exception",
 ]

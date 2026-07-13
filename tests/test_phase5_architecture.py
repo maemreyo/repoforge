@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import ast
 from pathlib import Path
 
@@ -10,7 +11,7 @@ def imports(path: Path) -> set[str]:
     result = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            result.update((alias.name for alias in node.names))
+            result.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             result.add(node.module)
     return result
@@ -28,15 +29,13 @@ def test_domain_is_pure() -> None:
         "service",
     }
     for path in (PACKAGE / "domain").glob("*.py"):
-        assert not any(
-            (item in name for name in imports(path) for item in forbidden)
-        ), path
+        assert not any(item in name for name in imports(path) for item in forbidden), path
 
 
 def test_application_depends_on_ports_not_adapters() -> None:
     for path in (PACKAGE / "application").rglob("*.py"):
         names = imports(path)
-        assert not any(("adapters" in name for name in names)), path
+        assert not any("adapters" in name for name in names), path
         assert "subprocess" not in names and "fcntl" not in names, path
 
 
@@ -81,9 +80,11 @@ def test_service_is_a_delegating_facade() -> None:
 
 def test_bootstrap_is_composition_root() -> None:
     assert "adapters" in (PACKAGE / "bootstrap.py").read_text(encoding="utf-8")
-    for path in [
-        PACKAGE / "service.py",
-        *(PACKAGE / "application").rglob("*.py"),
-        *(PACKAGE / "domain").rglob("*.py"),
-    ]:
-        assert "from .adapters" not in path.read_text(encoding="utf-8")
+    for path in PACKAGE.rglob("*.py"):
+        if path == PACKAGE / "bootstrap.py" or "adapters" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "repoforge.adapters" not in text, path
+        assert "from .adapters" not in text, path
+        assert "from ..adapters" not in text, path
+        assert "from ...adapters" not in text, path

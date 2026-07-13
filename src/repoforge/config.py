@@ -51,6 +51,7 @@ class ProfileConfig:
     commands: tuple[tuple[str, ...], ...]
     verification: bool = False
     timeout_seconds: int | None = None
+    working_directory: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,8 @@ class RepositoryConfig:
     allowed_base_branches: tuple[str, ...] = ("main",)
     branch_prefix: str = "ai/"
     protected_branches: tuple[str, ...] = ("main", "master", "develop", "production")
+    read_only: bool = False
+    publish_enabled: bool = True
     require_verification_before_commit: bool = True
     fetch_before_workspace: bool = True
     default_verification_profile: str | None = None
@@ -162,13 +165,27 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
         verification = _boolean(
             profile.get("verification"), False, f"profile {repo_id}.{name}.verification"
         )
+        working_directory_raw = profile.get("working_directory")
+        working_directory = None
+        if working_directory_raw is not None:
+            if not isinstance(working_directory_raw, str):
+                raise ConfigError(f"profile {repo_id}.{name}.working_directory must be a string")
+            normalized_workdir = working_directory_raw.replace("\\", "/").strip("/")
+            if (
+                not normalized_workdir
+                or normalized_workdir.startswith("-")
+                or any(part in {"", ".", ".."} for part in normalized_workdir.split("/"))
+            ):
+                raise ConfigError(
+                    f"profile {repo_id}.{name}.working_directory must be a safe relative path"
+                )
+            working_directory = normalized_workdir
         timeout_raw = profile.get("timeout_seconds")
         timeout_seconds = None
         if timeout_raw is not None:
             timeout_seconds = _positive_int(
                 timeout_raw, 1, f"profile {repo_id}.{name}.timeout_seconds"
             )
-
         raw_commands = profile.get("commands")
         if not isinstance(raw_commands, list) or not raw_commands:
             raise ConfigError(f"profile {repo_id}.{name} must contain at least one command")
@@ -183,13 +200,13 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
                     f"profile {repo_id}.{name}.commands[{index}] must be a non-empty string array"
                 )
             commands.append(tuple(command))
-
         profiles[name] = ProfileConfig(
             name=name,
             description=description,
             commands=tuple(commands),
             verification=verification,
             timeout_seconds=timeout_seconds,
+            working_directory=working_directory,
         )
     return profiles
 
@@ -202,13 +219,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             f"Configuration file not found: {config_path}. "
             "Run `repoforge init --repo /path/to/repo` first."
         )
-
     try:
         with config_path.open("rb") as handle:
             raw = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"Cannot load configuration {config_path}: {exc}") from exc
-
     base_dir = config_path.parent
     server_raw = _expect_mapping(raw.get("server", {}), "server")
     server = ServerConfig(
@@ -222,9 +237,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("max_file_bytes"), 2_000_000, "server.max_file_bytes"
         ),
         max_tool_output_chars=_positive_int(
-            server_raw.get("max_tool_output_chars"),
-            120_000,
-            "server.max_tool_output_chars",
+            server_raw.get("max_tool_output_chars"), 120_000, "server.max_tool_output_chars"
         ),
         default_command_timeout_seconds=_positive_int(
             server_raw.get("default_command_timeout_seconds"),
@@ -251,11 +264,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         )
         or DEFAULT_ALLOWED_ENVIRONMENT,
     )
-
     repositories_raw = _expect_mapping(raw.get("repositories"), "repositories")
     if not repositories_raw:
         raise ConfigError("At least one repository must be configured")
-
     repositories: dict[str, RepositoryConfig] = {}
     for repo_id, repo_raw_any in repositories_raw.items():
         if not _SAFE_REPO_ID.fullmatch(repo_id):
@@ -263,7 +274,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         repo_raw = _expect_mapping(repo_raw_any, f"repositories.{repo_id}")
         if "path" not in repo_raw:
             raise ConfigError(f"repositories.{repo_id}.path is required")
-
         default_base = _safe_ref(
             str(repo_raw.get("default_base", "main")), f"repositories.{repo_id}.default_base"
         )
@@ -281,14 +291,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             raise ConfigError(
                 f"repositories.{repo_id}.default_base must be in allowed_base_branches"
             )
-
         branch_prefix = str(repo_raw.get("branch_prefix", "ai/"))
         if not branch_prefix.endswith("/") or not _SAFE_BRANCH_COMPONENT.fullmatch(branch_prefix):
             raise ConfigError(
                 f"repositories.{repo_id}.branch_prefix must be a safe prefix ending in '/': "
                 f"{branch_prefix!r}"
             )
-
         protected = _tuple_of_strings(
             repo_raw.get("protected_branches", ["main", "master", "develop", "production"]),
             f"repositories.{repo_id}.protected_branches",
@@ -309,7 +317,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                     f"repositories.{repo_id}.default_verification_profile must reference a "
                     "verification profile"
                 )
-
         repositories[repo_id] = RepositoryConfig(
             repo_id=repo_id,
             path=_expand_path(str(repo_raw["path"]), base_dir=base_dir),
@@ -321,6 +328,16 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             allowed_base_branches=allowed_bases,
             branch_prefix=branch_prefix,
             protected_branches=protected,
+            read_only=_boolean(
+                repo_raw.get("read_only"),
+                False,
+                f"repositories.{repo_id}.read_only",
+            ),
+            publish_enabled=_boolean(
+                repo_raw.get("publish_enabled"),
+                True,
+                f"repositories.{repo_id}.publish_enabled",
+            ),
             require_verification_before_commit=_boolean(
                 repo_raw.get("require_verification_before_commit"),
                 True,
@@ -333,14 +350,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ),
             default_verification_profile=default_verification,
             max_changed_files=_positive_int(
-                repo_raw.get("max_changed_files"),
-                150,
-                f"repositories.{repo_id}.max_changed_files",
+                repo_raw.get("max_changed_files"), 150, f"repositories.{repo_id}.max_changed_files"
             ),
             max_diff_lines=_positive_int(
-                repo_raw.get("max_diff_lines"),
-                12_000,
-                f"repositories.{repo_id}.max_diff_lines",
+                repo_raw.get("max_diff_lines"), 12_000, f"repositories.{repo_id}.max_diff_lines"
             ),
             max_total_changed_bytes=_positive_int(
                 repo_raw.get("max_total_changed_bytes"),
@@ -367,5 +380,4 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ),
             profiles=profiles,
         )
-
     return AppConfig(source_path=config_path, server=server, repositories=repositories)

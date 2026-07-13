@@ -1,6 +1,7 @@
 """Local filesystem boundary used by application use cases."""
 
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Protocol
 
@@ -26,6 +27,4 @@ class FileSystem(Protocol):
 
     def unlink(self, path: Path, *, missing_ok: bool = False) -> None: ...
 
-    def mkdir(
-        self, path: Path, *, parents: bool = True, exist_ok: bool = True
-    ) -> None: ...
+    def mkdir(self, path: Path, *, parents: bool = True, exist_ok: bool = True) -> None: ...

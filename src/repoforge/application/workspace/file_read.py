@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 import hashlib
 from dataclasses import dataclass
-from ..context import ApplicationContext
+
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +70,8 @@ class WorkspaceFileReader:
                 raise SecurityError("File is not valid UTF-8") from exc
             lines = text.splitlines()
             selected = lines[start - 1 : end]
-            numbered = "\n".join(
-                (f"{n}: {line}" for n, line in enumerate(selected, start=start))
-            )
-            content, truncated = self._bound(
-                numbered, self.ctx.config.server.max_tool_output_chars
-            )
+            numbered = "\n".join((f"{n}: {line}" for n, line in enumerate(selected, start=start)))
+            content, truncated = self._bound(numbered, self.ctx.config.server.max_tool_output_chars)
             return WorkspaceFileReadResult(
                 c.workspace_id,
                 normalized,

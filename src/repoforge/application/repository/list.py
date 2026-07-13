@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 from ..context import ApplicationContext
 
 
@@ -28,6 +30,8 @@ class RepositoryLister:
                 "default_base": repo.default_base,
                 "allowed_base_branches": list(repo.allowed_base_branches),
                 "branch_prefix": repo.branch_prefix,
+                "read_only": repo.read_only,
+                "publish_enabled": repo.publish_enabled,
                 "default_verification_profile": repo.default_verification_profile,
                 "change_limits": {
                     "max_changed_files": repo.max_changed_files,
@@ -44,6 +48,7 @@ class RepositoryLister:
                         "description": p.description,
                         "verification": p.verification,
                         "commands": [list(c) for c in p.commands],
+                        "working_directory": p.working_directory,
                     }
                     for name, p in repo.profiles.items()
                 },

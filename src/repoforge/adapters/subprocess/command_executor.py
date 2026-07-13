@@ -1,12 +1,15 @@
 """Bounded subprocess adapter with process-group timeout cleanup."""
 
 from __future__ import annotations
+
+import contextlib
 import os
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
 from ...config import ServerConfig
 from ...domain.errors import CommandError
 from ...ports.command import CommandResult
@@ -17,14 +20,12 @@ class SubprocessCommandExecutor:
         self.config = config
 
     def environment(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-        env = {
-            k: os.environ[k] for k in self.config.allowed_environment if k in os.environ
-        }
+        env = {k: os.environ[k] for k in self.config.allowed_environment if k in os.environ}
         inherited = env.get("PATH", "")
         parts = [*self.config.path_prefixes]
         if inherited:
             parts.append(inherited)
-        env["PATH"] = os.pathsep.join(dict.fromkeys((p for p in parts if p)))
+        env["PATH"] = os.pathsep.join(dict.fromkeys(p for p in parts if p))
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GH_PROMPT_DISABLED"] = "1"
         if extra:
@@ -37,9 +38,7 @@ class SubprocessCommandExecutor:
             return text
         half = max(1, limit // 2)
         removed = len(text) - half * 2
-        return (
-            f"{text[:half]}\n\n... <{removed} characters omitted> ...\n\n{text[-half:]}"
-        )
+        return f"{text[:half]}\n\n... <{removed} characters omitted> ...\n\n{text[-half:]}"
 
     def _communicate(
         self,
@@ -75,14 +74,10 @@ class SubprocessCommandExecutor:
                 os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=2)
             except (ProcessLookupError, subprocess.TimeoutExpired):
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
             process.communicate()
-            raise CommandError(
-                f"Command timed out after {timeout}s: {' '.join(argv)}"
-            ) from exc
+            raise CommandError(f"Command timed out after {timeout}s: {' '.join(argv)}") from exc
 
     def run(
         self,
@@ -95,7 +90,7 @@ class SubprocessCommandExecutor:
         extra_env: Mapping[str, str] | None = None,
         output_limit: int | None = None,
     ) -> CommandResult:
-        if not argv or not all((isinstance(x, str) and x for x in argv)):
+        if not argv or not all(isinstance(x, str) and x for x in argv):
             raise CommandError("Command argv must contain non-empty strings")
         actual_timeout = timeout or self.config.default_command_timeout_seconds
         limit = output_limit or self.config.max_tool_output_chars

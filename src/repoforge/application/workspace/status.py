@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+
 from ..context import ApplicationContext
 
 
@@ -59,6 +60,4 @@ class WorkspaceStatusReader:
                 last,
             )
 
-        return self.ctx.audited(
-            "workspace_status", {"workspace_id": c.workspace_id}, op
-        )
+        return self.ctx.audited("workspace_status", {"workspace_id": c.workspace_id}, op)

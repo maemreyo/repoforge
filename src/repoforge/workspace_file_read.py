@@ -106,8 +106,7 @@ class WorkspaceFileReader:
         lines = text.splitlines()
         selected = lines[start_line - 1 : end_line]
         numbered = "\n".join(
-            f"{line_number}: {line}"
-            for line_number, line in enumerate(selected, start=start_line)
+            f"{line_number}: {line}" for line_number, line in enumerate(selected, start=start_line)
         )
         bounded_content, truncated = _bounded_text(numbered, self._ports.max_tool_output_chars)
 

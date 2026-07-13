@@ -1,5 +1,7 @@
-"""Backward-compatible audit adapter imports."""
+"""Backward-compatible audit adapter imports through the composition root."""
 
-from .adapters.audit import AuditLogger, JsonlAuditSink
+from .bootstrap import JsonlAuditSink
+
+AuditLogger = JsonlAuditSink
 
 __all__ = ["AuditLogger", "JsonlAuditSink"]

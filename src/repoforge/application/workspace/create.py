@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
-from ..context import ApplicationContext
+
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import slugify, validate_branch
 from ...domain.workspace import WorkspaceRecord
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +50,7 @@ class WorkspaceCreator:
         try:
             destination.relative_to(root)
         except ValueError as exc:
-            raise SecurityError(
-                "Generated workspace path escaped workspace_root"
-            ) from exc
+            raise SecurityError("Generated workspace path escaped workspace_root") from exc
         if destination.exists():
             raise WorkspaceError(f"Workspace destination already exists: {destination}")
 
@@ -75,8 +75,13 @@ class WorkspaceCreator:
                         f"Workspace registry save failed and compensation failed: {cleanup_exc}"
                     ) from exc
                 raise
+            next_step = (
+                "Inspect files and repository context. This repository is enrolled read-only."
+                if repo.read_only
+                else "Inspect files, make changes, run a verification profile, then review the diff."
+            )
             return WorkspaceCreateResult(
-                workspace_id, repo.repo_id, str(destination), branch, base, head
+                workspace_id, repo.repo_id, str(destination), branch, base, head, next_step
             )
 
         return self.ctx.audited(

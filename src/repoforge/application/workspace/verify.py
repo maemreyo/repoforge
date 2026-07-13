@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from typing import Any
-from ..context import ApplicationContext
+
 from ...domain.verification import select_verification_profile
-from .run_profile import WorkspaceRunProfileCommand, WorkspaceProfileRunner
+from ..context import ApplicationContext
+from .run_profile import WorkspaceProfileRunner, WorkspaceRunProfileCommand
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +25,7 @@ class WorkspaceVerifier:
     def execute(self, c: WorkspaceVerifyCommand) -> WorkspaceVerifyResult:
         record, repo, _ = self.ctx.workspace(c.workspace_id)
         profile, used_default = select_verification_profile(repo, c.profile_name)
-        r = self.runner.execute(
-            WorkspaceRunProfileCommand(c.workspace_id, profile.name)
-        )
+        r = self.runner.execute(WorkspaceRunProfileCommand(c.workspace_id, profile.name))
         return WorkspaceVerifyResult(
             {
                 "workspace_id": r.workspace_id,

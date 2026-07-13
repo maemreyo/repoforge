@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 import json
 from dataclasses import dataclass
 from typing import Any
-from ..context import ApplicationContext
+
 from ...domain.errors import SecurityError
 from ...domain.policy import assert_path_allowed
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,9 +66,7 @@ class RepositoryContextReader:
                     continue
                 size = path.stat().st_size
                 if size > self.ctx.config.server.max_file_bytes:
-                    instructions.append(
-                        {"path": relative, "size_bytes": size, "preview": None}
-                    )
+                    instructions.append({"path": relative, "size_bytes": size, "preview": None})
                     continue
                 data = path.read_bytes()
                 if b"\x00" in data:
@@ -85,11 +85,7 @@ class RepositoryContextReader:
             engines = {}
             if package:
                 raw = package.get("scripts")
-                scripts = (
-                    {str(k): str(v) for k, v in raw.items()}
-                    if isinstance(raw, dict)
-                    else {}
-                )
+                scripts = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
                 declared = package.get("packageManager")
                 manager = str(declared) if declared is not None else None
                 raw_engines = package.get("engines")

@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
 from ..context import ApplicationContext
 
 
@@ -154,9 +156,7 @@ class Doctor:
                                 remediation=f"Use the version declared by packageManager: {manager_value}.",
                             )
                     engines = package.get("engines")
-                    if isinstance(engines, dict) and isinstance(
-                        engines.get("node"), str
-                    ):
+                    if isinstance(engines, dict) and isinstance(engines.get("node"), str):
                         node = self.ctx.executables.which("node", path=search_path)
                         add(
                             f"runtime:{repo_id}:node",
@@ -185,9 +185,7 @@ class Doctor:
             try:
                 self.ctx.filesystem.mkdir(path)
                 probe = path / f".write-test-{os.getpid()}"
-                self.ctx.filesystem.write_bytes_atomic(
-                    probe, b"ok", preserve_mode=False
-                )
+                self.ctx.filesystem.write_bytes_atomic(probe, b"ok", preserve_mode=False)
                 self.ctx.filesystem.unlink(probe)
                 add(name, True, str(path))
             except OSError as exc:
@@ -197,7 +195,7 @@ class Doctor:
         return DoctorResult(
             not errors,
             {
-                "passed": sum((1 for x in checks if x["ok"])),
+                "passed": sum(1 for x in checks if x["ok"]),
                 "errors": len(errors),
                 "warnings": len(warnings),
                 "total": len(checks),

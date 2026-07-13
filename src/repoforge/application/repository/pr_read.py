@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+
 from ..context import ApplicationContext
 
 
@@ -25,7 +26,5 @@ class PullRequestReader:
         return self.ctx.audited(
             "repo_pr_read",
             {"repo_id": c.repo_id, "pr_number": c.pr_number},
-            lambda: PullRequestReadResult(
-                self.ctx.github.pr_read(repo.path, c.pr_number)
-            ),
+            lambda: PullRequestReadResult(self.ctx.github.pr_read(repo.path, c.pr_number)),
         )

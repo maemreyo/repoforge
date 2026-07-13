@@ -1,10 +1,12 @@
 """Pure path, branch, and patch policy decisions."""
 
 from __future__ import annotations
+
 import fnmatch
 import re
 import shlex
 from pathlib import Path, PurePosixPath
+
 from ..config import RepositoryConfig
 from .errors import SecurityError
 
@@ -35,15 +37,11 @@ def validate_branch(branch: str, repo: RepositoryConfig) -> None:
 
 
 def normalize_relative_path(value: str) -> str:
-    if not value or any((ord(c) < 32 for c in value)):
+    if not value or any(ord(c) < 32 for c in value):
         raise SecurityError("Path is empty or contains control characters")
     candidate = PurePosixPath(value.replace("\\", "/"))
-    if candidate.is_absolute() or any(
-        (part in {"", ".", ".."} for part in candidate.parts)
-    ):
-        raise SecurityError(
-            f"Path must be a normalized repository-relative path: {value!r}"
-        )
+    if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+        raise SecurityError(f"Path must be a normalized repository-relative path: {value!r}")
     return candidate.as_posix()
 
 
@@ -54,18 +52,14 @@ def _matches(path: str, pattern: str) -> bool:
     patterns = [normalized]
     if normalized.startswith("**/"):
         patterns.append(normalized[3:])
-    return any(
-        (fnmatch.fnmatchcase(path, p) or PurePosixPath(path).match(p) for p in patterns)
-    )
+    return any(fnmatch.fnmatchcase(path, p) or PurePosixPath(path).match(p) for p in patterns)
 
 
 def assert_path_allowed(path: str, repo: RepositoryConfig) -> str:
     normalized = normalize_relative_path(path)
-    if repo.allowed_paths and (
-        not any((_matches(normalized, p) for p in repo.allowed_paths))
-    ):
+    if repo.allowed_paths and (not any(_matches(normalized, p) for p in repo.allowed_paths)):
         raise SecurityError(f"Path is outside allowed_paths: {normalized}")
-    if any((_matches(normalized, p) for p in repo.denied_paths)):
+    if any(_matches(normalized, p) for p in repo.denied_paths):
         raise SecurityError(f"Path is denied by repository policy: {normalized}")
     return normalized
 
@@ -111,9 +105,7 @@ def extract_patch_paths(patch: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def validate_patch(
-    patch: str, repo: RepositoryConfig, *, max_chars: int
-) -> tuple[str, ...]:
+def validate_patch(patch: str, repo: RepositoryConfig, *, max_chars: int) -> tuple[str, ...]:
     if not patch.strip():
         raise SecurityError("Patch is empty")
     if len(patch) > max_chars:
@@ -122,13 +114,9 @@ def validate_patch(
         "^(?:new file mode|deleted file mode|old mode|new mode) (?:120000|160000)$",
         re.MULTILINE,
     )
-    index = re.compile(
-        "^index [0-9a-f]+\\.\\.[0-9a-f]+ (?:120000|160000)$", re.MULTILINE
-    )
+    index = re.compile("^index [0-9a-f]+\\.\\.[0-9a-f]+ (?:120000|160000)$", re.MULTILINE)
     if mode.search(patch) or index.search(patch):
-        raise SecurityError(
-            "Patches that create or modify symlinks/submodules are not allowed"
-        )
+        raise SecurityError("Patches that create or modify symlinks/submodules are not allowed")
     paths = extract_patch_paths(patch)
     for path in paths:
         assert_path_allowed(path, repo)

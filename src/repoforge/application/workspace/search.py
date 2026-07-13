@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
-from ..context import ApplicationContext
+
 from ...domain.errors import SecurityError
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,16 +29,12 @@ class WorkspaceSearcher:
         _, repo, path = self.ctx.workspace(c.workspace_id)
         if not c.query or "\x00" in c.query:
             raise ValueError("query must be non-empty")
-        if c.path_glob and (
-            c.path_glob.startswith(("/", "-")) or ".." in Path(c.path_glob).parts
-        ):
+        if c.path_glob and (c.path_glob.startswith(("/", "-")) or ".." in Path(c.path_glob).parts):
             raise SecurityError("Unsafe path_glob")
         limit = max(1, min(c.max_results, 2000))
 
         def op() -> WorkspaceSearchResult:
-            matches, truncated = self.ctx.git.search(
-                path, repo, c.query, c.path_glob, limit
-            )
+            matches, truncated = self.ctx.git.search(path, repo, c.query, c.path_glob, limit)
             return WorkspaceSearchResult(c.workspace_id, c.query, matches, truncated)
 
         return self.ctx.audited(

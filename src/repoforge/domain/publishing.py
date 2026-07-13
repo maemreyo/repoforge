@@ -10,15 +10,11 @@ def validate_commit_message(message: str) -> str:
     return normalized
 
 
-def validate_pr_update(
-    title: str | None, body: str | None
-) -> tuple[str | None, str | None]:
+def validate_pr_update(title: str | None, body: str | None) -> tuple[str | None, str | None]:
     if title is None and body is None:
         raise ValueError("At least one of title or body must be provided")
     normalized_title = title.strip() if title is not None else None
-    if normalized_title is not None and (
-        not normalized_title or len(normalized_title) > 256
-    ):
+    if normalized_title is not None and (not normalized_title or len(normalized_title) > 256):
         raise ValueError("PR title must contain 1-256 characters")
     if body is not None and len(body) > 100000:
         raise ValueError("PR body is too large")

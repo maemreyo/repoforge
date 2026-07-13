@@ -55,9 +55,7 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
         hello["sha256"],
     )
     assert replaced["replacements"] == 1
-    created_file = service.workspace_write_file(
-        workspace_id, "notes.txt", "temporary\n", "<new>"
-    )
+    created_file = service.workspace_write_file(workspace_id, "notes.txt", "temporary\n", "<new>")
     assert created_file["path"] == "notes.txt"
 
     current_status = service.workspace_status(workspace_id)
@@ -133,15 +131,11 @@ def test_batch_limit_and_denied_path(forge_env: ForgeEnvironment) -> None:
 
 def test_stale_locks_and_verification_invalidation(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
-    workspace_id = service.workspace_create("demo", "stale lock") ["workspace_id"]
+    workspace_id = service.workspace_create("demo", "stale lock")["workspace_id"]
     hello = service.workspace_read_file(workspace_id, "hello.txt")
-    service.workspace_write_file(
-        workspace_id, "hello.txt", "changed once\n", hello["sha256"]
-    )
+    service.workspace_write_file(workspace_id, "hello.txt", "changed once\n", hello["sha256"])
     with pytest.raises(WorkspaceError, match="changed since"):
-        service.workspace_write_file(
-            workspace_id, "hello.txt", "changed twice\n", hello["sha256"]
-        )
+        service.workspace_write_file(workspace_id, "hello.txt", "changed twice\n", hello["sha256"])
 
     service.workspace_verify(workspace_id)
     current = service.workspace_read_file(workspace_id, "hello.txt")
@@ -154,9 +148,7 @@ def test_stale_locks_and_verification_invalidation(forge_env: ForgeEnvironment) 
     status = service.workspace_status(workspace_id)
     stale = status["workspace_fingerprint"]
     current = service.workspace_read_file(workspace_id, "hello.txt")
-    service.workspace_write_file(
-        workspace_id, "hello.txt", "changed again\n", current["sha256"]
-    )
+    service.workspace_write_file(workspace_id, "hello.txt", "changed again\n", current["sha256"])
     with pytest.raises(WorkspaceError, match="changed since"):
         service.workspace_restore_paths(workspace_id, ["hello.txt"], stale)
 

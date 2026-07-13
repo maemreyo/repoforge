@@ -1,8 +1,9 @@
 from dataclasses import dataclass
-from ..context import ApplicationContext
+
 from ...domain.errors import WorkspaceError
 from ...domain.policy import validate_branch
 from ...domain.publishing import render_pr_body, validate_pr_create
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,15 +35,13 @@ class DraftPullRequestCreator:
         title, body = validate_pr_create(c.title, c.body)
 
         def op() -> WorkspaceCreateDraftPrResult:
-            with self.ctx.store.lock(c.workspace_id):
+            with self.ctx.locks.lock(c.workspace_id):
                 fresh = self.ctx.store.load(c.workspace_id)
                 self.ctx.git.changed_paths(path, repo)
                 self.ctx.git.ensure_clean(path, context="creating a pull request")
                 validate_branch(fresh.branch, repo)
                 if self.ctx.git.upstream_name(path) is None:
-                    raise WorkspaceError(
-                        "Branch has no upstream; call workspace_push first"
-                    )
+                    raise WorkspaceError("Branch has no upstream; call workspace_push first")
                 head = self.ctx.git.head_sha(path)
                 if self.ctx.git.upstream_sha(path) != head:
                     raise WorkspaceError(
@@ -53,26 +52,20 @@ class DraftPullRequestCreator:
                         "Workspace registry has no matching successful push for the current HEAD"
                     )
                 if self.ctx.git.ahead_of_base(path, fresh.remote, fresh.base) <= 0:
-                    raise WorkspaceError(
-                        "Branch has no commits ahead of the base branch"
-                    )
+                    raise WorkspaceError("Branch has no commits ahead of the base branch")
                 existing = self.ctx.github.find_pr(path, fresh.branch)
                 if existing is not None:
                     existing["already_existed"] = True
                     fresh.metadata["pr_url"] = existing.get("url")
                     fresh.metadata["pr_number"] = existing.get("number")
                     self.ctx.store.save(fresh)
-                    return WorkspaceCreateDraftPrResult(
-                        payload=existing, already_existed=True
-                    )
+                    return WorkspaceCreateDraftPrResult(payload=existing, already_existed=True)
                 final = render_pr_body(
                     body,
                     branch=fresh.branch,
                     head_sha=head,
                     verification_profile=fresh.metadata.get("verification_profile"),
-                    verification_completed_at=fresh.metadata.get(
-                        "verification_completed_at"
-                    ),
+                    verification_completed_at=fresh.metadata.get("verification_completed_at"),
                 )
                 url = self.ctx.github.create_draft(
                     path,

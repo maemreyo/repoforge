@@ -1,9 +1,10 @@
 import re
 from dataclasses import dataclass
 from typing import Any
-from ..context import ApplicationContext
+
 from ...domain.errors import WorkspaceError
 from ...domain.policy import assert_path_allowed
+from ..context import ApplicationContext
 
 _SHA = re.compile("^[a-f0-9]{64}$")
 
@@ -37,15 +38,11 @@ class WorkspacePathsRestorer:
                 f"relative_paths exceeds max_batch_files={self.ctx.config.server.max_batch_files}"
             )
         if not _SHA.fullmatch(c.expected_workspace_fingerprint):
-            raise ValueError(
-                "expected_workspace_fingerprint must be a lowercase SHA-256"
-            )
-        normalized = [
-            assert_path_allowed(x, repo) for x in dict.fromkeys(c.relative_paths)
-        ]
+            raise ValueError("expected_workspace_fingerprint must be a lowercase SHA-256")
+        normalized = [assert_path_allowed(x, repo) for x in dict.fromkeys(c.relative_paths)]
 
         def op() -> WorkspaceRestorePathsResult:
-            with self.ctx.store.lock(c.workspace_id):
+            with self.ctx.locks.lock(c.workspace_id):
                 if self.ctx.git.fingerprint(path) != c.expected_workspace_fingerprint:
                     raise WorkspaceError(
                         "Workspace changed since it was inspected; refresh status before restoring"

@@ -55,8 +55,8 @@ def test_javascript_detection_and_render_config(tmp_path: Path) -> None:
         "full",
     }
     rendered = render_config(detection)
-    assert "default_verification_profile = \"full\"" in rendered
-    assert '[repositories.modern-app.profiles.full]' in rendered
+    assert 'default_verification_profile = "full"' in rendered
+    assert "[repositories.modern-app.profiles.full]" in rendered
     assert str(repo) in rendered
 
 
@@ -103,9 +103,7 @@ def test_cli_setup_diagnostics_and_workspace_commands(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv(
-        "PATH", f"{forge_env.fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
-    )
+    monkeypatch.setenv("PATH", f"{forge_env.fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
     generated = tmp_path / "generated.toml"
     assert (
         main(

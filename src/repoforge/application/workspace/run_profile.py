@@ -1,10 +1,13 @@
 import hashlib
 from dataclasses import dataclass
 from typing import Any
-from ..context import ApplicationContext
+
+from ...domain.errors import SecurityError, WorkspaceError
+from ...domain.policy import normalize_relative_path
 from ...domain.verification import get_profile
 from ...domain.workspace import VerificationReceipt
 from ...ports.command import CommandResult
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +26,7 @@ class WorkspaceRunProfileResult:
     commands: list[dict[str, Any]]
     change_metrics: dict[str, Any]
     satisfies_commit_gate: bool
+    working_directory: str | None = None
 
 
 class WorkspaceProfileRunner:
@@ -50,16 +54,30 @@ class WorkspaceProfileRunner:
     def execute(self, c: WorkspaceRunProfileCommand) -> WorkspaceRunProfileResult:
         _, repo, path = self.ctx.workspace(c.workspace_id)
         profile = get_profile(repo, c.profile_name)
+        command_cwd = path
+        if profile.working_directory:
+            relative = normalize_relative_path(profile.working_directory)
+            unresolved = path / relative
+            if unresolved.is_symlink():
+                raise SecurityError("Profile working_directory cannot be a symlink")
+            command_cwd = unresolved.resolve(strict=False)
+            try:
+                command_cwd.relative_to(path.resolve(strict=True))
+            except ValueError as exc:
+                raise SecurityError("Profile working_directory escapes workspace") from exc
+            if not command_cwd.is_dir():
+                raise WorkspaceError(
+                    f"Profile working_directory does not exist: {profile.working_directory}"
+                )
 
         def op() -> WorkspaceRunProfileResult:
-            with self.ctx.store.lock(c.workspace_id):
+            with self.ctx.locks.lock(c.workspace_id):
                 fresh = self.ctx.store.load(c.workspace_id)
                 timeout = (
-                    profile.timeout_seconds
-                    or self.ctx.config.server.verification_timeout_seconds
+                    profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
                 )
                 results = [
-                    self.ctx.commands.run(command, cwd=path, timeout=timeout)
+                    self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
                     for command in profile.commands
                 ]
                 self.ctx.git.changed_paths(path, repo)
@@ -82,6 +100,7 @@ class WorkspaceProfileRunner:
                     [self.public(r) for r in results],
                     metrics,
                     profile.verification,
+                    profile.working_directory,
                 )
 
         return self.ctx.audited(

@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 import hashlib
 import re
 from dataclasses import dataclass
-from ..context import ApplicationContext
+
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
+from ..context import ApplicationContext
 
 _SHA = re.compile("^[a-f0-9]{64}$")
 
@@ -45,19 +47,15 @@ class WorkspaceFileWriter:
             raise SecurityError("Writing through symlinks is not allowed")
 
         def op() -> WorkspaceFileWriteResult:
-            with self.ctx.store.lock(c.workspace_id):
+            with self.ctx.locks.lock(c.workspace_id):
                 if self.ctx.filesystem.exists(path):
-                    if self.ctx.filesystem.is_symlink(
+                    if self.ctx.filesystem.is_symlink(path) or not self.ctx.filesystem.is_file(
                         path
-                    ) or not self.ctx.filesystem.is_file(path):
+                    ):
                         raise SecurityError("Only regular files can be overwritten")
                     if c.expected_sha256 == "<new>":
-                        raise WorkspaceError(
-                            "File already exists; supply its current SHA-256"
-                        )
-                    actual = hashlib.sha256(
-                        self.ctx.filesystem.read_bytes(path)
-                    ).hexdigest()
+                        raise WorkspaceError("File already exists; supply its current SHA-256")
+                    actual = hashlib.sha256(self.ctx.filesystem.read_bytes(path)).hexdigest()
                     if actual != c.expected_sha256:
                         raise WorkspaceError(
                             f"File changed since it was read: expected {c.expected_sha256}, got {actual}"
@@ -69,9 +67,7 @@ class WorkspaceFileWriter:
                 self.ctx.filesystem.write_bytes_atomic(path, data, preserve_mode=True)
                 sha = hashlib.sha256(data).hexdigest()
                 stat = self.ctx.git.diff_stat(workspace)
-                return WorkspaceFileWriteResult(
-                    c.workspace_id, normalized, sha, len(data), stat
-                )
+                return WorkspaceFileWriteResult(c.workspace_id, normalized, sha, len(data), stat)
 
         return self.ctx.audited(
             "workspace_write_file",

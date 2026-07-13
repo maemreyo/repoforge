@@ -1,10 +1,13 @@
 """Semantic Git adapter; application code never builds Git argv."""
 
 from __future__ import annotations
+
+import contextlib
 import hashlib
 import os
 from pathlib import Path
 from typing import Any
+
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
@@ -30,9 +33,7 @@ class GitCliRepository:
         return self._executor.run(["git", "diff", "--stat", "--"], cwd=path).stdout
 
     def current_branch(self, path: Path) -> str:
-        return self._executor.run(
-            ["git", "branch", "--show-current"], cwd=path
-        ).stdout.strip()
+        return self._executor.run(["git", "branch", "--show-current"], cwd=path).stdout.strip()
 
     def head_sha(self, path: Path) -> str:
         return self._executor.run(["git", "rev-parse", "HEAD"], cwd=path).stdout.strip()
@@ -43,9 +44,7 @@ class GitCliRepository:
         ).stdout
 
     def status_short_branch(self, path: Path) -> str:
-        return self._executor.run(
-            ["git", "status", "--short", "--branch"], cwd=path
-        ).combined
+        return self._executor.run(["git", "status", "--short", "--branch"], cwd=path).combined
 
     def remote_verbose(self, path: Path) -> str:
         return self._executor.run(["git", "remote", "-v"], cwd=path).combined
@@ -80,9 +79,7 @@ class GitCliRepository:
                 if entry and entry.split(maxsplit=1)
             }
             if modes.intersection({"120000", "160000"}):
-                raise SecurityError(
-                    f"Symlink or submodule changes are not allowed: {item}"
-                )
+                raise SecurityError(f"Symlink or submodule changes are not allowed: {item}")
         return changed
 
     def untracked_paths(self, path: Path, repo: RepositoryConfig) -> list[str]:
@@ -109,7 +106,7 @@ class GitCliRepository:
             max_bytes=self.server.max_fingerprint_bytes,
         )
         total = len(diff) + len(raw)
-        for name in sorted((x for x in raw.split(b"\x00") if x)):
+        for name in sorted(x for x in raw.split(b"\x00") if x):
             relative = name.decode("utf-8", errors="strict")
             file_path = path / relative
             digest.update(b"\x00UNTRACKED\x00" + name + b"\x00")
@@ -147,11 +144,9 @@ class GitCliRepository:
             except ValueError:
                 pass
         total = sum(
-            (
-                (path / r).stat().st_size
-                for r in changed
-                if (path / r).is_file() and (not (path / r).is_symlink())
-            )
+            (path / r).stat().st_size
+            for r in changed
+            if (path / r).is_file() and (not (path / r).is_symlink())
         )
         files = len(changed)
         lines = added + deleted
@@ -172,9 +167,7 @@ class GitCliRepository:
             and (total <= repo.max_total_changed_bytes),
         }
 
-    def enforce_change_budget(
-        self, path: Path, repo: RepositoryConfig
-    ) -> dict[str, Any]:
+    def enforce_change_budget(self, path: Path, repo: RepositoryConfig) -> dict[str, Any]:
         m = self.change_metrics(path, repo)
         v = []
         if m["changed_files"] > repo.max_changed_files:
@@ -238,10 +231,8 @@ class GitCliRepository:
             if item:
                 name = item.decode("utf-8", errors="strict")
                 if "/" not in name:
-                    try:
+                    with contextlib.suppress(SecurityError):
                         out.append(assert_path_allowed(name, repo))
-                    except SecurityError:
-                        pass
         return sorted(out)
 
     def recent_commits(self, path: Path, limit: int) -> list[dict[str, str]]:
@@ -258,7 +249,7 @@ class GitCliRepository:
         result = []
         for line in output.splitlines():
             values = [*line.split("\t", 3), "", "", "", ""][:4]
-            result.append(dict(zip(("sha", "date", "author", "subject"), values)))
+            result.append(dict(zip(("sha", "date", "author", "subject"), values, strict=False)))
         return result
 
     def search(
@@ -296,9 +287,7 @@ class GitCliRepository:
             True,
         )
 
-    def diff(
-        self, path: Path, repo: RepositoryConfig, *, staged: bool
-    ) -> dict[str, Any]:
+    def diff(self, path: Path, repo: RepositoryConfig, *, staged: bool) -> dict[str, Any]:
         changed = self.changed_paths(path, repo)
         stat_args = ["git", "diff", "--no-ext-diff", "--stat"]
         diff_args = ["git", "diff", "--no-ext-diff"]
@@ -315,9 +304,7 @@ class GitCliRepository:
                 if not fp.is_file() or fp.is_symlink():
                     continue
                 if fp.stat().st_size > self.server.max_file_bytes:
-                    parts.append(
-                        f"\nUntracked file omitted because it is too large: {rel}\n"
-                    )
+                    parts.append(f"\nUntracked file omitted because it is too large: {rel}\n")
                     continue
                 if b"\x00" in fp.read_bytes():
                     parts.append(f"\nBinary untracked file omitted: {rel}\n")
@@ -331,7 +318,7 @@ class GitCliRepository:
                     raise CommandError(r.combined)
                 parts.append(r.stdout)
         text, truncated = self._bound(
-            "\n".join((x for x in parts if x)), self.server.max_tool_output_chars
+            "\n".join(x for x in parts if x), self.server.max_tool_output_chars
         )
         return {
             "changed_paths": changed,
@@ -346,9 +333,7 @@ class GitCliRepository:
         self, path: Path, profile: ProfileConfig
     ) -> tuple[list[CommandResult], str, dict[str, Any]]:
         timeout = profile.timeout_seconds or self.server.verification_timeout_seconds
-        results = [
-            self._executor.run(c, cwd=path, timeout=timeout) for c in profile.commands
-        ]
+        results = [self._executor.run(c, cwd=path, timeout=timeout) for c in profile.commands]
         return (results, self.fingerprint(path), {})
 
     def restore_paths(
@@ -382,9 +367,7 @@ class GitCliRepository:
                 restored.append(rel)
             elif candidate.exists():
                 if candidate.is_symlink() or not candidate.is_file():
-                    raise SecurityError(
-                        f"Only untracked regular files can be removed: {rel}"
-                    )
+                    raise SecurityError(f"Only untracked regular files can be removed: {rel}")
                 candidate.unlink()
                 removed.append(rel)
         return (restored, removed)
@@ -393,9 +376,8 @@ class GitCliRepository:
         self, repo: RepositoryConfig, destination: Path, branch: str, base: str
     ) -> str:
         if repo.fetch_before_workspace:
-            self._executor.run(
-                ["git", "fetch", "--prune", repo.remote, base], cwd=repo.path
-            )
+            self._executor.run(["git", "fetch", "--prune", repo.remote, base], cwd=repo.path)
+        base_ref = base if (repo.read_only or not repo.publish_enabled) else f"{repo.remote}/{base}"
         self._executor.run(
             [
                 "git",
@@ -404,7 +386,7 @@ class GitCliRepository:
                 "-b",
                 branch,
                 str(destination),
-                f"{repo.remote}/{base}",
+                base_ref,
             ],
             cwd=repo.path,
             timeout=self.server.verification_timeout_seconds,
@@ -460,9 +442,7 @@ class GitCliRepository:
             cwd=path,
             input_text=patch,
         )
-        self._executor.run(
-            ["git", "apply", "--whitespace=fix", "-"], cwd=path, input_text=patch
-        )
+        self._executor.run(["git", "apply", "--whitespace=fix", "-"], cwd=path, input_text=patch)
 
     def reverse_patch(self, path: Path, patch: str) -> None:
         self._executor.run(
@@ -473,9 +453,7 @@ class GitCliRepository:
         )
 
     def remote_url(self, path: Path, remote: str) -> CommandResult:
-        return self._executor.run(
-            ["git", "remote", "get-url", remote], cwd=path, check=False
-        )
+        return self._executor.run(["git", "remote", "get-url", remote], cwd=path, check=False)
 
     def verify_base(self, path: Path, remote: str, base: str) -> CommandResult:
         return self._executor.run(

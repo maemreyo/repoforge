@@ -1,6 +1,7 @@
 """Local filesystem implementation with atomic, mode-preserving writes."""
 
 from __future__ import annotations
+
 import os
 import stat
 from pathlib import Path
@@ -34,15 +35,9 @@ class LocalFileSystem:
     def unlink(self, path: Path, *, missing_ok: bool = False) -> None:
         path.unlink(missing_ok=missing_ok)
 
-    def write_bytes_atomic(
-        self, path: Path, data: bytes, *, preserve_mode: bool = True
-    ) -> None:
+    def write_bytes_atomic(self, path: Path, data: bytes, *, preserve_mode: bool = True) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        mode = (
-            stat.S_IMODE(path.stat().st_mode)
-            if preserve_mode and path.exists()
-            else None
-        )
+        mode = stat.S_IMODE(path.stat().st_mode) if preserve_mode and path.exists() else None
         temporary = path.with_name(f".{path.name}.rf-{os.getpid()}")
         try:
             with temporary.open("wb") as handle:

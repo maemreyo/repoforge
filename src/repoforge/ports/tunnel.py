@@ -1,0 +1,26 @@
+"""Tunnel-client lifecycle boundary."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Protocol
+
+from ..domain.runtime import ChildProcess, TunnelProfile
+
+
+class TunnelClient(Protocol):
+    def executable_version(self) -> str: ...
+    def initialize(self, profile: TunnelProfile, *, env: dict[str, str]) -> None: ...
+    def doctor(self, profile: TunnelProfile, *, env: dict[str, str]) -> tuple[bool, str]: ...
+    def start(
+        self, profile: TunnelProfile, *, env: dict[str, str], log_path: Path
+    ) -> ChildProcess: ...
+    def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None: ...
+    def is_alive(self, child: ChildProcess) -> bool: ...
+
+
+class TunnelProfileStore(Protocol):
+    """Durable secret-free identity for the initialized tunnel profile."""
+
+    def fingerprint(self) -> str | None: ...
+    def commit(self, profile: TunnelProfile) -> None: ...

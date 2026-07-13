@@ -1,13 +1,16 @@
 """Thin MCP interface: parse typed inputs, call CodingService, return stable dictionaries."""
 
 from __future__ import annotations
+
 import ast
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+
 from ...config import load_config
 from ...service import CodingService
 
@@ -35,11 +38,7 @@ EXTERNAL_WRITE = ToolAnnotations(
 def tool_surface_hash() -> str:
     module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     create = next(
-        (
-            n
-            for n in module.body
-            if isinstance(n, ast.FunctionDef) and n.name == "create_server"
-        )
+        n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "create_server"
     )
     tools = []
     for node in create.body:
@@ -57,9 +56,7 @@ def tool_surface_hash() -> str:
         )
         if decorator is None:
             continue
-        keywords = {
-            k.arg: ast.unparse(k.value) for k in decorator.keywords if k.arg is not None
-        }
+        keywords = {k.arg: ast.unparse(k.value) for k in decorator.keywords if k.arg is not None}
         tools.append(
             {
                 "name": node.name,
@@ -75,8 +72,10 @@ def tool_surface_hash() -> str:
     ).hexdigest()
 
 
-def create_server(config_path: str | Path | None = None) -> FastMCP:
-    service = CodingService(load_config(config_path))
+def create_server(
+    config_path: str | Path | None = None, *, service: CodingService | None = None
+) -> FastMCP:
+    service = service or CodingService(load_config(config_path))
     mcp = FastMCP("RepoForge", instructions=SERVER_INSTRUCTIONS, log_level="WARNING")
 
     @mcp.tool(
@@ -97,23 +96,17 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         """Use this when checking the source clone, remotes, branch state, and gh authentication."""
         return service.repo_status(repo_id)
 
-    @mcp.tool(
-        title="Read repository context", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="Read repository context", annotations=READ_ONLY, structured_output=True)
     def repo_context(repo_id: str) -> dict[str, Any]:
         """Use this before planning to inspect manifests, scripts, root files, and instruction previews."""
         return service.repo_context(repo_id)
 
-    @mcp.tool(
-        title="Read recent commits", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="Read recent commits", annotations=READ_ONLY, structured_output=True)
     def repo_recent_commits(repo_id: str, limit: int = 20) -> dict[str, Any]:
         """Use this when recent history or commit conventions are relevant to the task."""
         return service.repo_recent_commits(repo_id, limit)
 
-    @mcp.tool(
-        title="Read GitHub issue", annotations=EXTERNAL_READ, structured_output=True
-    )
+    @mcp.tool(title="Read GitHub issue", annotations=EXTERNAL_READ, structured_output=True)
     def repo_issue_read(repo_id: str, issue_number: int) -> dict[str, Any]:
         """Use this when implementation requirements are defined by a GitHub issue."""
         return service.repo_issue_read(repo_id, issue_number)
@@ -132,43 +125,31 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         annotations=LOCAL_CREATE,
         structured_output=True,
     )
-    def workspace_create(
-        repo_id: str, task_slug: str, base: str | None = None
-    ) -> dict[str, Any]:
+    def workspace_create(repo_id: str, task_slug: str, base: str | None = None) -> dict[str, Any]:
         """Use this before editing to create a new ai/* branch in an isolated Git worktree."""
         return service.workspace_create(repo_id, task_slug, base)
 
-    @mcp.tool(
-        title="List coding workspaces", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="List coding workspaces", annotations=READ_ONLY, structured_output=True)
     def workspace_list() -> dict[str, Any]:
         """Use this when resuming work or finding active RepoForge workspaces."""
         return service.workspace_list()
 
-    @mcp.tool(
-        title="Inspect workspace status", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="Inspect workspace status", annotations=READ_ONLY, structured_output=True)
     def workspace_status(workspace_id: str) -> dict[str, Any]:
         """Use this before writes to refresh HEAD, fingerprint, change budget, and verification state."""
         return service.workspace_status(workspace_id)
 
-    @mcp.tool(
-        title="List workspace files", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="List workspace files", annotations=READ_ONLY, structured_output=True)
     def workspace_tree(workspace_id: str, max_entries: int = 2000) -> dict[str, Any]:
         """Use this when exploring tracked and untracked files allowed by repository policy."""
         return service.workspace_tree(workspace_id, max_entries)
 
-    @mcp.tool(
-        title="Read workspace file", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="Read workspace file", annotations=READ_ONLY, structured_output=True)
     def workspace_read_file(
         workspace_id: str, relative_path: str, start_line: int = 1, end_line: int = 500
     ) -> dict[str, Any]:
         """Use this when reading one UTF-8 file and obtaining its optimistic-lock SHA-256."""
-        return service.workspace_read_file(
-            workspace_id, relative_path, start_line, end_line
-        )
+        return service.workspace_read_file(workspace_id, relative_path, start_line, end_line)
 
     @mcp.tool(
         title="Read multiple workspace files",
@@ -182,13 +163,9 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         end_line: int = 500,
     ) -> dict[str, Any]:
         """Use this when the same bounded line range is needed from several related files."""
-        return service.workspace_read_files(
-            workspace_id, relative_paths, start_line, end_line
-        )
+        return service.workspace_read_files(workspace_id, relative_paths, start_line, end_line)
 
-    @mcp.tool(
-        title="Search workspace code", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="Search workspace code", annotations=READ_ONLY, structured_output=True)
     def workspace_search(
         workspace_id: str,
         query: str,
@@ -207,9 +184,7 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         workspace_id: str, relative_path: str, content: str, expected_sha256: str
     ) -> dict[str, Any]:
         """Use this to create or fully replace one UTF-8 file with optimistic locking."""
-        return service.workspace_write_file(
-            workspace_id, relative_path, content, expected_sha256
-        )
+        return service.workspace_write_file(workspace_id, relative_path, content, expected_sha256)
 
     @mcp.tool(
         title="Replace exact text",
@@ -265,9 +240,7 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
             workspace_id, relative_paths, expected_workspace_fingerprint
         )
 
-    @mcp.tool(
-        title="Inspect workspace diff", annotations=READ_ONLY, structured_output=True
-    )
+    @mcp.tool(title="Inspect workspace diff", annotations=READ_ONLY, structured_output=True)
     def workspace_diff(workspace_id: str, staged: bool = False) -> dict[str, Any]:
         """Use this after edits and before verification, commit, or publishing to review exact changes."""
         return service.workspace_diff(workspace_id, staged)
@@ -281,12 +254,8 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         """Use this for an explicitly named allowlisted setup, fix, build, or verification profile."""
         return service.workspace_run_profile(workspace_id, profile_name)
 
-    @mcp.tool(
-        title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True
-    )
-    def workspace_verify(
-        workspace_id: str, profile_name: str | None = None
-    ) -> dict[str, Any]:
+    @mcp.tool(title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True)
+    def workspace_verify(workspace_id: str, profile_name: str | None = None) -> dict[str, Any]:
         """Use this before commit to run the repository-default or explicitly named verification gate."""
         return service.workspace_verify(workspace_id, profile_name)
 
@@ -299,9 +268,7 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         """Use this after successful verification to stage and commit the exact verified tree."""
         return service.workspace_commit(workspace_id, message)
 
-    @mcp.tool(
-        title="Push AI branch", annotations=EXTERNAL_WRITE, structured_output=True
-    )
+    @mcp.tool(title="Push AI branch", annotations=EXTERNAL_WRITE, structured_output=True)
     def workspace_push(workspace_id: str) -> dict[str, Any]:
         """Use this after commit to push the allowlisted ai/* branch without force."""
         return service.workspace_push(workspace_id)
@@ -311,9 +278,7 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         annotations=EXTERNAL_WRITE,
         structured_output=True,
     )
-    def workspace_create_draft_pr(
-        workspace_id: str, title: str, body: str
-    ) -> dict[str, Any]:
+    def workspace_create_draft_pr(workspace_id: str, title: str, body: str) -> dict[str, Any]:
         """Use this after push to create a draft PR with configured labels and reviewers."""
         return service.workspace_create_draft_pr(workspace_id, title, body)
 
@@ -342,9 +307,7 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         annotations=EXTERNAL_READ,
         structured_output=True,
     )
-    def workspace_pr_checks(
-        workspace_id: str, required_only: bool = False
-    ) -> dict[str, Any]:
+    def workspace_pr_checks(workspace_id: str, required_only: bool = False) -> dict[str, Any]:
         """Use this to get compact pass, fail, pending, and skipped CI check buckets."""
         return service.workspace_pr_checks(workspace_id, required_only)
 
@@ -353,9 +316,7 @@ def create_server(config_path: str | Path | None = None) -> FastMCP:
         annotations=LOCAL_DESTRUCTIVE,
         structured_output=True,
     )
-    def workspace_remove(
-        workspace_id: str, delete_local_branch: bool = False
-    ) -> dict[str, Any]:
+    def workspace_remove(workspace_id: str, delete_local_branch: bool = False) -> dict[str, Any]:
         """Use this only after work is complete to remove a clean local worktree; remote data is untouched."""
         return service.workspace_remove(workspace_id, delete_local_branch)
 

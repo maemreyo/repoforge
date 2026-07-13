@@ -394,9 +394,7 @@ def test_replace_text_rejects_nul_in_query(forge_env: ForgeEnvironmentProtocol) 
 def test_replace_text_rejects_oversized_result(
     forge_env: ForgeEnvironmentProtocol,
 ) -> None:
-    replacer, repo, workspace_path, ws_id = _workspace_replacer(
-        forge_env, max_file_bytes=100
-    )
+    replacer, repo, workspace_path, ws_id = _workspace_replacer(forge_env, max_file_bytes=100)
 
     # Original: 10 bytes; replacing 1 byte with 100 bytes would exceed limit
     original = "x" * 10
@@ -579,9 +577,7 @@ def test_replace_text_rejects_missing_file(forge_env: ForgeEnvironmentProtocol) 
 def test_replace_text_rejects_oversized_file(
     forge_env: ForgeEnvironmentProtocol,
 ) -> None:
-    replacer, repo, workspace_path, ws_id = _workspace_replacer(
-        forge_env, max_file_bytes=50
-    )
+    replacer, repo, workspace_path, ws_id = _workspace_replacer(forge_env, max_file_bytes=50)
 
     oversized = "x" * 51
     _ = (workspace_path / "big.txt").write_text(oversized)

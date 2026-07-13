@@ -1,8 +1,10 @@
 """Semantic Git repository/worktree boundary."""
 
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Protocol
+
 from ..config import ProfileConfig, RepositoryConfig
 from .command import CommandExecutor, CommandResult
 
@@ -33,9 +35,7 @@ class GitRepository(Protocol):
 
     def change_metrics(self, path: Path, repo: RepositoryConfig) -> dict[str, Any]: ...
 
-    def enforce_change_budget(
-        self, path: Path, repo: RepositoryConfig
-    ) -> dict[str, Any]: ...
+    def enforce_change_budget(self, path: Path, repo: RepositoryConfig) -> dict[str, Any]: ...
 
     def ensure_clean(self, path: Path, *, context: str) -> None: ...
 
@@ -58,9 +58,7 @@ class GitRepository(Protocol):
         max_results: int,
     ) -> tuple[list[str], bool]: ...
 
-    def diff(
-        self, path: Path, repo: RepositoryConfig, *, staged: bool
-    ) -> dict[str, Any]: ...
+    def diff(self, path: Path, repo: RepositoryConfig, *, staged: bool) -> dict[str, Any]: ...
 
     def run_profile(
         self, path: Path, profile: ProfileConfig
@@ -80,9 +78,7 @@ class GitRepository(Protocol):
 
     def commit(self, path: Path, message: str) -> tuple[str, str]: ...
 
-    def push(
-        self, path: Path, remote: str, branch: str, timeout: int
-    ) -> CommandResult: ...
+    def push(self, path: Path, remote: str, branch: str, timeout: int) -> CommandResult: ...
 
     def upstream_name(self, path: Path) -> str | None: ...
 

@@ -1,8 +1,10 @@
 """GitHub issue and pull-request boundary."""
 
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Protocol
+
 from ..config import RepositoryConfig
 
 
@@ -32,6 +34,4 @@ class PullRequestGateway(Protocol):
 
     def status(self, cwd: Path, branch: str) -> dict[str, Any]: ...
 
-    def checks(
-        self, cwd: Path, branch: str, *, required_only: bool
-    ) -> list[dict[str, Any]]: ...
+    def checks(self, cwd: Path, branch: str, *, required_only: bool) -> list[dict[str, Any]]: ...

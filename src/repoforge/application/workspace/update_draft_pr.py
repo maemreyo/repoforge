@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import Any
-from ..context import ApplicationContext
+
 from ...domain.publishing import validate_pr_update
+from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)

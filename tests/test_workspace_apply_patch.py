@@ -238,7 +238,9 @@ def test_apply_patch_rejects_invalid_head_sha_format(
         verification_timeout_seconds=cfg.verification_timeout_seconds,
     )
 
-    with pytest.raises(ValueError, match="expected_head_sha must be a lowercase 40/64 hex Git object id"):
+    with pytest.raises(
+        ValueError, match="expected_head_sha must be a lowercase 40/64 hex Git object id"
+    ):
         _ = applier.execute(
             repo,
             workspace_path,
@@ -252,7 +254,9 @@ def test_apply_patch_rejects_invalid_head_sha_format(
         )
 
     # A 64-character SHA with uppercase hex is also invalid
-    with pytest.raises(ValueError, match="expected_head_sha must be a lowercase 40/64 hex Git object id"):
+    with pytest.raises(
+        ValueError, match="expected_head_sha must be a lowercase 40/64 hex Git object id"
+    ):
         _ = applier.execute(
             repo,
             workspace_path,
@@ -304,7 +308,9 @@ def test_apply_patch_rejects_invalid_fingerprint_format(
 +Bad fingerprint.
 """
 
-    with pytest.raises(ValueError, match="expected_workspace_fingerprint must be a lowercase SHA-256"):
+    with pytest.raises(
+        ValueError, match="expected_workspace_fingerprint must be a lowercase SHA-256"
+    ):
         _ = applier.execute(
             repo,
             workspace_path,

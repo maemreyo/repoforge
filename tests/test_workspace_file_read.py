@@ -75,9 +75,7 @@ def test_workspace_file_reader_rejects_traversal(
         reader.execute(
             repo,
             workspace_path,
-            WorkspaceFileReadCommand(
-                workspace_id=ws_id, relative_path="../outside.txt"
-            ),
+            WorkspaceFileReadCommand(workspace_id=ws_id, relative_path="../outside.txt"),
         )
 
 
