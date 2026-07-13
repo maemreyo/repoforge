@@ -134,6 +134,7 @@ rf runtime status
 rf runtime start
 rf runtime stop
 rf runtime restart
+rf runtime logs --tail 100
 rf config history
 rf config rollback 3
 ```
@@ -145,6 +146,7 @@ and restart requirement; `rf runtime status` makes that comparison explicit.
 `rf runtime start` manages its tunnel-client child as a local process group; `stop` and `restart`
 only affect that identity-validated managed child. `rf start` remains the foreground compatibility
 entry point.
+`rf runtime logs` reads a bounded, redacted tail from the managed tunnel child only.
 
 Every accepted minimal configuration is retained as a paired source and resolved-lock snapshot.
 `rf config history` lists complete retained generations; `rf config rollback N` validates and restores

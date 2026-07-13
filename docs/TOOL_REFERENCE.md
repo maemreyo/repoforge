@@ -17,6 +17,10 @@ arbitrary commands or target an unrecorded process. `rf runtime restart` perform
 stop then starts the reviewed runtime again. This stage does not yet provide request draining,
 health-check rollback, or in-process hot reload.
 
+`rf runtime logs --tail N` returns at most 1,000 lines from the supervisor-owned tunnel log. The
+reader bounds file access to one megabyte and redacts credential-shaped `token`, `secret`, password,
+authorization, and control-plane-key values before printing; log bodies never enter the audit log.
+
 When a managed runtime is active, accepted repository additions and refreshes restart it automatically;
 a failed expansion restores the prior validated generation. A repository removal is restrictive: failed
 activation leaves the restricted configuration on disk and never restores removed repository access.

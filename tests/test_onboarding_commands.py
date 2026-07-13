@@ -567,6 +567,22 @@ def test_runtime_stop_is_idempotent(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert output["pid"] is None
 
 
+def test_runtime_logs_returns_bounded_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_minimal_config(tmp_path)
+    log = tmp_path / "managed-runtime.log"
+    log.write_text("one\ntwo\n", encoding="utf-8")
+    monkeypatch.setattr(onboarding, "_managed_runtime_log_path", lambda path: log)
+
+    assert (
+        handle_onboarding_command(["runtime", "logs", "--config", str(config), "--tail", "1"]) == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["lines"] == ["two"]
+
+
 def test_repo_add_restarts_an_active_managed_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 from repoforge.runtime import (
     clear_runtime_state,
     read_managed_runtime,
+    read_runtime_log,
     read_runtime_state,
     stop_managed_runtime,
     write_managed_runtime,
@@ -78,3 +79,15 @@ def test_managed_runtime_stops_only_the_recorded_process_group(tmp_path: Path) -
     assert stopped is not None
     assert stopped.pid == process.pid
     assert read_managed_runtime(state_path) is None
+
+
+def test_runtime_log_returns_bounded_redacted_tail(tmp_path: Path) -> None:
+    # Given: a supervisor-owned log containing a credential-shaped value.
+    log_path = tmp_path / "managed-runtime.log"
+    log_path.write_text("first\ntoken=abc123\nlast\n", encoding="utf-8")
+
+    # When: the bounded tail is requested.
+    lines = read_runtime_log(log_path, 2)
+
+    # Then: only requested lines are returned and secrets are redacted.
+    assert lines == ["token=<redacted>", "last"]

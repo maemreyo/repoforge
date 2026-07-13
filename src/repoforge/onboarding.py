@@ -22,6 +22,7 @@ from .config_delta import classify_capability_delta
 from .errors import ConfigError, PersonalCodingMCPError
 from .runtime import (
     read_managed_runtime,
+    read_runtime_log,
     read_runtime_state,
     stop_managed_runtime,
     write_managed_runtime,
@@ -80,6 +81,10 @@ def _runtime_state_path(config_path: Path) -> Path:
 
 def _managed_runtime_path(config_path: Path) -> Path:
     return resolved_config_path(config_path).with_name("managed-runtime.json")
+
+
+def _managed_runtime_log_path(config_path: Path) -> Path:
+    return resolved_config_path(config_path).with_name("managed-runtime.log")
 
 
 def _activation_result(config_path: Path, repo_id: str | None = None) -> dict[str, Any]:
@@ -618,7 +623,16 @@ def _start(args: argparse.Namespace, *, emit: bool = True) -> int:
         managed_path = _managed_runtime_path(config_path)
         if read_managed_runtime(managed_path) is not None:
             raise ConfigError("ALREADY_RUNNING: run `rf runtime status` or `rf runtime stop`")
-        process = subprocess.Popen(run_argv, env=environment, start_new_session=True)
+        log_path = _managed_runtime_log_path(config_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as log_handle:
+            process = subprocess.Popen(
+                run_argv,
+                env=environment,
+                start_new_session=True,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
         managed = write_managed_runtime(
             managed_path,
             pid=process.pid,
@@ -681,6 +695,9 @@ def _build_parser() -> argparse.ArgumentParser:
     runtime_start.add_argument("--skip-doctor", action="store_true")
     runtime_stop = runtime_subparsers.add_parser("stop")
     runtime_stop.add_argument("--config", default=argparse.SUPPRESS)
+    runtime_logs = runtime_subparsers.add_parser("logs")
+    runtime_logs.add_argument("--config", default=argparse.SUPPRESS)
+    runtime_logs.add_argument("--tail", type=int, default=100)
     runtime_restart = runtime_subparsers.add_parser("restart")
     runtime_restart.add_argument("--config", default=argparse.SUPPRESS)
     runtime_restart.add_argument("--tunnel-id", default=os.environ.get("TUNNEL_ID"))
@@ -782,6 +799,11 @@ def handle_onboarding_command(argv: list[str]) -> int | None:
                     "safe_next_action": "Run `rf runtime start` when ready.",
                 }
             )
+            return 0
+        if args.command == "runtime" and args.runtime_command == "logs":
+            config_path = Path(args.config).expanduser().resolve()
+            lines = read_runtime_log(_managed_runtime_log_path(config_path), args.tail)
+            _json({"path": str(_managed_runtime_log_path(config_path)), "lines": lines})
             return 0
         if args.command == "runtime" and args.runtime_command == "restart":
             config_path = Path(args.config).expanduser().resolve()

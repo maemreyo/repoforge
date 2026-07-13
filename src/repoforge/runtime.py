@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -13,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError
+
+_LOG_READ_LIMIT = 1_000_000
+_SECRET_VALUE = re.compile(
+    r"(?i)\b(control_plane_api_key|authorization|token|secret|password)\b(\s*[:=]\s*)([^\s]+)"
+)
 
 
 @dataclass(frozen=True)
@@ -187,3 +193,20 @@ def stop_managed_runtime(path: Path, timeout_seconds: int = 15) -> ManagedRuntim
     os.killpg(runtime.pid, signal.SIGKILL)
     path.unlink(missing_ok=True)
     return runtime
+
+
+def read_runtime_log(path: Path, tail: int) -> list[str]:
+    """Read a bounded redacted tail from a supervisor-owned local log file."""
+    if tail <= 0 or tail > 1_000:
+        raise ConfigError("Runtime log tail must be between 1 and 1000 lines")
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _LOG_READ_LIMIT))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigError(f"Cannot read runtime log {path}: {exc}") from exc
+    return [_SECRET_VALUE.sub(r"\1\2<redacted>", line) for line in text.splitlines()[-tail:]]
