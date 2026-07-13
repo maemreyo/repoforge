@@ -41,7 +41,6 @@ from .user_config import (
     config_history,
     config_kind,
     detect_repository_for_setup,
-    generation_snapshot_path,
     load_user_config,
     lock_generation,
     profile_summary,
@@ -51,6 +50,7 @@ from .user_config import (
     rollback_generation,
     sha256_file,
     sha256_text,
+    store_generation_snapshot,
     write_user_and_lock,
 )
 
@@ -485,9 +485,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
         raise ConfigError("Configuration changed during refresh; no lock was written")
     candidate, _ = build_lock_text(config, source_text, generation=current_generation + 1)
     atomic_write(lock_path, candidate)
-    snapshot = generation_snapshot_path(config.source_path, current_generation + 1)
-    atomic_write(snapshot / "config.toml", source_text)
-    atomic_write(snapshot / "resolved.toml", candidate)
+    store_generation_snapshot(config.source_path, current_generation + 1, source_text, candidate)
     _json(
         {
             "changed": True,

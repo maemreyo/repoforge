@@ -21,6 +21,7 @@ from repoforge.user_config import (
     resolve_runtime_config_path,
     resolved_config_path,
     rollback_generation,
+    store_generation_snapshot,
     write_user_and_lock,
 )
 
@@ -346,6 +347,22 @@ def test_rollback_rejects_incomplete_generation_snapshot(
 
     with pytest.raises(ConfigError, match="Unknown complete"):
         rollback_generation(config, 7)
+
+
+def test_generation_snapshot_retention_prunes_oldest_complete_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(user_config, "DEFAULT_STATE_ROOT", str(tmp_path / "state"))
+    config = tmp_path / "config.toml"
+    source = 'version = 1\n[tunnel]\nid = "tunnel_test"\n[[repo]]\npath = "/tmp/demo"\n'
+
+    for generation in range(1, 13):
+        lock = f"[repoforge_lock]\ngeneration = {generation}\n"
+        store_generation_snapshot(config, generation, source, lock)
+
+    assert config_history(config) == list(range(12, 2, -1))
+    assert not generation_snapshot_path(config, 1).exists()
+    assert not generation_snapshot_path(config, 2).exists()
 
 
 def test_missing_and_invalid_toml_are_reported(tmp_path: Path) -> None:

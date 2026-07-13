@@ -164,6 +164,7 @@ process-group restart as `restart`, then starts the latest reviewed configuratio
 Every accepted minimal configuration is retained as a paired source and resolved-lock snapshot.
 `rf config history` lists complete retained generations; `rf config rollback N` validates and restores
 the exact source/lock pair for generation `N`, then reports whether the running process needs restart.
+RepoForge retains the newest ten complete generations to keep rollback state bounded.
 
 `rf repo inspect` and `rf repo add --preview` never write configuration. `rf repo add --preview`
 returns a deterministic proposal ID bound to the current config, repository path, ID, and detected

@@ -53,6 +53,7 @@ is the explicit operator action that enrolls exactly the reviewed capability.
 `rf config history` lists only complete paired source/lock snapshots. `rf config rollback N` validates
 the requested snapshot against its source before atomically restoring both files; it never accepts a
 partial, stale, or modified snapshot and reports the activation impact after restoration.
+Snapshot retention is bounded to the newest ten complete generations.
 
 ## Repository inspection
 

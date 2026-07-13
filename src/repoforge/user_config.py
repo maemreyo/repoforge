@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from .security import slugify
 
 _MINIMAL_CONFIG_VERSION = 1
 _LOCK_FORMAT_VERSION = 2
+_RETAINED_GENERATIONS = 10
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _SAFE_TUNNEL_ID = re.compile(r"^[A-Za-z0-9._:-]+$")
 _RELEVANT_PROFILE_FILES = (
@@ -478,6 +480,17 @@ def config_history(config_path: str | Path) -> list[int]:
     return sorted(generations, reverse=True)
 
 
+def store_generation_snapshot(
+    config_path: str | Path, generation: int, source_text: str, lock_text: str
+) -> None:
+    """Persist a complete generation and retain only the newest rollback snapshots."""
+    snapshot = generation_snapshot_path(config_path, generation)
+    atomic_write(snapshot / "config.toml", source_text)
+    atomic_write(snapshot / "resolved.toml", lock_text)
+    for expired in config_history(config_path)[_RETAINED_GENERATIONS:]:
+        shutil.rmtree(generation_snapshot_path(config_path, expired))
+
+
 def rollback_generation(config_path: str | Path, generation: int) -> Path:
     """Restore a validated paired source and lock snapshot for one generation."""
     source_path = Path(config_path).expanduser().resolve()
@@ -515,9 +528,7 @@ def write_user_and_lock(
     lock_text, detections = build_lock_text(config, source_text, generation=current_generation + 1)
     atomic_write(config.source_path, source_text)
     atomic_write(lock_path, lock_text)
-    snapshot = generation_snapshot_path(config.source_path, current_generation + 1)
-    atomic_write(snapshot / "config.toml", source_text)
-    atomic_write(snapshot / "resolved.toml", lock_text)
+    store_generation_snapshot(config.source_path, current_generation + 1, source_text, lock_text)
     return lock_path, detections
 
 
