@@ -8,6 +8,8 @@ import re
 import signal
 import subprocess
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -202,6 +204,23 @@ def stop_managed_runtime(path: Path, timeout_seconds: int = 15) -> ManagedRuntim
     os.killpg(runtime.pid, signal.SIGKILL)
     path.unlink(missing_ok=True)
     return runtime
+
+
+@contextmanager
+def managed_start_claim(path: Path) -> Iterator[None]:
+    """Hold an exclusive non-blocking local claim while creating a managed child."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ConfigError("ALREADY_STARTING: another runtime start is in progress") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def read_runtime_log(path: Path, tail: int) -> list[str]:

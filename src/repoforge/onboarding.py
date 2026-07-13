@@ -23,6 +23,7 @@ from .config_delta import classify_capability_delta
 from .errors import ConfigError, PersonalCodingMCPError
 from .proposal import assess_repository_proposal
 from .runtime import (
+    managed_start_claim,
     read_managed_runtime,
     read_runtime_log,
     read_runtime_state,
@@ -87,6 +88,10 @@ def _managed_runtime_path(config_path: Path) -> Path:
 
 def _managed_runtime_log_path(config_path: Path) -> Path:
     return resolved_config_path(config_path).with_name("managed-runtime.log")
+
+
+def _managed_runtime_start_claim_path(config_path: Path) -> Path:
+    return resolved_config_path(config_path).with_name("managed-runtime.start.lock")
 
 
 def _activation_result(config_path: Path, repo_id: str | None = None) -> dict[str, Any]:
@@ -708,25 +713,26 @@ def _start(args: argparse.Namespace, *, emit: bool = True) -> int:
         )
     if getattr(args, "managed", False):
         managed_path = _managed_runtime_path(config_path)
-        if read_managed_runtime(managed_path) is not None:
-            raise ConfigError("ALREADY_RUNNING: run `rf runtime status` or `rf runtime stop`")
-        log_path = _managed_runtime_log_path(config_path)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("ab") as log_handle:
-            process = subprocess.Popen(
-                run_argv,
-                env=environment,
-                start_new_session=True,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
+        with managed_start_claim(_managed_runtime_start_claim_path(config_path)):
+            if read_managed_runtime(managed_path) is not None:
+                raise ConfigError("ALREADY_RUNNING: run `rf runtime status` or `rf runtime stop`")
+            log_path = _managed_runtime_log_path(config_path)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("ab") as log_handle:
+                process = subprocess.Popen(
+                    run_argv,
+                    env=environment,
+                    start_new_session=True,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                )
+            managed = write_managed_runtime(
+                managed_path,
+                pid=process.pid,
+                generation=lock_generation(runtime_path),
+                profile=profile,
+                executable=run_argv[0],
             )
-        managed = write_managed_runtime(
-            managed_path,
-            pid=process.pid,
-            generation=lock_generation(runtime_path),
-            profile=profile,
-            executable=run_argv[0],
-        )
         if emit:
             _json(
                 {

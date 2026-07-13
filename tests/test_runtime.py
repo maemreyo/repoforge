@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from repoforge.errors import ConfigError
 from repoforge.runtime import (
     clear_runtime_state,
+    managed_start_claim,
     read_managed_runtime,
     read_runtime_log,
     read_runtime_state,
@@ -92,3 +97,18 @@ def test_runtime_log_returns_bounded_redacted_tail(tmp_path: Path) -> None:
 
     # Then: only requested lines are returned and secrets are redacted.
     assert lines == ["token=<redacted>", "last"]
+
+
+def test_managed_start_claim_rejects_concurrent_claim(tmp_path: Path) -> None:
+    # Given: another process holds the startup lock.
+    claim_path = tmp_path / "managed-runtime.start.lock"
+    with claim_path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+        # When: a second runtime launch attempts to claim the same lock.
+        with pytest.raises(ConfigError, match="ALREADY_STARTING"), managed_start_claim(claim_path):
+            pass
+
+    # Then: a later start can acquire the released claim.
+    with managed_start_claim(claim_path):
+        pass
