@@ -286,7 +286,7 @@ class GhCliGateway:
                 "view",
                 branch,
                 "--json",
-                "number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup",
+                "number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
             ],
             cwd=cwd,
             output_limit=10_000_000,

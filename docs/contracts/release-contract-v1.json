@@ -70,7 +70,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "a164efa4d13b6b39775702a5217e123f5678acbea652dd76e5cc782a7cdf0742",
+    "tool_surface_hash": "26a42be1c7444ce71a1a66139ae5f5521df0238242c5fe871988c1933ef837d8",
     "tools": [
       {
         "annotations": {
@@ -1121,6 +1121,50 @@
           "type": "object"
         },
         "title": "Read workspace PR status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "Use this to start a durable exact-SHA check watch and return its operation reference.",
+        "inputSchema": {
+          "properties": {
+            "include_failure_evidence": {
+              "default": true,
+              "title": "Include Failure Evidence",
+              "type": "boolean"
+            },
+            "timeout_seconds": {
+              "default": 900,
+              "title": "Timeout Seconds",
+              "type": "integer"
+            },
+            "until": {
+              "default": "all_completed",
+              "title": "Until",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_pr_watchArguments",
+          "type": "object"
+        },
+        "name": "workspace_pr_watch",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_pr_watchDictOutput",
+          "type": "object"
+        },
+        "title": "Watch workspace PR checks"
       },
       {
         "annotations": {

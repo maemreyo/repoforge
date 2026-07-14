@@ -62,6 +62,11 @@ class ErrorCode(str, Enum):
     STALE_ASSESSMENT_SNAPSHOT = "STALE_ASSESSMENT_SNAPSHOT"
     ASSESSMENT_COMPONENT_UNAVAILABLE = "ASSESSMENT_COMPONENT_UNAVAILABLE"
     ASSESSMENT_INVALID = "ASSESSMENT_INVALID"
+    PR_CHECK_WATCH_INVALID = "PR_CHECK_WATCH_INVALID"
+    PR_CHECK_WATCH_STALE = "PR_CHECK_WATCH_STALE"
+    PR_CHECK_WATCH_TIMEOUT = "PR_CHECK_WATCH_TIMEOUT"
+    PR_CHECK_WATCH_STATE_CORRUPT = "PR_CHECK_WATCH_STATE_CORRUPT"
+    PR_CHECK_WATCH_UNAVAILABLE = "PR_CHECK_WATCH_UNAVAILABLE"
     DIAGNOSTIC_NOT_FOUND = "DIAGNOSTIC_NOT_FOUND"
     DIAGNOSTIC_SELECTOR_REQUIRED = "DIAGNOSTIC_SELECTOR_REQUIRED"
     DIAGNOSTIC_SELECTOR_INVALID = "DIAGNOSTIC_SELECTOR_INVALID"
@@ -223,6 +228,11 @@ def operation_error_from_exception(
         ErrorCode.STALE_ASSESSMENT_SNAPSHOT: "The workspace, configuration, or policy identity changed while evidence was being collected.",
         ErrorCode.ASSESSMENT_COMPONENT_UNAVAILABLE: "A bounded assessment provider could not return trustworthy evidence for the captured snapshot.",
         ErrorCode.ASSESSMENT_INVALID: "The assessment model violates snapshot identity, coverage, ordering, or bound invariants.",
+        ErrorCode.PR_CHECK_WATCH_INVALID: "The check-watch request violates a typed bound or completion-mode invariant.",
+        ErrorCode.PR_CHECK_WATCH_STALE: "The workspace, pushed commit, pull request, or Check Run no longer matches the captured watch identity.",
+        ErrorCode.PR_CHECK_WATCH_TIMEOUT: "The requested check condition was not reached before the bounded deadline.",
+        ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT: "The durable watch definition is missing, malformed, or inconsistent with its operation.",
+        ErrorCode.PR_CHECK_WATCH_UNAVAILABLE: "GitHub did not return the bounded check evidence required for this polling iteration.",
         ErrorCode.DIAGNOSTIC_NOT_FOUND: "The requested diagnostic is not part of the reviewed repository capability set.",
         ErrorCode.DIAGNOSTIC_SELECTOR_REQUIRED: "The diagnostic requires one typed selector before its reviewed argv can be resolved.",
         ErrorCode.DIAGNOSTIC_SELECTOR_INVALID: "The supplied selector violates the configured type, path policy, or closed value set.",

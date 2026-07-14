@@ -32,6 +32,7 @@ def recover_operations(
     *,
     now: str,
     retention_seconds: int = 7 * 24 * 60 * 60,
+    resumable_kinds: frozenset[str] = frozenset(),
 ) -> OperationRecoveryReport:
     """Expire due work, orphan unrecoverable running work, and prune old terminals."""
     if retention_seconds < 0:
@@ -55,7 +56,7 @@ def recover_operations(
                 manager.expire(task.operation_id, now=now)
                 expired += 1
                 continue
-            if task.state is OperationState.RUNNING:
+            if task.state is OperationState.RUNNING and task.kind not in resumable_kinds:
                 manager.orphan(task.operation_id, now=now)
                 orphaned += 1
         except RepoForgeError as exc:

@@ -86,6 +86,7 @@ from .workspace.pr_status import (
     WorkspacePrStatusCommand,
     WorkspacePrStatusReader,
 )
+from .workspace.pr_watch import WorkspacePrWatchCommand
 from .workspace.push import WorkspacePushCommand, WorkspacePusher
 from .workspace.refresh import WorkspaceRefreshCommand, WorkspaceRefresher
 from .workspace.refresh_preview import (
@@ -215,6 +216,7 @@ class CodingService:
         self._checks = WorkspacePrChecksReader(ctx)
         self._check_details = WorkspacePrCheckDetailsReader(ctx)
         self._failure_evidence = WorkspacePrFailureEvidenceReader(ctx)
+        self._pr_watch = self.application.pr_check_watches
         self._remove = WorkspaceRemover(ctx)
         self._doctor = Doctor(ctx)
 
@@ -578,6 +580,24 @@ class CodingService:
 
     def workspace_pr_checks(self, workspace_id: str, required_only: bool = False) -> dict[str, Any]:
         return _result(self._checks.execute(WorkspacePrChecksCommand(workspace_id, required_only)))
+
+    def workspace_pr_watch(
+        self,
+        workspace_id: str,
+        until: str = "all_completed",
+        timeout_seconds: int = 900,
+        include_failure_evidence: bool = True,
+    ) -> dict[str, Any]:
+        return _result(
+            self._pr_watch.start(
+                WorkspacePrWatchCommand(
+                    workspace_id,
+                    until,
+                    timeout_seconds,
+                    include_failure_evidence,
+                )
+            )
+        )
 
     def workspace_pr_check_details(
         self,

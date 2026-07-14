@@ -29,6 +29,33 @@ class FixedClock:
         return self.value
 
 
+class RecordingSleeper:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
+class ManualBackgroundTaskRunner:
+    def __init__(self) -> None:
+        self._tasks: dict[str, Callable[[], None]] = {}
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(sorted(self._tasks))
+
+    def submit(self, key: str, task: Callable[[], None]) -> bool:
+        if key in self._tasks:
+            return False
+        self._tasks[key] = task
+        return True
+
+    def run(self, key: str) -> None:
+        task = self._tasks.pop(key)
+        task()
+
+
 class SequenceIdGenerator:
     def __init__(self, values: Sequence[str] = ("0000000001",)) -> None:
         self._values = deque(values)
