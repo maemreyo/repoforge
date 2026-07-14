@@ -1223,6 +1223,21 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("show-config")
     commands.add_parser("doctor")
     commands.add_parser("list-workspaces")
+    operation = commands.add_parser("operation")
+    operation_sub = operation.add_subparsers(dest="operation_command", required=True)
+    operation_status = operation_sub.add_parser("status")
+    operation_status.add_argument("operation_id")
+    operation_list = operation_sub.add_parser("list")
+    operation_list.add_argument("--scope")
+    operation_list.add_argument(
+        "--state",
+        choices=("pending", "running", "succeeded", "failed", "cancelled", "expired", "orphaned"),
+    )
+    operation_list.add_argument("--limit", type=int, default=50)
+    operation_list.add_argument("--cursor")
+    operation_cancel = operation_sub.add_parser("cancel")
+    operation_cancel.add_argument("operation_id")
+    operation_cancel.add_argument("--expected-updated-at")
     diagnostics = commands.add_parser("diagnostics")
     diagnostics_sub = diagnostics.add_subparsers(dest="diagnostics_command", required=True)
     bundle = diagnostics_sub.add_parser("bundle")
@@ -1370,6 +1385,28 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError("No accepted configuration generation")
         config = load_config(store.resolved_path(active_for_cli.generation))
         service = CodingService(config)
+        if args.command == "operation":
+            if args.operation_command == "status":
+                _json(service.operation_status(args.operation_id))
+                return 0
+            if args.operation_command == "list":
+                _json(
+                    service.operation_list(
+                        scope=args.scope,
+                        state=args.state,
+                        limit=args.limit,
+                        cursor=args.cursor,
+                    )
+                )
+                return 0
+            if args.operation_command == "cancel":
+                _json(
+                    service.operation_cancel(
+                        args.operation_id,
+                        expected_updated_at=args.expected_updated_at,
+                    )
+                )
+                return 0
         if args.command == "show-config":
             _json(
                 service.repo_list()

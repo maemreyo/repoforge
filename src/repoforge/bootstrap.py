@@ -18,7 +18,7 @@ from .adapters.github import GhCliGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
-from .adapters.persistence import JsonIdempotencyStore, JsonOnboardingStore
+from .adapters.persistence import JsonIdempotencyStore, JsonOnboardingStore, JsonOperationStore
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
@@ -73,6 +73,7 @@ from .application.onboarding.coordinator import OnboardingCoordinator
 from .application.onboarding.discover import OnboardingDiscoveryService
 from .application.onboarding.planner import OnboardingPlanner
 from .application.onboarding.preflight import OnboardingPreflightService
+from .application.operations import OperationManager, recover_operations
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.supervisor import RuntimeSupervisor
@@ -94,6 +95,7 @@ from .ports import (
     OnboardingEnvironment,
     OnboardingStore,
     OperationGate,
+    OperationStore,
     ProcessInspector,
     PullRequestGateway,
     RepositoryDiscovery,
@@ -123,11 +125,13 @@ class AdapterOverrides:
     executables: ExecutableLocator | None = None
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
+    operations: OperationStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Application:
     context: ApplicationContext
+    operations: OperationManager
 
 
 def default_state_root() -> Path:
@@ -262,6 +266,13 @@ def build_idempotency_store(state_root: Path) -> IdempotencyStore:
     return JsonIdempotencyStore(state_root)
 
 
+def build_operation_store(
+    state_root: Path,
+    locks: LockManager | None = None,
+) -> OperationStore:
+    return JsonOperationStore(state_root, locks or build_lock_manager(state_root))
+
+
 def write_private_file(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     ConfigGenerationStore._atomic_write(path, data, mode=mode)
 
@@ -290,24 +301,27 @@ def build_application(
     executables = o.executables or SystemExecutableLocator()
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
-    return Application(
-        ApplicationContext(
-            config,
-            command,
-            git,
-            github,
-            filesystem,
-            store,
-            locks,
-            gate,
-            audit,
-            clock,
-            ids,
-            executables,
-            metrics,
-            idempotency,
-        )
+    operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    context = ApplicationContext(
+        config=config,
+        commands=command,
+        git=git,
+        github=github,
+        filesystem=filesystem,
+        store=store,
+        locks=locks,
+        gate=gate,
+        audit=audit,
+        clock=clock,
+        ids=ids,
+        executables=executables,
+        metrics=metrics,
+        idempotency=idempotency,
+        operation_store=operation_store,
     )
+    operations = OperationManager(context)
+    recover_operations(operations, now=clock.now_iso())
+    return Application(context, operations)
 
 
 def run_runtime_worker(config_path: Path) -> int:

@@ -101,6 +101,9 @@ LOCAL_CREATE = ToolAnnotations(
 LOCAL_MUTATE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
 )
+LOCAL_IDEMPOTENT_MUTATE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
 LOCAL_DESTRUCTIVE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
 )
@@ -159,6 +162,33 @@ def create_server(
     )
     bounded_service = _ServiceErrorBoundary(raw_service, router=router)
     mcp = FastMCP("RepoForge", instructions=SERVER_INSTRUCTIONS, log_level="WARNING")
+
+    @mcp.tool(title="Read durable operation status", annotations=READ_ONLY, structured_output=True)
+    def operation_status(operation_id: str) -> dict[str, Any]:
+        """Use this to inspect one exact durable operation and its bounded progress metadata."""
+        return bounded_service.call("operation_status", operation_id)
+
+    @mcp.tool(title="List durable operations", annotations=READ_ONLY, structured_output=True)
+    def operation_list(
+        scope: str | None = None,
+        state: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this to list bounded durable operations by optional task/workspace scope and state."""
+        return bounded_service.call("operation_list", scope, state, limit, cursor)
+
+    @mcp.tool(
+        title="Request operation cancellation",
+        annotations=LOCAL_IDEMPOTENT_MUTATE,
+        structured_output=True,
+    )
+    def operation_cancel(
+        operation_id: str,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this to idempotently request cancellation without marking terminal cancellation."""
+        return bounded_service.call("operation_cancel", operation_id, expected_updated_at)
 
     @mcp.tool(
         title="List configured repositories",

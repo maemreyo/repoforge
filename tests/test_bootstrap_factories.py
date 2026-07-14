@@ -5,6 +5,7 @@ from pathlib import Path
 from repoforge import bootstrap
 from repoforge.adapters.configuration import ConfigGenerationStore
 from repoforge.adapters.locking import FcntlLockManager
+from repoforge.adapters.persistence import JsonOperationStore
 from repoforge.adapters.repository import LocalRepositoryProbe
 from repoforge.adapters.runtime import (
     InProcessOperationGate,
@@ -28,6 +29,7 @@ def test_bootstrap_factories_are_concrete_and_writable(tmp_path: Path) -> None:
     )
     assert isinstance(bootstrap.build_repository_probe(tmp_path), LocalRepositoryProbe)
     assert isinstance(bootstrap.build_operation_gate(), InProcessOperationGate)
+    assert isinstance(bootstrap.build_operation_store(tmp_path), JsonOperationStore)
     assert isinstance(bootstrap.build_runtime_store(tmp_path / "runtime.json"), JsonRuntimeStore)
     assert isinstance(
         bootstrap.build_tunnel_profile_store(tmp_path / "profile.json"), JsonTunnelProfileStore

@@ -38,6 +38,12 @@ def build_cli_release_contract() -> dict[str, object]:
                 "options": ["--exclude", "--include", "--max-depth"],
                 "read_only": True,
             },
+            "operation": {
+                "actions": ["status", "list", "cancel"],
+                "public_creation": False,
+                "cancellation_is_request_only": True,
+                "max_list_limit": 100,
+            },
         },
         "exit_codes": {
             "0": "completed or read-only success",

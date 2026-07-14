@@ -49,6 +49,12 @@ class ErrorCode(str, Enum):
     CHECK_SELECTOR_INVALID = "CHECK_SELECTOR_INVALID"
     CHECK_EVIDENCE_STALE = "CHECK_EVIDENCE_STALE"
     CHECK_EVIDENCE_UNAVAILABLE = "CHECK_EVIDENCE_UNAVAILABLE"
+    OPERATION_INVALID = "OPERATION_INVALID"
+    OPERATION_NOT_FOUND = "OPERATION_NOT_FOUND"
+    OPERATION_STALE = "OPERATION_STALE"
+    OPERATION_CORRUPT = "OPERATION_CORRUPT"
+    OPERATION_SCHEMA_UNSUPPORTED = "OPERATION_SCHEMA_UNSUPPORTED"
+    OPERATION_TRANSITION_INVALID = "OPERATION_TRANSITION_INVALID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +194,12 @@ def operation_error_from_exception(
         ErrorCode.CHECK_SELECTOR_INVALID: "The supplied value is not an opaque CI selector issued by RepoForge.",
         ErrorCode.CHECK_EVIDENCE_STALE: "The selected Check Run does not match the exact pushed workspace commit.",
         ErrorCode.CHECK_EVIDENCE_UNAVAILABLE: "GitHub did not return the primary Check Run evidence required for this read.",
+        ErrorCode.OPERATION_INVALID: "The operation request violates a typed identity, progress, scope, or bounds invariant.",
+        ErrorCode.OPERATION_NOT_FOUND: "No durable operation exists for the supplied identifier.",
+        ErrorCode.OPERATION_STALE: "Another writer changed the durable operation after the caller's reviewed timestamp.",
+        ErrorCode.OPERATION_CORRUPT: "The persisted operation record is malformed, unsafe, or inconsistent with its identity.",
+        ErrorCode.OPERATION_SCHEMA_UNSUPPORTED: "The operation record uses a schema version this RepoForge build cannot safely interpret.",
+        ErrorCode.OPERATION_TRANSITION_INVALID: "The requested state transition is not allowed by the durable operation state machine.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

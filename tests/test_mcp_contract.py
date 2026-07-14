@@ -4,6 +4,8 @@ import pytest
 from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from repoforge.application.service import CodingService
+from repoforge.config import load_config
 from repoforge.interfaces.mcp.server import create_server, tool_surface_hash
 
 
@@ -19,6 +21,9 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
         result = await session.list_tools()
         names = {tool.name for tool in result.tools}
         expected = {
+            "operation_status",
+            "operation_list",
+            "operation_cancel",
             "repo_list",
             "repo_status",
             "repo_context",
@@ -91,7 +96,15 @@ async def test_mcp_error_is_returned_as_tool_error(forge_env: ForgeEnvironment) 
 
 @pytest.mark.anyio
 async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> None:
-    server = create_server(forge_env.config_path)
+    service = CodingService(load_config(forge_env.config_path))
+    operation = service.operations.create(
+        kind="contract",
+        phase="queued",
+        cancel_supported=True,
+        task_id="mcp-contract",
+    )
+    operation = service.operations.start(operation.operation_id)
+    server = create_server(service=service)
     async with create_connected_server_and_client_session(server) as session:
 
         async def call(name: str, arguments: dict[str, object]) -> dict[str, object]:
@@ -100,6 +113,18 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             assert result.structuredContent is not None
             return result.structuredContent
 
+        await call("operation_status", {"operation_id": operation.operation_id})
+        await call(
+            "operation_list",
+            {"scope": "task:mcp-contract", "state": "running", "limit": 20},
+        )
+        await call(
+            "operation_cancel",
+            {
+                "operation_id": operation.operation_id,
+                "expected_updated_at": operation.updated_at,
+            },
+        )
         await call("repo_list", {})
         await call("repo_status", {"repo_id": "demo"})
         await call("repo_context", {"repo_id": "demo"})

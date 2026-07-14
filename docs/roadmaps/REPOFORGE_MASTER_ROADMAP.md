@@ -129,6 +129,7 @@ RepoForge is already strong in the following areas:
 | Repository access | Explicit allowlist and canonical roots |
 | Repository snapshots | Issue #5 complete: immutable branch/commit tree, file, batch-read, and search operations with exact snapshot identity |
 | CI failure evidence | Issue #7 complete: exact pushed-SHA Check Run selectors, bounded details, secret-safe failure excerpts, classification, and partial-coverage reporting |
+| Durable operations | Issue #9 complete: protocol-independent state machine, private optimistic persistence, recovery/expiry/retention, progress, cancellation request, and bounded status/list interfaces |
 | Workspace isolation | Per-task Git worktrees |
 | Mutation safety | SHA/fingerprint optimistic locking |
 | Change control | Protected paths, branches, file and diff budgets |
@@ -144,8 +145,9 @@ RepoForge is already strong in the following areas:
 
 The main product gaps are:
 
-- task state is not a first-class durable entity;
-- the agent must manually reconstruct context after interruption;
+- task-capsule intent, decisions, and acceptance context are not yet a first-class durable entity;
+- durable operations exist, but approved consumers have not yet adopted them for resumable execution;
+- the agent must manually reconstruct broader task context after interruption;
 - workspace analysis requires multiple tool calls;
 - long-running work lacks a unified task/progress contract;
 - tool-selection behavior is not evaluated end to end;
@@ -328,6 +330,12 @@ workspace_execute_plan(workspace_id, plan_id, through)
 ---
 
 ## 8. Durable operations and progress
+
+Issue #9 delivers the protocol-independent foundation: explicit immutable transitions, monotonic
+progress, cancellation requests separate from terminal cancellation, private per-record JSON CAS,
+startup orphaning, expiry and retention, and bounded status/list/cancel interfaces through both CLI
+and MCP. Concrete workers, resumable verification/indexing, PR-check watching, and MCP Tasks
+adaptation remain future consumer work.
 
 ### Goal
 
