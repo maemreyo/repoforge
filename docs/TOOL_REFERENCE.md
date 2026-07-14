@@ -125,7 +125,9 @@ Read-only Git-aware discovery. Reports eligible and excluded repositories with s
 
 ### `rf onboard ROOT [ROOT ...]`
 
-Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. Important options include `--template`, `--activate`, `--plan-only`, `--non-interactive`, `--decision`, `--policy-override`, `--approve`, `--repo-id PATH=ID`, `--wait`, and `--rollback-on-failure`.
+Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. Interactive review is presented as Discovery → Safe defaults → Ambiguous decisions → Repository summaries → Config diff → Apply.
+
+Important options include `--ui auto|rich|plain`, `--defaults safe|ask|none`, `--template`, `--activate`, `--plan-only`, `--non-interactive`, `--decision`, `--policy-override`, `--approve`, `--repo-id PATH=ID`, `--wait`, and `--rollback-on-failure`. Non-interactive mode accepts only `--defaults none` and never loads optional terminal UI packages.
 
 ### Session actions
 

@@ -1,6 +1,8 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from test_onboarding_planner import FakeProposals
 
 from repoforge.application.onboarding.coordinator import OnboardingCommand, OnboardingCoordinator
@@ -8,6 +10,7 @@ from repoforge.application.onboarding.discover import OnboardingDiscoveryService
 from repoforge.application.onboarding.planner import OnboardingPlanner
 from repoforge.application.onboarding.preflight import OnboardingPreflightService
 from repoforge.domain.config_generation import CapabilityDeltaKind, ConfigGeneration
+from repoforge.domain.errors import ConfigError
 from repoforge.domain.onboarding import DiscoveryIdentity, OnboardingOptions, OnboardingStatus
 from repoforge.ports.onboarding_environment import EnvironmentPreflight
 
@@ -112,6 +115,26 @@ def make_coordinator(store, sessions, smoke, activate):
     )
 
 
+def test_initial_tunnel_is_required_before_repository_review() -> None:
+    store = Store()
+    sessions = MemorySessions()
+    coordinator = make_coordinator(store, sessions, lambda *a: (), lambda *a: {})
+
+    with pytest.raises(
+        ConfigError, match="INPUT_REQUIRED: --tunnel-id is required for initial onboarding"
+    ):
+        coordinator.run(
+            OnboardingCommand(
+                Path("/tmp/config.toml"),
+                (Path("/repos"),),
+                OnboardingOptions(),
+            )
+        )
+
+    assert sessions.value.status is OnboardingStatus.DISCOVERED
+    assert sessions.value.repositories[0].proposal_id is None
+
+
 def test_plan_only_never_mutates() -> None:
     store = Store()
     sessions = MemorySessions()
@@ -129,6 +152,7 @@ def test_plan_only_never_mutates() -> None:
         )
     )
     assert first.session.status is OnboardingStatus.AWAITING_APPROVAL
+    assert first.session.options.tunnel_id == "t"
     token = "approve:" + first.session.repositories[0].proposal_id
     result = coordinator.run(
         OnboardingCommand(
@@ -138,7 +162,6 @@ def test_plan_only_never_mutates() -> None:
             approvals=(token,),
             resume_session_id=first.session.session_id,
             plan_only=True,
-            tunnel_id="t",
         )
     )
     assert result.plan is not None and not store.accept_calls and not calls

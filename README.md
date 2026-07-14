@@ -251,6 +251,7 @@ protocol tests.
 ## Documentation
 
 - [ChatGPT and tunnel setup](docs/CHATGPT_SETUP.md)
+- [Interactive onboarding UI](docs/INTERACTIVE_ONBOARDING.md)
 - [Tool reference](docs/TOOL_REFERENCE.md)
 - [Development guide](docs/DEVELOPMENT.md)
 - [Testing strategy](docs/TESTING.md)
@@ -284,3 +285,7 @@ rf onboard cancel SESSION_ID
 ```
 
 Use `--non-interactive` only when every decision, exact `approve:PROPOSAL_ID`, and duplicate-path ID override is supplied explicitly. For duplicate directory names, pass `--repo-id /canonical/path=unique-id`. Interrupted interactive sessions are private, resumable metadata under `~/.local/state/repoforge/onboarding/`; they never store API keys, raw approval tokens, repository contents, patches, or command output.
+
+Interactive review supports `--ui auto|rich|plain` and `--defaults safe|ask|none`, with a
+six-stage batch review and dependency-free plain fallback. See
+[Interactive onboarding UI](docs/INTERACTIVE_ONBOARDING.md).

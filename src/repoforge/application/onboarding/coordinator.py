@@ -61,6 +61,20 @@ class OnboardingResult:
     preflight: dict[str, object] | None = None
 
 
+def _resolve_initial_tunnel_id(
+    current_source: SourceConfiguration | None,
+    *,
+    command_tunnel_id: str | None,
+    session_tunnel_id: str | None,
+) -> str:
+    if current_source is not None:
+        return current_source.tunnel_id
+    value = command_tunnel_id or session_tunnel_id
+    if value is None or not value.strip():
+        raise ConfigError("INPUT_REQUIRED: --tunnel-id is required for initial onboarding")
+    return value.strip()
+
+
 class OnboardingCoordinator:
     def __init__(
         self,
@@ -200,6 +214,21 @@ class OnboardingCoordinator:
             return OnboardingResult(
                 session, None, summarize_session(session), None, preflight_payload
             )
+        tunnel_id = _resolve_initial_tunnel_id(
+            current_source,
+            command_tunnel_id=command.tunnel_id,
+            session_tunnel_id=session.options.tunnel_id,
+        )
+        if current_source is None and session.options.tunnel_id != tunnel_id:
+            previous = session
+            session = self._save(
+                previous,
+                replace(
+                    session,
+                    options=replace(session.options, tunnel_id=tunnel_id),
+                    updated_at=now,
+                ),
+            )
         decisions = dict(command.decisions)
         overrides = dict(command.overrides)
         templates = dict(command.templates)
@@ -232,7 +261,7 @@ class OnboardingCoordinator:
             current_generation=current,
             inputs=tuple(inputs),
             now=now,
-            tunnel_id=command.tunnel_id or session.options.tunnel_id,
+            tunnel_id=tunnel_id,
             profile=session.options.profile,
         )
         session = self._save(previous, session)

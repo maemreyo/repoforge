@@ -15,6 +15,7 @@
           "--activate",
           "--approve",
           "--decision",
+          "--defaults",
           "--exclude",
           "--include",
           "--max-depth",
@@ -29,6 +30,7 @@
           "--rollback-on-failure",
           "--template",
           "--tunnel-id",
+          "--ui",
           "--wait"
         ]
       },
