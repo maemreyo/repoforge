@@ -2,8 +2,44 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_REFRESH_PREVIEW_RE = re.compile(r"refresh-v1:([0-9a-f]{40}(?:[0-9a-f]{24})?):([0-9a-f]{64})")
+
+WORKSPACE_REFRESH_RECEIPTS = (
+    "verification",
+    "assessment",
+    "architecture",
+    "execution_plan",
+)
+
+_REFRESH_RECEIPT_METADATA: dict[str, tuple[str, ...]] = {
+    "verification": (
+        "verified_commit_sha",
+        "verification_profile",
+        "verification_completed_at",
+    ),
+    "assessment": (
+        "assessment_receipt",
+        "assessment_snapshot_id",
+        "evidence_snapshot_id",
+    ),
+    "architecture": (
+        "architecture_receipt",
+        "architecture_policy_hash",
+    ),
+    "execution_plan": (
+        "accepted_plan_id",
+        "execution_plan_id",
+        "verification_plan_id",
+        "plan_receipt",
+    ),
+}
 
 
 @dataclass
@@ -25,3 +61,64 @@ class WorkspaceRecord:
     created_at: str
     last_verification: VerificationReceipt | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRefreshBinding:
+    workspace_id: str
+    configured_base: str
+    workspace_base_sha: str
+    target_base_sha: str
+    head_sha: str
+    workspace_fingerprint: str
+    strategy: str
+    predicted_conflict_paths: tuple[str, ...]
+    workspace_clean: bool
+
+    def preview_id(self) -> str:
+        payload = {
+            "configured_base": self.configured_base,
+            "head_sha": self.head_sha,
+            "predicted_conflict_paths": list(self.predicted_conflict_paths),
+            "strategy": self.strategy,
+            "target_base_sha": self.target_base_sha,
+            "version": 1,
+            "workspace_base_sha": self.workspace_base_sha,
+            "workspace_clean": self.workspace_clean,
+            "workspace_fingerprint": self.workspace_fingerprint,
+            "workspace_id": self.workspace_id,
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        return f"refresh-v1:{self.target_base_sha}:{digest}"
+
+
+def is_commit_sha(value: object) -> bool:
+    return isinstance(value, str) and _COMMIT_SHA_RE.fullmatch(value) is not None
+
+
+def refresh_preview_target(preview_id: str) -> str:
+    matched = _REFRESH_PREVIEW_RE.fullmatch(preview_id)
+    if matched is None:
+        raise ValueError("Refresh preview id is invalid")
+    return matched.group(1)
+
+
+def invalidate_workspace_refresh_receipts(record: WorkspaceRecord) -> tuple[str, ...]:
+    invalidated: list[str] = []
+    for category, keys in _REFRESH_RECEIPT_METADATA.items():
+        present = category == "verification" and record.last_verification is not None
+        for key in keys:
+            if key in record.metadata:
+                present = True
+                record.metadata.pop(key, None)
+        if present:
+            invalidated.append(category)
+    record.last_verification = None
+    record.metadata.pop("refresh_commit_sha", None)
+    return tuple(invalidated)

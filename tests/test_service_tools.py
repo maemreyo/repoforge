@@ -37,6 +37,20 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
 
     status = service.workspace_status(workspace_id)
     assert status["clean"] is True
+    base_status = service.workspace_base_status(workspace_id)
+    assert base_status["staleness"] == "current"
+    refresh_preview = service.workspace_refresh_preview(
+        workspace_id,
+        status["head_sha"],
+        status["workspace_fingerprint"],
+    )
+    refreshed = service.workspace_refresh(
+        workspace_id,
+        refresh_preview["preview_id"],
+        status["head_sha"],
+        status["workspace_fingerprint"],
+    )
+    assert refreshed["status"] == "current"
     tree = service.workspace_tree(workspace_id, 100)
     assert "hello.txt" in tree["entries"]
 

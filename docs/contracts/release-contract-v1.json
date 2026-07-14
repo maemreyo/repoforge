@@ -70,7 +70,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "c7698f06738042091c322dfe56f40aefe37174b70fbb3bedcbdc17ba565431a4",
+    "tool_surface_hash": "a164efa4d13b6b39775702a5217e123f5678acbea652dd76e5cc782a7cdf0742",
     "tools": [
       {
         "annotations": {
@@ -762,6 +762,35 @@
       {
         "annotations": {
           "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this to compare the workspace base with configured local and latest remote base state.",
+        "inputSchema": {
+          "properties": {
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "title": "workspace_base_statusArguments",
+          "type": "object"
+        },
+        "name": "workspace_base_status",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_base_statusDictOutput",
+          "type": "object"
+        },
+        "title": "Inspect workspace base freshness"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -1224,6 +1253,89 @@
           "type": "object"
         },
         "title": "Read multiple workspace files"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "Use this to merge the exact reviewed base target without rebase, force push, or remote write.",
+        "inputSchema": {
+          "properties": {
+            "expected_fingerprint": {
+              "title": "Expected Fingerprint",
+              "type": "string"
+            },
+            "expected_head_sha": {
+              "title": "Expected Head Sha",
+              "type": "string"
+            },
+            "preview_id": {
+              "title": "Preview Id",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "preview_id",
+            "expected_head_sha",
+            "expected_fingerprint"
+          ],
+          "title": "workspace_refreshArguments",
+          "type": "object"
+        },
+        "name": "workspace_refresh",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_refreshDictOutput",
+          "type": "object"
+        },
+        "title": "Refresh workspace from reviewed base"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this to review one immutable merge preview against the latest configured remote base.",
+        "inputSchema": {
+          "properties": {
+            "expected_fingerprint": {
+              "title": "Expected Fingerprint",
+              "type": "string"
+            },
+            "expected_head_sha": {
+              "title": "Expected Head Sha",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "expected_head_sha",
+            "expected_fingerprint"
+          ],
+          "title": "workspace_refresh_previewArguments",
+          "type": "object"
+        },
+        "name": "workspace_refresh_preview",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_refresh_previewDictOutput",
+          "type": "object"
+        },
+        "title": "Preview workspace base refresh"
       },
       {
         "annotations": {

@@ -39,6 +39,9 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_create",
             "workspace_list",
             "workspace_status",
+            "workspace_base_status",
+            "workspace_refresh_preview",
+            "workspace_refresh",
             "workspace_tree",
             "workspace_read_file",
             "workspace_read_files",
@@ -79,7 +82,8 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             assert evidence_tool.annotations.destructiveHint is False
             assert evidence_tool.annotations.openWorldHint is False
 
-        diagnostic = next(tool for tool in result.tools if tool.name == "workspace_run_diagnostic")
+        tools = {tool.name: tool for tool in result.tools}
+        diagnostic = tools["workspace_run_diagnostic"]
         assert diagnostic.annotations.readOnlyHint is False
         assert diagnostic.annotations.destructiveHint is False
         assert diagnostic.annotations.openWorldHint is False
@@ -89,6 +93,19 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "selector",
             "expected_fingerprint",
         }
+        for name in ("workspace_base_status", "workspace_refresh_preview"):
+            annotations = tools[name].annotations
+            assert annotations is not None
+            assert annotations.readOnlyHint is True
+            assert annotations.destructiveHint is False
+            assert annotations.idempotentHint is True
+            assert annotations.openWorldHint is True
+        refresh_annotations = tools["workspace_refresh"].annotations
+        assert refresh_annotations is not None
+        assert refresh_annotations.readOnlyHint is False
+        assert refresh_annotations.destructiveHint is False
+        assert refresh_annotations.idempotentHint is False
+        assert refresh_annotations.openWorldHint is True
 
         read_result = await session.call_tool("repo_list", {})
         assert read_result.isError is False
@@ -188,6 +205,26 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         workspace_id = str(created["workspace_id"])
         await call("workspace_list", {})
         diagnostic_status = await call("workspace_status", {"workspace_id": workspace_id})
+        base_status = await call("workspace_base_status", {"workspace_id": workspace_id})
+        assert base_status["staleness"] == "current"
+        refresh_preview = await call(
+            "workspace_refresh_preview",
+            {
+                "workspace_id": workspace_id,
+                "expected_head_sha": diagnostic_status["head_sha"],
+                "expected_fingerprint": diagnostic_status["workspace_fingerprint"],
+            },
+        )
+        refresh = await call(
+            "workspace_refresh",
+            {
+                "workspace_id": workspace_id,
+                "preview_id": refresh_preview["preview_id"],
+                "expected_head_sha": diagnostic_status["head_sha"],
+                "expected_fingerprint": diagnostic_status["workspace_fingerprint"],
+            },
+        )
+        assert refresh["status"] == "current"
         diagnostic_result = await call(
             "workspace_run_diagnostic",
             {

@@ -24,7 +24,8 @@ RepoForge has evolved beyond a thin MCP wrapper around Git. Its current strength
 - deterministic onboarding proposals;
 - interactive safe-default review;
 - stable MCP and release contracts;
-- bounded committed-snapshot tree, file, batch-read, search, commit, and comparison evidence without checkout.
+- bounded committed-snapshot tree, file, batch-read, search, commit, and comparison evidence without checkout;
+- exact workspace-base freshness evidence and preview-bound merge-only refresh without rebase or force-push.
 
 The next stage should not be driven by adding many more low-level Git tools. RepoForge should become a:
 

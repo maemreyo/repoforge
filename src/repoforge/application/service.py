@@ -48,6 +48,7 @@ from .workspace.apply_patch import (
     WorkspaceApplyPatchCommand,
     WorkspacePatchApplier,
 )
+from .workspace.base_status import WorkspaceBaseStatusCommand, WorkspaceBaseStatusReader
 from .workspace.commit import WorkspaceCommitCommand, WorkspaceCommitter
 from .workspace.create import WorkspaceCreateCommand, WorkspaceCreator
 from .workspace.create_draft_pr import (
@@ -85,6 +86,11 @@ from .workspace.pr_status import (
     WorkspacePrStatusReader,
 )
 from .workspace.push import WorkspacePushCommand, WorkspacePusher
+from .workspace.refresh import WorkspaceRefreshCommand, WorkspaceRefresher
+from .workspace.refresh_preview import (
+    WorkspaceRefreshPreviewCommand,
+    WorkspaceRefreshPreviewer,
+)
 from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
 from .workspace.replace_text import (
     WorkspaceReplaceTextCommand,
@@ -184,6 +190,7 @@ class CodingService:
         self._create = WorkspaceCreator(ctx)
         self._list = WorkspaceLister(ctx)
         self._status = WorkspaceStatusReader(ctx)
+        self._base_status = WorkspaceBaseStatusReader(ctx)
         self._tree = WorkspaceTreeReader(ctx)
         self._read = WorkspaceFileReader(ctx)
         self._reads = WorkspaceFilesReader(ctx)
@@ -192,6 +199,8 @@ class CodingService:
         self._replace = WorkspaceTextReplacer(ctx)
         self._patch = WorkspacePatchApplier(ctx)
         self._restore = WorkspacePathsRestorer(ctx)
+        self._refresh_preview = WorkspaceRefreshPreviewer(ctx)
+        self._refresh = WorkspaceRefresher(ctx)
         self._diff = WorkspaceDiffReader(ctx)
         self._profile = WorkspaceProfileRunner(ctx)
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
@@ -352,6 +361,9 @@ class CodingService:
     def workspace_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._status.execute(WorkspaceStatusCommand(workspace_id)))
 
+    def workspace_base_status(self, workspace_id: str) -> dict[str, Any]:
+        return _result(self._base_status.execute(WorkspaceBaseStatusCommand(workspace_id)))
+
     def workspace_tree(self, workspace_id: str, max_entries: int = 2000) -> dict[str, Any]:
         return _result(self._tree.execute(WorkspaceTreeCommand(workspace_id, max_entries)))
 
@@ -453,6 +465,40 @@ class CodingService:
             self._restore.execute(
                 WorkspaceRestorePathsCommand(
                     workspace_id, relative_paths, expected_workspace_fingerprint
+                )
+            )
+        )
+
+    def workspace_refresh_preview(
+        self,
+        workspace_id: str,
+        expected_head_sha: str,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        return _result(
+            self._refresh_preview.execute(
+                WorkspaceRefreshPreviewCommand(
+                    workspace_id,
+                    expected_head_sha,
+                    expected_fingerprint,
+                )
+            )
+        )
+
+    def workspace_refresh(
+        self,
+        workspace_id: str,
+        preview_id: str,
+        expected_head_sha: str,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        return _result(
+            self._refresh.execute(
+                WorkspaceRefreshCommand(
+                    workspace_id,
+                    preview_id,
+                    expected_head_sha,
+                    expected_fingerprint,
                 )
             )
         )
