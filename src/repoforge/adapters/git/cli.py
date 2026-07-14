@@ -3,17 +3,49 @@
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import os
 import re
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ...ports.command import CommandExecutor, CommandResult
-from ...ports.git import GitSnapshotBlob, ResolvedRepositoryRef
+from ...ports.git import (
+    GitActorIdentity,
+    GitChangedFileEvidence,
+    GitCommitEvidence,
+    GitComparisonEvidence,
+    GitSnapshotBlob,
+    ResolvedRepositoryRef,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RawDiffEntry:
+    status_code: str
+    old_mode: str
+    new_mode: str
+    path: str
+    previous_path: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CollectedEvidence:
+    files: tuple[GitChangedFileEvidence, ...]
+    total_files: int
+    files_truncated: bool
+    additions: int
+    deletions: int
+    binary_files: int
+    omitted_paths: int
+    patch: str | None
+    patch_truncated: bool
+    binary_patch_omitted: bool
 
 
 class GitCliRepository:
@@ -271,14 +303,66 @@ class GitCliRepository:
             unchanged_state=("The source clone and repository references were not modified.",),
         )
 
+    @staticmethod
+    def _tag_name(requested: str) -> str | None:
+        name = requested.removeprefix("refs/tags/")
+        if requested.startswith("refs/") and not requested.startswith("refs/tags/"):
+            return None
+        if (
+            not name
+            or len(name) > 200
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", name) is None
+            or ".." in name
+            or "@{" in name
+            or name.endswith((".", "/", ".lock"))
+            or any(part in {"", ".", ".."} or part.startswith(".") for part in name.split("/"))
+        ):
+            return None
+        return name
+
+    def _commit_is_reviewed(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+    ) -> bool:
+        allowed_branches = tuple(dict.fromkeys((repo.default_base, *repo.allowed_base_branches)))
+        for branch in allowed_branches:
+            branch_ref = f"refs/heads/{branch}"
+            exists = self._executor.run(
+                ["git", "rev-parse", "--verify", "--end-of-options", f"{branch_ref}^{{commit}}"],
+                cwd=path,
+                check=False,
+                output_limit=512,
+            )
+            if exists.returncode != 0:
+                continue
+            ancestry = self._executor.run(
+                ["git", "merge-base", "--is-ancestor", commit_sha, branch_ref],
+                cwd=path,
+                check=False,
+                output_limit=512,
+            )
+            if ancestry.returncode == 0:
+                return True
+            if ancestry.returncode != 1:
+                raise CommandError(
+                    ancestry.combined or "Unable to validate repository ref ancestry"
+                )
+        return False
+
     def resolve_snapshot_ref(
         self, path: Path, repo: RepositoryConfig, ref: str | None
     ) -> ResolvedRepositoryRef:
         allowed_branches = tuple(dict.fromkeys((repo.default_base, *repo.allowed_base_branches)))
         requested = ref or repo.default_base
-        if not requested or any(ord(character) < 32 for character in requested):
+        if (
+            not requested
+            or len(requested) > 256
+            or any(ord(character) < 32 for character in requested)
+        ):
             self._raise_ref_error(
-                "Repository ref is empty or contains control characters",
+                "Repository ref is empty, too long, or contains control characters",
                 ErrorCode.REPOSITORY_REF_DISALLOWED,
             )
 
@@ -297,6 +381,29 @@ class GitCliRepository:
                 )
             return ResolvedRepositoryRef(resolved_ref, result.stdout.strip())
 
+        tag_name = self._tag_name(requested)
+        if tag_name is not None:
+            tag_ref = f"refs/tags/{tag_name}"
+            tag = self._executor.run(
+                ["git", "rev-parse", "--verify", "--end-of-options", f"{tag_ref}^{{commit}}"],
+                cwd=path,
+                check=False,
+                output_limit=512,
+            )
+            if tag.returncode == 0:
+                commit_sha = tag.stdout.strip()
+                if not self._commit_is_reviewed(path, repo, commit_sha):
+                    self._raise_ref_error(
+                        f"Repository ref is outside reviewed base history: {requested}",
+                        ErrorCode.REPOSITORY_REF_EXTERNAL,
+                    )
+                return ResolvedRepositoryRef(tag_ref, commit_sha)
+            if requested.startswith("refs/tags/"):
+                self._raise_ref_error(
+                    f"Repository ref not found: {requested}",
+                    ErrorCode.REPOSITORY_REF_NOT_FOUND,
+                )
+
         full_object_id = re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", requested)
         if full_object_id is not None:
             result = self._executor.run(
@@ -311,37 +418,7 @@ class GitCliRepository:
                     ErrorCode.REPOSITORY_REF_NOT_FOUND,
                 )
             commit_sha = result.stdout.strip()
-            reachable = False
-            for branch in allowed_branches:
-                branch_ref = f"refs/heads/{branch}"
-                exists = self._executor.run(
-                    [
-                        "git",
-                        "rev-parse",
-                        "--verify",
-                        "--end-of-options",
-                        f"{branch_ref}^{{commit}}",
-                    ],
-                    cwd=path,
-                    check=False,
-                    output_limit=512,
-                )
-                if exists.returncode != 0:
-                    continue
-                ancestry = self._executor.run(
-                    ["git", "merge-base", "--is-ancestor", commit_sha, branch_ref],
-                    cwd=path,
-                    check=False,
-                    output_limit=512,
-                )
-                if ancestry.returncode == 0:
-                    reachable = True
-                    break
-                if ancestry.returncode != 1:
-                    raise CommandError(
-                        ancestry.combined or "Unable to validate repository ref ancestry"
-                    )
-            if not reachable:
+            if not self._commit_is_reviewed(path, repo, commit_sha):
                 self._raise_ref_error(
                     f"Repository ref is outside reviewed base history: {requested}",
                     ErrorCode.REPOSITORY_REF_EXTERNAL,
@@ -498,6 +575,515 @@ class GitCliRepository:
             matches.append(f"{normalized}:{line_number}:{content}")
         matches.sort()
         return matches[:max_results], executor_truncated or len(matches) > max_results
+
+    @staticmethod
+    def _raise_evidence_error(message: str, code: ErrorCode) -> NoReturn:
+        raise RepoForgeError(
+            message,
+            code=code,
+            unchanged_state=(
+                "The source clone, working tree, and Git references were not modified.",
+            ),
+        )
+
+    @classmethod
+    def _decode_git_path(cls, raw: bytes) -> str:
+        try:
+            value = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            cls._raise_evidence_error(
+                "Git returned a non-UTF-8 committed path",
+                ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+            )
+            raise AssertionError("unreachable") from exc
+        if not value:
+            cls._raise_evidence_error(
+                "Git returned an empty committed path",
+                ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+            )
+        return value
+
+    @classmethod
+    def _parse_raw_diff(cls, raw: bytes) -> list[_RawDiffEntry]:
+        tokens = raw.split(b"\x00")
+        entries: list[_RawDiffEntry] = []
+        index = 0
+        while index < len(tokens):
+            header = tokens[index]
+            index += 1
+            if not header:
+                continue
+            try:
+                fields = header.decode("ascii", errors="strict").split()
+            except UnicodeDecodeError as exc:
+                cls._raise_evidence_error(
+                    "Git returned a malformed raw diff header",
+                    ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                )
+                raise AssertionError("unreachable") from exc
+            if len(fields) != 5 or not fields[0].startswith(":"):
+                cls._raise_evidence_error(
+                    "Git returned a malformed raw diff record",
+                    ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                )
+            if index >= len(tokens):
+                cls._raise_evidence_error(
+                    "Git raw diff omitted a path",
+                    ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                )
+            old_mode = fields[0][1:]
+            new_mode = fields[1]
+            status_code = fields[4]
+            first_path = cls._decode_git_path(tokens[index])
+            index += 1
+            previous_path: str | None = None
+            current_path = first_path
+            if status_code[:1] in {"R", "C"}:
+                if index >= len(tokens):
+                    cls._raise_evidence_error(
+                        "Git rename/copy record omitted its destination path",
+                        ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                    )
+                previous_path = first_path
+                current_path = cls._decode_git_path(tokens[index])
+                index += 1
+            entries.append(
+                _RawDiffEntry(status_code, old_mode, new_mode, current_path, previous_path)
+            )
+        return entries
+
+    @classmethod
+    def _parse_numstat(
+        cls,
+        raw: bytes,
+    ) -> dict[tuple[str | None, str], tuple[int | None, int | None, bool]]:
+        tokens = raw.split(b"\x00")
+        stats: dict[tuple[str | None, str], tuple[int | None, int | None, bool]] = {}
+        index = 0
+        while index < len(tokens):
+            header = tokens[index]
+            index += 1
+            if not header:
+                continue
+            parts = header.split(b"\t", 2)
+            if len(parts) != 3:
+                cls._raise_evidence_error(
+                    "Git returned a malformed numstat record",
+                    ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                )
+            added_raw, deleted_raw, path_raw = parts
+            previous_path: str | None = None
+            if path_raw:
+                current_path = cls._decode_git_path(path_raw)
+            else:
+                if index + 1 >= len(tokens):
+                    cls._raise_evidence_error(
+                        "Git rename/copy numstat omitted paths",
+                        ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                    )
+                previous_path = cls._decode_git_path(tokens[index])
+                current_path = cls._decode_git_path(tokens[index + 1])
+                index += 2
+            binary = added_raw == b"-" or deleted_raw == b"-"
+            try:
+                additions = None if binary else int(added_raw)
+                deletions = None if binary else int(deleted_raw)
+            except ValueError as exc:
+                cls._raise_evidence_error(
+                    "Git returned non-numeric file statistics",
+                    ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                )
+                raise AssertionError("unreachable") from exc
+            stats[(previous_path, current_path)] = (additions, deletions, binary)
+        return stats
+
+    @classmethod
+    def _status_name(cls, status_code: str) -> str:
+        names = {
+            "A": "added",
+            "M": "modified",
+            "D": "deleted",
+            "R": "renamed",
+            "C": "copied",
+            "T": "type_changed",
+            "U": "unmerged",
+        }
+        name = names.get(status_code[:1])
+        if name is None:
+            cls._raise_evidence_error(
+                f"Git returned an unsupported changed-file status: {status_code}",
+                ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+            )
+        return name
+
+    def _diff_bytes(
+        self,
+        path: Path,
+        base_sha: str | None,
+        head_sha: str,
+        output_kind: str,
+    ) -> bytes:
+        if output_kind not in {"--raw", "--numstat"}:
+            raise ValueError("Unsupported evidence diff output kind")
+        if base_sha is None:
+            argv = [
+                "git",
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "-r",
+                "-z",
+                output_kind,
+                "-M",
+                "-C",
+                head_sha,
+                "--",
+            ]
+        else:
+            argv = [
+                "git",
+                "diff",
+                output_kind,
+                "-z",
+                "-M",
+                "-C",
+                base_sha,
+                head_sha,
+                "--",
+            ]
+        return self._executor.run_bytes(
+            argv,
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        )
+
+    @staticmethod
+    def _glob_matches(path: str, pattern: str) -> bool:
+        return fnmatch.fnmatchcase(path, pattern) or PurePosixPath(path).match(pattern)
+
+    def _patch_for_files(
+        self,
+        path: Path,
+        base_sha: str | None,
+        head_sha: str,
+        files: tuple[GitChangedFileEvidence, ...],
+    ) -> tuple[str, bool]:
+        paths = sorted(
+            {
+                candidate
+                for item in files
+                if not item.binary
+                for candidate in (item.previous_path, item.path)
+                if candidate is not None
+            }
+        )
+        if not paths:
+            return "", False
+        if base_sha is None:
+            argv = [
+                "git",
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "-r",
+                "--patch",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "-M",
+                "-C",
+                head_sha,
+                "--",
+            ]
+        else:
+            argv = [
+                "git",
+                "diff",
+                "--patch",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "-M",
+                "-C",
+                base_sha,
+                head_sha,
+                "--",
+            ]
+        argv.extend(f":(literal){candidate}" for candidate in paths)
+        result = self._executor.run(
+            argv,
+            cwd=path,
+            output_limit=self.server.max_tool_output_chars,
+        )
+        return result.stdout, result.stdout_truncated
+
+    def _collect_evidence(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        base_sha: str | None,
+        head_sha: str,
+        path_glob: str | None,
+        max_files: int,
+        include_patch: bool,
+    ) -> _CollectedEvidence:
+        raw_entries = self._parse_raw_diff(self._diff_bytes(path, base_sha, head_sha, "--raw"))
+        numstats = self._parse_numstat(self._diff_bytes(path, base_sha, head_sha, "--numstat"))
+        visible: list[GitChangedFileEvidence] = []
+        omitted_paths = 0
+        for entry in raw_entries:
+            if {entry.old_mode, entry.new_mode}.intersection({"120000", "160000"}):
+                omitted_paths += 1
+                continue
+            try:
+                current = assert_path_allowed(entry.path, repo)
+                previous = (
+                    assert_path_allowed(entry.previous_path, repo)
+                    if entry.previous_path is not None
+                    else None
+                )
+            except SecurityError:
+                omitted_paths += 1
+                continue
+            if path_glob and not (
+                self._glob_matches(current, path_glob)
+                or (previous is not None and self._glob_matches(previous, path_glob))
+            ):
+                continue
+            stat = numstats.get((entry.previous_path, entry.path))
+            if stat is None:
+                self._raise_evidence_error(
+                    f"Git statistics did not match changed path: {current}",
+                    ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+                )
+            additions, deletions, binary = stat
+            visible.append(
+                GitChangedFileEvidence(
+                    self._status_name(entry.status_code),
+                    current,
+                    previous,
+                    additions,
+                    deletions,
+                    binary,
+                )
+            )
+        visible.sort(key=lambda item: (item.path, item.previous_path or ""))
+        returned = tuple(visible[:max_files])
+        patch: str | None = None
+        patch_truncated = False
+        if include_patch:
+            patch, patch_truncated = self._patch_for_files(
+                path,
+                base_sha,
+                head_sha,
+                returned,
+            )
+        return _CollectedEvidence(
+            returned,
+            len(visible),
+            len(visible) > max_files,
+            sum(item.additions or 0 for item in visible),
+            sum(item.deletions or 0 for item in visible),
+            sum(1 for item in visible if item.binary),
+            omitted_paths,
+            patch,
+            patch_truncated,
+            any(item.binary for item in visible),
+        )
+
+    def _commit_metadata(
+        self,
+        path: Path,
+        commit_sha: str,
+    ) -> tuple[
+        str,
+        tuple[str, ...],
+        GitActorIdentity,
+        GitActorIdentity,
+        str,
+        str,
+        bool,
+    ]:
+        fixed = self._executor.run(
+            [
+                "git",
+                "show",
+                "-s",
+                "--no-show-signature",
+                "--format=%T%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                commit_sha,
+            ],
+            cwd=path,
+            output_limit=32_000,
+        )
+        if fixed.stdout_truncated:
+            self._raise_evidence_error(
+                "Git commit identity exceeded its bounded parser contract",
+                ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+            )
+        parts = fixed.stdout.rstrip("\n").split("\x00")
+        if len(parts) != 8:
+            self._raise_evidence_error(
+                "Git returned malformed commit identity metadata",
+                ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+            )
+        (
+            tree_sha,
+            parents_raw,
+            author_name,
+            author_email,
+            author_date,
+            committer_name,
+            committer_email,
+            committer_date,
+        ) = parts
+        subject_result = self._executor.run(
+            ["git", "show", "-s", "--no-show-signature", "--format=%s", commit_sha],
+            cwd=path,
+            output_limit=min(4_000, self.server.max_tool_output_chars),
+        )
+        body_result = self._executor.run(
+            ["git", "show", "-s", "--no-show-signature", "--format=%b", commit_sha],
+            cwd=path,
+            output_limit=max(1_000, min(20_000, self.server.max_tool_output_chars)),
+        )
+        return (
+            tree_sha,
+            tuple(parent for parent in parents_raw.split() if parent),
+            GitActorIdentity(author_name, author_email, author_date),
+            GitActorIdentity(committer_name, committer_email, committer_date),
+            subject_result.stdout.rstrip("\n"),
+            body_result.stdout.rstrip("\n"),
+            subject_result.stdout_truncated or body_result.stdout_truncated,
+        )
+
+    def read_commit_evidence(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        snapshot: ResolvedRepositoryRef,
+        max_files: int,
+        include_patch: bool,
+    ) -> GitCommitEvidence:
+        (
+            tree_sha,
+            parent_shas,
+            author,
+            committer,
+            subject,
+            body,
+            message_truncated,
+        ) = self._commit_metadata(path, snapshot.commit_sha)
+        comparison_parent = parent_shas[0] if parent_shas else None
+        collected = self._collect_evidence(
+            path,
+            repo,
+            comparison_parent,
+            snapshot.commit_sha,
+            None,
+            max_files,
+            include_patch,
+        )
+        return GitCommitEvidence(
+            tree_sha,
+            parent_shas,
+            comparison_parent,
+            author,
+            committer,
+            subject,
+            body,
+            message_truncated,
+            collected.files,
+            collected.total_files,
+            collected.files_truncated,
+            collected.additions,
+            collected.deletions,
+            collected.binary_files,
+            collected.omitted_paths,
+            collected.patch,
+            collected.patch_truncated,
+            collected.binary_patch_omitted,
+        )
+
+    def compare_commits(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        base: ResolvedRepositoryRef,
+        head: ResolvedRepositoryRef,
+        path_glob: str | None,
+        max_files: int,
+        include_patch: bool,
+    ) -> GitComparisonEvidence:
+        merge_base = self._executor.run(
+            ["git", "merge-base", base.commit_sha, head.commit_sha],
+            cwd=path,
+            check=False,
+            output_limit=512,
+        )
+        if merge_base.returncode == 1:
+            shallow = self._executor.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=path,
+                check=False,
+                output_limit=64,
+            )
+            code = (
+                ErrorCode.REPOSITORY_HISTORY_INCOMPLETE
+                if shallow.returncode == 0 and shallow.stdout.strip() == "true"
+                else ErrorCode.REPOSITORY_HISTORIES_UNRELATED
+            )
+            self._raise_evidence_error(
+                "Reviewed commits do not have an available merge base",
+                code,
+            )
+        if merge_base.returncode != 0:
+            raise CommandError(merge_base.combined or "Unable to calculate merge base")
+        counts = self._executor.run(
+            [
+                "git",
+                "rev-list",
+                "--left-right",
+                "--count",
+                f"{base.commit_sha}...{head.commit_sha}",
+            ],
+            cwd=path,
+            output_limit=128,
+        )
+        try:
+            behind_text, ahead_text = counts.stdout.split()
+            behind = int(behind_text)
+            ahead = int(ahead_text)
+        except (ValueError, TypeError) as exc:
+            self._raise_evidence_error(
+                "Git returned malformed ahead/behind counts",
+                ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED,
+            )
+            raise AssertionError("unreachable") from exc
+        collected = self._collect_evidence(
+            path,
+            repo,
+            base.commit_sha,
+            head.commit_sha,
+            path_glob,
+            max_files,
+            include_patch,
+        )
+        return GitComparisonEvidence(
+            merge_base.stdout.strip(),
+            ahead,
+            behind,
+            collected.files,
+            collected.total_files,
+            collected.files_truncated,
+            collected.additions,
+            collected.deletions,
+            collected.binary_files,
+            collected.omitted_paths,
+            collected.patch,
+            collected.patch_truncated,
+            collected.binary_patch_omitted,
+        )
 
     def search(
         self,

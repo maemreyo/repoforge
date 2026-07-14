@@ -70,7 +70,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "6641d5415e50bf7507449f816f7b97cd673d4aafac0f6ee235027ca505bbebde",
+    "tool_surface_hash": "c7698f06738042091c322dfe56f40aefe37174b70fbb3bedcbdc17ba565431a4",
     "tools": [
       {
         "annotations": {
@@ -204,6 +204,111 @@
           "type": "object"
         },
         "title": "Read durable operation status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to inspect one exact reviewed commit with bounded file statistics and optional patch evidence.",
+        "inputSchema": {
+          "properties": {
+            "include_patch": {
+              "default": false,
+              "title": "Include Patch",
+              "type": "boolean"
+            },
+            "max_files": {
+              "default": 100,
+              "title": "Max Files",
+              "type": "integer"
+            },
+            "ref": {
+              "title": "Ref",
+              "type": "string"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "ref"
+          ],
+          "title": "repo_commit_readArguments",
+          "type": "object"
+        },
+        "name": "repo_commit_read",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_commit_readDictOutput",
+          "type": "object"
+        },
+        "title": "Read committed change evidence"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to compare two exact reviewed commits with merge-base, divergence, bounded files, and optional patch evidence.",
+        "inputSchema": {
+          "properties": {
+            "base_ref": {
+              "title": "Base Ref",
+              "type": "string"
+            },
+            "head_ref": {
+              "title": "Head Ref",
+              "type": "string"
+            },
+            "include_patch": {
+              "default": false,
+              "title": "Include Patch",
+              "type": "boolean"
+            },
+            "max_files": {
+              "default": 100,
+              "title": "Max Files",
+              "type": "integer"
+            },
+            "path_glob": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Path Glob"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "base_ref",
+            "head_ref"
+          ],
+          "title": "repo_compareArguments",
+          "type": "object"
+        },
+        "name": "repo_compare",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_compareDictOutput",
+          "type": "object"
+        },
+        "title": "Compare committed repository refs"
       },
       {
         "annotations": {

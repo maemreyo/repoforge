@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes thirty-seven focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes thirty-nine focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -85,15 +85,26 @@ CLI equivalents are `rf operation status ID`, `rf operation list`, and `rf opera
 | `repo_read_files` | Read one bounded line range from multiple committed blobs in the same resolved snapshot, subject to `max_batch_files`. |
 | `repo_search` | Run bounded fixed-string search against one committed snapshot with an optional safe path glob. |
 | `repo_recent_commits` | Read bounded local commit history, up to one hundred commits. |
+| `repo_commit_read` | Inspect one exact reviewed commit with metadata, deterministic changed-file statistics, first-parent/root comparison identity, and an optional bounded patch. |
+| `repo_compare` | Compare two exact reviewed commits with merge-base, ahead/behind counts, optional safe path glob, deterministic changed files, and an optional bounded patch. |
 | `repo_issue_read` | Read a GitHub issue through `gh` with bounded output. |
 | `repo_pr_read` | Read pull-request metadata, files, commits, checks, and reviews through `gh`. |
 
-The committed snapshot tools never checkout or read working-tree file contents. An omitted `ref`
-resolves to the configured default base branch; an explicit ref must be an allowlisted base branch or
-a full commit object ID reachable from one. Every result returns `resolved_ref` and `commit_sha`.
-Denied paths, symlinks, gitlinks, binary or non-UTF-8 blobs, oversized files, unsafe globs, ambiguous
-object prefixes, remote refs, and revision expressions fail closed. Tree and search results are sorted,
-and line, batch, result, file-size, and tool-output limits report truncation explicitly.
+The committed repository tools never checkout or read working-tree file contents. An omitted snapshot
+`ref` resolves to the configured default base branch; explicit refs may be reviewed base branches,
+exact local tags whose peeled commits remain in reviewed history, or reachable full commit object IDs.
+Every result returns canonical resolved refs and exact commit SHAs. Abbreviated hashes, revision
+expressions, arbitrary local branches, and remote refs fail closed.
+
+Commit evidence compares merge commits with their first parent and root commits with Git's empty tree.
+Comparison evidence returns the exact merge base plus deterministic ahead/behind counts. Changed paths
+are parsed from NUL-delimited Git output and filtered by repository policy before becoming visible; a
+rename or copy is returned only when both paths are allowed. Binary entries retain bounded statistics
+but binary patch bodies are omitted explicitly. Actor names/emails and commit subject/body text are
+bounded and sanitized for credential assignments, bearer tokens, credential URLs, private-key blocks,
+high-entropy token shapes, and denied-path snippets. Optional patches are generated only for the already-approved visible
+non-binary literal path set. File, patch, line, batch, result, and tool-output limits expose truncation
+rather than silently widening output.
 
 ## Workspace lifecycle
 

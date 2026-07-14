@@ -19,6 +19,11 @@ from .dto import to_data
 from .operations.cancel import OperationCancelCommand, OperationCancellationRequester
 from .operations.list import OperationListCommand, OperationLister
 from .operations.status import OperationStatusCommand, OperationStatusReader
+from .repository.commit_read import (
+    RepositoryCommitReadCommand,
+    RepositoryCommitReader,
+)
+from .repository.compare import RepositoryCompareCommand, RepositoryComparer
 from .repository.context import (
     RepositoryContextCommand,
     RepositoryContextReader,
@@ -167,6 +172,8 @@ class CodingService:
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
         self._repo_context = RepositoryContextReader(ctx)
+        self._repo_commit = RepositoryCommitReader(ctx)
+        self._repo_compare = RepositoryComparer(ctx)
         self._repo_tree = RepositoryTreeReader(ctx)
         self._repo_read = RepositoryFileReader(ctx)
         self._repo_reads = RepositoryFilesReader(ctx)
@@ -233,6 +240,41 @@ class CodingService:
 
     def repo_context(self, repo_id: str) -> dict[str, Any]:
         return _result(self._repo_context.execute(RepositoryContextCommand(repo_id)))
+
+    def repo_commit_read(
+        self,
+        repo_id: str,
+        ref: str,
+        max_files: int = 100,
+        include_patch: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_commit.execute(
+                RepositoryCommitReadCommand(repo_id, ref, max_files, include_patch)
+            )
+        )
+
+    def repo_compare(
+        self,
+        repo_id: str,
+        base_ref: str,
+        head_ref: str,
+        path_glob: str | None = None,
+        max_files: int = 100,
+        include_patch: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_compare.execute(
+                RepositoryCompareCommand(
+                    repo_id,
+                    base_ref,
+                    head_ref,
+                    path_glob,
+                    max_files,
+                    include_patch,
+                )
+            )
+        )
 
     def repo_tree(
         self,
