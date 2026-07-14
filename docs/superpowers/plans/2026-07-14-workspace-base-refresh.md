@@ -1,7 +1,7 @@
 # Workspace Base Freshness and Safe Refresh Implementation Plan
 
-**Issue:** #12  
-**Status:** Implemented  
+**Issue:** #12
+**Status:** Implemented
 **Goal:** Make upstream base drift visible and refresh an isolated `ai/*` workspace without rebase, force-push, protected-branch mutation, automatic conflict resolution, or stale receipt reuse.
 
 ## Architecture
