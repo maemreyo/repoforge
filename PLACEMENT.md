@@ -4,8 +4,8 @@ Copy these files into the RepoForge source tree:
 
 ```text
 AGENTS.md
-docs/FULL_FLOW_TESTING.md
-docs/TEST_RUN_RECORD.md
+docs/testing/FULL_FLOW_TESTING.md
+docs/testing/TEST_RUN_RECORD.md
 scripts/e2e-preflight.sh
 .github/PULL_REQUEST_TEMPLATE.md
 ```

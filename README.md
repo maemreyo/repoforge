@@ -178,7 +178,7 @@ rf repo refresh --accept
 ```
 
 Legacy full `[server]` and `[repositories.*]` configurations remain supported. Detailed setup,
-security behavior, and troubleshooting are in [docs/CHATGPT_SETUP.md](docs/CHATGPT_SETUP.md).
+security behavior, and troubleshooting are in [the ChatGPT setup guide](docs/getting-started/CHATGPT_SETUP.md).
 
 ## Recommended workflow
 
@@ -250,14 +250,15 @@ protocol tests.
 
 ## Documentation
 
-- [ChatGPT and tunnel setup](docs/CHATGPT_SETUP.md)
-- [Interactive onboarding UI](docs/INTERACTIVE_ONBOARDING.md)
-- [Tool reference](docs/TOOL_REFERENCE.md)
-- [Development guide](docs/DEVELOPMENT.md)
-- [Testing strategy](docs/TESTING.md)
-- [Full-flow test runbook](docs/FULL_FLOW_TESTING.md)
-- [Starter prompts](docs/STARTER_PROMPTS.md)
-- [Plugin regression cases](docs/PLUGIN_TEST_CASES.md)
+- [Documentation index](docs/README.md)
+- [ChatGPT and tunnel setup](docs/getting-started/CHATGPT_SETUP.md)
+- [Interactive onboarding UI](docs/getting-started/INTERACTIVE_ONBOARDING.md)
+- [Tool reference](docs/development/TOOL_REFERENCE.md)
+- [Development guide](docs/development/DEVELOPMENT.md)
+- [Testing strategy](docs/testing/TESTING.md)
+- [Full-flow test runbook](docs/testing/FULL_FLOW_TESTING.md)
+- [Starter prompts](docs/guides/STARTER_PROMPTS.md)
+- [Plugin regression cases](docs/testing/PLUGIN_TEST_CASES.md)
 - [Security model](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
@@ -288,4 +289,4 @@ Use `--non-interactive` only when every decision, exact `approve:PROPOSAL_ID`, a
 
 Interactive review supports `--ui auto|rich|plain` and `--defaults safe|ask|none`, with a
 six-stage batch review and dependency-free plain fallback. See
-[Interactive onboarding UI](docs/INTERACTIVE_ONBOARDING.md).
+[Interactive onboarding UI](docs/getting-started/INTERACTIVE_ONBOARDING.md).

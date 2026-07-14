@@ -116,7 +116,7 @@ machine-specific credentials, and distinguish automated validation from checks t
 GitHub account or Secure MCP Tunnel.
 
 When tool metadata changes, rerun direct, indirect, and negative Plugin prompts from
-[PLUGIN_TEST_CASES.md](PLUGIN_TEST_CASES.md).
+[PLUGIN_TEST_CASES.md](../testing/PLUGIN_TEST_CASES.md).
 
 ## Definition of done
 

@@ -64,8 +64,11 @@ def _verify_guided_onboarding(root: Path, source: Path) -> dict[str, object]:
     payload = json.loads(preview.stdout)
     session_id = str(payload["session_id"])
     repositories = payload["session"]["repositories"]
+    canonical_source = source.resolve()
     selected = next(
-        item for item in repositories if item["candidate"]["identity"]["path"] == str(source)
+        item
+        for item in repositories
+        if Path(str(item["candidate"]["identity"]["path"])).resolve() == canonical_source
     )
     proposal_id = str(selected["proposal_id"])
     token = f"approve:{proposal_id}"
@@ -90,7 +93,10 @@ def _verify_guided_onboarding(root: Path, source: Path) -> dict[str, object]:
     listed = _rf("--config", str(config), "repo", "list", env=env)
     assert listed.returncode == 0, listed.stdout + listed.stderr
     listed_payload = json.loads(listed.stdout)
-    assert any(item["path"] == str(source) for item in listed_payload["repositories"])
+    assert any(
+        Path(str(item["path"])).resolve() == canonical_source
+        for item in listed_payload["repositories"]
+    )
     session_path = home / ".local/state/repoforge/onboarding" / f"{session_id}.json"
     persisted = session_path.read_text(encoding="utf-8")
     assert token not in persisted

@@ -64,9 +64,7 @@ def make_session(status=OnboardingStatus.AWAITING_APPROVAL):
 
 def test_parser_exposes_onboard_and_repo_discover() -> None:
     parser = cli.build_parser()
-    parsed = parser.parse_args(
-        ["onboard", "/repos", "--ui", "rich", "--defaults", "safe"]
-    )
+    parsed = parser.parse_args(["onboard", "/repos", "--ui", "rich", "--defaults", "safe"])
     assert parsed.command == "onboard"
     assert parsed.ui == "rich"
     assert parsed.defaults == "safe"
@@ -97,9 +95,7 @@ def test_noninteractive_does_not_construct_optional_ui(monkeypatch, capsys) -> N
     def fail_ui(*args, **kwargs):
         raise AssertionError("interactive UI must not be constructed")
 
-    monkeypatch.setattr(
-        "repoforge.interfaces.cli.onboarding.build_onboarding_ui", fail_ui
-    )
+    monkeypatch.setattr("repoforge.interfaces.cli.onboarding.build_onboarding_ui", fail_ui)
     assert (
         cli.main(
             [
@@ -261,9 +257,7 @@ class BatchReviewUI:
 
 class BatchReviewCoordinator:
     def __init__(self, *, config_path: str):
-        identity = DiscoveryIdentity(
-            "/repos/demo", "/repos/demo", "/repos/demo/.git", True, False
-        )
+        identity = DiscoveryIdentity("/repos/demo", "/repos/demo", "/repos/demo/.git", True, False)
         self.candidate = DiscoveryCandidate(identity, "demo")
         self.calls = []
         self.config_path = config_path
@@ -415,9 +409,7 @@ def test_interactive_batch_review_runs_all_six_stages(monkeypatch, tmp_path) -> 
         lambda args, roots: discovered,
     )
 
-    assert _run_interactive(
-        _batch_args(config), None, (Path("/repos"),), rendered.append
-    ) == 0
+    assert _run_interactive(_batch_args(config), None, (Path("/repos"),), rendered.append) == 0
     assert [title for _index, _total, title in ui.stages] == [
         "Discovery",
         "Safe defaults",
@@ -457,12 +449,15 @@ def test_interactive_plan_only_stops_after_config_diff(monkeypatch, tmp_path) ->
         lambda args, roots: discovered,
     )
 
-    assert _run_interactive(
-        _batch_args(config, plan_only=True),
-        None,
-        (Path("/repos"),),
-        rendered.append,
-    ) == 0
+    assert (
+        _run_interactive(
+            _batch_args(config, plan_only=True),
+            None,
+            (Path("/repos"),),
+            rendered.append,
+        )
+        == 0
+    )
     assert len(coordinator.calls) == 4
     assert ui.confirm_calls == 0
     assert rendered[-1]["status"] == "ready"

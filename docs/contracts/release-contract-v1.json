@@ -328,7 +328,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this before editing to create a new ai/* branch in an isolated Git worktree.\n\nSupply a stable idempotency key when an automated caller may retry the request.\n",
+        "description": "Use this before editing to create an isolated ai/* worktree; use an idempotency key for retries.",
         "inputSchema": {
           "properties": {
             "base": {

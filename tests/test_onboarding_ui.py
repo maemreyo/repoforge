@@ -30,9 +30,7 @@ def test_auto_uses_plain_without_tty_and_does_not_probe_optional_backends(
     def fail_probe(name: str) -> bool:
         raise AssertionError(f"optional backend probed: {name}")
 
-    monkeypatch.setattr(
-        "repoforge.interfaces.cli.onboarding_ui._module_available", fail_probe
-    )
+    monkeypatch.setattr("repoforge.interfaces.cli.onboarding_ui._module_available", fail_probe)
     ui = build_onboarding_ui("auto", stdin=Pipe(), stdout=Pipe(), stderr=Pipe())
     assert isinstance(ui, PlainOnboardingUI)
     assert not ui.interactive
@@ -132,23 +130,24 @@ def test_inquirer_backend_uses_arrow_select_and_preselected_checkboxes(monkeypat
     monkeypatch.setattr(
         onboarding_ui_module,
         "_load_attribute",
-        lambda module, attribute: FakeChoice
-        if (module, attribute) == ("InquirerPy.base.control", "Choice")
-        else None,
+        lambda module, attribute: (
+            FakeChoice if (module, attribute) == ("InquirerPy.base.control", "Choice") else None
+        ),
     )
-    monkeypatch.setattr(
-        RichOnboardingUI, "_inquirer", staticmethod(lambda: fake_inquirer)
-    )
+    monkeypatch.setattr(RichOnboardingUI, "_inquirer", staticmethod(lambda: fake_inquirer))
     ui = object.__new__(RichOnboardingUI)
     PlainOnboardingUI.__init__(ui, TTY(), TTY(), TTY())
     ui._console = None
     ui._inquirer_enabled = True
 
-    assert ui.choose(
-        prompt="pick",
-        choices=(ChoiceItem("a", "Alpha"), ChoiceItem("b", "Beta")),
-        default="b",
-    ) == "b"
+    assert (
+        ui.choose(
+            prompt="pick",
+            choices=(ChoiceItem("a", "Alpha"), ChoiceItem("b", "Beta")),
+            default="b",
+        )
+        == "b"
+    )
     assert fake_inquirer.select_call["cycle"] is False
     assert fake_inquirer.select_call["default"] == "b"
 

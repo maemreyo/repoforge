@@ -118,5 +118,5 @@ Manual levels still required:
   L5  controlled canary edit, exact verification, approved commit/push/draft PR
   Cleanup close the canary PR and delete its branch
 
-Follow docs/FULL_FLOW_TESTING.md and record results in docs/TEST_RUN_RECORD.md.
+Follow docs/testing/FULL_FLOW_TESTING.md and record results in docs/testing/TEST_RUN_RECORD.md.
 EOF

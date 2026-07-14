@@ -182,3 +182,26 @@ def test_is_alive_keeps_owned_running_process_when_identity_temporarily_mismatch
         process.terminate()
         process.wait(timeout=3)
         client._children.pop(process.pid, None)
+
+
+def test_terminate_stops_owned_process_when_identity_temporarily_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the owned Popen handle when a shebang exec changes observable process identity."""
+    client = TunnelCliClient("unused")
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)"], start_new_session=True
+    )
+    client._children[process.pid] = process
+    monkeypatch.setattr(
+        "repoforge.adapters.runtime.tunnel_cli.process_identity", lambda _pid: "z" * 64
+    )
+    try:
+        client.terminate(ChildProcess(process.pid, "b" * 64, "now"), grace_seconds=0.2)
+        process.wait(timeout=3)
+        assert process.returncode is not None
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=3)
+        client._children.pop(process.pid, None)

@@ -49,8 +49,6 @@ def recommend_safe_decisions(
             selected.append(DecisionRecommendation(code, configured[0], configured[1]))
         elif len(choices) == 1:
             selected.append(
-                DecisionRecommendation(
-                    code, choices[0], "only available bounded option"
-                )
+                DecisionRecommendation(code, choices[0], "only available bounded option")
             )
     return tuple(selected)

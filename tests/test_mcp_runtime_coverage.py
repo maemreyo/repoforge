@@ -71,8 +71,17 @@ def test_managed_runtime_lifecycle_and_start_lock(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="valid process"):
         write_managed_runtime(state_path, pid=0, generation=1, profile="p", executable="python")
     process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+        [
+            sys.executable,
+            "-c",
+            "import time; print('ready', flush=True); time.sleep(60)",
+        ],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        text=True,
     )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "ready"
     try:
         managed = write_managed_runtime(
             state_path,

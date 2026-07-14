@@ -114,8 +114,17 @@ def test_managed_runtime_stops_only_the_recorded_process_group(tmp_path: Path) -
     # Given: a child process owns its own process group.
     state_path = tmp_path / "managed-runtime.json"
     process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+        [
+            sys.executable,
+            "-c",
+            "import time; print('ready', flush=True); time.sleep(60)",
+        ],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        text=True,
     )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "ready"
     write_managed_runtime(
         state_path,
         pid=process.pid,

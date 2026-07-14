@@ -263,7 +263,7 @@ Expected:
 
 - RepoForge is not selected.
 
-Record each result in `docs/TEST_RUN_RECORD.md`.
+Record each result in `docs/testing/TEST_RUN_RECORD.md`.
 
 ## 9. L5: controlled local edit
 

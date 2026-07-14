@@ -11,7 +11,7 @@ fi
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/repoforge-wheel-smoke.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
-uv venv --python "${REPOFORGE_SMOKE_PYTHON:-python}" "$TMP_ROOT/venv" >/dev/null
+uv venv --python "${REPOFORGE_SMOKE_PYTHON:-python3}" "$TMP_ROOT/venv" >/dev/null
 uv pip install --python "$TMP_ROOT/venv/bin/python" "$WHEEL" >/dev/null
 "$TMP_ROOT/venv/bin/python" - <<'PY'
 import asyncio

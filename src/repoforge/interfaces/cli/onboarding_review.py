@@ -15,9 +15,7 @@ class DefaultsMode(str, Enum):
     NONE = "none"
 
 
-def resolve_defaults_mode(
-    requested: str | None, *, non_interactive: bool
-) -> DefaultsMode:
+def resolve_defaults_mode(requested: str | None, *, non_interactive: bool) -> DefaultsMode:
     if non_interactive:
         if requested not in {None, DefaultsMode.NONE.value}:
             raise ValueError("--defaults safe/ask is interactive-only")
@@ -83,16 +81,12 @@ def proposal_summary(state: Any) -> RepositorySummary:
     raw_profiles = policy.get("profiles")
     profiles = raw_profiles if isinstance(raw_profiles, list) else []
     profile_names = tuple(
-        str(item.get("name"))
-        for item in profiles
-        if isinstance(item, dict) and item.get("name")
+        str(item.get("name")) for item in profiles if isinstance(item, dict) and item.get("name")
     )
     raw_findings = proposal.get("findings")
     findings = raw_findings if isinstance(raw_findings, list) else []
     finding_codes = tuple(
-        str(item.get("code"))
-        for item in findings
-        if isinstance(item, dict) and item.get("code")
+        str(item.get("code")) for item in findings if isinstance(item, dict) and item.get("code")
     )
     max_files = policy.get("max_changed_files", "?")
     max_lines = policy.get("max_diff_lines", "?")
