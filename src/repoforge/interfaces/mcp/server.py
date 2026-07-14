@@ -215,10 +215,7 @@ def create_server(
         base: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Use this before editing to create a new ai/* branch in an isolated Git worktree.
-
-        Supply a stable idempotency key when an automated caller may retry the request.
-        """
+        """Use this before editing to create an isolated ai/* worktree; use an idempotency key for retries."""
         return bounded_service.call("workspace_create", repo_id, task_slug, base, idempotency_key)
 
     @mcp.tool(title="List coding workspaces", annotations=READ_ONLY, structured_output=True)

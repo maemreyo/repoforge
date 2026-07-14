@@ -58,13 +58,9 @@ class OnboardingUI(Protocol):
         default: str | None = None,
     ) -> str: ...
 
-    def select_many(
-        self, *, prompt: str, choices: tuple[ChoiceItem, ...]
-    ) -> tuple[str, ...]: ...
+    def select_many(self, *, prompt: str, choices: tuple[ChoiceItem, ...]) -> tuple[str, ...]: ...
 
-    def ask(
-        self, *, prompt: str, secret: bool = False, default: str | None = None
-    ) -> str: ...
+    def ask(self, *, prompt: str, secret: bool = False, default: str | None = None) -> str: ...
 
     def confirm(self, *, prompt: str, default: bool = False) -> bool: ...
 
@@ -150,8 +146,7 @@ class PlainOnboardingUI:
         print(f"  {separator}", file=self._stderr)
         for row in rows:
             rendered = " | ".join(
-                value[: widths[index]].ljust(widths[index])
-                for index, value in enumerate(row)
+                value[: widths[index]].ljust(widths[index]) for index, value in enumerate(row)
             )
             print(f"  {rendered}", file=self._stderr)
 
@@ -183,9 +178,7 @@ class PlainOnboardingUI:
                 return enabled[int(raw) - 1].value
             print("Choose one listed value or number.", file=self._stderr)
 
-    def select_many(
-        self, *, prompt: str, choices: tuple[ChoiceItem, ...]
-    ) -> tuple[str, ...]:
+    def select_many(self, *, prompt: str, choices: tuple[ChoiceItem, ...]) -> tuple[str, ...]:
         enabled = tuple(choice for choice in choices if not choice.disabled)
         defaults = tuple(choice.value for choice in enabled if choice.selected)
         if not enabled:
@@ -194,9 +187,7 @@ class PlainOnboardingUI:
         while True:
             for index, choice in enumerate(enabled, start=1):
                 marker = "x" if choice.selected else " "
-                print(
-                    f"  {index}. [{marker}] {_choice_text(choice)}", file=self._stderr
-                )
+                print(f"  {index}. [{marker}] {_choice_text(choice)}", file=self._stderr)
             print(
                 f"{prompt} [comma-separated numbers; Enter=defaults, all, none]",
                 file=self._stderr,
@@ -223,14 +214,10 @@ class PlainOnboardingUI:
                     break
             if valid:
                 selected_set = set(selected)
-                return tuple(
-                    choice.value for choice in enabled if choice.value in selected_set
-                )
+                return tuple(choice.value for choice in enabled if choice.value in selected_set)
             print("Select only listed values or numbers.", file=self._stderr)
 
-    def ask(
-        self, *, prompt: str, secret: bool = False, default: str | None = None
-    ) -> str:
+    def ask(self, *, prompt: str, secret: bool = False, default: str | None = None) -> str:
         suffix = f" [{default}]" if default is not None else ""
         if secret:
             value = getpass.getpass(prompt + suffix + ": ", stream=self._stderr).strip()
@@ -285,9 +272,7 @@ class RichOnboardingUI(PlainOnboardingUI):
 
     def panel(self, *, title: str, lines: tuple[str, ...]) -> None:
         panel_type = _load_attribute("rich.panel", "Panel")
-        self._console.print(
-            panel_type("\n".join(lines) if lines else "(none)", title=title)
-        )
+        self._console.print(panel_type("\n".join(lines) if lines else "(none)", title=title))
 
     def table(
         self,
@@ -366,9 +351,7 @@ class RichOnboardingUI(PlainOnboardingUI):
             )
         )
 
-    def select_many(
-        self, *, prompt: str, choices: tuple[ChoiceItem, ...]
-    ) -> tuple[str, ...]:
+    def select_many(self, *, prompt: str, choices: tuple[ChoiceItem, ...]) -> tuple[str, ...]:
         if self._inquirer_enabled:
             result = (
                 self._inquirer()
@@ -384,9 +367,7 @@ class RichOnboardingUI(PlainOnboardingUI):
             return tuple(choice.value for choice in choices if choice.value in selected)
         return super().select_many(prompt=prompt, choices=choices)
 
-    def ask(
-        self, *, prompt: str, secret: bool = False, default: str | None = None
-    ) -> str:
+    def ask(self, *, prompt: str, secret: bool = False, default: str | None = None) -> str:
         if self._inquirer_enabled:
             inquirer = self._inquirer()
             factory = inquirer.secret if secret else inquirer.text
@@ -405,9 +386,7 @@ class RichOnboardingUI(PlainOnboardingUI):
 
     def confirm(self, *, prompt: str, default: bool = False) -> bool:
         if self._inquirer_enabled:
-            return bool(
-                self._inquirer().confirm(message=prompt, default=default).execute()
-            )
+            return bool(self._inquirer().confirm(message=prompt, default=default).execute())
         confirm_type = _load_attribute("rich.prompt", "Confirm")
         return bool(
             confirm_type.ask(

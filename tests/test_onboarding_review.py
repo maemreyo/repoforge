@@ -41,9 +41,7 @@ def test_discovery_rows_separates_eligible_and_excluded() -> None:
     )
     eligible, excluded = discovery_rows(result)
     assert eligible == (("demo", "/repos/demo", "root"),)
-    assert excluded == (
-        ("/repos/demo/.worktrees/one", "linked_worktree", "secondary checkout"),
-    )
+    assert excluded == (("/repos/demo/.worktrees/one", "linked_worktree", "secondary checkout"),)
 
 
 def test_proposal_summary_is_compact_and_fail_closed() -> None:
@@ -63,9 +61,7 @@ def test_proposal_summary_is_compact_and_fail_closed() -> None:
         "findings": [{"code": "RISKY_COMMANDS_EXCLUDED"}],
     }
     state = SimpleNamespace(
-        candidate=SimpleNamespace(
-            repo_id="demo", identity=SimpleNamespace(path="/fallback")
-        ),
+        candidate=SimpleNamespace(repo_id="demo", identity=SimpleNamespace(path="/fallback")),
         template="standard",
         proposal_json=json.dumps(payload),
     )

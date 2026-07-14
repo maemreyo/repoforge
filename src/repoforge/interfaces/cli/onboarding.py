@@ -285,9 +285,7 @@ def _resolve_interactive_duplicate_ids(
                         "underscores, or hyphens.",
                     ),
                 )
-    args.repo_id = [
-        f"{path}={repo_id}" for path, repo_id in sorted(assignments.items())
-    ]
+    args.repo_id = [f"{path}={repo_id}" for path, repo_id in sorted(assignments.items())]
 
 
 def _read_source_tunnel_id(config_path: Path) -> str | None:
@@ -420,22 +418,16 @@ def _apply_recommendations(
     ui.table(
         title="Applied safe defaults",
         headers=("Repository decision", "Value"),
-        rows=tuple(
-            (key, values[key]) for key in _choices_to_keys(choices, selected_set)
-        ),
+        rows=tuple((key, values[key]) for key in _choices_to_keys(choices, selected_set)),
     )
     return tuple(sorted(updated.items())), bool(selected)
 
 
-def _choices_to_keys(
-    choices: tuple[ChoiceItem, ...], selected: set[str]
-) -> tuple[str, ...]:
+def _choices_to_keys(choices: tuple[ChoiceItem, ...], selected: set[str]) -> tuple[str, ...]:
     return tuple(choice.value for choice in choices if choice.value in selected)
 
 
-def _show_repository_summary(
-    ui: OnboardingUI, state: OnboardingRepositoryState
-) -> None:
+def _show_repository_summary(ui: OnboardingUI, state: OnboardingRepositoryState) -> None:
     summary = proposal_summary(state)
     ui.panel(
         title=f"Repository review: {summary.repo_id}",
@@ -454,9 +446,7 @@ def _collect_working_directory_override(
     args: argparse.Namespace, repo_id: str, ui: OnboardingUI
 ) -> None:
     while True:
-        selected = ui.ask(
-            prompt=f"{repo_id}: relative working directory for scoped verification"
-        )
+        selected = ui.ask(prompt=f"{repo_id}: relative working directory for scoped verification")
         normalized = selected.strip().replace("\\", "/")
         if (
             normalized
@@ -471,9 +461,7 @@ def _collect_working_directory_override(
         )
     overrides = parse_assignments(args.policy_override, option="--policy-override")
     overrides[f"{repo_id}.working_directory"] = normalized
-    args.policy_override = [
-        f"{key}={value}" for key, value in sorted(overrides.items())
-    ]
+    args.policy_override = [f"{key}={value}" for key, value in sorted(overrides.items())]
 
 
 def _resolve_ambiguous_decisions(
@@ -489,8 +477,7 @@ def _resolve_ambiguous_decisions(
     pending = tuple(
         state
         for state in result.session.repositories
-        if state.progress
-        in {RepositoryProgress.NEEDS_DECISION, RepositoryProgress.BLOCKED}
+        if state.progress in {RepositoryProgress.NEEDS_DECISION, RepositoryProgress.BLOCKED}
     )
     if not pending:
         return decisions, False, None
@@ -556,9 +543,7 @@ def _approval_states(result: OnboardingResult) -> tuple[OnboardingRepositoryStat
     )
 
 
-def _show_approval_table(
-    ui: OnboardingUI, states: tuple[OnboardingRepositoryState, ...]
-) -> None:
+def _show_approval_table(ui: OnboardingUI, states: tuple[OnboardingRepositoryState, ...]) -> None:
     summaries = tuple(proposal_summary(state) for state in states)
     ui.stage(index=4, total=6, title="Repository summaries")
     ui.table(
@@ -669,16 +654,12 @@ def _current_source_text(config_path: Path) -> str:
         return ""
 
 
-def _show_config_diff(
-    ui: OnboardingUI, config_path: Path, result: OnboardingResult
-) -> None:
+def _show_config_diff(ui: OnboardingUI, config_path: Path, result: OnboardingResult) -> None:
     assert result.plan is not None
     ui.stage(index=5, total=6, title="Config diff")
     ui.code(
         title="Reviewed source configuration",
-        text=configuration_diff(
-            _current_source_text(config_path), result.plan.source_text
-        ),
+        text=configuration_diff(_current_source_text(config_path), result.plan.source_text),
         lexer="diff",
     )
     ui.panel(
@@ -711,27 +692,19 @@ def _run_interactive(
         raise ConfigError(
             "INTERACTION_REQUIRED: use --non-interactive with explicit decisions and approvals"
         )
-    defaults_mode = resolve_defaults_mode(
-        getattr(args, "defaults", None), non_interactive=False
-    )
+    defaults_mode = resolve_defaults_mode(getattr(args, "defaults", None), non_interactive=False)
     config_path = Path(args.config).expanduser().resolve()
     coordinator = build_onboarding_coordinator(config_path)
-    _ensure_interactive_tunnel_id(
-        args, session_id=session_id, coordinator=coordinator, io=ui
-    )
+    _ensure_interactive_tunnel_id(args, session_id=session_id, coordinator=coordinator, io=ui)
     display_roots = roots
     if session_id is not None and not display_roots:
-        display_roots = tuple(
-            Path(root) for root in coordinator.status(session_id).session.roots
-        )
+        display_roots = tuple(Path(root) for root in coordinator.status(session_id).session.roots)
     discovered = _discover_result(args, display_roots)
     _show_discovery(ui, discovered)
     if session_id is None:
         _resolve_interactive_duplicate_ids(args, roots, ui, result=discovered)
     approvals = tuple(args.approve)
-    decisions = tuple(
-        sorted(parse_assignments(args.decision, option="--decision").items())
-    )
+    decisions = tuple(sorted(parse_assignments(args.decision, option="--decision").items()))
     templates: dict[str, str] = {}
     skips: set[str] = set()
     processed_defaults: set[str] = set()
@@ -796,9 +769,7 @@ def _run_interactive(
             if getattr(args, "plan_only", False):
                 ui.panel(
                     title="Plan-only complete",
-                    lines=(
-                        "No configuration generation or runtime state was changed.",
-                    ),
+                    lines=("No configuration generation or runtime state was changed.",),
                 )
                 render(result_payload(result))
                 return 0
@@ -829,9 +800,7 @@ def _run_interactive(
         if result.session.status is OnboardingStatus.COMPLETED:
             ui.panel(
                 title="Nothing to enroll",
-                lines=(
-                    "All discovered repositories are already enrolled or excluded.",
-                ),
+                lines=("All discovered repositories are already enrolled or excluded.",),
             )
             render(result_payload(result))
             return 0

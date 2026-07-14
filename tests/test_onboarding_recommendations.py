@@ -18,15 +18,11 @@ def test_safe_defaults_do_not_guess_ambiguous_repository_choices() -> None:
     )
 
     assert recommend_safe_decisions(required) == (
-        DecisionRecommendation(
-            "dependency_install", "exclude", "avoid networked dependency setup"
-        ),
+        DecisionRecommendation("dependency_install", "exclude", "avoid networked dependency setup"),
         DecisionRecommendation(
             "risky_commands",
             "exclude",
             "keep deploy, release, and destructive commands unavailable",
         ),
-        DecisionRecommendation(
-            "publish_remote", "read_only", "only available bounded option"
-        ),
+        DecisionRecommendation("publish_remote", "read_only", "only available bounded option"),
     )
