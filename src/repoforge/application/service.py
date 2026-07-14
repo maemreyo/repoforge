@@ -60,9 +60,17 @@ from .workspace.files_read import (
     WorkspaceFilesReader,
 )
 from .workspace.list import WorkspaceListCommand, WorkspaceLister
+from .workspace.pr_check_details import (
+    WorkspacePrCheckDetailsCommand,
+    WorkspacePrCheckDetailsReader,
+)
 from .workspace.pr_checks import (
     WorkspacePrChecksCommand,
     WorkspacePrChecksReader,
+)
+from .workspace.pr_failure_evidence import (
+    WorkspacePrFailureEvidenceCommand,
+    WorkspacePrFailureEvidenceReader,
 )
 from .workspace.pr_status import (
     WorkspacePrStatusCommand,
@@ -175,6 +183,8 @@ class CodingService:
         self._update_pr = DraftPullRequestUpdater(ctx)
         self._pr_status = WorkspacePrStatusReader(ctx)
         self._checks = WorkspacePrChecksReader(ctx)
+        self._check_details = WorkspacePrCheckDetailsReader(ctx)
+        self._failure_evidence = WorkspacePrFailureEvidenceReader(ctx)
         self._remove = WorkspaceRemover(ctx)
         self._doctor = Doctor(ctx)
 
@@ -420,6 +430,33 @@ class CodingService:
 
     def workspace_pr_checks(self, workspace_id: str, required_only: bool = False) -> dict[str, Any]:
         return _result(self._checks.execute(WorkspacePrChecksCommand(workspace_id, required_only)))
+
+    def workspace_pr_check_details(
+        self,
+        workspace_id: str,
+        check_selector: str,
+    ) -> dict[str, Any]:
+        return _result(
+            self._check_details.execute(
+                WorkspacePrCheckDetailsCommand(workspace_id, check_selector)
+            )
+        )
+
+    def workspace_pr_failure_evidence(
+        self,
+        workspace_id: str,
+        check_selector: str,
+        max_excerpt_lines: int = 80,
+    ) -> dict[str, Any]:
+        return _result(
+            self._failure_evidence.execute(
+                WorkspacePrFailureEvidenceCommand(
+                    workspace_id,
+                    check_selector,
+                    max_excerpt_lines,
+                )
+            )
+        )
 
     def workspace_remove(
         self, workspace_id: str, delete_local_branch: bool = False

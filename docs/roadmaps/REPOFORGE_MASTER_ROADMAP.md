@@ -128,6 +128,7 @@ RepoForge is already strong in the following areas:
 | --- | --- |
 | Repository access | Explicit allowlist and canonical roots |
 | Repository snapshots | Issue #5 complete: immutable branch/commit tree, file, batch-read, and search operations with exact snapshot identity |
+| CI failure evidence | Issue #7 complete: exact pushed-SHA Check Run selectors, bounded details, secret-safe failure excerpts, classification, and partial-coverage reporting |
 | Workspace isolation | Per-task Git worktrees |
 | Mutation safety | SHA/fingerprint optimistic locking |
 | Change control | Protected paths, branches, file and diff budgets |
@@ -675,6 +676,12 @@ Cache accelerates iteration. Environment mismatch invalidates reuse. Final commi
 ---
 
 ## 23. Failure Intelligence
+
+Issue #7 delivers the first production slice: workspace PR checks expose opaque Check Run selectors,
+and exact pushed-SHA details/failure evidence provides bounded annotations, failed-step context, secret-safe
+excerpts, deterministic classification, retryability, truncation, and partial-source coverage. Broader
+cross-provider diagnosis, automatic verification-plan integration, and check watching/cancellation remain
+future work.
 
 ### Failure classes
 

@@ -480,6 +480,40 @@ def create_server(
         return bounded_service.call("workspace_pr_checks", workspace_id, required_only)
 
     @mcp.tool(
+        title="Read structured PR check details",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def workspace_pr_check_details(
+        workspace_id: str,
+        check_selector: str,
+    ) -> dict[str, Any]:
+        """Use this with an exact selector from workspace_pr_checks to inspect one Check Run."""
+        return bounded_service.call(
+            "workspace_pr_check_details",
+            workspace_id,
+            check_selector,
+        )
+
+    @mcp.tool(
+        title="Read bounded PR failure evidence",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def workspace_pr_failure_evidence(
+        workspace_id: str,
+        check_selector: str,
+        max_excerpt_lines: int = 80,
+    ) -> dict[str, Any]:
+        """Use this with a failed check selector to get redacted, bounded diagnostic evidence."""
+        return bounded_service.call(
+            "workspace_pr_failure_evidence",
+            workspace_id,
+            check_selector,
+            max_excerpt_lines,
+        )
+
+    @mcp.tool(
         title="Remove local workspace",
         annotations=LOCAL_DESTRUCTIVE,
         structured_output=True,

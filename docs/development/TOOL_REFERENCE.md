@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes thirty-one focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes thirty-three focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -111,7 +111,19 @@ and line, batch, result, file-size, and tool-output limits report truncation exp
 | `workspace_create_draft_pr` | Create a draft pull request with configured labels, reviewers, and maintainer-edit policy. |
 | `workspace_update_draft_pr` | Update the title or body of the existing draft pull request without changing draft state. |
 | `workspace_pr_status` | Read draft state, mergeability, review decision, and rolled-up checks. |
-| `workspace_pr_checks` | Return compact `pass`, `fail`, `pending`, `skipping`, and `cancel` CI buckets. |
+| `workspace_pr_checks` | Return compact `pass`, `fail`, `pending`, `skipping`, and `cancel` CI buckets plus exact Check Run selectors when available. |
+| `workspace_pr_check_details` | Resolve one exact `check-run:<id>` selector into bounded Check Run identity, status, attempt, failed-step, annotation, and source metadata. |
+| `workspace_pr_failure_evidence` | Return a redacted, bounded failure excerpt, class, hash, retryability, source coverage, uncertainty, and truncation metadata for one selected Check Run. |
+
+Call `workspace_pr_checks` first and reuse an exact `check-run:<id>` selector; URLs, API paths,
+job IDs, and arbitrary `gh` arguments are not accepted. Details and failure evidence require the
+workspace's current HEAD, recorded successful push, and selected Check Run to share the same commit
+SHA. Evidence uses at most fifty annotations and prioritizes annotations, failed-step metadata, and
+Check Run output before a bounded job log. Credential assignments, bearer tokens, credential URLs,
+private-key blocks, high-confidence secret-shaped tokens, and lines exposing denied repository paths
+are redacted or withheld locally. Optional GitHub permissions or log failures produce explicit
+`complete`, `partial`, or `none` coverage plus uncertainty rather than raw external errors. These tools
+do not rerun, cancel, watch, or administer GitHub Actions.
 
 ## Deliberately unsupported capabilities
 

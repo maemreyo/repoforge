@@ -60,7 +60,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "9cae328351e9d397da85a3ea042630ca181091b0182a8f9741df15992c0b5a00",
+    "tool_surface_hash": "769294f00946e02fd9ded8c0467b831d2907f3c3af29a274df004f56b954d040",
     "tools": [
       {
         "annotations": {
@@ -713,6 +713,40 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this with an exact selector from workspace_pr_checks to inspect one Check Run.",
+        "inputSchema": {
+          "properties": {
+            "check_selector": {
+              "title": "Check Selector",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "check_selector"
+          ],
+          "title": "workspace_pr_check_detailsArguments",
+          "type": "object"
+        },
+        "name": "workspace_pr_check_details",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_pr_check_detailsDictOutput",
+          "type": "object"
+        },
+        "title": "Read structured PR check details"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
           "openWorldHint": true,
           "readOnlyHint": true
         },
@@ -742,6 +776,45 @@
           "type": "object"
         },
         "title": "Read workspace PR checks"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this with a failed check selector to get redacted, bounded diagnostic evidence.",
+        "inputSchema": {
+          "properties": {
+            "check_selector": {
+              "title": "Check Selector",
+              "type": "string"
+            },
+            "max_excerpt_lines": {
+              "default": 80,
+              "title": "Max Excerpt Lines",
+              "type": "integer"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "check_selector"
+          ],
+          "title": "workspace_pr_failure_evidenceArguments",
+          "type": "object"
+        },
+        "name": "workspace_pr_failure_evidence",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_pr_failure_evidenceDictOutput",
+          "type": "object"
+        },
+        "title": "Read bounded PR failure evidence"
       },
       {
         "annotations": {

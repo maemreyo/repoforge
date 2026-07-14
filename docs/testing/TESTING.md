@@ -23,9 +23,10 @@ The gate runs:
    smoke-test, audit, tunnel command and error handling.
 3. **Local Git integration:** bare remote + clone + real worktree + edit + verification receipt + commit + push.
 4. **Fake GitHub CLI integration:** deterministic issue/PR reads, draft PR create/edit/status/checks, labels and reviewers without touching a real account.
-5. **In-memory MCP protocol:** actual MCP client lists tools, checks schemas/annotations, invokes all 31 tools and validates tool errors.
+5. **In-memory MCP protocol:** actual MCP client lists tools, checks schemas/annotations, invokes all 33 tools and validates tool errors.
 6. **Committed snapshot integration:** real Git objects prove exact branch/commit identity, dirty-clone isolation, deterministic ordering, truncation, and ref/path/object rejection.
-7. **Negative regression:** stale SHA, stale fingerprint, post-verification edits, batch limit, denied workflow path and change-budget enforcement.
+7. **Structured CI evidence:** fake Check Runs, annotations, attempts, job steps, logs, permission failures, stale SHAs, selectors, redaction, denied snippets, classification, coverage, and output bounds.
+8. **Negative regression:** stale SHA, stale fingerprint, post-verification edits, batch limit, denied workflow path and change-budget enforcement.
 
 ## Live checks still required on the recipient machine
 

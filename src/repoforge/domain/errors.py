@@ -46,6 +46,9 @@ class ErrorCode(str, Enum):
     REPOSITORY_REF_AMBIGUOUS = "REPOSITORY_REF_AMBIGUOUS"
     REPOSITORY_REF_EXTERNAL = "REPOSITORY_REF_EXTERNAL"
     REPOSITORY_REF_DISALLOWED = "REPOSITORY_REF_DISALLOWED"
+    CHECK_SELECTOR_INVALID = "CHECK_SELECTOR_INVALID"
+    CHECK_EVIDENCE_STALE = "CHECK_EVIDENCE_STALE"
+    CHECK_EVIDENCE_UNAVAILABLE = "CHECK_EVIDENCE_UNAVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +185,9 @@ def operation_error_from_exception(
         ErrorCode.REPOSITORY_REF_AMBIGUOUS: "Abbreviated Git object names are not accepted for snapshot reads.",
         ErrorCode.REPOSITORY_REF_EXTERNAL: "The requested ref is outside the reviewed local base-branch history.",
         ErrorCode.REPOSITORY_REF_DISALLOWED: "The requested ref form is not permitted by repository read policy.",
+        ErrorCode.CHECK_SELECTOR_INVALID: "The supplied value is not an opaque CI selector issued by RepoForge.",
+        ErrorCode.CHECK_EVIDENCE_STALE: "The selected Check Run does not match the exact pushed workspace commit.",
+        ErrorCode.CHECK_EVIDENCE_UNAVAILABLE: "GitHub did not return the primary Check Run evidence required for this read.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

@@ -7,7 +7,14 @@ from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
 from .filesystem import FileSystem
 from .git import GitRepository, GitSnapshotBlob, ResolvedRepositoryRef
-from .github import PullRequestGateway
+from .github import (
+    GitHubActionsJob,
+    GitHubActionsStep,
+    GitHubCheckAnnotation,
+    GitHubCheckRun,
+    GitHubJobLog,
+    PullRequestGateway,
+)
 from .idempotency import IdempotencyStore
 from .ids import IdGenerator
 from .locking import LockManager
@@ -39,6 +46,11 @@ __all__ = [
     "ExecutableLocator",
     "FileSystem",
     "GateState",
+    "GitHubActionsJob",
+    "GitHubActionsStep",
+    "GitHubCheckAnnotation",
+    "GitHubCheckRun",
+    "GitHubJobLog",
     "GitRepository",
     "GitSnapshotBlob",
     "IdGenerator",
