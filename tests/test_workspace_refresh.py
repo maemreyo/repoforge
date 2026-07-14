@@ -11,10 +11,9 @@ from repoforge.domain.errors import SecurityError, WorkspaceError
 
 def _clone_publisher(env: ForgeEnvironment, name: str = "publisher") -> Path:
     publisher = env.root / name
-    git("clone", str(env.remote), str(publisher), cwd=env.root)
+    git("clone", "--branch", "main", str(env.remote), str(publisher), cwd=env.root)
     git("config", "user.name", "Upstream Maintainer", cwd=publisher)
     git("config", "user.email", "upstream@example.test", cwd=publisher)
-    git("pull", "--ff-only", "origin", "main", cwd=publisher)
     return publisher
 
 
