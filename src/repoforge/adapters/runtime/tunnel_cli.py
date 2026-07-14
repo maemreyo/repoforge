@@ -190,6 +190,7 @@ class TunnelCliClient:
             [
                 self.executable,
                 "init",
+                "--force",
                 "--sample",
                 "sample_mcp_stdio_local",
                 "--profile",
