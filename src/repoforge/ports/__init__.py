@@ -34,6 +34,7 @@ from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
+from .provider_registry import ProviderRegistry
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
 from .runtime_control import (
@@ -55,7 +56,6 @@ from .workflow_replay import (
     WorkflowReplayDecision,
     WorkflowReplayObservation,
 )
-from .provider_registry import ProviderRegistry
 from .workspace_store import WorkspaceStore
 
 __all__ = [
@@ -68,7 +68,6 @@ __all__ = [
     "DiscoveryRequest",
     "EnvironmentPreflight",
     "ExecutableLocator",
-    "ProviderRegistry",
     "FileSystem",
     "GateState",
     "GitBaseReferences",
@@ -94,6 +93,7 @@ __all__ = [
     "PrCheckWatchPage",
     "PrCheckWatchStore",
     "ProcessInspector",
+    "ProviderRegistry",
     "PullRequestGateway",
     "RepositoryDiscovery",
     "RepositoryProbe",

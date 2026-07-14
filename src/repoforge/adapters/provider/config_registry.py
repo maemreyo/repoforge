@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from repoforge.domain.provider_manifest import (
     ConfidenceModel,
@@ -16,8 +15,6 @@ from repoforge.domain.provider_manifest import (
     ProviderManifest,
     ProviderOutputBounds,
 )
-from repoforge.domain.errors import RepoForgeError
-from repoforge.ports.provider_registry import ProviderRegistry
 
 
 @dataclass

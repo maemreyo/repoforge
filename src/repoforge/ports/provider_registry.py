@@ -6,7 +6,6 @@ from typing import Protocol
 
 from repoforge.domain.provider_manifest import (
     ProviderHealth,
-    ProviderHealthStatus,
     ProviderManifest,
 )
 
