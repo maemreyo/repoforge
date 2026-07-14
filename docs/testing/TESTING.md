@@ -32,14 +32,15 @@ The gate runs:
 11. **Sanitized workflow recording/replay:** deterministic direct/failure frames, argument category hashing, forbidden-content omission, checksum/schema corruption, private permissions, retention/export, explicit truncation, and isolated no-real-write replay.
 12. **Negative regression:** stale SHA, stale fingerprint, post-verification edits, batch limit, denied workflow path and change-budget enforcement.
 
-## Live checks still required on the recipient machine
+## Live checks still required on the operator machine
 
-Automated tests deliberately do not use the recipient's GitHub credentials or OpenAI tunnel. Before
-first real coding task, run:
+Automated tests deliberately do not use operator GitHub credentials or an OpenAI tunnel. Before the
+first real coding task, select a configured `REPO_ID` and run:
 
 ```bash
-rf doctor --fix
-rf smoke-test --repo-id work-frontier
+rf config path
+rf doctor
+rf repo list
 ./scripts/inspect-mcp.sh
 ```
 

@@ -9,12 +9,13 @@ from typing import Any
 import tomli as tomllib
 
 from ...domain.repository_proposal import RepositoryProposal
+from ...domain.user_paths import DEFAULT_STATE_ROOT, DEFAULT_WORKSPACE_ROOT
 
 RESOLVED_CONFIG_FORMAT_VERSION = 3
 
 _DEFAULT_SERVER: dict[str, Any] = {
-    "workspace_root": "~/.local/share/repoforge/workspaces",
-    "state_root": "~/.local/state/repoforge",
+    "workspace_root": DEFAULT_WORKSPACE_ROOT,
+    "state_root": DEFAULT_STATE_ROOT,
     "max_file_bytes": 2_000_000,
     "max_tool_output_chars": 120_000,
     "default_command_timeout_seconds": 120,

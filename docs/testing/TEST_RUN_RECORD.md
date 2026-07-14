@@ -29,8 +29,8 @@ dumps, file bodies from sensitive repositories, or unredacted audit logs.
 | ChatGPT model | |
 | Plugin name | RepoForge |
 | Plugin refreshed after tool changes | Yes / No |
-| Target repo ID | work-frontier |
-| Target source path | `/Users/trung.ngo/Documents/zaob-dev/work-frontier` |
+| Target repo ID | |
+| Target source path | |
 | Target base SHA | |
 | Config SHA-256 | |
 | Tunnel identifier | Redacted label only |
@@ -57,16 +57,17 @@ dumps, file bodies from sensitive repositories, or unredacted audit logs.
 | Service/write tools | Pass / Fail | |
 | MCP contract | Pass / Fail | |
 
-## L2 — recipient machine
+## L2 — operator machine
 
 | Check | Result | Notes |
 |---|---|---|
-| `rf doctor --fix` | Pass / Fail | |
+| `rf config path` | Pass / Fail | |
+| `rf doctor` | Pass / Fail | |
+| `rf repo list` contains target repo ID | Pass / Fail | |
 | Correct source path | Pass / Fail | |
 | Correct `origin/main` | Pass / Fail | |
 | `gh auth status` | Pass / Fail | |
 | Required tool versions | Pass / Fail | |
-| `rf smoke-test --repo-id work-frontier` | Pass / Fail | |
 | Source clone clean afterward | Pass / Fail | |
 | No remote branch or PR created | Pass / Fail | |
 

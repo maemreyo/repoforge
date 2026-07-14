@@ -21,10 +21,16 @@ from .domain.diagnostics import (
 )
 from .domain.errors import ConfigError
 from .domain.risk import RiskPolicy, default_risk_policy
+from .domain.user_paths import (
+    DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
+)
+from .domain.user_paths import (
+    DEFAULT_STATE_ROOT as DEFAULT_STATE_ROOT,
+)
+from .domain.user_paths import (
+    DEFAULT_WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT,
+)
 
-DEFAULT_CONFIG_PATH = Path("~/.config/repoforge/config.toml").expanduser()
-DEFAULT_WORKSPACE_ROOT = "~/.local/share/repoforge/workspaces"
-DEFAULT_STATE_ROOT = "~/.local/state/repoforge"
 DEFAULT_PATH_PREFIXES = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
 DEFAULT_ALLOWED_ENVIRONMENT = (
     "HOME",

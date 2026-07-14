@@ -74,14 +74,11 @@ configured audit log; never print debug output to stdout.
 ## Source layout
 
 ```text
-src/repoforge/config.py     TOML models, defaults, loading, and validation
-src/repoforge/discovery.py  repository detection and configuration rendering
-src/repoforge/security.py   branch, path, patch, and policy enforcement
-src/repoforge/runner.py     constrained subprocess execution
-src/repoforge/state.py      workspace registry, locks, fingerprints, and receipts
-src/repoforge/service.py    Git, worktree, GitHub CLI, verification, and PR operations
-src/repoforge/server.py     MCP metadata and tool registration
-src/repoforge/cli.py        setup, diagnostics, smoke testing, audit, and tunnel commands
+src/repoforge/domain/       pure contracts, invariants, errors, risk, and patch models
+src/repoforge/application/  use cases for configuration, onboarding, repositories, and workspaces
+src/repoforge/ports/        typed boundaries for Git, filesystem, persistence, runtime, and GitHub
+src/repoforge/adapters/     constrained local implementations of those boundaries
+src/repoforge/interfaces/   CLI, MCP, and runtime composition-facing adapters
 tests/                      unit, security, integration, CLI, and MCP protocol tests
 docs/                       operator, developer, testing, and tool documentation
 scripts/                    reproducible development and operational entry points
@@ -113,7 +110,7 @@ When configuration fields or defaults change:
 1. preserve compatibility where practical;
 2. update `config.example.toml` and relevant tracked examples;
 3. add valid and invalid configuration tests;
-4. run `rf show-config`, `rf doctor`, and `rf smoke-test`;
+4. run `rf config path`, `rf show-config`, `rf doctor`, and `rf repo list`;
 5. document required operator actions;
 6. verify that permissions were not silently broadened.
 

@@ -1,6 +1,14 @@
 {
   "cli": {
     "commands": {
+      "config": {
+        "actions": [
+          "path",
+          "history",
+          "rollback"
+        ],
+        "path_inspection_is_read_only": true
+      },
       "onboard": {
         "actions": [
           "run",
@@ -70,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "26a42be1c7444ce71a1a66139ae5f5521df0238242c5fe871988c1933ef837d8",
+    "tool_surface_hash": "3985a9b49a06934907357ef576a681e5276f604722c18332654b9b1617ef46f3",
     "tools": [
       {
         "annotations": {
@@ -722,7 +730,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for a validated multi-file unified patch against an unchanged workspace snapshot.",
+        "description": "Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_replace_text for one exact edit or workspace_write_file for full reviewed content.",
         "inputSchema": {
           "properties": {
             "expected_head_sha": {
@@ -757,7 +765,7 @@
           "title": "workspace_apply_patchDictOutput",
           "type": "object"
         },
-        "title": "Apply unified patch"
+        "title": "Apply validated patch"
       },
       {
         "annotations": {

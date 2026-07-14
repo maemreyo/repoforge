@@ -14,6 +14,11 @@ from repoforge.interfaces.cli.onboarding_ui import (
 )
 
 
+def test_interactive_runtime_dependencies_are_installed_by_default() -> None:
+    import InquirerPy  # noqa: F401
+    import rich  # noqa: F401
+
+
 class TTY(io.StringIO):
     def isatty(self) -> bool:
         return True
@@ -58,7 +63,7 @@ def test_explicit_rich_reports_install_action_when_rich_is_missing(monkeypatch) 
         "repoforge.interfaces.cli.onboarding_ui._module_available",
         lambda name: False,
     )
-    with pytest.raises(UiBackendUnavailable, match="--with rich --with InquirerPy"):
+    with pytest.raises(UiBackendUnavailable, match="locked package"):
         build_onboarding_ui("rich", stdin=TTY(), stdout=TTY(), stderr=TTY())
 
 

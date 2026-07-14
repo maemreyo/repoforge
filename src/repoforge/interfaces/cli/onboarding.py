@@ -11,6 +11,7 @@ from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
 
+from ...application.configuration.paths import resolve_repoforge_paths
 from ...application.configuration.source import parse_source
 from ...application.onboarding.coordinator import (
     OnboardingCommand,
@@ -65,6 +66,19 @@ def _plain(value: object) -> object:
 
 
 def result_payload(result: OnboardingResult) -> dict[str, object]:
+    paths = resolve_repoforge_paths(
+        Path(result.session.config_path), state_root=default_state_root()
+    )
+    path_payload = paths.payload()
+    files_written: list[str] = []
+    if result.session.status is OnboardingStatus.COMPLETED:
+        if paths.config_file.is_file():
+            files_written.append(str(paths.config_file))
+        if paths.generation_root.is_dir():
+            files_written.extend(
+                str(path) for path in sorted(paths.generation_root.rglob("*")) if path.is_file()
+            )
+            files_written = files_written[:20]
     return {
         "status": result.session.status.value,
         "session_id": result.session.session_id,
@@ -73,6 +87,8 @@ def result_payload(result: OnboardingResult) -> dict[str, object]:
         "plan": _plain(asdict(result.plan)) if result.plan else None,
         "activation": result.activation,
         "preflight": result.preflight,
+        "paths": path_payload,
+        "files_written": files_written,
         "safe_next_action": _next_action(result),
     }
 

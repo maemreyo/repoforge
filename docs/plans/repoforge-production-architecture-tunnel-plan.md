@@ -147,7 +147,7 @@ Example result:
 All capability-expanding changes support preview:
 
 ```bash
-rf repo add /path/to/repo --preview
+rf repo propose /path/to/repo
 rf repo refresh
 ```
 
@@ -165,7 +165,7 @@ Preview output must distinguish:
 Automation must never hang waiting for prompts:
 
 ```bash
-rf repo add /path/to/repo --non-interactive --policy approved-policy.toml
+rf repo add /path/to/repo --non-interactive --approve approve:PROPOSAL_ID
 ```
 
 When decisions are missing, return a structured `INPUT_REQUIRED` error with choices and no writes.

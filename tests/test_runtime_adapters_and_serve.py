@@ -327,6 +327,9 @@ def test_serve_health_failure_and_missing_generation(
         def active(self) -> None:
             return None
 
+        def current(self) -> None:
+            return None
+
     monkeypatch.setattr(cli, "_ensure_generation", lambda path: EmptyStore())
-    with pytest.raises(ConfigError, match="No staged"):
+    with pytest.raises(ConfigError, match="No accepted configuration generation"):
         cli._serve(tmp_path / "config.toml")

@@ -412,8 +412,8 @@ def build_onboarding_ui(
     rich_available = _module_available("rich")
     if mode == "rich" and not rich_available:
         raise UiBackendUnavailable(
-            "Rich UI is unavailable. Install with `uv tool install --with rich "
-            "--with InquirerPy ...` or use `--ui plain`."
+            "Rich UI is unavailable in this installation. Reinstall RepoForge from the locked "
+            "package or use `--ui plain`."
         )
     if rich_available:
         return RichOnboardingUI(stdin, stdout, stderr)

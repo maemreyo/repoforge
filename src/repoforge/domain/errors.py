@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -15,6 +15,11 @@ class ErrorCode(str, Enum):
     COMMAND_FAILED = "COMMAND_FAILED"
     COMMAND_TIMEOUT = "COMMAND_TIMEOUT"
     WORKSPACE_INVALID = "WORKSPACE_INVALID"
+    PATCH_FORMAT_UNSUPPORTED = "PATCH_FORMAT_UNSUPPORTED"
+    PATCH_PARSE_FAILED = "PATCH_PARSE_FAILED"
+    PATCH_CONTEXT_NOT_FOUND = "PATCH_CONTEXT_NOT_FOUND"
+    PATCH_CONTEXT_AMBIGUOUS = "PATCH_CONTEXT_AMBIGUOUS"
+    PATCH_APPLY_FAILED = "PATCH_APPLY_FAILED"
     STALE_STATE = "STALE_STATE"
     LOCK_TIMEOUT = "LOCK_TIMEOUT"
     RUNTIME_UNAVAILABLE = "RUNTIME_UNAVAILABLE"
@@ -100,6 +105,7 @@ class OperationError:
     safe_next_action: str = "Review the error and retry after correcting the reported condition."
     retryable: bool = False
     correlation_id: str | None = None
+    details: dict[str, object] = field(default_factory=dict)
 
 
 _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
@@ -151,6 +157,7 @@ class RepoForgeError(RuntimeError):
         safe_next_action: str | None = None,
         unchanged_state: tuple[str, ...] = (),
         correlation_id: str | None = None,
+        details: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         inferred_code, inferred_retryable = _infer_code(message, self.default_code)
@@ -159,6 +166,7 @@ class RepoForgeError(RuntimeError):
         self.safe_next_action = safe_next_action
         self.unchanged_state = unchanged_state
         self.correlation_id = correlation_id
+        self.details = dict(details or {})
 
 
 PersonalCodingMCPError = RepoForgeError
@@ -227,6 +235,11 @@ def operation_error_from_exception(
         ErrorCode.STATE_CORRUPT: "The durable state record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.STATE_SCHEMA_UNSUPPORTED: "The durable state record uses a schema version this build cannot safely interpret.",
         ErrorCode.STATE_TOO_LARGE: "The encoded durable state record exceeds its reviewed storage bound.",
+        ErrorCode.PATCH_FORMAT_UNSUPPORTED: "The supplied patch is not one of RepoForge's reviewed patch formats.",
+        ErrorCode.PATCH_PARSE_FAILED: "The patch structure is malformed or violates a bounded parser contract.",
+        ErrorCode.PATCH_CONTEXT_NOT_FOUND: "The requested hunk context does not exist in the exact current workspace file.",
+        ErrorCode.PATCH_CONTEXT_AMBIGUOUS: "The requested hunk context matches more than one location and cannot be applied safely.",
+        ErrorCode.PATCH_APPLY_FAILED: "Git rejected the canonical validated patch without changing the reviewed workspace state.",
         ErrorCode.REPOSITORY_REF_NOT_FOUND: "The requested immutable Git ref does not resolve to a committed snapshot.",
         ErrorCode.REPOSITORY_REF_AMBIGUOUS: "Abbreviated Git object names are not accepted for snapshot reads.",
         ErrorCode.REPOSITORY_REF_EXTERNAL: "The requested ref is outside the reviewed local base-branch history.",
@@ -277,4 +290,5 @@ def operation_error_from_exception(
         safe_action,
         retryable,
         correlation_id or getattr(exc, "correlation_id", None),
+        dict(getattr(exc, "details", {}) or {}),
     )

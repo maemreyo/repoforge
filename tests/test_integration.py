@@ -122,3 +122,34 @@ denied_paths = [".git/**", ".env"]
         status["workspace_fingerprint"],
     )
     assert "a.txt" in applied["changed_paths"]
+    assert applied["input_format"] == "unified_diff"
+    assert len(applied["normalized_patch_sha256"]) == 64
+
+    refreshed = service.workspace_status(workspace_id)
+    envelope = (
+        "*** Begin Patch\n"
+        "*** Add File: envelope.txt\n"
+        "+created through envelope\n"
+        "*** Update File: a.txt\n"
+        "@@\n"
+        "-two\n"
+        "+three   \n"
+        "*** End Patch\n"
+    )
+    applied_envelope = service.workspace_apply_patch(
+        workspace_id,
+        envelope,
+        refreshed["head_sha"],
+        refreshed["workspace_fingerprint"],
+    )
+    assert applied_envelope["input_format"] == "openai_apply_patch"
+    assert "converted_openai_envelope" in applied_envelope["repair_actions"]
+    assert (Path(created["path"]) / "a.txt").read_text(encoding="utf-8") == "three\n"
+    assert (Path(created["path"]) / "envelope.txt").read_text(encoding="utf-8") == (
+        "created through envelope\n"
+    )
+
+    audit_text = (tmp_path / "state" / "audit.jsonl").read_text(encoding="utf-8")
+    assert "created through envelope" not in audit_text
+    assert "input_patch_sha256" in audit_text
+    assert "normalized_patch_sha256" in audit_text

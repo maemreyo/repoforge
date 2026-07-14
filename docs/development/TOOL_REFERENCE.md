@@ -42,11 +42,12 @@ activation leaves the restricted configuration on disk and never restores remove
 
 ## Repository proposal commands
 
-`rf repo inspect PATH` and `rf repo add PATH --preview` inspect local repository facts and return a
+`rf repo inspect PATH` and `rf repo propose PATH` inspect local repository facts and return a
 structured `pending_approval` proposal without changing configuration or running discovered commands.
-Detected verification profiles are classified as an `expansion`. The `repo add --preview` proposal ID
-binds the current configuration, path, repository ID, and profiles, so `rf repo add PATH --approve ID`
-is the explicit operator action that enrolls exactly the reviewed capability.
+Detected verification profiles are classified as an `expansion`. The `repo propose` proposal ID binds
+the current configuration, path, repository ID, and profiles, so
+`rf repo add PATH --approve approve:PROPOSAL_ID` is the explicit operator action that enrolls exactly
+the reviewed capability.
 
 ## Configuration generation commands
 
@@ -135,7 +136,7 @@ normal non-force push can publish it.
 | `workspace_search` | Run bounded literal repository search with an optional path glob. |
 | `workspace_write_file` | Create or replace a complete UTF-8 file using optimistic SHA locking. |
 | `workspace_replace_text` | Perform an exact replacement with a file SHA and expected occurrence count. |
-| `workspace_apply_patch` | Apply a validated unified patch against an expected HEAD and workspace fingerprint. |
+| `workspace_apply_patch` | Apply a validated git-style unified diff or OpenAI apply_patch envelope against an expected HEAD and workspace fingerprint; deterministic repairs remain policy-checked and auditable by hash. |
 | `workspace_restore_paths` | Restore selected tracked paths or remove selected untracked files. |
 | `workspace_diff` | Return the diff, diff stat, untracked patch, and change-budget metrics. |
 

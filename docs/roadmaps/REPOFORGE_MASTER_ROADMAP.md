@@ -3,7 +3,7 @@
 **Status:** Proposed  
 **Scope:** Product, architecture, agent experience, execution, evidence, safety, and scale  
 **Target horizon:** Post–RepoForge 2.0  
-**Last updated:** 2026-07-14  
+**Last updated:** 2026-07-15
 
 ---
 
@@ -27,6 +27,8 @@ RepoForge has evolved beyond a thin MCP wrapper around Git. Its current strength
 - deterministic issue governance with a validated dependency graph and Ready-ticket selector;
 - snapshot-bound explainable risk and ordered verification recommendations;
 - reusable private atomic durable-state envelopes adopted by OperationTask;
+- local-first setup/serve with standard-install interactive onboarding and deterministic path provenance;
+- atomic dual-format patch normalization with bounded deterministic repair and actionable failures;
 - bounded committed-snapshot tree, file, batch-read, search, commit, and comparison evidence without checkout;
 - exact workspace-base freshness evidence and preview-bound merge-only refresh without rebase or force-push.
 
@@ -65,6 +67,15 @@ An implementation ticket is selectable only when its canonical status is `Ready`
 active, its specification is complete, and every blocker is closed. Executable tests, safety policy,
 typed contracts, and current product behavior remain higher authority than both roadmap and issue
 metadata.
+
+### 1.2 Active onboarding and patch-reliability batch
+
+The current single-worktree batch implements #103, #104, #105, #106, #111, #112, #113, and #114.
+It delivers command/document drift prevention, local-first setup and serve, standard-install interactive
+onboarding, config/state path provenance, dual-format patch input, deterministic hunk repair,
+whitespace-check/apply parity, and structured actionable failures. Parent initiatives #101 and #102
+remain open because #107–#110 and #115–#116 are separate follow-on work. The next P0 selectable ticket
+after this batch is #115; #116 remains blocked by #115.
 
 ---
 
@@ -896,11 +907,13 @@ Tool metadata changes should pass behavioral evals before release.
 
 Unified status should cover supervisor, MCP runtime, tunnel, active generation, provider processes, indexes, tasks, workspaces, locks, disk, health, warnings, and safe remediations.
 
+Proposed future CLI surface:
+
 ```text
-rf status
-rf doctor --explain
-rf doctor --fix-safe
-rf doctor --plan-fixes
+status
+doctor --explain
+doctor --fix-safe
+doctor --plan-fixes
 ```
 
 Safe repairs include stale sockets, dead process records, expired tasks, old cache, abandoned managed-index locks, and unsafe private file modes. Capability or policy changes still require approval.

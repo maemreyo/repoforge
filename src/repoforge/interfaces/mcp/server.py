@@ -77,6 +77,7 @@ class _ServiceErrorBoundary:
                 or ["No unreported state transition was committed."],
                 "safe_next_action": envelope.safe_next_action,
                 "retryable": envelope.retryable,
+                "details": envelope.details,
                 "automatic_retry_allowed": automatic_retry_allowed(
                     name,
                     envelope.code,
@@ -436,7 +437,7 @@ def create_server(
         )
 
     @mcp.tool(
-        title="Apply unified patch",
+        title="Apply validated patch",
         annotations=LOCAL_DESTRUCTIVE,
         structured_output=True,
     )
@@ -446,7 +447,7 @@ def create_server(
         expected_head_sha: str,
         expected_workspace_fingerprint: str,
     ) -> dict[str, Any]:
-        """Use this for a validated multi-file unified patch against an unchanged workspace snapshot."""
+        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_replace_text for one exact edit or workspace_write_file for full reviewed content."""
         return bounded_service.call(
             "workspace_apply_patch",
             workspace_id,

@@ -19,6 +19,7 @@ from ...application.configuration.document import (
     remove_repository,
     render_resolved,
 )
+from ...application.configuration.paths import resolve_repoforge_paths
 from ...application.configuration.source import (
     SourceConfiguration,
     SourceRepository,
@@ -127,6 +128,28 @@ def _locks() -> LockManager:
 
 def _store(config_path: Path) -> ConfigurationStore:
     return build_configuration_store(config_path, state_root=_state_root(), locks=_locks())
+
+
+def _resolved_paths(config_path: Path) -> dict[str, dict[str, object]]:
+    return resolve_repoforge_paths(config_path, state_root=_state_root()).payload()
+
+
+def _files_written(config_path: Path, store: ConfigurationStore) -> list[str]:
+    candidates = (config_path, store.root, store.active_resolved_path)
+    return [str(path) for path in candidates if path.exists()]
+
+
+def _require_managed_runtime_configuration(config_path: Path) -> None:
+    try:
+        source = parse_source(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if source.tunnel_id is None:
+        raise ConfigError(
+            "Managed runtime requires a tunnel ID, the tunnel-client executable, and "
+            "CONTROL_PLANE_API_KEY. This configuration is local-only; continue with "
+            f"`rf --config {config_path} serve` or rerun setup with --tunnel-id."
+        )
 
 
 def _probe() -> RepositoryProbe:
@@ -275,6 +298,13 @@ def _approval_map(values: list[str]) -> set[str]:
 
 def _setup(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
+    local_only = bool(getattr(args, "local", False))
+    if local_only and args.tunnel_id:
+        raise ConfigError("--local cannot be combined with --tunnel-id")
+    if not local_only and not args.tunnel_id:
+        raise ConfigError(
+            "Initial setup requires --tunnel-id unless --local is selected explicitly"
+        )
     if config_path.exists() and not args.force:
         raise ConfigError(f"Configuration already exists: {config_path}; use repo enroll/refresh")
     proposal_service = RepositoryProposalService(_probe())
@@ -314,7 +344,7 @@ def _setup(args: argparse.Namespace) -> int:
         )
         return 3
     source = SourceConfiguration(
-        args.tunnel_id,
+        None if local_only else args.tunnel_id,
         args.profile,
         tuple(
             SourceRepository(
@@ -376,14 +406,16 @@ def _setup(args: argparse.Namespace) -> int:
         store,
         config_path,
         generation,
-        mode=args.activate,
+        mode="never" if local_only else args.activate,
         wait=args.wait,
         rollback_on_failure=args.rollback_on_failure,
     )
     _json(
         {
             "status": "configured",
+            "local_only": local_only,
             "config": str(config_path),
+            "files_written": _files_written(config_path, store),
             "generation": asdict(generation),
             "smoke": smoke,
             **activation,
@@ -866,6 +898,8 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
 
 def _runtime_command(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
+    if args.runtime_command in {"start", "reload", "restart"}:
+        _require_managed_runtime_configuration(config_path)
     store = _ensure_generation(config_path)
     runtime_path, supervisor_socket, mcp_socket = _runtime_paths(store)
     if args.runtime_command == "status":
@@ -1006,9 +1040,9 @@ def _serve(config_path: Path) -> int:
     from ..mcp.server import create_server, tool_surface_hash
 
     store = _ensure_generation(config_path)
-    initial_generation = store.activation_target() or store.active()
+    initial_generation = store.activation_target() or store.active() or store.current()
     if initial_generation is None:
-        raise ConfigError("No staged or active configuration generation")
+        raise ConfigError("No accepted configuration generation")
 
     def build_container(
         generation: int, *, allow_incompatible: bool = False
@@ -1148,8 +1182,9 @@ def build_parser() -> argparse.ArgumentParser:
     start_alias.add_argument("--tunnel-id")
     start_alias.add_argument("--profile")
     setup = commands.add_parser("setup")
+    setup.add_argument("--local", action="store_true")
     setup.add_argument("repos", nargs="+")
-    setup.add_argument("--tunnel-id", required=True)
+    setup.add_argument("--tunnel-id")
     setup.add_argument("--profile", default="repoforge")
     setup.add_argument("--decision", action="append", default=[])
     setup.add_argument("--policy-override", action="append", default=[])
@@ -1216,6 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--tail", type=int, default=100)
     config = commands.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
+    config_sub.add_parser("path")
     config_sub.add_parser("history")
     rollback = config_sub.add_parser("rollback")
     rollback.add_argument("generation", type=int)
@@ -1297,6 +1333,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "runtime":
             return _runtime_command(args)
         if args.command == "config":
+            if args.config_command == "path":
+                _json(_resolved_paths(config_path))
+                return 0
             store = _ensure_generation(config_path)
             if args.config_command == "history":
                 _json(
@@ -1420,6 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "doctor":
             result = service.doctor()
+            result["paths"] = _resolved_paths(config_path)
             _json(result)
             return 0 if result["ok"] else 1
         if args.command == "list-workspaces":
@@ -1443,6 +1483,7 @@ def main(argv: list[str] | None = None) -> int:
                 "safe_next_action": envelope.safe_next_action,
                 "retryable": envelope.retryable,
                 "automatic_retry_allowed": False,
+                "details": envelope.details,
             }
         )
         return 2

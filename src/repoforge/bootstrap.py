@@ -398,6 +398,11 @@ def run_runtime_worker(config_path: Path) -> int:
         source = parse_source(config_path.read_text(encoding="utf-8"))
         tunnel_id = source.tunnel_id
         profile_name = source.profile
+        if tunnel_id is None:
+            raise ConfigError(
+                "Managed runtime requires a tunnel ID; this accepted configuration is local-only. "
+                f"Run `rf --config {config_path} serve` or rerun setup with --tunnel-id."
+            )
     except (ValueError, OSError):
         tunnel_id = os.environ.get("REPOFORGE_TUNNEL_ID", "")
         profile_name = os.environ.get("REPOFORGE_TUNNEL_PROFILE", "repoforge")

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 CONFIG="${REPOFORGE_CONFIG:-$HOME/.config/repoforge/config.toml}"
-REPO_ID="${REPOFORGE_E2E_REPO_ID:-work-frontier}"
+REPO_ID="${REPOFORGE_E2E_REPO_ID:-${REPO_ID:-}}"
 SKIP_SOURCE_GATE=0
 
 usage() {
@@ -17,7 +17,7 @@ files, pushes a branch, or creates a pull request.
 
 Options:
   --config PATH       RepoForge config path
-  --repo-id ID        Configured repository id (default: work-frontier)
+  --repo-id ID        Configured repository id (required unless REPOFORGE_E2E_REPO_ID is set)
   --skip-source-gate  Skip ./scripts/test-all.sh
   -h, --help          Show this help
 
@@ -55,9 +55,14 @@ while (($#)); do
   esac
 done
 
+if [[ -z "$REPO_ID" ]]; then
+  echo "Set --repo-id or REPOFORGE_E2E_REPO_ID to a configured repository id." >&2
+  exit 2
+fi
+
 if [[ ! -f "$CONFIG" ]]; then
   echo "RepoForge config not found: $CONFIG" >&2
-  echo "Install config.work-frontier.toml first." >&2
+  echo "Create it with rf setup --local PATH or rf setup --tunnel-id ID PATH." >&2
   exit 1
 fi
 
@@ -101,8 +106,12 @@ run_step \
   "${RF[@]}" doctor
 
 run_step \
-  "L2 real-repository smoke test" \
-  "${RF[@]}" smoke-test --repo-id "$REPO_ID"
+  "L2 configured repository inventory" \
+  "${RF[@]}" repo list
+
+run_step \
+  "Show RepoForge paths" \
+  "${RF[@]}" config path
 
 run_step \
   "Show resolved config" \
