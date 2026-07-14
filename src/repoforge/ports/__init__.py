@@ -6,7 +6,7 @@ from .clock import Clock
 from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
 from .filesystem import FileSystem
-from .git import GitRepository
+from .git import GitRepository, GitSnapshotBlob, ResolvedRepositoryRef
 from .github import PullRequestGateway
 from .idempotency import IdempotencyStore
 from .ids import IdGenerator
@@ -40,6 +40,7 @@ __all__ = [
     "FileSystem",
     "GateState",
     "GitRepository",
+    "GitSnapshotBlob",
     "IdGenerator",
     "IdempotencyStore",
     "LockManager",
@@ -52,6 +53,7 @@ __all__ = [
     "PullRequestGateway",
     "RepositoryDiscovery",
     "RepositoryProbe",
+    "ResolvedRepositoryRef",
     "RuntimeControlClient",
     "RuntimeControlServer",
     "RuntimeLauncher",

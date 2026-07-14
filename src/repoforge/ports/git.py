@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import ProfileConfig, RepositoryConfig
 from .command import CommandExecutor, CommandResult
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRepositoryRef:
+    resolved_ref: str
+    commit_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitSnapshotBlob:
+    path: str
+    object_sha: str
+    mode: str
+    size_bytes: int
+    data: bytes
 
 
 class GitRepository(Protocol):
@@ -48,6 +64,36 @@ class GitRepository(Protocol):
     def root_files(self, path: Path, repo: RepositoryConfig) -> list[str]: ...
 
     def recent_commits(self, path: Path, limit: int) -> list[dict[str, str]]: ...
+
+    def resolve_snapshot_ref(
+        self, path: Path, repo: RepositoryConfig, ref: str | None
+    ) -> ResolvedRepositoryRef: ...
+
+    def list_snapshot_files(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+        max_entries: int,
+    ) -> tuple[list[str], bool]: ...
+
+    def read_snapshot_blob(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+        relative_path: str,
+    ) -> GitSnapshotBlob: ...
+
+    def search_snapshot(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+        query: str,
+        path_glob: str | None,
+        max_results: int,
+    ) -> tuple[list[str], bool]: ...
 
     def search(
         self,

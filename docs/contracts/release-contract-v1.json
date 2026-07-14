@@ -60,7 +60,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "1c8548cf5b6b9b9006aa6f821df37c73c84f96457d8205b9432b5241721716cf",
+    "tool_surface_hash": "9cae328351e9d397da85a3ea042630ca181091b0182a8f9741df15992c0b5a00",
     "tools": [
       {
         "annotations": {
@@ -187,6 +187,121 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
+        "description": "Use this to read one UTF-8 file from an immutable reviewed repository snapshot.",
+        "inputSchema": {
+          "properties": {
+            "end_line": {
+              "default": 500,
+              "title": "End Line",
+              "type": "integer"
+            },
+            "ref": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ref"
+            },
+            "relative_path": {
+              "title": "Relative Path",
+              "type": "string"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            },
+            "start_line": {
+              "default": 1,
+              "title": "Start Line",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "repo_id",
+            "relative_path"
+          ],
+          "title": "repo_read_fileArguments",
+          "type": "object"
+        },
+        "name": "repo_read_file",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_read_fileDictOutput",
+          "type": "object"
+        },
+        "title": "Read committed repository file"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to read the same bounded line range from several files in one immutable snapshot.",
+        "inputSchema": {
+          "properties": {
+            "end_line": {
+              "default": 500,
+              "title": "End Line",
+              "type": "integer"
+            },
+            "ref": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ref"
+            },
+            "relative_paths": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Relative Paths",
+              "type": "array"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            },
+            "start_line": {
+              "default": 1,
+              "title": "Start Line",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "repo_id",
+            "relative_paths"
+          ],
+          "title": "repo_read_filesArguments",
+          "type": "object"
+        },
+        "name": "repo_read_files",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_read_filesDictOutput",
+          "type": "object"
+        },
+        "title": "Read multiple committed repository files"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
         "description": "Use this when recent history or commit conventions are relevant to the task.",
         "inputSchema": {
           "properties": {
@@ -218,6 +333,69 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to locate literal text in an immutable reviewed repository snapshot.",
+        "inputSchema": {
+          "properties": {
+            "max_results": {
+              "default": 200,
+              "title": "Max Results",
+              "type": "integer"
+            },
+            "path_glob": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Path Glob"
+            },
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "ref": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ref"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "query"
+          ],
+          "title": "repo_searchArguments",
+          "type": "object"
+        },
+        "name": "repo_search",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_searchDictOutput",
+          "type": "object"
+        },
+        "title": "Search committed repository code"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
           "openWorldHint": true,
           "readOnlyHint": true
         },
@@ -242,6 +420,52 @@
           "type": "object"
         },
         "title": "Inspect repository status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to list files from an immutable reviewed repository snapshot without a workspace.",
+        "inputSchema": {
+          "properties": {
+            "max_entries": {
+              "default": 2000,
+              "title": "Max Entries",
+              "type": "integer"
+            },
+            "ref": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ref"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id"
+          ],
+          "title": "repo_treeArguments",
+          "type": "object"
+        },
+        "name": "repo_tree",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_treeDictOutput",
+          "type": "object"
+        },
+        "title": "List committed repository files"
       },
       {
         "annotations": {

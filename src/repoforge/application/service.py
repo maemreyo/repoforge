@@ -21,6 +21,8 @@ from .repository.context import (
     RepositoryContextReader,
 )
 from .repository.doctor import Doctor, DoctorCommand
+from .repository.file_read import RepositoryFileReadCommand, RepositoryFileReader
+from .repository.files_read import RepositoryFilesReadCommand, RepositoryFilesReader
 from .repository.issue_read import IssueReadCommand, IssueReader
 from .repository.list import RepositoryListCommand, RepositoryLister
 from .repository.pr_read import PullRequestReadCommand, PullRequestReader
@@ -28,10 +30,12 @@ from .repository.recent_commits import (
     RecentCommitsCommand,
     RecentCommitsReader,
 )
+from .repository.search import RepositorySearchCommand, RepositorySearcher
 from .repository.status import (
     RepositoryStatusCommand,
     RepositoryStatusReader,
 )
+from .repository.tree import RepositoryTreeCommand, RepositoryTreeReader
 from .workspace.apply_patch import (
     WorkspaceApplyPatchCommand,
     WorkspacePatchApplier,
@@ -144,6 +148,10 @@ class CodingService:
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
         self._repo_context = RepositoryContextReader(ctx)
+        self._repo_tree = RepositoryTreeReader(ctx)
+        self._repo_read = RepositoryFileReader(ctx)
+        self._repo_reads = RepositoryFilesReader(ctx)
+        self._repo_search = RepositorySearcher(ctx)
         self._recent = RecentCommitsReader(ctx)
         self._issue = IssueReader(ctx)
         self._repo_pr = PullRequestReader(ctx)
@@ -178,6 +186,56 @@ class CodingService:
 
     def repo_context(self, repo_id: str) -> dict[str, Any]:
         return _result(self._repo_context.execute(RepositoryContextCommand(repo_id)))
+
+    def repo_tree(
+        self,
+        repo_id: str,
+        ref: str | None = None,
+        max_entries: int = 2000,
+    ) -> dict[str, Any]:
+        return _result(self._repo_tree.execute(RepositoryTreeCommand(repo_id, ref, max_entries)))
+
+    def repo_read_file(
+        self,
+        repo_id: str,
+        relative_path: str,
+        ref: str | None = None,
+        start_line: int = 1,
+        end_line: int = 500,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_read.execute(
+                RepositoryFileReadCommand(repo_id, relative_path, ref, start_line, end_line)
+            )
+        )
+
+    def repo_read_files(
+        self,
+        repo_id: str,
+        relative_paths: list[str],
+        ref: str | None = None,
+        start_line: int = 1,
+        end_line: int = 500,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_reads.execute(
+                RepositoryFilesReadCommand(repo_id, relative_paths, ref, start_line, end_line)
+            )
+        )
+
+    def repo_search(
+        self,
+        repo_id: str,
+        query: str,
+        ref: str | None = None,
+        path_glob: str | None = None,
+        max_results: int = 200,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_search.execute(
+                RepositorySearchCommand(repo_id, query, ref, path_glob, max_results)
+            )
+        )
 
     def repo_recent_commits(self, repo_id: str, limit: int = 20) -> dict[str, Any]:
         return _result(self._recent.execute(RecentCommitsCommand(repo_id, limit)))

@@ -42,6 +42,10 @@ class ErrorCode(str, Enum):
     CANDIDATE_SMOKE_FAILED = "CANDIDATE_SMOKE_FAILED"
     ACTIVATION_FAILED = "ACTIVATION_FAILED"
     EXECUTABLE_SHADOWED = "EXECUTABLE_SHADOWED"
+    REPOSITORY_REF_NOT_FOUND = "REPOSITORY_REF_NOT_FOUND"
+    REPOSITORY_REF_AMBIGUOUS = "REPOSITORY_REF_AMBIGUOUS"
+    REPOSITORY_REF_EXTERNAL = "REPOSITORY_REF_EXTERNAL"
+    REPOSITORY_REF_DISALLOWED = "REPOSITORY_REF_DISALLOWED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +178,10 @@ def operation_error_from_exception(
         ErrorCode.IDEMPOTENCY_CONFLICT: "The same idempotency key was already bound to different reviewed input.",
         ErrorCode.IDEMPOTENCY_IN_PROGRESS: "Another process is still executing the same keyed operation.",
         ErrorCode.STATE_PERSISTENCE_FAILED: "RepoForge could not durably record required local operational state.",
+        ErrorCode.REPOSITORY_REF_NOT_FOUND: "The requested immutable Git ref does not resolve to a committed snapshot.",
+        ErrorCode.REPOSITORY_REF_AMBIGUOUS: "Abbreviated Git object names are not accepted for snapshot reads.",
+        ErrorCode.REPOSITORY_REF_EXTERNAL: "The requested ref is outside the reviewed local base-branch history.",
+        ErrorCode.REPOSITORY_REF_DISALLOWED: "The requested ref form is not permitted by repository read policy.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes twenty-seven focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes thirty-one focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -62,9 +62,20 @@ Snapshot retention is bounded to the newest ten complete generations.
 | `repo_list` | List configured repositories, profiles, branch policy, pull-request defaults, and change limits. |
 | `repo_status` | Read Git status, remotes, current branch information, and `gh auth status`. |
 | `repo_context` | Inspect manifests, scripts, engines, root files, and bounded instruction-file previews. |
+| `repo_tree` | List policy-allowed regular files from the reviewed default branch or an explicit reachable full commit ID. |
+| `repo_read_file` | Read a bounded UTF-8 line range from one committed blob and return its SHA-256 plus exact snapshot identity. |
+| `repo_read_files` | Read one bounded line range from multiple committed blobs in the same resolved snapshot, subject to `max_batch_files`. |
+| `repo_search` | Run bounded fixed-string search against one committed snapshot with an optional safe path glob. |
 | `repo_recent_commits` | Read bounded local commit history, up to one hundred commits. |
 | `repo_issue_read` | Read a GitHub issue through `gh` with bounded output. |
 | `repo_pr_read` | Read pull-request metadata, files, commits, checks, and reviews through `gh`. |
+
+The committed snapshot tools never checkout or read working-tree file contents. An omitted `ref`
+resolves to the configured default base branch; an explicit ref must be an allowlisted base branch or
+a full commit object ID reachable from one. Every result returns `resolved_ref` and `commit_sha`.
+Denied paths, symlinks, gitlinks, binary or non-UTF-8 blobs, oversized files, unsafe globs, ambiguous
+object prefixes, remote refs, and revision expressions fail closed. Tree and search results are sorted,
+and line, batch, result, file-size, and tool-output limits report truncation explicitly.
 
 ## Workspace lifecycle
 
