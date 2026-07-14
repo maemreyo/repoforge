@@ -274,7 +274,14 @@ class TunnelCliClient:
         return process_identity(child.pid) == child.process_identity
 
     def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None:
-        if process_identity(child.pid) != child.process_identity:
+        process = self._children.get(child.pid)
+        if process is not None:
+            if process.poll() is not None:
+                self._finalize_child(child.pid)
+                return
+            # The owned Popen handle is authoritative while its child is alive. A shebang exec can
+            # temporarily change the process facts used for identity hashing, especially on Darwin.
+        elif process_identity(child.pid) != child.process_identity:
             self._finalize_child(child.pid)
             return
         try:
