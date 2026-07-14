@@ -25,6 +25,62 @@ class GitSnapshotBlob:
     data: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class GitActorIdentity:
+    name: str
+    email: str
+    date: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitChangedFileEvidence:
+    status: str
+    path: str
+    previous_path: str | None
+    additions: int | None
+    deletions: int | None
+    binary: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GitCommitEvidence:
+    tree_sha: str
+    parent_shas: tuple[str, ...]
+    comparison_parent_sha: str | None
+    author: GitActorIdentity
+    committer: GitActorIdentity
+    subject: str
+    body: str
+    message_truncated: bool
+    files: tuple[GitChangedFileEvidence, ...]
+    total_files: int
+    files_truncated: bool
+    additions: int
+    deletions: int
+    binary_files: int
+    omitted_paths: int
+    patch: str | None
+    patch_truncated: bool
+    binary_patch_omitted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GitComparisonEvidence:
+    merge_base_sha: str
+    ahead: int
+    behind: int
+    files: tuple[GitChangedFileEvidence, ...]
+    total_files: int
+    files_truncated: bool
+    additions: int
+    deletions: int
+    binary_files: int
+    omitted_paths: int
+    patch: str | None
+    patch_truncated: bool
+    binary_patch_omitted: bool
+
+
 class GitRepository(Protocol):
     @property
     def executor(self) -> CommandExecutor: ...
@@ -96,6 +152,26 @@ class GitRepository(Protocol):
         path_glob: str | None,
         max_results: int,
     ) -> tuple[list[str], bool]: ...
+
+    def read_commit_evidence(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        snapshot: ResolvedRepositoryRef,
+        max_files: int,
+        include_patch: bool,
+    ) -> GitCommitEvidence: ...
+
+    def compare_commits(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        base: ResolvedRepositoryRef,
+        head: ResolvedRepositoryRef,
+        path_glob: str | None,
+        max_files: int,
+        include_patch: bool,
+    ) -> GitComparisonEvidence: ...
 
     def search(
         self,

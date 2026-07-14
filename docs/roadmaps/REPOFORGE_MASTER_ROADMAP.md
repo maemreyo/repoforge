@@ -24,7 +24,7 @@ RepoForge has evolved beyond a thin MCP wrapper around Git. Its current strength
 - deterministic onboarding proposals;
 - interactive safe-default review;
 - stable MCP and release contracts;
-- bounded committed-snapshot tree, file, batch-read, and search inspection without checkout.
+- bounded committed-snapshot tree, file, batch-read, search, commit, and comparison evidence without checkout.
 
 The next stage should not be driven by adding many more low-level Git tools. RepoForge should become a:
 
@@ -140,6 +140,7 @@ RepoForge is already strong in the following areas:
 | --- | --- |
 | Repository access | Explicit allowlist and canonical roots |
 | Repository snapshots | Issue #5 complete: immutable branch/commit tree, file, batch-read, and search operations with exact snapshot identity |
+| Commit and comparison evidence | Issue #6 implementation: exact branch/tag/SHA commit metadata, first-parent/root file evidence, merge-base and ahead/behind facts, policy-filtered paths, message redaction, binary-patch omission, and bounded optional patches |
 | CI failure evidence | Issue #7 complete: exact pushed-SHA Check Run selectors, bounded details, secret-safe failure excerpts, classification, and partial-coverage reporting |
 | Durable operations | Issue #9 complete: protocol-independent state machine, private optimistic persistence, recovery/expiry/retention, progress, cancellation request, and bounded status/list interfaces |
 | Workspace isolation | Per-task Git worktrees |

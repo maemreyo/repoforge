@@ -215,6 +215,38 @@ def create_server(
         """Use this before planning to inspect manifests, scripts, root files, and instruction previews."""
         return bounded_service.call("repo_context", repo_id)
 
+    @mcp.tool(title="Read committed change evidence", annotations=READ_ONLY, structured_output=True)
+    def repo_commit_read(
+        repo_id: str,
+        ref: str,
+        max_files: int = 100,
+        include_patch: bool = False,
+    ) -> dict[str, Any]:
+        """Use this to inspect one exact reviewed commit with bounded file statistics and optional patch evidence."""
+        return bounded_service.call("repo_commit_read", repo_id, ref, max_files, include_patch)
+
+    @mcp.tool(
+        title="Compare committed repository refs", annotations=READ_ONLY, structured_output=True
+    )
+    def repo_compare(
+        repo_id: str,
+        base_ref: str,
+        head_ref: str,
+        path_glob: str | None = None,
+        max_files: int = 100,
+        include_patch: bool = False,
+    ) -> dict[str, Any]:
+        """Use this to compare two exact reviewed commits with merge-base, divergence, bounded files, and optional patch evidence."""
+        return bounded_service.call(
+            "repo_compare",
+            repo_id,
+            base_ref,
+            head_ref,
+            path_glob,
+            max_files,
+            include_patch,
+        )
+
     @mcp.tool(
         title="List committed repository files", annotations=READ_ONLY, structured_output=True
     )

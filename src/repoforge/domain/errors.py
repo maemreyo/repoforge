@@ -46,6 +46,10 @@ class ErrorCode(str, Enum):
     REPOSITORY_REF_AMBIGUOUS = "REPOSITORY_REF_AMBIGUOUS"
     REPOSITORY_REF_EXTERNAL = "REPOSITORY_REF_EXTERNAL"
     REPOSITORY_REF_DISALLOWED = "REPOSITORY_REF_DISALLOWED"
+    REPOSITORY_HISTORIES_UNRELATED = "REPOSITORY_HISTORIES_UNRELATED"
+    REPOSITORY_HISTORY_INCOMPLETE = "REPOSITORY_HISTORY_INCOMPLETE"
+    REPOSITORY_EVIDENCE_LIMIT_INVALID = "REPOSITORY_EVIDENCE_LIMIT_INVALID"
+    REPOSITORY_EVIDENCE_PARSE_FAILED = "REPOSITORY_EVIDENCE_PARSE_FAILED"
     CHECK_SELECTOR_INVALID = "CHECK_SELECTOR_INVALID"
     CHECK_EVIDENCE_STALE = "CHECK_EVIDENCE_STALE"
     CHECK_EVIDENCE_UNAVAILABLE = "CHECK_EVIDENCE_UNAVAILABLE"
@@ -200,6 +204,10 @@ def operation_error_from_exception(
         ErrorCode.REPOSITORY_REF_AMBIGUOUS: "Abbreviated Git object names are not accepted for snapshot reads.",
         ErrorCode.REPOSITORY_REF_EXTERNAL: "The requested ref is outside the reviewed local base-branch history.",
         ErrorCode.REPOSITORY_REF_DISALLOWED: "The requested ref form is not permitted by repository read policy.",
+        ErrorCode.REPOSITORY_HISTORIES_UNRELATED: "The two reviewed commits have no merge base and cannot be compared as one history.",
+        ErrorCode.REPOSITORY_HISTORY_INCOMPLETE: "The local clone lacks enough committed history to calculate the requested evidence.",
+        ErrorCode.REPOSITORY_EVIDENCE_LIMIT_INVALID: "The requested committed-evidence limit is outside the reviewed bound.",
+        ErrorCode.REPOSITORY_EVIDENCE_PARSE_FAILED: "Git returned committed evidence that did not match the typed parser contract.",
         ErrorCode.CHECK_SELECTOR_INVALID: "The supplied value is not an opaque CI selector issued by RepoForge.",
         ErrorCode.CHECK_EVIDENCE_STALE: "The selected Check Run does not match the exact pushed workspace commit.",
         ErrorCode.CHECK_EVIDENCE_UNAVAILABLE: "GitHub did not return the primary Check Run evidence required for this read.",

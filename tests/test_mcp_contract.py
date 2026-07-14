@@ -32,6 +32,8 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "repo_read_files",
             "repo_search",
             "repo_recent_commits",
+            "repo_commit_read",
+            "repo_compare",
             "repo_issue_read",
             "repo_pr_read",
             "workspace_create",
@@ -71,6 +73,12 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             assert tool.annotations.destructiveHint is not None
             assert tool.annotations.openWorldHint is not None
             assert tool.inputSchema["type"] == "object"
+        for name in ("repo_commit_read", "repo_compare"):
+            evidence_tool = next(tool for tool in result.tools if tool.name == name)
+            assert evidence_tool.annotations.readOnlyHint is True
+            assert evidence_tool.annotations.destructiveHint is False
+            assert evidence_tool.annotations.openWorldHint is False
+
         diagnostic = next(tool for tool in result.tools if tool.name == "workspace_run_diagnostic")
         assert diagnostic.annotations.readOnlyHint is False
         assert diagnostic.annotations.destructiveHint is False
@@ -157,6 +165,22 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             {"repo_id": "demo", "query": "Repository", "max_results": 20},
         )
         await call("repo_recent_commits", {"repo_id": "demo", "limit": 2})
+        commit = await call(
+            "repo_commit_read",
+            {"repo_id": "demo", "ref": "main", "max_files": 20},
+        )
+        assert commit["commit_sha"] == snapshot["commit_sha"]
+        comparison = await call(
+            "repo_compare",
+            {
+                "repo_id": "demo",
+                "base_ref": "main",
+                "head_ref": "main",
+                "max_files": 20,
+            },
+        )
+        assert comparison["merge_base_sha"] == snapshot["commit_sha"]
+        assert comparison["total_files"] == 0
         await call("repo_issue_read", {"repo_id": "demo", "issue_number": 1})
         await call("repo_pr_read", {"repo_id": "demo", "pr_number": 2})
 
