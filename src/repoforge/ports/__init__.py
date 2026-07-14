@@ -55,6 +55,7 @@ from .workflow_replay import (
     WorkflowReplayDecision,
     WorkflowReplayObservation,
 )
+from .execution_environment import ArtifactResult, ExecutionEnvironmentPort, ExecutionReceipt
 from .workspace_store import WorkspaceStore
 
 __all__ = [
@@ -66,7 +67,10 @@ __all__ = [
     "ConfigurationStore",
     "DiscoveryRequest",
     "EnvironmentPreflight",
+    "ArtifactResult",
     "ExecutableLocator",
+    "ExecutionEnvironmentPort",
+    "ExecutionReceipt",
     "FileSystem",
     "GateState",
     "GitBaseReferences",
