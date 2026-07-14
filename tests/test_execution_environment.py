@@ -6,6 +6,7 @@ import hashlib
 import json
 import platform
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from repoforge.domain.execution_environment import (
     ToolVersion,
     normalize_tool_name,
 )
+from repoforge.ports.command import CommandResult
 
 
 class TestToolVersion:
@@ -266,8 +268,6 @@ class TestRealPlatformIdentity:
         assert len(h) == 64
         assert ident.cache_eligible
 
-
-from repoforge.ports.command import CommandResult
 
 class _FakeExecutor:
     def __init__(self) -> None:

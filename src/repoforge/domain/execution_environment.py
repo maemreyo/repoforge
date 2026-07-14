@@ -137,18 +137,14 @@ class EnvironmentIdentity:
 
     @property
     def cache_eligible(self) -> bool:
-        """Cache is eligible only when all fingerprintable fields are populated."""
-        if not self.platform or not self.architecture:
-            return False
-        if not self.python_version:
-            return False
-        if not self.runtime_version:
-            return False
-        if not self.tools:
-            return False
-        if any(t.version is None for t in self.tools):
-            return False
-        return True
+        return bool(
+            self.platform
+            and self.architecture
+            and self.python_version
+            and self.runtime_version
+            and self.tools
+            and not any(t.version is None for t in self.tools)
+        )
 
 
 def normalize_tool_name(raw: str) -> str:

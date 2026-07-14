@@ -6,6 +6,7 @@ from .capabilities import ExecutableLocator
 from .clock import Clock
 from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
+from .execution_environment import ArtifactResult, ExecutionEnvironmentPort, ExecutionReceipt
 from .filesystem import FileSystem
 from .git import (
     GitBaseReferences,
@@ -55,10 +56,10 @@ from .workflow_replay import (
     WorkflowReplayDecision,
     WorkflowReplayObservation,
 )
-from .execution_environment import ArtifactResult, ExecutionEnvironmentPort, ExecutionReceipt
 from .workspace_store import WorkspaceStore
 
 __all__ = [
+    "ArtifactResult",
     "AuditSink",
     "BackgroundTaskRunner",
     "Clock",
@@ -67,7 +68,6 @@ __all__ = [
     "ConfigurationStore",
     "DiscoveryRequest",
     "EnvironmentPreflight",
-    "ArtifactResult",
     "ExecutableLocator",
     "ExecutionEnvironmentPort",
     "ExecutionReceipt",

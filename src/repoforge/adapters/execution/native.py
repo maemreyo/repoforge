@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import platform
 import shutil
 import subprocess
@@ -19,11 +18,9 @@ from repoforge.domain.execution_environment import (
     ToolVersion,
     normalize_tool_name,
 )
-from repoforge.domain.errors import RepoForgeError
-from repoforge.ports.command import CommandExecutor, CommandResult
+from repoforge.ports.command import CommandExecutor
 from repoforge.ports.execution_environment import (
     ArtifactResult,
-    ExecutionEnvironmentPort,
     ExecutionReceipt,
 )
 
