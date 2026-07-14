@@ -59,6 +59,9 @@ class ErrorCode(str, Enum):
     OPERATION_CORRUPT = "OPERATION_CORRUPT"
     OPERATION_SCHEMA_UNSUPPORTED = "OPERATION_SCHEMA_UNSUPPORTED"
     OPERATION_TRANSITION_INVALID = "OPERATION_TRANSITION_INVALID"
+    STALE_ASSESSMENT_SNAPSHOT = "STALE_ASSESSMENT_SNAPSHOT"
+    ASSESSMENT_COMPONENT_UNAVAILABLE = "ASSESSMENT_COMPONENT_UNAVAILABLE"
+    ASSESSMENT_INVALID = "ASSESSMENT_INVALID"
     PR_CHECK_WATCH_INVALID = "PR_CHECK_WATCH_INVALID"
     PR_CHECK_WATCH_STALE = "PR_CHECK_WATCH_STALE"
     PR_CHECK_WATCH_TIMEOUT = "PR_CHECK_WATCH_TIMEOUT"
@@ -222,6 +225,9 @@ def operation_error_from_exception(
         ErrorCode.OPERATION_CORRUPT: "The persisted operation record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.OPERATION_SCHEMA_UNSUPPORTED: "The operation record uses a schema version this RepoForge build cannot safely interpret.",
         ErrorCode.OPERATION_TRANSITION_INVALID: "The requested state transition is not allowed by the durable operation state machine.",
+        ErrorCode.STALE_ASSESSMENT_SNAPSHOT: "The workspace, configuration, or policy identity changed while evidence was being collected.",
+        ErrorCode.ASSESSMENT_COMPONENT_UNAVAILABLE: "A bounded assessment provider could not return trustworthy evidence for the captured snapshot.",
+        ErrorCode.ASSESSMENT_INVALID: "The assessment model violates snapshot identity, coverage, ordering, or bound invariants.",
         ErrorCode.PR_CHECK_WATCH_INVALID: "The check-watch request violates a typed bound or completion-mode invariant.",
         ErrorCode.PR_CHECK_WATCH_STALE: "The workspace, pushed commit, pull request, or Check Run no longer matches the captured watch identity.",
         ErrorCode.PR_CHECK_WATCH_TIMEOUT: "The requested check condition was not reached before the bounded deadline.",
