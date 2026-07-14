@@ -255,6 +255,23 @@ A pull request should explain:
 
 Do not mark a change ready when the full required gate is red.
 
+## Roadmap issue pickup
+
+When instructed to pick or continue RepoForge roadmap work:
+
+1. read the [master roadmap](docs/roadmaps/REPOFORGE_MASTER_ROADMAP.md) and canonical
+   [execution program](https://github.com/maemreyo/repoforge/issues/3);
+2. select only an implementation ticket whose canonical status is `Ready` and whose blockers are
+   closed;
+3. read the parent initiative, ticket body, and all specification or dependency-update comments;
+4. inspect current `main`, recent commits, affected contracts, implementation, and tests before
+   editing;
+5. treat executable tests, safety policy, typed contracts, and current repository behavior as higher
+   authority than roadmap prose or stale issue-title text.
+
+If issue metadata and live dependency state disagree, report the drift and follow the derived
+readiness rules tracked by issue #68 rather than guessing.
+
 ## Definition of done
 
 Before presenting a RepoForge change as complete:

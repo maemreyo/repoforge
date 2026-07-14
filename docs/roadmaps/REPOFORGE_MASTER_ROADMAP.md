@@ -50,6 +50,18 @@ The highest-priority outcomes are:
 - architecture drift prevention;
 - explainable risk and adaptive verification.
 
+### 1.1 Delivery tracking and authority
+
+The canonical execution index is [GitHub issue #3](https://github.com/maemreyo/repoforge/issues/3).
+Initiatives and implementation tickets record hierarchy, blockers, acceptance criteria, tests, and
+expected PR shape. Delivery status comes from current issue state and the validated dependency graph,
+not from prose in this document or stale status text in an issue title.
+
+An implementation ticket is selectable only when its canonical status is `Ready`, its parent is
+active, its specification is complete, and every blocker is closed. Executable tests, safety policy,
+typed contracts, and current product behavior remain higher authority than both roadmap and issue
+metadata.
+
 ---
 
 ## 2. Product vision
@@ -156,6 +168,21 @@ The main product gaps are:
 - execution is not fully reproducible across machines;
 - analyzer outputs lack one normalized evidence model;
 - team and multi-agent coordination are not first-class.
+
+## 4.1 Cross-cutting foundation initiatives
+
+The six product programs depend on five cross-cutting foundations tracked in the issue program:
+
+| Initiative | Purpose | Primary consumers |
+| --- | --- | --- |
+| [#70 Durable State Platform](https://github.com/maemreyo/repoforge/issues/70) | Shared schema versions, atomic persistence, CAS, migrations, retention, quotas, integrity, and recovery | Tasks, operations, plans, evidence, receipts, leases, caches, and indexes |
+| [#75 Protocol compatibility and client capability matrix](https://github.com/maemreyo/repoforge/issues/75) | Capability negotiation, compatibility conformance, contract versioning, fallbacks, and diagnostics | MCP core clients, Tasks, Apps, Elicitation, CLI, and future adapters |
+| [#80 Human approval and consent plane](https://github.com/maemreyo/repoforge/issues/80) | Exact-state approval requests, action classification, receipts, replay protection, and operator handoff | Onboarding, plan acceptance, capability expansion, disclosure, and external writes |
+| [#85 Provider trust and lifecycle](https://github.com/maemreyo/repoforge/issues/85) | Provider identity, digest, capability, health, canaries, upgrade, fallback, and evidence degradation | Code intelligence, analyzers, policy engines, and execution providers |
+| [#89 Resource budgets and backpressure](https://github.com/maemreyo/repoforge/issues/89) | CPU, memory, disk, queue, concurrency, output, cache/index, and provider limits | Durable operations, indexing, analyzers, verification, multi-repo, and remote execution |
+
+These initiatives do not create new authority. They make existing authority, state, compatibility,
+provider evidence, and machine-resource limits explicit and reusable.
 
 ---
 
@@ -1005,6 +1032,39 @@ Deliver OpenTelemetry, record/replay, behavioral evals, multi-repo bundles, mult
 # 36. Dependency graph
 
 ```text
+Delivery Graph and Derived Readiness
+    └── Every issue-driven delivery wave
+
+Durable State Platform
+    ├── Task Capsule
+    ├── Durable Operations and Plans
+    ├── Evidence and Receipts
+    └── Leases, Caches, and Indexes
+
+Protocol Compatibility Matrix
+    ├── MCP Tasks and Progress
+    ├── MCP Apps and Elicitation
+    ├── Tool Surface Versioning
+    └── Client Diagnostics
+
+Human Approval Plane
+    ├── Configuration and Capability Changes
+    ├── Plan Acceptance
+    ├── Sensitive Disclosure
+    └── External Writes
+
+Provider Trust and Lifecycle
+    ├── Code Intelligence
+    ├── Analyzer Plugins
+    ├── Policy Providers
+    └── Execution Providers
+
+Resource Budgets and Backpressure
+    ├── Durable Operations
+    ├── Verification and Analyzers
+    ├── Caches and Indexes
+    └── Multi-repository and Remote Execution
+
 Task Capsule
     ├── Durable Operations
     ├── Leases
@@ -1151,13 +1211,13 @@ Do not:
 
 # 40. Top five recommended next initiatives
 
-1. **Task Capsule and resumable task workflow**
-2. **Unified Workspace Assessment**
-3. **Durable Tasks, progress, and cancellation**
-4. **MCP Apps UI and Elicitation**
-5. **Behavioral agent evaluation with record/replay**
+1. **Issue-driven delivery governance and next-ready automation** — complete #61, then #68/#69 and #63/#64.
+2. **Unified Workspace Assessment** — complete base freshness and typed diagnostics, then #14–#16.
+3. **Durable State Platform and Task Control Plane** — complete #71, then Task Capsule and the remaining state lifecycle work.
+4. **Protocol Compatibility and Human Approval** — complete #29/#76/#77/#79 before client-specific UX, and #81–#84 before Elicitation approvals.
+5. **Provider Trust and Resource Control** — complete #86–#88 before semantic provider expansion and #90–#93 before heavy indexing, caches, multi-repository, or remote execution.
 
-CodeGraph, Architecture Drift, and Adaptive Verification should be developed immediately after or alongside the shared evidence and unified assessment foundations.
+CodeGraph, Architecture Drift, MCP Apps, Adaptive Verification, analyzers, and isolated execution should consume these foundations rather than introduce parallel state, approval, provider, compatibility, or resource-control semantics.
 
 ---
 

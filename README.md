@@ -435,6 +435,7 @@ Policy decisions belong in the domain and application layers, not in MCP handler
 - [Full-flow testing](docs/testing/FULL_FLOW_TESTING.md)
 - [Security model](SECURITY.md)
 - [Master roadmap](docs/roadmaps/REPOFORGE_MASTER_ROADMAP.md)
+- [Issue-driven execution program](https://github.com/maemreyo/repoforge/issues/3)
 
 ---
 
@@ -486,6 +487,8 @@ The long-term architecture is organized around:
    - optional team, remote, and A2A adapters.
 
 The roadmap preserves the current safety model: new intelligence may recommend, explain, or broaden verification, but it may not silently expand authority.
+
+Delivery status is tracked by the [program issue](https://github.com/maemreyo/repoforge/issues/3) and its dependency graph. Select only tickets whose canonical status is `Ready` and whose blockers are closed; roadmap prose does not override executable policy, tests, or current issue state.
 
 See the [RepoForge Master Roadmap](docs/roadmaps/REPOFORGE_MASTER_ROADMAP.md) and the [program issue](https://github.com/maemreyo/repoforge/issues/3).
 
