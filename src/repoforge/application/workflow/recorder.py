@@ -79,8 +79,21 @@ class WorkflowRecorder:
                 except RepoForgeError as exc:
                     if exc.code is not ErrorCode.WORKFLOW_RECORD_TOO_LARGE or len(events) == 1:
                         raise
-                    events = events[:-1]
                     reason = "event_and_size_limit" if truncated else "size_limit"
+                    lower = 1
+                    upper = len(events) - 1
+                    while lower < upper:
+                        candidate_count = (lower + upper + 1) // 2
+                        candidate = build(events[:candidate_count], reason)
+                        try:
+                            self.store.create(candidate)
+                        except RepoForgeError as candidate_exc:
+                            if candidate_exc.code is not ErrorCode.WORKFLOW_RECORD_TOO_LARGE:
+                                raise
+                            upper = candidate_count - 1
+                        else:
+                            return candidate
+                    events = events[:lower]
             raise RepoForgeError(
                 "workflow recording could not retain one bounded event",
                 code=ErrorCode.WORKFLOW_RECORD_TOO_LARGE,

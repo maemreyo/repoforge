@@ -122,8 +122,8 @@ class JsonWorkflowRecordingStore:
         encoded = (
             json.dumps(
                 JsonWorkflowRecordingStore._frame(recording),
+                indent=2,
                 sort_keys=True,
-                separators=(",", ":"),
                 ensure_ascii=False,
             )
             + "\n"
