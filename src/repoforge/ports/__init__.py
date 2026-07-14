@@ -22,6 +22,7 @@ from .metrics import MetricsSink
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
 from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
+from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
 from .process import ProcessInspector
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
@@ -60,6 +61,8 @@ __all__ = [
     "OnboardingEnvironment",
     "OnboardingStore",
     "OperationGate",
+    "OperationRecordPage",
+    "OperationStore",
     "OperatorIO",
     "ProcessInspector",
     "PullRequestGateway",

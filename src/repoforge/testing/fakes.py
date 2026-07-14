@@ -13,9 +13,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ..domain.errors import ErrorCode, RepoForgeError
+from ..domain.operation_task import OperationTask
 from ..domain.workspace import WorkspaceRecord
 from ..ports.command import CommandResult
 from ..ports.operation_gate import GateState
+from ..ports.operation_store import OperationRecordPage
 
 
 class FixedClock:
@@ -118,6 +121,48 @@ class InMemoryWorkspaceStore:
     def lock(self, workspace_id: str) -> Iterator[None]:
         del workspace_id
         yield
+
+
+class InMemoryOperationStore:
+    def __init__(self, injector: FailureInjector | None = None) -> None:
+        self.records: dict[str, OperationTask] = {}
+        self.injector = injector or FailureInjector()
+
+    def create(self, task: OperationTask) -> OperationTask:
+        self.injector.hit("operation_store.create")
+        if task.operation_id in self.records:
+            raise RepoForgeError("Operation already exists", code=ErrorCode.ALREADY_EXISTS)
+        self.records[task.operation_id] = task
+        return task
+
+    def read(self, operation_id: str) -> OperationTask | None:
+        self.injector.hit("operation_store.read")
+        return self.records.get(operation_id)
+
+    def save(self, task: OperationTask, *, expected_updated_at: str) -> OperationTask:
+        self.injector.hit("operation_store.save")
+        current = self.records.get(task.operation_id)
+        if current is None:
+            raise RepoForgeError("Operation not found", code=ErrorCode.OPERATION_NOT_FOUND)
+        if current.updated_at != expected_updated_at:
+            raise RepoForgeError(
+                "Operation changed", code=ErrorCode.OPERATION_STALE, retryable=True
+            )
+        self.records[task.operation_id] = task
+        return task
+
+    def list_records(self, *, max_records: int) -> OperationRecordPage:
+        self.injector.hit("operation_store.list")
+        values = sorted(
+            self.records.values(),
+            key=lambda item: (item.updated_at, item.operation_id),
+            reverse=True,
+        )
+        return OperationRecordPage(tuple(values[:max_records]), len(values) > max_records)
+
+    def delete(self, operation_id: str) -> None:
+        self.injector.hit("operation_store.delete")
+        self.records.pop(operation_id, None)
 
 
 class InMemoryLockManager:

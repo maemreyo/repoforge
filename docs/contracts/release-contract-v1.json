@@ -34,6 +34,16 @@
           "--wait"
         ]
       },
+      "operation": {
+        "actions": [
+          "status",
+          "list",
+          "cancel"
+        ],
+        "cancellation_is_request_only": true,
+        "max_list_limit": 100,
+        "public_creation": false
+      },
       "repo discover": {
         "arguments": [
           "ROOT"
@@ -60,8 +70,141 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "769294f00946e02fd9ded8c0467b831d2907f3c3af29a274df004f56b954d040",
+    "tool_surface_hash": "8fd459aec00a1708cf2a18a0e98aabfa4f9c694add4c1c190f09c6b27b0aa7e4",
     "tools": [
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this to idempotently request cancellation without marking terminal cancellation.",
+        "inputSchema": {
+          "properties": {
+            "expected_updated_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expected Updated At"
+            },
+            "operation_id": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id"
+          ],
+          "title": "operation_cancelArguments",
+          "type": "object"
+        },
+        "name": "operation_cancel",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "operation_cancelDictOutput",
+          "type": "object"
+        },
+        "title": "Request operation cancellation"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to list bounded durable operations by optional task/workspace scope and state.",
+        "inputSchema": {
+          "properties": {
+            "cursor": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cursor"
+            },
+            "limit": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Scope"
+            },
+            "state": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "State"
+            }
+          },
+          "title": "operation_listArguments",
+          "type": "object"
+        },
+        "name": "operation_list",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "operation_listDictOutput",
+          "type": "object"
+        },
+        "title": "List durable operations"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to inspect one exact durable operation and its bounded progress metadata.",
+        "inputSchema": {
+          "properties": {
+            "operation_id": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id"
+          ],
+          "title": "operation_statusArguments",
+          "type": "object"
+        },
+        "name": "operation_status",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "operation_statusDictOutput",
+          "type": "object"
+        },
+        "title": "Read durable operation status"
+      },
       {
         "annotations": {
           "destructiveHint": false,

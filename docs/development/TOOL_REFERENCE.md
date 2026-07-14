@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes thirty-three focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes thirty-six focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -54,6 +54,24 @@ is the explicit operator action that enrolls exactly the reviewed capability.
 the requested snapshot against its source before atomically restoring both files; it never accepts a
 partial, stale, or modified snapshot and reports the activation impact after restoration.
 Snapshot retention is bounded to the newest ten complete generations.
+
+## Durable operations
+
+| Tool | Purpose |
+|---|---|
+| `operation_status` | Read one exact durable operation with bounded phase, progress, result-reference, error, retryability, cancellation, and timestamp metadata. |
+| `operation_list` | List at most one hundred operations, optionally filtered by `task:<id>`, `workspace:<id>`, or state, with deterministic cursor pagination. |
+| `operation_cancel` | Idempotently request cancellation using an optional optimistic `expected_updated_at`; it does not mark the operation terminal. |
+
+RepoForge stores one schema-versioned operation record per private file under the local state root.
+Writes use cross-process locking, atomic replacement, fsync, `0600` files, and compare-and-swap on
+`updated_at`. On startup, due non-terminal operations expire, unrecoverable running operations become
+`orphaned`, and terminal records older than seven days are pruned. Public interfaces cannot create
+operations or update progress; those capabilities are internal foundations for approved future
+consumers. Operation records never contain source bodies, patches, raw logs, secrets, or environment
+bodies.
+
+CLI equivalents are `rf operation status ID`, `rf operation list`, and `rf operation cancel ID`.
 
 ## Repository inspection
 

@@ -28,6 +28,7 @@ from ..ports import (
     LockManager,
     MetricsSink,
     OperationGate,
+    OperationStore,
     PullRequestGateway,
     WorkspaceStore,
 )
@@ -195,6 +196,7 @@ class ApplicationContext:
     executables: ExecutableLocator
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
+    operation_store: OperationStore | None = None
 
     def now_epoch(self) -> float:
         try:

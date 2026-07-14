@@ -16,6 +16,9 @@ from ..ports import (
     WorkspaceStore,
 )
 from .dto import to_data
+from .operations.cancel import OperationCancelCommand, OperationCancellationRequester
+from .operations.list import OperationListCommand, OperationLister
+from .operations.status import OperationStatusCommand, OperationStatusReader
 from .repository.context import (
     RepositoryContextCommand,
     RepositoryContextReader,
@@ -152,7 +155,11 @@ class CodingService:
         self.gate = self.application.context.gate
         self.metrics = self.application.context.metrics
         self.idempotency = self.application.context.idempotency
+        self.operations = self.application.operations
         ctx = self.application.context
+        self._operation_status = OperationStatusReader(self.operations)
+        self._operation_list = OperationLister(self.operations)
+        self._operation_cancel = OperationCancellationRequester(self.operations)
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
         self._repo_context = RepositoryContextReader(ctx)
@@ -187,6 +194,31 @@ class CodingService:
         self._failure_evidence = WorkspacePrFailureEvidenceReader(ctx)
         self._remove = WorkspaceRemover(ctx)
         self._doctor = Doctor(ctx)
+
+    def operation_status(self, operation_id: str) -> dict[str, Any]:
+        return _result(self._operation_status.execute(OperationStatusCommand(operation_id)))
+
+    def operation_list(
+        self,
+        scope: str | None = None,
+        state: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._operation_list.execute(OperationListCommand(scope, state, limit, cursor))
+        )
+
+    def operation_cancel(
+        self,
+        operation_id: str,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._operation_cancel.execute(
+                OperationCancelCommand(operation_id, expected_updated_at)
+            )
+        )
 
     def repo_list(self) -> dict[str, Any]:
         return _result(self._repo_list.execute(RepositoryListCommand()))
