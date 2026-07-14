@@ -78,9 +78,9 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
     ):
         assert command in workflow
     assert "macos-latest" in workflow
-    assert "scripts/verify-wheel-e2e.py" in (ROOT / "scripts/verify-wheel-install.sh").read_text(
-        encoding="utf-8"
-    )
+    wheel_verifier = (ROOT / "scripts/verify-wheel-install.sh").read_text(encoding="utf-8")
+    assert "scripts/verify-wheel-e2e.py" in wheel_verifier
+    assert "${REPOFORGE_SMOKE_PYTHON:-python3}" in wheel_verifier
     assert (ROOT / "scripts/verify-wheel-e2e.py").is_file()
 
 
