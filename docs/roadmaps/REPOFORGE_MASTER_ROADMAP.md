@@ -853,9 +853,19 @@ Important product metrics:
 
 ## 29. Agent Workflow Record and Replay
 
-Sanitized recordings contain tool inventory, selected tool, validated arguments, result category, state transitions, fingerprints, next action, and error handling.
+The internal foundation now defines schema-versioned sanitized recordings containing tool inventory,
+selected tool, normalized argument categories and hashes, result category, stable error code, safe
+workspace/task/snapshot references, state transitions, next actions, metrics, and explicit truncation.
+Private checksum-framed JSON persistence enforces deterministic serialization, `0600` files, bounded
+size/event counts, retention, and explicit fixture export.
 
-Use them for model-upgrade evaluation, tool-description experiments, routing regression, incident reproduction, and latency/call-count comparison.
+Replay runs only through adapters declaring isolation and no real writes. The default adapter replays
+recorded categories without filesystem, Git, GitHub, network, or subprocess access. Truncated records
+remain readable for diagnosis but are not eligible as complete evaluation evidence.
+
+Use this foundation for model-upgrade evaluation, tool-description experiments, routing regression,
+incident reproduction, and latency/call-count comparison. Prompts, source, patches, logs, full paths,
+credentials, private reasoning traces, and provider payloads remain prohibited.
 
 ---
 

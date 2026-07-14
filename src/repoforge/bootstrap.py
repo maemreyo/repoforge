@@ -18,7 +18,12 @@ from .adapters.github import GhCliGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
-from .adapters.persistence import JsonIdempotencyStore, JsonOnboardingStore, JsonOperationStore
+from .adapters.persistence import (
+    JsonIdempotencyStore,
+    JsonOnboardingStore,
+    JsonOperationStore,
+    JsonWorkflowRecordingStore,
+)
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
@@ -77,6 +82,11 @@ from .application.operations import OperationManager, recover_operations
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.supervisor import RuntimeSupervisor
+from .application.workflow import (
+    RecordedCategoryReplayAdapter,
+    WorkflowRecorder,
+    WorkflowReplayEngine,
+)
 from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
@@ -106,6 +116,7 @@ from .ports import (
     RuntimeStore,
     TunnelClient,
     TunnelProfileStore,
+    WorkflowRecordingStore,
     WorkspaceStore,
 )
 
@@ -126,12 +137,15 @@ class AdapterOverrides:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operations: OperationStore | None = None
+    workflow_recordings: WorkflowRecordingStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Application:
     context: ApplicationContext
     operations: OperationManager
+    workflow_recorder: WorkflowRecorder
+    workflow_replay: WorkflowReplayEngine
 
 
 def default_state_root() -> Path:
@@ -273,6 +287,13 @@ def build_operation_store(
     return JsonOperationStore(state_root, locks or build_lock_manager(state_root))
 
 
+def build_workflow_recording_store(
+    state_root: Path,
+    locks: LockManager | None = None,
+) -> WorkflowRecordingStore:
+    return JsonWorkflowRecordingStore(state_root, locks or build_lock_manager(state_root))
+
+
 def write_private_file(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     ConfigGenerationStore._atomic_write(path, data, mode=mode)
 
@@ -302,6 +323,10 @@ def build_application(
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    workflow_recording_store = o.workflow_recordings or JsonWorkflowRecordingStore(
+        config.server.state_root,
+        locks,
+    )
     context = ApplicationContext(
         config=config,
         commands=command,
@@ -321,7 +346,9 @@ def build_application(
     )
     operations = OperationManager(context)
     recover_operations(operations, now=clock.now_iso())
-    return Application(context, operations)
+    workflow_recorder = WorkflowRecorder(context, workflow_recording_store)
+    workflow_replay = WorkflowReplayEngine(RecordedCategoryReplayAdapter())
+    return Application(context, operations, workflow_recorder, workflow_replay)
 
 
 def run_runtime_worker(config_path: Path) -> int:

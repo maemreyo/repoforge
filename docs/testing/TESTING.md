@@ -23,12 +23,13 @@ The gate runs:
    smoke-test, audit, tunnel command and error handling.
 3. **Local Git integration:** bare remote + clone + real worktree + edit + verification receipt + commit + push.
 4. **Fake GitHub CLI integration:** deterministic issue/PR reads, draft PR create/edit/status/checks, labels and reviewers without touching a real account.
-5. **In-memory MCP protocol:** actual MCP client lists tools, checks schemas/annotations, invokes all 39 tools and validates tool errors.
+5. **In-memory MCP protocol:** actual MCP client lists tools, checks schemas/annotations, invokes all 42 tools and validates tool errors.
 6. **Committed repository evidence:** real Git objects prove branch/tag/SHA identity, dirty-clone isolation, root/empty/merge commits, first-parent evidence, merge-base and ahead/behind calculation, add/modify/delete/rename/binary parsing, denied-path omission, message redaction, deterministic bounds, and unrelated-history errors.
 7. **Structured CI evidence:** fake Check Runs, annotations, attempts, job steps, logs, permission failures, stale SHAs, selectors, redaction, denied snippets, classification, coverage, and output bounds.
 8. **Durable operation foundation:** transition tables, monotonic progress, cancellation requests, JSON CAS races, permissions, corruption/future schemas, restart orphaning, expiry, retention, pagination, CLI, and MCP.
 9. **Typed workspace diagnostics:** reviewed profile loading and semantic deltas, tracked selectors, exact argv, parser/failure classes, stale fingerprints, mutation/artifact enforcement, output bounds, doctor checks, and MCP invocation.
-10. **Negative regression:** stale SHA, stale fingerprint, post-verification edits, batch limit, denied workflow path and change-budget enforcement.
+10. **Sanitized workflow recording/replay:** deterministic direct/failure frames, argument category hashing, forbidden-content omission, checksum/schema corruption, private permissions, retention/export, explicit truncation, and isolated no-real-write replay.
+11. **Negative regression:** stale SHA, stale fingerprint, post-verification edits, batch limit, denied workflow path and change-budget enforcement.
 
 ## Live checks still required on the recipient machine
 

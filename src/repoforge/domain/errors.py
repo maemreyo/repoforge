@@ -59,6 +59,13 @@ class ErrorCode(str, Enum):
     OPERATION_CORRUPT = "OPERATION_CORRUPT"
     OPERATION_SCHEMA_UNSUPPORTED = "OPERATION_SCHEMA_UNSUPPORTED"
     OPERATION_TRANSITION_INVALID = "OPERATION_TRANSITION_INVALID"
+    WORKFLOW_RECORD_INVALID = "WORKFLOW_RECORD_INVALID"
+    WORKFLOW_RECORD_CORRUPT = "WORKFLOW_RECORD_CORRUPT"
+    WORKFLOW_RECORD_SCHEMA_UNSUPPORTED = "WORKFLOW_RECORD_SCHEMA_UNSUPPORTED"
+    WORKFLOW_RECORD_TOO_LARGE = "WORKFLOW_RECORD_TOO_LARGE"
+    WORKFLOW_RECORD_NOT_FOUND = "WORKFLOW_RECORD_NOT_FOUND"
+    WORKFLOW_RECORD_INCOMPLETE = "WORKFLOW_RECORD_INCOMPLETE"
+    WORKFLOW_REPLAY_UNSAFE = "WORKFLOW_REPLAY_UNSAFE"
     DIAGNOSTIC_NOT_FOUND = "DIAGNOSTIC_NOT_FOUND"
     DIAGNOSTIC_SELECTOR_REQUIRED = "DIAGNOSTIC_SELECTOR_REQUIRED"
     DIAGNOSTIC_SELECTOR_INVALID = "DIAGNOSTIC_SELECTOR_INVALID"
@@ -217,6 +224,13 @@ def operation_error_from_exception(
         ErrorCode.OPERATION_CORRUPT: "The persisted operation record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.OPERATION_SCHEMA_UNSUPPORTED: "The operation record uses a schema version this RepoForge build cannot safely interpret.",
         ErrorCode.OPERATION_TRANSITION_INVALID: "The requested state transition is not allowed by the durable operation state machine.",
+        ErrorCode.WORKFLOW_RECORD_INVALID: "The workflow recording violates a typed identity, ordering, category, or bound invariant.",
+        ErrorCode.WORKFLOW_RECORD_CORRUPT: "The persisted workflow recording is malformed, unsafe, or inconsistent with its checksum.",
+        ErrorCode.WORKFLOW_RECORD_SCHEMA_UNSUPPORTED: "The workflow recording or frame uses a future schema this build cannot safely interpret.",
+        ErrorCode.WORKFLOW_RECORD_TOO_LARGE: "The sanitized recording exceeds its reviewed event or encoded-size bound.",
+        ErrorCode.WORKFLOW_RECORD_NOT_FOUND: "No private workflow recording exists for the supplied identifier.",
+        ErrorCode.WORKFLOW_RECORD_INCOMPLETE: "The recording was explicitly truncated and cannot be treated as complete evaluation evidence.",
+        ErrorCode.WORKFLOW_REPLAY_UNSAFE: "The replay adapter is not isolated or could perform real repository, GitHub, network, or subprocess writes.",
         ErrorCode.DIAGNOSTIC_NOT_FOUND: "The requested diagnostic is not part of the reviewed repository capability set.",
         ErrorCode.DIAGNOSTIC_SELECTOR_REQUIRED: "The diagnostic requires one typed selector before its reviewed argv can be resolved.",
         ErrorCode.DIAGNOSTIC_SELECTOR_INVALID: "The supplied selector violates the configured type, path policy, or closed value set.",
