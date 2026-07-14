@@ -70,7 +70,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "c7698f06738042091c322dfe56f40aefe37174b70fbb3bedcbdc17ba565431a4",
+    "tool_surface_hash": "a164efa4d13b6b39775702a5217e123f5678acbea652dd76e5cc782a7cdf0742",
     "tools": [
       {
         "annotations": {
