@@ -49,6 +49,8 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_update_draft_pr",
             "workspace_pr_status",
             "workspace_pr_checks",
+            "workspace_pr_check_details",
+            "workspace_pr_failure_evidence",
             "workspace_remove",
         }
         assert names == expected
@@ -201,7 +203,23 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             {"workspace_id": workspace_id, "title": "MCP contract updated"},
         )
         await call("workspace_pr_status", {"workspace_id": workspace_id})
-        await call("workspace_pr_checks", {"workspace_id": workspace_id, "required_only": True})
+        checks = await call(
+            "workspace_pr_checks",
+            {"workspace_id": workspace_id, "required_only": True},
+        )
+        selector = checks["checks"][0]["selector"]
+        await call(
+            "workspace_pr_check_details",
+            {"workspace_id": workspace_id, "check_selector": selector},
+        )
+        await call(
+            "workspace_pr_failure_evidence",
+            {
+                "workspace_id": workspace_id,
+                "check_selector": selector,
+                "max_excerpt_lines": 20,
+            },
+        )
         assert committed["head_sha"]
         await call(
             "workspace_remove",

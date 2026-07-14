@@ -52,6 +52,11 @@ def branch():
         ["git", "branch", "--show-current"], check=True, capture_output=True, text=True
     ).stdout.strip()
 
+def head_sha():
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
 def arg_value(args, flag, default=None):
     try:
         return args[args.index(flag) + 1]
@@ -103,6 +108,7 @@ if args[:2] == ["pr", "create"]:
         "mergeable": "MERGEABLE",
         "reviewDecision": "",
         "statusCheckRollup": [],
+        "headRefOid": head_sha(),
     }}
     data.setdefault("prs", {{}})[head] = pr
     save(data)
@@ -123,10 +129,12 @@ if args[:2] == ["pr", "edit"]:
     save(data)
     raise SystemExit(0)
 if args[:2] == ["pr", "checks"]:
-    print(json.dumps([
-        {{"name": "unit", "state": "SUCCESS", "bucket": "pass", "link": "https://ci/unit", "workflow": "CI", "description": "ok", "startedAt": "", "completedAt": ""}},
-        {{"name": "lint", "state": "SKIPPED", "bucket": "skipping", "link": "https://ci/lint", "workflow": "CI", "description": "skipped", "startedAt": "", "completedAt": ""}},
-    ]))
+    data = load()
+    checks = data.get("checks") or [
+        {{"name": "unit", "state": "SUCCESS", "bucket": "pass", "link": "https://github.com/owner/demo/actions/runs/1001/job/101", "workflow": "CI", "description": "ok", "startedAt": "", "completedAt": ""}},
+        {{"name": "lint", "state": "SKIPPED", "bucket": "skipping", "link": "https://github.com/owner/demo/actions/runs/1002/job/102", "workflow": "CI", "description": "skipped", "startedAt": "", "completedAt": ""}},
+    ]
+    print(json.dumps(checks))
     raise SystemExit(0)
 if args[:2] == ["pr", "view"]:
     ref = args[2]
@@ -154,8 +162,61 @@ if args[:2] == ["pr", "view"]:
     if not pr:
         print("no pull request found", file=sys.stderr)
         raise SystemExit(1)
-    print(json.dumps(pr))
+    if "--jq" in args and ".headRefOid" in args:
+        print(pr.get("headRefOid", head_sha()))
+    else:
+        print(json.dumps(pr))
     raise SystemExit(0)
+
+if args and args[0] == "api":
+    data = load()
+    endpoint = next((arg for arg in args[1:] if not arg.startswith("-") and arg not in {{"GET", "per_page=100", "filter=latest"}}), "")
+    current_head = head_sha()
+    if endpoint.endswith("/check-runs") and "/commits/" in endpoint:
+        runs = data.get("check_runs") or {{
+            "101": {{"id": 101, "name": "unit", "head_sha": current_head, "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/demo/actions/runs/1001/job/101", "html_url": "https://github.com/owner/demo/actions/runs/1001/job/101", "started_at": "", "completed_at": "", "output": {{"title": "", "summary": "", "text": "", "annotations_count": 0}}, "app": {{"name": "GitHub Actions"}}}},
+            "102": {{"id": 102, "name": "lint", "head_sha": current_head, "status": "completed", "conclusion": "skipped", "details_url": "https://github.com/owner/demo/actions/runs/1002/job/102", "html_url": "https://github.com/owner/demo/actions/runs/1002/job/102", "started_at": "", "completed_at": "", "output": {{"title": "", "summary": "", "text": "", "annotations_count": 0}}, "app": {{"name": "GitHub Actions"}}}},
+        }}
+        print(json.dumps({{"total_count": len(runs), "check_runs": list(runs.values())}}))
+        raise SystemExit(0)
+    if "/check-runs/" in endpoint and endpoint.endswith("/annotations"):
+        check_id = endpoint.split("/check-runs/", 1)[1].split("/", 1)[0]
+        if data.get("annotations_permission_denied"):
+            print("Resource not accessible by integration", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps((data.get("annotations") or {{}}).get(check_id, [])))
+        raise SystemExit(0)
+    if "/check-runs/" in endpoint:
+        check_id = endpoint.rsplit("/", 1)[-1]
+        runs = data.get("check_runs") or {{
+            "101": {{"id": 101, "name": "unit", "head_sha": current_head, "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/demo/actions/runs/1001/job/101", "html_url": "https://github.com/owner/demo/actions/runs/1001/job/101", "started_at": "", "completed_at": "", "output": {{"title": "", "summary": "", "text": "", "annotations_count": 0}}, "app": {{"name": "GitHub Actions"}}}},
+            "102": {{"id": 102, "name": "lint", "head_sha": current_head, "status": "completed", "conclusion": "skipped", "details_url": "https://github.com/owner/demo/actions/runs/1002/job/102", "html_url": "https://github.com/owner/demo/actions/runs/1002/job/102", "started_at": "", "completed_at": "", "output": {{"title": "", "summary": "", "text": "", "annotations_count": 0}}, "app": {{"name": "GitHub Actions"}}}},
+        }}
+        item = runs.get(check_id)
+        if item is None:
+            print("check run not found", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(item))
+        raise SystemExit(0)
+    if "/actions/jobs/" in endpoint and endpoint.endswith("/logs"):
+        job_id = endpoint.split("/actions/jobs/", 1)[1].split("/", 1)[0]
+        if data.get("logs_permission_denied"):
+            print("Resource not accessible by integration", file=sys.stderr)
+            raise SystemExit(1)
+        log = (data.get("logs") or {{}}).get(job_id)
+        if log is None:
+            print("job log not found", file=sys.stderr)
+            raise SystemExit(1)
+        print(log, end="")
+        raise SystemExit(0)
+    if "/actions/jobs/" in endpoint:
+        job_id = endpoint.rsplit("/", 1)[-1]
+        job = (data.get("jobs") or {{}}).get(job_id)
+        if job is None:
+            print("job not found", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(job))
+        raise SystemExit(0)
 
 print("unsupported fake gh invocation: " + " ".join(args), file=sys.stderr)
 raise SystemExit(2)
