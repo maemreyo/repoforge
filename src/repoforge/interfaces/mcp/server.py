@@ -612,6 +612,26 @@ def create_server(
         return bounded_service.call("workspace_pr_checks", workspace_id, required_only)
 
     @mcp.tool(
+        title="Watch workspace PR checks",
+        annotations=EXTERNAL_MUTATE,
+        structured_output=True,
+    )
+    def workspace_pr_watch(
+        workspace_id: str,
+        until: str = "all_completed",
+        timeout_seconds: int = 900,
+        include_failure_evidence: bool = True,
+    ) -> dict[str, Any]:
+        """Use this to start a durable exact-SHA check watch and return its operation reference."""
+        return bounded_service.call(
+            "workspace_pr_watch",
+            workspace_id,
+            until,
+            timeout_seconds,
+            include_failure_evidence,
+        )
+
+    @mcp.tool(
         title="Read structured PR check details",
         annotations=READ_ONLY,
         structured_output=True,

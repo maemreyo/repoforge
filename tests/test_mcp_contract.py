@@ -62,6 +62,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_pr_checks",
             "workspace_pr_check_details",
             "workspace_pr_failure_evidence",
+            "workspace_pr_watch",
             "workspace_remove",
         }
         assert names == expected

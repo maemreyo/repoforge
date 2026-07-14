@@ -1,6 +1,7 @@
 """Protocols only; concrete implementations live under adapters/."""
 
 from .audit import AuditSink
+from .background_tasks import BackgroundTaskRunner
 from .capabilities import ExecutableLocator
 from .clock import Clock
 from .command import CommandExecutor, CommandResult
@@ -31,6 +32,7 @@ from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
 from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
+from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
@@ -40,11 +42,13 @@ from .runtime_control import (
     RuntimeLauncher,
     RuntimeStore,
 )
+from .sleeper import Sleeper
 from .tunnel import TunnelClient, TunnelProfileStore
 from .workspace_store import WorkspaceStore
 
 __all__ = [
     "AuditSink",
+    "BackgroundTaskRunner",
     "Clock",
     "CommandExecutor",
     "CommandResult",
@@ -74,6 +78,8 @@ __all__ = [
     "OperationRecordPage",
     "OperationStore",
     "OperatorIO",
+    "PrCheckWatchPage",
+    "PrCheckWatchStore",
     "ProcessInspector",
     "PullRequestGateway",
     "RepositoryDiscovery",
@@ -83,6 +89,7 @@ __all__ = [
     "RuntimeControlServer",
     "RuntimeLauncher",
     "RuntimeStore",
+    "Sleeper",
     "TunnelClient",
     "TunnelProfileStore",
     "WorkspaceStore",
