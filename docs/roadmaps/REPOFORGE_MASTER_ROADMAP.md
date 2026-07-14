@@ -255,7 +255,13 @@ task_complete
 
 Replace repeated manual status, diff, impact, architecture, risk, and verification-selection calls with one consistent assessment transaction.
 
-### Proposed operation
+### Current shell and future public operation
+
+The application layer now provides a snapshot-consistent internal assessment shell over status,
+diff, policy, base, PR, CI, failure-reference, and verification-receipt evidence. It rechecks HEAD,
+workspace fingerprint, configuration generation, and policy hash after every provider boundary.
+Semantic impact, architecture, risk, immutable-plan selection, caching, and public MCP exposure remain
+separate follow-on work.
 
 ```text
 workspace_assess(workspace_id)

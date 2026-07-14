@@ -48,6 +48,7 @@ from .workspace.apply_patch import (
     WorkspaceApplyPatchCommand,
     WorkspacePatchApplier,
 )
+from .workspace.assessment import WorkspaceAssessmentCommand, WorkspaceAssessmentReader
 from .workspace.base_status import WorkspaceBaseStatusCommand, WorkspaceBaseStatusReader
 from .workspace.commit import WorkspaceCommitCommand, WorkspaceCommitter
 from .workspace.create import WorkspaceCreateCommand, WorkspaceCreator
@@ -190,6 +191,7 @@ class CodingService:
         self._create = WorkspaceCreator(ctx)
         self._list = WorkspaceLister(ctx)
         self._status = WorkspaceStatusReader(ctx)
+        self._assessment = WorkspaceAssessmentReader(ctx)
         self._base_status = WorkspaceBaseStatusReader(ctx)
         self._tree = WorkspaceTreeReader(ctx)
         self._read = WorkspaceFileReader(ctx)
@@ -360,6 +362,9 @@ class CodingService:
 
     def workspace_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._status.execute(WorkspaceStatusCommand(workspace_id)))
+
+    def workspace_assessment(self, workspace_id: str) -> dict[str, Any]:
+        return _result(self._assessment.execute(WorkspaceAssessmentCommand(workspace_id)))
 
     def workspace_base_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._base_status.execute(WorkspaceBaseStatusCommand(workspace_id)))
