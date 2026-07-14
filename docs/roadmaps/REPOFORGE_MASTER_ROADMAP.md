@@ -70,12 +70,13 @@ metadata.
 
 ### 1.2 Active onboarding and patch-reliability batch
 
-The current single-worktree batch implements #103, #104, #105, #106, #111, #112, #113, and #114.
-It delivers command/document drift prevention, local-first setup and serve, standard-install interactive
-onboarding, config/state path provenance, dual-format patch input, deterministic hunk repair,
-whitespace-check/apply parity, and structured actionable failures. Parent initiatives #101 and #102
-remain open because #107–#110 and #115–#116 are separate follow-on work. The next P0 selectable ticket
-after this batch is #115; #116 remains blocked by #115.
+Draft PR [#118](https://github.com/maemreyo/repoforge/pull/118) places #103, #104, #105, #106,
+#111, #112, #113, and #114 in review from one verified worktree. It delivers command/document drift
+prevention, local-first setup and serve, standard-install interactive onboarding, config/state path
+provenance, dual-format patch input, deterministic hunk repair, whitespace-check/apply parity, and
+structured actionable failures. Parent initiatives #101 and #102 remain open because #107–#110 and
+#115–#116 are separate follow-on work. The next P0 selectable ticket after this batch is #115; #116
+remains blocked by #115.
 
 ---
 
