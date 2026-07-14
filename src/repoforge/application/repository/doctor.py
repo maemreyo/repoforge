@@ -189,6 +189,17 @@ class Doctor:
                         found or "not found",
                         remediation=f"Install {command[0]} or update the configured profile command.",
                     )
+            for diagnostic in repo.diagnostics.values():
+                executable = diagnostic.argv_template[0]
+                found = self.ctx.executables.which(executable, path=search_path)
+                add(
+                    f"diagnostic_executable:{repo_id}:{diagnostic.diagnostic_id}:{executable}",
+                    bool(found),
+                    found or "not found",
+                    remediation=(
+                        f"Install {executable} or update the reviewed diagnostic profile."
+                    ),
+                )
         for name, path in (
             ("workspace_root_writable", self.ctx.config.server.workspace_root),
             ("state_root_writable", self.ctx.config.server.state_root),

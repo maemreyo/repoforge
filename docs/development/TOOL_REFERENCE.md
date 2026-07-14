@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes thirty-six focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes thirty-seven focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -77,7 +77,7 @@ CLI equivalents are `rf operation status ID`, `rf operation list`, and `rf opera
 
 | Tool | Purpose |
 |---|---|
-| `repo_list` | List configured repositories, profiles, branch policy, pull-request defaults, and change limits. |
+| `repo_list` | List configured repositories, profiles, safe diagnostic metadata, branch policy, pull-request defaults, and change limits. |
 | `repo_status` | Read Git status, remotes, current branch information, and `gh auth status`. |
 | `repo_context` | Inspect manifests, scripts, engines, root files, and bounded instruction-file previews. |
 | `repo_tree` | List policy-allowed regular files from the reviewed default branch or an explicit reachable full commit ID. |
@@ -123,6 +123,7 @@ and line, batch, result, file-size, and tool-output limits report truncation exp
 | Tool | Purpose |
 |---|---|
 | `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. |
+| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, and explicit mutation reporting. |
 | `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. |
 | `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. |
 | `workspace_push` | Push the workspace branch without force and record the pushed commit SHA. |
@@ -132,6 +133,21 @@ and line, batch, result, file-size, and tool-output limits report truncation exp
 | `workspace_pr_checks` | Return compact `pass`, `fail`, `pending`, `skipping`, and `cancel` CI buckets plus exact Check Run selectors when available. |
 | `workspace_pr_check_details` | Resolve one exact `check-run:<id>` selector into bounded Check Run identity, status, attempt, failed-step, annotation, and source metadata. |
 | `workspace_pr_failure_evidence` | Return a redacted, bounded failure excerpt, class, hash, retryability, source coverage, uncertainty, and truncation metadata for one selected Check Run. |
+
+A diagnostic profile is part of the reviewed repository configuration. It fixes the executable and argv
+template, selector kind, working directory, timeout, local-only network declaration, mutability, parser,
+output limit, and optional artifact paths. Callers provide only `diagnostic_id`, an optional typed selector,
+and an optional reviewed workspace fingerprint. Supported selector kinds are `none`, `tracked_path`,
+`pytest_node`, `package_name`, `enum`, and `check_id`; path selectors must be policy-allowed tracked
+regular files and always occupy one complete argv token. RepoForge never accepts shell fragments,
+free-form argv, environment values, executables, or working directories through this tool.
+
+Read-only diagnostics must preserve the exact workspace fingerprint. Artifact diagnostics may change
+only configured artifact patterns; every current changed path and any unexpected path is reported. Any
+fingerprint change invalidates a prior verification receipt. Missing tools, timeouts, parser failures,
+contract drift, dependency/environment failures, output truncation, stale fingerprints, and unexpected
+mutation are explicit. Diagnostics do not update golden files, grant commit eligibility, replace
+`workspace_verify`, or imply an operating-system network sandbox.
 
 Call `workspace_pr_checks` first and reuse an exact `check-run:<id>` selector; URLs, API paths,
 job IDs, and arbitrary `gh` arguments are not accepted. Details and failure evidence require the

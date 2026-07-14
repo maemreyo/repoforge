@@ -440,6 +440,26 @@ def create_server(
         """Use this for an explicitly named allowlisted setup, fix, build, or verification profile."""
         return bounded_service.call("workspace_run_profile", workspace_id, profile_name)
 
+    @mcp.tool(
+        title="Run reviewed workspace diagnostic",
+        annotations=LOCAL_MUTATE,
+        structured_output=True,
+    )
+    def workspace_run_diagnostic(
+        workspace_id: str,
+        diagnostic_id: str,
+        selector: str | None = None,
+        expected_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input."""
+        return bounded_service.call(
+            "workspace_run_diagnostic",
+            workspace_id,
+            diagnostic_id,
+            selector,
+            expected_fingerprint,
+        )
+
     @mcp.tool(title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True)
     def workspace_verify(workspace_id: str, profile_name: str | None = None) -> dict[str, Any]:
         """Use this before commit to run the repository-default or explicitly named verification gate."""

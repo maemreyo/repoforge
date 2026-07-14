@@ -55,6 +55,15 @@ class ErrorCode(str, Enum):
     OPERATION_CORRUPT = "OPERATION_CORRUPT"
     OPERATION_SCHEMA_UNSUPPORTED = "OPERATION_SCHEMA_UNSUPPORTED"
     OPERATION_TRANSITION_INVALID = "OPERATION_TRANSITION_INVALID"
+    DIAGNOSTIC_NOT_FOUND = "DIAGNOSTIC_NOT_FOUND"
+    DIAGNOSTIC_SELECTOR_REQUIRED = "DIAGNOSTIC_SELECTOR_REQUIRED"
+    DIAGNOSTIC_SELECTOR_INVALID = "DIAGNOSTIC_SELECTOR_INVALID"
+    DIAGNOSTIC_STALE_WORKSPACE = "DIAGNOSTIC_STALE_WORKSPACE"
+    DIAGNOSTIC_TOOL_MISSING = "DIAGNOSTIC_TOOL_MISSING"
+    DIAGNOSTIC_TIMEOUT = "DIAGNOSTIC_TIMEOUT"
+    DIAGNOSTIC_PARSER_FAILED = "DIAGNOSTIC_PARSER_FAILED"
+    DIAGNOSTIC_UNEXPECTED_MUTATION = "DIAGNOSTIC_UNEXPECTED_MUTATION"
+    DIAGNOSTIC_OUTPUT_INVALID = "DIAGNOSTIC_OUTPUT_INVALID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +209,15 @@ def operation_error_from_exception(
         ErrorCode.OPERATION_CORRUPT: "The persisted operation record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.OPERATION_SCHEMA_UNSUPPORTED: "The operation record uses a schema version this RepoForge build cannot safely interpret.",
         ErrorCode.OPERATION_TRANSITION_INVALID: "The requested state transition is not allowed by the durable operation state machine.",
+        ErrorCode.DIAGNOSTIC_NOT_FOUND: "The requested diagnostic is not part of the reviewed repository capability set.",
+        ErrorCode.DIAGNOSTIC_SELECTOR_REQUIRED: "The diagnostic requires one typed selector before its reviewed argv can be resolved.",
+        ErrorCode.DIAGNOSTIC_SELECTOR_INVALID: "The supplied selector violates the configured type, path policy, or closed value set.",
+        ErrorCode.DIAGNOSTIC_STALE_WORKSPACE: "The workspace fingerprint changed after the caller reviewed it.",
+        ErrorCode.DIAGNOSTIC_TOOL_MISSING: "The reviewed diagnostic executable is not available in the constrained runtime path.",
+        ErrorCode.DIAGNOSTIC_TIMEOUT: "The reviewed diagnostic exceeded its configured bounded execution time.",
+        ErrorCode.DIAGNOSTIC_PARSER_FAILED: "The configured parser could not interpret the bounded diagnostic output safely.",
+        ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION: "The diagnostic changed workspace paths outside its reviewed mutability contract.",
+        ErrorCode.DIAGNOSTIC_OUTPUT_INVALID: "The diagnostic returned malformed or unsupported bounded output.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

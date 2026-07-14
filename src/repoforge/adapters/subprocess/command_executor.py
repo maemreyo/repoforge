@@ -33,12 +33,15 @@ class SubprocessCommandExecutor:
         return env
 
     @staticmethod
-    def _truncate(text: str, limit: int) -> str:
+    def _truncate(text: str, limit: int) -> tuple[str, bool]:
         if len(text) <= limit:
-            return text
+            return text, False
         half = max(1, limit // 2)
         removed = len(text) - half * 2
-        return f"{text[:half]}\n\n... <{removed} characters omitted> ...\n\n{text[-half:]}"
+        return (
+            f"{text[:half]}\n\n... <{removed} characters omitted> ...\n\n{text[-half:]}",
+            True,
+        )
 
     def _communicate(
         self,
@@ -104,12 +107,16 @@ class SubprocessCommandExecutor:
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise CommandError("Text command returned binary output")
+        bounded_stdout, stdout_truncated = self._truncate(stdout, limit)
+        bounded_stderr, stderr_truncated = self._truncate(stderr, limit)
         result = CommandResult(
             tuple(argv),
             str(cwd),
             process.returncode or 0,
-            self._truncate(stdout, limit),
-            self._truncate(stderr, limit),
+            bounded_stdout,
+            bounded_stderr,
+            stdout_truncated,
+            stderr_truncated,
         )
         if check and result.returncode != 0:
             raise CommandError(

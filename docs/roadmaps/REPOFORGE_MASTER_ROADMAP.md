@@ -134,6 +134,7 @@ RepoForge is already strong in the following areas:
 | Mutation safety | SHA/fingerprint optimistic locking |
 | Change control | Protected paths, branches, file and diff budgets |
 | Command execution | Reviewed named profiles rather than arbitrary shell |
+| Workspace diagnostics | Issue #11 complete: typed reviewed profiles, constrained tracked selectors, bounded parsers, exact mutation detection, and safe failure classes |
 | Verification | Exact-tree verification receipts |
 | Publishing | Non-force push and draft PR only |
 | Configuration | Immutable accepted generations and semantic deltas |
@@ -687,9 +688,12 @@ Cache accelerates iteration. Environment mismatch invalidates reuse. Final commi
 
 Issue #7 delivers the first production slice: workspace PR checks expose opaque Check Run selectors,
 and exact pushed-SHA details/failure evidence provides bounded annotations, failed-step context, secret-safe
-excerpts, deterministic classification, retryability, truncation, and partial-source coverage. Broader
-cross-provider diagnosis, automatic verification-plan integration, and check watching/cancellation remain
-future work.
+excerpts, deterministic classification, retryability, truncation, and partial-source coverage. Issue #11
+adds repository-reviewed workspace diagnostics with typed selectors, bounded parser output, explicit
+failure classes, exact pre/post fingerprints, artifact-path enforcement, and verification invalidation.
+Diagnostics remain synchronous and local-only, never accept model-authored argv, and do not replace the
+final verification gate. Broader cross-provider diagnosis, automatic verification-plan integration,
+durable background diagnostics, and check watching/cancellation remain future work.
 
 ### Failure classes
 

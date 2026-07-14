@@ -52,6 +52,19 @@ class RepositoryLister:
                     }
                     for name, p in repo.profiles.items()
                 },
+                "diagnostics": {
+                    name: {
+                        "summary": diagnostic.summary,
+                        "selector_kind": diagnostic.selector.kind.value,
+                        "mutability": diagnostic.mutability.value,
+                        "parser": diagnostic.parser.value,
+                        "network_policy": diagnostic.network_policy.value,
+                        "timeout_seconds": diagnostic.timeout_seconds,
+                        "output_limit": diagnostic.output_limit,
+                        "artifact_paths": list(diagnostic.artifact_paths),
+                    }
+                    for name, diagnostic in repo.diagnostics.items()
+                },
             }
             repositories.append(entry)
         return RepositoryListResult(repositories)

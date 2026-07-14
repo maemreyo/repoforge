@@ -92,6 +92,15 @@ class GitCliRepository:
         ).decode("utf-8", errors="strict")
         return [assert_path_allowed(x, repo) for x in raw.split("\x00") if x]
 
+    def is_tracked_path(self, path: Path, relative_path: str) -> bool:
+        result = self._executor.run(
+            ["git", "ls-files", "--error-unmatch", "--", relative_path],
+            cwd=path,
+            check=False,
+            output_limit=1_024,
+        )
+        return result.returncode == 0 and result.stdout.strip() == relative_path
+
     def fingerprint(self, path: Path) -> str:
         digest = hashlib.sha256()
         digest.update(self.head_sha(path).encode())

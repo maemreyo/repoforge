@@ -15,6 +15,8 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
     @property
     def combined(self) -> str:

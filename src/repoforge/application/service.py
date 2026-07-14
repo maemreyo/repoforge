@@ -89,6 +89,10 @@ from .workspace.restore_paths import (
     WorkspacePathsRestorer,
     WorkspaceRestorePathsCommand,
 )
+from .workspace.run_diagnostic import (
+    WorkspaceDiagnosticRunner,
+    WorkspaceRunDiagnosticCommand,
+)
 from .workspace.run_profile import (
     WorkspaceProfileRunner,
     WorkspaceRunProfileCommand,
@@ -183,6 +187,7 @@ class CodingService:
         self._restore = WorkspacePathsRestorer(ctx)
         self._diff = WorkspaceDiffReader(ctx)
         self._profile = WorkspaceProfileRunner(ctx)
+        self._diagnostic = WorkspaceDiagnosticRunner(ctx)
         self._verify = WorkspaceVerifier(ctx)
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
@@ -416,6 +421,24 @@ class CodingService:
     def workspace_run_profile(self, workspace_id: str, profile_name: str) -> dict[str, Any]:
         return _result(
             self._profile.execute(WorkspaceRunProfileCommand(workspace_id, profile_name))
+        )
+
+    def workspace_run_diagnostic(
+        self,
+        workspace_id: str,
+        diagnostic_id: str,
+        selector: str | None = None,
+        expected_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._diagnostic.execute(
+                WorkspaceRunDiagnosticCommand(
+                    workspace_id,
+                    diagnostic_id,
+                    selector,
+                    expected_fingerprint,
+                )
+            )
         )
 
     def workspace_verify(
