@@ -24,6 +24,9 @@ RepoForge has evolved beyond a thin MCP wrapper around Git. Its current strength
 - deterministic onboarding proposals;
 - interactive safe-default review;
 - stable MCP and release contracts;
+- deterministic issue governance with a validated dependency graph and Ready-ticket selector;
+- snapshot-bound explainable risk and ordered verification recommendations;
+- reusable private atomic durable-state envelopes adopted by OperationTask;
 - bounded committed-snapshot tree, file, batch-read, search, commit, and comparison evidence without checkout;
 - exact workspace-base freshness evidence and preview-bound merge-only refresh without rebase or force-push.
 
@@ -257,11 +260,13 @@ Replace repeated manual status, diff, impact, architecture, risk, and verificati
 
 ### Current shell and future public operation
 
-The application layer now provides a snapshot-consistent internal assessment shell over status,
-diff, policy, base, PR, CI, failure-reference, and verification-receipt evidence. It rechecks HEAD,
-workspace fingerprint, configuration generation, and policy hash after every provider boundary.
-Semantic impact, architecture, risk, immutable-plan selection, caching, and public MCP exposure remain
-separate follow-on work.
+The application layer now provides a snapshot-consistent internal assessment over status, diff,
+policy, base, PR, CI, failure-reference, verification-receipt, explainable risk, and ordered
+verification-recommendation evidence. It rechecks HEAD, workspace fingerprint, configuration
+generation, and policy hash after every provider boundary. Missing evidence raises rather than lowers
+risk, every recommendation retains the configured final exact-tree profile, and critical paths require
+manual review. Semantic impact, architecture analysis, immutable-plan execution, caching, and public
+MCP exposure remain separate follow-on work.
 
 ```text
 workspace_assess(workspace_id)
@@ -367,11 +372,13 @@ workspace_execute_plan(workspace_id, plan_id, through)
 
 ## 8. Durable operations and progress
 
-Issue #9 delivers the protocol-independent foundation: explicit immutable transitions, monotonic
-progress, cancellation requests separate from terminal cancellation, private per-record JSON CAS,
-startup orphaning, expiry and retention, and bounded status/list/cancel interfaces through both CLI
-and MCP. Concrete workers, resumable verification/indexing, PR-check watching, and MCP Tasks
-adaptation remain future consumer work.
+Issue #9 delivers the protocol-independent operation state machine: explicit immutable transitions,
+monotonic progress, cancellation requests separate from terminal cancellation, startup orphaning,
+expiry and retention, and bounded status/list/cancel interfaces through both CLI and MCP. Issue #71
+extracts the reusable durable-state substrate beneath it: typed schema versions and revisions, private
+bounded JSON, atomic replace and directory fsync, revision compare-and-swap, stable corruption and
+future-schema errors, and safe audit metadata. Concrete workers, migrations, quotas, resumable
+verification/indexing, PR-check watching, and MCP Tasks adaptation remain future consumer work.
 
 ### Goal
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -26,6 +26,7 @@ from .base_status import WorkspaceBaseStatusCommand, WorkspaceBaseStatusReader
 from .diff import WorkspaceDiffCommand, WorkspaceDiffReader
 from .pr_checks import WorkspacePrChecksCommand, WorkspacePrChecksReader
 from .pr_status import WorkspacePrStatusCommand, WorkspacePrStatusReader
+from .risk import assess_workspace_risk, recommend_verification
 from .status import WorkspaceStatusCommand, WorkspaceStatusReader
 
 T = TypeVar("T")
@@ -329,7 +330,7 @@ class WorkspaceAssessmentReader:
                 )
             )
             self._assert_current(snapshot, repo, path)
-            return validate_workspace_assessment(
+            base_assessment = validate_workspace_assessment(
                 WorkspaceAssessment(
                     snapshot=snapshot,
                     changed_paths=changed_paths,
@@ -343,6 +344,22 @@ class WorkspaceAssessmentReader:
                     receipt_freshness=receipt_freshness,
                     evidence_coverage=coverage,
                     uncertainties=uncertainties,
+                )
+            )
+            risk = assess_workspace_risk(base_assessment, repo.risk_policy)
+            recommendation = recommend_verification(
+                base_assessment,
+                risk,
+                repo.risk_policy,
+                available_profiles=set(repo.profiles),
+                available_diagnostics=set(repo.diagnostics),
+            )
+            self._assert_current(snapshot, repo, path)
+            return validate_workspace_assessment(
+                replace(
+                    base_assessment,
+                    risk=risk,
+                    verification_recommendation=recommendation,
                 )
             )
 

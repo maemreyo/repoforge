@@ -1,0 +1,83 @@
+name: Initiative
+about: Define an AI-ready RepoForge initiative and its implementation-ticket graph.
+title: "[INITIATIVE][P1][BACKLOG] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Complete every required field. `Ready` is valid only when details are complete and all blockers are Done.
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options: [initiative]
+    validations: {required: true}
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: [P0, P1, P2, P3]
+    validations: {required: true}
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      options: [Backlog, Ready, In progress, Blocked, In review, Done]
+    validations: {required: true}
+  - type: input
+    id: parent
+    attributes: {label: Parent, placeholder: "#3"}
+    validations: {required: true}
+  - type: input
+    id: blocked-by
+    attributes: {label: Blocked by, placeholder: "None or #12, #14"}
+    validations: {required: true}
+  - type: input
+    id: blocks
+    attributes: {label: Blocks, placeholder: "None or #20, #21"}
+    validations: {required: true}
+  - type: input
+    id: roadmap
+    attributes: {label: Roadmap, placeholder: "master / section anchor"}
+    validations: {required: true}
+  - type: textarea
+    id: objective
+    attributes: {label: Objective}
+    validations: {required: true}
+  - type: textarea
+    id: user-value
+    attributes: {label: User value}
+    validations: {required: true}
+  - type: textarea
+    id: scope
+    attributes: {label: Scope}
+    validations: {required: true}
+  - type: textarea
+    id: non-goals
+    attributes: {label: Non-goals}
+    validations: {required: true}
+  - type: textarea
+    id: architecture
+    attributes: {label: Architecture / contracts}
+    validations: {required: true}
+  - type: textarea
+    id: acceptance
+    attributes: {label: Acceptance criteria}
+    validations: {required: true}
+  - type: textarea
+    id: tests
+    attributes: {label: Tests}
+    validations: {required: true}
+  - type: textarea
+    id: verification
+    attributes: {label: Final verification}
+    validations: {required: true}
+  - type: textarea
+    id: migration
+    attributes: {label: Migration / compatibility}
+    validations: {required: true}
+  - type: textarea
+    id: pr-shape
+    attributes: {label: Expected PR shape}
+    validations: {required: true}

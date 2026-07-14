@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Any
 
 from .errors import ErrorCode, RepoForgeError
+from .risk import VerificationRecommendation, WorkspaceRiskAssessment
 
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
 _SHA64 = re.compile(r"^[a-f0-9]{64}$")
@@ -67,6 +68,8 @@ class WorkspaceAssessment:
     evidence_coverage: dict[str, str]
     uncertainties: tuple[str, ...]
     current: bool = True
+    risk: WorkspaceRiskAssessment | None = None
+    verification_recommendation: VerificationRecommendation | None = None
 
 
 def _invalid(message: str) -> RepoForgeError:
@@ -193,6 +196,28 @@ def validate_workspace_assessment(assessment: WorkspaceAssessment) -> WorkspaceA
         raise _invalid("assessment contains too many uncertainties")
     if tuple(sorted(set(assessment.uncertainties))) != assessment.uncertainties:
         raise _invalid("uncertainties must be sorted and unique")
+    risk = assessment.risk
+    recommendation = assessment.verification_recommendation
+    if (risk is None) != (recommendation is None):
+        raise _invalid("risk and verification recommendation must be present together")
+    if risk is not None and recommendation is not None:
+        if risk.assessment_snapshot_id != assessment.snapshot.snapshot_id:
+            raise _invalid("risk belongs to a different assessment snapshot")
+        if recommendation.assessment_snapshot_id != assessment.snapshot.snapshot_id:
+            raise _invalid("verification recommendation belongs to a different snapshot")
+        if len(risk.factors) > 64 or len(risk.uncertainties) > _MAX_UNCERTAINTIES:
+            raise _invalid("risk contains too many factors or uncertainties")
+        if len(recommendation.ordered_stages) > 32:
+            raise _invalid("verification recommendation contains too many stages")
+        if len(recommendation.next_safe_actions) > 32:
+            raise _invalid("verification recommendation contains too many actions")
+        orders = tuple(stage.order for stage in recommendation.ordered_stages)
+        if orders != tuple(range(1, len(orders) + 1)):
+            raise _invalid("verification stages must have contiguous one-based order")
+        if not recommendation.required_profiles:
+            raise _invalid("verification recommendation must retain a final profile")
+        if recommendation.required_profiles[-1] != recommendation.final_profile:
+            raise _invalid("final verification profile must be the last required profile")
     if not assessment.current:
         raise _invalid("a returned workspace assessment must be current")
     return assessment

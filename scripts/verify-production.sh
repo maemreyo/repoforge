@@ -22,19 +22,27 @@ fi
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/repoforge-production-gate.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
 export PYTHONDONTWRITEBYTECODE=1
-export COVERAGE_FILE="$TMP_ROOT/coverage"
 export RUFF_CACHE_DIR="$TMP_ROOT/ruff-cache"
 
+echo "[integrity] synchronize frozen dependencies"
 uv sync --extra dev --frozen
+echo "[integrity] validate ticket graph"
+uv run python scripts/validate_ticket_graph.py
+echo "[integrity] validate release contract"
 uv run python scripts/check_release_contracts.py
+echo "[integrity] check formatting, lint, and types"
 uv run ruff format --check src tests scripts
 uv run ruff check src tests scripts
 uv run mypy --strict --cache-dir "$TMP_ROOT/mypy-cache" src/repoforge
-uv run pytest --timeout=60 -p no:cacheprovider --cov=repoforge --cov-branch --cov-report=term-missing
+echo "[integrity] run deterministic pytest shards and combine branch coverage"
+uv run python scripts/run_test_shards.py --coverage-dir "$TMP_ROOT/coverage-data"
 
+echo "[integrity] build source and wheel distributions"
 uv build --out-dir "$TMP_ROOT/dist"
+echo "[integrity] verify isolated installed-wheel behavior"
 scripts/verify-wheel-install.sh "$TMP_ROOT/dist"
 
+echo "[integrity] validate diff and repository cleanliness"
 git diff --check
 if [ "$ALLOW_DIRTY" = false ]; then
   STATUS=$(git status --porcelain --untracked-files=normal)

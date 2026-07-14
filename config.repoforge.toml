@@ -58,6 +58,31 @@ pr_labels = []
 pr_reviewers = []
 no_maintainer_edit = false
 
+[repositories.repoforge.risk]
+low_max = 24
+medium_max = 49
+high_max = 74
+final_profile = "full"
+ordered_profiles = ["quick", "test", "full"]
+narrow_diagnostics = ["pytest-target", "release-contract-diff"]
+critical_globs = [
+  ".github/workflows/**",
+  "**/auth*.py",
+  "**/config.py",
+  "**/runtime*.py",
+  "**/schema*.py",
+  "**/security*.py",
+  "scripts/verify-production.sh",
+]
+public_contract_globs = [
+  "src/repoforge/config.py",
+  "src/repoforge/domain/errors.py",
+  "src/repoforge/interfaces/cli/**",
+  "src/repoforge/interfaces/mcp/**",
+]
+manifest_globs = ["**/uv.lock", "pyproject.toml", "**/package-lock.json", "**/pnpm-lock.yaml"]
+docs_globs = ["*.md", "docs/**"]
+
 [repositories.repoforge.diagnostics.pytest-target]
 summary = "Run one tracked pytest path or node without changing verification profiles"
 argv = ["uv", "run", "--extra", "dev", "pytest", "{selector}", "-q"]
@@ -105,8 +130,14 @@ verification = true
 timeout_seconds = 600
 commands = [["make", "build"]]
 
+[repositories.repoforge.profiles.ticket-graph]
+description = "Validate the checked-in roadmap graph and show the next Ready tickets"
+verification = true
+timeout_seconds = 120
+commands = [["make", "tickets"]]
+
 [repositories.repoforge.profiles.full]
-description = "Run lint, strict typing, tests with coverage, and package builds"
+description = "Run ticket governance, lint, strict typing, tests with coverage, and package builds"
 verification = true
 timeout_seconds = 1800
 commands = [["make", "check"]]
