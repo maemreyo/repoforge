@@ -1,87 +1,248 @@
+<div align="center">
+
+<img src="plugin-icon.png" alt="RepoForge logo" width="180" />
+
 # RepoForge
 
-**Safe local Git workspaces and draft pull requests for ChatGPT.**
+### The control plane for agentic software engineering
 
-RepoForge is a local [Model Context Protocol](https://modelcontextprotocol.io/) server that gives
-ChatGPT controlled access to allowlisted Git repositories. It creates isolated worktrees, applies
-bounded code changes, runs repository-defined verification profiles, pushes `ai/*` branches without
-force, and opens draft pull requests through the GitHub CLI.
+**Safe execution. Exact evidence. Human control.**
 
-RepoForge is deliberately **not** a general-purpose terminal or filesystem bridge. It does not
-provide tools for arbitrary shell execution, protected-branch writes, force-pushes, pull-request
-merges, secret management, repository administration, or GitHub Actions workflow changes.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-beta-orange)](#project-status)
+[![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-compatible-6E56CF)](https://modelcontextprotocol.io/)
 
-> **Project status:** Beta. RepoForge is designed as a personal developer tool for repositories and
-> machines you control. Review every diff and keep ChatGPT write confirmations enabled.
+[Getting Started](#getting-started) ·
+[How It Works](#how-it-works) ·
+[Security](#security-model) ·
+[Documentation](#documentation) ·
+[Roadmap](#roadmap)
 
-## Why RepoForge
+</div>
 
-ChatGPT web cannot directly access a local checkout, run its test suite, or use an existing `gh`
-session. RepoForge provides a constrained bridge with explicit safety boundaries:
+---
 
-- repositories are configured by a short, model-facing ID;
-- every task runs in an isolated Git worktree;
-- writable branches must match a configured prefix, normally `ai/`;
-- file access is restricted by canonical path checks and deny patterns;
-- model-visible commands come only from predefined TOML profiles;
-- verification receipts are bound to the exact workspace fingerprint;
-- pushes are non-force and pull requests are always created as drafts;
-- local activity is recorded in a JSONL audit log without storing file bodies, patches, or secrets.
+## What is RepoForge?
 
-See [SECURITY.md](SECURITY.md) for the complete threat model and limitations.
+RepoForge is a local [Model Context Protocol](https://modelcontextprotocol.io/) server that gives AI agents controlled access to allowlisted Git repositories.
 
-## Architecture
+It sits between an AI client and your development environment, enforcing a safe, reviewable workflow for repository inspection, isolated code changes, verification, Git operations, and draft pull-request publication.
+
+RepoForge is designed around a simple principle:
+
+> An AI-generated change is not ready merely because the code looks plausible.  
+> It is ready when the exact source tree has current, reproducible evidence that explains what changed, what may be affected, how it was verified, and which actions were authorized.
+
+Today, RepoForge can:
+
+- inspect explicitly allowlisted repositories;
+- create isolated Git worktrees on controlled `ai/*` branches;
+- read and modify files within canonical path and change-budget policies;
+- run repository-defined, allowlisted command profiles;
+- bind verification receipts to the exact workspace tree;
+- commit only the verified tree;
+- push without force;
+- create and update draft pull requests;
+- inspect pull-request and CI state;
+- manage local configuration generations and runtime lifecycle;
+- record bounded, secret-safe audit metadata.
+
+RepoForge is deliberately **not** a general-purpose shell, unrestricted filesystem bridge, merge bot, secret manager, or CI bypass mechanism.
+
+---
+
+## Why RepoForge?
+
+AI agents are increasingly capable of understanding and changing large codebases. The difficult part is no longer only code generation. The difficult part is controlling the entire engineering workflow around it:
+
+- Which repository may the agent access?
+- Which files may it change?
+- Is the workspace still based on the expected source state?
+- Which commands are approved?
+- Did the source tree change after verification?
+- Is the evidence still current?
+- Can the operation be resumed safely after interruption?
+- What was pushed, and what remains incomplete?
+- Which decisions still require a human?
+
+RepoForge provides a constrained engineering control plane that makes those questions explicit.
+
+### Core promises
+
+1. **Local-first control**  
+   Source code and credentials remain under the operator's control.
+
+2. **Least privilege**  
+   Repositories, branches, paths, commands, and external writes are explicitly constrained.
+
+3. **Exact-state decisions**  
+   Writes, plans, and verification are bound to exact Git and workspace state.
+
+4. **Evidence before confidence**  
+   Model confidence cannot replace tests, policy, or current source evidence.
+
+5. **Human authority**  
+   Capability expansion and high-impact decisions remain reviewable by a human.
+
+---
+
+## How It Works
 
 ```text
-ChatGPT web
-    |
-    | MCP tool calls
-    v
-OpenAI Secure MCP Tunnel
-    |
-    | local stdio process
-    v
+Human intent
+    │
+    ▼
+AI client / ChatGPT
+    │  MCP tool calls
+    ▼
 RepoForge
-    |-- allowlisted repositories
-    |-- isolated Git worktrees
-    |-- predefined verification profiles
-    |-- git + GitHub CLI
-    v
-ai/* branch -> non-force push -> draft pull request
+    ├── repository allowlist
+    ├── path and branch policy
+    ├── isolated Git worktrees
+    ├── optimistic locking
+    ├── bounded change budgets
+    ├── approved execution profiles
+    ├── exact-tree verification receipts
+    ├── audit and runtime state
+    └── GitHub publication controls
+    │
+    ▼
+ai/* branch
+    │
+    ├── non-force push
+    └── draft pull request
 ```
 
-## Key capabilities
+A typical task follows this flow:
 
-- Repository discovery and configuration generation with `rf init` and `rf inspect-repo`.
-- Actionable environment diagnostics through `rf doctor`.
-- A non-mutating repository/worktree smoke test through `rf smoke-test`.
-- Twenty-seven focused MCP tools with separate read and write responsibilities.
-- Optimistic file locking, workspace fingerprints, verification receipts, and change budgets.
-- Bounded file reads, batch reads, literal search, exact replacement, unified patches, and path
-  restoration.
-- Draft pull-request creation and updates, plus compact CI status buckets.
-- Reproducible Python environments through `uv.lock`.
-- Unit, security, local Git integration, fake-`gh`, CLI, and in-memory MCP protocol tests.
+1. Inspect repository context and project instructions.
+2. Read the relevant issue, plan, source files, and tests.
+3. Create an isolated workspace from an allowlisted base.
+4. Make bounded changes using optimistic locking.
+5. Review the exact diff and change-budget metrics.
+6. Run narrow approved checks while iterating.
+7. Run the repository's authoritative verification profile.
+8. Commit the exact verified tree.
+9. Push the controlled branch without force.
+10. Create or update a draft pull request.
+11. Observe CI and return the exact resulting state.
 
-## Requirements
+---
 
-- macOS or Linux;
-- Python 3.10 or newer;
-- Git;
-- GitHub CLI (`gh`) authenticated for the repositories you intend to use;
-- [`uv`](https://docs.astral.sh/uv/) for the recommended installation path;
-- `tunnel-client` when connecting RepoForge to ChatGPT web through Secure MCP Tunnel;
-- Node.js and `npx` only when using MCP Inspector.
+## Safety Model
 
-## Installation
+RepoForge treats safety boundaries as product behavior, not optional guidance.
 
-For normal use, install the CLI directly:
+### Enforced invariants
+
+- Repository access is configured by a short allowlisted `repo_id`.
+- Model-provided absolute repository paths are not accepted by MCP tools.
+- File paths are canonicalized and cannot escape the repository or worktree.
+- Protected branches cannot be modified.
+- Writable branches must use the configured prefix, normally `ai/`.
+- Every task uses an isolated Git worktree.
+- Secret-bearing and protected paths are denied by policy.
+- Symlinks, submodules, and gitlinks cannot bypass path restrictions.
+- Writes require current file hashes or a current workspace fingerprint.
+- Any source mutation invalidates prior verification evidence.
+- Commit may require a receipt for the exact current tree.
+- Push never uses force.
+- Pull requests are created as drafts.
+- Audit records exclude source bodies, patches, secrets, and full process environments.
+- MCP stdio mode reserves stdout for protocol messages.
+
+### Deliberately unsupported
+
+RepoForge does not expose tools for:
+
+- arbitrary shell execution;
+- unrestricted filesystem access;
+- direct writes to protected branches;
+- force-pushing;
+- merging pull requests;
+- enabling auto-merge;
+- managing repository secrets;
+- modifying branch protection;
+- repository administration;
+- release creation;
+- editing GitHub Actions workflows.
+
+These omissions are part of the security model.
+
+See [SECURITY.md](SECURITY.md) for the detailed threat model and limitations.
+
+---
+
+## Key Capabilities
+
+### Repository inspection
+
+- List configured repositories and policies.
+- Inspect Git status, remotes, branch state, manifests, scripts, and project instructions.
+- Read recent commits, GitHub issues, pull requests, reviews, and checks.
+
+### Isolated workspace lifecycle
+
+- Create one managed worktree per task.
+- Track workspace identity, branch, base, HEAD, fingerprint, and change metrics.
+- Resume or remove clean local workspaces safely.
+
+### Controlled file operations
+
+- Bounded UTF-8 file reads.
+- Batched reads with configured limits.
+- Literal repository search.
+- Exact text replacement with optimistic locking.
+- Validated unified patches.
+- Path restoration.
+- Exact diff review and change-budget enforcement.
+
+### Verification and publication
+
+- Execute explicitly named repository profiles.
+- Store verification receipts for the exact resulting tree.
+- Commit only after the configured gate succeeds.
+- Push without force.
+- Create and update draft pull requests.
+- Read mergeability and compact CI status.
+
+### Configuration and runtime operations
+
+- Guided repository onboarding.
+- Reviewed configuration generations.
+- Atomic activation and rollback behavior.
+- Managed tunnel lifecycle.
+- Runtime status, logs, diagnostics, restart, and reload.
+- Bounded and redacted operational metadata.
+
+---
+
+## Getting Started
+
+### Requirements
+
+- macOS or Linux
+- Python 3.10 or newer
+- Git
+- GitHub CLI (`gh`)
+- [`uv`](https://docs.astral.sh/uv/)
+- `tunnel-client` when connecting RepoForge to ChatGPT through a secure MCP tunnel
+- Node.js and `npx` only for MCP Inspector workflows
+
+### Install
 
 ```bash
 uv tool install git+https://github.com/maemreyo/repoforge.git
 ```
 
-Contributors can instead clone the repository and run `uv sync --extra dev`.
+For development:
+
+```bash
+git clone https://github.com/maemreyo/repoforge.git
+cd repoforge
+uv sync --extra dev
+```
 
 Authenticate GitHub CLI:
 
@@ -90,203 +251,293 @@ gh auth login
 gh auth setup-git
 ```
 
-The installed commands are:
+Installed commands:
 
 ```text
 repoforge
-rf
 repoforge-mcp
+rf
 ```
 
-## Configure and start
+### Configure
 
-Configure the tunnel and every local repository once:
+Configure a tunnel and one or more repositories:
 
 ```bash
 rf setup \
   --tunnel-id tunnel_... \
   /absolute/path/to/repoforge \
-  /absolute/path/to/work-frontier
+  /absolute/path/to/another-repository
 ```
 
-RepoForge writes a minimal user config containing only the tunnel identifier and repository paths.
-It generates the full safety policy and exact command allowlists into a reviewed lock under
-`~/.local/state/repoforge/config-locks/`. Setup also runs diagnostics and a safe worktree smoke test.
+RepoForge stores minimal user intent and generates a reviewed configuration lock containing the resolved repository policy and approved execution profiles.
 
-After setup, start RepoForge with one command:
+### Start
 
 ```bash
 rf start
 ```
 
-When `CONTROL_PLANE_API_KEY` is absent, `rf start` asks for it using a hidden terminal prompt. The key
-is never written to configuration, logs, audit records, or shell history.
+When `CONTROL_PLANE_API_KEY` is not already available, RepoForge requests it through a hidden terminal prompt. The key is not written to configuration, audit records, runtime logs, or shell history.
 
-Manage repositories without editing TOML:
+### Manage repositories
 
 ```bash
 rf repo list
-rf repo inspect /absolute/path/to/another-repository
-rf repo add /absolute/path/to/another-repository --preview
-rf repo add /absolute/path/to/another-repository --approve PROPOSAL_ID
+rf repo inspect /absolute/path/to/repository
+
+rf repo add /absolute/path/to/repository --preview
+rf repo add /absolute/path/to/repository --approve PROPOSAL_ID
+
+rf repo refresh
+rf repo refresh --accept
+
 rf repo remove repository-id
+```
+
+Repository inspection and preview operations do not execute discovered commands. Capability expansion requires explicit approval of the current proposal.
+
+### Manage the runtime
+
+```bash
 rf runtime status
 rf runtime start
 rf runtime stop
 rf runtime restart
 rf runtime reload
 rf runtime logs --tail 100
+
 rf config history
 rf config rollback 3
+
 rf diagnostics bundle
 ```
 
-Managed runtime changes auto-restart after a successful repository add or accepted refresh; failed
-expansions roll back to the previous retained generation. Repository removals are restrictive and
-never roll back removed access if activation fails. Foreground runtimes report the reviewed generation
-and restart requirement; `rf runtime status` makes that comparison explicit.
-`rf runtime start` manages its tunnel-client child as a local process group; `stop` and `restart`
-only affect that identity-validated managed child. `rf start` remains the foreground compatibility
-entry point.
-`rf runtime logs` reads a bounded, redacted tail from the managed tunnel child only.
-`rf runtime status` includes local health evidence for the managed tunnel and its MCP child; it does
-not make network requests or expose tunnel credentials.
-When the MCP child is live, runtime status also includes a deterministic `tool_surface_hash` derived
-from public MCP metadata, so an upgrade that changes tool names, signatures, titles, or annotations
-can be detected independently of a configuration generation.
+---
 
-`rf diagnostics bundle` writes a local JSON artifact containing only config fingerprints, retained
-generation numbers, and runtime metadata. It explicitly excludes configuration/file/patch/PR bodies,
-runtime logs, the process environment, and tunnel credentials.
-`rf runtime reload` is the Stage-A supervisor-managed reload: it performs the same controlled
-process-group restart as `restart`, then starts the latest reviewed configuration generation.
+## Recommended Agent Workflow
 
-Every accepted minimal configuration is retained as a paired source and resolved-lock snapshot.
-`rf config history` lists complete retained generations; `rf config rollback N` validates and restores
-the exact source/lock pair for generation `N`, then reports whether the running process needs restart.
-RepoForge retains the newest ten complete generations to keep rollback state bounded.
-
-`rf repo inspect` and `rf repo add --preview` never write configuration. `rf repo add --preview`
-returns a deterministic proposal ID bound to the current config, repository path, ID, and detected
-profiles; enrollment requires supplying that exact ID via `--approve`. If a `Makefile`,
-`package.json`, `pyproject.toml`, or another command source changes, RepoForge fails
-closed. Review the proposed allowlist diff and then accept it explicitly:
-
-```bash
-rf repo refresh
-rf repo refresh --accept
-```
-
-Legacy full `[server]` and `[repositories.*]` configurations remain supported. Detailed setup,
-security behavior, and troubleshooting are in [the ChatGPT setup guide](docs/getting-started/CHATGPT_SETUP.md).
-
-## Recommended workflow
-
-1. Inspect the configured repository with `repo_list`, `repo_status`, and `repo_context`.
-2. Read relevant instructions, plans, issues, implementation files, and tests.
-3. Create one isolated workspace for the approved task.
-4. Make small, bounded changes with optimistic locking.
-5. Review `workspace_diff` after each meaningful change.
-6. Run narrow allowlisted profiles while iterating.
-7. Run `workspace_verify` before commit.
-8. Stop for human review of the final diff and verification receipt.
-9. Commit the exact verified tree, push without force, and create a draft pull request.
-10. Read CI status through `workspace_pr_checks`. RepoForge never marks a PR ready or merges it.
-
-Example planning prompt:
+A strong prompt for an AI agent is:
 
 ```text
-Use only RepoForge.
+Use RepoForge only.
 
-Repository ID: my-repository.
+Inspect the repository status, instructions, relevant issue or plan,
+implementation, and tests before making changes.
 
-Inspect repository status, instructions, the relevant issue or plan, implementation, and tests.
-Do not change anything yet. Return the proposed scope, affected files, risks, narrow tests, and final
-verification profile, then stop for approval.
+Return:
+1. exact task interpretation;
+2. affected modules and contracts;
+3. expected files;
+4. risks and non-goals;
+5. narrow tests to run while iterating;
+6. final verification profile;
+7. any reason the task should be split.
+
+Stop for approval before editing.
 ```
 
-## Command-line reference
+After approval:
 
 ```text
-rf setup              Configure tunnel and repositories in one step
-rf start              Validate and start the secure tunnel
-rf repo               List, add, remove, or refresh repositories
-rf init               Generate a legacy full configuration
-rf inspect-repo       Preview ecosystem, scripts, instructions, and profiles
-rf doctor             Validate tools, auth, paths, remotes, and profiles
-rf smoke-test         Exercise safe repository/worktree operations
-rf show-config        Print the resolved configuration
-rf list-workspaces    List registered local workspaces
-rf remove-workspace   Remove a clean local worktree
-rf audit              Read recent local audit events
-rf tunnel-command     Print tunnel-client initialization commands
-rf serve              Run the MCP server over stdio
+Create an isolated workspace, implement the approved task using small
+test-driven changes, review the final diff, run the full verification
+profile, commit the exact verified tree, push without force, and create
+a draft pull request. Do not merge it.
 ```
 
-Use `rf <command> --help` for complete options.
+---
 
 ## Development
 
-Run the full local quality gate:
+Set up the environment:
 
 ```bash
 uv sync --extra dev
-./scripts/test-all.sh
 ```
 
-Equivalent Make targets are available:
+Run individual gates:
 
 ```bash
 make lint
 make typecheck
 make test
 make build
+```
+
+Run the standard local gate:
+
+```bash
 make check
 ```
 
-The project enforces strict Mypy checks, Ruff, branch coverage of at least 80%, distribution builds,
-security regressions, real local Git/worktree integration, deterministic fake-GitHub tests, and MCP
-protocol tests.
+Run the production release gate:
+
+```bash
+scripts/verify-production.sh
+```
+
+During development on a dirty tree:
+
+```bash
+scripts/verify-production.sh --allow-dirty
+```
+
+The production gate checks public contracts, formatting, linting, typing, tests, coverage, packaging, and installed-wheel behavior.
+
+### Project structure
+
+```text
+src/repoforge/
+├── domain/          Core models, invariants, and policy concepts
+├── application/     Use cases and orchestration
+├── ports/           Abstract boundaries
+├── adapters/        Git, GitHub, filesystem, persistence, runtime, and execution
+├── interfaces/      MCP, CLI, and runtime entry points
+└── testing/         Shared test doubles and fixtures
+
+docs/
+├── architecture/
+├── contracts/
+├── development/
+├── getting-started/
+├── guides/
+├── plans/
+├── roadmaps/
+├── superpowers/
+└── testing/
+```
+
+RepoForge follows dependency inversion:
+
+```text
+Interfaces
+    ↓
+Application use cases
+    ↓
+Domain contracts
+    ↑
+Ports and infrastructure adapters
+```
+
+Policy decisions belong in the domain and application layers, not in MCP handlers, CLI rendering, or UI components.
+
+---
 
 ## Documentation
 
 - [Documentation index](docs/README.md)
-- [ChatGPT and tunnel setup](docs/getting-started/CHATGPT_SETUP.md)
-- [Interactive onboarding UI](docs/getting-started/INTERACTIVE_ONBOARDING.md)
-- [Tool reference](docs/development/TOOL_REFERENCE.md)
+- [ChatGPT setup guide](docs/getting-started/CHATGPT_SETUP.md)
+- [Interactive onboarding](docs/getting-started/INTERACTIVE_ONBOARDING.md)
 - [Development guide](docs/development/DEVELOPMENT.md)
+- [MCP tool reference](docs/development/TOOL_REFERENCE.md)
 - [Testing strategy](docs/testing/TESTING.md)
-- [Full-flow test runbook](docs/testing/FULL_FLOW_TESTING.md)
-- [Starter prompts](docs/guides/STARTER_PROMPTS.md)
-- [Plugin regression cases](docs/testing/PLUGIN_TEST_CASES.md)
+- [Full-flow testing](docs/testing/FULL_FLOW_TESTING.md)
 - [Security model](SECURITY.md)
-- [Changelog](CHANGELOG.md)
+- [Master roadmap](docs/roadmaps/REPOFORGE_MASTER_ROADMAP.md)
+
+---
+
+## Roadmap
+
+RepoForge is evolving from a safe local Git bridge into an evidence-driven engineering control plane for humans and AI agents.
+
+The long-term architecture is organized around:
+
+1. **Agent Control Plane**
+   - durable task capsules;
+   - resumable operations;
+   - immutable execution plans;
+   - workspace leases;
+   - structured next actions.
+
+2. **Unified Evidence**
+   - snapshot-consistent workspace assessment;
+   - impact and affected-test intelligence;
+   - architecture drift detection;
+   - explainable risk;
+   - adaptive verification.
+
+3. **ChatGPT-native UX**
+   - MCP Apps dashboards;
+   - progress and cancellation;
+   - review and approval interfaces;
+   - capability-aware elicitation.
+
+4. **Reproducible Execution**
+   - environment identity;
+   - verification DAGs;
+   - safe caches;
+   - structured failure intelligence;
+   - optional isolated execution adapters.
+
+5. **Security and Trust**
+   - analyzer integrations;
+   - secret-safe egress;
+   - explicit capability policy;
+   - workload identity;
+   - verification attestations.
+
+6. **Scale**
+   - behavioral agent evaluations;
+   - record and replay;
+   - OpenTelemetry-compatible traces;
+   - multi-repository task bundles;
+   - optional team, remote, and A2A adapters.
+
+The roadmap preserves the current safety model: new intelligence may recommend, explain, or broaden verification, but it may not silently expand authority.
+
+See the [RepoForge Master Roadmap](docs/roadmaps/REPOFORGE_MASTER_ROADMAP.md) and the [program issue](https://github.com/maemreyo/repoforge/issues/3).
+
+---
+
+## Vision
+
+> A future where humans and AI agents can build software at high speed while every change remains safe, explainable, verifiable, and under human control.
+
+## Mission
+
+> RepoForge turns engineering intent into evidence-backed software changes by orchestrating tasks, constraining capabilities, isolating execution, assessing impact, and verifying the exact source state before publication.
+
+---
+
+## Project Status
+
+RepoForge is currently **Beta**.
+
+It is intended primarily as a local, personal developer tool for repositories and machines you control. Review every diff, preserve client-side confirmation for write operations, and do not treat the current release as a multi-tenant security boundary.
+
+Compatibility and behavior may evolve while the task, evidence, execution, and UI control-plane roadmap is implemented.
+
+---
+
+## Contributing
+
+Contributions should preserve RepoForge's safety invariants and architectural boundaries.
+
+Before opening a pull request:
+
+1. Read [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+2. Keep the change scoped to one independently reviewable concern.
+3. Add positive, negative, stale-state, and failure-path coverage where applicable.
+4. Run the production verification gate.
+5. Document public contract changes explicitly.
+6. Open a draft pull request for review.
+
+Please do not propose arbitrary shell access, force push, automatic merge, secret exposure, or policy bypasses as convenience features.
+
+---
 
 ## License
 
-RepoForge is distributed under the [MIT License](LICENSE).
+RepoForge is available under the [MIT License](LICENSE).
 
-## Guided onboarding for all local repositories
+---
 
-The production happy path is now Git-aware and config-aware. Point RepoForge at the directory that contains your local repositories; it excludes linked worktrees and generated directories, skips paths already enrolled, and guides each required policy decision and exact approval without `find`, `jq`, or shell loops.
+<div align="center">
 
-```bash
-uv tool install --force 'git+https://github.com/maemreyo/repoforge.git@main'
-rf onboard /absolute/root/containing/repos
-rf runtime start
-```
+**RepoForge — The control plane for agentic software engineering.**
 
-Useful supporting commands:
+Safe execution · Exact evidence · Human control
 
-```bash
-rf repo discover /absolute/root/containing/repos
-rf onboard status SESSION_ID
-rf onboard resume SESSION_ID
-rf onboard cancel SESSION_ID
-```
-
-Use `--non-interactive` only when every decision, exact `approve:PROPOSAL_ID`, and duplicate-path ID override is supplied explicitly. For duplicate directory names, pass `--repo-id /canonical/path=unique-id`. Interrupted interactive sessions are private, resumable metadata under `~/.local/state/repoforge/onboarding/`; they never store API keys, raw approval tokens, repository contents, patches, or command output.
-
-Interactive review supports `--ui auto|rich|plain` and `--defaults safe|ask|none`, with a
-six-stage batch review and dependency-free plain fallback. See
-[Interactive onboarding UI](docs/getting-started/INTERACTIVE_ONBOARDING.md).
+</div>
