@@ -55,6 +55,7 @@ from .workflow_replay import (
     WorkflowReplayDecision,
     WorkflowReplayObservation,
 )
+from .provider_registry import ProviderRegistry
 from .workspace_store import WorkspaceStore
 
 __all__ = [
@@ -67,6 +68,7 @@ __all__ = [
     "DiscoveryRequest",
     "EnvironmentPreflight",
     "ExecutableLocator",
+    "ProviderRegistry",
     "FileSystem",
     "GateState",
     "GitBaseReferences",
