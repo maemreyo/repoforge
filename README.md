@@ -45,6 +45,9 @@ Today, RepoForge can:
 - push without force;
 - create and update draft pull requests;
 - inspect pull-request and CI state;
+- validate a deterministic issue dependency graph and select the next Ready work;
+- attach explainable risk and ordered verification recommendations to one assessment snapshot;
+- reuse private atomic durable-state primitives across operational records;
 - manage local configuration generations and runtime lifecycle;
 - record bounded, secret-safe audit metadata.
 
@@ -359,11 +362,14 @@ uv sync --extra dev
 Run individual gates:
 
 ```bash
+make tickets
 make lint
 make typecheck
 make test
 make build
 ```
+
+`make tickets` validates `docs/roadmaps/REPOFORGE_TICKET_GRAPH.json` and prints the next deterministic Ready tickets. Add `--live-repo owner/name` to `scripts/validate_ticket_graph.py` for an optional bounded, read-only GitHub drift check.
 
 Run the standard local gate:
 
@@ -383,7 +389,7 @@ During development on a dirty tree:
 scripts/verify-production.sh --allow-dirty
 ```
 
-The production gate checks public contracts, formatting, linting, typing, tests, coverage, packaging, and installed-wheel behavior.
+The production gate validates ticket governance and release contracts, then checks formatting, linting, strict typing, tests, branch coverage, clean package builds, and installed-wheel behavior. See [the integrity policy](docs/development/INTEGRITY_POLICY.md) for ordering, scope, generated artifacts, symlinks, line endings, and failure semantics.
 
 ### Project structure
 
@@ -430,6 +436,8 @@ Policy decisions belong in the domain and application layers, not in MCP handler
 - [ChatGPT setup guide](docs/getting-started/CHATGPT_SETUP.md)
 - [Interactive onboarding](docs/getting-started/INTERACTIVE_ONBOARDING.md)
 - [Development guide](docs/development/DEVELOPMENT.md)
+- [Ticket governance](docs/development/TICKET_GOVERNANCE.md)
+- [Source and release integrity policy](docs/development/INTEGRITY_POLICY.md)
 - [MCP tool reference](docs/development/TOOL_REFERENCE.md)
 - [Testing strategy](docs/testing/TESTING.md)
 - [Full-flow testing](docs/testing/FULL_FLOW_TESTING.md)

@@ -21,6 +21,7 @@ uv run --locked pytest
 The supported Make targets are:
 
 ```bash
+make tickets
 make lint
 make typecheck
 make test
@@ -43,8 +44,15 @@ Run the complete project gate with:
 ./scripts/test-all.sh
 ```
 
-A change is not complete until linting, strict typing, tests with the configured branch-coverage
-threshold, and package builds all pass.
+`make tickets` validates the checked-in program graph and prints the next deterministic Ready work.
+The production authority is `scripts/verify-production.sh`; use `--allow-dirty` only while iterating.
+Its ordered guarantees are documented in [INTEGRITY_POLICY.md](INTEGRITY_POLICY.md), while issue
+metadata and tracking rules are documented in [TICKET_GOVERNANCE.md](TICKET_GOVERNANCE.md).
+
+A change is not complete until ticket and release contracts, linting, strict typing, tests with the
+configured branch-coverage threshold, clean package builds, and installed-wheel smoke all pass.
+The production gate runs deterministic size-balanced test shards and combines their coverage data;
+set `REPOFORGE_TEST_SHARDS` to a positive integer to tune local parallelism without changing scope.
 
 ## Local MCP debugging
 

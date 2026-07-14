@@ -25,6 +25,12 @@ class ErrorCode(str, Enum):
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
     STATE_PERSISTENCE_FAILED = "STATE_PERSISTENCE_FAILED"
+    STATE_INVALID = "STATE_INVALID"
+    STATE_NOT_FOUND = "STATE_NOT_FOUND"
+    STATE_STALE = "STATE_STALE"
+    STATE_CORRUPT = "STATE_CORRUPT"
+    STATE_SCHEMA_UNSUPPORTED = "STATE_SCHEMA_UNSUPPORTED"
+    STATE_TOO_LARGE = "STATE_TOO_LARGE"
     NOT_FOUND = "NOT_FOUND"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     DISCOVERY_ROOT_NOT_FOUND = "DISCOVERY_ROOT_NOT_FOUND"
@@ -215,6 +221,12 @@ def operation_error_from_exception(
         ErrorCode.IDEMPOTENCY_CONFLICT: "The same idempotency key was already bound to different reviewed input.",
         ErrorCode.IDEMPOTENCY_IN_PROGRESS: "Another process is still executing the same keyed operation.",
         ErrorCode.STATE_PERSISTENCE_FAILED: "RepoForge could not durably record required local operational state.",
+        ErrorCode.STATE_INVALID: "The state collection, identifier, payload, or bound violates the reusable durable-state contract.",
+        ErrorCode.STATE_NOT_FOUND: "No durable state record exists for the supplied identifier.",
+        ErrorCode.STATE_STALE: "Another writer changed the durable state record after the caller's reviewed revision.",
+        ErrorCode.STATE_CORRUPT: "The durable state record is malformed, unsafe, or inconsistent with its identity.",
+        ErrorCode.STATE_SCHEMA_UNSUPPORTED: "The durable state record uses a schema version this build cannot safely interpret.",
+        ErrorCode.STATE_TOO_LARGE: "The encoded durable state record exceeds its reviewed storage bound.",
         ErrorCode.REPOSITORY_REF_NOT_FOUND: "The requested immutable Git ref does not resolve to a committed snapshot.",
         ErrorCode.REPOSITORY_REF_AMBIGUOUS: "Abbreviated Git object names are not accepted for snapshot reads.",
         ErrorCode.REPOSITORY_REF_EXTERNAL: "The requested ref is outside the reviewed local base-branch history.",

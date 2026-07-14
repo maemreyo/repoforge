@@ -20,6 +20,7 @@ from .domain.diagnostics import (
     validate_diagnostic_profile,
 )
 from .domain.errors import ConfigError
+from .domain.risk import RiskPolicy, default_risk_policy
 
 DEFAULT_CONFIG_PATH = Path("~/.config/repoforge/config.toml").expanduser()
 DEFAULT_WORKSPACE_ROOT = "~/.local/share/repoforge/workspaces"
@@ -88,6 +89,9 @@ class RepositoryConfig:
     no_maintainer_edit: bool = False
     profiles: dict[str, ProfileConfig] = field(default_factory=dict)
     diagnostics: dict[str, DiagnosticProfileConfig] = field(default_factory=dict)
+    risk_policy: RiskPolicy = field(
+        default_factory=lambda: default_risk_policy(final_profile="full")
+    )
 
 
 @dataclass(frozen=True)
@@ -308,6 +312,83 @@ def _load_diagnostics(raw: Any, repo_id: str) -> dict[str, DiagnosticProfileConf
     return diagnostics
 
 
+def _load_risk_policy(
+    raw: Any,
+    repo_id: str,
+    *,
+    final_profile: str,
+    profiles: dict[str, ProfileConfig],
+    diagnostics: dict[str, DiagnosticProfileConfig],
+) -> RiskPolicy:
+    defaults = default_risk_policy(final_profile=final_profile)
+    if raw is None:
+        return defaults
+    table = _expect_mapping(raw, f"repositories.{repo_id}.risk")
+
+    def threshold(name: str, default: int) -> int:
+        value = table.get(name, default)
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
+            raise ConfigError(f"repositories.{repo_id}.risk.{name} must be an integer in 0..100")
+        return value
+
+    resolved_final = str(table.get("final_profile", defaults.final_profile))
+    if profiles and (resolved_final not in profiles or not profiles[resolved_final].verification):
+        raise ConfigError(
+            f"repositories.{repo_id}.risk.final_profile must reference a verification profile"
+        )
+    ordered_profiles = _tuple_of_strings(
+        table.get("ordered_profiles", list(defaults.ordered_profiles)),
+        f"repositories.{repo_id}.risk.ordered_profiles",
+    )
+    if profiles:
+        unknown_profiles = [
+            item
+            for item in ordered_profiles
+            if item not in profiles or not profiles[item].verification
+        ]
+        if unknown_profiles:
+            raise ConfigError(
+                f"repositories.{repo_id}.risk.ordered_profiles contains unknown verification profiles: {unknown_profiles}"
+            )
+    narrow_diagnostics = _tuple_of_strings(
+        table.get("narrow_diagnostics", list(defaults.narrow_diagnostics)),
+        f"repositories.{repo_id}.risk.narrow_diagnostics",
+    )
+    if diagnostics:
+        unknown_diagnostics = [item for item in narrow_diagnostics if item not in diagnostics]
+        if unknown_diagnostics:
+            raise ConfigError(
+                f"repositories.{repo_id}.risk.narrow_diagnostics contains unknown diagnostics: {unknown_diagnostics}"
+            )
+    try:
+        return RiskPolicy(
+            low_max=threshold("low_max", defaults.low_max),
+            medium_max=threshold("medium_max", defaults.medium_max),
+            high_max=threshold("high_max", defaults.high_max),
+            critical_globs=_tuple_of_strings(
+                table.get("critical_globs", list(defaults.critical_globs)),
+                f"repositories.{repo_id}.risk.critical_globs",
+            ),
+            public_contract_globs=_tuple_of_strings(
+                table.get("public_contract_globs", list(defaults.public_contract_globs)),
+                f"repositories.{repo_id}.risk.public_contract_globs",
+            ),
+            manifest_globs=_tuple_of_strings(
+                table.get("manifest_globs", list(defaults.manifest_globs)),
+                f"repositories.{repo_id}.risk.manifest_globs",
+            ),
+            docs_globs=_tuple_of_strings(
+                table.get("docs_globs", list(defaults.docs_globs)),
+                f"repositories.{repo_id}.risk.docs_globs",
+            ),
+            narrow_diagnostics=narrow_diagnostics,
+            ordered_profiles=ordered_profiles,
+            final_profile=resolved_final,
+        )
+    except ValueError as exc:
+        raise ConfigError(f"repositories.{repo_id}.risk is invalid: {exc}") from exc
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     config_value: str | Path = path or os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
     config_path = Path(config_value).expanduser().resolve()
@@ -441,6 +522,19 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                     f"repositories.{repo_id}.default_verification_profile must reference a "
                     "verification profile"
                 )
+        verification_profiles = tuple(
+            name for name, profile in profiles.items() if profile.verification
+        )
+        risk_final_profile = default_verification or (
+            verification_profiles[-1] if verification_profiles else "full"
+        )
+        risk_policy = _load_risk_policy(
+            repo_raw.get("risk"),
+            repo_id,
+            final_profile=risk_final_profile,
+            profiles=profiles,
+            diagnostics=diagnostics,
+        )
         repositories[repo_id] = RepositoryConfig(
             repo_id=repo_id,
             path=_expand_path(str(repo_raw["path"]), base_dir=base_dir),
@@ -504,5 +598,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ),
             profiles=profiles,
             diagnostics=diagnostics,
+            risk_policy=risk_policy,
         )
     return AppConfig(source_path=config_path, server=server, repositories=repositories)

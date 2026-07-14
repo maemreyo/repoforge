@@ -104,6 +104,25 @@ def test_assessment_is_deterministic_read_only_and_explicit_about_gaps(
     assert first["path_policy"]["value"]["violations"] == []
     assert tuple(first["evidence_coverage"]) == tuple(sorted(first["evidence_coverage"]))
     assert first["pr_state"]["status"] in {"current", "not_applicable"}
+    for result in (first, second):
+        assert result["risk"]["assessment_snapshot_id"] == result["snapshot"]["snapshot_id"]
+        assert (
+            result["verification_recommendation"]["assessment_snapshot_id"]
+            == result["snapshot"]["snapshot_id"]
+        )
+        assert result["verification_recommendation"]["required_profiles"][-1] == "full"
+    assert {
+        key: value for key, value in first["risk"].items() if key != "assessment_snapshot_id"
+    } == {key: value for key, value in second["risk"].items() if key != "assessment_snapshot_id"}
+    assert {
+        key: value
+        for key, value in first["verification_recommendation"].items()
+        if key != "assessment_snapshot_id"
+    } == {
+        key: value
+        for key, value in second["verification_recommendation"].items()
+        if key != "assessment_snapshot_id"
+    }
 
     after = forge_env.service.application.context.store.load(workspace_id)
     assert after.last_verification is None

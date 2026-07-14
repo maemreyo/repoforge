@@ -21,6 +21,13 @@ Python package: `repoforge-mcp`
 - richer tool descriptions, annotations and stable structured outputs;
 - golden prompt and plugin regression test documentation.
 
+## Current hardening additions
+
+- deterministic 80-node ticket graph validation, Ready-ticket selection, AI-ready issue forms, and optional bounded read-only GitHub drift checks;
+- snapshot-bound explainable workspace risk with policy-driven ordered verification recommendations;
+- shared typed durable-state envelopes and private atomic JSON storage adopted by OperationTask without changing its serialized record contract;
+- executable source and release integrity policy replacing the obsolete manually maintained source hash inventory.
+
 ## Validation in build environment
 
 - Ruff: passed.

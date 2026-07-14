@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -21,6 +19,7 @@ from ...domain.operation_task import (
 )
 from ...ports.locking import LockManager
 from ...ports.operation_store import OperationRecordPage
+from .json_state_repository import AtomicJsonFileStore
 
 _FORBIDDEN_KEYS = {
     "body",
@@ -42,10 +41,13 @@ _FORBIDDEN_KEYS = {
 
 class JsonOperationStore:
     def __init__(self, state_root: Path, locks: LockManager):
-        self.root = state_root.expanduser().resolve() / "operations"
-        self._locks = locks
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        self._files = AtomicJsonFileStore(
+            state_root,
+            collection="operations",
+            locks=locks,
+            id_validator=validate_operation_id,
+        )
+        self.root = self._files.root
 
     @staticmethod
     def _error(
@@ -64,7 +66,7 @@ class JsonOperationStore:
         )
 
     def _path(self, operation_id: str) -> Path:
-        return self.root / f"{validate_operation_id(operation_id)}.json"
+        return self._files.path(operation_id)
 
     @staticmethod
     def _assert_safe(value: object, path: str = "") -> None:
@@ -209,51 +211,13 @@ class JsonOperationStore:
                 code=ErrorCode.OPERATION_CORRUPT,
             ) from exc
 
-    @staticmethod
-    def _fsync_dir(path: Path) -> None:
-        try:
-            descriptor = os.open(path, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-        finally:
-            os.close(descriptor)
-
     def _write(self, path: Path, data: bytes) -> None:
-        try:
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{path.name}.tmp-", dir=path.parent
-            )
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    os.fchmod(handle.fileno(), 0o600)
-                    handle.write(data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, path)
-                os.chmod(path, 0o600)
-                self._fsync_dir(path.parent)
-            finally:
-                temporary.unlink(missing_ok=True)
-        except OSError as exc:
-            raise self._error(
-                f"Cannot persist operation record {path.name}",
-                code=ErrorCode.STATE_PERSISTENCE_FAILED,
-                retryable=True,
-            ) from exc
+        self._files.write_bytes(path.stem, data)
 
     def create(self, task: OperationTask) -> OperationTask:
         validate_operation_task(task)
         path = self._path(task.operation_id)
-        with self._locks.lock(
-            f"operation-{task.operation_id}",
-            timeout_seconds=5,
-            metadata={"operation": "create"},
-        ):
+        with self._files.locked(task.operation_id, operation="create"):
             if path.exists():
                 raise self._error(
                     f"Operation already exists: {task.operation_id}",
@@ -263,27 +227,16 @@ class JsonOperationStore:
         return task
 
     def read(self, operation_id: str) -> OperationTask | None:
-        path = self._path(operation_id)
-        if not path.is_file():
+        safe_id = validate_operation_id(operation_id)
+        data = self._files.read_bytes(safe_id)
+        if data is None:
             return None
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            raise self._error(
-                f"Cannot read operation record {operation_id}",
-                code=ErrorCode.STATE_PERSISTENCE_FAILED,
-                retryable=True,
-            ) from exc
-        return self._decode(data, expected_operation_id=operation_id)
+        return self._decode(data, expected_operation_id=safe_id)
 
     def save(self, task: OperationTask, *, expected_updated_at: str) -> OperationTask:
         validate_operation_task(task)
         path = self._path(task.operation_id)
-        with self._locks.lock(
-            f"operation-{task.operation_id}",
-            timeout_seconds=5,
-            metadata={"operation": "save"},
-        ):
+        with self._files.locked(task.operation_id, operation="save"):
             current = self.read(task.operation_id)
             if current is None:
                 raise self._error(
@@ -309,31 +262,18 @@ class JsonOperationStore:
                 "max_records must be between 1 and 2000",
                 code=ErrorCode.OPERATION_INVALID,
             )
-        paths = sorted(self.root.glob("op-*.json"))
-        scan_truncated = len(paths) > max_records
+        operation_ids, scan_truncated = self._files.list_ids(
+            pattern="op-*.json", max_records=max_records
+        )
         records: list[OperationTask] = []
-        for path in paths[:max_records]:
-            record = self.read(path.stem)
+        for operation_id in operation_ids:
+            record = self.read(operation_id)
             if record is not None:
                 records.append(record)
         records.sort(key=lambda item: (item.updated_at, item.operation_id), reverse=True)
         return OperationRecordPage(tuple(records), scan_truncated)
 
     def delete(self, operation_id: str) -> None:
-        path = self._path(operation_id)
-        with self._locks.lock(
-            f"operation-{operation_id}",
-            timeout_seconds=5,
-            metadata={"operation": "delete"},
-        ):
-            existed = path.exists()
-            try:
-                path.unlink(missing_ok=True)
-                if existed:
-                    self._fsync_dir(path.parent)
-            except OSError as exc:
-                raise self._error(
-                    f"Cannot delete operation record {operation_id}",
-                    code=ErrorCode.STATE_PERSISTENCE_FAILED,
-                    retryable=True,
-                ) from exc
+        safe_id = validate_operation_id(operation_id)
+        with self._files.locked(safe_id, operation="delete"):
+            self._files.delete_bytes(safe_id)

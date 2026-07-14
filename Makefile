@@ -1,4 +1,4 @@
-.PHONY: setup lint typecheck test build check doctor smoke inspector
+.PHONY: setup lint typecheck test build check tickets doctor smoke inspector
 
 setup:
 	uv sync --extra dev
@@ -17,6 +17,9 @@ build:
 
 check:
 	./scripts/verify-production.sh --allow-dirty
+
+tickets:
+	uv run python scripts/validate_ticket_graph.py --next --limit 7
 
 doctor:
 	uv run rf doctor --fix

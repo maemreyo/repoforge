@@ -86,14 +86,17 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
 
 def test_production_verifier_reports_head_and_refuses_dirty_tracked_tree() -> None:
     script = (ROOT / "scripts/verify-production.sh").read_text(encoding="utf-8")
+    shard_runner = (ROOT / "scripts/run_test_shards.py").read_text(encoding="utf-8")
     assert "git rev-parse HEAD" in script
     assert "check_release_contracts.py" in script
     assert "verify-wheel-install.sh" in script
     assert "git status --porcelain --untracked-files=normal" in script
     assert "PYTHONDONTWRITEBYTECODE=1" in script
-    assert "COVERAGE_FILE=" in script
-    assert "-p no:cacheprovider" in script
-    assert "--timeout=60" in script
+    assert "run_test_shards.py" in script
+    assert "COVERAGE_FILE" in shard_runner
+    assert '"-p"' in shard_runner and '"no:cacheprovider"' in shard_runner
+    assert '"--timeout=60"' in shard_runner
+    assert '"combine"' in shard_runner and '"--fail-under=80"' in shard_runner
     assert script.count("git status --porcelain --untracked-files=normal") >= 2
 
 

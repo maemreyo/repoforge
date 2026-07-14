@@ -224,7 +224,9 @@ def test_json_operation_store_is_private_atomic_and_compare_and_swap(tmp_path: P
     assert path.is_file()
     assert os.stat(root).st_mode & 0o777 == 0o700
     assert os.stat(path).st_mode & 0o777 == 0o600
+    assert path.read_bytes() == JsonOperationStore.encode_for_test(task)
     assert store.read(task.operation_id) == task
+    assert JsonOperationStore(tmp_path, InMemoryLockManager()).read(task.operation_id) == task
 
     with pytest.raises(RepoForgeError) as duplicate:
         store.create(task)
