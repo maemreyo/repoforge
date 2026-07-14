@@ -59,6 +59,11 @@ class ErrorCode(str, Enum):
     OPERATION_CORRUPT = "OPERATION_CORRUPT"
     OPERATION_SCHEMA_UNSUPPORTED = "OPERATION_SCHEMA_UNSUPPORTED"
     OPERATION_TRANSITION_INVALID = "OPERATION_TRANSITION_INVALID"
+    PR_CHECK_WATCH_INVALID = "PR_CHECK_WATCH_INVALID"
+    PR_CHECK_WATCH_STALE = "PR_CHECK_WATCH_STALE"
+    PR_CHECK_WATCH_TIMEOUT = "PR_CHECK_WATCH_TIMEOUT"
+    PR_CHECK_WATCH_STATE_CORRUPT = "PR_CHECK_WATCH_STATE_CORRUPT"
+    PR_CHECK_WATCH_UNAVAILABLE = "PR_CHECK_WATCH_UNAVAILABLE"
     DIAGNOSTIC_NOT_FOUND = "DIAGNOSTIC_NOT_FOUND"
     DIAGNOSTIC_SELECTOR_REQUIRED = "DIAGNOSTIC_SELECTOR_REQUIRED"
     DIAGNOSTIC_SELECTOR_INVALID = "DIAGNOSTIC_SELECTOR_INVALID"
@@ -217,6 +222,11 @@ def operation_error_from_exception(
         ErrorCode.OPERATION_CORRUPT: "The persisted operation record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.OPERATION_SCHEMA_UNSUPPORTED: "The operation record uses a schema version this RepoForge build cannot safely interpret.",
         ErrorCode.OPERATION_TRANSITION_INVALID: "The requested state transition is not allowed by the durable operation state machine.",
+        ErrorCode.PR_CHECK_WATCH_INVALID: "The check-watch request violates a typed bound or completion-mode invariant.",
+        ErrorCode.PR_CHECK_WATCH_STALE: "The workspace, pushed commit, pull request, or Check Run no longer matches the captured watch identity.",
+        ErrorCode.PR_CHECK_WATCH_TIMEOUT: "The requested check condition was not reached before the bounded deadline.",
+        ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT: "The durable watch definition is missing, malformed, or inconsistent with its operation.",
+        ErrorCode.PR_CHECK_WATCH_UNAVAILABLE: "GitHub did not return the bounded check evidence required for this polling iteration.",
         ErrorCode.DIAGNOSTIC_NOT_FOUND: "The requested diagnostic is not part of the reviewed repository capability set.",
         ErrorCode.DIAGNOSTIC_SELECTOR_REQUIRED: "The diagnostic requires one typed selector before its reviewed argv can be resolved.",
         ErrorCode.DIAGNOSTIC_SELECTOR_INVALID: "The supplied selector violates the configured type, path policy, or closed value set.",

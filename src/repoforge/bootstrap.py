@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
+from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.filesystem import LocalFileSystem
@@ -18,7 +19,12 @@ from .adapters.github import GhCliGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
-from .adapters.persistence import JsonIdempotencyStore, JsonOnboardingStore, JsonOperationStore
+from .adapters.persistence import (
+    JsonIdempotencyStore,
+    JsonOnboardingStore,
+    JsonOperationStore,
+    JsonPrCheckWatchStore,
+)
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
@@ -77,11 +83,13 @@ from .application.operations import OperationManager, recover_operations
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.supervisor import RuntimeSupervisor
+from .application.workspace.pr_watch import PrCheckWatchCoordinator
 from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
 from .ports import (
     AuditSink,
+    BackgroundTaskRunner,
     Clock,
     CommandExecutor,
     ConfigurationStore,
@@ -96,6 +104,7 @@ from .ports import (
     OnboardingStore,
     OperationGate,
     OperationStore,
+    PrCheckWatchStore,
     ProcessInspector,
     PullRequestGateway,
     RepositoryDiscovery,
@@ -104,6 +113,7 @@ from .ports import (
     RuntimeControlServer,
     RuntimeLauncher,
     RuntimeStore,
+    Sleeper,
     TunnelClient,
     TunnelProfileStore,
     WorkspaceStore,
@@ -126,12 +136,16 @@ class AdapterOverrides:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operations: OperationStore | None = None
+    pr_check_watches: PrCheckWatchStore | None = None
+    background_tasks: BackgroundTaskRunner | None = None
+    sleeper: Sleeper | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Application:
     context: ApplicationContext
     operations: OperationManager
+    pr_check_watches: PrCheckWatchCoordinator
 
 
 def default_state_root() -> Path:
@@ -302,6 +316,12 @@ def build_application(
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    pr_check_watch_store = o.pr_check_watches or JsonPrCheckWatchStore(
+        config.server.state_root,
+        locks,
+    )
+    background_tasks = o.background_tasks or ThreadBackgroundTaskRunner()
+    sleeper = o.sleeper or SystemSleeper()
     context = ApplicationContext(
         config=config,
         commands=command,
@@ -320,8 +340,20 @@ def build_application(
         operation_store=operation_store,
     )
     operations = OperationManager(context)
-    recover_operations(operations, now=clock.now_iso())
-    return Application(context, operations)
+    recover_operations(
+        operations,
+        now=clock.now_iso(),
+        resumable_kinds=frozenset({"pr_check_watch"}),
+    )
+    pr_check_watches = PrCheckWatchCoordinator(
+        context,
+        operations,
+        pr_check_watch_store,
+        background_tasks,
+        sleeper,
+    )
+    pr_check_watches.resume_active()
+    return Application(context, operations, pr_check_watches)
 
 
 def run_runtime_worker(config_path: Path) -> int:

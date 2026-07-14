@@ -152,6 +152,7 @@ normal non-force push can publish it.
 | `workspace_update_draft_pr` | Update the title or body of the existing draft pull request without changing draft state. |
 | `workspace_pr_status` | Read draft state, mergeability, review decision, and rolled-up checks. |
 | `workspace_pr_checks` | Return compact `pass`, `fail`, `pending`, `skipping`, and `cancel` CI buckets plus exact Check Run selectors when available. |
+| `workspace_pr_watch` | Start a durable, cancellable, resumable watch bound to the exact pushed workspace and PR head; use operation tools for status and cancellation. |
 | `workspace_pr_check_details` | Resolve one exact `check-run:<id>` selector into bounded Check Run identity, status, attempt, failed-step, annotation, and source metadata. |
 | `workspace_pr_failure_evidence` | Return a redacted, bounded failure excerpt, class, hash, retryability, source coverage, uncertainty, and truncation metadata for one selected Check Run. |
 
@@ -177,8 +178,11 @@ SHA. Evidence uses at most fifty annotations and prioritizes annotations, failed
 Check Run output before a bounded job log. Credential assignments, bearer tokens, credential URLs,
 private-key blocks, high-confidence secret-shaped tokens, and lines exposing denied repository paths
 are redacted or withheld locally. Optional GitHub permissions or log failures produce explicit
-`complete`, `partial`, or `none` coverage plus uncertainty rather than raw external errors. These tools
-do not rerun, cancel, watch, or administer GitHub Actions.
+`complete`, `partial`, or `none` coverage plus uncertainty rather than raw external errors. The watch
+operation polls with bounded backoff until all checks complete or the first failure appears, persists
+only compact counts and exact selectors, resumes eligible active work after restart, and fails closed
+when workspace, pushed SHA, PR number, or PR head identity changes. No tool reruns checks, dispatches
+workflows, merges, or otherwise administers GitHub Actions.
 
 ## Deliberately unsupported capabilities
 
