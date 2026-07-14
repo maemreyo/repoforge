@@ -185,6 +185,60 @@ def create_server(
         """Use this before planning to inspect manifests, scripts, root files, and instruction previews."""
         return bounded_service.call("repo_context", repo_id)
 
+    @mcp.tool(
+        title="List committed repository files", annotations=READ_ONLY, structured_output=True
+    )
+    def repo_tree(
+        repo_id: str,
+        ref: str | None = None,
+        max_entries: int = 2000,
+    ) -> dict[str, Any]:
+        """Use this to list files from an immutable reviewed repository snapshot without a workspace."""
+        return bounded_service.call("repo_tree", repo_id, ref, max_entries)
+
+    @mcp.tool(title="Read committed repository file", annotations=READ_ONLY, structured_output=True)
+    def repo_read_file(
+        repo_id: str,
+        relative_path: str,
+        ref: str | None = None,
+        start_line: int = 1,
+        end_line: int = 500,
+    ) -> dict[str, Any]:
+        """Use this to read one UTF-8 file from an immutable reviewed repository snapshot."""
+        return bounded_service.call(
+            "repo_read_file", repo_id, relative_path, ref, start_line, end_line
+        )
+
+    @mcp.tool(
+        title="Read multiple committed repository files",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def repo_read_files(
+        repo_id: str,
+        relative_paths: list[str],
+        ref: str | None = None,
+        start_line: int = 1,
+        end_line: int = 500,
+    ) -> dict[str, Any]:
+        """Use this to read the same bounded line range from several files in one immutable snapshot."""
+        return bounded_service.call(
+            "repo_read_files", repo_id, relative_paths, ref, start_line, end_line
+        )
+
+    @mcp.tool(
+        title="Search committed repository code", annotations=READ_ONLY, structured_output=True
+    )
+    def repo_search(
+        repo_id: str,
+        query: str,
+        ref: str | None = None,
+        path_glob: str | None = None,
+        max_results: int = 200,
+    ) -> dict[str, Any]:
+        """Use this to locate literal text in an immutable reviewed repository snapshot."""
+        return bounded_service.call("repo_search", repo_id, query, ref, path_glob, max_results)
+
     @mcp.tool(title="Read recent commits", annotations=READ_ONLY, structured_output=True)
     def repo_recent_commits(repo_id: str, limit: int = 20) -> dict[str, Any]:
         """Use this when recent history or commit conventions are relevant to the task."""

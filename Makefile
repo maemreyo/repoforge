@@ -15,7 +15,8 @@ test:
 build:
 	uv build
 
-check: lint typecheck test build
+check:
+	./scripts/verify-production.sh --allow-dirty
 
 doctor:
 	uv run rf doctor --fix

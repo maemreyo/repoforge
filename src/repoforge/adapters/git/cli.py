@@ -5,13 +5,15 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
-from ...domain.errors import CommandError, SecurityError, WorkspaceError
+from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ...ports.command import CommandExecutor, CommandResult
+from ...ports.git import GitSnapshotBlob, ResolvedRepositoryRef
 
 
 class GitCliRepository:
@@ -251,6 +253,242 @@ class GitCliRepository:
             values = [*line.split("\t", 3), "", "", "", ""][:4]
             result.append(dict(zip(("sha", "date", "author", "subject"), values, strict=False)))
         return result
+
+    @staticmethod
+    def _raise_ref_error(message: str, code: ErrorCode) -> NoReturn:
+        raise RepoForgeError(
+            message,
+            code=code,
+            unchanged_state=("The source clone and repository references were not modified.",),
+        )
+
+    def resolve_snapshot_ref(
+        self, path: Path, repo: RepositoryConfig, ref: str | None
+    ) -> ResolvedRepositoryRef:
+        allowed_branches = tuple(dict.fromkeys((repo.default_base, *repo.allowed_base_branches)))
+        requested = ref or repo.default_base
+        if not requested or any(ord(character) < 32 for character in requested):
+            self._raise_ref_error(
+                "Repository ref is empty or contains control characters",
+                ErrorCode.REPOSITORY_REF_DISALLOWED,
+            )
+
+        if requested in allowed_branches:
+            resolved_ref = f"refs/heads/{requested}"
+            result = self._executor.run(
+                ["git", "rev-parse", "--verify", "--end-of-options", f"{resolved_ref}^{{commit}}"],
+                cwd=path,
+                check=False,
+                output_limit=512,
+            )
+            if result.returncode != 0:
+                self._raise_ref_error(
+                    f"Repository ref not found: {requested}",
+                    ErrorCode.REPOSITORY_REF_NOT_FOUND,
+                )
+            return ResolvedRepositoryRef(resolved_ref, result.stdout.strip())
+
+        full_object_id = re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", requested)
+        if full_object_id is not None:
+            result = self._executor.run(
+                ["git", "rev-parse", "--verify", "--end-of-options", f"{requested}^{{commit}}"],
+                cwd=path,
+                check=False,
+                output_limit=512,
+            )
+            if result.returncode != 0:
+                self._raise_ref_error(
+                    f"Repository ref not found: {requested}",
+                    ErrorCode.REPOSITORY_REF_NOT_FOUND,
+                )
+            commit_sha = result.stdout.strip()
+            reachable = False
+            for branch in allowed_branches:
+                branch_ref = f"refs/heads/{branch}"
+                exists = self._executor.run(
+                    [
+                        "git",
+                        "rev-parse",
+                        "--verify",
+                        "--end-of-options",
+                        f"{branch_ref}^{{commit}}",
+                    ],
+                    cwd=path,
+                    check=False,
+                    output_limit=512,
+                )
+                if exists.returncode != 0:
+                    continue
+                ancestry = self._executor.run(
+                    ["git", "merge-base", "--is-ancestor", commit_sha, branch_ref],
+                    cwd=path,
+                    check=False,
+                    output_limit=512,
+                )
+                if ancestry.returncode == 0:
+                    reachable = True
+                    break
+                if ancestry.returncode != 1:
+                    raise CommandError(
+                        ancestry.combined or "Unable to validate repository ref ancestry"
+                    )
+            if not reachable:
+                self._raise_ref_error(
+                    f"Repository ref is outside reviewed base history: {requested}",
+                    ErrorCode.REPOSITORY_REF_EXTERNAL,
+                )
+            return ResolvedRepositoryRef(commit_sha, commit_sha)
+
+        if re.fullmatch(r"[0-9a-fA-F]{4,63}", requested) is not None:
+            self._raise_ref_error(
+                f"Abbreviated repository ref is ambiguous: {requested}",
+                ErrorCode.REPOSITORY_REF_AMBIGUOUS,
+            )
+        if requested.startswith(("refs/remotes/", f"{repo.remote}/")):
+            self._raise_ref_error(
+                f"External repository ref is not allowed: {requested}",
+                ErrorCode.REPOSITORY_REF_EXTERNAL,
+            )
+        self._raise_ref_error(
+            f"Repository ref form is not allowed: {requested}",
+            ErrorCode.REPOSITORY_REF_DISALLOWED,
+        )
+
+    @staticmethod
+    def _parse_tree_entry(raw: bytes) -> tuple[str, str, str, str]:
+        try:
+            metadata, encoded_path = raw.split(b"\t", 1)
+            mode, object_type, object_sha = metadata.decode("ascii").split(" ", 2)
+            relative_path = encoded_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise SecurityError("Committed snapshot contains an invalid Git tree entry") from exc
+        return mode, object_type, object_sha, relative_path
+
+    def list_snapshot_files(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+        max_entries: int,
+    ) -> tuple[list[str], bool]:
+        raw = self._executor.run_bytes(
+            ["git", "ls-tree", "-r", "-z", "--full-tree", commit_sha],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        )
+        entries: list[str] = []
+        for item in raw.split(b"\x00"):
+            if not item:
+                continue
+            mode, object_type, _, relative_path = self._parse_tree_entry(item)
+            if mode in {"120000", "160000"} or object_type != "blob":
+                continue
+            try:
+                normalized = assert_path_allowed(relative_path, repo)
+            except SecurityError:
+                continue
+            entries.append(normalized)
+        entries.sort()
+        return entries[:max_entries], len(entries) > max_entries
+
+    def read_snapshot_blob(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+        relative_path: str,
+    ) -> GitSnapshotBlob:
+        normalized = assert_path_allowed(relative_path, repo)
+        raw = self._executor.run_bytes(
+            ["git", "ls-tree", "-z", commit_sha, "--", f":(literal){normalized}"],
+            cwd=path,
+            max_bytes=min(self.server.max_fingerprint_bytes, 1_000_000),
+        )
+        entries = [item for item in raw.split(b"\x00") if item]
+        if not entries:
+            raise RepoForgeError(
+                f"File not found in committed snapshot: {normalized}",
+                code=ErrorCode.NOT_FOUND,
+            )
+        mode, object_type, object_sha, returned_path = self._parse_tree_entry(entries[0])
+        if returned_path != normalized:
+            raise SecurityError("Git returned a different path than the requested literal path")
+        if mode == "120000":
+            raise SecurityError(f"Reading symlink entries is not allowed: {normalized}")
+        if mode == "160000":
+            raise SecurityError(f"Reading gitlink entries is not allowed: {normalized}")
+        if object_type != "blob" or not mode.startswith("100"):
+            raise SecurityError(f"Unsupported committed object type for path: {normalized}")
+        size_result = self._executor.run(
+            ["git", "cat-file", "-s", object_sha],
+            cwd=path,
+            output_limit=128,
+        )
+        try:
+            size_bytes = int(size_result.stdout.strip())
+        except ValueError as exc:
+            raise CommandError("Git returned an invalid committed blob size") from exc
+        if size_bytes > self.server.max_file_bytes:
+            raise SecurityError(
+                f"File size {size_bytes} exceeds max_file_bytes={self.server.max_file_bytes}"
+            )
+        data = self._executor.run_bytes(
+            ["git", "cat-file", "blob", object_sha],
+            cwd=path,
+            max_bytes=self.server.max_file_bytes,
+        )
+        return GitSnapshotBlob(normalized, object_sha, mode, size_bytes, data)
+
+    def search_snapshot(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+        query: str,
+        path_glob: str | None,
+        max_results: int,
+    ) -> tuple[list[str], bool]:
+        argv = [
+            "git",
+            "grep",
+            "-n",
+            "-I",
+            "-F",
+            "--full-name",
+            "-e",
+            query,
+            commit_sha,
+            "--",
+        ]
+        if path_glob:
+            argv.append(f":(glob){path_glob}")
+        result = self._executor.run(
+            argv,
+            cwd=path,
+            check=False,
+            output_limit=self.server.max_fingerprint_bytes,
+        )
+        if result.returncode == 1:
+            return [], False
+        if result.returncode != 0:
+            raise CommandError(result.combined or "Committed snapshot search failed")
+        executor_truncated = "characters omitted" in result.stdout
+        pattern = re.compile(rf"^{re.escape(commit_sha)}:(.*?):(\d+):(.*)$")
+        matches: list[str] = []
+        for line in result.stdout.splitlines():
+            parsed = pattern.match(line)
+            if parsed is None:
+                if executor_truncated:
+                    continue
+                raise CommandError("Git returned an invalid committed snapshot search result")
+            raw_path, line_number, content = parsed.groups()
+            try:
+                normalized = assert_path_allowed(raw_path, repo)
+            except SecurityError:
+                continue
+            matches.append(f"{normalized}:{line_number}:{content}")
+        matches.sort()
+        return matches[:max_results], executor_truncated or len(matches) > max_results
 
     def search(
         self,

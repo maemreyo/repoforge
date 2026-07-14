@@ -22,6 +22,10 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "repo_list",
             "repo_status",
             "repo_context",
+            "repo_tree",
+            "repo_read_file",
+            "repo_read_files",
+            "repo_search",
             "repo_recent_commits",
             "repo_issue_read",
             "repo_pr_read",
@@ -97,6 +101,23 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         await call("repo_list", {})
         await call("repo_status", {"repo_id": "demo"})
         await call("repo_context", {"repo_id": "demo"})
+        snapshot = await call("repo_tree", {"repo_id": "demo", "max_entries": 50})
+        assert snapshot["resolved_ref"] == "refs/heads/main"
+        await call(
+            "repo_read_file",
+            {"repo_id": "demo", "relative_path": "hello.txt"},
+        )
+        await call(
+            "repo_read_files",
+            {
+                "repo_id": "demo",
+                "relative_paths": ["hello.txt", "README.md"],
+            },
+        )
+        await call(
+            "repo_search",
+            {"repo_id": "demo", "query": "Repository", "max_results": 20},
+        )
         await call("repo_recent_commits", {"repo_id": "demo", "limit": 2})
         await call("repo_issue_read", {"repo_id": "demo", "issue_number": 1})
         await call("repo_pr_read", {"repo_id": "demo", "pr_number": 2})

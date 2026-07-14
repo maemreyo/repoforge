@@ -23,7 +23,8 @@ RepoForge has evolved beyond a thin MCP wrapper around Git. Its current strength
 - managed tunnel lifecycle;
 - deterministic onboarding proposals;
 - interactive safe-default review;
-- stable MCP and release contracts.
+- stable MCP and release contracts;
+- bounded committed-snapshot tree, file, batch-read, and search inspection without checkout.
 
 The next stage should not be driven by adding many more low-level Git tools. RepoForge should become a:
 
@@ -126,6 +127,7 @@ RepoForge is already strong in the following areas:
 | Area | Current strength |
 | --- | --- |
 | Repository access | Explicit allowlist and canonical roots |
+| Repository snapshots | Issue #5 complete: immutable branch/commit tree, file, batch-read, and search operations with exact snapshot identity |
 | Workspace isolation | Per-task Git worktrees |
 | Mutation safety | SHA/fingerprint optimistic locking |
 | Change control | Protected paths, branches, file and diff budgets |
