@@ -44,6 +44,16 @@ from .runtime_control import (
 )
 from .sleeper import Sleeper
 from .tunnel import TunnelClient, TunnelProfileStore
+from .workflow_recording_store import (
+    WorkflowRecordingPage,
+    WorkflowRecordingStore,
+    WorkflowRetentionReport,
+)
+from .workflow_replay import (
+    WorkflowReplayAdapter,
+    WorkflowReplayDecision,
+    WorkflowReplayObservation,
+)
 from .workspace_store import WorkspaceStore
 
 __all__ = [
@@ -92,5 +102,11 @@ __all__ = [
     "Sleeper",
     "TunnelClient",
     "TunnelProfileStore",
+    "WorkflowRecordingPage",
+    "WorkflowRecordingStore",
+    "WorkflowReplayAdapter",
+    "WorkflowReplayDecision",
+    "WorkflowReplayObservation",
+    "WorkflowRetentionReport",
     "WorkspaceStore",
 ]

@@ -29,7 +29,8 @@ The gate runs:
 8. **Durable operation foundation:** transition tables, monotonic progress, cancellation requests, JSON CAS races, permissions, corruption/future schemas, restart orphaning, expiry, retention, pagination, CLI, and MCP.
 9. **Durable PR check watch:** exact pushed-SHA and PR-head binding, pending-to-terminal polling, first-failure evidence references, cancellation, bounded backoff, restart resumption, duplicate-worker prevention, timeouts, stale fingerprints, and MCP invocation.
 10. **Typed workspace diagnostics:** reviewed profile loading and semantic deltas, tracked selectors, exact argv, parser/failure classes, stale fingerprints, mutation/artifact enforcement, output bounds, doctor checks, and MCP invocation.
-11. **Negative regression:** stale SHA, stale fingerprint, post-verification edits, batch limit, denied workflow path and change-budget enforcement.
+11. **Sanitized workflow recording/replay:** deterministic direct/failure frames, argument category hashing, forbidden-content omission, checksum/schema corruption, private permissions, retention/export, explicit truncation, and isolated no-real-write replay.
+12. **Negative regression:** stale SHA, stale fingerprint, post-verification edits, batch limit, denied workflow path and change-budget enforcement.
 
 ## Live checks still required on the recipient machine
 
