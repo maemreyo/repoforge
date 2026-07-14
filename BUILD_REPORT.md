@@ -44,4 +44,4 @@ Python package: `repoforge-mcp`
 - Work Frontier's real `pnpm` verification commands.
 
 Those checks require the recipient's Mac, local checkout, GitHub login and tunnel ID. Run `rf doctor`,
-`rf smoke-test`, then the golden cases in `docs/PLUGIN_TEST_CASES.md` before the first real task.
+`rf smoke-test`, then the golden cases in `docs/testing/PLUGIN_TEST_CASES.md` before the first real task.

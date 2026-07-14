@@ -20,20 +20,6 @@ from ...application.onboarding.coordinator import (
 from ...application.onboarding.discover import DiscoveryResult, OnboardingDiscoveryService
 from ...application.onboarding.inputs import parse_assignments
 from ...application.onboarding.recommendations import recommend_safe_decisions
-from .onboarding_review import (
-    DefaultsMode,
-    configuration_diff,
-    discovery_rows,
-    proposal_summary,
-    resolve_defaults_mode,
-)
-from .onboarding_ui import (
-    ChoiceItem,
-    OnboardingUI,
-    PlainOnboardingUI,
-    UiBackendUnavailable,
-    build_onboarding_ui,
-)
 from ...bootstrap import (
     build_configuration_store,
     build_onboarding_coordinator,
@@ -50,6 +36,20 @@ from ...domain.onboarding import (
 from ...domain.policy import slugify
 from ...domain.repository_proposal import EnrollmentMode
 from ...ports.repository_discovery import DiscoveryRequest
+from .onboarding_review import (
+    DefaultsMode,
+    configuration_diff,
+    discovery_rows,
+    proposal_summary,
+    resolve_defaults_mode,
+)
+from .onboarding_ui import (
+    ChoiceItem,
+    OnboardingUI,
+    PlainOnboardingUI,
+    UiBackendUnavailable,
+    build_onboarding_ui,
+)
 
 Render = Callable[[object], None]
 

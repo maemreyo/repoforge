@@ -2,7 +2,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
 from test_onboarding_planner import FakeProposals
 
 from repoforge.application.onboarding.coordinator import OnboardingCommand, OnboardingCoordinator

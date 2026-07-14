@@ -37,5 +37,5 @@ rf smoke-test --repo-id work-frontier
 ./scripts/inspect-mcp.sh
 ```
 
-Then run the prompts in `docs/PLUGIN_TEST_CASES.md` against the actual ChatGPT Plugin. Confirm that
+Then run the prompts in `docs/testing/PLUGIN_TEST_CASES.md` against the actual ChatGPT Plugin. Confirm that
 write actions request approval and that the final PR remains draft.

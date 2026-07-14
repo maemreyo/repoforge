@@ -137,7 +137,7 @@ Expected result:
 - no workspace or branch is created;
 - no write confirmation appears.
 
-Then follow [FULL_FLOW_TESTING.md](FULL_FLOW_TESTING.md) for the first controlled write.
+Then follow [the full-flow testing runbook](../testing/FULL_FLOW_TESTING.md) for the first controlled write.
 
 ## Troubleshooting
 

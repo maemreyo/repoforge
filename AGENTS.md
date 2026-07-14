@@ -156,7 +156,7 @@ Every tool change must include all of the following:
 7. Positive unit coverage.
 8. Negative and stale-state coverage.
 9. MCP protocol-level coverage through an actual client session.
-10. Documentation updates in `docs/TOOL_REFERENCE.md`.
+10. Documentation updates in `docs/development/TOOL_REFERENCE.md`.
 11. Golden-prompt updates when discovery or tool selection can change.
 
 Do not add two tools that differ only by wording. Prefer one well-scoped tool with a constrained
@@ -184,9 +184,10 @@ For safety-policy, state, runner, Git, or write-tool changes, include:
 - in-memory MCP schema and invocation coverage.
 
 For tool metadata changes, run the direct, indirect, and negative prompts in
-`docs/PLUGIN_TEST_CASES.md`, then record results using `docs/TEST_RUN_RECORD.md`.
+`docs/testing/PLUGIN_TEST_CASES.md`, then record results using
+`docs/testing/TEST_RUN_RECORD.md`.
 
-For release candidates, follow `docs/FULL_FLOW_TESTING.md`.
+For release candidates, follow `docs/testing/FULL_FLOW_TESTING.md`.
 
 ## Test isolation
 
