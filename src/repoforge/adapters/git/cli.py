@@ -1476,12 +1476,44 @@ class GitCliRepository:
         return self._executor.run(["git", "rev-parse", "@{u}"], cwd=path).stdout.strip()
 
     def apply_patch(self, path: Path, patch: str) -> None:
-        self._executor.run(
-            ["git", "apply", "--check", "--whitespace=error-all", "-"],
-            cwd=path,
-            input_text=patch,
-        )
-        self._executor.run(["git", "apply", "--whitespace=fix", "-"], cwd=path, input_text=patch)
+        try:
+            self._executor.run(
+                ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+                cwd=path,
+                input_text=patch,
+            )
+            self._executor.run(
+                ["git", "apply", "--whitespace=fix", "-"], cwd=path, input_text=patch
+            )
+        except CommandError as exc:
+            target_path = ""
+            hunk_header = ""
+            for line in patch.splitlines():
+                if not target_path and line.startswith("diff --git "):
+                    parts = line.split()
+                    if len(parts) == 4:
+                        target_path = parts[3].removeprefix("b/")
+                if not hunk_header and line.startswith("@@ "):
+                    hunk_header = line
+                if target_path and hunk_header:
+                    break
+            raise RepoForgeError(
+                "Git rejected the canonical normalized patch",
+                code=ErrorCode.PATCH_APPLY_FAILED,
+                safe_next_action=(
+                    "Refresh workspace_status and workspace_read_file, then regenerate the patch. "
+                    "Use workspace_replace_text for one exact replacement or workspace_write_file "
+                    "for complete reviewed file content."
+                ),
+                retryable=False,
+                unchanged_state=("Git apply did not commit or stage any changes.",),
+                details={
+                    "target_path": target_path,
+                    "hunk_ordinal": 1 if hunk_header else None,
+                    "hunk_header": hunk_header,
+                    "git_stderr_excerpt": str(exc)[:2000],
+                },
+            ) from exc
 
     def reverse_patch(self, path: Path, patch: str) -> None:
         self._executor.run(

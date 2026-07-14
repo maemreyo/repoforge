@@ -66,7 +66,7 @@ def _resolve_initial_tunnel_id(
     *,
     command_tunnel_id: str | None,
     session_tunnel_id: str | None,
-) -> str:
+) -> str | None:
     if current_source is not None:
         return current_source.tunnel_id
     value = command_tunnel_id or session_tunnel_id

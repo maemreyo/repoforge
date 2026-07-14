@@ -1,8 +1,8 @@
 # Connect RepoForge to ChatGPT with Secure MCP Tunnel
 
-RepoForge now has a two-command happy path. The user config contains only the tunnel identifier and
-local repositories; RepoForge generates a reviewed runtime lock with the full safety policy and
-allowlisted verification commands.
+Verify RepoForge locally before adding a managed tunnel. The user config contains only local intent;
+RepoForge generates a reviewed runtime lock with the full safety policy and allowlisted verification
+commands. See the [getting-started path chooser](README.md) for the local-first MCP Inspector flow.
 
 ## 1. Install RepoForge and authenticate GitHub
 
@@ -12,17 +12,19 @@ gh auth login
 gh auth setup-git
 ```
 
-Contributors can instead clone the repository and run `uv sync --extra dev`.
+Contributors can instead clone the repository and run `uv sync --extra dev`. A standard install
+includes Rich and InquirerPy; no dependency extras are required for interactive onboarding.
 
-Download `tunnel-client` from the OpenAI Platform tunnel settings and place it on `PATH`.
+First run `rf setup --local /absolute/path/to/repository` and verify `rf serve`. Then download
+`tunnel-client` from the OpenAI Platform tunnel settings and place it on `PATH`.
 
 ## 2. Configure all repositories once
 
 ```bash
 rf setup \
   --tunnel-id tunnel_... \
-  /absolute/path/to/repoforge \
-  /absolute/path/to/work-frontier
+  /absolute/path/to/repository \
+  /absolute/path/to/another-repository
 ```
 
 `rf setup` performs repository detection, creates the minimal config, generates the reviewed runtime
@@ -32,22 +34,22 @@ machine is temporarily offline or a remote cannot be fetched.
 The generated user config is intentionally small:
 
 ```toml
-version = 1
+version = 2
 
 [tunnel]
 id = "tunnel_..."
 
 [[repo]]
-id = "repoforge"
-path = "/absolute/path/to/repoforge"
+id = "repository"
+path = "/absolute/path/to/repository"
 
 [[repo]]
-id = "work-frontier"
-path = "/absolute/path/to/work-frontier"
+id = "another-repository"
+path = "/absolute/path/to/another-repository"
 ```
 
-The generated resolved config lives under `~/.local/state/repoforge/config-locks/`. It contains the
-secure defaults and exact command allowlists. Do not edit it directly.
+Run `rf config path` to locate the generated resolved configuration and state files. The resolved
+lock contains secure defaults and exact command allowlists. Do not edit it directly.
 
 ## 3. Start RepoForge
 
@@ -155,14 +157,16 @@ commands available to ChatGPT.
 
 ### The tunnel is not visible in ChatGPT
 
-Run:
+Inspect the resolved paths and managed runtime state:
 
 ```bash
-rf start --dry-run
+rf config path
+rf doctor
+rf runtime status
 ```
 
 Confirm that `tunnel-client` is installed, the tunnel belongs to the same OpenAI organization and
-ChatGPT workspace, and the runtime key can use that tunnel.
+ChatGPT workspace, and `CONTROL_PLANE_API_KEY` can use that tunnel.
 
 ### GitHub operations fail
 

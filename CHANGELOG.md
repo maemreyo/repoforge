@@ -7,6 +7,8 @@
 - Added reusable typed durable-state envelopes and private atomic JSON storage, adopted by OperationTask without changing its serialized record contract.
 - Replaced the obsolete manual source hash manifest with a documented executable source and release integrity policy.
 - Added deterministic size-balanced pytest sharding with combined branch coverage so the complete production gate remains exact-tree bound and connector-friendly.
+- Added local-first setup and serve, standard-install interactive onboarding dependencies, deterministic config/state path discovery, written-file summaries, and executable docs/script drift coverage.
+- Added dual-format atomic patch application for unified diffs and OpenAI apply_patch envelopes, deterministic hunk repair, actionable structured failures, and whitespace-check/apply parity without logging patch bodies.
 
 ## 2.0.0 — 2026-07-12
 

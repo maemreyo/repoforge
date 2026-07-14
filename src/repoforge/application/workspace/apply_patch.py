@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
 from ...domain.errors import WorkspaceError
-from ...domain.policy import validate_patch
 from ..context import ApplicationContext
+from .patch_input import normalize_workspace_patch
 
 _OID = re.compile("^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 _SHA = re.compile("^[a-f0-9]{64}$")
@@ -25,6 +26,9 @@ class WorkspaceApplyPatchResult:
     changed_paths: tuple[str, ...]
     workspace_fingerprint: str
     diff_stat: str
+    input_format: str
+    normalized_patch_sha256: str
+    repair_actions: tuple[str, ...]
 
 
 class WorkspacePatchApplier:
@@ -37,9 +41,10 @@ class WorkspacePatchApplier:
             raise ValueError("expected_head_sha must be a lowercase 40/64 hex Git object id")
         if not _SHA.fullmatch(c.expected_workspace_fingerprint):
             raise ValueError("expected_workspace_fingerprint must be a lowercase SHA-256")
-        changed = validate_patch(
-            c.patch, repo, max_chars=self.ctx.config.server.max_tool_output_chars * 4
-        )
+        audit_details: dict[str, object] = {
+            "workspace_id": c.workspace_id,
+            "input_patch_sha256": hashlib.sha256(c.patch.encode("utf-8")).hexdigest(),
+        }
 
         def op() -> WorkspaceApplyPatchResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -53,11 +58,27 @@ class WorkspacePatchApplier:
                     raise WorkspaceError(
                         "Workspace changed since it was inspected; refresh status before applying patch"
                     )
-                self.ctx.git.apply_patch(path, c.patch)
+                normalized, changed = normalize_workspace_patch(
+                    workspace_root=path,
+                    repository=repo,
+                    server=self.ctx.config.server,
+                    filesystem=self.ctx.filesystem,
+                    patch=c.patch,
+                )
+                audit_details.update(
+                    {
+                        "input_format": normalized.input_format,
+                        "normalized_patch_sha256": normalized.normalized_sha256,
+                        "repair_actions": list(normalized.repair_actions),
+                        "changed_paths": list(changed),
+                    }
+                )
+                self.ctx.git.apply_patch(path, normalized.patch)
                 try:
-                    self.ctx.git.changed_paths(path, repo)
+                    actual_changed = tuple(self.ctx.git.changed_paths(path, repo))
+                    self.ctx.git.enforce_change_budget(path, repo)
                 except Exception:
-                    self.ctx.git.reverse_patch(path, c.patch)
+                    self.ctx.git.reverse_patch(path, normalized.patch)
                     if self.ctx.git.fingerprint(path) != before:
                         raise WorkspaceError(
                             "Patch violated policy and rollback did not fully restore the workspace"
@@ -65,13 +86,16 @@ class WorkspacePatchApplier:
                     raise
                 return WorkspaceApplyPatchResult(
                     c.workspace_id,
-                    changed,
+                    actual_changed,
                     self.ctx.git.fingerprint(path),
                     self.ctx.git.diff_stat(path),
+                    normalized.input_format,
+                    normalized.normalized_sha256,
+                    normalized.repair_actions,
                 )
 
         return self.ctx.audited(
             "workspace_apply_patch",
-            {"workspace_id": c.workspace_id, "changed_paths": list(changed)},
+            audit_details,
             op,
         )

@@ -35,7 +35,7 @@ Do not skip directly to L5. A live PR must not be the first evidence that a writ
 ## 2. Safety rules for the live test
 
 - Start from a clean source clone.
-- Use repository ID `work-frontier`.
+- Set `REPO_ID` to one configured repository ID and `REPO_PATH` to its absolute checkout path.
 - Use a unique task slug beginning with `repoforge-e2e-`.
 - Use an isolated RepoForge worktree.
 - Make only the canary file described below.
@@ -48,25 +48,20 @@ Do not skip directly to L5. A live PR must not be the first evidence that a writ
 - Do not paste API keys, tokens, tunnel credentials, environment dumps, or secret-bearing logs into
   ChatGPT or the test record.
 
-## 3. Expected Work Frontier configuration
+## 3. Expected operator configuration
 
-The live target is:
-
-```text
-/Users/trung.ngo/Documents/zaob-dev/work-frontier
-```
-
-Install the supplied configuration:
+Select one real configured repository without hardcoding a shared machine path:
 
 ```sh
-mkdir -p ~/.config/repoforge
-cp config.work-frontier.toml ~/.config/repoforge/config.toml
-export REPOFORGE_CONFIG="$HOME/.config/repoforge/config.toml"
+export REPO_ID="your-configured-repository-id"
+export REPO_PATH="/absolute/path/to/repository"
+export REPOFORGE_CONFIG="${REPOFORGE_CONFIG:-$HOME/.config/repoforge/config.toml}"
 ```
 
-Inspect the resolved configuration:
+Inspect the resolved paths and configuration:
 
 ```sh
+rf config path
 rf show-config
 ```
 
@@ -140,11 +135,12 @@ Confirm coverage exists for:
 ## 6. L2: real repository preflight without edits
 
 ```sh
-rf doctor --fix
-rf smoke-test --repo-id work-frontier
+rf config path
+rf doctor
+rf repo list
 ```
 
-Expected smoke steps:
+Confirm the selected `$REPO_ID` is present, then perform these read-only checks through MCP Inspector:
 
 ```text
 repo_list

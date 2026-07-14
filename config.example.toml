@@ -1,11 +1,14 @@
-# Minimal RepoForge configuration. `rf setup` creates this file for you.
-version = 1
+# Minimal RepoForge source configuration. `rf setup` creates this file for you.
+version = 2
 
+# Omit [tunnel] for local-only stdio operation.
 [tunnel]
 id = "tunnel_replace_me"
+profile = "repoforge"
 
 [[repo]]
-path = "/absolute/path/to/repoforge"
-
-[[repo]]
-path = "/absolute/path/to/work-frontier"
+id = "example-repository"
+path = "/absolute/path/to/repository"
+policy_template = "standard"
+decisions = []
+policy_overrides = []

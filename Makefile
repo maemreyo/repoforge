@@ -22,10 +22,11 @@ tickets:
 	uv run python scripts/validate_ticket_graph.py --next --limit 7
 
 doctor:
-	uv run rf doctor --fix
+	uv run rf doctor
 
 smoke:
-	uv run rf smoke-test --repo-id work-frontier
+	@test -n "$(REPO_ID)" || (echo "Set REPO_ID to a configured repository id" >&2; exit 2)
+	uv run rf repo list
 
 inspector:
 	./scripts/inspect-mcp.sh

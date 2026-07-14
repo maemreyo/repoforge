@@ -24,7 +24,7 @@ class SourceRepository:
 
 @dataclass(frozen=True, slots=True)
 class SourceConfiguration:
-    tunnel_id: str
+    tunnel_id: str | None
     profile: str
     repositories: tuple[SourceRepository, ...]
 
@@ -33,9 +33,15 @@ def parse_source(text: str) -> SourceConfiguration:
     raw: Any = tomllib.loads(text)
     if not isinstance(raw, dict):
         raise ValueError("Configuration must be a TOML table")
-    tunnel = raw.get("tunnel", {})
-    if not isinstance(tunnel, dict) or not isinstance(tunnel.get("id"), str):
-        raise ValueError("[tunnel].id is required")
+    tunnel = raw.get("tunnel")
+    if tunnel is None:
+        tunnel_id: str | None = None
+        profile = "repoforge"
+    elif isinstance(tunnel, dict) and isinstance(tunnel.get("id"), str):
+        tunnel_id = str(tunnel["id"])
+        profile = str(tunnel.get("profile", "repoforge"))
+    else:
+        raise ValueError("[tunnel].id must be a string when tunnel configuration is present")
     repos = raw.get("repo")
     if not isinstance(repos, list) or not repos:
         raise ValueError("At least one [[repo]] is required")
@@ -69,20 +75,23 @@ def parse_source(text: str) -> SourceConfiguration:
                 overrides,
             )
         )
-    return SourceConfiguration(
-        str(tunnel["id"]), str(tunnel.get("profile", "repoforge")), tuple(result)
-    )
+    return SourceConfiguration(tunnel_id, profile, tuple(result))
 
 
 def render_source(config: SourceConfiguration) -> str:
     lines = [
         "# RepoForge user configuration. Approved policy is stored in immutable generations.",
         f"version = {SOURCE_CONFIG_VERSION}",
-        "",
-        "[tunnel]",
-        f"id = {json.dumps(config.tunnel_id)}",
-        f"profile = {json.dumps(config.profile)}",
     ]
+    if config.tunnel_id is not None:
+        lines.extend(
+            [
+                "",
+                "[tunnel]",
+                f"id = {json.dumps(config.tunnel_id)}",
+                f"profile = {json.dumps(config.profile)}",
+            ]
+        )
     for repo in config.repositories:
         lines.extend(
             [

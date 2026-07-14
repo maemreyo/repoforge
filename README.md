@@ -262,26 +262,57 @@ repoforge-mcp
 rf
 ```
 
+### Environment overrides
+
+| Variable | Purpose |
+| --- | --- |
+| `REPOFORGE_CONFIG` | Override the editable source configuration path. |
+| `REPOFORGE_OUTPUT` | Select supported CLI output rendering such as JSON. |
+| `REPOFORGE_TUNNEL_ID` | Supply a managed tunnel ID for legacy/runtime compatibility paths. |
+| `REPOFORGE_TUNNEL_PROFILE` | Override the managed tunnel profile name. |
+| `CONTROL_PLANE_API_KEY` | Authorize managed tunnel startup; never persisted by RepoForge. |
+
+### Where RepoForge keeps files
+
+Run `rf config path` before or after setup to see the absolute source config, generated lock directory, state root, onboarding store, audit and metrics files, runtime log, and diagnostics directory. Each entry reports whether it currently exists. See the [getting-started path chooser](docs/getting-started/README.md) for local-first and tunnel flows.
+
 ### Configure
 
-Configure a tunnel and one or more repositories:
+Start with local-only stdio operation when no tunnel is required:
+
+```bash
+rf setup --local /absolute/path/to/repository
+```
+
+Review the proposal and rerun with every exact `approve:<proposal-id>` token shown by RepoForge. To configure managed tunnel operation instead:
 
 ```bash
 rf setup \
   --tunnel-id tunnel_... \
-  /absolute/path/to/repoforge \
-  /absolute/path/to/another-repository
+  /absolute/path/to/repository
 ```
 
-RepoForge stores minimal user intent and generates a reviewed configuration lock containing the resolved repository policy and approved execution profiles.
+RepoForge stores minimal user intent and generates a reviewed configuration lock containing the resolved repository policy and approved execution profiles. Inspect every resolved location without creating files:
+
+```bash
+rf config path
+```
 
 ### Start
+
+For local MCP stdio:
+
+```bash
+rf serve
+```
+
+For the managed runtime and tunnel lifecycle:
 
 ```bash
 rf start
 ```
 
-When `CONTROL_PLANE_API_KEY` is not already available, RepoForge requests it through a hidden terminal prompt. The key is not written to configuration, audit records, runtime logs, or shell history.
+Managed startup requires a configured tunnel ID, the `tunnel-client` executable, and `CONTROL_PLANE_API_KEY`. The key is not written to configuration, audit records, runtime logs, or shell history.
 
 ### Manage repositories
 
@@ -289,8 +320,8 @@ When `CONTROL_PLANE_API_KEY` is not already available, RepoForge requests it thr
 rf repo list
 rf repo inspect /absolute/path/to/repository
 
-rf repo add /absolute/path/to/repository --preview
-rf repo add /absolute/path/to/repository --approve PROPOSAL_ID
+rf repo propose /absolute/path/to/repository
+rf repo add /absolute/path/to/repository --approve approve:PROPOSAL_ID
 
 rf repo refresh
 rf repo refresh --accept
