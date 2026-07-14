@@ -35,7 +35,10 @@ class WorkspaceCommitter:
                 fresh = self.ctx.store.load(c.workspace_id)
                 self.ctx.git.changed_paths(path, repo)
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
-                if not self.ctx.git.status_porcelain(path).strip():
+                dirty = bool(self.ctx.git.status_porcelain(path).strip())
+                current_head = self.ctx.git.head_sha(path)
+                controlled_refresh = fresh.metadata.get("refresh_commit_sha") == current_head
+                if not dirty and not controlled_refresh:
                     raise WorkspaceError("There are no changes to commit")
                 if repo.require_verification_before_commit:
                     if not fresh.last_verification:
@@ -50,7 +53,11 @@ class WorkspaceCommitter:
                 completed = (
                     fresh.last_verification.completed_at if fresh.last_verification else None
                 )
-                head, show = self.ctx.git.commit(path, message)
+                if controlled_refresh and not dirty:
+                    head = current_head
+                    show = self.ctx.git.commit_summary(path)
+                else:
+                    head, show = self.ctx.git.commit(path, message)
                 if repo.require_verification_before_commit:
                     fresh.metadata.update(
                         {
@@ -59,6 +66,7 @@ class WorkspaceCommitter:
                             "verification_completed_at": completed,
                         }
                     )
+                fresh.metadata.pop("refresh_commit_sha", None)
                 fresh.last_verification = None
                 try:
                     self.ctx.store.save(fresh)

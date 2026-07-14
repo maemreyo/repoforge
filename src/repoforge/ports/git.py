@@ -81,6 +81,30 @@ class GitComparisonEvidence:
     binary_patch_omitted: bool
 
 
+@dataclass(frozen=True, slots=True)
+class GitBaseReferences:
+    local_sha: str
+    remote_sha: str | None
+    remote_available: bool
+    remote_error_code: str | None
+    relation: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitMergePreview:
+    target_sha: str
+    merge_base_sha: str
+    conflict_paths: tuple[str, ...]
+    already_integrated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GitMergeResult:
+    status: str
+    head_sha: str
+    conflict_paths: tuple[str, ...]
+
+
 class GitRepository(Protocol):
     @property
     def executor(self) -> CommandExecutor: ...
@@ -114,6 +138,32 @@ class GitRepository(Protocol):
     def ensure_clean(self, path: Path, *, context: str) -> None: ...
 
     def ahead_of_base(self, path: Path, remote: str, base: str) -> int: ...
+
+    def inspect_base_references(
+        self, path: Path, remote: str, base: str, *, fetch_remote: bool
+    ) -> GitBaseReferences: ...
+
+    def ahead_behind(self, path: Path, left_sha: str, right_sha: str) -> tuple[int, int]: ...
+
+    def merge_base(self, path: Path, left_sha: str, right_sha: str) -> str: ...
+
+    def changed_paths_between(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        older_sha: str,
+        newer_sha: str,
+    ) -> list[str]: ...
+
+    def preview_merge(
+        self, path: Path, repo: RepositoryConfig, target_sha: str
+    ) -> GitMergePreview: ...
+
+    def merge_no_ff(
+        self, path: Path, repo: RepositoryConfig, target_sha: str
+    ) -> GitMergeResult: ...
+
+    def reset_hard(self, path: Path, target_sha: str) -> None: ...
 
     def list_files(
         self, path: Path, repo: RepositoryConfig, max_entries: int
@@ -201,6 +251,8 @@ class GitRepository(Protocol):
     ) -> bool: ...
 
     def commit(self, path: Path, message: str) -> tuple[str, str]: ...
+
+    def commit_summary(self, path: Path) -> str: ...
 
     def push(self, path: Path, remote: str, branch: str, timeout: int) -> CommandResult: ...
 

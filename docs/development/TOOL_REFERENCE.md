@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes thirty-nine focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes forty-two focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -113,7 +113,17 @@ rather than silently widening output.
 | `workspace_create` | Create one isolated worktree and unique `ai/*` branch from an allowlisted base. |
 | `workspace_list` | List workspaces managed by the local RepoForge registry. |
 | `workspace_status` | Return HEAD, branch, Git status, workspace fingerprint, verification state, and change metrics. |
+| `workspace_base_status` | Fetch the configured remote base and return exact workspace-base, local-base, remote-base, HEAD, ahead/behind, path-overlap, publication, outage, and staleness evidence. |
+| `workspace_refresh_preview` | Produce a read-only preview bound to the exact HEAD, fingerprint, recorded workspace base, latest remote-base SHA, merge strategy, and predicted conflict paths. |
+| `workspace_refresh` | Merge only the exact reviewed remote-base target with `--no-ff`; it never rebases, force-pushes, writes the remote, or mutates a protected/base branch. |
 | `workspace_remove` | Remove a clean local worktree; remote branches and pull requests are untouched. |
+
+A refresh preview becomes stale when the workspace HEAD, fingerprint, recorded base, remote target, or
+predicted merge evidence changes. A conflicting refresh reports policy-allowed conflict paths and aborts
+back to the exact reviewed HEAD and fingerprint. A successful refresh invalidates verification,
+assessment, architecture, and execution-plan receipts. When it creates a merge commit, the workspace
+must pass exact-tree verification and `workspace_commit` must approve that controlled commit before a
+normal non-force push can publish it.
 
 ## Read, search, and edit
 

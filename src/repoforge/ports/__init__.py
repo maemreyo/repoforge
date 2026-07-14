@@ -6,7 +6,14 @@ from .clock import Clock
 from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
 from .filesystem import FileSystem
-from .git import GitRepository, GitSnapshotBlob, ResolvedRepositoryRef
+from .git import (
+    GitBaseReferences,
+    GitMergePreview,
+    GitMergeResult,
+    GitRepository,
+    GitSnapshotBlob,
+    ResolvedRepositoryRef,
+)
 from .github import (
     GitHubActionsJob,
     GitHubActionsStep,
@@ -47,11 +54,14 @@ __all__ = [
     "ExecutableLocator",
     "FileSystem",
     "GateState",
+    "GitBaseReferences",
     "GitHubActionsJob",
     "GitHubActionsStep",
     "GitHubCheckAnnotation",
     "GitHubCheckRun",
     "GitHubJobLog",
+    "GitMergePreview",
+    "GitMergeResult",
     "GitRepository",
     "GitSnapshotBlob",
     "IdGenerator",

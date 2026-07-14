@@ -113,6 +113,7 @@ class WorkspaceCreator:
             head = self.ctx.git.create_worktree(repo, destination, branch, base)
             metadata: dict[str, object] = {
                 "repository_policy_snapshot": repository_policy_snapshot(repo),
+                "workspace_base_sha": head,
             }
             if key_hash:
                 metadata["workspace_create_idempotency"] = key_hash

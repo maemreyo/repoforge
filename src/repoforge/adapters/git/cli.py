@@ -17,9 +17,12 @@ from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ...ports.command import CommandExecutor, CommandResult
 from ...ports.git import (
     GitActorIdentity,
+    GitBaseReferences,
     GitChangedFileEvidence,
     GitCommitEvidence,
     GitComparisonEvidence,
+    GitMergePreview,
+    GitMergeResult,
     GitSnapshotBlob,
     ResolvedRepositoryRef,
 )
@@ -240,6 +243,204 @@ class GitCliRepository:
             ).stdout.strip()
             or "0"
         )
+
+    def _commit_ref(self, path: Path, ref: str, *, check: bool = True) -> str | None:
+        result = self._executor.run(
+            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
+            cwd=path,
+            check=False,
+            output_limit=256,
+        )
+        if result.returncode != 0:
+            if check:
+                raise CommandError(f"Git commit reference is unavailable: {ref}")
+            return None
+        return result.stdout.strip()
+
+    def _is_ancestor(self, path: Path, ancestor_sha: str, descendant_sha: str) -> bool:
+        result = self._executor.run(
+            ["git", "merge-base", "--is-ancestor", ancestor_sha, descendant_sha],
+            cwd=path,
+            check=False,
+            output_limit=256,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        raise CommandError(result.combined or "Unable to inspect Git ancestry")
+
+    def inspect_base_references(
+        self, path: Path, remote: str, base: str, *, fetch_remote: bool
+    ) -> GitBaseReferences:
+        local_ref = f"refs/heads/{base}"
+        remote_ref = f"refs/remotes/{remote}/{base}"
+        local_sha = self._commit_ref(path, local_ref)
+        assert local_sha is not None
+        last_known_remote = self._commit_ref(path, remote_ref, check=False)
+        remote_available = True
+        remote_error_code: str | None = None
+        if fetch_remote:
+            result = self._executor.run(
+                [
+                    "git",
+                    "fetch",
+                    "--prune",
+                    remote,
+                    f"+refs/heads/{base}:{remote_ref}",
+                ],
+                cwd=path,
+                check=False,
+                timeout=self.server.verification_timeout_seconds,
+                output_limit=2048,
+            )
+            if result.returncode != 0:
+                remote_available = False
+                remote_error_code = "REMOTE_BASE_UNAVAILABLE"
+        remote_sha = (
+            self._commit_ref(path, remote_ref, check=False)
+            if remote_available
+            else last_known_remote
+        )
+        if remote_sha is None:
+            remote_available = False
+            remote_error_code = "REMOTE_BASE_UNAVAILABLE"
+            relation = "unavailable"
+        elif local_sha == remote_sha:
+            relation = "equal"
+        elif self._is_ancestor(path, local_sha, remote_sha):
+            relation = "local_behind_remote"
+        elif self._is_ancestor(path, remote_sha, local_sha):
+            relation = "local_ahead_remote"
+        else:
+            relation = "diverged"
+        return GitBaseReferences(
+            local_sha,
+            remote_sha,
+            remote_available,
+            remote_error_code,
+            relation,
+        )
+
+    def ahead_behind(self, path: Path, left_sha: str, right_sha: str) -> tuple[int, int]:
+        raw = self._executor.run(
+            ["git", "rev-list", "--left-right", "--count", f"{left_sha}...{right_sha}"],
+            cwd=path,
+            output_limit=128,
+        ).stdout.split()
+        if len(raw) != 2:
+            raise CommandError("Git returned invalid ahead/behind counts")
+        try:
+            return int(raw[0]), int(raw[1])
+        except ValueError as exc:
+            raise CommandError("Git returned non-numeric ahead/behind counts") from exc
+
+    def merge_base(self, path: Path, left_sha: str, right_sha: str) -> str:
+        return self._executor.run(
+            ["git", "merge-base", left_sha, right_sha],
+            cwd=path,
+            output_limit=256,
+        ).stdout.strip()
+
+    @staticmethod
+    def _bounded_policy_paths(raw_paths: list[str], repo: RepositoryConfig) -> list[str]:
+        paths: list[str] = []
+        for raw in raw_paths:
+            if not raw:
+                continue
+            try:
+                normalized = assert_path_allowed(raw, repo)
+            except SecurityError:
+                continue
+            if normalized not in paths:
+                paths.append(normalized)
+        return sorted(paths)
+
+    def changed_paths_between(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        older_sha: str,
+        newer_sha: str,
+    ) -> list[str]:
+        if older_sha == newer_sha:
+            return []
+        raw = self._executor.run_bytes(
+            ["git", "diff", "--name-only", "-z", older_sha, newer_sha, "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        ).decode("utf-8", errors="strict")
+        return self._bounded_policy_paths(raw.split("\x00"), repo)
+
+    def preview_merge(self, path: Path, repo: RepositoryConfig, target_sha: str) -> GitMergePreview:
+        head = self.head_sha(path)
+        merge_base = self.merge_base(path, head, target_sha)
+        if self._is_ancestor(path, target_sha, head):
+            return GitMergePreview(target_sha, merge_base, (), True)
+        result = self._executor.run(
+            [
+                "git",
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                "--no-messages",
+                head,
+                target_sha,
+            ],
+            cwd=path,
+            check=False,
+            output_limit=self.server.max_fingerprint_bytes,
+        )
+        if result.returncode not in {0, 1}:
+            raise CommandError(result.combined or "Unable to compute merge preview")
+        fields = result.stdout.split("\x00")
+        if not fields or not fields[0]:
+            raise CommandError("Git returned an invalid merge preview")
+        raw_paths = [field for field in fields[1:] if field] if result.returncode == 1 else []
+        conflicts = self._bounded_policy_paths(raw_paths, repo)
+        return GitMergePreview(target_sha, merge_base, tuple(conflicts), False)
+
+    def merge_no_ff(self, path: Path, repo: RepositoryConfig, target_sha: str) -> GitMergeResult:
+        head = self.head_sha(path)
+        if self._is_ancestor(path, target_sha, head):
+            return GitMergeResult("current", head, ())
+        result = self._executor.run(
+            ["git", "merge", "--no-ff", "--no-edit", target_sha],
+            cwd=path,
+            check=False,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=self.server.max_tool_output_chars,
+        )
+        if result.returncode == 0:
+            return GitMergeResult("refreshed", self.head_sha(path), ())
+        raw = self._executor.run_bytes(
+            ["git", "diff", "--name-only", "--diff-filter=U", "-z", "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        ).decode("utf-8", errors="strict")
+        raw_paths = [item for item in raw.split("\x00") if item]
+        merge_in_progress = self._commit_ref(path, "MERGE_HEAD", check=False) is not None
+        if not merge_in_progress:
+            raise CommandError(result.combined or "Workspace base merge failed")
+        conflicts = self._bounded_policy_paths(raw_paths, repo)
+        aborted = self._executor.run(
+            ["git", "merge", "--abort"],
+            cwd=path,
+            check=False,
+            output_limit=2048,
+        )
+        if aborted.returncode != 0:
+            raise WorkspaceError(
+                "Workspace refresh conflict could not be aborted cleanly",
+                safe_next_action="Inspect the isolated workspace before any further mutation.",
+            )
+        if raw_paths and not conflicts:
+            raise SecurityError("Workspace refresh conflicts touch only denied repository paths")
+        return GitMergeResult("conflict", self.head_sha(path), tuple(conflicts))
+
+    def reset_hard(self, path: Path, target_sha: str) -> None:
+        self._executor.run(["git", "reset", "--hard", target_sha], cwd=path, output_limit=2048)
 
     def list_files(
         self, path: Path, repo: RepositoryConfig, max_entries: int
@@ -1250,6 +1451,11 @@ class GitCliRepository:
             ["git", "show", "-1", "--stat", "--oneline", "--decorate"], cwd=path
         ).stdout
         return (head, show)
+
+    def commit_summary(self, path: Path) -> str:
+        return self._executor.run(
+            ["git", "show", "-1", "--stat", "--oneline", "--decorate"], cwd=path
+        ).stdout
 
     def push(self, path: Path, remote: str, branch: str, timeout: int) -> CommandResult:
         return self._executor.run(

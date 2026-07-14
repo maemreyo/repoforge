@@ -95,6 +95,9 @@ READ_ONLY = ToolAnnotations(
 EXTERNAL_READ = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 )
+EXTERNAL_MUTATE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
 LOCAL_CREATE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
 )
@@ -346,6 +349,15 @@ def create_server(
         """Use this before writes to refresh HEAD, fingerprint, change budget, and verification state."""
         return bounded_service.call("workspace_status", workspace_id)
 
+    @mcp.tool(
+        title="Inspect workspace base freshness",
+        annotations=EXTERNAL_READ,
+        structured_output=True,
+    )
+    def workspace_base_status(workspace_id: str) -> dict[str, Any]:
+        """Use this to compare the workspace base with configured local and latest remote base state."""
+        return bounded_service.call("workspace_base_status", workspace_id)
+
     @mcp.tool(title="List workspace files", annotations=READ_ONLY, structured_output=True)
     def workspace_tree(workspace_id: str, max_entries: int = 2000) -> dict[str, Any]:
         """Use this when exploring tracked and untracked files allowed by repository policy."""
@@ -456,6 +468,44 @@ def create_server(
         """Use this to undo selected uncommitted tracked changes or remove selected untracked files."""
         return bounded_service.call(
             "workspace_restore_paths", workspace_id, relative_paths, expected_workspace_fingerprint
+        )
+
+    @mcp.tool(
+        title="Preview workspace base refresh",
+        annotations=EXTERNAL_READ,
+        structured_output=True,
+    )
+    def workspace_refresh_preview(
+        workspace_id: str,
+        expected_head_sha: str,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Use this to review one immutable merge preview against the latest configured remote base."""
+        return bounded_service.call(
+            "workspace_refresh_preview",
+            workspace_id,
+            expected_head_sha,
+            expected_fingerprint,
+        )
+
+    @mcp.tool(
+        title="Refresh workspace from reviewed base",
+        annotations=EXTERNAL_MUTATE,
+        structured_output=True,
+    )
+    def workspace_refresh(
+        workspace_id: str,
+        preview_id: str,
+        expected_head_sha: str,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Use this to merge the exact reviewed base target without rebase, force push, or remote write."""
+        return bounded_service.call(
+            "workspace_refresh",
+            workspace_id,
+            preview_id,
+            expected_head_sha,
+            expected_fingerprint,
         )
 
     @mcp.tool(title="Inspect workspace diff", annotations=READ_ONLY, structured_output=True)
