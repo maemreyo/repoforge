@@ -178,6 +178,19 @@ def _profile_commands(profile: dict[str, Any]) -> set[str]:
     }
 
 
+def _diagnostic_map(repo: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    diagnostics = repo.get("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        return {}
+    return {str(name): raw for name, raw in diagnostics.items() if isinstance(raw, dict)}
+
+
+def _argv_identity(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return ()
+    return tuple(value)
+
+
 def _record_profile_changes(
     changes: list[CapabilityChange],
     prefix: str,
@@ -232,6 +245,73 @@ def _record_profile_changes(
                     CapabilityDeltaKind.INCOMPATIBLE,
                     "profile execution scope changed",
                 )
+            )
+
+
+def _record_diagnostic_changes(
+    changes: list[CapabilityChange],
+    prefix: str,
+    before_repo: dict[str, Any],
+    after_repo: dict[str, Any],
+) -> None:
+    before = _diagnostic_map(before_repo)
+    after = _diagnostic_map(after_repo)
+    _record_set_change(
+        changes,
+        prefix,
+        set(before),
+        set(after),
+        additions=CapabilityDeltaKind.EXPANSION,
+        removals=CapabilityDeltaKind.RESTRICTION,
+        reason="reviewed diagnostic availability changed",
+    )
+    for diagnostic_id in sorted(set(before) & set(after)):
+        left = before[diagnostic_id]
+        right = after[diagnostic_id]
+        diagnostic_prefix = f"{prefix}.{diagnostic_id}"
+        for field, reason in (
+            ("argv", "diagnostic executable or argument template changed"),
+            ("selector_kind", "diagnostic selector type changed"),
+            ("working_directory", "diagnostic execution scope changed"),
+            ("network_policy", "diagnostic network policy changed"),
+            ("mutability", "diagnostic mutation policy changed"),
+            ("parser", "diagnostic output parser changed"),
+        ):
+            left_value = _argv_identity(left.get(field)) if field == "argv" else left.get(field)
+            right_value = _argv_identity(right.get(field)) if field == "argv" else right.get(field)
+            if left_value != right_value:
+                changes.append(
+                    CapabilityChange(
+                        f"{diagnostic_prefix}.{field}",
+                        left_value,
+                        right_value,
+                        CapabilityDeltaKind.INCOMPATIBLE,
+                        reason,
+                    )
+                )
+        for field, reason in (
+            ("selector_values", "diagnostic selector allowlist changed"),
+            ("artifact_paths", "diagnostic artifact path capability changed"),
+        ):
+            _record_set_change(
+                changes,
+                f"{diagnostic_prefix}.{field}",
+                _set(left.get(field)),
+                _set(right.get(field)),
+                additions=CapabilityDeltaKind.EXPANSION,
+                removals=CapabilityDeltaKind.RESTRICTION,
+                reason=reason,
+            )
+        for field, reason in (
+            ("timeout_seconds", "diagnostic process duration"),
+            ("output_limit", "diagnostic output disclosure bound"),
+        ):
+            _record_number(
+                changes,
+                f"{diagnostic_prefix}.{field}",
+                left.get(field, 0),
+                right.get(field, 0),
+                reason=reason,
             )
 
 
@@ -390,6 +470,7 @@ _REPO_RECOGNIZED = {
     "pr_reviewers",
     "no_maintainer_edit",
     "profiles",
+    "diagnostics",
 }
 _SERVER_RECOGNIZED = {
     "workspace_root",
@@ -443,9 +524,20 @@ def _metadata(value: dict[str, Any]) -> dict[str, Any]:
             if isinstance(profiles, dict)
             else {}
         )
+        diagnostics = repo.get("diagnostics", {})
+        diagnostic_summaries = (
+            {
+                str(name): raw.get("summary")
+                for name, raw in diagnostics.items()
+                if isinstance(diagnostics, dict) and isinstance(raw, dict)
+            }
+            if isinstance(diagnostics, dict)
+            else {}
+        )
         result["repositories"][repo_id] = {
             "display_name": repo.get("display_name"),
             "profile_descriptions": descriptions,
+            "diagnostic_summaries": diagnostic_summaries,
         }
     return result
 
@@ -552,6 +644,7 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
                 reason=reason,
             )
         _record_profile_changes(changes, prefix + ".profiles", left, right)
+        _record_diagnostic_changes(changes, prefix + ".diagnostics", left, right)
         for field, reason in (
             ("max_changed_files", "changed-file budget"),
             ("max_diff_lines", "diff-line budget"),

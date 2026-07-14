@@ -70,7 +70,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "8fd459aec00a1708cf2a18a0e98aabfa4f9c694add4c1c190f09c6b27b0aa7e4",
+    "tool_surface_hash": "6641d5415e50bf7507449f816f7b97cd673d4aafac0f6ee235027ca505bbebde",
     "tools": [
       {
         "annotations": {
@@ -1249,6 +1249,64 @@
           "type": "object"
         },
         "title": "Restore selected workspace paths"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input.",
+        "inputSchema": {
+          "properties": {
+            "diagnostic_id": {
+              "title": "Diagnostic Id",
+              "type": "string"
+            },
+            "expected_fingerprint": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expected Fingerprint"
+            },
+            "selector": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Selector"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "diagnostic_id"
+          ],
+          "title": "workspace_run_diagnosticArguments",
+          "type": "object"
+        },
+        "name": "workspace_run_diagnostic",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_run_diagnosticDictOutput",
+          "type": "object"
+        },
+        "title": "Run reviewed workspace diagnostic"
       },
       {
         "annotations": {

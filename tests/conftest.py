@@ -303,6 +303,16 @@ commands = [["python3", "-c", "from pathlib import Path; assert Path('hello.txt'
 description = "Full verification"
 verification = true
 commands = [["python3", "-c", "from pathlib import Path; assert Path('hello.txt').read_text().startswith('changed')"]]
+
+[repositories.demo.diagnostics.pytest-target]
+summary = "Run one tracked pytest target"
+argv = ["python3", "-c", "print('1 passed in 0.01s')", "{{selector}}"]
+selector_kind = "pytest_node"
+timeout_seconds = 30
+network_policy = "local_only"
+mutability = "read_only"
+parser = "pytest"
+output_limit = 2000
 ''',
         encoding="utf-8",
     )

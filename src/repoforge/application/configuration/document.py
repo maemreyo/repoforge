@@ -158,7 +158,7 @@ def render_resolved(
             if not isinstance(raw, dict):
                 continue
             lines.extend(["", f"[repositories.{repo_id}]"])
-            for key in sorted(k for k in raw if k != "profiles"):
+            for key in sorted(k for k in raw if k not in {"profiles", "diagnostics"}):
                 value = raw[key]
                 if isinstance(value, (str, int, bool, list)):
                     lines.append(f"{key} = {_toml(value)}")
@@ -184,4 +184,27 @@ def render_resolved(
                             if isinstance(command, list):
                                 lines.append(f"  {_toml(command)},")
                         lines.append("]")
+            diagnostics = raw.get("diagnostics", {})
+            if isinstance(diagnostics, dict):
+                for diagnostic_id in sorted(diagnostics):
+                    diagnostic = diagnostics[diagnostic_id]
+                    if not isinstance(diagnostic, dict):
+                        continue
+                    lines.extend(["", f"[repositories.{repo_id}.diagnostics.{diagnostic_id}]"])
+                    for key in (
+                        "summary",
+                        "selector_kind",
+                        "timeout_seconds",
+                        "network_policy",
+                        "mutability",
+                        "parser",
+                        "output_limit",
+                        "working_directory",
+                    ):
+                        if key in diagnostic and isinstance(diagnostic[key], (str, int, bool)):
+                            lines.append(f"{key} = {_toml(diagnostic[key])}")
+                    for key in ("argv", "selector_values", "artifact_paths"):
+                        value = diagnostic.get(key)
+                        if isinstance(value, list):
+                            lines.append(f"{key} = {_toml(value)}")
     return "\n".join(lines).rstrip() + "\n"

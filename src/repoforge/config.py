@@ -10,6 +10,15 @@ from typing import Any
 
 import tomli as tomllib
 
+from .domain.diagnostics import (
+    DiagnosticMutability,
+    DiagnosticNetworkPolicy,
+    DiagnosticParserKind,
+    DiagnosticProfileConfig,
+    DiagnosticSelectorConfig,
+    DiagnosticSelectorKind,
+    validate_diagnostic_profile,
+)
 from .domain.errors import ConfigError
 
 DEFAULT_CONFIG_PATH = Path("~/.config/repoforge/config.toml").expanduser()
@@ -78,6 +87,7 @@ class RepositoryConfig:
     pr_reviewers: tuple[str, ...] = ()
     no_maintainer_edit: bool = False
     profiles: dict[str, ProfileConfig] = field(default_factory=dict)
+    diagnostics: dict[str, DiagnosticProfileConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -217,6 +227,87 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
     return profiles
 
 
+def _enum_value(enum_type: type[Any], value: Any, context: str) -> Any:
+    if not isinstance(value, str):
+        raise ConfigError(f"{context} must be a string")
+    try:
+        return enum_type(value)
+    except ValueError as exc:
+        allowed = sorted(item.value for item in enum_type)
+        raise ConfigError(f"{context} must be one of {allowed}") from exc
+
+
+def _load_diagnostics(raw: Any, repo_id: str) -> dict[str, DiagnosticProfileConfig]:
+    if raw is None:
+        return {}
+    table = _expect_mapping(raw, f"repositories.{repo_id}.diagnostics")
+    diagnostics: dict[str, DiagnosticProfileConfig] = {}
+    for diagnostic_id, diagnostic_raw in table.items():
+        profile = _expect_mapping(
+            diagnostic_raw,
+            f"repositories.{repo_id}.diagnostics.{diagnostic_id}",
+        )
+        argv_raw = profile.get("argv")
+        if (
+            not isinstance(argv_raw, list)
+            or not argv_raw
+            or not all(isinstance(argument, str) and argument for argument in argv_raw)
+        ):
+            raise ConfigError(f"diagnostic {repo_id}.{diagnostic_id}.argv must be a string array")
+        selector_kind = _enum_value(
+            DiagnosticSelectorKind,
+            profile.get("selector_kind", "none"),
+            f"diagnostic {repo_id}.{diagnostic_id}.selector_kind",
+        )
+        selector_values = _tuple_of_strings(
+            profile.get("selector_values"),
+            f"diagnostic {repo_id}.{diagnostic_id}.selector_values",
+        )
+        working_directory_raw = profile.get("working_directory")
+        if working_directory_raw is not None and not isinstance(working_directory_raw, str):
+            raise ConfigError(
+                f"diagnostic {repo_id}.{diagnostic_id}.working_directory must be a string"
+            )
+        diagnostic = DiagnosticProfileConfig(
+            diagnostic_id=str(diagnostic_id),
+            summary=str(profile.get("summary", "")),
+            argv_template=tuple(argv_raw),
+            selector=DiagnosticSelectorConfig(selector_kind, selector_values),
+            working_directory=working_directory_raw,
+            timeout_seconds=_positive_int(
+                profile.get("timeout_seconds"),
+                30,
+                f"diagnostic {repo_id}.{diagnostic_id}.timeout_seconds",
+            ),
+            network_policy=_enum_value(
+                DiagnosticNetworkPolicy,
+                profile.get("network_policy", "local_only"),
+                f"diagnostic {repo_id}.{diagnostic_id}.network_policy",
+            ),
+            mutability=_enum_value(
+                DiagnosticMutability,
+                profile.get("mutability", "read_only"),
+                f"diagnostic {repo_id}.{diagnostic_id}.mutability",
+            ),
+            parser=_enum_value(
+                DiagnosticParserKind,
+                profile.get("parser", "text"),
+                f"diagnostic {repo_id}.{diagnostic_id}.parser",
+            ),
+            output_limit=_positive_int(
+                profile.get("output_limit"),
+                12_000,
+                f"diagnostic {repo_id}.{diagnostic_id}.output_limit",
+            ),
+            artifact_paths=_tuple_of_strings(
+                profile.get("artifact_paths"),
+                f"diagnostic {repo_id}.{diagnostic_id}.artifact_paths",
+            ),
+        )
+        diagnostics[diagnostic_id] = validate_diagnostic_profile(diagnostic)
+    return diagnostics
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     config_value: str | Path = path or os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
     config_path = Path(config_value).expanduser().resolve()
@@ -334,6 +425,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             f"repositories.{repo_id}.protected_branches",
         )
         profiles = _load_profiles(repo_raw.get("profiles"), repo_id)
+        diagnostics = _load_diagnostics(repo_raw.get("diagnostics"), repo_id)
         default_verification_raw = repo_raw.get("default_verification_profile")
         default_verification = (
             str(default_verification_raw) if default_verification_raw is not None else None
@@ -411,5 +503,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 f"repositories.{repo_id}.no_maintainer_edit",
             ),
             profiles=profiles,
+            diagnostics=diagnostics,
         )
     return AppConfig(source_path=config_path, server=server, repositories=repositories)

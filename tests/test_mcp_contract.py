@@ -47,6 +47,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_restore_paths",
             "workspace_diff",
             "workspace_run_profile",
+            "workspace_run_diagnostic",
             "workspace_verify",
             "workspace_commit",
             "workspace_push",
@@ -70,6 +71,16 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             assert tool.annotations.destructiveHint is not None
             assert tool.annotations.openWorldHint is not None
             assert tool.inputSchema["type"] == "object"
+        diagnostic = next(tool for tool in result.tools if tool.name == "workspace_run_diagnostic")
+        assert diagnostic.annotations.readOnlyHint is False
+        assert diagnostic.annotations.destructiveHint is False
+        assert diagnostic.annotations.openWorldHint is False
+        assert set(diagnostic.inputSchema["properties"]) == {
+            "workspace_id",
+            "diagnostic_id",
+            "selector",
+            "expected_fingerprint",
+        }
 
         read_result = await session.call_tool("repo_list", {})
         assert read_result.isError is False
@@ -152,7 +163,18 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         created = await call("workspace_create", {"repo_id": "demo", "task_slug": "MCP contract"})
         workspace_id = str(created["workspace_id"])
         await call("workspace_list", {})
-        await call("workspace_status", {"workspace_id": workspace_id})
+        diagnostic_status = await call("workspace_status", {"workspace_id": workspace_id})
+        diagnostic_result = await call(
+            "workspace_run_diagnostic",
+            {
+                "workspace_id": workspace_id,
+                "diagnostic_id": "pytest-target",
+                "selector": "hello.txt::test_example",
+                "expected_fingerprint": diagnostic_status["workspace_fingerprint"],
+            },
+        )
+        assert diagnostic_result["outcome"] == "passed"
+        assert diagnostic_result["resolved_selector"] == "hello.txt::test_example"
         await call("workspace_tree", {"workspace_id": workspace_id, "max_entries": 50})
         hello = await call(
             "workspace_read_file",

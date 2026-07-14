@@ -58,6 +58,26 @@ pr_labels = []
 pr_reviewers = []
 no_maintainer_edit = false
 
+[repositories.repoforge.diagnostics.pytest-target]
+summary = "Run one tracked pytest path or node without changing verification profiles"
+argv = ["uv", "run", "--extra", "dev", "pytest", "{selector}", "-q"]
+selector_kind = "pytest_node"
+timeout_seconds = 300
+network_policy = "local_only"
+mutability = "read_only"
+parser = "pytest"
+output_limit = 12000
+
+[repositories.repoforge.diagnostics.release-contract-diff]
+summary = "Check the reviewed release contract without updating it"
+argv = ["uv", "run", "--extra", "dev", "python", "scripts/check_release_contracts.py"]
+selector_kind = "none"
+timeout_seconds = 120
+network_policy = "local_only"
+mutability = "read_only"
+parser = "release_contract"
+output_limit = 8000
+
 [repositories.repoforge.profiles.setup]
 description = "Synchronize the locked RepoForge development environment"
 verification = false
