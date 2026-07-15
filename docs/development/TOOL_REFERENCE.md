@@ -31,6 +31,31 @@ identity without an extra probe. It excludes source
 bodies, command output, full environment bodies, secrets, and absolute user paths. Verification
 receipts add an optional `environment_identity_hash`; legacy receipts without this field remain valid.
 
+## Shared normalized evidence
+
+`EvidenceItem` is the provider-neutral contract used to carry architecture, code-intelligence,
+analyzer, verification, CI, Git, and knowledge evidence without granting any new repository or command
+authority. Its deterministic identity binds provider/version provenance, typed path/symbol/flow/test
+scope, exact repository or workspace snapshot identity, redacted bounded summary, coverage/confidence
+measures, conflict group, timestamps, and optional content-addressed artifact reference. Raw provider
+logs, patches, source bodies, environment bodies, and artifact bytes are never embedded in the normalized
+item.
+
+Evidence status is explicit: `current`, `stale`, `partial`, `conflicting`, or `unavailable`. Staleness is
+derived against the complete current snapshot identity and optional expiry timestamp; a HEAD,
+workspace-fingerprint, configuration-generation, or policy-hash mismatch cannot remain current.
+Divergent records in the same snapshot-bound conflict group are marked conflicting rather than silently
+choosing a winner. Queries are bounded and deterministic across snapshot, source kind, path, symbol,
+test, status, and opaque evidence-ID cursor, with stale evidence excluded unless explicitly requested.
+
+The private JSON evidence store separates checksum-framed normalized records from content-addressed
+artifact blobs. Directories use `0700`, files use `0600`, and writes use process-local serialization,
+cross-process locking, atomic replacement, fsync, strict schema/checksum validation, artifact digest and
+size verification, item/artifact/total-byte quotas, and deterministic pagination. Retention applies age,
+count, and byte bounds but accepts protected evidence IDs so assessments, plans, tasks, and receipts can
+prevent referenced evidence from being pruned. Corruption, unsupported future schemas, missing artifacts,
+and quota exhaustion fail closed with stable error codes.
+
 ## Local runtime commands
 
 `rf runtime status` is a local operator command, not an MCP tool. It compares the reviewed lock
