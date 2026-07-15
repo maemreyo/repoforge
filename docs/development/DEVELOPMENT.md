@@ -118,6 +118,8 @@ When configuration fields or defaults change:
 
 A resolved repository table can set `policy = "strict" | "standard" | "relaxed"`. The typed loader expands the selected preset into the reviewed lock, then lets explicitly supplied repository fields win. A path-only repository table uses `strict`; existing expanded repository tables remain compatible without a preset.
 
+Editable source configuration stays minimal: rendering omits the default `standard` source template and empty decision or policy-override lists. Parsing restores those defaults before RepoForge generates the fully explicit reviewed lock.
+
 | Preset | Read-only | Publishing | Changed files | Diff lines | Changed bytes |
 | --- | --- | --- | ---: | ---: | ---: |
 | `strict` | yes | no | 25 | 2,000 | 5 MiB |

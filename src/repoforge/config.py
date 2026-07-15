@@ -232,9 +232,8 @@ def _safe_remote(value: str, context: str) -> str:
 def _resolve_repository_preset(raw: dict[str, Any], repo_id: str) -> dict[str, Any]:
     policy = raw.get("policy")
     if policy is None:
-        # A path-only table is the new minimal form. Existing expanded tables retain
-        # their historical field defaults until an operator explicitly selects a preset.
-        return {**_POLICY_PRESETS["strict"], **raw} if set(raw) == {"path"} else raw
+        preset_fields = _POLICY_PRESETS["strict"].keys()
+        return {**_POLICY_PRESETS["strict"], **raw} if preset_fields.isdisjoint(raw) else raw
     if not isinstance(policy, str) or policy not in _POLICY_PRESETS:
         allowed = ", ".join(("strict", "standard", "relaxed"))
         raise ConfigError(f"repositories.{repo_id}.policy must be one of: {allowed}")

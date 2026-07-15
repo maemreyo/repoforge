@@ -40,6 +40,20 @@ def test_minimal_repository_config_resolves_to_fail_closed_strict_policy(tmp_pat
     assert resolved.denied_paths == DEFAULT_DENIED_PATHS
 
 
+def test_repository_metadata_without_policy_knobs_uses_strict_policy(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = tmp_path / "config.toml"
+    _config(config, repo, extra='display_name = "Demo"\n')
+
+    resolved = load_config(config).repositories["demo"]
+
+    assert resolved.display_name == "Demo"
+    assert resolved.read_only is True
+    assert resolved.publish_enabled is False
+    assert resolved.max_changed_files == 25
+
+
 @pytest.mark.parametrize(
     ("policy", "read_only", "publish_enabled", "max_diff_lines"),
     [
