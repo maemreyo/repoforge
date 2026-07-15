@@ -23,6 +23,7 @@ from ..ports import (
     ExecutableLocator,
     ExecutionEnvironmentPort,
     FileSystem,
+    GitHubReadCache,
     GitRepository,
     IdempotencyStore,
     IdGenerator,
@@ -208,6 +209,7 @@ class ApplicationContext:
     fingerprint_cache: FingerprintCache | None = None
     execution_environment: ExecutionEnvironmentPort | None = None
     provider_registry: ProviderRegistry | None = None
+    github_read_cache: GitHubReadCache | None = None
 
     def now_epoch(self) -> float:
         try:
@@ -388,6 +390,42 @@ class ApplicationContext:
             result_bytes=result_bytes,
         )
         return result
+
+    def github_read(
+        self,
+        kind: str,
+        repo_id: str,
+        number: int,
+        *,
+        fresh: bool,
+        loader: Callable[[], dict[str, Any]],
+    ) -> tuple[dict[str, Any], bool]:
+        """Serve one GitHub issue/PR read from the bounded local cache, or fall back live.
+
+        The cache is evidence only: a hit never grants authorization, and repository,
+        path, and branch policy are enforced identically for a cached or a live payload
+        because callers resolve and validate the repository before this is invoked.
+        ``fresh`` forces a live read and refreshes the cache entry. Any cache failure
+        (missing, expired, corrupt, or an adapter error) is treated as a plain miss.
+        """
+        cache = self.github_read_cache
+        if cache is not None and not fresh:
+            cached: dict[str, Any] | None = None
+            with contextlib.suppress(Exception):
+                cached = cache.get(
+                    repo_id,
+                    kind,
+                    number,
+                    ttl_seconds=self.config.server.github_read_cache_ttl_seconds,
+                    now_epoch=self.now_epoch(),
+                )
+            if cached is not None:
+                return cached, True
+        payload = loader()
+        if cache is not None:
+            with contextlib.suppress(Exception):
+                cache.put(repo_id, kind, number, payload, now_epoch=self.now_epoch())
+        return payload, False
 
     def idempotent(
         self,

@@ -1,3 +1,4 @@
+from .json_github_read_cache import JsonGitHubReadCache
 from .json_idempotency_store import JsonIdempotencyStore
 from .json_onboarding_store import JsonOnboardingStore
 from .json_operation_store import JsonOperationStore
@@ -6,6 +7,7 @@ from .json_workflow_recording_store import JsonWorkflowRecordingStore
 from .json_workspace_store import JsonWorkspaceStore
 
 __all__ = [
+    "JsonGitHubReadCache",
     "JsonIdempotencyStore",
     "JsonOnboardingStore",
     "JsonOperationStore",

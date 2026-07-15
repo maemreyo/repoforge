@@ -175,6 +175,7 @@ class ServerConfig:
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
+    github_read_cache_ttl_seconds: int = 120
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,14 @@ def _positive_int(value: Any, default: int, context: str) -> int:
         return default
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ConfigError(f"{context} must be a positive integer")
+    return value
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int, context: str) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+        raise ConfigError(f"{context} must be an integer between {minimum} and {maximum}")
     return value
 
 
@@ -562,6 +571,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("max_background_profiles"),
             2,
             "server.max_background_profiles",
+        ),
+        github_read_cache_ttl_seconds=_bounded_int(
+            server_raw.get("github_read_cache_ttl_seconds"),
+            120,
+            60,
+            300,
+            "server.github_read_cache_ttl_seconds",
         ),
         path_prefixes=_tuple_of_strings(server_raw.get("path_prefixes"), "server.path_prefixes")
         or DEFAULT_PATH_PREFIXES,

@@ -23,6 +23,7 @@ from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
+    JsonGitHubReadCache,
     JsonIdempotencyStore,
     JsonOnboardingStore,
     JsonOperationStore,
@@ -107,6 +108,7 @@ from .ports import (
     ExecutableLocator,
     ExecutionEnvironmentPort,
     FileSystem,
+    GitHubReadCache,
     GitRepository,
     IdempotencyStore,
     IdGenerator,
@@ -151,6 +153,7 @@ class AdapterOverrides:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operations: OperationStore | None = None
+    github_read_cache: GitHubReadCache | None = None
     pr_check_watches: PrCheckWatchStore | None = None
     background_tasks: BackgroundTaskRunner | None = None
     sleeper: Sleeper | None = None
@@ -311,6 +314,13 @@ def build_operation_store(
     return JsonOperationStore(state_root, locks or build_lock_manager(state_root))
 
 
+def build_github_read_cache(
+    state_root: Path,
+    locks: LockManager | None = None,
+) -> GitHubReadCache:
+    return JsonGitHubReadCache(state_root, locks or build_lock_manager(state_root))
+
+
 def build_workflow_recording_store(
     state_root: Path,
     locks: LockManager | None = None,
@@ -352,6 +362,7 @@ def build_application(
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    github_read_cache = o.github_read_cache or JsonGitHubReadCache(config.server.state_root, locks)
     pr_check_watch_store = o.pr_check_watches or JsonPrCheckWatchStore(
         config.server.state_root,
         locks,
@@ -381,6 +392,7 @@ def build_application(
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,
+        github_read_cache=github_read_cache,
     )
     operations = OperationManager(context)
     recover_operations(

@@ -201,7 +201,18 @@ CLI equivalents are `rf operation status ID`, `rf operation list`, and `rf opera
 | `repo_commit_read` | Inspect one exact reviewed commit with metadata, deterministic changed-file statistics, first-parent/root comparison identity, and an optional bounded patch. |
 | `repo_compare` | Compare two exact reviewed commits with merge-base, ahead/behind counts, optional safe path glob, deterministic changed files, and an optional bounded patch. |
 | `repo_issue_read` | Read a GitHub issue through `gh` with bounded output. |
+| `repo_issue_spec` | Read one roadmap ticket's manifest node, live GitHub issue, drift, and comment references. |
 | `repo_pr_read` | Read pull-request metadata, files, commits, checks, and reviews through `gh`. |
+
+`repo_issue_read`, `repo_issue_spec`, and `repo_pr_read` serve a repeat read of the same issue or
+pull request within a short TTL (`server.github_read_cache_ttl_seconds`, default 120 seconds, bounded
+to 60-300) from a private, bounded, local cache instead of calling `gh` again; a served read is marked
+`cache_hit: true` in the result. `repo_issue_read` and `repo_issue_spec` share one cache entry per
+issue number since both read the same live GitHub issue. The cache is evidence only: it never grants
+authorization, and repository, path, and branch policy are enforced identically for a cached or a live
+result. Pass `fresh=true` on any of the three tools to force a live `gh` read and refresh the cached
+entry, for example immediately before acting on a check or review that must not be stale. A stale
+(TTL-expired) or corrupt cache entry always falls back to a live read rather than failing.
 
 The committed repository tools never checkout or read working-tree file contents. An omitted snapshot
 `ref` resolves to the configured default base branch; explicit refs may be reviewed base branches,

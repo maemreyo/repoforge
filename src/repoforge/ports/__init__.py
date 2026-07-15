@@ -29,6 +29,7 @@ from .github import (
     GitHubJobLog,
     PullRequestGateway,
 )
+from .github_read_cache import GitHubReadCache
 from .idempotency import IdempotencyStore
 from .ids import IdGenerator
 from .locking import LockManager
@@ -86,6 +87,7 @@ __all__ = [
     "GitHubCheckAnnotation",
     "GitHubCheckRun",
     "GitHubJobLog",
+    "GitHubReadCache",
     "GitMergePreview",
     "GitMergeResult",
     "GitRepository",

@@ -352,9 +352,14 @@ def create_server(
         return bounded_service.call("repo_recent_commits", repo_id, limit)
 
     @mcp.tool(title="Read GitHub issue", annotations=EXTERNAL_READ, structured_output=True)
-    def repo_issue_read(repo_id: str, issue_number: int) -> dict[str, Any]:
-        """Use this when implementation requirements are defined by a GitHub issue."""
-        return bounded_service.call("repo_issue_read", repo_id, issue_number)
+    def repo_issue_read(
+        repo_id: str, issue_number: int, fresh: bool = False
+    ) -> dict[str, Any]:
+        """Use this when implementation requirements are defined by a GitHub issue. A recent
+        read of the same issue in this session may be served from a short-lived local cache
+        (marked `cache_hit: true`); pass `fresh=true` to force a live read, e.g. before acting
+        on a check or review that must not be stale."""
+        return bounded_service.call("repo_issue_read", repo_id, issue_number, fresh)
 
     @mcp.tool(title="Query the roadmap ticket graph", annotations=READ_ONLY, structured_output=True)
     def repo_issue_graph(
@@ -402,18 +407,23 @@ def create_server(
         annotations=EXTERNAL_READ,
         structured_output=True,
     )
-    def repo_issue_spec(repo_id: str, issue_number: int) -> dict[str, Any]:
-        """Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat."""
-        return bounded_service.call("repo_issue_spec", repo_id, issue_number)
+    def repo_issue_spec(
+        repo_id: str, issue_number: int, fresh: bool = False
+    ) -> dict[str, Any]:
+        """Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat. The live issue portion may be served from a short-lived local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read."""
+        return bounded_service.call("repo_issue_spec", repo_id, issue_number, fresh)
 
     @mcp.tool(
         title="Read GitHub pull request",
         annotations=EXTERNAL_READ,
         structured_output=True,
     )
-    def repo_pr_read(repo_id: str, pr_number: int) -> dict[str, Any]:
-        """Use this when reviewing an existing pull request, checks, commits, files, or reviews."""
-        return bounded_service.call("repo_pr_read", repo_id, pr_number)
+    def repo_pr_read(repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
+        """Use this when reviewing an existing pull request, checks, commits, files, or reviews.
+        A recent read of the same pull request in this session may be served from a short-lived
+        local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read before
+        acting on checks or reviews that must not be stale."""
+        return bounded_service.call("repo_pr_read", repo_id, pr_number, fresh)
 
     @mcp.tool(
         title="Create isolated coding workspace",

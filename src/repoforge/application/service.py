@@ -354,8 +354,10 @@ class CodingService:
     def repo_recent_commits(self, repo_id: str, limit: int = 20) -> dict[str, Any]:
         return _result(self._recent.execute(RecentCommitsCommand(repo_id, limit)))
 
-    def repo_issue_read(self, repo_id: str, issue_number: int) -> dict[str, Any]:
-        return _result(self._issue.execute(IssueReadCommand(repo_id, issue_number)))
+    def repo_issue_read(
+        self, repo_id: str, issue_number: int, fresh: bool = False
+    ) -> dict[str, Any]:
+        return _result(self._issue.execute(IssueReadCommand(repo_id, issue_number, fresh)))
 
     def repo_issue_graph(
         self,
@@ -397,11 +399,15 @@ class CodingService:
             )
         )
 
-    def repo_issue_spec(self, repo_id: str, issue_number: int) -> dict[str, Any]:
-        return _result(self._issue_spec.execute(RepositoryIssueSpecCommand(repo_id, issue_number)))
+    def repo_issue_spec(
+        self, repo_id: str, issue_number: int, fresh: bool = False
+    ) -> dict[str, Any]:
+        return _result(
+            self._issue_spec.execute(RepositoryIssueSpecCommand(repo_id, issue_number, fresh))
+        )
 
-    def repo_pr_read(self, repo_id: str, pr_number: int) -> dict[str, Any]:
-        return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number)))
+    def repo_pr_read(self, repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
+        return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number, fresh)))
 
     def workspace_create(
         self,

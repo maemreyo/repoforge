@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
-    "tool_surface_hash": "a973c298ae6e03c82c2ca90428cf787cffb35654fd7f3a60e810582432d71c7e",
+    "tool_surface_hash": "07a7c67287cc0fa49f603e6b4f2c8847ff377b3b6895dfbd5b320b67d38d5adf",
     "tools": [
       {
         "annotations": {
@@ -502,9 +502,14 @@
           "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Use this when implementation requirements are defined by a GitHub issue.",
+        "description": "Use this when implementation requirements are defined by a GitHub issue. A recent\nread of the same issue in this session may be served from a short-lived local cache\n(marked `cache_hit: true`); pass `fresh=true` to force a live read, e.g. before acting\non a check or review that must not be stale.",
         "inputSchema": {
           "properties": {
+            "fresh": {
+              "default": false,
+              "title": "Fresh",
+              "type": "boolean"
+            },
             "issue_number": {
               "title": "Issue Number",
               "type": "integer"
@@ -536,9 +541,14 @@
           "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat.",
+        "description": "Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat. The live issue portion may be served from a short-lived local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read.",
         "inputSchema": {
           "properties": {
+            "fresh": {
+              "default": false,
+              "title": "Fresh",
+              "type": "boolean"
+            },
             "issue_number": {
               "title": "Issue Number",
               "type": "integer"
@@ -591,9 +601,14 @@
           "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Use this when reviewing an existing pull request, checks, commits, files, or reviews.",
+        "description": "Use this when reviewing an existing pull request, checks, commits, files, or reviews.\nA recent read of the same pull request in this session may be served from a short-lived\nlocal cache (marked `cache_hit: true`); pass `fresh=true` to force a live read before\nacting on checks or reviews that must not be stale.",
         "inputSchema": {
           "properties": {
+            "fresh": {
+              "default": false,
+              "title": "Fresh",
+              "type": "boolean"
+            },
             "pr_number": {
               "title": "Pr Number",
               "type": "integer"

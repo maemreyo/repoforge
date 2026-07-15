@@ -22,6 +22,7 @@ def _first_heading(body: str) -> str | None:
 class RepositoryIssueSpecCommand:
     repo_id: str
     issue_number: int
+    fresh: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,7 @@ class RepositoryIssueSpecResult:
     live: dict[str, Any]
     drift: list[dict[str, Any]]
     comments: list[dict[str, Any]]
+    cache_hit: bool = False
 
 
 class RepositoryIssueSpecReader:
@@ -54,10 +56,19 @@ class RepositoryIssueSpecReader:
         if graph is not None:
             node = next((item for item in graph.nodes if item.number == c.issue_number), None)
 
-        live_payload = self.ctx.audited(
+        def load_live() -> tuple[dict[str, Any], bool]:
+            return self.ctx.github_read(
+                "issue",
+                c.repo_id,
+                c.issue_number,
+                fresh=c.fresh,
+                loader=lambda: self.ctx.github.issue_read(repo.path, c.issue_number),
+            )
+
+        live_payload, cache_hit = self.ctx.audited(
             "repo_issue_spec",
             {"repo_id": c.repo_id, "issue_number": c.issue_number},
-            lambda: self.ctx.github.issue_read(repo.path, c.issue_number),
+            load_live,
         )
 
         comments: list[dict[str, Any]] = []
@@ -93,4 +104,5 @@ class RepositoryIssueSpecReader:
             live_payload,
             drift,
             comments,
+            cache_hit,
         )
