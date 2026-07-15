@@ -273,6 +273,108 @@ def test_metrics_sink_aggregates_duration_and_failure_category(tmp_path: Path) -
     assert metrics.path.stat().st_mode & 0o777 == 0o600
 
 
+def test_metrics_sink_records_into_the_correct_day_bucket(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    clock = FixedClock("2026-07-14T09:00:00+00:00")
+    metrics = JsonMetricsSink(tmp_path, locks, clock)
+    metrics.record("workspace_commit", success=True, duration_ms=10.0, error_code=None)
+    metrics.record("workspace_commit", success=False, duration_ms=30.0, error_code="STALE_STATE")
+
+    clock.value = "2026-07-15T09:00:00+00:00"
+    metrics.record("workspace_commit", success=True, duration_ms=5.0, error_code=None)
+
+    snapshot = metrics.snapshot()
+    buckets = snapshot["buckets"]
+    assert set(buckets) == {"2026-07-14", "2026-07-15"}
+    assert buckets["2026-07-14"]["workspace_commit"] == {
+        "count": 2,
+        "successes": 1,
+        "failures": 1,
+        "duration_ms_total": 40.0,
+        "duration_ms_max": 30.0,
+        "failure_categories": {"STALE_STATE": 1},
+    }
+    assert buckets["2026-07-15"]["workspace_commit"]["count"] == 1
+    # Lifetime totals keep accumulating across the day boundary.
+    assert snapshot["operations"]["workspace_commit"]["count"] == 3
+
+
+def test_metrics_sink_prunes_buckets_older_than_retention(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    clock = FixedClock("2026-07-01T00:00:00+00:00")
+    metrics = JsonMetricsSink(tmp_path, locks, clock, retention_days=3)
+    metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
+
+    clock.value = "2026-07-02T00:00:00+00:00"
+    metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
+
+    # Still within the 3-day retention window (07-01, 07-02, 07-03).
+    assert set(metrics.snapshot()["buckets"]) == {"2026-07-01", "2026-07-02"}
+
+    # 07-05 only keeps 07-03..07-05; 07-01 and 07-02 must be pruned.
+    clock.value = "2026-07-05T00:00:00+00:00"
+    metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
+
+    buckets = metrics.snapshot()["buckets"]
+    assert set(buckets) == {"2026-07-05"}
+    # Pruning never touches the lifetime totals.
+    assert metrics.snapshot()["operations"]["workspace_status"]["count"] == 3
+
+
+def test_metrics_sink_migrates_v1_file_and_keeps_accumulating(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    path = tmp_path / "operation-metrics.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "operations": {
+                    "workspace_push": {
+                        "count": 5,
+                        "successes": 4,
+                        "failures": 1,
+                        "duration_ms_total": 500.0,
+                        "duration_ms_max": 200.0,
+                        "failure_categories": {"COMMAND_TIMEOUT": 1},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    clock = FixedClock("2026-07-14T00:00:00+00:00")
+    metrics = JsonMetricsSink(tmp_path, locks, clock)
+    snapshot = metrics.snapshot()
+    assert snapshot["operations"]["workspace_push"]["count"] == 5
+    assert snapshot["buckets"] == {}
+
+    metrics.record("workspace_push", success=True, duration_ms=10.0, error_code=None)
+    snapshot = metrics.snapshot()
+    assert snapshot["operations"]["workspace_push"]["count"] == 6
+    assert snapshot["buckets"]["2026-07-14"]["workspace_push"]["count"] == 1
+
+
+def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    path = tmp_path / "operation-metrics.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    path.write_text("not json", encoding="utf-8")
+    metrics = JsonMetricsSink(tmp_path, locks, FixedClock())
+    assert metrics.snapshot() == {"version": 2, "operations": {}, "buckets": {}}
+
+    path.write_text(json.dumps({"version": 2, "operations": {}, "buckets": "not-a-dict"}), encoding="utf-8")
+    assert metrics.snapshot()["buckets"] == {}
+
+    path.write_text(json.dumps({"version": 2, "operations": "not-a-dict"}), encoding="utf-8")
+    assert metrics.snapshot() == {"version": 2, "operations": {}, "buckets": {}}
+
+    metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
+    assert metrics.snapshot()["operations"]["workspace_status"]["count"] == 1
+
+
 def test_idempotency_store_rejects_corrupt_identity_and_wraps_persistence_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

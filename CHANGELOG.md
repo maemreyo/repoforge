@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added bounded 30-day daily buckets alongside lifetime totals in `operation-metrics.json`, migrated compatibly from schema version 1, and extended `rf audit stats` with `--since`/`--until` window filters so a fix's before/after effect on a tool's failure rate or latency can be measured locally; default `rf audit stats` output is unchanged.
 - Added optional bounded `issue_ids` workspace metadata to `workspace_create`, surfaced in `workspace_list` and `workspace_status` alongside dirty/clean state, plus a documented one-issue-per-workspace default with a stacked-issue exception.
 - Added local `rf audit` and `rf audit stats` commands to read the existing private audit log and operation-metrics snapshot, with `--last`, `--action`, `--failed`, and `--slow` filters, so a failed or slow consumer call can be found and timed without new instrumentation.
 - Added AI-ready issue forms, a deterministic machine-readable ticket graph, offline validation, Ready-ticket selection, and bounded read-only GitHub drift checks.
