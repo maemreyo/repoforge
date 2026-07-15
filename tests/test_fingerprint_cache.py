@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from conftest import create_forge_environment
+
 from repoforge.application.service import CodingService
 from repoforge.config import load_config
 from repoforge.ports.command import CommandExecutor, CommandResult
-
-from .conftest import create_forge_environment
 
 
 class CountingExecutor:
