@@ -15,6 +15,9 @@ arguments, confirmation prompts, results and unexpected tool calls.
    the exact result. Do not commit.”
 5. **Draft PR** — “For the approved verified workspace, commit, push, create a draft PR and report CI
    buckets. Do not mark ready or merge.”
+6. **Stacked issues** — “Issues #101 and #102 must land as one dependent change. Create one workspace
+   for both and link both issue IDs.” Expected: single `workspace_create` call with `issue_ids: ["101",
+   "102"]`; no second `workspace_create` for #102.
 
 ## Indirect
 
@@ -23,6 +26,9 @@ arguments, confirmation prompts, results and unexpected tool calls.
 2. “What has changed in the current coding workspace and did those exact bytes pass tests?” Expected:
    status/diff/verification tools; no write.
 3. “The draft PR CI is red—show me which required checks failed.” Expected: PR checks only.
+4. “Which of my open RepoForge workspaces are old and safe to delete?” Expected: `workspace_list`
+   selected; answer cites each workspace's age, dirty/clean state, and linked issue_ids without calling
+   `workspace_remove` unprompted.
 
 ## Negative
 

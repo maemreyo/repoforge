@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added optional bounded `issue_ids` workspace metadata to `workspace_create`, surfaced in `workspace_list` and `workspace_status` alongside dirty/clean state, plus a documented one-issue-per-workspace default with a stacked-issue exception.
+- Added local `rf audit` and `rf audit stats` commands to read the existing private audit log and operation-metrics snapshot, with `--last`, `--action`, `--failed`, and `--slow` filters, so a failed or slow consumer call can be found and timed without new instrumentation.
 - Added AI-ready issue forms, a deterministic machine-readable ticket graph, offline validation, Ready-ticket selection, and bounded read-only GitHub drift checks.
 - Added snapshot-bound explainable workspace risk and policy-driven ordered verification recommendations while retaining the final exact-tree gate.
 - Added reusable typed durable-state envelopes and private atomic JSON storage, adopted by OperationTask without changing its serialized record contract.

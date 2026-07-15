@@ -68,6 +68,8 @@ class FakeStore:
 
 class FakeService:
     config = SimpleNamespace(source_path=Path("/config"))
+    audit: Any = None
+    metrics: Any = None
 
     def repo_list(self) -> dict[str, Any]:
         return {"repositories": [{"repo_id": "demo"}]}
@@ -77,6 +79,25 @@ class FakeService:
 
     def workspace_list(self) -> dict[str, Any]:
         return {"workspaces": []}
+
+
+def _fake_service_with_audit(tmp_path: Path) -> FakeService:
+    service = FakeService()
+    audit_path = tmp_path / "state" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        json.dumps(
+            {"action": "workspace_create", "success": True, "details": {"duration_ms": 12.5}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    service.audit = SimpleNamespace(path=audit_path)
+    service.metrics = SimpleNamespace(
+        path=tmp_path / "state" / "operation-metrics.json",
+        snapshot=lambda: {"version": 1, "operations": {}},
+    )
+    return service
 
 
 def test_cli_helpers_and_rendering(capsys: pytest.CaptureFixture[str]) -> None:
@@ -135,7 +156,7 @@ def test_main_dispatches_all_command_families(
         cli, "write_private_file", lambda path, data, mode=0o600: path.write_bytes(data)
     )
     monkeypatch.setattr(cli, "load_config", lambda path: object())
-    monkeypatch.setattr(cli, "CodingService", lambda config: FakeService())
+    monkeypatch.setattr(cli, "CodingService", lambda config: _fake_service_with_audit(tmp_path))
     monkeypatch.setattr(cli, "system_clock", lambda: SimpleNamespace(now_iso=lambda: "now"))
 
     called: list[str] = []
@@ -201,6 +222,35 @@ def test_main_dispatches_all_command_families(
     assert cli.main(["--config", config, "show-config"]) == 0
     assert cli.main(["--config", config, "doctor"]) == 0
     assert cli.main(["--config", config, "list-workspaces"]) == 0
+
+    capsys.readouterr()
+    assert cli.main(["--config", config, "audit", "--last", "5"]) == 0
+    audit_payload = json.loads(capsys.readouterr().out)
+    assert audit_payload["events"][0]["action"] == "workspace_create"
+
+    assert cli.main(["--config", config, "audit", "stats"]) == 0
+    stats_payload = json.loads(capsys.readouterr().out)
+    assert stats_payload["path"].endswith("operation-metrics.json")
+    assert stats_payload["operations"] == []
+
+
+def test_audit_stats_requires_configured_metrics_sink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = FakeStore(tmp_path)
+    store.source_path.write_text("x", encoding="utf-8")
+    store.active_resolved_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
+    monkeypatch.setattr(cli, "load_config", lambda path: object())
+    service = FakeService()
+    service.audit = SimpleNamespace(path=tmp_path / "audit.jsonl")
+    service.metrics = None
+    monkeypatch.setattr(cli, "CodingService", lambda config: service)
+
+    code = cli.main(["--config", str(store.source_path), "audit", "stats"])
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "failed"
 
 
 def test_main_returns_stable_error_envelope(

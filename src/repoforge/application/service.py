@@ -384,9 +384,12 @@ class CodingService:
         task_slug: str,
         base: str | None = None,
         idempotency_key: str | None = None,
+        issue_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         return _result(
-            self._create.execute(WorkspaceCreateCommand(repo_id, task_slug, base, idempotency_key))
+            self._create.execute(
+                WorkspaceCreateCommand(repo_id, task_slug, base, idempotency_key, issue_ids)
+            )
         )
 
     def workspace_list(self) -> dict[str, Any]:

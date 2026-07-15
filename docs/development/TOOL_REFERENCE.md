@@ -67,7 +67,23 @@ When a managed runtime is active, accepted repository additions and refreshes re
 a failed expansion restores the prior validated generation. A repository removal is restrictive: failed
 activation leaves the restricted configuration on disk and never restores removed repository access.
 
-## Repository proposal commands
+## Local audit and metrics commands
+
+`rf audit` and `rf audit stats` are local operator commands, not MCP tools. They only read state that
+every consumer call (MCP or CLI) already durably records through `ApplicationContext.audited`; they add
+no new persistence or instrumentation.
+
+`rf audit --last N --action NAME --failed --slow MS` returns up to `N` (bounded 1-1000, default 20) most
+recent private audit events, most recent first, from the active configuration's `audit.jsonl`. `--action`
+filters to one action name, `--failed` returns only failed calls, and `--slow MS` returns only calls
+whose recorded `duration_ms` is at least `MS`. Each returned event includes its `correlation_id`,
+`duration_ms`, and, for failures, `error_code` and `error_type`; audit bodies remain redacted exactly as
+written by the audit sink.
+
+`rf audit stats` renders the active configuration's aggregate `operation-metrics.json` as one row per
+action: call count, failure count and rate, average and maximum `duration_ms`, and up to three most
+frequent failure error codes, sorted slowest-average-first. Use it to find which tool is failing most or
+taking the longest before diving into `rf audit --action NAME --slow MS` for individual calls.
 
 `rf repo inspect PATH` and `rf repo propose PATH` inspect local repository facts and return a
 structured `pending_approval` proposal without changing configuration or running discovered commands.
@@ -138,8 +154,8 @@ rather than silently widening output.
 
 | Tool | Purpose |
 |---|---|
-| `workspace_create` | Create one isolated worktree and unique `ai/*` branch from an allowlisted base. |
-| `workspace_list` | List workspaces managed by the local RepoForge registry. |
+| `workspace_create` | Create one isolated worktree and unique `ai/*` branch from an allowlisted base; accepts an optional bounded `issue_ids` list. |
+| `workspace_list` | List workspaces managed by the local RepoForge registry, including age, dirty/clean state, and linked `issue_ids`. |
 | `workspace_status` | Return HEAD, branch, Git status, workspace fingerprint, verification state, and change metrics. |
 | `workspace_base_status` | Fetch the configured remote base and return exact workspace-base, local-base, remote-base, HEAD, ahead/behind, path-overlap, publication, outage, and staleness evidence. |
 | `workspace_refresh_preview` | Produce a read-only preview bound to the exact HEAD, fingerprint, recorded workspace base, latest remote-base SHA, merge strategy, and predicted conflict paths. |
@@ -152,6 +168,14 @@ back to the exact reviewed HEAD and fingerprint. A successful refresh invalidate
 assessment, architecture, and execution-plan receipts. When it creates a merge commit, the workspace
 must pass exact-tree verification and `workspace_commit` must approve that controlled commit before a
 normal non-force push can publish it.
+
+`issue_ids` is optional, free-form, display-only metadata (up to 16 entries, each at most 64
+characters); RepoForge never validates it against GitHub or any other tracker, and it cannot be changed
+after `workspace_create`. The default workflow is one issue per workspace. Pass every dependent issue ID
+at creation time only for a deliberate chain of stacked issues worked sequentially in the same worktree.
+`workspace_list` and `workspace_status` surface `issue_ids` alongside `created_at` and the dirty/clean
+Git state so an operator or agent can decide what is safe to reuse or remove; RepoForge does not
+automatically expire or remove workspaces.
 
 ## Read, search, and edit
 

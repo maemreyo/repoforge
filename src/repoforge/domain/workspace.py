@@ -5,11 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import WorkspaceError
+
 _COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _REFRESH_PREVIEW_RE = re.compile(r"refresh-v1:([0-9a-f]{40}(?:[0-9a-f]{24})?):([0-9a-f]{64})")
+
+MAX_ISSUE_IDS = 16
+MAX_ISSUE_ID_LENGTH = 64
 
 WORKSPACE_REFRESH_RECEIPTS = (
     "verification",
@@ -97,6 +103,25 @@ class WorkspaceRefreshBinding:
         ).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         return f"refresh-v1:{self.target_base_sha}:{digest}"
+
+
+def normalize_issue_ids(values: Sequence[str] | None) -> tuple[str, ...]:
+    """Validate and normalize the free-form, non-authoritative issue links for a workspace."""
+    if not values:
+        return ()
+    if len(values) > MAX_ISSUE_IDS:
+        raise WorkspaceError(f"issue_ids accepts at most {MAX_ISSUE_IDS} entries: got {len(values)}")
+    normalized: list[str] = []
+    for raw in values:
+        value = raw.strip()
+        if not value:
+            raise WorkspaceError("issue_ids entries must be non-empty")
+        if len(value) > MAX_ISSUE_ID_LENGTH:
+            raise WorkspaceError(
+                f"issue_ids entries must be at most {MAX_ISSUE_ID_LENGTH} characters: {value!r}"
+            )
+        normalized.append(value)
+    return tuple(normalized)
 
 
 def is_commit_sha(value: object) -> bool:
