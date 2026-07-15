@@ -97,6 +97,16 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             assert evidence_tool.annotations.openWorldHint is False
 
         tools = {tool.name: tool for tool in result.tools}
+        assert tools["workspace_create"].description == (
+            "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\n"
+            "retries. Create one workspace per issue; pass issue_ids only when several dependent\n"
+            "(stacked) issues are deliberately worked in this same workspace. issue_ids is\n"
+            "display-only metadata, not validated against any tracker."
+        )
+        assert tools["workspace_list"].description == (
+            "Use this when resuming work or finding active RepoForge workspaces; each entry reports age,\n"
+            "dirty state, and linked issue_ids to help decide what to reuse or remove."
+        )
         diagnostic = tools["workspace_run_diagnostic"]
         assert diagnostic.annotations.readOnlyHint is False
         assert diagnostic.annotations.destructiveHint is False
