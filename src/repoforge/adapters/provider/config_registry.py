@@ -1,146 +1,128 @@
-"""Config-backed provider registry — loaded from reviewed configuration."""
+"""Immutable registry derived only from reviewed provider manifests."""
 
 from __future__ import annotations
 
-import subprocess
+import hashlib
+import os
+import stat
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Final
 
-from repoforge.domain.provider_manifest import (
-    ConfidenceModel,
-    CoverageModel,
-    ProviderFilesystemRequirement,
-    ProviderHealth,
-    ProviderHealthStatus,
+from ...domain.provider_manifest import (
+    ProviderAvailability,
+    ProviderAvailabilityStatus,
+    ProviderImageIdentity,
     ProviderKind,
     ProviderManifest,
-    ProviderOutputBounds,
 )
+from ...ports.capabilities import ExecutableLocator
+
+_MAX_EXECUTABLE_BYTES: Final = 1_000_000_000
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ConfigProviderRegistry:
-    """Provider registry backed by reviewed configuration.
-
-    Registration is read-only after construction. Provider discovery cannot
-    silently grant capability — only providers explicitly listed in the
-    configuration are registered.
-    """
-
-    providers: tuple[ProviderManifest, ...] = field(default_factory=tuple)
-    _provider_index: dict[str, ProviderManifest] = field(default_factory=dict, init=False)
+    providers: tuple[ProviderManifest, ...]
+    executables: ExecutableLocator
+    _provider_index: dict[str, ProviderManifest] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        ids = tuple(provider.provider_id for provider in self.providers)
-        if len(ids) != len(set(ids)):
+        index = {provider.provider_id: provider for provider in self.providers}
+        if len(index) != len(self.providers):
             raise ValueError("Provider registry contains duplicate provider_id values")
-        self._provider_index = {provider.provider_id: provider for provider in self.providers}
+        self._validate_fallbacks(index)
+        object.__setattr__(self, "_provider_index", index)
+
+    @staticmethod
+    def _validate_fallbacks(index: dict[str, ProviderManifest]) -> None:
+        for provider in index.values():
+            fallback_id = provider.fallback_provider_id
+            if not fallback_id:
+                continue
+            fallback = index.get(fallback_id)
+            if fallback is None:
+                raise ValueError(f"Provider {provider.provider_id!r} references unknown fallback")
+            if fallback.kind is not provider.kind:
+                raise ValueError("Provider fallback kind is incompatible")
+            if not fallback.is_compatible_with(provider.version):
+                raise ValueError("Provider fallback major version is incompatible")
+            if not fallback.supports(provider.supported_capabilities):
+                raise ValueError("Provider fallback is missing required capabilities")
+            if not set(provider.supported_languages).issubset(fallback.supported_languages):
+                raise ValueError("Provider fallback is missing required languages")
+        for provider_id in index:
+            seen: set[str] = set()
+            current = provider_id
+            while current:
+                if current in seen:
+                    raise ValueError("Provider fallback cycle is not allowed")
+                seen.add(current)
+                current = index[current].fallback_provider_id
 
     def list_providers(self) -> tuple[ProviderManifest, ...]:
-        return tuple(sorted(self.providers, key=lambda p: p.provider_id))
+        return tuple(sorted(self.providers, key=lambda provider: provider.provider_id))
 
     def get_provider(self, provider_id: str) -> ProviderManifest | None:
         return self._provider_index.get(provider_id)
 
-    def get_providers_by_kind(self, kind: str) -> tuple[ProviderManifest, ...]:
-        try:
-            target = ProviderKind(kind)
-        except ValueError:
-            return ()
-        return tuple(
-            sorted(
-                (p for p in self.providers if p.kind is target),
-                key=lambda p: p.provider_id,
+    def get_providers_by_kind(self, kind: ProviderKind) -> tuple[ProviderManifest, ...]:
+        return tuple(provider for provider in self.list_providers() if provider.kind is kind)
+
+    def check_availability(self, provider_id: str) -> ProviderAvailability:
+        provider = self.get_provider(provider_id)
+        if provider is None:
+            return ProviderAvailability(
+                provider_id,
+                ProviderAvailabilityStatus.UNAVAILABLE,
+                "Provider is not registered",
             )
+        runtime = provider.runtime
+        if isinstance(runtime, ProviderImageIdentity):
+            return ProviderAvailability(
+                provider_id,
+                ProviderAvailabilityStatus.UNVERIFIED,
+                "Image availability requires a configured execution adapter",
+            )
+        executable = self.executables.which(runtime.executable)
+        if executable is None:
+            return ProviderAvailability(
+                provider_id,
+                ProviderAvailabilityStatus.UNAVAILABLE,
+                "Configured executable is unavailable",
+            )
+        resolved = Path(executable).resolve()
+        try:
+            actual_digest = self._sha256_file(resolved)
+        except OSError:
+            return ProviderAvailability(
+                provider_id,
+                ProviderAvailabilityStatus.UNAVAILABLE,
+                "Configured executable cannot be read",
+            )
+        if actual_digest != runtime.sha256:
+            return ProviderAvailability(
+                provider_id,
+                ProviderAvailabilityStatus.UNAVAILABLE,
+                "Configured executable digest does not match",
+            )
+        return ProviderAvailability(
+            provider_id,
+            ProviderAvailabilityStatus.AVAILABLE,
+            "Configured executable identity verified",
+            str(resolved),
         )
 
-    def check_health(self, provider_id: str) -> ProviderHealth:
-        manifest = self.get_provider(provider_id)
-        if manifest is None:
-            return ProviderHealth(
-                provider_id=provider_id,
-                status=ProviderHealthStatus.UNREACHABLE,
-                message="Provider not found in registry",
-            )
-        if not manifest.health_check_enabled:
-            return ProviderHealth(
-                provider_id=provider_id,
-                status=ProviderHealthStatus.UNKNOWN,
-                message="No health probe configured",
-            )
-        try:
-            completed = subprocess.run(
-                list(manifest.health_probe_command),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if completed.returncode == 0:
-                return ProviderHealth(
-                    provider_id=provider_id,
-                    status=ProviderHealthStatus.HEALTHY,
-                    message=completed.stdout.strip()[:256] or "Healthy",
-                )
-            return ProviderHealth(
-                provider_id=provider_id,
-                status=ProviderHealthStatus.DEGRADED,
-                message=(completed.stderr or completed.stdout or "").strip()[:256],
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return ProviderHealth(
-                provider_id=provider_id,
-                status=ProviderHealthStatus.UNREACHABLE,
-                message=str(exc)[:256],
-            )
-
-
-def _string_tuple(raw: object) -> tuple[str, ...]:
-    if not isinstance(raw, (list, tuple)):
-        return ()
-    return tuple(str(value) for value in raw)
-
-
-def _config_map(raw: object) -> dict[str, object]:
-    if not isinstance(raw, dict):
-        return {}
-    return {str(key): value for key, value in raw.items()}
-
-
-def _positive_int(raw: object, default: int) -> int:
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
-        return raw
-    return default
-
-
-def provider_manifest_from_config(raw: dict[str, object]) -> ProviderManifest:
-    try:
-        kind = ProviderKind(str(raw.get("kind", "analyzer")))
-    except ValueError:
-        kind = ProviderKind.ANALYZER
-    filesystem_raw = _config_map(raw.get("filesystem"))
-    output_raw = _config_map(raw.get("output_bounds"))
-    return ProviderManifest(
-        provider_id=str(raw.get("provider_id", "")),
-        kind=kind,
-        version=str(raw.get("version", "")),
-        executable=str(raw.get("executable", "")),
-        executable_digest=str(raw.get("executable_digest", "")),
-        supported_languages=_string_tuple(raw.get("supported_languages")),
-        supported_capabilities=_string_tuple(raw.get("supported_capabilities")),
-        health_probe_command=_string_tuple(raw.get("health_probe_command")),
-        coverage_model=CoverageModel(str(raw.get("coverage_model", "none"))),
-        confidence_model=ConfidenceModel(str(raw.get("confidence_model", "none"))),
-        network_policy=str(raw.get("network_policy", "none")),
-        filesystem=ProviderFilesystemRequirement(
-            capability=str(filesystem_raw.get("capability", "read")),
-            allowed_paths=_string_tuple(filesystem_raw.get("allowed_paths")),
-        ),
-        output_bounds=ProviderOutputBounds(
-            max_stdout_chars=_positive_int(output_raw.get("max_stdout_chars"), 100_000),
-            max_stderr_chars=_positive_int(output_raw.get("max_stderr_chars"), 10_000),
-            max_artifact_bytes=_positive_int(
-                output_raw.get("max_artifact_bytes"),
-                10_000_000,
-            ),
-        ),
-        fallback_provider_id=str(raw.get("fallback_provider_id", "")),
-    )
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            file_status = os.fstat(handle.fileno())
+            if not stat.S_ISREG(file_status.st_mode):
+                raise OSError("Provider executable must be a regular file")
+            if file_status.st_size > _MAX_EXECUTABLE_BYTES:
+                raise OSError("Provider executable exceeds the digest verification limit")
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()

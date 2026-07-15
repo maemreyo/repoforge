@@ -1,4 +1,6 @@
 # Minimal RepoForge source configuration. `rf setup` creates this file for you.
+# Provider manifests are enrolled separately into reviewed immutable configuration;
+# this editable source file cannot grant provider capabilities.
 version = 2
 
 # Omit [tunnel] for local-only stdio operation.

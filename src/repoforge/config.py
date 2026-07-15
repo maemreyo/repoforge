@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import tomli as tomllib
 
@@ -20,6 +21,8 @@ from .domain.diagnostics import (
     validate_diagnostic_profile,
 )
 from .domain.errors import ConfigError
+from .domain.provider_config import load_provider_manifests
+from .domain.provider_manifest import ProviderManifest
 from .domain.risk import RiskPolicy, default_risk_policy
 from .domain.user_paths import (
     DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
@@ -58,6 +61,7 @@ DEFAULT_DENIED_PATHS = (
 )
 _SAFE_BRANCH_COMPONENT = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SAFE_REPO_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+EnumValue = TypeVar("EnumValue", bound=Enum)
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,7 @@ class AppConfig:
     source_path: Path
     server: ServerConfig
     repositories: dict[str, RepositoryConfig]
+    providers: tuple[ProviderManifest, ...] = ()
 
 
 def _expand_path(value: str, *, base_dir: Path) -> Path:
@@ -237,13 +242,13 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
     return profiles
 
 
-def _enum_value(enum_type: type[Any], value: Any, context: str) -> Any:
+def _enum_value(enum_type: type[EnumValue], value: object, context: str) -> EnumValue:
     if not isinstance(value, str):
         raise ConfigError(f"{context} must be a string")
     try:
         return enum_type(value)
     except ValueError as exc:
-        allowed = sorted(item.value for item in enum_type)
+        allowed = sorted(str(item.value) for item in enum_type)
         raise ConfigError(f"{context} must be one of {allowed}") from exc
 
 
@@ -606,4 +611,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             diagnostics=diagnostics,
             risk_policy=risk_policy,
         )
-    return AppConfig(source_path=config_path, server=server, repositories=repositories)
+    providers = load_provider_manifests(raw.get("providers"))
+    return AppConfig(
+        source_path=config_path,
+        server=server,
+        repositories=repositories,
+        providers=providers,
+    )

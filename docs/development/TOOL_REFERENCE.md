@@ -7,13 +7,16 @@ flow.
 ## Provider registry
 
 Provider manifests and the provider registry are internal application contracts, not MCP tools.
-`ProviderManifest` records the reviewed provider ID, kind, version, executable digest, supported
-languages/capabilities, health probe, coverage/confidence model, network/filesystem requirements,
-output limits, and declared fallback. `ConfigProviderRegistry` accepts only explicitly configured
-providers, rejects duplicate IDs, orders listings deterministically, and never promotes discovered
-binaries into capability. Health probes return bounded redacted status text; missing probes remain
-`unknown` rather than healthy. Provider configuration is advisory evidence only and cannot authorize
-repository, filesystem, command, network, or publishing access.
+`ProviderManifest` records the reviewed provider ID, kind, version, digest-pinned executable or image,
+supported languages/capabilities, health-probe arguments, coverage/confidence model,
+network/filesystem requirements, output limits, and declared fallback. Provider manifests live only in
+immutable resolved configuration in this stage; the minimal editable source format has no provider
+enrollment path. `ConfigProviderRegistry` accepts only explicitly configured manifests, rejects
+duplicate IDs and invalid fallback graphs, orders listings deterministically, and never promotes a
+discovered binary into capability. Static availability checks resolve only configured executables and
+verify their SHA-256 without executing provider code. Image availability and health-probe execution are
+deferred to the provider lifecycle stage. Provider configuration is advisory evidence only and cannot
+authorize repository, filesystem, command, network, or publishing access.
 
 ## Execution environments
 
