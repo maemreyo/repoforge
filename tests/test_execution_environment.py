@@ -236,6 +236,31 @@ class TestEnvironmentIdentity:
         assert "secret" not in raw.lower()
 
 
+class TestVerificationReceiptCompatibility:
+    def test_receipt_remains_compatible_without_environment_identity(self) -> None:
+        from repoforge.domain.workspace import VerificationReceipt
+
+        receipt = VerificationReceipt(
+            profile="full",
+            fingerprint="a" * 64,
+            completed_at="2026-07-15T00:00:00+00:00",
+            commands=[],
+        )
+        assert receipt.environment_identity_hash is None
+
+    def test_receipt_can_bind_environment_identity(self) -> None:
+        from repoforge.domain.workspace import VerificationReceipt
+
+        receipt = VerificationReceipt(
+            profile="full",
+            fingerprint="a" * 64,
+            completed_at="2026-07-15T00:00:00+00:00",
+            commands=[],
+            environment_identity_hash="b" * 64,
+        )
+        assert receipt.environment_identity_hash == "b" * 64
+
+
 class TestNormalizeToolName:
     def test_basic_normalize(self) -> None:
         assert normalize_tool_name("Python") == "python"

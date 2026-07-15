@@ -21,6 +21,7 @@ from ..ports import (
     Clock,
     CommandExecutor,
     ExecutableLocator,
+    ExecutionEnvironmentPort,
     FileSystem,
     GitRepository,
     IdempotencyStore,
@@ -198,6 +199,7 @@ class ApplicationContext:
     clock: Clock
     ids: IdGenerator
     executables: ExecutableLocator
+    execution_environment: ExecutionEnvironmentPort | None = None
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None

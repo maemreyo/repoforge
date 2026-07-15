@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from repoforge.domain.execution_environment import (
+from ...domain.execution_environment import (
     EnvironmentAdapterKind,
     EnvironmentIdentity,
     FilesystemCapability,
@@ -18,11 +18,8 @@ from repoforge.domain.execution_environment import (
     ToolVersion,
     normalize_tool_name,
 )
-from repoforge.ports.command import CommandExecutor
-from repoforge.ports.execution_environment import (
-    ArtifactResult,
-    ExecutionReceipt,
-)
+from ...ports.command import CommandExecutor
+from ...ports.execution_environment import ArtifactResult, ExecutionReceipt
 
 
 def _resolve_tool_version(tool: str) -> ToolVersion:
@@ -166,9 +163,10 @@ class NativeReviewedAdapter:
         """Prepare — idempotent no-op for native execution."""
         _ = cwd, extra_env  # Native env is already prepared
 
-    def identity(self) -> EnvironmentIdentity:
+    def identity(self, *, cwd: Path | None = None) -> EnvironmentIdentity:
         """Fingerprint the native execution environment."""
-        if self._cached_identity is not None:
+        project_root = cwd or self._project_root
+        if project_root is None and self._cached_identity is not None:
             return self._cached_identity
 
         tools: list[ToolVersion] = []
@@ -179,12 +177,9 @@ class NativeReviewedAdapter:
         lockfile_digests: tuple[tuple[str, str], ...] = ()
         manifest_digests: tuple[tuple[str, str], ...] = ()
         wd_policy_hash = ""
-        if self._project_root is not None:
-            lockfile_digests = _find_lockfiles(self._project_root)
-            manifest_digests = _find_manifests(self._project_root)
-            wd_policy_hash = hashlib.sha256(
-                str(self._project_root.resolve()).encode()
-            ).hexdigest()
+        if project_root is not None:
+            lockfile_digests = _find_lockfiles(project_root)
+            manifest_digests = _find_manifests(project_root)
 
         ident = EnvironmentIdentity(
             adapter_kind=EnvironmentAdapterKind.NATIVE_REVIEWED,
@@ -201,7 +196,8 @@ class NativeReviewedAdapter:
             filesystem_capability=self._filesystem_capability,
             working_directory_policy_hash=wd_policy_hash,
         )
-        self._cached_identity = ident
+        if project_root is None:
+            self._cached_identity = ident
         return ident
 
     def execute(
@@ -216,7 +212,7 @@ class NativeReviewedAdapter:
         output_limit: int | None = None,
     ) -> ExecutionReceipt:
         """Execute an approved command and return a receipt bound to the current identity."""
-        ident = self.identity()
+        ident = self.identity(cwd=cwd)
         result = self._executor.run(
             argv,
             cwd=cwd,

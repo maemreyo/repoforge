@@ -113,17 +113,14 @@ class EnvironmentIdentity:
             "architecture": self.architecture,
             "python_version": self.python_version,
             "runtime_version": self.runtime_version,
-            "tools": sorted(
-                [
-                    {
-                        "name": t.name,
-                        "version": t.version,
-                        "digest": t.digest,
-                    }
-                    for t in self.tools
-                ],
-                key=lambda x: x["name"],
-            ),
+            "tools": [
+                {
+                    "name": tool.name,
+                    "version": tool.version,
+                    "digest": tool.digest,
+                }
+                for tool in sorted(self.tools, key=lambda tool: tool.name)
+            ],
             "lockfile_digests": sorted(self.lockfile_digests),
             "manifest_digests": sorted(self.manifest_digests),
             "approved_env_var_names": sorted(self.approved_env_var_names),

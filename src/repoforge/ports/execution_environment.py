@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from repoforge.domain.execution_environment import EnvironmentIdentity
-from repoforge.ports.command import CommandResult
+from ..domain.execution_environment import EnvironmentIdentity
+from .command import CommandResult
 
 
 @dataclass(frozen=True)
@@ -51,8 +51,8 @@ class ExecutionEnvironmentPort(Protocol):
         """
         ...
 
-    def identity(self) -> EnvironmentIdentity:
-        """Fingerprint the current execution environment.
+    def identity(self, *, cwd: Path | None = None) -> EnvironmentIdentity:
+        """Fingerprint the current execution environment for an optional workspace.
 
         Must be deterministic, secret-free, and safe for audit/receipts.
         """

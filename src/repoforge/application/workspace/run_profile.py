@@ -77,18 +77,32 @@ class WorkspaceProfileRunner:
                     profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
                 )
                 results = [
-                    self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
+                    (
+                        self.ctx.execution_environment.execute(
+                            command,
+                            cwd=command_cwd,
+                            timeout=timeout,
+                        ).result
+                        if self.ctx.execution_environment is not None
+                        else self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
+                    )
                     for command in profile.commands
                 ]
                 self.ctx.git.changed_paths(path, repo)
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
                 fp = self.ctx.git.fingerprint(path)
                 if profile.verification:
+                    environment_identity_hash = (
+                        self.ctx.execution_environment.identity(cwd=path).identity_hash
+                        if self.ctx.execution_environment is not None
+                        else None
+                    )
                     fresh.last_verification = VerificationReceipt(
                         profile.name,
                         fp,
                         self.ctx.clock.now_iso(),
                         [self.receipt(r) for r in results],
+                        environment_identity_hash,
                     )
                     self.ctx.store.save(fresh)
                 return WorkspaceRunProfileResult(
