@@ -206,6 +206,19 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             "repo_search",
             {"repo_id": "demo", "query": "Repository", "max_results": 20},
         )
+        contextual_repo_search = await call(
+            "repo_search",
+            {
+                "repo_id": "demo",
+                "query": "Repository",
+                "max_results": 20,
+                "context_lines": 1,
+            },
+        )
+        assert contextual_repo_search["matches"] == [
+            "README.md-2-",
+            "README.md:3:Repository instructions.",
+        ]
         await call("repo_recent_commits", {"repo_id": "demo", "limit": 2})
         commit = await call(
             "repo_commit_read",
@@ -293,6 +306,19 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             "workspace_search",
             {"workspace_id": workspace_id, "query": "Repository", "max_results": 20},
         )
+        contextual_workspace_search = await call(
+            "workspace_search",
+            {
+                "workspace_id": workspace_id,
+                "query": "Repository",
+                "max_results": 20,
+                "context_lines": 1,
+            },
+        )
+        assert contextual_workspace_search["matches"] == [
+            "README.md-2-",
+            "README.md:3:Repository instructions.",
+        ]
         await call(
             "workspace_replace_text",
             {

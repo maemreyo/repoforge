@@ -342,9 +342,15 @@ def create_server(
         ref: str | None = None,
         path_glob: str | None = None,
         max_results: int = 200,
+        context_lines: int = 0,
     ) -> dict[str, Any]:
-        """Use this to locate literal text in an immutable reviewed repository snapshot."""
-        return bounded_service.call("repo_search", repo_id, query, ref, path_glob, max_results)
+        """Use this to locate literal text in an immutable reviewed repository snapshot. Pass
+        context_lines (0-5) to also return that many surrounding lines on each side of a match
+        instead of a follow-up repo_read_file call; context lines are marked with `-` instead of
+        `:` after the path and line number, and still count toward max_results."""
+        return bounded_service.call(
+            "repo_search", repo_id, query, ref, path_glob, max_results, context_lines
+        )
 
     @mcp.tool(title="Read recent commits", annotations=READ_ONLY, structured_output=True)
     def repo_recent_commits(repo_id: str, limit: int = 20) -> dict[str, Any]:
@@ -535,9 +541,15 @@ def create_server(
         query: str,
         path_glob: str | None = None,
         max_results: int = 200,
+        context_lines: int = 0,
     ) -> dict[str, Any]:
-        """Use this when locating literal text in allowed workspace files; it is not a shell tool."""
-        return bounded_service.call("workspace_search", workspace_id, query, path_glob, max_results)
+        """Use this when locating literal text in allowed workspace files; it is not a shell tool.
+        Pass context_lines (0-5) to also return that many surrounding lines on each side of a
+        match instead of a follow-up workspace_read_file call; context lines are marked with `-`
+        instead of `:` after the path and line number, and still count toward max_results."""
+        return bounded_service.call(
+            "workspace_search", workspace_id, query, path_glob, max_results, context_lines
+        )
 
     @mcp.tool(
         title="Write complete file",

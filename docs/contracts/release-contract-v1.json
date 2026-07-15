@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f0724bcb7eca9ba8a6f86da1eaab6007214743ce601bd113c29814b510dc0d37",
-    "tool_surface_hash": "939b0cbd088865113ae1eb2ab01c02a5e02a41dd17536908f17f2146cd1ef011",
+    "tool_surface_hash": "c017e366116a702ddd1d0947fd8cab59537091deb2a44539c23f77d922f95699",
     "tools": [
       {
         "annotations": {
@@ -789,9 +789,14 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use this to locate literal text in an immutable reviewed repository snapshot.",
+        "description": "Use this to locate literal text in an immutable reviewed repository snapshot. Pass\ncontext_lines (0-5) to also return that many surrounding lines on each side of a match\ninstead of a follow-up repo_read_file call; context lines are marked with `-` instead of\n`:` after the path and line number, and still count toward max_results.",
         "inputSchema": {
           "properties": {
+            "context_lines": {
+              "default": 0,
+              "title": "Context Lines",
+              "type": "integer"
+            },
             "max_results": {
               "default": 200,
               "title": "Max Results",
@@ -1943,9 +1948,14 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use this when locating literal text in allowed workspace files; it is not a shell tool.",
+        "description": "Use this when locating literal text in allowed workspace files; it is not a shell tool.\nPass context_lines (0-5) to also return that many surrounding lines on each side of a\nmatch instead of a follow-up workspace_read_file call; context lines are marked with `-`\ninstead of `:` after the path and line number, and still count toward max_results.",
         "inputSchema": {
           "properties": {
+            "context_lines": {
+              "default": 0,
+              "title": "Context Lines",
+              "type": "integer"
+            },
             "max_results": {
               "default": 200,
               "title": "Max Results",

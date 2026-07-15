@@ -162,3 +162,76 @@ def test_repository_snapshot_rejects_invalid_refs(forge_env: ForgeEnvironment) -
         with pytest.raises(RepoForgeError) as exc_info:
             forge_env.service.repo_tree("demo", ref=ref)
         assert exc_info.value.code is expected_code
+
+
+def test_repository_search_context_lines_returns_surrounding_lines(
+    forge_env: ForgeEnvironment,
+) -> None:
+    (forge_env.source / "ctx.txt").write_text(
+        "alpha\nbravo\nNEEDLE charlie\ndelta\necho\n", encoding="utf-8"
+    )
+    git("add", "ctx.txt", cwd=forge_env.source)
+    git("commit", "-m", "add context fixture", cwd=forge_env.source)
+
+    result = forge_env.service.repo_search("demo", "NEEDLE", context_lines=2)
+    assert result["matches"] == [
+        "ctx.txt-1-alpha",
+        "ctx.txt-2-bravo",
+        "ctx.txt:3:NEEDLE charlie",
+        "ctx.txt-4-delta",
+        "ctx.txt-5-echo",
+    ]
+    assert result["truncated"] is False
+
+
+def test_repository_search_context_lines_bounds_and_truncation(
+    forge_env: ForgeEnvironment,
+) -> None:
+    (forge_env.source / "ctx2.txt").write_text("line1\nNEEDLE x\nline3\n", encoding="utf-8")
+    git("add", "ctx2.txt", cwd=forge_env.source)
+    git("commit", "-m", "add second context fixture", cwd=forge_env.source)
+
+    with pytest.raises(ValueError, match="context_lines"):
+        forge_env.service.repo_search("demo", "NEEDLE", context_lines=6)
+    with pytest.raises(ValueError, match="context_lines"):
+        forge_env.service.repo_search("demo", "NEEDLE", context_lines=-1)
+
+    truncated = forge_env.service.repo_search(
+        "demo", "NEEDLE", context_lines=1, max_results=2, path_glob="ctx2.txt"
+    )
+    assert truncated["matches"] == ["ctx2.txt-1-line1", "ctx2.txt:2:NEEDLE x"]
+    assert truncated["truncated"] is True
+
+
+def test_repository_search_context_lines_never_leaks_denied_path(
+    forge_env: ForgeEnvironment,
+) -> None:
+    (forge_env.source / ".env").write_text(
+        "before secret\nNEEDLE_BOUNDARY=denied\nafter secret\n", encoding="utf-8"
+    )
+    (forge_env.source / "allowed_neighbor.txt").write_text(
+        "line one\nNEEDLE_BOUNDARY here\nline three\n", encoding="utf-8"
+    )
+    git("add", "-A", cwd=forge_env.source)
+    git("commit", "-m", "add denied/allowed boundary fixture", cwd=forge_env.source)
+
+    result = forge_env.service.repo_search("demo", "NEEDLE_BOUNDARY", context_lines=1)
+    assert all(".env" not in match for match in result["matches"])
+    assert all("secret" not in match for match in result["matches"])
+    assert result["matches"] == [
+        "allowed_neighbor.txt-1-line one",
+        "allowed_neighbor.txt:2:NEEDLE_BOUNDARY here",
+        "allowed_neighbor.txt-3-line three",
+    ]
+
+
+def test_repository_search_default_context_lines_is_contract_stable(
+    forge_env: ForgeEnvironment,
+) -> None:
+    commit_sha = git("rev-parse", "main", cwd=forge_env.source)
+    default_call = forge_env.service.repo_search("demo", "Repository", ref=commit_sha)
+    explicit_zero = forge_env.service.repo_search(
+        "demo", "Repository", ref=commit_sha, context_lines=0
+    )
+    assert explicit_zero == default_call
+    assert default_call["matches"] == ["README.md:3:Repository instructions."]

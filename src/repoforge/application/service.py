@@ -346,10 +346,13 @@ class CodingService:
         ref: str | None = None,
         path_glob: str | None = None,
         max_results: int = 200,
+        context_lines: int = 0,
     ) -> dict[str, Any]:
         return _result(
             self._repo_search.execute(
-                RepositorySearchCommand(repo_id, query, ref, path_glob, max_results)
+                RepositorySearchCommand(
+                    repo_id, query, ref, path_glob, max_results, context_lines
+                )
             )
         )
 
@@ -484,10 +487,11 @@ class CodingService:
         query: str,
         path_glob: str | None = None,
         max_results: int = 200,
+        context_lines: int = 0,
     ) -> dict[str, Any]:
         return _result(
             self._search.execute(
-                WorkspaceSearchCommand(workspace_id, query, path_glob, max_results)
+                WorkspaceSearchCommand(workspace_id, query, path_glob, max_results, context_lines)
             )
         )
 

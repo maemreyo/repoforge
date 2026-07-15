@@ -739,6 +739,84 @@ class GitCliRepository:
         )
         return GitSnapshotBlob(normalized, object_sha, mode, size_bytes, data)
 
+    @staticmethod
+    def _split_grep_hunks(lines: list[str]) -> list[list[str]]:
+        """Split git-grep -C output into per-match hunks on its bare "--" separator.
+
+        Git only ever emits a standalone "--" line between two non-adjacent hunks; a real
+        content line that happens to equal "--" is always prefixed with its file/line marker
+        (e.g. "path:5:--" or "path-5---"), so the exact-equality check below cannot confuse
+        the two.
+        """
+        hunks: list[list[str]] = []
+        current: list[str] = []
+        for line in lines:
+            if line == "--":
+                if current:
+                    hunks.append(current)
+                    current = []
+                continue
+            current.append(line)
+        if current:
+            hunks.append(current)
+        return hunks
+
+    @staticmethod
+    def _grep_hunk_with_anchor(
+        hunk: list[str], prefix: str, anchor_path: str
+    ) -> list[tuple[str, str, str, bool]] | None:
+        full_prefix = f"{prefix}{anchor_path}"
+        entries: list[tuple[str, str, str, bool]] = []
+        for line in hunk:
+            if not line.startswith(full_prefix):
+                return None
+            rest = line[len(full_prefix) :]
+            if len(rest) < 2 or rest[0] not in ":-":
+                return None
+            delimiter = rest[0]
+            remainder = rest[1:]
+            digit_count = 0
+            while digit_count < len(remainder) and remainder[digit_count].isdigit():
+                digit_count += 1
+            if digit_count == 0:
+                return None
+            line_number = remainder[:digit_count]
+            tail = remainder[digit_count:]
+            if not tail.startswith(delimiter):
+                return None
+            entries.append((anchor_path, line_number, tail[1:], delimiter == ":"))
+        return entries
+
+    @classmethod
+    def _parse_grep_hunk(
+        cls, hunk: list[str], prefix: str
+    ) -> list[tuple[str, str, str, bool]] | None:
+        """Parse one git-grep -C hunk into (path, line_number, content, is_match) tuples.
+
+        Every line in a hunk belongs to the same file, and a git-grep match line always uses
+        ``:`` (never ``-``) between the path, line number, and content. We locate that
+        unambiguous match line to learn the exact file path, then use it as a literal prefix
+        to split every other line in the hunk (context lines use ``-`` and may themselves
+        contain ``-`` or ``:`` in their content without any ambiguity once the path prefix is
+        known exactly). Several lines may look like a match line; each distinct candidate is
+        tried until one produces a fully self-consistent hunk, so an accidental "path-look-alike"
+        substring can never silently attribute lines to the wrong file. Returns None when no
+        candidate parses the whole hunk consistently.
+        """
+        pattern = re.compile(rf"^{re.escape(prefix)}(.*?):(\d+):(.*)$")
+        seen: set[str] = set()
+        candidates: list[str] = []
+        for line in hunk:
+            parsed = pattern.match(line)
+            if parsed is not None and parsed.group(1) not in seen:
+                seen.add(parsed.group(1))
+                candidates.append(parsed.group(1))
+        for anchor_path in candidates:
+            entries = cls._grep_hunk_with_anchor(hunk, prefix, anchor_path)
+            if entries is not None:
+                return entries
+        return None
+
     def search_snapshot(
         self,
         path: Path,
@@ -747,19 +825,12 @@ class GitCliRepository:
         query: str,
         path_glob: str | None,
         max_results: int,
+        context_lines: int = 0,
     ) -> tuple[list[str], bool]:
-        argv = [
-            "git",
-            "grep",
-            "-n",
-            "-I",
-            "-F",
-            "--full-name",
-            "-e",
-            query,
-            commit_sha,
-            "--",
-        ]
+        argv = ["git", "grep", "-n", "-I", "-F", "--full-name"]
+        if context_lines:
+            argv.extend(["-C", str(context_lines)])
+        argv.extend(["-e", query, commit_sha, "--"])
         if path_glob:
             argv.append(f":(glob){path_glob}")
         result = self._executor.run(
@@ -773,22 +844,54 @@ class GitCliRepository:
         if result.returncode != 0:
             raise CommandError(result.combined or "Committed snapshot search failed")
         executor_truncated = "characters omitted" in result.stdout
-        pattern = re.compile(rf"^{re.escape(commit_sha)}:(.*?):(\d+):(.*)$")
-        matches: list[str] = []
-        for line in result.stdout.splitlines():
-            parsed = pattern.match(line)
-            if parsed is None:
+
+        if not context_lines:
+            pattern = re.compile(rf"^{re.escape(commit_sha)}:(.*?):(\d+):(.*)$")
+            matches: list[str] = []
+            for line in result.stdout.splitlines():
+                parsed = pattern.match(line)
+                if parsed is None:
+                    if executor_truncated:
+                        continue
+                    raise CommandError(
+                        "Git returned an invalid committed snapshot search result"
+                    )
+                raw_path, line_number, content = parsed.groups()
+                try:
+                    normalized = assert_path_allowed(raw_path, repo)
+                except SecurityError:
+                    continue
+                matches.append(f"{normalized}:{line_number}:{content}")
+            matches.sort()
+            return matches[:max_results], executor_truncated or len(matches) > max_results
+
+        prefix = f"{commit_sha}:"
+        blocks: list[tuple[str, int, list[str]]] = []
+        for hunk in self._split_grep_hunks(result.stdout.splitlines()):
+            entries = self._parse_grep_hunk(hunk, prefix)
+            if entries is None:
                 if executor_truncated:
                     continue
                 raise CommandError("Git returned an invalid committed snapshot search result")
-            raw_path, line_number, content = parsed.groups()
+            raw_path = entries[0][0]
             try:
                 normalized = assert_path_allowed(raw_path, repo)
             except SecurityError:
                 continue
-            matches.append(f"{normalized}:{line_number}:{content}")
-        matches.sort()
-        return matches[:max_results], executor_truncated or len(matches) > max_results
+            rendered = [
+                f"{normalized}{':' if is_match else '-'}{line_number}"
+                f"{':' if is_match else '-'}{content}"
+                for _, line_number, content, is_match in entries
+            ]
+            try:
+                first_line_number = int(entries[0][1])
+            except ValueError:
+                first_line_number = 0
+            blocks.append((normalized, first_line_number, rendered))
+        blocks.sort(key=lambda item: (item[0], item[1]))
+        context_lines_out = [rendered_line for _, _, rendered in blocks for rendered_line in rendered]
+        truncated = executor_truncated or len(context_lines_out) > max_results
+        return context_lines_out[:max_results], truncated
 
     @staticmethod
     def _raise_evidence_error(message: str, code: ErrorCode) -> NoReturn:
@@ -1306,23 +1409,47 @@ class GitCliRepository:
         query: str,
         path_glob: str | None,
         max_results: int,
+        context_lines: int = 0,
     ) -> tuple[list[str], bool]:
-        argv = ["git", "grep", "--untracked", "-n", "-I", "-F", "-e", query, "--"]
+        argv = ["git", "grep", "--untracked", "-n", "-I", "-F"]
+        if context_lines:
+            argv.extend(["-C", str(context_lines)])
+        argv.extend(["-e", query, "--"])
         if path_glob:
             argv.append(path_glob)
         r = self._executor.run(argv, cwd=path, check=False)
         if r.returncode not in (0, 1):
             raise CommandError(r.combined)
-        matches = []
-        for line in r.stdout.splitlines():
+
+        if not context_lines:
+            matches = []
+            for line in r.stdout.splitlines():
+                try:
+                    assert_path_allowed(line.split(":", 1)[0], repo)
+                except SecurityError:
+                    continue
+                matches.append(line)
+                if len(matches) >= max_results:
+                    break
+            return (matches, len(matches) >= max_results)
+
+        lines: list[str] = []
+        for hunk in self._split_grep_hunks(r.stdout.splitlines()):
+            entries = self._parse_grep_hunk(hunk, "")
+            if entries is None:
+                if r.stdout_truncated:
+                    continue
+                raise CommandError("Git returned an invalid workspace search result")
+            raw_path = entries[0][0]
             try:
-                assert_path_allowed(line.split(":", 1)[0], repo)
+                normalized = assert_path_allowed(raw_path, repo)
             except SecurityError:
                 continue
-            matches.append(line)
-            if len(matches) >= max_results:
-                break
-        return (matches, len(matches) >= max_results)
+            for _, line_number, content, is_match in entries:
+                delimiter = ":" if is_match else "-"
+                lines.append(f"{normalized}{delimiter}{line_number}{delimiter}{content}")
+        truncated = r.stdout_truncated or len(lines) > max_results
+        return (lines[:max_results], truncated)
 
     @staticmethod
     def _bound(text: str, limit: int) -> tuple[str, bool]:

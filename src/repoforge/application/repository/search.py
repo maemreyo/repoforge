@@ -14,6 +14,7 @@ class RepositorySearchCommand:
     ref: str | None = None
     path_glob: str | None = None
     max_results: int = 200
+    context_lines: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,8 @@ class RepositorySearcher:
                 or ".." in glob_path.parts
             ):
                 raise SecurityError("Unsafe path_glob")
+        if not (0 <= command.context_lines <= 5):
+            raise ValueError("context_lines must be between 0 and 5")
         limit = max(1, min(command.max_results, 2000))
         repo = self.ctx.repo(command.repo_id)
 
@@ -53,6 +56,7 @@ class RepositorySearcher:
                 command.query,
                 command.path_glob,
                 limit,
+                command.context_lines,
             )
             return RepositorySearchResult(
                 command.repo_id,
@@ -70,6 +74,7 @@ class RepositorySearcher:
                 "ref": command.ref,
                 "path_glob": command.path_glob,
                 "max_results": limit,
+                "context_lines": command.context_lines,
             },
             op,
         )

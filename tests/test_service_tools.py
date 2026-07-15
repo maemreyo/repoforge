@@ -152,6 +152,82 @@ def test_batch_limit_and_denied_path(forge_env: ForgeEnvironment) -> None:
         )
 
 
+def test_workspace_search_context_lines_returns_surrounding_lines(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "context search")["workspace_id"]
+    workspace_path = Path(service.workspace_status(workspace_id)["path"])
+    (workspace_path / "ctx.txt").write_text(
+        "alpha\nbravo\nNEEDLE charlie\ndelta\necho\n", encoding="utf-8"
+    )
+
+    result = service.workspace_search(workspace_id, "NEEDLE", context_lines=2)
+    assert result["matches"] == [
+        "ctx.txt-1-alpha",
+        "ctx.txt-2-bravo",
+        "ctx.txt:3:NEEDLE charlie",
+        "ctx.txt-4-delta",
+        "ctx.txt-5-echo",
+    ]
+    assert result["truncated"] is False
+
+
+def test_workspace_search_context_lines_bounds_and_truncation(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "context bounds")["workspace_id"]
+    workspace_path = Path(service.workspace_status(workspace_id)["path"])
+    (workspace_path / "ctx2.txt").write_text("line1\nNEEDLE x\nline3\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="context_lines"):
+        service.workspace_search(workspace_id, "NEEDLE", context_lines=6)
+    with pytest.raises(ValueError, match="context_lines"):
+        service.workspace_search(workspace_id, "NEEDLE", context_lines=-1)
+
+    truncated = service.workspace_search(
+        workspace_id, "NEEDLE", context_lines=1, max_results=2, path_glob="ctx2.txt"
+    )
+    assert truncated["matches"] == ["ctx2.txt-1-line1", "ctx2.txt:2:NEEDLE x"]
+    assert truncated["truncated"] is True
+
+
+def test_workspace_search_context_lines_never_leaks_denied_path(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "context denied boundary")["workspace_id"]
+    workspace_path = Path(service.workspace_status(workspace_id)["path"])
+    (workspace_path / ".env").write_text(
+        "before secret\nNEEDLE_BOUNDARY=denied\nafter secret\n", encoding="utf-8"
+    )
+    (workspace_path / "allowed_neighbor.txt").write_text(
+        "line one\nNEEDLE_BOUNDARY here\nline three\n", encoding="utf-8"
+    )
+
+    result = service.workspace_search(workspace_id, "NEEDLE_BOUNDARY", context_lines=1)
+    assert all(".env" not in match for match in result["matches"])
+    assert all("secret" not in match for match in result["matches"])
+    assert result["matches"] == [
+        "allowed_neighbor.txt-1-line one",
+        "allowed_neighbor.txt:2:NEEDLE_BOUNDARY here",
+        "allowed_neighbor.txt-3-line three",
+    ]
+
+
+def test_workspace_search_default_context_lines_is_contract_stable(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "context stability")["workspace_id"]
+
+    default_call = service.workspace_search(workspace_id, "Repository")
+    explicit_zero = service.workspace_search(workspace_id, "Repository", context_lines=0)
+    assert explicit_zero == default_call
+    assert default_call["matches"] == ["README.md:3:Repository instructions."]
+
+
 def test_stale_locks_and_verification_invalidation(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "stale lock")["workspace_id"]

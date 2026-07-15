@@ -196,7 +196,7 @@ CLI equivalents are `rf operation status ID`, `rf operation list`, and `rf opera
 | `repo_tree` | List policy-allowed regular files from the reviewed default branch or an explicit reachable full commit ID. |
 | `repo_read_file` | Read a bounded UTF-8 line range from one committed blob and return its SHA-256 plus exact snapshot identity. |
 | `repo_read_files` | Read one bounded line range from multiple committed blobs in the same resolved snapshot, subject to `max_batch_files`. |
-| `repo_search` | Run bounded fixed-string search against one committed snapshot with an optional safe path glob. |
+| `repo_search` | Run bounded fixed-string search against one committed snapshot with an optional safe path glob and optional `context_lines` (0-5) of surrounding lines per match. |
 | `repo_recent_commits` | Read bounded local commit history, up to one hundred commits. |
 | `repo_commit_read` | Inspect one exact reviewed commit with metadata, deterministic changed-file statistics, first-parent/root comparison identity, and an optional bounded patch. |
 | `repo_compare` | Compare two exact reviewed commits with merge-base, ahead/behind counts, optional safe path glob, deterministic changed files, and an optional bounded patch. |
@@ -280,12 +280,23 @@ automatically expire or remove workspaces.
 | `workspace_tree` | List tracked and untracked paths permitted by repository policy. |
 | `workspace_read_file` | Read a bounded UTF-8 line range and return the file SHA-256 for optimistic locking. |
 | `workspace_read_files` | Read the same bounded range from multiple files, subject to `max_batch_files`. |
-| `workspace_search` | Run bounded literal repository search with an optional path glob. |
+| `workspace_search` | Run bounded literal repository search with an optional path glob and optional `context_lines` (0-5) of surrounding lines per match. |
 | `workspace_write_file` | Create or replace a complete UTF-8 file using optimistic SHA locking. |
 | `workspace_replace_text` | Perform an exact replacement with a file SHA and expected occurrence count, or a bounded ordered `edits` list (at most 20) applied atomically against the same file under one lock and fingerprint cycle. |
 | `workspace_apply_patch` | Apply a validated git-style unified diff or OpenAI apply_patch envelope against an expected HEAD and workspace fingerprint; deterministic repairs remain policy-checked and auditable by hash. |
 | `workspace_restore_paths` | Restore selected tracked paths or remove selected untracked files. |
 | `workspace_diff` | Return the diff, diff stat, untracked patch, and change-budget metrics. |
+
+`workspace_search` and `repo_search` (against a committed snapshot) share the same bounded Git
+search adapter and accept an additive `context_lines: int = 0` (0-5) to return that many
+surrounding lines on each side of a match instead of a follow-up `workspace_read_file`/
+`repo_read_file` call for the same file. Each returned line keeps Git's own `path:line:content`
+format for the matching line and `path-line-content` for a context line (colon for a match, dash
+for a context line), so the delimiter alone tells a caller which lines matched. Context lines are
+still resolved against the same repository path policy as the match itself — a hunk in a
+denied path is dropped in full, never partially — and every returned line, match or context,
+counts toward `max_results` and the tool's output byte bound, with truncation reported the same
+way as today. The default `context_lines=0` is unchanged from the tool's prior behavior.
 
 ## Verification and publication
 

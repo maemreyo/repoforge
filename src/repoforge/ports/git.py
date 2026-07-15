@@ -203,6 +203,7 @@ class GitRepository(Protocol):
         query: str,
         path_glob: str | None,
         max_results: int,
+        context_lines: int = 0,
     ) -> tuple[list[str], bool]: ...
 
     def read_commit_evidence(
@@ -232,6 +233,7 @@ class GitRepository(Protocol):
         query: str,
         path_glob: str | None,
         max_results: int,
+        context_lines: int = 0,
     ) -> tuple[list[str], bool]: ...
 
     def diff(self, path: Path, repo: RepositoryConfig, *, staged: bool) -> dict[str, Any]: ...
