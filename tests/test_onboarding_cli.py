@@ -24,7 +24,9 @@ from repoforge.interfaces.cli.onboarding import (
     TerminalOperatorIO,
     _ensure_interactive_tunnel_id,
     _run_interactive,
+    _show_consolidated_review,
 )
+from repoforge.interfaces.cli.onboarding_ui import ChoiceLike
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
 
@@ -62,12 +64,15 @@ def make_session(status=OnboardingStatus.AWAITING_APPROVAL):
     )
 
 
-def test_parser_exposes_onboard_and_repo_discover() -> None:
+def test_parser_defaults_onboard_to_safe_defaults_and_supports_yes() -> None:
     parser = cli.build_parser()
-    parsed = parser.parse_args(["onboard", "/repos", "--ui", "rich", "--defaults", "safe"])
+    parsed = parser.parse_args(["onboard", "/repos", "--ui", "rich"])
+
     assert parsed.command == "onboard"
     assert parsed.ui == "rich"
-    assert parsed.defaults == "safe"
+    assert parsed.defaults is None
+    assert parsed.yes is False
+    assert parser.parse_args(["onboard", "/repos", "--yes"]).yes is True
     args = parser.parse_args(["repo", "discover", "/repos"])
     assert args.repo_command == "discover"
 
@@ -111,6 +116,92 @@ def test_noninteractive_does_not_construct_optional_ui(monkeypatch, capsys) -> N
         == 3
     )
     assert "awaiting_approval" in capsys.readouterr().out
+
+
+def test_yes_does_not_construct_optional_ui(monkeypatch) -> None:
+    fake = FakeCoordinator(make_session())
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_coordinator", lambda path: fake
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_ui",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not build UI")),
+    )
+
+    assert cli.main(["--config", "/tmp/c", "onboard", "/repos", "--yes", "--tunnel-id", "t"]) == 3
+
+
+class SafeYesCoordinator:
+    def __init__(self) -> None:
+        identity = DiscoveryIdentity("/repos/demo", "/repos/demo", "/repos/demo/.git", True, False)
+        self.candidate = DiscoveryCandidate(identity, "demo")
+        self.calls = []
+
+    def _result(self, status, state):
+        session = replace(
+            OnboardingSession.new(
+                session_id="b" * 24,
+                created_at="now",
+                config_path="/tmp/c",
+                roots=("/repos",),
+                options=OnboardingOptions(tunnel_id="t"),
+            ),
+            status=status,
+            repositories=(state,),
+        )
+        return OnboardingResult(session, None, summarize_session(session), None, {})
+
+    def run(self, command):
+        self.calls.append(command)
+        if len(self.calls) == 1:
+            return self._result(
+                OnboardingStatus.AWAITING_DECISIONS,
+                OnboardingRepositoryState(
+                    self.candidate,
+                    progress=RepositoryProgress.NEEDS_DECISION,
+                    proposal_id="proposal-1",
+                    required_decisions=(
+                        (
+                            "dependency_install",
+                            "Dependency setup may access the network.",
+                            ("exclude", "block"),
+                        ),
+                    ),
+                ),
+            )
+        if len(self.calls) == 2:
+            return self._result(
+                OnboardingStatus.AWAITING_APPROVAL,
+                OnboardingRepositoryState(
+                    self.candidate,
+                    progress=RepositoryProgress.NEEDS_APPROVAL,
+                    proposal_id="proposal-1",
+                ),
+            )
+        return self._result(
+            OnboardingStatus.COMPLETED,
+            OnboardingRepositoryState(
+                self.candidate,
+                progress=RepositoryProgress.ENROLLED,
+                proposal_id="proposal-1",
+            ),
+        )
+
+
+def test_yes_applies_only_safe_defaults_and_exact_approvals_without_ui(monkeypatch, capsys) -> None:
+    coordinator = SafeYesCoordinator()
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_coordinator", lambda path: coordinator
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_ui",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not build UI")),
+    )
+
+    assert cli.main(["--config", "/tmp/c", "onboard", "/repos", "--yes", "--tunnel-id", "t"]) == 0
+    assert dict(coordinator.calls[1].decisions) == {"demo.dependency_install": "exclude"}
+    assert coordinator.calls[2].approvals == ("approve:proposal-1",)
+    assert '"status": "completed"' in capsys.readouterr().out
 
 
 def test_noninteractive_rejects_interactive_default_inference(monkeypatch, capsys) -> None:
@@ -230,12 +321,21 @@ class BatchReviewUI:
     def code(self, *, title, text, lexer="text"):
         pass
 
-    def choose(self, *, prompt, choices, default=None):
+    def choose(
+        self,
+        *,
+        prompt: str,
+        choices: tuple[ChoiceLike, ...],
+        default: str | None = None,
+    ) -> str:
         values = tuple(getattr(choice, "value", choice) for choice in choices)
         if "base branch" in prompt:
             assert "main" in values
             return "main"
-        raise AssertionError(f"unexpected choice prompt: {prompt}")
+        if "Review complete" in prompt:
+            assert "accept" in values
+            return "accept"
+        raise AssertionError(f"unexpected choice prompt: {prompt} {values}")
 
     def select_many(self, *, prompt, choices):
         values = tuple(choice.value for choice in choices)
@@ -260,6 +360,7 @@ class BatchReviewCoordinator:
         identity = DiscoveryIdentity("/repos/demo", "/repos/demo", "/repos/demo/.git", True, False)
         self.candidate = DiscoveryCandidate(identity, "demo")
         self.calls = []
+        self.discarded_session_ids = []
         self.config_path = config_path
         self.proposal_json = json.dumps(
             {
@@ -363,18 +464,22 @@ class BatchReviewCoordinator:
             session, plan, summarize_session(session), {"active_generation": 1}, None
         )
 
+    def discard(self, session_id):
+        self.discarded_session_ids.append(session_id)
 
-def _batch_args(config: Path, *, plan_only: bool = False):
+
+def _batch_args(config: Path, *, plan_only: bool = False, defaults: str | None = None):
     return argparse.Namespace(
         config=str(config),
         ui="auto",
-        defaults="ask",
+        defaults=defaults or "safe",
         max_depth=8,
         include=[],
         exclude=[],
         template="standard",
         activate="auto",
         plan_only=plan_only,
+        yes=False,
         decision=[],
         policy_override=[],
         approve=[],
@@ -386,8 +491,74 @@ def _batch_args(config: Path, *, plan_only: bool = False):
     )
 
 
-def test_interactive_batch_review_runs_all_six_stages(monkeypatch, tmp_path) -> None:
+def test_consolidated_review_edits_only_selected_decision(tmp_path) -> None:
+    class EditUI(BatchReviewUI):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rows = ()
+
+        def table(self, *, title, headers, rows):
+            if title == "Decisions taken":
+                self.rows = rows
+
+        def choose(
+            self,
+            *,
+            prompt: str,
+            choices: tuple[ChoiceLike, ...],
+            default: str | None = None,
+        ) -> str:
+            if prompt == "Review complete — choose action":
+                values = tuple(getattr(choice, "value", choice) for choice in choices)
+                assert values == ("accept", "e", "q")
+                return "e"
+            if prompt == "Choose the item to edit":
+                return "demo.dependency_install"
+            if "Dependency setup" in prompt:
+                return "block"
+            raise AssertionError(f"unexpected prompt: {prompt}")
+
+    coordinator = BatchReviewCoordinator(config_path=str(tmp_path / "config.toml"))
+    state = OnboardingRepositoryState(
+        coordinator.candidate,
+        progress=RepositoryProgress.APPROVED,
+        proposal_id="proposal-1",
+        proposal_json=coordinator.proposal_json,
+    )
+    session = coordinator._session(OnboardingStatus.READY, state)
+    plan = OnboardingBatchPlan(
+        "version = 2\n",
+        "resolved",
+        ("demo",),
+        ("proposal-1",),
+        "combined",
+        ("approval-hash",),
+        (("demo", "fingerprint"),),
+        "expansion",
+    )
+    ui = EditUI()
+
+    action = _show_consolidated_review(
+        ui,
+        tmp_path / "config.toml",
+        OnboardingResult(session, plan, summarize_session(session), None, None),
+        (("demo.dependency_install", "exclude"),),
+        {
+            "demo.dependency_install": (
+                "demo: Dependency setup may access the network.",
+                ("exclude", "block"),
+            )
+        },
+        {"demo.dependency_install": "avoid networked dependency setup"},
+    )
+
+    assert action == ("demo.dependency_install", "block")
+    assert ui.rows == (("demo.dependency_install", "exclude", "avoid networked dependency setup"),)
+
+
+def test_interactive_batch_review_runs_consolidated_flow(monkeypatch, tmp_path) -> None:
     config = tmp_path / "config.toml"
+    args = _batch_args(config)
     ui = BatchReviewUI()
     coordinator = BatchReviewCoordinator(config_path=str(config.resolve()))
     discovered = DiscoveryResult((coordinator.candidate,), (), ())
@@ -409,25 +580,24 @@ def test_interactive_batch_review_runs_all_six_stages(monkeypatch, tmp_path) -> 
         lambda args, roots: discovered,
     )
 
-    assert _run_interactive(_batch_args(config), None, (Path("/repos"),), rendered.append) == 0
+    assert _run_interactive(args, None, (Path("/repos"),), rendered.append) == 0
     assert [title for _index, _total, title in ui.stages] == [
         "Discovery",
         "Safe defaults",
         "Ambiguous decisions",
-        "Repository summaries",
-        "Config diff",
-        "Apply",
+        "Review and apply",
     ]
     assert dict(coordinator.calls[1].decisions)["demo.dependency_install"] == "exclude"
     assert dict(coordinator.calls[2].decisions)["demo.default_base"] == "main"
     assert coordinator.calls[3].approvals == ("approve:proposal-1",)
     assert coordinator.calls[4].plan_only is False
-    assert ui.confirm_calls == 1
     assert rendered[-1]["status"] == "completed"
 
 
-def test_interactive_plan_only_stops_after_config_diff(monkeypatch, tmp_path) -> None:
+def test_interactive_plan_only_stops_after_review(monkeypatch, tmp_path) -> None:
     config = tmp_path / "config.toml"
+    args = _batch_args(config, plan_only=True)
+    args.defaults = "ask"
     ui = BatchReviewUI(confirm_apply=False)
     coordinator = BatchReviewCoordinator(config_path=str(config.resolve()))
     discovered = DiscoveryResult((coordinator.candidate,), (), ())
@@ -451,7 +621,7 @@ def test_interactive_plan_only_stops_after_config_diff(monkeypatch, tmp_path) ->
 
     assert (
         _run_interactive(
-            _batch_args(config, plan_only=True),
+            args,
             None,
             (Path("/repos"),),
             rendered.append,
@@ -459,5 +629,83 @@ def test_interactive_plan_only_stops_after_config_diff(monkeypatch, tmp_path) ->
         == 0
     )
     assert len(coordinator.calls) == 4
-    assert ui.confirm_calls == 0
     assert rendered[-1]["status"] == "ready"
+
+
+def test_interactive_abort_discards_new_session_without_writing_config(
+    monkeypatch, tmp_path
+) -> None:
+    class AbortUI(BatchReviewUI):
+        def choose(
+            self,
+            *,
+            prompt: str,
+            choices: tuple[ChoiceLike, ...],
+            default: str | None = None,
+        ) -> str:
+            if prompt == "Review complete — choose action":
+                return "q"
+            return super().choose(prompt=prompt, choices=choices, default=default)
+
+    config = tmp_path / "config.toml"
+    args = _batch_args(config)
+    coordinator = BatchReviewCoordinator(config_path=str(config.resolve()))
+    discovered = DiscoveryResult((coordinator.candidate,), (), ())
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_ui",
+        lambda *args, **kwargs: AbortUI(),
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_coordinator",
+        lambda path: coordinator,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._ensure_interactive_tunnel_id",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._discover_result",
+        lambda args, roots: discovered,
+    )
+
+    assert _run_interactive(args, None, (Path("/repos"),), lambda payload: None) == 3
+    assert coordinator.discarded_session_ids == ["a" * 24]
+    assert not config.exists()
+
+
+def test_interactive_abort_preserves_resumed_session(monkeypatch, tmp_path) -> None:
+    class AbortUI(BatchReviewUI):
+        def choose(
+            self,
+            *,
+            prompt: str,
+            choices: tuple[ChoiceLike, ...],
+            default: str | None = None,
+        ) -> str:
+            if prompt == "Review complete — choose action":
+                return "q"
+            return super().choose(prompt=prompt, choices=choices, default=default)
+
+    config = tmp_path / "config.toml"
+    args = _batch_args(config)
+    coordinator = BatchReviewCoordinator(config_path=str(config.resolve()))
+    discovered = DiscoveryResult((coordinator.candidate,), (), ())
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_ui",
+        lambda *args, **kwargs: AbortUI(),
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_coordinator",
+        lambda path: coordinator,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._ensure_interactive_tunnel_id",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._discover_result",
+        lambda args, roots: discovered,
+    )
+
+    assert _run_interactive(args, "a" * 24, (Path("/repos"),), lambda payload: None) == 3
+    assert coordinator.discarded_session_ids == []

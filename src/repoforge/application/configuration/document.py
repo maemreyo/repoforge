@@ -152,6 +152,25 @@ def render_resolved(
         for key in sorted(server):
             if isinstance(server[key], (str, int, bool, list)):
                 lines.append(f"{key} = {_toml(server[key])}")
+    providers = document.get("providers", [])
+    if isinstance(providers, list):
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            lines.extend(["", "[[providers]]"])
+            for key in sorted(k for k in provider if k not in {"filesystem", "output_bounds"}):
+                value = provider[key]
+                if isinstance(value, (str, int, bool, list)):
+                    lines.append(f"{key} = {_toml(value)}")
+            for section in ("filesystem", "output_bounds"):
+                values = provider.get(section)
+                if not isinstance(values, dict):
+                    continue
+                lines.extend(["", f"[providers.{section}]"])
+                for key in sorted(values):
+                    value = values[key]
+                    if isinstance(value, (str, int, bool, list)):
+                        lines.append(f"{key} = {_toml(value)}")
     repositories = document.get("repositories", {})
     if isinstance(repositories, dict):
         for repo_id in sorted(repositories):

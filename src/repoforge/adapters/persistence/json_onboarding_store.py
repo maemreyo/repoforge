@@ -140,13 +140,17 @@ class JsonOnboardingStore:
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
             os.chmod(path, 0o600)
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            self._fsync_dir(path.parent)
         finally:
             Path(temporary).unlink(missing_ok=True)
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        directory_fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def create(self, session: OnboardingSession) -> OnboardingSession:
         path = self._path(session.session_id)
@@ -182,6 +186,25 @@ class JsonOnboardingStore:
             updated = replace(session, revision=expected_revision + 1)
             self._write(path, self._encode(updated))
             return updated
+
+    def discard(self, session_id: str) -> None:
+        path = self._path(session_id)
+        lock_name = f"onboarding-{session_id}"
+        lock_path = self._locks.path_for(lock_name)
+        try:
+            with self._locks.lock(
+                lock_name,
+                timeout_seconds=5,
+                metadata={"operation": "discard"},
+            ):
+                path.unlink(missing_ok=True)
+                self._fsync_dir(path.parent)
+            lock_path.unlink(missing_ok=True)
+            self._fsync_dir(lock_path.parent)
+        except OSError as exc:
+            raise ConfigError(
+                "SESSION_PERSISTENCE_FAILED: provisional session cannot be discarded"
+            ) from exc
 
     def cancel(
         self, session_id: str, *, expected_revision: int, updated_at: str

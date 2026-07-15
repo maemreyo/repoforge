@@ -17,10 +17,12 @@ class DefaultsMode(str, Enum):
 
 def resolve_defaults_mode(requested: str | None, *, non_interactive: bool) -> DefaultsMode:
     if non_interactive:
-        if requested not in {None, DefaultsMode.NONE.value}:
-            raise ValueError("--defaults safe/ask is interactive-only")
-        return DefaultsMode.NONE
-    return DefaultsMode(requested or DefaultsMode.ASK.value)
+        if requested not in {None, DefaultsMode.NONE.value, DefaultsMode.SAFE.value}:
+            raise ValueError("--defaults ask is interactive-only")
+        return (
+            DefaultsMode.NONE if requested in {None, DefaultsMode.NONE.value} else DefaultsMode.SAFE
+        )
+    return DefaultsMode(requested or DefaultsMode.SAFE.value)
 
 
 @dataclass(frozen=True, slots=True)
