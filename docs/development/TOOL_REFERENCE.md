@@ -208,9 +208,9 @@ Read-only Git-aware discovery. Reports eligible and excluded repositories with s
 
 ### `rf onboard ROOT [ROOT ...]`
 
-Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. Interactive review is presented as Discovery → Safe defaults → Ambiguous decisions → Repository summaries → Config diff → Apply.
+Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. The default interactive review is Discovery → Safe defaults → genuinely ambiguous decisions → one consolidated review. In that review Enter accepts, `e` changes one selected decision, and `q` aborts without writing configuration or runtime state.
 
-Important options include `--ui auto|rich|plain`, `--defaults safe|ask|none`, `--template`, `--activate`, `--plan-only`, `--non-interactive`, `--decision`, `--policy-override`, `--approve`, `--repo-id PATH=ID`, `--wait`, and `--rollback-on-failure`. Non-interactive mode accepts only `--defaults none` and never loads optional terminal UI packages.
+Important options include `--ui auto|rich|plain`, `--defaults safe|ask|none` (default: `safe`), `--yes`, `--template`, `--activate`, `--plan-only`, `--non-interactive`, `--decision`, `--policy-override`, `--approve`, `--repo-id PATH=ID`, `--wait`, and `--rollback-on-failure`. `--yes` is a zero-prompt safe-default acceptance flow; it stops with exit code `3` rather than guessing an ambiguous decision. Non-interactive mode never loads optional terminal UI packages.
 
 ### Session actions
 
