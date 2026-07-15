@@ -237,7 +237,9 @@ def test_repo_inspect_and_propose_status_variants(
     _common(monkeypatch)
     inspect_args = argparse.Namespace(path="/repo", repo_id="custom")
     assert cli._repo_inspect(inspect_args) == 0
-    assert json.loads(capsys.readouterr().out)["facts"]["repo_id"] == "custom"
+    inspected = json.loads(capsys.readouterr().out)
+    assert inspected["facts"]["repo_id"] == "custom"
+    assert inspected["verification_profile_candidates"] == []
 
     args = argparse.Namespace(
         path="/repo",

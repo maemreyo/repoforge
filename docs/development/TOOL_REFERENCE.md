@@ -1,8 +1,35 @@
 # RepoForge tool reference
 
-RepoForge exposes forty-two focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes forty-three focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
+
+## Provider registry
+
+Provider manifests and the provider registry are internal application contracts, not MCP tools.
+`ProviderManifest` records the reviewed provider ID, kind, version, digest-pinned executable or image,
+supported languages/capabilities, health-probe arguments, coverage/confidence model,
+network/filesystem requirements, output limits, and declared fallback. Provider manifests live only in
+immutable resolved configuration in this stage; the minimal editable source format has no provider
+enrollment path. `ConfigProviderRegistry` accepts only explicitly configured manifests, rejects
+duplicate IDs and invalid fallback graphs, orders listings deterministically, and never promotes a
+discovered binary into capability. Static availability checks resolve only configured executables and
+verify their SHA-256 without executing provider code. Image availability and health-probe execution are
+deferred to the provider lifecycle stage. Provider configuration is advisory evidence only and cannot
+authorize repository, filesystem, command, network, or publishing access.
+
+## Execution environments
+
+Execution environments are internal application contracts, not MCP tools. `ExecutionEnvironmentPort`
+encapsulates doctor, idempotent prepare/cleanup, deterministic identity, approved-command execution,
+and declared artifact collection. The native reviewed adapter delegates to the existing constrained
+command executor, preserving profile argv, working directory, timeout, output bounds, and failure
+behavior. Its identity includes normalized platform/architecture, versions of known safely inspectable
+profile tools, reviewed environment names and value hashes, recognized lockfile and manifest digests,
+working-directory/network/filesystem policy, and adapter version. Unknown executables produce partial
+identity without an extra probe. It excludes source
+bodies, command output, full environment bodies, secrets, and absolute user paths. Verification
+receipts add an optional `environment_identity_hash`; legacy receipts without this field remain valid.
 
 ## Local runtime commands
 
@@ -206,11 +233,15 @@ These omissions are part of the security model, not missing convenience features
 
 Read-only Git-aware discovery. Reports eligible and excluded repositories with stable reasons. It never creates proposals, sessions, configuration generations, workspaces, or runtime changes.
 
+### `rf repo inspect PATH`
+
+Read-only repository inspection. In addition to repository facts, the response includes `verification_profile_candidates`: bounded, provenance-tagged candidates inferred from Python/uv, Node package-manager, Go, Cargo, and Makefile markers. Detection never executes a command. Dependency-install candidates are marked as requiring explicit network confirmation; accepted profile proposals retain explicit timeouts, and `rf repo inspect` exposes each candidate's network and mutability metadata.
+
 ### `rf onboard ROOT [ROOT ...]`
 
-Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. Interactive review is presented as Discovery → Safe defaults → Ambiguous decisions → Repository summaries → Config diff → Apply.
+Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. The default interactive review is Discovery → Safe defaults → genuinely ambiguous decisions → one consolidated review. In that review Enter accepts, `e` changes one selected decision, and `q` aborts without writing configuration or runtime state.
 
-Important options include `--ui auto|rich|plain`, `--defaults safe|ask|none`, `--template`, `--activate`, `--plan-only`, `--non-interactive`, `--decision`, `--policy-override`, `--approve`, `--repo-id PATH=ID`, `--wait`, and `--rollback-on-failure`. Non-interactive mode accepts only `--defaults none` and never loads optional terminal UI packages.
+Important options include `--ui auto|rich|plain`, `--defaults safe|ask|none` (default: `safe`), `--yes`, `--template`, `--activate`, `--plan-only`, `--non-interactive`, `--decision`, `--policy-override`, `--approve`, `--repo-id PATH=ID`, `--wait`, and `--rollback-on-failure`. `--yes` is a zero-prompt safe-default acceptance flow; it stops with exit code `3` rather than guessing an ambiguous decision. Non-interactive mode never loads optional terminal UI packages.
 
 ### Session actions
 

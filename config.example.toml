@@ -1,4 +1,6 @@
 # Minimal RepoForge source configuration. `rf setup` creates this file for you.
+# Provider manifests are enrolled separately into reviewed immutable configuration;
+# this editable source file cannot grant provider capabilities.
 version = 2
 
 # Omit [tunnel] for local-only stdio operation.
@@ -9,6 +11,10 @@ profile = "repoforge"
 [[repo]]
 id = "example-repository"
 path = "/absolute/path/to/repository"
-policy_template = "standard"
-decisions = []
-policy_overrides = []
+
+# The generated reviewed lock expands all policy settings. Source onboarding defaults
+# to the standard template; a path-only resolved repository defaults to strict.
+# Use policy_overrides only after review.
+# policy_template = "strict"
+# decisions = []
+# policy_overrides = []

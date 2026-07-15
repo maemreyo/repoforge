@@ -63,6 +63,7 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
             "verification": profile.verification,
             "commands": [list(command) for command in profile.commands],
             "working_directory": profile.working_directory,
+            "timeout_seconds": profile.timeout_seconds,
         }
     default_profile = (
         "full" if "full" in profile_map else (sorted(profile_map)[0] if profile_map else None)
@@ -159,6 +160,25 @@ def render_resolved(
                 value = resource_budget[key]
                 if isinstance(value, int):
                     lines.append(f"{key} = {_toml(value)}")
+    providers = document.get("providers", [])
+    if isinstance(providers, list):
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            lines.extend(["", "[[providers]]"])
+            for key in sorted(k for k in provider if k not in {"filesystem", "output_bounds"}):
+                value = provider[key]
+                if isinstance(value, (str, int, bool, list)):
+                    lines.append(f"{key} = {_toml(value)}")
+            for section in ("filesystem", "output_bounds"):
+                values = provider.get(section)
+                if not isinstance(values, dict):
+                    continue
+                lines.extend(["", f"[providers.{section}]"])
+                for key in sorted(values):
+                    value = values[key]
+                    if isinstance(value, (str, int, bool, list)):
+                        lines.append(f"{key} = {_toml(value)}")
     repositories = document.get("repositories", {})
     if isinstance(repositories, dict):
         for repo_id in sorted(repositories):

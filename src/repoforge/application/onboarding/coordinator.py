@@ -367,6 +367,9 @@ class OnboardingCoordinator:
             raise ConfigError("SESSION_NOT_FOUND: onboarding session does not exist")
         return OnboardingResult(session, None, summarize_session(session), None)
 
+    def discard(self, session_id: str) -> None:
+        self._sessions.discard(session_id)
+
     def pause(self, session_id: str) -> OnboardingResult:
         session = self._sessions.read(session_id)
         if session is None:
