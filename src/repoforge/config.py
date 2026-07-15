@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import tomli as tomllib
 
@@ -20,6 +21,13 @@ from .domain.diagnostics import (
     validate_diagnostic_profile,
 )
 from .domain.errors import ConfigError
+from .domain.provider_config import load_provider_manifests
+from .domain.provider_manifest import ProviderManifest
+from .domain.resource_budget import (
+    DEFAULT_RESOURCE_BUDGET,
+    RESOURCE_BUDGET_FIELDS,
+    ResourceBudget,
+)
 from .domain.risk import RiskPolicy, default_risk_policy
 from .domain.user_paths import (
     DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
@@ -56,8 +64,54 @@ DEFAULT_DENIED_PATHS = (
     "**/*credential*",
     ".github/workflows/**",
 )
+DEFAULT_PROTECTED_BRANCHES = ("main", "master", "develop", "production")
+_POLICY_PRESETS: dict[str, dict[str, bool | int]] = {
+    "strict": {
+        "read_only": True,
+        "publish_enabled": False,
+        "require_verification_before_commit": True,
+        "fetch_before_workspace": False,
+        "max_changed_files": 25,
+        "max_diff_lines": 2_000,
+        "max_total_changed_bytes": 5 * 1024 * 1024,
+    },
+    "standard": {
+        "read_only": False,
+        "publish_enabled": False,
+        "require_verification_before_commit": True,
+        "fetch_before_workspace": False,
+        "max_changed_files": 75,
+        "max_diff_lines": 6_000,
+        "max_total_changed_bytes": 10 * 1024 * 1024,
+    },
+    "relaxed": {
+        "read_only": False,
+        "publish_enabled": True,
+        "require_verification_before_commit": True,
+        "fetch_before_workspace": True,
+        "max_changed_files": 150,
+        "max_diff_lines": 12_000,
+        "max_total_changed_bytes": 25 * 1024 * 1024,
+    },
+}
 _SAFE_BRANCH_COMPONENT = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SAFE_REPO_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+EnumValue = TypeVar("EnumValue", bound=Enum)
+
+
+def policy_preset_reference() -> tuple[tuple[str, bool, bool, int, int, int], ...]:
+    """Return the stable, reviewable values expanded from named repository presets."""
+    return tuple(
+        (
+            name,
+            bool(values["read_only"]),
+            bool(values["publish_enabled"]),
+            int(values["max_changed_files"]),
+            int(values["max_diff_lines"]),
+            int(values["max_total_changed_bytes"]),
+        )
+        for name, values in _POLICY_PRESETS.items()
+    )
 
 
 @dataclass(frozen=True)
@@ -98,6 +152,7 @@ class RepositoryConfig:
     risk_policy: RiskPolicy = field(
         default_factory=lambda: default_risk_policy(final_profile="full")
     )
+    resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -118,6 +173,7 @@ class ServerConfig:
     idempotency_lock_timeout_seconds: int = 2
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
+    resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -125,6 +181,7 @@ class AppConfig:
     source_path: Path
     server: ServerConfig
     repositories: dict[str, RepositoryConfig]
+    providers: tuple[ProviderManifest, ...] = ()
 
 
 def _expand_path(value: str, *, base_dir: Path) -> Path:
@@ -157,6 +214,28 @@ def _positive_int(value: Any, default: int, context: str) -> int:
     return value
 
 
+def _load_resource_budget(
+    raw: Any,
+    context: str,
+    defaults: ResourceBudget = DEFAULT_RESOURCE_BUDGET,
+    ceiling: ResourceBudget | None = None,
+) -> ResourceBudget:
+    if raw is None:
+        return defaults
+    table = _expect_mapping(raw, context)
+    unknown = sorted(set(table) - set(RESOURCE_BUDGET_FIELDS))
+    if unknown:
+        raise ConfigError(f"{context} contains unsupported budget fields: {unknown}")
+    values: dict[str, int] = {}
+    for field_name in RESOURCE_BUDGET_FIELDS:
+        default = getattr(defaults, field_name)
+        configured = _positive_int(table.get(field_name), default, f"{context}.{field_name}")
+        if ceiling is not None and configured > getattr(ceiling, field_name):
+            raise ConfigError(f"{context}.{field_name} cannot exceed its inherited server limit")
+        values[field_name] = configured
+    return ResourceBudget(**values)
+
+
 def _boolean(value: Any, default: bool, context: str) -> bool:
     if value is None:
         return default
@@ -177,6 +256,17 @@ def _safe_remote(value: str, context: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", value) or value.startswith("-"):
         raise ConfigError(f"{context} must be a safe configured remote name: {value!r}")
     return value
+
+
+def _resolve_repository_preset(raw: dict[str, Any], repo_id: str) -> dict[str, Any]:
+    policy = raw.get("policy")
+    if policy is None:
+        preset_fields = _POLICY_PRESETS["strict"].keys()
+        return {**_POLICY_PRESETS["strict"], **raw} if preset_fields.isdisjoint(raw) else raw
+    if not isinstance(policy, str) or policy not in _POLICY_PRESETS:
+        allowed = ", ".join(("strict", "standard", "relaxed"))
+        raise ConfigError(f"repositories.{repo_id}.policy must be one of: {allowed}")
+    return {**_POLICY_PRESETS[policy], **raw}
 
 
 def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
@@ -237,13 +327,13 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
     return profiles
 
 
-def _enum_value(enum_type: type[Any], value: Any, context: str) -> Any:
+def _enum_value(enum_type: type[EnumValue], value: object, context: str) -> EnumValue:
     if not isinstance(value, str):
         raise ConfigError(f"{context} must be a string")
     try:
         return enum_type(value)
     except ValueError as exc:
-        allowed = sorted(item.value for item in enum_type)
+        allowed = sorted(str(item.value) for item in enum_type)
         raise ConfigError(f"{context} must be one of {allowed}") from exc
 
 
@@ -473,6 +563,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("allowed_environment"), "server.allowed_environment"
         )
         or DEFAULT_ALLOWED_ENVIRONMENT,
+        resource_budget=_load_resource_budget(
+            server_raw.get("resource_budget"),
+            "server.resource_budget",
+        ),
     )
     repositories_raw = _expect_mapping(raw.get("repositories"), "repositories")
     if not repositories_raw:
@@ -481,7 +575,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     for repo_id, repo_raw_any in repositories_raw.items():
         if not _SAFE_REPO_ID.fullmatch(repo_id):
             raise ConfigError(f"Unsafe repository id: {repo_id!r}")
-        repo_raw = _expect_mapping(repo_raw_any, f"repositories.{repo_id}")
+        repo_raw = _resolve_repository_preset(
+            _expect_mapping(repo_raw_any, f"repositories.{repo_id}"), repo_id
+        )
         if "path" not in repo_raw:
             raise ConfigError(f"repositories.{repo_id}.path is required")
         default_base = _safe_ref(
@@ -508,7 +604,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 f"{branch_prefix!r}"
             )
         protected = _tuple_of_strings(
-            repo_raw.get("protected_branches", ["main", "master", "develop", "production"]),
+            repo_raw.get("protected_branches", list(DEFAULT_PROTECTED_BRANCHES)),
             f"repositories.{repo_id}.protected_branches",
         )
         profiles = _load_profiles(repo_raw.get("profiles"), repo_id)
@@ -540,6 +636,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             final_profile=risk_final_profile,
             profiles=profiles,
             diagnostics=diagnostics,
+        )
+        resource_budget = _load_resource_budget(
+            repo_raw.get("resource_budget"),
+            f"repositories.{repo_id}.resource_budget",
+            defaults=server.resource_budget,
+            ceiling=server.resource_budget,
         )
         repositories[repo_id] = RepositoryConfig(
             repo_id=repo_id,
@@ -605,5 +707,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             profiles=profiles,
             diagnostics=diagnostics,
             risk_policy=risk_policy,
+            resource_budget=resource_budget,
         )
-    return AppConfig(source_path=config_path, server=server, repositories=repositories)
+    providers = load_provider_manifests(raw.get("providers"))
+    return AppConfig(
+        source_path=config_path,
+        server=server,
+        repositories=repositories,
+        providers=providers,
+    )

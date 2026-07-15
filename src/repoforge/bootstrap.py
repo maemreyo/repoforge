@@ -13,6 +13,7 @@ from .adapters.audit import JsonlAuditSink as JsonlAuditSink
 from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
 from .adapters.configuration import ConfigGenerationStore
+from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import LocalFileSystem
 from .adapters.git import GitCliRepository
 from .adapters.github import GhCliGateway
@@ -27,6 +28,7 @@ from .adapters.persistence import (
     JsonWorkflowRecordingStore,
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
+from .adapters.provider.config_registry import ConfigProviderRegistry
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
 from .adapters.runtime import (
@@ -101,6 +103,7 @@ from .ports import (
     CommandExecutor,
     ConfigurationStore,
     ExecutableLocator,
+    ExecutionEnvironmentPort,
     FileSystem,
     GitRepository,
     IdempotencyStore,
@@ -113,6 +116,7 @@ from .ports import (
     OperationStore,
     PrCheckWatchStore,
     ProcessInspector,
+    ProviderRegistry,
     PullRequestGateway,
     RepositoryDiscovery,
     RepositoryProbe,
@@ -131,6 +135,7 @@ from .ports import (
 @dataclass(frozen=True, slots=True)
 class AdapterOverrides:
     command: CommandExecutor | None = None
+    execution_environment: ExecutionEnvironmentPort | None = None
     store: WorkspaceStore | None = None
     locks: LockManager | None = None
     gate: OperationGate | None = None
@@ -148,6 +153,7 @@ class AdapterOverrides:
     background_tasks: BackgroundTaskRunner | None = None
     sleeper: Sleeper | None = None
     workflow_recordings: WorkflowRecordingStore | None = None
+    provider_registry: ProviderRegistry | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +323,10 @@ def build_application(
     config.server.state_root.mkdir(parents=True, exist_ok=True)
     clock = o.clock or SystemClock()
     command = o.command or SubprocessCommandExecutor(config.server)
+    execution_environment = o.execution_environment or NativeReviewedAdapter(
+        command,
+        max_artifact_bytes=config.server.max_file_bytes,
+    )
     store = o.store or JsonWorkspaceStore(config.server.state_root)
     locks = o.locks or FcntlLockManager(config.server.state_root / "locks")
     gate = o.gate or InProcessOperationGate()
@@ -331,6 +341,7 @@ def build_application(
     github = o.github or GhCliGateway(command, config.server)
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
+    provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
@@ -358,6 +369,8 @@ def build_application(
         clock=clock,
         ids=ids,
         executables=executables,
+        execution_environment=execution_environment,
+        provider_registry=provider_registry,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
+from typing import Protocol
 
 from ...application.configuration.paths import resolve_repoforge_paths
 from ...application.configuration.source import parse_source
@@ -53,6 +54,10 @@ from .onboarding_ui import (
 )
 
 Render = Callable[[object], None]
+
+
+class _OnboardingStatusReader(Protocol):
+    def status(self, session_id: str) -> OnboardingResult: ...
 
 
 def _plain(value: object) -> object:
@@ -139,7 +144,13 @@ def add_onboarding_parsers(
         "--defaults",
         choices=("safe", "ask", "none"),
         default=None,
-        help="Interactive recommendation policy; default is ask",
+        help="Interactive recommendation policy; default is safe",
+    )
+    onboard.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help="Non-interactive accept-safe-defaults run; supersets --non-interactive",
     )
     onboard.add_argument("--decision", action="append", default=[])
     onboard.add_argument("--policy-override", action="append", default=[])
@@ -317,7 +328,7 @@ def _ensure_interactive_tunnel_id(
     args: argparse.Namespace,
     *,
     session_id: str | None,
-    coordinator: OnboardingCoordinator,
+    coordinator: _OnboardingStatusReader,
     io: OnboardingUI,
 ) -> None:
     config_path = Path(args.config).expanduser().resolve()
@@ -345,7 +356,7 @@ def _ensure_interactive_tunnel_id(
 
 def _show_discovery(ui: OnboardingUI, result: DiscoveryResult) -> None:
     eligible, excluded = discovery_rows(result)
-    ui.stage(index=1, total=6, title="Discovery")
+    ui.stage(index=1, total=4, title="Discovery")
     ui.table(
         title="Eligible repositories",
         headers=("ID", "Path", "Parent"),
@@ -412,7 +423,7 @@ def _apply_recommendations(
     if not choices:
         return decisions, False
     processed.update(choice.value for choice in choices)
-    ui.stage(index=2, total=6, title="Safe defaults")
+    ui.stage(index=2, total=4, title="Safe defaults")
     if mode is DefaultsMode.NONE:
         ui.panel(
             title="Safe defaults disabled",
@@ -497,7 +508,7 @@ def _resolve_ambiguous_decisions(
     )
     if not pending:
         return decisions, False, None
-    ui.stage(index=3, total=6, title="Ambiguous decisions")
+    ui.stage(index=3, total=4, title="Ambiguous decisions")
     updated = dict(decisions)
     changed = False
     for state in pending:
@@ -561,7 +572,7 @@ def _approval_states(result: OnboardingResult) -> tuple[OnboardingRepositoryStat
 
 def _show_approval_table(ui: OnboardingUI, states: tuple[OnboardingRepositoryState, ...]) -> None:
     summaries = tuple(proposal_summary(state) for state in states)
-    ui.stage(index=4, total=6, title="Repository summaries")
+    ui.stage(index=3, total=4, title="Repository summaries")
     ui.table(
         title="Repositories awaiting exact approval",
         headers=("ID", "Mode", "Confidence", "Remote", "Base", "Profiles", "Findings"),
@@ -672,7 +683,6 @@ def _current_source_text(config_path: Path) -> str:
 
 def _show_config_diff(ui: OnboardingUI, config_path: Path, result: OnboardingResult) -> None:
     assert result.plan is not None
-    ui.stage(index=5, total=6, title="Config diff")
     ui.code(
         title="Reviewed source configuration",
         text=configuration_diff(_current_source_text(config_path), result.plan.source_text),
@@ -687,6 +697,81 @@ def _show_config_diff(ui: OnboardingUI, config_path: Path, result: OnboardingRes
             "Configuration and runtime remain unchanged until Apply is confirmed.",
         ),
     )
+
+
+ReviewAction = str | tuple[str, str]
+
+
+def _show_consolidated_review(
+    ui: OnboardingUI,
+    config_path: Path,
+    result: OnboardingResult,
+    decisions: tuple[tuple[str, str], ...],
+    decision_choices: dict[str, tuple[str, tuple[str, ...]]],
+    decision_reasons: dict[str, str],
+) -> ReviewAction:
+    """Show the safe-default review screen and return accept, abort, or one replacement."""
+    assert result.plan is not None
+    ui.stage(index=4, total=4, title="Review and apply")
+    _show_config_diff(ui, config_path, result)
+    ui.table(
+        title="Decisions taken",
+        headers=("Decision", "Value", "Reason"),
+        rows=tuple(
+            (key, value, decision_reasons.get(key, "operator-supplied decision"))
+            for key, value in decisions
+        ),
+    )
+    for state in result.session.repositories:
+        if state.progress is not RepositoryProgress.APPROVED:
+            continue
+        summary = proposal_summary(state)
+        ui.panel(
+            title=summary.repo_id,
+            lines=(
+                f"Mode: {summary.mode} | Profiles: {summary.profiles}",
+                f"Budget: {summary.budget} | Findings: {summary.findings}",
+            ),
+        )
+    action = ui.choose(
+        prompt="Review complete — choose action",
+        choices=(
+            ChoiceItem("accept", "Accept all and apply (Enter)"),
+            ChoiceItem("e", "Edit one item"),
+            ChoiceItem("q", "Abort — discard all changes"),
+        ),
+        default="accept",
+    )
+    if action == "q":
+        return "abort"
+    if action != "e":
+        return "accept"
+    editable = tuple(key for key, _value in decisions if key in decision_choices)
+    if not editable:
+        return "accept"
+    key = ui.choose(
+        prompt="Choose the item to edit",
+        choices=tuple(ChoiceItem(item, item) for item in editable),
+    )
+    prompt, choices = decision_choices[key]
+    value = ui.choose(prompt=prompt, choices=choices, default=dict(decisions)[key])
+    return key, value
+
+
+def _approved_tokens(result: OnboardingResult) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            f"approve:{state.proposal_id}"
+            for state in _approval_states(result)
+            if state.proposal_id is not None
+        )
+    )
+
+
+def _replace_decision(
+    decisions: tuple[tuple[str, str], ...], key: str, value: str
+) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted((*tuple(item for item in decisions if item[0] != key), (key, value))))
 
 
 def _run_interactive(
@@ -724,6 +809,8 @@ def _run_interactive(
     templates: dict[str, str] = {}
     skips: set[str] = set()
     processed_defaults: set[str] = set()
+    decision_choices: dict[str, tuple[str, tuple[str, ...]]] = {}
+    decision_reasons: dict[str, str] = {}
     current_session = session_id
     shown_preflight = False
     while True:
@@ -743,6 +830,13 @@ def _run_interactive(
         if result.preflight and not shown_preflight:
             _show_preflight(ui, result.preflight)
             shown_preflight = True
+        for state in result.session.repositories:
+            for code, prompt, choices in state.required_decisions:
+                key = f"{state.candidate.repo_id}.{code}"
+                decision_choices[key] = (f"{state.candidate.repo_id}: {prompt}", choices)
+        recommended_choices, _ = _recommendation_choices(
+            result.session.repositories, processed_defaults
+        )
         decisions, changed = _apply_recommendations(
             ui,
             defaults_mode,
@@ -751,46 +845,91 @@ def _run_interactive(
             processed_defaults,
         )
         if changed:
+            selected = dict(decisions)
+            for choice in recommended_choices:
+                if choice.value in selected:
+                    decision_reasons.setdefault(choice.value, choice.description)
             continue
-        decisions, changed, exit_code = _resolve_ambiguous_decisions(
-            args,
-            ui,
-            result,
-            decisions,
-            templates,
-            skips,
-            coordinator,
-            render,
-        )
-        if exit_code is not None:
-            return exit_code
-        if changed:
-            continue
-        approvals, changed, exit_code = _review_approvals(
-            ui,
-            result,
-            approvals,
-            templates,
-            skips,
-            coordinator,
-            render,
-        )
-        if exit_code is not None:
-            return exit_code
-        if changed:
+        if defaults_mode in {DefaultsMode.ASK, DefaultsMode.NONE}:
+            decisions, changed, exit_code = _resolve_ambiguous_decisions(
+                args,
+                ui,
+                result,
+                decisions,
+                templates,
+                skips,
+                coordinator,
+                render,
+            )
+            if exit_code is not None:
+                return exit_code
+            if changed:
+                continue
+            approvals, changed, exit_code = _review_approvals(
+                ui,
+                result,
+                approvals,
+                templates,
+                skips,
+                coordinator,
+                render,
+            )
+            if exit_code is not None:
+                return exit_code
+            if changed:
+                continue
+        elif result.session.status is OnboardingStatus.AWAITING_DECISIONS:
+            decisions, changed, exit_code = _resolve_ambiguous_decisions(
+                args,
+                ui,
+                result,
+                decisions,
+                templates,
+                skips,
+                coordinator,
+                render,
+            )
+            if exit_code is not None:
+                return exit_code
+            if changed:
+                continue
+        elif result.session.status is OnboardingStatus.AWAITING_APPROVAL:
+            approvals = tuple(sorted(set(approvals) | set(_approved_tokens(result))))
             continue
         if result.session.status is OnboardingStatus.READY and result.plan is not None:
-            _show_config_diff(ui, config_path, result)
-            ui.stage(index=6, total=6, title="Apply")
             if getattr(args, "plan_only", False):
+                ui.stage(index=4, total=4, title="Review")
+                _show_config_diff(ui, config_path, result)
                 ui.panel(
                     title="Plan-only complete",
                     lines=("No configuration generation or runtime state was changed.",),
                 )
                 render(result_payload(result))
                 return 0
-            if not ui.confirm(prompt="Apply this reviewed batch?", default=False):
-                return 3
+            if defaults_mode is DefaultsMode.ASK:
+                _show_config_diff(ui, config_path, result)
+                if not ui.confirm(prompt="Apply this reviewed batch?", default=False):
+                    if session_id is None:
+                        coordinator.discard(current_session)
+                    return 3
+            else:
+                review_action = _show_consolidated_review(
+                    ui,
+                    config_path,
+                    result,
+                    decisions,
+                    decision_choices,
+                    decision_reasons,
+                )
+                if review_action == "abort":
+                    if session_id is None:
+                        coordinator.discard(current_session)
+                    return 3
+                if isinstance(review_action, tuple):
+                    decisions = _replace_decision(decisions, *review_action)
+                    decision_reasons[review_action[0]] = "operator-edited decision"
+                    approvals = ()
+                    continue
             completed = coordinator.run(
                 _command(
                     args,
@@ -824,28 +963,92 @@ def _run_interactive(
         return 3
 
 
+def _non_interactive_run(
+    args: argparse.Namespace,
+    roots: tuple[Path, ...],
+    session_id: str | None,
+    *,
+    yes_mode: bool,
+    render: Render,
+) -> int:
+    coordinator = build_onboarding_coordinator(Path(args.config))
+    decisions = tuple(sorted(parse_assignments(args.decision, option="--decision").items()))
+    approvals = tuple(args.approve)
+    templates: dict[str, str] = {}
+    skips: set[str] = set()
+    current_session = session_id
+
+    while True:
+        result = coordinator.run(
+            _command(
+                args,
+                roots=roots,
+                resume_session_id=current_session,
+                approvals=approvals,
+                decisions=decisions,
+                templates=tuple(sorted(templates.items())),
+                skips=tuple(sorted(skips)),
+                plan_only=False,
+            )
+        )
+        current_session = result.session.session_id
+        status = result.session.status
+
+        if status is OnboardingStatus.COMPLETED:
+            render(result_payload(result))
+            return 0
+
+        if yes_mode and status is OnboardingStatus.AWAITING_DECISIONS:
+            updated_decisions = dict(decisions)
+            for state in result.session.repositories:
+                if state.progress is not RepositoryProgress.NEEDS_DECISION:
+                    continue
+                for recommendation in recommend_safe_decisions(state.required_decisions):
+                    updated_decisions.setdefault(
+                        f"{state.candidate.repo_id}.{recommendation.code}",
+                        recommendation.value,
+                    )
+            resolved_decisions = tuple(sorted(updated_decisions.items()))
+            if resolved_decisions == decisions:
+                render(result_payload(result))
+                return 3
+            decisions = resolved_decisions
+            continue
+
+        if yes_mode and status is OnboardingStatus.AWAITING_APPROVAL:
+            resolved_approvals = tuple(sorted(set(approvals) | set(_approved_tokens(result))))
+            if resolved_approvals == approvals:
+                render(result_payload(result))
+                return 3
+            approvals = resolved_approvals
+            continue
+
+        if status in {OnboardingStatus.AWAITING_DECISIONS, OnboardingStatus.AWAITING_APPROVAL}:
+            render(result_payload(result))
+            return 3
+
+        render(result_payload(result))
+        return 3
+
+
 def run_onboarding_command(args: argparse.Namespace, *, render: Render) -> int:
     action, session_id, roots = _action(args)
-    coordinator = build_onboarding_coordinator(Path(args.config))
     if action == "status":
+        coordinator = build_onboarding_coordinator(Path(args.config))
         assert session_id is not None
         render(result_payload(coordinator.status(session_id)))
         return 0
     if action == "cancel":
+        coordinator = build_onboarding_coordinator(Path(args.config))
         assert session_id is not None
         render(result_payload(coordinator.cancel(session_id)))
         return 0
-    if not args.non_interactive:
+    yes_mode = getattr(args, "yes", False)
+    non_interactive = getattr(args, "non_interactive", False) or yes_mode
+    if not non_interactive:
         return _run_interactive(args, session_id, roots, render)
     try:
         resolve_defaults_mode(getattr(args, "defaults", None), non_interactive=True)
     except ValueError as exc:
         raise ConfigError(f"INTERACTION_REQUIRED: {exc}") from exc
-    result = coordinator.run(_command(args, roots=roots, resume_session_id=session_id))
-    render(result_payload(result))
-    return (
-        3
-        if result.session.status
-        in {OnboardingStatus.AWAITING_DECISIONS, OnboardingStatus.AWAITING_APPROVAL}
-        else 0
-    )
+    return _non_interactive_run(args, roots, session_id, yes_mode=yes_mode, render=render)

@@ -48,6 +48,7 @@ class VerificationReceipt:
     fingerprint: str
     completed_at: str
     commands: list[dict[str, Any]]
+    environment_identity_hash: str | None = None
 
 
 @dataclass

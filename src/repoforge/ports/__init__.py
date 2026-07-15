@@ -6,6 +6,12 @@ from .capabilities import ExecutableLocator
 from .clock import Clock
 from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
+from .execution_environment import (
+    ApprovedExecution,
+    ArtifactResult,
+    ExecutionEnvironmentPort,
+    ExecutionReceipt,
+)
 from .filesystem import FileSystem
 from .git import (
     GitBaseReferences,
@@ -34,6 +40,7 @@ from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
+from .provider_registry import ProviderRegistry
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
 from .runtime_control import (
@@ -58,6 +65,8 @@ from .workflow_replay import (
 from .workspace_store import WorkspaceStore
 
 __all__ = [
+    "ApprovedExecution",
+    "ArtifactResult",
     "AuditSink",
     "BackgroundTaskRunner",
     "Clock",
@@ -67,6 +76,8 @@ __all__ = [
     "DiscoveryRequest",
     "EnvironmentPreflight",
     "ExecutableLocator",
+    "ExecutionEnvironmentPort",
+    "ExecutionReceipt",
     "FileSystem",
     "GateState",
     "GitBaseReferences",
@@ -92,6 +103,7 @@ __all__ = [
     "PrCheckWatchPage",
     "PrCheckWatchStore",
     "ProcessInspector",
+    "ProviderRegistry",
     "PullRequestGateway",
     "RepositoryDiscovery",
     "RepositoryProbe",

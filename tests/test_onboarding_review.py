@@ -14,9 +14,10 @@ from repoforge.interfaces.cli.onboarding_review import (
 )
 
 
-def test_defaults_mode_is_ask_for_interactive_and_none_for_noninteractive() -> None:
-    assert resolve_defaults_mode(None, non_interactive=False) is DefaultsMode.ASK
+def test_defaults_mode_is_safe_for_interactive_and_none_for_noninteractive() -> None:
+    assert resolve_defaults_mode(None, non_interactive=False) is DefaultsMode.SAFE
     assert resolve_defaults_mode("safe", non_interactive=False) is DefaultsMode.SAFE
+    assert resolve_defaults_mode("ask", non_interactive=False) is DefaultsMode.ASK
     assert resolve_defaults_mode(None, non_interactive=True) is DefaultsMode.NONE
     with pytest.raises(ValueError, match="interactive-only"):
         resolve_defaults_mode("ask", non_interactive=True)
