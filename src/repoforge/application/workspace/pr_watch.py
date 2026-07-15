@@ -126,68 +126,81 @@ class PrCheckWatchCoordinator:
                 "include_failure_evidence must be a boolean",
                 code=ErrorCode.PR_CHECK_WATCH_INVALID,
             )
-        record, _repo, path = self.ctx.workspace(command.workspace_id)
-        with self.ctx.locks.lock(command.workspace_id):
-            fresh = self.ctx.store.load(command.workspace_id)
-            pushed = fresh.metadata.get("last_pushed_sha")
-            head = self.ctx.git.head_sha(path)
-            fingerprint = self.ctx.git.fingerprint(path)
-            if not isinstance(pushed, str) or pushed != head:
-                raise RepoForgeError(
-                    "PR check watch requires the exact current workspace commit to be pushed",
-                    code=ErrorCode.PR_CHECK_WATCH_STALE,
-                )
-            pr = self.ctx.github.status(path, fresh.branch)
-            pr_number = self._pr_number(pr)
-            if self._pr_head(pr) != pushed:
-                raise RepoForgeError(
-                    "Pull-request head does not match the exact pushed workspace commit",
-                    code=ErrorCode.PR_CHECK_WATCH_STALE,
-                )
-            now = self.ctx.clock.now_iso()
-            deadline = self._deadline(now, timeout)
-            task = self.operations.create(
-                kind="pr_check_watch",
-                phase="queued",
-                cancel_supported=True,
-                workspace_id=command.workspace_id,
-                snapshot_binding=OperationSnapshotBinding(
-                    head_sha=head,
-                    workspace_fingerprint=fingerprint,
-                ),
-                expires_at=deadline,
-                now=now,
-            )
-            watch = new_pr_check_watch(
-                operation_id=task.operation_id,
-                workspace_id=command.workspace_id,
-                branch=record.branch,
-                pr_number=pr_number,
-                pushed_sha=pushed,
-                workspace_fingerprint=fingerprint,
-                until=until,
-                include_failure_evidence=command.include_failure_evidence,
-                timeout_seconds=timeout,
-                created_at=now,
-                deadline_at=deadline,
-            )
-            try:
-                self.store.create(watch)
-                started = self.operations.start(task.operation_id, now=now)
-            except Exception:
-                self.operations.fail(
-                    task.operation_id,
-                    error_code=ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT.value,
-                    error_message="Durable PR check watch state could not be created",
+        details: dict[str, object] = {
+            "workspace_id": command.workspace_id,
+            "until": until.value,
+            "timeout_seconds": timeout,
+            "include_failure_evidence": command.include_failure_evidence,
+        }
+
+        def op() -> WorkspacePrWatchResult:
+            record, _repo, path = self.ctx.workspace(command.workspace_id)
+            with self.ctx.locks.lock(command.workspace_id):
+                fresh = self.ctx.store.load(command.workspace_id)
+                pushed = fresh.metadata.get("last_pushed_sha")
+                head = self.ctx.git.head_sha(path)
+                fingerprint = self.ctx.git.fingerprint(path)
+                if not isinstance(pushed, str) or pushed != head:
+                    raise RepoForgeError(
+                        "PR check watch requires the exact current workspace commit to be pushed",
+                        code=ErrorCode.PR_CHECK_WATCH_STALE,
+                    )
+                pr = self.ctx.github.status(path, fresh.branch)
+                pr_number = self._pr_number(pr)
+                if self._pr_head(pr) != pushed:
+                    raise RepoForgeError(
+                        "Pull-request head does not match the exact pushed workspace commit",
+                        code=ErrorCode.PR_CHECK_WATCH_STALE,
+                    )
+                now = self.ctx.clock.now_iso()
+                deadline = self._deadline(now, timeout)
+                task = self.operations.create(
+                    kind="pr_check_watch",
+                    phase="queued",
+                    cancel_supported=True,
+                    workspace_id=command.workspace_id,
+                    snapshot_binding=OperationSnapshotBinding(
+                        head_sha=head,
+                        workspace_fingerprint=fingerprint,
+                    ),
+                    expires_at=deadline,
                     now=now,
                 )
-                raise
-        self.schedule(task.operation_id)
-        return WorkspacePrWatchResult(
-            operation_summary(started),
-            until.value,
-            deadline,
-        )
+                details["operation_id"] = task.operation_id
+                details["pr_number"] = pr_number
+                details["deadline_at"] = deadline
+                watch = new_pr_check_watch(
+                    operation_id=task.operation_id,
+                    workspace_id=command.workspace_id,
+                    branch=record.branch,
+                    pr_number=pr_number,
+                    pushed_sha=pushed,
+                    workspace_fingerprint=fingerprint,
+                    until=until,
+                    include_failure_evidence=command.include_failure_evidence,
+                    timeout_seconds=timeout,
+                    created_at=now,
+                    deadline_at=deadline,
+                )
+                try:
+                    self.store.create(watch)
+                    started = self.operations.start(task.operation_id, now=now)
+                except Exception:
+                    self.operations.fail(
+                        task.operation_id,
+                        error_code=ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT.value,
+                        error_message="Durable PR check watch state could not be created",
+                        now=now,
+                    )
+                    raise
+            self.schedule(task.operation_id)
+            return WorkspacePrWatchResult(
+                operation_summary(started),
+                until.value,
+                deadline,
+            )
+
+        return self.ctx.audited("workspace_pr_watch", details, op, mutating=True)
 
     def schedule(self, operation_id: str) -> bool:
         return self.runner.submit(

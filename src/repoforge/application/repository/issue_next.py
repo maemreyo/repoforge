@@ -38,22 +38,45 @@ class RepositoryIssueNextReader:
 
     def execute(self, c: RepositoryIssueNextCommand) -> RepositoryIssueNextResult:
         repo = self.ctx.repo(c.repo_id)
-        graph = load_repo_ticket_graph(repo.path)
-        if graph is None:
-            return RepositoryIssueNextResult(c.repo_id, False, False, [], [])
-        diagnostics = validate_ticket_graph(graph)
-        if diagnostics:
+        details: dict[str, object] = {
+            "repo_id": c.repo_id,
+            "root_issue": c.root_issue,
+            "limit": c.limit,
+        }
+
+        def op() -> RepositoryIssueNextResult:
+            graph = load_repo_ticket_graph(repo.path)
+            if graph is None:
+                details["manifest_found"] = False
+                details["valid"] = False
+                details["ticket_count"] = 0
+                return RepositoryIssueNextResult(c.repo_id, False, False, [], [])
+            diagnostics = validate_ticket_graph(graph)
+            if diagnostics:
+                details["manifest_found"] = True
+                details["valid"] = False
+                details["diagnostic_count"] = len(diagnostics)
+                details["ticket_count"] = 0
+                return RepositoryIssueNextResult(
+                    c.repo_id,
+                    True,
+                    False,
+                    [
+                        {
+                            "code": item.code,
+                            "issue_number": item.issue_number,
+                            "message": item.message,
+                        }
+                        for item in diagnostics
+                    ],
+                    [],
+                )
+            tickets = select_ready_tickets(graph, limit=c.limit, root_issue=c.root_issue)
+            details["manifest_found"] = True
+            details["valid"] = True
+            details["ticket_count"] = len(tickets)
             return RepositoryIssueNextResult(
-                c.repo_id,
-                True,
-                False,
-                [
-                    {"code": item.code, "issue_number": item.issue_number, "message": item.message}
-                    for item in diagnostics
-                ],
-                [],
+                c.repo_id, True, True, [], [node_payload(item) for item in tickets]
             )
-        tickets = select_ready_tickets(graph, limit=c.limit, root_issue=c.root_issue)
-        return RepositoryIssueNextResult(
-            c.repo_id, True, True, [], [node_payload(item) for item in tickets]
-        )
+
+        return self.ctx.audited("repo_issue_next", details, op)

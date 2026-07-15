@@ -251,6 +251,68 @@ def test_watch_first_failure_cancellation_and_stale_identity(
     assert stale_status["error_code"] == ErrorCode.PR_CHECK_WATCH_STALE.value
 
 
+def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
+    audit_path = root / "state" / "audit.jsonl"
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line]
+    return [event for event in events if event["action"] == action]
+
+
+def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_event(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id = _published_workspace(forge_env)
+    coordinator, _runner = _coordinator(forge_env)
+
+    result = coordinator.start(WorkspacePrWatchCommand(workspace_id, "all_completed", 300, True))
+
+    events = _audit_events(forge_env.root, "workspace_pr_watch")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is True
+    details = event["details"]
+    assert details["workspace_id"] == workspace_id
+    assert details["until"] == "all_completed"
+    assert details["timeout_seconds"] == 300
+    assert details["include_failure_evidence"] is True
+    assert details["operation_id"] == result.operation.operation_id
+    # Bounded: a PR number is an identifier, never the PR title/body or check output.
+    assert set(details) == {
+        "workspace_id",
+        "until",
+        "timeout_seconds",
+        "include_failure_evidence",
+        "operation_id",
+        "pr_number",
+        "deadline_at",
+        "correlation_id",
+        "duration_ms",
+    }
+    assert "Watch checks" not in json.dumps(details)
+    assert "Test body" not in json.dumps(details)
+
+
+def test_workspace_pr_watch_audits_failure_when_the_commit_was_never_pushed(
+    forge_env: ForgeEnvironment,
+) -> None:
+    created = forge_env.service.workspace_create("demo", "unpushed watch")
+    workspace_id = created["workspace_id"]
+    coordinator, _runner = _coordinator(forge_env)
+
+    with pytest.raises(RepoForgeError) as exc:
+        coordinator.start(WorkspacePrWatchCommand(workspace_id, "all_completed", 300, True))
+    assert exc.value.code is ErrorCode.PR_CHECK_WATCH_STALE
+
+    events = _audit_events(forge_env.root, "workspace_pr_watch")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is False
+    assert event["details"]["workspace_id"] == workspace_id
+    assert event["details"]["error_code"] == ErrorCode.PR_CHECK_WATCH_STALE.value
+    # No operation/PR identifiers exist yet at this failure point; nothing beyond inputs leaked.
+    assert "operation_id" not in event["details"]
+    assert "pr_number" not in event["details"]
+
+
 def test_watch_recovery_preserves_and_reschedules_resumable_work(
     forge_env: ForgeEnvironment,
 ) -> None:
