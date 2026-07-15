@@ -26,6 +26,7 @@ from repoforge.interfaces.cli.onboarding import (
     _run_interactive,
     _show_consolidated_review,
 )
+from repoforge.interfaces.cli.onboarding_ui import ChoiceLike
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
 
@@ -320,7 +321,13 @@ class BatchReviewUI:
     def code(self, *, title, text, lexer="text"):
         pass
 
-    def choose(self, *, prompt, choices, default=None):
+    def choose(
+        self,
+        *,
+        prompt: str,
+        choices: tuple[ChoiceLike, ...],
+        default: str | None = None,
+    ) -> str:
         values = tuple(getattr(choice, "value", choice) for choice in choices)
         if "base branch" in prompt:
             assert "main" in values
@@ -353,6 +360,7 @@ class BatchReviewCoordinator:
         identity = DiscoveryIdentity("/repos/demo", "/repos/demo", "/repos/demo/.git", True, False)
         self.candidate = DiscoveryCandidate(identity, "demo")
         self.calls = []
+        self.discarded_session_ids = []
         self.config_path = config_path
         self.proposal_json = json.dumps(
             {
@@ -456,6 +464,9 @@ class BatchReviewCoordinator:
             session, plan, summarize_session(session), {"active_generation": 1}, None
         )
 
+    def discard(self, session_id):
+        self.discarded_session_ids.append(session_id)
+
 
 def _batch_args(config: Path, *, plan_only: bool = False, defaults: str | None = None):
     return argparse.Namespace(
@@ -490,9 +501,17 @@ def test_consolidated_review_edits_only_selected_decision(tmp_path) -> None:
             if title == "Decisions taken":
                 self.rows = rows
 
-        def choose(self, *, prompt, choices, default=None):
+        def choose(
+            self,
+            *,
+            prompt: str,
+            choices: tuple[ChoiceLike, ...],
+            default: str | None = None,
+        ) -> str:
             if prompt == "Review complete — choose action":
-                return "edit"
+                values = tuple(getattr(choice, "value", choice) for choice in choices)
+                assert values == ("accept", "e", "q")
+                return "e"
             if prompt == "Choose the item to edit":
                 return "demo.dependency_install"
             if "Dependency setup" in prompt:
@@ -611,3 +630,82 @@ def test_interactive_plan_only_stops_after_review(monkeypatch, tmp_path) -> None
     )
     assert len(coordinator.calls) == 4
     assert rendered[-1]["status"] == "ready"
+
+
+def test_interactive_abort_discards_new_session_without_writing_config(
+    monkeypatch, tmp_path
+) -> None:
+    class AbortUI(BatchReviewUI):
+        def choose(
+            self,
+            *,
+            prompt: str,
+            choices: tuple[ChoiceLike, ...],
+            default: str | None = None,
+        ) -> str:
+            if prompt == "Review complete — choose action":
+                return "q"
+            return super().choose(prompt=prompt, choices=choices, default=default)
+
+    config = tmp_path / "config.toml"
+    args = _batch_args(config)
+    coordinator = BatchReviewCoordinator(config_path=str(config.resolve()))
+    discovered = DiscoveryResult((coordinator.candidate,), (), ())
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_ui",
+        lambda *args, **kwargs: AbortUI(),
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_coordinator",
+        lambda path: coordinator,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._ensure_interactive_tunnel_id",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._discover_result",
+        lambda args, roots: discovered,
+    )
+
+    assert _run_interactive(args, None, (Path("/repos"),), lambda payload: None) == 3
+    assert coordinator.discarded_session_ids == ["a" * 24]
+    assert not config.exists()
+
+
+def test_interactive_abort_preserves_resumed_session(monkeypatch, tmp_path) -> None:
+    class AbortUI(BatchReviewUI):
+        def choose(
+            self,
+            *,
+            prompt: str,
+            choices: tuple[ChoiceLike, ...],
+            default: str | None = None,
+        ) -> str:
+            if prompt == "Review complete — choose action":
+                return "q"
+            return super().choose(prompt=prompt, choices=choices, default=default)
+
+    config = tmp_path / "config.toml"
+    args = _batch_args(config)
+    coordinator = BatchReviewCoordinator(config_path=str(config.resolve()))
+    discovered = DiscoveryResult((coordinator.candidate,), (), ())
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_ui",
+        lambda *args, **kwargs: AbortUI(),
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding.build_onboarding_coordinator",
+        lambda path: coordinator,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._ensure_interactive_tunnel_id",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "repoforge.interfaces.cli.onboarding._discover_result",
+        lambda args, roots: discovered,
+    )
+
+    assert _run_interactive(args, "a" * 24, (Path("/repos"),), lambda payload: None) == 3
+    assert coordinator.discarded_session_ids == []

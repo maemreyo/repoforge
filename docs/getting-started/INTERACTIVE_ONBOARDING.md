@@ -51,7 +51,7 @@ The default interactive review is one batch:
 3. Any genuinely ambiguous decision
 4. One consolidated review of every repository policy, decision, reason, and source-config diff
 
-At the review prompt, press Enter to accept the whole batch, `e` to change one selected decision through its existing bounded prompt, or `q` to abort. Aborting writes no configuration generation or runtime state. `--plan-only` stops after rendering this review.
+At the review prompt, press Enter to accept the whole batch, `e` to change one selected decision through its existing bounded prompt, or `q` to abort. Aborting a newly started session writes no configuration generation or runtime state and removes its provisional session and lock records. Aborting a resumed session preserves it for later use. `--plan-only` stops after rendering this review.
 
 ## Automation
 

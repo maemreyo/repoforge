@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
+from typing import Protocol
 
 from ...application.configuration.paths import resolve_repoforge_paths
 from ...application.configuration.source import parse_source
@@ -53,6 +54,10 @@ from .onboarding_ui import (
 )
 
 Render = Callable[[object], None]
+
+
+class _OnboardingStatusReader(Protocol):
+    def status(self, session_id: str) -> OnboardingResult: ...
 
 
 def _plain(value: object) -> object:
@@ -323,7 +328,7 @@ def _ensure_interactive_tunnel_id(
     args: argparse.Namespace,
     *,
     session_id: str | None,
-    coordinator: OnboardingCoordinator,
+    coordinator: _OnboardingStatusReader,
     io: OnboardingUI,
 ) -> None:
     config_path = Path(args.config).expanduser().resolve()
@@ -732,13 +737,15 @@ def _show_consolidated_review(
         prompt="Review complete — choose action",
         choices=(
             ChoiceItem("accept", "Accept all and apply (Enter)"),
-            ChoiceItem("edit", "Edit one item"),
-            ChoiceItem("abort", "Abort — discard all changes"),
+            ChoiceItem("e", "Edit one item"),
+            ChoiceItem("q", "Abort — discard all changes"),
         ),
         default="accept",
     )
-    if action != "edit":
-        return action
+    if action == "q":
+        return "abort"
+    if action != "e":
+        return "accept"
     editable = tuple(key for key, _value in decisions if key in decision_choices)
     if not editable:
         return "accept"
@@ -902,6 +909,8 @@ def _run_interactive(
             if defaults_mode is DefaultsMode.ASK:
                 _show_config_diff(ui, config_path, result)
                 if not ui.confirm(prompt="Apply this reviewed batch?", default=False):
+                    if session_id is None:
+                        coordinator.discard(current_session)
                     return 3
             else:
                 review_action = _show_consolidated_review(
@@ -913,6 +922,8 @@ def _run_interactive(
                     decision_reasons,
                 )
                 if review_action == "abort":
+                    if session_id is None:
+                        coordinator.discard(current_session)
                     return 3
                 if isinstance(review_action, tuple):
                     decisions = _replace_decision(decisions, *review_action)
