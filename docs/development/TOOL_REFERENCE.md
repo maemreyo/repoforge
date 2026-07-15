@@ -219,6 +219,10 @@ These omissions are part of the security model, not missing convenience features
 
 Read-only Git-aware discovery. Reports eligible and excluded repositories with stable reasons. It never creates proposals, sessions, configuration generations, workspaces, or runtime changes.
 
+### `rf repo inspect PATH`
+
+Read-only repository inspection. In addition to repository facts, the response includes `verification_profile_candidates`: bounded, provenance-tagged candidates inferred from Python/uv, Node package-manager, Go, Cargo, and Makefile markers. Detection never executes a command. Dependency-install candidates are marked as requiring explicit network confirmation; accepted profile proposals retain explicit timeouts, and `rf repo inspect` exposes each candidate's network and mutability metadata.
+
 ### `rf onboard ROOT [ROOT ...]`
 
 Runs environment preflight, discovery, proposal review, required decisions, exact approvals, candidate smoke tests, one atomic batch acceptance, and at most one activation. Interactive review is presented as Discovery → Safe defaults → Ambiguous decisions → Repository summaries → Config diff → Apply.

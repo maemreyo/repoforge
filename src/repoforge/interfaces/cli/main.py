@@ -38,6 +38,7 @@ from ...application.runtime.hot_reload import (
     HotReloadCoordinator,
 )
 from ...application.service import CodingService
+from ...application.verification_detection import VerificationProfileDetector
 from ...bootstrap import (
     AdapterOverrides,
     build_application,
@@ -656,11 +657,15 @@ def _activate(
 
 
 def _repo_inspect(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser().resolve()
     service = RepositoryProposalService(_probe())
     _json(
         {
             "status": "inspected",
-            "facts": service.inspect(Path(args.path), repo_id=args.repo_id),
+            "facts": service.inspect(root, repo_id=args.repo_id),
+            "verification_profile_candidates": [
+                asdict(item) for item in VerificationProfileDetector().detect(root)
+            ],
             "unchanged_state": ["configuration", "runtime"],
         }
     )
