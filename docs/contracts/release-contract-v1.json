@@ -730,7 +730,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_replace_text for one exact edit or workspace_write_file for full reviewed content.",
+        "description": "Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_replace_text for one exact edit or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "expected_head_sha": {
@@ -1313,7 +1313,7 @@
           "openWorldHint": true,
           "readOnlyHint": false
         },
-        "description": "Use this to merge the exact reviewed base target without rebase, force push, or remote write.",
+        "description": "Use this to merge the exact reviewed base target without rebase, force push, or remote write; the response carries a fresh workspace_fingerprint for the next locked call.",
         "inputSchema": {
           "properties": {
             "expected_fingerprint": {
@@ -1430,7 +1430,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for a precise replacement after validating the file SHA and occurrence count.",
+        "description": "Use this for a precise replacement after validating the file SHA and occurrence count; the response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "expected_occurrences": {
@@ -1484,7 +1484,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this to undo selected uncommitted tracked changes or remove selected untracked files.",
+        "description": "Use this to undo selected uncommitted tracked changes or remove selected untracked files; the response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "expected_workspace_fingerprint": {
@@ -1526,7 +1526,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input.",
+        "description": "Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed.",
         "inputSchema": {
           "properties": {
             "diagnostic_id": {
@@ -1584,7 +1584,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile.",
+        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile; the response carries a fresh fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "profile_name": {
@@ -1838,7 +1838,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this to create or fully replace one UTF-8 file with optimistic locking.",
+        "description": "Use this to create or fully replace one UTF-8 file with optimistic locking; the response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between.",
         "inputSchema": {
           "properties": {
             "content": {
