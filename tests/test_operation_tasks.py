@@ -434,6 +434,82 @@ def test_restart_recovery_orphans_running_expires_due_and_prunes_old_terminal(
     assert restarted.operation_status(running.operation_id)["state"] == "orphaned"
 
 
+def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
+    audit_path = root / "state" / "audit.jsonl"
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line]
+    return [event for event in events if event["action"] == action]
+
+
+def test_operation_status_list_cancel_each_produce_exactly_one_audit_event(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(
+        kind="pr_check_watch",
+        phase="queued",
+        cancel_supported=True,
+        task_id="task-audit",
+    )
+    manager.start(task.operation_id)
+
+    forge_env.service.operation_status(task.operation_id)
+    status_events = _audit_events(forge_env.root, "operation_status")
+    assert len(status_events) == 1
+    assert status_events[0]["success"] is True
+    assert status_events[0]["details"]["operation_id"] == task.operation_id
+
+    forge_env.service.operation_list(scope="task:task-audit", limit=10)
+    list_events = _audit_events(forge_env.root, "operation_list")
+    assert len(list_events) == 1
+    assert list_events[0]["success"] is True
+
+    forge_env.service.operation_cancel(task.operation_id)
+    cancel_events = _audit_events(forge_env.root, "operation_cancel")
+    assert len(cancel_events) == 1
+    assert cancel_events[0]["success"] is True
+    assert cancel_events[0]["details"]["operation_id"] == task.operation_id
+
+
+def test_operation_status_audits_failure_for_an_unknown_operation_id(
+    forge_env: ForgeEnvironment,
+) -> None:
+    with pytest.raises(RepoForgeError) as exc:
+        forge_env.service.operation_status("op-ffffffffffffffffffffffff")
+    assert exc.value.code is ErrorCode.OPERATION_NOT_FOUND
+
+    events = _audit_events(forge_env.root, "operation_status")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is False
+    assert event["details"]["operation_id"] == "op-ffffffffffffffffffffffff"
+    assert event["details"]["error_code"] == ErrorCode.OPERATION_NOT_FOUND.value
+
+
+def test_operation_cancel_audits_failure_when_the_durable_store_write_fails(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(kind="watch", phase="queued", cancel_supported=True)
+    manager.start(task.operation_id)
+
+    store = forge_env.service.application.context.operation_store
+    assert store is not None
+
+    def fail_save(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated durable operation store write failure")
+
+    monkeypatch.setattr(store, "save", fail_save)
+    with pytest.raises(OSError):
+        forge_env.service.operation_cancel(task.operation_id)
+
+    events = _audit_events(forge_env.root, "operation_cancel")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is False
+    assert event["details"]["operation_id"] == task.operation_id
+
+
 def test_in_memory_store_cas_cannot_lose_terminal_transition() -> None:
     store = InMemoryOperationStore()
     pending = _task()

@@ -71,23 +71,39 @@ class RepositoryIssueGraphReader:
 
     def execute(self, c: RepositoryIssueGraphCommand) -> RepositoryIssueGraphResult:
         repo = self.ctx.repo(c.repo_id)
-        graph = load_repo_ticket_graph(repo.path)
-        if graph is None:
-            return RepositoryIssueGraphResult(c.repo_id, False, None, [], 0, False)
-        status = _parse_status(c.status)
-        priority = _parse_priority(c.priority)
-        nodes, truncated = select_ticket_nodes(
-            graph,
-            root_issue=c.root_issue,
-            status=status,
-            priority=priority,
-            initiative=c.initiative,
-        )
-        return RepositoryIssueGraphResult(
-            c.repo_id,
-            True,
-            graph.program_issue,
-            [node_payload(node) for node in nodes],
-            len(nodes),
-            truncated,
-        )
+        details: dict[str, object] = {
+            "repo_id": c.repo_id,
+            "root_issue": c.root_issue,
+            "status": c.status,
+            "priority": c.priority,
+            "initiative": c.initiative,
+        }
+
+        def op() -> RepositoryIssueGraphResult:
+            graph = load_repo_ticket_graph(repo.path)
+            if graph is None:
+                details["manifest_found"] = False
+                details["node_count"] = 0
+                return RepositoryIssueGraphResult(c.repo_id, False, None, [], 0, False)
+            status = _parse_status(c.status)
+            priority = _parse_priority(c.priority)
+            nodes, truncated = select_ticket_nodes(
+                graph,
+                root_issue=c.root_issue,
+                status=status,
+                priority=priority,
+                initiative=c.initiative,
+            )
+            details["manifest_found"] = True
+            details["node_count"] = len(nodes)
+            details["truncated"] = truncated
+            return RepositoryIssueGraphResult(
+                c.repo_id,
+                True,
+                graph.program_issue,
+                [node_payload(node) for node in nodes],
+                len(nodes),
+                truncated,
+            )
+
+        return self.ctx.audited("repo_issue_graph", details, op)

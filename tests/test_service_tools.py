@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment
 
 from repoforge.domain.errors import SecurityError, WorkspaceError
+
+
+def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
+    audit_path = root / "state" / "audit.jsonl"
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line]
+    return [event for event in events if event["action"] == action]
 
 
 def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
@@ -178,3 +185,52 @@ def test_change_budget_blocks_verification_and_commit(tmp_path: Path) -> None:
         service.workspace_verify(workspace_id)
     with pytest.raises(WorkspaceError, match="Change budget exceeded"):
         service.workspace_commit(workspace_id, "Too broad")
+
+
+def test_repo_list_produces_exactly_one_bounded_audit_event(forge_env: ForgeEnvironment) -> None:
+    listed = forge_env.service.repo_list()
+    assert len(listed["repositories"]) == 1
+
+    events = _audit_events(forge_env.root, "repo_list")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is True
+    assert event["details"]["repo_count"] == 1
+    # Bounded: only a count plus the standard correlation/duration fields, never the
+    # full repository listing (paths, profiles, diagnostics) that the result contains.
+    assert set(event["details"]) == {"repo_count", "correlation_id", "duration_ms"}
+
+
+def test_workspace_list_produces_exactly_one_bounded_audit_event(
+    forge_env: ForgeEnvironment,
+) -> None:
+    forge_env.service.workspace_create("demo", "audit coverage for list")
+    listed = forge_env.service.workspace_list()
+    assert len(listed["workspaces"]) == 1
+
+    events = _audit_events(forge_env.root, "workspace_list")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is True
+    assert event["details"]["workspace_count"] == 1
+    assert set(event["details"]) == {"workspace_count", "correlation_id", "duration_ms"}
+
+
+def test_workspace_list_audits_failure_without_leaking_internal_error_state(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_list() -> list[object]:
+        raise OSError("simulated registry directory read failure: /secret/state/path")
+
+    monkeypatch.setattr(forge_env.service.state, "list", fail_list)
+    with pytest.raises(OSError):
+        forge_env.service.workspace_list()
+
+    events = _audit_events(forge_env.root, "workspace_list")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is False
+    assert "error_code" in event["details"]
+    assert "workspace_count" not in event["details"]
+    assert "/secret/state/path" not in json.dumps(event["details"])

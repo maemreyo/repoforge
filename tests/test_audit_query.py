@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,146 @@ def test_summarize_operation_metrics_matches_real_metrics_sink(tmp_path: Path) -
     assert rows[0]["count"] == 2
     assert rows[0]["failures"] == 1
     assert rows[0]["top_error_codes"] == [["STALE_STATE", 1]]
+
+
+def test_summarize_operation_metrics_since_aggregates_only_matching_day_buckets(
+    tmp_path: Path,
+) -> None:
+    locks = InMemoryLockManager()
+    clock = FixedClock("2026-07-13T00:00:00+00:00")
+    metrics = JsonMetricsSink(tmp_path, locks, clock)
+    metrics.record("workspace_commit", success=True, duration_ms=100.0, error_code=None)
+
+    clock.value = "2026-07-14T00:00:00+00:00"
+    metrics.record("workspace_commit", success=True, duration_ms=10.0, error_code=None)
+    metrics.record(
+        "workspace_commit", success=False, duration_ms=30.0, error_code="STALE_STATE"
+    )
+
+    clock.value = "2026-07-15T00:00:00+00:00"
+    metrics.record("workspace_commit", success=True, duration_ms=1_000.0, error_code=None)
+
+    # Window covers only 07-14: the 07-13 and 07-15 calls must not be counted.
+    rows = summarize_operation_metrics(
+        metrics.snapshot(), since="2026-07-14", until="2026-07-14"
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["action"] == "workspace_commit"
+    assert row["count"] == 2
+    assert row["failures"] == 1
+    assert row["failure_rate"] == 0.5
+    assert row["duration_ms_avg"] == 20.0
+    assert row["duration_ms_max"] == 30.0
+    assert row["top_error_codes"] == [["STALE_STATE", 1]]
+
+    # Lifetime totals (no since/until) still include all three days, unchanged.
+    lifetime_rows = summarize_operation_metrics(metrics.snapshot())
+    assert lifetime_rows[0]["count"] == 4
+
+
+def test_summarize_operation_metrics_since_only_is_open_ended(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    clock = FixedClock("2026-07-13T00:00:00+00:00")
+    metrics = JsonMetricsSink(tmp_path, locks, clock)
+    metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
+    clock.value = "2026-07-20T00:00:00+00:00"
+    metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
+
+    rows = summarize_operation_metrics(metrics.snapshot(), since="2026-07-14")
+    assert rows[0]["count"] == 1
+
+
+def test_summarize_operation_metrics_rejects_malformed_or_inverted_window() -> None:
+    snapshot = {"version": 2, "operations": {}, "buckets": {}}
+    with pytest.raises(ConfigError, match="Invalid --since date"):
+        summarize_operation_metrics(snapshot, since="not-a-date")
+    with pytest.raises(ConfigError, match="Invalid --until date"):
+        summarize_operation_metrics(snapshot, since="2026-07-01", until="not-a-date")
+    with pytest.raises(ConfigError, match="must not be after"):
+        summarize_operation_metrics(snapshot, since="2026-07-10", until="2026-07-01")
+
+
+def test_summarize_operation_metrics_since_tolerates_corrupt_bucket_entries() -> None:
+    snapshot = {
+        "version": 2,
+        "operations": {},
+        "buckets": {
+            "not-a-date": {"workspace_status": {"count": 99}},
+            "2026-07-14": "not-a-dict",
+            "2026-07-15": {
+                "workspace_status": "not-a-dict",
+                "workspace_commit": {
+                    "count": 1,
+                    "successes": 1,
+                    "failures": 0,
+                    "duration_ms_total": 5.0,
+                    "duration_ms_max": 5.0,
+                    "failure_categories": {},
+                },
+            },
+        },
+    }
+    rows = summarize_operation_metrics(snapshot, since="2026-07-01", until="2026-07-31")
+    assert len(rows) == 1
+    assert rows[0]["action"] == "workspace_commit"
+    assert rows[0]["count"] == 1
+
+
+def test_summarize_operation_metrics_since_matches_manual_jsonl_aggregation(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion: `rf audit stats --since` matches hand-aggregated JSONL fixture data."""
+    locks = InMemoryLockManager()
+    clock = FixedClock("2026-07-13T00:00:00+00:00")
+    audit = JsonlAuditSink(tmp_path, clock)
+    metrics = JsonMetricsSink(tmp_path, locks, clock)
+
+    def _call(action: str, *, success: bool, duration_ms: float, error_code: str | None) -> None:
+        details: dict[str, object] = {"duration_ms": duration_ms}
+        if not success and error_code:
+            details["error_code"] = error_code
+        audit.record(action, success=success, details=details)
+        metrics.record(action, success=success, duration_ms=duration_ms, error_code=error_code)
+
+    _call("workspace_apply_patch", success=True, duration_ms=50.0, error_code=None)
+    clock.value = "2026-07-14T00:00:00+00:00"
+    _call("workspace_apply_patch", success=False, duration_ms=200.0, error_code="PATCH_REJECTED")
+    _call("workspace_apply_patch", success=True, duration_ms=100.0, error_code=None)
+    _call("workspace_status", success=True, duration_ms=2.0, error_code=None)
+    clock.value = "2026-07-16T00:00:00+00:00"
+    _call("workspace_apply_patch", success=True, duration_ms=999.0, error_code=None)
+
+    since, until = "2026-07-14", "2026-07-14"
+
+    # Manually aggregate the fixture JSONL for the same window, independent of the sink.
+    manual: dict[str, dict[str, object]] = {}
+    for line in audit.path.read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        day = event["timestamp"][:10]
+        if not (since <= day <= until):
+            continue
+        action = event["action"]
+        bucket = manual.setdefault(
+            action, {"count": 0, "failures": 0, "duration_total": 0.0, "duration_max": 0.0}
+        )
+        bucket["count"] += 1
+        duration = event["details"]["duration_ms"]
+        bucket["duration_total"] += duration
+        bucket["duration_max"] = max(bucket["duration_max"], duration)
+        if not event["success"]:
+            bucket["failures"] += 1
+
+    rows = {
+        row["action"]: row
+        for row in summarize_operation_metrics(metrics.snapshot(), since=since, until=until)
+    }
+    assert set(rows) == set(manual)
+    for action, expected in manual.items():
+        actual = rows[action]
+        assert actual["count"] == expected["count"]
+        assert actual["failures"] == expected["failures"]
+        assert actual["duration_ms_avg"] == round(
+            expected["duration_total"] / expected["count"], 3
+        )
+        assert actual["duration_ms_max"] == expected["duration_max"]

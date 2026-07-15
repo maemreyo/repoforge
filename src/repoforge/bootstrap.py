@@ -291,8 +291,12 @@ def build_tunnel_client(
     )
 
 
-def build_metrics_sink(state_root: Path, locks: LockManager | None = None) -> MetricsSink:
-    return JsonMetricsSink(state_root, locks or build_lock_manager(state_root))
+def build_metrics_sink(
+    state_root: Path,
+    locks: LockManager | None = None,
+    clock: Clock | None = None,
+) -> MetricsSink:
+    return JsonMetricsSink(state_root, locks or build_lock_manager(state_root), clock)
 
 
 def build_idempotency_store(state_root: Path) -> IdempotencyStore:
@@ -344,7 +348,7 @@ def build_application(
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
-    metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks)
+    metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     pr_check_watch_store = o.pr_check_watches or JsonPrCheckWatchStore(

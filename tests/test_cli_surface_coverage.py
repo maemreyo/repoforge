@@ -253,6 +253,99 @@ def test_audit_stats_requires_configured_metrics_sink(
     assert payload["status"] == "failed"
 
 
+def test_audit_stats_since_aggregates_the_requested_bucket_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = FakeStore(tmp_path)
+    store.source_path.write_text("x", encoding="utf-8")
+    store.active_resolved_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
+    monkeypatch.setattr(cli, "load_config", lambda path: object())
+    service = FakeService()
+    service.audit = SimpleNamespace(path=tmp_path / "audit.jsonl")
+    service.metrics = SimpleNamespace(
+        path=tmp_path / "state" / "operation-metrics.json",
+        snapshot=lambda: {
+            "version": 2,
+            "operations": {
+                "workspace_commit": {
+                    "count": 10,
+                    "successes": 9,
+                    "failures": 1,
+                    "duration_ms_total": 1_000.0,
+                    "duration_ms_max": 500.0,
+                    "failure_categories": {"STALE_STATE": 1},
+                }
+            },
+            "buckets": {
+                "2026-07-14": {
+                    "workspace_commit": {
+                        "count": 2,
+                        "successes": 1,
+                        "failures": 1,
+                        "duration_ms_total": 40.0,
+                        "duration_ms_max": 30.0,
+                        "failure_categories": {"STALE_STATE": 1},
+                    }
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(cli, "CodingService", lambda config: service)
+
+    code = cli.main(
+        [
+            "--config",
+            str(store.source_path),
+            "audit",
+            "stats",
+            "--since",
+            "2026-07-14",
+            "--until",
+            "2026-07-14",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["since"] == "2026-07-14"
+    assert payload["until"] == "2026-07-14"
+    assert payload["operations"] == [
+        {
+            "action": "workspace_commit",
+            "count": 2,
+            "failures": 1,
+            "failure_rate": 0.5,
+            "duration_ms_avg": 20.0,
+            "duration_ms_max": 30.0,
+            "top_error_codes": [["STALE_STATE", 1]],
+        }
+    ]
+
+
+def test_audit_stats_since_rejects_malformed_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = FakeStore(tmp_path)
+    store.source_path.write_text("x", encoding="utf-8")
+    store.active_resolved_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
+    monkeypatch.setattr(cli, "load_config", lambda path: object())
+    service = FakeService()
+    service.audit = SimpleNamespace(path=tmp_path / "audit.jsonl")
+    service.metrics = SimpleNamespace(
+        path=tmp_path / "state" / "operation-metrics.json",
+        snapshot=lambda: {"version": 2, "operations": {}, "buckets": {}},
+    )
+    monkeypatch.setattr(cli, "CodingService", lambda config: service)
+
+    code = cli.main(
+        ["--config", str(store.source_path), "audit", "stats", "--since", "not-a-date"]
+    )
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "failed"
+
+
 def test_main_returns_stable_error_envelope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -8,6 +8,7 @@ persistence and never touches Git, GitHub, or a workspace.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -63,12 +64,8 @@ def read_audit_events(
     return matched
 
 
-def summarize_operation_metrics(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    """Flatten an operation-metrics snapshot into rows sorted by average duration, slowest first."""
-    operations = snapshot.get("operations")
+def _rows_from_operations(operations: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    if not isinstance(operations, dict):
-        return rows
     for action, stats in operations.items():
         if not isinstance(stats, dict):
             continue
@@ -94,3 +91,82 @@ def summarize_operation_metrics(snapshot: dict[str, Any]) -> list[dict[str, Any]
         )
     rows.sort(key=lambda row: row["duration_ms_avg"], reverse=True)
     return rows
+
+
+def _empty_bucket_stat() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "successes": 0,
+        "failures": 0,
+        "duration_ms_total": 0.0,
+        "duration_ms_max": 0.0,
+        "failure_categories": {},
+    }
+
+
+def _merge_bucket_stat(target: dict[str, Any], source: dict[str, Any]) -> None:
+    target["count"] += int(source.get("count", 0) or 0)
+    target["successes"] += int(source.get("successes", 0) or 0)
+    target["failures"] += int(source.get("failures", 0) or 0)
+    target["duration_ms_total"] += float(source.get("duration_ms_total", 0.0) or 0.0)
+    target["duration_ms_max"] = max(
+        float(target["duration_ms_max"]), float(source.get("duration_ms_max", 0.0) or 0.0)
+    )
+    categories = source.get("failure_categories")
+    if isinstance(categories, dict):
+        target_categories = target["failure_categories"]
+        for code, occurrences in categories.items():
+            target_categories[code] = int(target_categories.get(code, 0)) + int(occurrences or 0)
+
+
+def _parse_window_date(value: str, *, field: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ConfigError(f"Invalid --{field} date {value!r}; expected YYYY-MM-DD") from exc
+
+
+def summarize_operation_metrics(
+    snapshot: dict[str, Any],
+    *,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict[str, Any]]:
+    """Flatten an operation-metrics snapshot into rows sorted by average duration, slowest first.
+
+    Without `since`/`until` this aggregates the lifetime `operations` totals — the original,
+    contract-stable behavior. Passing either bound instead aggregates only the daily `buckets`
+    whose date falls within `[since, until]` (a bound left as `None` is open-ended), so an
+    operator can isolate a specific window (for example, the days after a fix shipped) without
+    the lifetime totals diluting the comparison.
+    """
+    if since is None and until is None:
+        operations = snapshot.get("operations")
+        if not isinstance(operations, dict):
+            return []
+        return _rows_from_operations(operations)
+
+    since_date = _parse_window_date(since, field="since") if since is not None else None
+    until_date = _parse_window_date(until, field="until") if until is not None else None
+    if since_date is not None and until_date is not None and since_date > until_date:
+        raise ConfigError(f"--since {since} must not be after --until {until}")
+
+    buckets = snapshot.get("buckets")
+    aggregated: dict[str, dict[str, Any]] = {}
+    if isinstance(buckets, dict):
+        for day, actions in buckets.items():
+            try:
+                day_date = date.fromisoformat(day)
+            except (TypeError, ValueError):
+                continue
+            if since_date is not None and day_date < since_date:
+                continue
+            if until_date is not None and day_date > until_date:
+                continue
+            if not isinstance(actions, dict):
+                continue
+            for action, stats in actions.items():
+                if not isinstance(stats, dict):
+                    continue
+                _merge_bucket_stat(aggregated.setdefault(action, _empty_bucket_stat()), stats)
+    return _rows_from_operations(aggregated)
