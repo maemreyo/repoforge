@@ -4,6 +4,17 @@ RepoForge exposes forty-two focused MCP tools. Each tool has one clear responsib
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
+## Provider registry
+
+Provider manifests and the provider registry are internal application contracts, not MCP tools.
+`ProviderManifest` records the reviewed provider ID, kind, version, executable digest, supported
+languages/capabilities, health probe, coverage/confidence model, network/filesystem requirements,
+output limits, and declared fallback. `ConfigProviderRegistry` accepts only explicitly configured
+providers, rejects duplicate IDs, orders listings deterministically, and never promotes discovered
+binaries into capability. Health probes return bounded redacted status text; missing probes remain
+`unknown` rather than healthy. Provider configuration is advisory evidence only and cannot authorize
+repository, filesystem, command, network, or publishing access.
+
 ## Local runtime commands
 
 `rf runtime status` is a local operator command, not an MCP tool. It compares the reviewed lock
