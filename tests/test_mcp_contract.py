@@ -14,6 +14,16 @@ def test_tool_surface_hash_is_deterministic() -> None:
     assert len(tool_surface_hash()) == 64
 
 
+def test_tool_surface_hash_does_not_depend_on_ast_unparse(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ast
+
+    def fail_unparse(_node: ast.AST) -> str:
+        raise AssertionError("ast.unparse is not stable across supported Python minor versions")
+
+    monkeypatch.setattr(ast, "unparse", fail_unparse)
+    assert len(tool_surface_hash()) == 64
+
+
 @pytest.mark.anyio
 async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment) -> None:
     server = create_server(forge_env.config_path)
