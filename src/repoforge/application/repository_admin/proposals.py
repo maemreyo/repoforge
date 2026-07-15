@@ -12,6 +12,7 @@ from ...domain.repository_proposal import (
     build_repository_proposal,
 )
 from ...ports.repository_probe import RepositoryProbe
+from ..verification_detection import VerificationProfileDetector
 
 
 class RepositoryProposalService:
@@ -34,11 +35,18 @@ class RepositoryProposalService:
         template: EnrollmentMode = EnrollmentMode.STANDARD,
         overrides: dict[str, str] | None = None,
     ) -> RepositoryProposal:
+        selected_decisions = decisions or {}
         return build_repository_proposal(
             self._probe.inspect(path, repo_id=repo_id),
-            decisions=decisions,
+            decisions=selected_decisions,
             template=template,
             overrides=overrides,
+            detected_profiles=VerificationProfileDetector().proposed_profiles(
+                path,
+                include_dependency_setup=(
+                    selected_decisions.get("dependency_install") == "include_non_verification"
+                ),
+            ),
         )
 
     @staticmethod

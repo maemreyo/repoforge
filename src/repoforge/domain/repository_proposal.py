@@ -50,6 +50,7 @@ class ProposedProfile:
     confidence: ProposalConfidence
     source: str
     working_directory: str | None = None
+    timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,6 +383,7 @@ def build_repository_proposal(
     decisions: dict[str, str] | None = None,
     template: EnrollmentMode = EnrollmentMode.STANDARD,
     overrides: dict[str, str] | None = None,
+    detected_profiles: tuple[ProposedProfile, ...] | None = None,
 ) -> RepositoryProposal:
     decisions = decisions or {}
     overrides = overrides or {}
@@ -735,7 +737,7 @@ def build_repository_proposal(
                 ("required",),
             )
         )
-    profiles = _profile_candidates(
+    profiles = detected_profiles or _profile_candidates(
         facts,
         package_manager=package_manager_choice,
         working_directory=working_directory if monorepo_scope == "scoped" else None,
@@ -817,7 +819,7 @@ def build_repository_proposal(
             raise ValueError(
                 "working_directory must be contained by at least one allowed_paths override"
             )
-    denied_paths = list(SAFE_DENIED_PATHS)
+    denied_paths: list[str] = list(SAFE_DENIED_PATHS)
     if "denied_paths_add" in overrides:
         denied_paths.extend(_path_list(overrides["denied_paths_add"], key="denied_paths_add"))
     strict = template is EnrollmentMode.STRICT

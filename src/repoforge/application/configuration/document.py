@@ -63,6 +63,7 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
             "verification": profile.verification,
             "commands": [list(command) for command in profile.commands],
             "working_directory": profile.working_directory,
+            "timeout_seconds": profile.timeout_seconds,
         }
     default_profile = (
         "full" if "full" in profile_map else (sorted(profile_map)[0] if profile_map else None)
