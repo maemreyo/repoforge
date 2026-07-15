@@ -22,9 +22,7 @@ def test_run_nonzero_exit_is_command_failed_regardless_of_output_text(tmp_path: 
     executor = _executor(tmp_path)
     script = tmp_path / "print_timeout.py"
     script.write_text(
-        "import sys\n"
-        "sys.stdout.write('timeout: 60.0s exceeded while collecting\\n')\n"
-        "sys.exit(1)\n"
+        "import sys\nsys.stdout.write('timeout: 60.0s exceeded while collecting\\n')\nsys.exit(1)\n"
     )
     with pytest.raises(CommandError) as excinfo:
         executor.run(["python3", str(script)], cwd=tmp_path)
@@ -61,9 +59,7 @@ def test_run_output_containing_not_found_does_not_misclassify(tmp_path: Path) ->
     executor = _executor(tmp_path)
     script = tmp_path / "print_not_found.py"
     script.write_text(
-        "import sys\n"
-        "sys.stdout.write('module not found: some_module\\n')\n"
-        "sys.exit(1)\n"
+        "import sys\nsys.stdout.write('module not found: some_module\\n')\nsys.exit(1)\n"
     )
     with pytest.raises(CommandError) as excinfo:
         executor.run(["python3", str(script)], cwd=tmp_path)
@@ -75,11 +71,7 @@ def test_run_output_containing_not_found_does_not_misclassify(tmp_path: Path) ->
 def test_run_bytes_nonzero_exit_is_command_failed(tmp_path: Path) -> None:
     executor = _executor(tmp_path)
     script = tmp_path / "fail_binary.py"
-    script.write_text(
-        "import sys\n"
-        "sys.stderr.write('timeout: 60.0s\\n')\n"
-        "sys.exit(1)\n"
-    )
+    script.write_text("import sys\nsys.stderr.write('timeout: 60.0s\\n')\nsys.exit(1)\n")
     with pytest.raises(CommandError) as excinfo:
         executor.run_bytes(["python3", str(script)], cwd=tmp_path, max_bytes=1000)
     err = excinfo.value

@@ -74,9 +74,7 @@ def test_read_audit_events_missing_file_returns_empty(tmp_path: Path) -> None:
 def test_read_audit_events_skips_malformed_lines(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     path.write_text(
-        '{"action": "ok", "success": true, "details": {}}\n'
-        "not-json\n"
-        "[1, 2, 3]\n",
+        '{"action": "ok", "success": true, "details": {}}\nnot-json\n[1, 2, 3]\n',
         encoding="utf-8",
     )
     events = read_audit_events(path, limit=10)
@@ -126,9 +124,7 @@ def test_summarize_operation_metrics_matches_real_metrics_sink(tmp_path: Path) -
     locks = InMemoryLockManager()
     metrics = JsonMetricsSink(tmp_path, locks)
     metrics.record("workspace_commit", success=True, duration_ms=42.0, error_code=None)
-    metrics.record(
-        "workspace_commit", success=False, duration_ms=8.0, error_code="STALE_STATE"
-    )
+    metrics.record("workspace_commit", success=False, duration_ms=8.0, error_code="STALE_STATE")
 
     rows = summarize_operation_metrics(metrics.snapshot())
     assert len(rows) == 1
