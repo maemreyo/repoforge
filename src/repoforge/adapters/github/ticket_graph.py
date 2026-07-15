@@ -57,20 +57,17 @@ class GitHubTicketGraphReader:
                     timeout=30,
                     output_limit=_MAX_BODY_CHARS + 10_000,
                 )
-            except CommandError as exc:
-                raise TicketGraphError(
-                    f"live GitHub metadata is unavailable for issue #{issue_number}"
-                ) from exc
+            except CommandError:
+                # Unreadable for this one issue (missing, permission denied, gh
+                # outage). The caller sees it as an issue absent from the live
+                # snapshot rather than aborting every other bounded read.
+                continue
             try:
                 payload: Any = json.loads(result.stdout)
-            except json.JSONDecodeError as exc:
-                raise TicketGraphError(
-                    f"GitHub returned invalid JSON for issue #{issue_number}"
-                ) from exc
+            except json.JSONDecodeError:
+                continue
             if not isinstance(payload, dict):
-                raise TicketGraphError(
-                    f"GitHub returned an invalid issue object for #{issue_number}"
-                )
+                continue
             live_number = payload.get("number")
             title = payload.get("title")
             state = payload.get("state")
@@ -80,12 +77,13 @@ class GitHubTicketGraphReader:
                 or not isinstance(title, str)
                 or not title.strip()
                 or not isinstance(state, str)
+                # `gh issue view` also resolves pull request numbers (GitHub
+                # shares one number sequence between issues and PRs); a state
+                # outside {OPEN, CLOSED} means this number is not an issue.
                 or state not in {"OPEN", "CLOSED"}
                 or not isinstance(body, str)
                 or len(body) > _MAX_BODY_CHARS
             ):
-                raise TicketGraphError(
-                    f"GitHub issue #{issue_number} metadata is malformed or too large"
-                )
+                continue
             snapshots.append(TicketLiveMetadata(issue_number, title.strip(), state, body))
         return tuple(snapshots)

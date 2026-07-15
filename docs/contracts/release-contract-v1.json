@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "3985a9b49a06934907357ef576a681e5276f604722c18332654b9b1617ef46f3",
+    "tool_surface_hash": "9963b22156c65f4c57663a99fd5c05fee8087b04b0c5708138adb206ba6af272",
     "tools": [
       {
         "annotations": {
@@ -351,6 +351,129 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to list or filter the checked-in roadmap ticket graph without searching GitHub comments; it is offline, bounded, and cannot assign, edit, or close an issue.",
+        "inputSchema": {
+          "properties": {
+            "initiative": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Initiative"
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Priority"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            },
+            "root_issue": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Root Issue"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status"
+            }
+          },
+          "required": [
+            "repo_id"
+          ],
+          "title": "repo_issue_graphArguments",
+          "type": "object"
+        },
+        "name": "repo_issue_graph",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_issue_graphDictOutput",
+          "type": "object"
+        },
+        "title": "Query the roadmap ticket graph"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this to pick the next selectable implementation ticket by validated status, closed blockers, and priority; a stale or invalid manifest is reported as diagnostics instead of an empty result.",
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "default": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            },
+            "root_issue": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Root Issue"
+            }
+          },
+          "required": [
+            "repo_id"
+          ],
+          "title": "repo_issue_nextArguments",
+          "type": "object"
+        },
+        "name": "repo_issue_next",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_issue_nextDictOutput",
+          "type": "object"
+        },
+        "title": "Select the next ready roadmap ticket"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
           "openWorldHint": true,
           "readOnlyHint": true
         },
@@ -380,6 +503,40 @@
           "type": "object"
         },
         "title": "Read GitHub issue"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat.",
+        "inputSchema": {
+          "properties": {
+            "issue_number": {
+              "title": "Issue Number",
+              "type": "integer"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "issue_number"
+          ],
+          "title": "repo_issue_specArguments",
+          "type": "object"
+        },
+        "name": "repo_issue_spec",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_issue_specDictOutput",
+          "type": "object"
+        },
+        "title": "Read one roadmap ticket's specification references"
       },
       {
         "annotations": {

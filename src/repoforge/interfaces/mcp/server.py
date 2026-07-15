@@ -315,6 +315,39 @@ def create_server(
         """Use this when implementation requirements are defined by a GitHub issue."""
         return bounded_service.call("repo_issue_read", repo_id, issue_number)
 
+    @mcp.tool(title="Query the roadmap ticket graph", annotations=READ_ONLY, structured_output=True)
+    def repo_issue_graph(
+        repo_id: str,
+        root_issue: int | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        initiative: int | None = None,
+    ) -> dict[str, Any]:
+        """Use this to list or filter the checked-in roadmap ticket graph without searching GitHub comments; it is offline, bounded, and cannot assign, edit, or close an issue."""
+        return bounded_service.call(
+            "repo_issue_graph", repo_id, root_issue, status, priority, initiative
+        )
+
+    @mcp.tool(
+        title="Select the next ready roadmap ticket",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def repo_issue_next(
+        repo_id: str, root_issue: int | None = None, limit: int = 1
+    ) -> dict[str, Any]:
+        """Use this to pick the next selectable implementation ticket by validated status, closed blockers, and priority; a stale or invalid manifest is reported as diagnostics instead of an empty result."""
+        return bounded_service.call("repo_issue_next", repo_id, root_issue, limit)
+
+    @mcp.tool(
+        title="Read one roadmap ticket's specification references",
+        annotations=EXTERNAL_READ,
+        structured_output=True,
+    )
+    def repo_issue_spec(repo_id: str, issue_number: int) -> dict[str, Any]:
+        """Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat."""
+        return bounded_service.call("repo_issue_spec", repo_id, issue_number)
+
     @mcp.tool(
         title="Read GitHub pull request",
         annotations=EXTERNAL_READ,

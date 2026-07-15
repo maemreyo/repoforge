@@ -285,22 +285,104 @@ def validate_ticket_graph(graph: TicketGraph) -> tuple[TicketDiagnostic, ...]:
     return tuple(sorted(set(diagnostics)))
 
 
-def select_ready_tickets(graph: TicketGraph, *, limit: int) -> tuple[TicketNode, ...]:
+def _subtree_numbers(graph: TicketGraph, root_issue: int) -> set[int]:
+    nodes = {node.number: node for node in graph.nodes}
+    if root_issue not in nodes:
+        raise TicketGraphError(f"root_issue #{root_issue} is not present in the graph")
+    result: set[int] = set()
+    stack = [root_issue]
+    while stack:
+        current = stack.pop()
+        if current in result:
+            continue
+        result.add(current)
+        stack.extend(nodes[current].children)
+    return result
+
+
+def select_ready_tickets(
+    graph: TicketGraph, *, limit: int, root_issue: int | None = None
+) -> tuple[TicketNode, ...]:
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
         raise TicketGraphError("limit must be between 1 and 100")
+    scope = _subtree_numbers(graph, root_issue) if root_issue is not None else None
     if validate_ticket_graph(graph):
         return ()
-    ready = [node for node in graph.nodes if node.status is TicketStatus.READY]
+    ready = [
+        node
+        for node in graph.nodes
+        if node.status is TicketStatus.READY
+        and node.ticket_type is TicketType.IMPLEMENTATION_TICKET
+        and (scope is None or node.number in scope)
+    ]
     ready.sort(key=lambda node: (_PRIORITY_ORDER[node.priority], node.number))
     return tuple(ready[:limit])
 
 
+_MAX_QUERY_RESULTS = 200
+
+
+def select_ticket_nodes(
+    graph: TicketGraph,
+    *,
+    root_issue: int | None = None,
+    status: TicketStatus | None = None,
+    priority: TicketPriority | None = None,
+    initiative: int | None = None,
+) -> tuple[tuple[TicketNode, ...], bool]:
+    """Bounded, deterministic query over the checked-in ticket graph.
+
+    Returns the matching nodes (sorted by issue number, capped at
+    ``_MAX_QUERY_RESULTS``) and whether the result was truncated.
+    """
+    nodes = {node.number: node for node in graph.nodes}
+    scope = _subtree_numbers(graph, root_issue) if root_issue is not None else None
+    if initiative is not None:
+        target = nodes.get(initiative)
+        if target is None:
+            raise TicketGraphError(f"initiative #{initiative} is not present in the graph")
+        if target.ticket_type is not TicketType.INITIATIVE:
+            raise TicketGraphError(f"issue #{initiative} is not an initiative")
+        initiative_scope = _subtree_numbers(graph, initiative)
+        scope = initiative_scope if scope is None else scope & initiative_scope
+
+    matched = [
+        node
+        for node in graph.nodes
+        if (scope is None or node.number in scope)
+        and (status is None or node.status is status)
+        and (priority is None or node.priority is priority)
+    ]
+    matched.sort(key=lambda node: node.number)
+    truncated = len(matched) > _MAX_QUERY_RESULTS
+    return tuple(matched[:_MAX_QUERY_RESULTS]), truncated
+
+
+_NEXT_FIELD_BOUNDARY = r"(?:\.\s|\Z|\n)"
+
+
 def _body_metadata(body: str, label: str) -> str | None:
+    """Extract one tracked field from an issue body.
+
+    Two conventions coexist in this project's issue history: an older
+    multi-line ``**Label:** value`` form (one field per line) and the
+    established terse single sentence this program's issues actually use,
+    e.g. ``Parent: #101. Status: Blocked. Blocked by: #106. ...`` (with the
+    last recognized field sometimes followed by free-form prose rather than
+    another field, e.g. initiative bodies that omit ``Blocked by:``
+    entirely). Both are matched by requiring the label to start at a field
+    boundary (start of body, start of a line, or right after a ". ") and
+    capturing up to the next sentence boundary rather than to end of line;
+    no tracked field's own value contains a ". " or a newline.
+    """
     pattern = re.compile(
-        rf"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*:\s*(.+?)\s*$"
+        rf"(?is)(?:\A|\.\s+|\n)\s*(?:[-*]\s*)?(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*:\s*"
+        rf"(.+?)(?={_NEXT_FIELD_BOUNDARY})"
     )
     match = pattern.search(body)
-    return match.group(1).strip() if match is not None else None
+    if match is None:
+        return None
+    return match.group(1).strip().rstrip(".").strip()
 
 
 def compare_live_ticket_metadata(
@@ -349,7 +431,12 @@ def compare_live_ticket_metadata(
         }
         for label, expected in expected_metadata.items():
             actual = _body_metadata(live.body, label)
-            if actual != expected:
+            # This project's established issue body is one terse sentence
+            # that never restates Type/Priority (those live only in the
+            # specification comment); a field absent from the body is not
+            # evidence of drift, only a field present with a different
+            # value is.
+            if actual is not None and actual != expected:
                 diagnostics.append(
                     _diagnostic(
                         "LIVE_BODY_DRIFT",

@@ -52,8 +52,14 @@ def _node(
 
 
 class RecordingExecutor:
-    def __init__(self, responses: dict[int, dict[str, object]]) -> None:
+    def __init__(
+        self,
+        responses: dict[int, dict[str, object]],
+        *,
+        unreadable: frozenset[int] = frozenset(),
+    ) -> None:
         self.responses = responses
+        self.unreadable = unreadable
         self.calls: list[tuple[str, ...]] = []
 
     def environment(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -74,6 +80,10 @@ class RecordingExecutor:
         command = tuple(argv)
         self.calls.append(command)
         issue_number = int(command[3])
+        if issue_number in self.unreadable:
+            from repoforge.domain.errors import CommandError
+
+            raise CommandError(f"gh: issue #{issue_number} not found")
         return CommandResult(command, str(cwd), 0, json.dumps(self.responses[issue_number]), "")
 
     def run_bytes(
@@ -181,6 +191,30 @@ def test_ticket_graph_excludes_backlog_and_bounds_limit(tmp_path: Path) -> None:
         select_ready_tickets(graph, limit=0)
 
 
+def test_select_ready_tickets_excludes_ready_initiatives(tmp_path: Path) -> None:
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[8])
+    ready_initiative = _node(8, ticket_type="initiative", status="Ready", children=[9])
+    ready_ticket = _node(9, parent=8)
+    graph = load_ticket_graph(_write_graph(tmp_path, [program, ready_initiative, ready_ticket]))
+    assert [item.number for item in select_ready_tickets(graph, limit=10)] == [9]
+
+
+def test_select_ready_tickets_scopes_to_a_root_issue_subtree(tmp_path: Path) -> None:
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[8, 20])
+    initiative_a = _node(8, ticket_type="initiative", status="In progress", children=[9])
+    ticket_a = _node(9, parent=8)
+    initiative_b = _node(20, ticket_type="initiative", status="In progress", children=[21])
+    ticket_b = _node(21, parent=20)
+    graph = load_ticket_graph(
+        _write_graph(tmp_path, [program, initiative_a, ticket_a, initiative_b, ticket_b])
+    )
+    assert [item.number for item in select_ready_tickets(graph, limit=10, root_issue=8)] == [9]
+    assert [item.number for item in select_ready_tickets(graph, limit=10, root_issue=20)] == [21]
+    assert {item.number for item in select_ready_tickets(graph, limit=10)} == {9, 21}
+    with pytest.raises(TicketGraphError):
+        select_ready_tickets(graph, limit=10, root_issue=999)
+
+
 def test_checked_in_ticket_graph_and_issue_forms_are_complete() -> None:
     root = Path(__file__).parents[1]
     graph = load_ticket_graph(root / "docs/roadmaps/REPOFORGE_TICKET_GRAPH.json")
@@ -243,6 +277,39 @@ def test_live_reader_is_bounded_read_only_and_normalizes_metadata(tmp_path: Path
     assert not {"create", "edit", "close", "delete", "comment"}.intersection(executor.calls[0])
 
 
+def test_live_reader_skips_one_unreadable_issue_without_aborting_the_rest(tmp_path: Path) -> None:
+    body = "\n".join(
+        (
+            "**Type:** implementation_ticket",
+            "**Priority:** P0",
+            "**Status:** Ready",
+            "**Parent:** #3",
+        )
+    )
+    executor = RecordingExecutor(
+        {
+            4: {"number": 4, "title": "Issue 4", "state": "OPEN", "body": body},
+            # A number that resolves to a merged pull request rather than an
+            # issue: `gh issue view` still returns an object, but with a
+            # `state` outside {OPEN, CLOSED}.
+            65: {"number": 65, "title": "Some PR", "state": "MERGED", "body": "pr body"},
+            6: {"number": 6, "title": "Issue 6", "state": "CLOSED", "body": body},
+        }
+    )
+    snapshots = GitHubTicketGraphReader(executor, cwd=tmp_path).read("owner/repo", (4, 6, 65))
+    assert {item.number for item in snapshots} == {4, 6}
+    assert len(executor.calls) == 3
+
+
+def test_live_reader_skips_an_issue_gh_cannot_read_at_all(tmp_path: Path) -> None:
+    executor = RecordingExecutor(
+        {4: {"number": 4, "title": "Issue 4", "state": "OPEN", "body": "body"}},
+        unreadable=frozenset({404}),
+    )
+    snapshots = GitHubTicketGraphReader(executor, cwd=tmp_path).read("owner/repo", (4, 404))
+    assert {item.number for item in snapshots} == {4}
+
+
 def test_live_drift_reports_title_state_and_body_mismatches(tmp_path: Path) -> None:
     program = _node(
         3,
@@ -268,3 +335,90 @@ def test_live_drift_reports_title_state_and_body_mismatches(tmp_path: Path) -> N
     )
     codes = {item.code for item in compare_live_ticket_metadata(graph, live)}
     assert {"LIVE_TITLE_DRIFT", "LIVE_STATE_DRIFT", "LIVE_BODY_DRIFT"}.issubset(codes)
+
+
+def test_live_drift_understands_the_established_terse_single_line_body(tmp_path: Path) -> None:
+    """Real issue bodies in this repository are one sentence, e.g.:
+
+    'Parent: #101. Status: Blocked. Blocked by: #106. Read the first
+    specification comment before implementation.'
+
+    They never restate Type/Priority (those live only in the specification
+    comment). Matching this convention must not manufacture drift noise.
+    """
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[4, 5])
+    matching = _node(4, status="Blocked", blockers=[5], blocks=[])
+    open_blocker = _node(5, status="Blocked", blocks=[4])
+    graph = load_ticket_graph(_write_graph(tmp_path, [program, matching, open_blocker]))
+    live = (
+        TicketLiveMetadata(
+            3,
+            "Issue 3",
+            "OPEN",
+            "Parent: None. Status: In progress. Blocked by: None. Read the program spec.",
+        ),
+        TicketLiveMetadata(
+            4,
+            "Issue 4",
+            "OPEN",
+            "Parent: #3. Status: Blocked. Blocked by: #5. Read the first specification "
+            "comment before implementation.",
+        ),
+        TicketLiveMetadata(
+            5,
+            "Issue 5",
+            "OPEN",
+            "Parent: #3. Status: Blocked. Blocked by: None. Read the first specification "
+            "comment before implementation.",
+        ),
+    )
+    diagnostics = compare_live_ticket_metadata(graph, live)
+    assert diagnostics == ()
+
+
+def test_live_drift_handles_a_terse_body_with_no_blocked_by_clause(tmp_path: Path) -> None:
+    """Initiative bodies often omit ``Blocked by:`` entirely, e.g.:
+
+    'Parent: #3. Status: Ready. Read the first specification comment and
+    linked child tickets before implementation.'
+
+    ``Status`` here is the last recognized field before free-form prose, not
+    before another ``Label:`` clause; the sentence boundary alone must still
+    terminate the captured value.
+    """
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[4])
+    initiative = _node(4, ticket_type="initiative", status="Ready")
+    graph = load_ticket_graph(_write_graph(tmp_path, [program, initiative]))
+    live = (
+        TicketLiveMetadata(3, "Issue 3", "OPEN", "Parent: None. Status: In progress."),
+        TicketLiveMetadata(
+            4,
+            "Issue 4",
+            "OPEN",
+            "Parent: #3. Status: Ready. Read the first specification comment and linked "
+            "child tickets before implementation.",
+        ),
+    )
+    assert compare_live_ticket_metadata(graph, live) == ()
+
+
+def test_live_drift_still_flags_a_real_status_mismatch_in_a_terse_body(tmp_path: Path) -> None:
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[4])
+    node = _node(4, status="Ready")
+    graph = load_ticket_graph(_write_graph(tmp_path, [program, node]))
+    live = (
+        TicketLiveMetadata(
+            3, "Issue 3", "OPEN", "Parent: None. Status: In progress. Blocked by: None."
+        ),
+        TicketLiveMetadata(
+            4,
+            "Issue 4",
+            "OPEN",
+            "Parent: #3. Status: Blocked. Blocked by: None. Read the spec.",
+        ),
+    )
+    diagnostics = compare_live_ticket_metadata(graph, live)
+    codes = {item.code for item in diagnostics}
+    assert "LIVE_BODY_DRIFT" in codes
+    messages = [item.message for item in diagnostics if item.code == "LIVE_BODY_DRIFT"]
+    assert any("Status" in message for message in messages)
