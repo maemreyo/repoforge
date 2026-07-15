@@ -18,6 +18,7 @@ from mcp.types import ToolAnnotations
 
 from ...application.runtime.hot_reload import AtomicServiceRouter
 from ...application.service import CodingService
+from ...application.workspace.replace_text import TextEdit
 from ...config import load_config
 from ...domain.errors import operation_error_from_exception
 from ...domain.operations import automatic_retry_allowed
@@ -528,20 +529,22 @@ def create_server(
     def workspace_replace_text(
         workspace_id: str,
         relative_path: str,
-        old_text: str,
-        new_text: str,
-        expected_sha256: str,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        expected_sha256: str = "",
         expected_occurrences: int = 1,
+        edits: list[TextEdit] | None = None,
     ) -> dict[str, Any]:
-        """Use this for a precise replacement after validating the file SHA and occurrence count; the response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
+        """Use this for a precise replacement after validating the file SHA and occurrence count; pass a single old_text/new_text pair for one edit, or a bounded ordered edits list (up to 20) to apply several replacements against the same file atomically under one lock and fingerprint cycle. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
         return bounded_service.call(
             "workspace_replace_text",
             workspace_id,
             relative_path,
-            old_text,
-            new_text,
-            expected_sha256,
-            expected_occurrences,
+            old_text=old_text,
+            new_text=new_text,
+            expected_sha256=expected_sha256,
+            expected_occurrences=expected_occurrences,
+            edits=edits,
         )
 
     @mcp.tool(

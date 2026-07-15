@@ -25,6 +25,10 @@ arguments, confirmation prompts, results and unexpected tool calls.
 8. **Final verification before commit** — “I'm done iterating and believe the change is ready. Run full
    verification and, if it passes, commit.” Expected: one `workspace_run_profile`/`workspace_verify` call
    naming `full` (or the repository default) immediately followed by `workspace_commit` only on success.
+9. **Several exact edits to one file** — “In this workspace, make these four exact text replacements to
+   the same file, then show me the diff.” Expected: one `workspace_replace_text` call with an `edits`
+   list carrying all four ordered entries and a single shared `expected_sha256`, not four separate
+   `workspace_replace_text` calls.
 
 ## Indirect
 

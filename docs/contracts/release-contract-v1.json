@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
-    "tool_surface_hash": "969cd3b26d9c54a719589c3963f9f78b5e4920ea4da9270f77e6f678d8e9cfd4",
+    "tool_surface_hash": "0d02ec8caba251a993629f76e55673695df55f117d3e6ff1f90a104ca3a210e4",
     "tools": [
       {
         "annotations": {
@@ -1627,25 +1627,83 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for a precise replacement after validating the file SHA and occurrence count; the response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
+        "description": "Use this for a precise replacement after validating the file SHA and occurrence count; pass a single old_text/new_text pair for one edit, or a bounded ordered edits list (up to 20) to apply several replacements against the same file atomically under one lock and fingerprint cycle. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
+          "$defs": {
+            "TextEdit": {
+              "description": "One ordered exact-replacement entry within a batched `workspace_replace_text` call.",
+              "properties": {
+                "expected_occurrences": {
+                  "default": 1,
+                  "title": "Expected Occurrences",
+                  "type": "integer"
+                },
+                "new_text": {
+                  "title": "New Text",
+                  "type": "string"
+                },
+                "old_text": {
+                  "title": "Old Text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "old_text",
+                "new_text"
+              ],
+              "title": "TextEdit",
+              "type": "object"
+            }
+          },
           "properties": {
+            "edits": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/TextEdit"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Edits"
+            },
             "expected_occurrences": {
               "default": 1,
               "title": "Expected Occurrences",
               "type": "integer"
             },
             "expected_sha256": {
+              "default": "",
               "title": "Expected Sha256",
               "type": "string"
             },
             "new_text": {
-              "title": "New Text",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "New Text"
             },
             "old_text": {
-              "title": "Old Text",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Old Text"
             },
             "relative_path": {
               "title": "Relative Path",
@@ -1658,10 +1716,7 @@
           },
           "required": [
             "workspace_id",
-            "relative_path",
-            "old_text",
-            "new_text",
-            "expected_sha256"
+            "relative_path"
           ],
           "title": "workspace_replace_textArguments",
           "type": "object"

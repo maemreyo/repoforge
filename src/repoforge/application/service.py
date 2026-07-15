@@ -98,6 +98,7 @@ from .workspace.refresh_preview import (
 )
 from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
 from .workspace.replace_text import (
+    TextEdit,
     WorkspaceReplaceTextCommand,
     WorkspaceTextReplacer,
 )
@@ -478,20 +479,22 @@ class CodingService:
         self,
         workspace_id: str,
         relative_path: str,
-        old_text: str,
-        new_text: str,
-        expected_sha256: str,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        expected_sha256: str = "",
         expected_occurrences: int = 1,
+        edits: list[TextEdit] | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._replace.execute(
                 WorkspaceReplaceTextCommand(
-                    workspace_id,
-                    relative_path,
-                    old_text,
-                    new_text,
-                    expected_sha256,
-                    expected_occurrences,
+                    workspace_id=workspace_id,
+                    relative_path=relative_path,
+                    expected_sha256=expected_sha256,
+                    old_text=old_text,
+                    new_text=new_text,
+                    expected_occurrences=expected_occurrences,
+                    edits=tuple(edits) if edits is not None else None,
                 )
             )
         )

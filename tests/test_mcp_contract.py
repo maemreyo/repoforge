@@ -373,3 +373,90 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             "workspace_remove",
             {"workspace_id": workspace_id, "delete_local_branch": True},
         )
+
+
+@pytest.mark.anyio
+async def test_workspace_replace_text_batch_edits_through_mcp_protocol(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """The additive `edits` parameter applies several ordered replacements in one call.
+
+    Regression coverage for issue #142: one `workspace_replace_text` call with a bounded
+    `edits` list must apply every entry atomically under one lock/fingerprint cycle, and a
+    failing entry must reject the whole call by index without touching the file.
+    """
+    server = create_server(forge_env.config_path)
+    async with create_connected_server_and_client_session(server) as session:
+
+        async def call(name: str, arguments: dict[str, object]) -> dict[str, object]:
+            result = await session.call_tool(name, arguments)
+            assert result.isError is False, (name, result.content)
+            assert result.structuredContent is not None
+            return result.structuredContent
+
+        created = await call(
+            "workspace_create", {"repo_id": "demo", "task_slug": "batch replace text"}
+        )
+        workspace_id = str(created["workspace_id"])
+        hello = await call(
+            "workspace_read_file",
+            {"workspace_id": workspace_id, "relative_path": "hello.txt"},
+        )
+
+        batch_result = await call(
+            "workspace_replace_text",
+            {
+                "workspace_id": workspace_id,
+                "relative_path": "hello.txt",
+                "expected_sha256": hello["sha256"],
+                "edits": [
+                    {"old_text": "hello", "new_text": "hi there"},
+                    {"old_text": "hi there", "new_text": "hi there, batched"},
+                ],
+            },
+        )
+        assert batch_result["replacements"] == 2
+        assert batch_result["edits"] == [
+            {"index": 0, "replacements": 1},
+            {"index": 1, "replacements": 1},
+        ]
+
+        status_before_failure = await call("workspace_status", {"workspace_id": workspace_id})
+        failing = await session.call_tool(
+            "workspace_replace_text",
+            {
+                "workspace_id": workspace_id,
+                "relative_path": "hello.txt",
+                "expected_sha256": batch_result["sha256"],
+                "edits": [
+                    {"old_text": "hi there, batched", "new_text": "changed once more"},
+                    {"old_text": "text that does not exist", "new_text": "unreachable"},
+                ],
+            },
+        )
+        assert failing.isError is True
+        rendered = "\n".join(
+            item.text for item in failing.content if getattr(item, "type", None) == "text"
+        )
+        assert "edits[1]" in rendered
+        status_after_failure = await call("workspace_status", {"workspace_id": workspace_id})
+        assert (
+            status_after_failure["workspace_fingerprint"]
+            == status_before_failure["workspace_fingerprint"]
+        )
+        assert status_after_failure["head_sha"] == status_before_failure["head_sha"]
+
+        too_many_edits = await session.call_tool(
+            "workspace_replace_text",
+            {
+                "workspace_id": workspace_id,
+                "relative_path": "hello.txt",
+                "expected_sha256": batch_result["sha256"],
+                "edits": [{"old_text": "hi", "new_text": "hi"} for _ in range(21)],
+            },
+        )
+        assert too_many_edits.isError is True
+        bound_rendered = "\n".join(
+            item.text for item in too_many_edits.content if getattr(item, "type", None) == "text"
+        )
+        assert "at most 20 entries, got 21" in bound_rendered
