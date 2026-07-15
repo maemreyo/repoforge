@@ -28,6 +28,7 @@ from .adapters.persistence import (
     JsonWorkflowRecordingStore,
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
+from .adapters.provider.config_registry import ConfigProviderRegistry
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
 from .adapters.runtime import (
@@ -114,6 +115,7 @@ from .ports import (
     OperationStore,
     PrCheckWatchStore,
     ProcessInspector,
+    ProviderRegistry,
     PullRequestGateway,
     RepositoryDiscovery,
     RepositoryProbe,
@@ -150,6 +152,7 @@ class AdapterOverrides:
     background_tasks: BackgroundTaskRunner | None = None
     sleeper: Sleeper | None = None
     workflow_recordings: WorkflowRecordingStore | None = None
+    provider_registry: ProviderRegistry | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +340,7 @@ def build_application(
     github = o.github or GhCliGateway(command, config.server)
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
+    provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
@@ -364,6 +368,7 @@ def build_application(
         ids=ids,
         executables=executables,
         execution_environment=execution_environment,
+        provider_registry=provider_registry,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,

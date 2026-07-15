@@ -40,6 +40,7 @@ from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
+from .provider_registry import ProviderRegistry
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
 from .runtime_control import (
@@ -102,6 +103,7 @@ __all__ = [
     "PrCheckWatchPage",
     "PrCheckWatchStore",
     "ProcessInspector",
+    "ProviderRegistry",
     "PullRequestGateway",
     "RepositoryDiscovery",
     "RepositoryProbe",

@@ -30,6 +30,7 @@ from ..ports import (
     MetricsSink,
     OperationGate,
     OperationStore,
+    ProviderRegistry,
     PullRequestGateway,
     WorkspaceStore,
 )
@@ -203,6 +204,7 @@ class ApplicationContext:
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
     execution_environment: ExecutionEnvironmentPort | None = None
+    provider_registry: ProviderRegistry | None = None
 
     def now_epoch(self) -> float:
         try:
