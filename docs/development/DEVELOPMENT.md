@@ -114,6 +114,13 @@ When configuration fields or defaults change:
 5. document required operator actions;
 6. verify that permissions were not silently broadened.
 
+### Resource budgets
+
+Resource budgets are configured in `[server.resource_budget]`. Repository-specific
+`[repositories.<repo_id>.resource_budget]` tables inherit server values and may only tighten them.
+Budgets constrain local resource pressure; they do not reduce required verification or expand
+repository, command, network, or publication authority.
+
 ### Repository policy presets
 
 A resolved repository table can set `policy = "strict" | "standard" | "relaxed"`. The typed loader expands the selected preset into the reviewed lock, then lets explicitly supplied repository fields win. A path-only repository table uses `strict`; existing expanded repository tables remain compatible without a preset.

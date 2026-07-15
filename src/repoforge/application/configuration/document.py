@@ -153,6 +153,13 @@ def render_resolved(
         for key in sorted(server):
             if isinstance(server[key], (str, int, bool, list)):
                 lines.append(f"{key} = {_toml(server[key])}")
+        resource_budget = server.get("resource_budget")
+        if isinstance(resource_budget, dict):
+            lines.extend(["", "[server.resource_budget]"])
+            for key in sorted(resource_budget):
+                value = resource_budget[key]
+                if isinstance(value, int):
+                    lines.append(f"{key} = {_toml(value)}")
     providers = document.get("providers", [])
     if isinstance(providers, list):
         for provider in providers:
@@ -179,10 +186,19 @@ def render_resolved(
             if not isinstance(raw, dict):
                 continue
             lines.extend(["", f"[repositories.{repo_id}]"])
-            for key in sorted(k for k in raw if k not in {"profiles", "diagnostics"}):
+            for key in sorted(
+                k for k in raw if k not in {"profiles", "diagnostics", "resource_budget"}
+            ):
                 value = raw[key]
                 if isinstance(value, (str, int, bool, list)):
                     lines.append(f"{key} = {_toml(value)}")
+            resource_budget = raw.get("resource_budget")
+            if isinstance(resource_budget, dict):
+                lines.extend(["", f"[repositories.{repo_id}.resource_budget]"])
+                for key in sorted(resource_budget):
+                    value = resource_budget[key]
+                    if isinstance(value, int):
+                        lines.append(f"{key} = {_toml(value)}")
             profiles = raw.get("profiles", {})
             if isinstance(profiles, dict):
                 for name in sorted(profiles):

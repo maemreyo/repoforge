@@ -23,6 +23,11 @@ from .domain.diagnostics import (
 from .domain.errors import ConfigError
 from .domain.provider_config import load_provider_manifests
 from .domain.provider_manifest import ProviderManifest
+from .domain.resource_budget import (
+    DEFAULT_RESOURCE_BUDGET,
+    RESOURCE_BUDGET_FIELDS,
+    ResourceBudget,
+)
 from .domain.risk import RiskPolicy, default_risk_policy
 from .domain.user_paths import (
     DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
@@ -147,6 +152,7 @@ class RepositoryConfig:
     risk_policy: RiskPolicy = field(
         default_factory=lambda: default_risk_policy(final_profile="full")
     )
+    resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -167,6 +173,7 @@ class ServerConfig:
     idempotency_lock_timeout_seconds: int = 2
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
+    resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -205,6 +212,28 @@ def _positive_int(value: Any, default: int, context: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ConfigError(f"{context} must be a positive integer")
     return value
+
+
+def _load_resource_budget(
+    raw: Any,
+    context: str,
+    defaults: ResourceBudget = DEFAULT_RESOURCE_BUDGET,
+    ceiling: ResourceBudget | None = None,
+) -> ResourceBudget:
+    if raw is None:
+        return defaults
+    table = _expect_mapping(raw, context)
+    unknown = sorted(set(table) - set(RESOURCE_BUDGET_FIELDS))
+    if unknown:
+        raise ConfigError(f"{context} contains unsupported budget fields: {unknown}")
+    values: dict[str, int] = {}
+    for field_name in RESOURCE_BUDGET_FIELDS:
+        default = getattr(defaults, field_name)
+        configured = _positive_int(table.get(field_name), default, f"{context}.{field_name}")
+        if ceiling is not None and configured > getattr(ceiling, field_name):
+            raise ConfigError(f"{context}.{field_name} cannot exceed its inherited server limit")
+        values[field_name] = configured
+    return ResourceBudget(**values)
 
 
 def _boolean(value: Any, default: bool, context: str) -> bool:
@@ -534,6 +563,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("allowed_environment"), "server.allowed_environment"
         )
         or DEFAULT_ALLOWED_ENVIRONMENT,
+        resource_budget=_load_resource_budget(
+            server_raw.get("resource_budget"),
+            "server.resource_budget",
+        ),
     )
     repositories_raw = _expect_mapping(raw.get("repositories"), "repositories")
     if not repositories_raw:
@@ -604,6 +637,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             profiles=profiles,
             diagnostics=diagnostics,
         )
+        resource_budget = _load_resource_budget(
+            repo_raw.get("resource_budget"),
+            f"repositories.{repo_id}.resource_budget",
+            defaults=server.resource_budget,
+            ceiling=server.resource_budget,
+        )
         repositories[repo_id] = RepositoryConfig(
             repo_id=repo_id,
             path=_expand_path(str(repo_raw["path"]), base_dir=base_dir),
@@ -668,6 +707,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             profiles=profiles,
             diagnostics=diagnostics,
             risk_policy=risk_policy,
+            resource_budget=resource_budget,
         )
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(
