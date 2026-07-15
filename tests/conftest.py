@@ -81,7 +81,9 @@ if args[:2] == ["repo", "view"]:
     raise SystemExit(0)
 if args[:2] == ["issue", "view"]:
     number = int(args[2])
-    print(json.dumps({{
+    data = load()
+    override = (data.get("issues") or {{}}).get(str(number), {{}})
+    payload = {{
         "number": number,
         "title": "Implement safer workflow",
         "body": "Issue body",
@@ -90,8 +92,17 @@ if args[:2] == ["issue", "view"]:
         "labels": [{{"name": "enhancement"}}],
         "assignees": [],
         "url": f"https://github.com/owner/demo/issues/{{number}}",
-        "comments": [{{"body": "context", "author": {{"login": "reviewer"}}}}],
-    }}))
+        "comments": [{{
+            "body": (
+                "context\\n\\nObjective: implement the ticket.\\n"
+                "Acceptance criteria: behavior is verified.\\n"
+                "Tests: run the production gate."
+            ),
+            "author": {{"login": "reviewer"}},
+        }}],
+    }}
+    payload.update(override)
+    print(json.dumps(payload))
     raise SystemExit(0)
 if args[:2] == ["pr", "create"]:
     data = load()

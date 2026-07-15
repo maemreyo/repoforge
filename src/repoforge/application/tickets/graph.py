@@ -247,21 +247,6 @@ def validate_ticket_graph(graph: TicketGraph) -> tuple[TicketDiagnostic, ...]:
                         f"blocked issue #{blocked} does not list #{node.number} as a blocker",
                     )
                 )
-        if node.status is TicketStatus.READY:
-            open_blockers = [
-                blocker
-                for blocker in node.blockers
-                if blocker not in nodes or nodes[blocker].status is not TicketStatus.DONE
-            ]
-            if open_blockers:
-                diagnostics.append(
-                    _diagnostic(
-                        "READY_WITH_OPEN_BLOCKER",
-                        node.number,
-                        f"Ready ticket has open blockers: {open_blockers}",
-                    )
-                )
-
     for number, node in sorted(nodes.items()):
         expected = tuple(sorted(derived_children[number]))
         if node.children != expected:
@@ -298,6 +283,12 @@ def _subtree_numbers(graph: TicketGraph, root_issue: int) -> set[int]:
         result.add(current)
         stack.extend(nodes[current].children)
     return result
+
+
+def ticket_subtree_numbers(graph: TicketGraph, root_issue: int) -> frozenset[int]:
+    """Return one validated ticket subtree as an immutable delivery scope."""
+
+    return frozenset(_subtree_numbers(graph, root_issue))
 
 
 def select_ready_tickets(

@@ -370,14 +370,31 @@ def create_server(
 
     @mcp.tool(
         title="Select the next ready roadmap ticket",
-        annotations=READ_ONLY,
+        annotations=EXTERNAL_READ,
         structured_output=True,
     )
     def repo_issue_next(
-        repo_id: str, root_issue: int | None = None, limit: int = 1
+        repo_id: str,
+        root_issue: int | None = None,
+        limit: int = 1,
+        p0_wip_limit: int = 2,
+        p1_wip_limit: int = 3,
+        p2_wip_limit: int = 4,
+        p3_wip_limit: int = 4,
+        initiative_wip_limit: int = 2,
     ) -> dict[str, Any]:
-        """Use this to pick the next selectable implementation ticket by validated status, closed blockers, and priority; a stale or invalid manifest is reported as diagnostics instead of an empty result."""
-        return bounded_service.call("repo_issue_next", repo_id, root_issue, limit)
+        """Use this to derive selectable tickets from bounded live issue state, complete specs, closed blockers, active parents, WIP limits, and deterministic delivery order without editing GitHub."""
+        return bounded_service.call(
+            "repo_issue_next",
+            repo_id,
+            root_issue,
+            limit,
+            p0_wip_limit,
+            p1_wip_limit,
+            p2_wip_limit,
+            p3_wip_limit,
+            initiative_wip_limit,
+        )
 
     @mcp.tool(
         title="Read one roadmap ticket's specification references",

@@ -49,6 +49,20 @@ progress notifications use status polling by operation ID. These fallbacks prese
 filesystem, command, verification, and publication policy; capability data can never grant or widen
 access.
 
+## Derived ticket readiness
+
+`repo_issue_next` is an advisory external-read tool. It validates the checked-in graph before any
+network access, then reads at most 200 tracked GitHub issues with at most eight concurrent workers. It
+never assigns, edits, closes, relabels, or reorders an issue. A missing, malformed, or unreadable live
+issue fails closed for that ticket instead of silently trusting stale manifest status.
+
+For each ticket, RepoForge derives status from live open/closed state, specification completeness,
+unresolved design gates, parent activity, closed blockers, explicit supersession, and configurable WIP
+limits by priority and initiative. Selectable implementation tickets are ordered deterministically by
+priority, delivery wave, delivery sequence, then issue number. Results include the derived and declared
+status, stable reason codes and messages, unresolved blockers, WIP conflicts, and advisory metadata
+repairs. Those repairs are output only; applying them remains a separate human-controlled GitHub action.
+
 ## Shared normalized evidence
 
 `EvidenceItem` is the provider-neutral contract used to carry architecture, code-intelligence,
