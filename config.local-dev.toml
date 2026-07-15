@@ -189,3 +189,49 @@ description = "Run the registered foundation closure and write exact-revision su
 verification = true
 timeout_seconds = 3600
 commands = [["make", "recertify-foundation"]]
+
+[repositories.zamery-studio]
+path = "/Users/trung.ngo/Documents/zaob-dev/zamery-studio"
+display_name = "Zamery Studio"
+remote = "origin"
+default_base = "main"
+allowed_base_branches = ["main"]
+branch_prefix = "ai/"
+protected_branches = ["main", "master", "develop", "production"]
+require_verification_before_commit = true
+fetch_before_workspace = true
+default_verification_profile = "full"
+max_changed_files = 150
+max_diff_lines = 12000
+max_total_changed_bytes = 26214400
+allowed_paths = []
+denied_paths = [
+  ".git",
+  ".git/**",
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  "**/*.pem",
+  "**/*.key",
+  "**/*secret*",
+  "**/*credential*",
+]
+pr_labels = []
+pr_reviewers = []
+no_maintainer_edit = false
+
+[repositories.zamery-studio.profiles.setup]
+description = "Install the exact Zamery Studio toolchain"
+verification = false
+timeout_seconds = 1800
+commands = [
+  ["corepack", "prepare", "pnpm@11.13.0", "--activate"],
+  ["pnpm", "install"],
+]
+
+[repositories.zamery-studio.profiles.full]
+description = "Run Zamery Studio complete verification"
+verification = true
+timeout_seconds = 1800
+commands = [["make", "check"]]
