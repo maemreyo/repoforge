@@ -74,6 +74,7 @@ from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
+from .application.fingerprint_cache import FingerprintCache
 from .application.onboarding.activation import ConfigurationActivator
 from .application.onboarding.candidate import smoke_candidate
 from .application.onboarding.coordinator import OnboardingCoordinator
@@ -345,6 +346,7 @@ def build_application(
     sleeper = o.sleeper or SystemSleeper()
     context = ApplicationContext(
         config=config,
+        fingerprint_cache=FingerprintCache(),
         commands=command,
         git=git,
         github=github,

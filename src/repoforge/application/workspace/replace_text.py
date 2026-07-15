@@ -78,6 +78,8 @@ class WorkspaceTextReplacer:
                 if len(encoded) > self.ctx.config.server.max_file_bytes:
                     raise SecurityError("Updated content exceeds max_file_bytes")
                 self.ctx.filesystem.write_bytes_atomic(path, encoded, preserve_mode=True)
+                if self.ctx.fingerprint_cache is not None:
+                    self.ctx.fingerprint_cache.invalidate(c.workspace_id)
                 sha = hashlib.sha256(encoded).hexdigest()
                 stat = self.ctx.git.diff_stat(workspace)
                 return WorkspaceReplaceTextResult(

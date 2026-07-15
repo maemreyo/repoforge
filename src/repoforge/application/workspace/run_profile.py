@@ -8,6 +8,7 @@ from ...domain.verification import get_profile
 from ...domain.workspace import VerificationReceipt
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
+from ..fingerprint_cache import compute_validity_token
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +84,10 @@ class WorkspaceProfileRunner:
                 self.ctx.git.changed_paths(path, repo)
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
                 fp = self.ctx.git.fingerprint(path)
+                cache = self.ctx.fingerprint_cache
+                if cache is not None:
+                    token = compute_validity_token(self.ctx.git, path)
+                    cache.set(c.workspace_id, fp, token)
                 if profile.verification:
                     fresh.last_verification = VerificationReceipt(
                         profile.name,

@@ -13,6 +13,7 @@ from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityEr
 from ...domain.policy import normalize_relative_path
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
+from ..fingerprint_cache import FingerprintCache, compute_validity_token
 from .diagnostic_parser import parse_diagnostic
 from .diagnostic_selector import resolve_diagnostic_selector
 
@@ -150,14 +151,31 @@ class WorkspaceDiagnosticRunner:
         _, repo, _ = self.ctx.workspace(command.workspace_id)
         profile = _profile(repo, command.diagnostic_id)
 
+        fingerprint_source: str = "computed"
+
         def operation() -> WorkspaceRunDiagnosticResult:
+            nonlocal fingerprint_source
             with self.ctx.locks.lock(command.workspace_id):
+                cache_fp: FingerprintCache | None = self.ctx.fingerprint_cache
                 fresh, locked_repo, locked_workspace = self.ctx.workspace(command.workspace_id)
                 locked_profile = _profile(locked_repo, command.diagnostic_id)
                 command_cwd = _command_cwd(locked_workspace, locked_profile)
                 before_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
                 before_states = _path_state(locked_workspace, before_paths)
-                before_fingerprint = self.ctx.git.fingerprint(locked_workspace)
+                fingerprint_source = "computed"
+                if cache_fp is not None:
+                    cached = cache_fp.get(command.workspace_id)
+                    if cached is not None:
+                        token = compute_validity_token(self.ctx.git, locked_workspace)
+                        if token == cached.validity_token:
+                            before_fingerprint = cached.fingerprint
+                            fingerprint_source = "cache_hit"
+                        else:
+                            cache_fp.invalidate(command.workspace_id)
+                    if fingerprint_source == "computed":
+                        before_fingerprint = self.ctx.git.fingerprint(locked_workspace)
+                else:
+                    before_fingerprint = self.ctx.git.fingerprint(locked_workspace)
                 if (
                     command.expected_fingerprint is not None
                     and command.expected_fingerprint != before_fingerprint
@@ -193,6 +211,9 @@ class WorkspaceDiagnosticRunner:
                     after_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
                 except SecurityError as exc:
                     after_fingerprint = self.ctx.git.fingerprint(locked_workspace)
+                    if cache_fp is not None:
+                        token = compute_validity_token(self.ctx.git, locked_workspace)
+                        cache_fp.set(command.workspace_id, after_fingerprint, token)
                     if (
                         fresh.last_verification is not None
                         and after_fingerprint != before_fingerprint
@@ -206,6 +227,9 @@ class WorkspaceDiagnosticRunner:
                     ) from exc
                 after_states = _path_state(locked_workspace, after_paths)
                 after_fingerprint = self.ctx.git.fingerprint(locked_workspace)
+                if cache_fp is not None:
+                    token = compute_validity_token(self.ctx.git, locked_workspace)
+                    cache_fp.set(command.workspace_id, after_fingerprint, token)
                 fingerprint_changed = after_fingerprint != before_fingerprint
                 touched_paths = sorted(
                     path
@@ -305,6 +329,7 @@ class WorkspaceDiagnosticRunner:
                 "selector_kind": profile.selector.kind.value,
                 "mutability": profile.mutability.value,
                 "parser": profile.parser.value,
+                "fingerprint_source": fingerprint_source,
             },
             operation,
             mutating=True,

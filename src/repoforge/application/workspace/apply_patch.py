@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ...domain.errors import WorkspaceError
 from ..context import ApplicationContext
+from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from .patch_input import normalize_workspace_patch
 
 _OID = re.compile("^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
@@ -53,7 +54,13 @@ class WorkspacePatchApplier:
                     raise WorkspaceError(
                         f"HEAD changed: expected {c.expected_head_sha}, got {actual_head}"
                     )
-                before = self.ctx.git.fingerprint(path)
+                before_lookup = read_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    c.workspace_id,
+                    self.ctx.git,
+                    path,
+                )
+                before = before_lookup.fingerprint
                 if before != c.expected_workspace_fingerprint:
                     raise WorkspaceError(
                         "Workspace changed since it was inspected; refresh status before applying patch"
@@ -71,6 +78,8 @@ class WorkspacePatchApplier:
                         "normalized_patch_sha256": normalized.normalized_sha256,
                         "repair_actions": list(normalized.repair_actions),
                         "changed_paths": list(changed),
+                        "fingerprint_source": before_lookup.source,
+                        "fingerprint_duration_ms": before_lookup.duration_ms,
                     }
                 )
                 self.ctx.git.apply_patch(path, normalized.patch)
@@ -79,15 +88,30 @@ class WorkspacePatchApplier:
                     self.ctx.git.enforce_change_budget(path, repo)
                 except Exception:
                     self.ctx.git.reverse_patch(path, normalized.patch)
-                    if self.ctx.git.fingerprint(path) != before:
+                    rollback_lookup = prime_fingerprint(
+                        self.ctx.fingerprint_cache,
+                        c.workspace_id,
+                        self.ctx.git,
+                        path,
+                    )
+                    if rollback_lookup.fingerprint != before:
                         raise WorkspaceError(
                             "Patch violated policy and rollback did not fully restore the workspace"
                         ) from None
                     raise
+
+                after_lookup = prime_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    c.workspace_id,
+                    self.ctx.git,
+                    path,
+                )
+                after = after_lookup.fingerprint
+                audit_details["post_mutation_fingerprint_duration_ms"] = after_lookup.duration_ms
                 return WorkspaceApplyPatchResult(
                     c.workspace_id,
                     actual_changed,
-                    self.ctx.git.fingerprint(path),
+                    after,
                     self.ctx.git.diff_stat(path),
                     normalized.input_format,
                     normalized.normalized_sha256,

@@ -32,6 +32,7 @@ from ..ports import (
     PullRequestGateway,
     WorkspaceStore,
 )
+from .fingerprint_cache import FingerprintCache
 from .idempotency import execute_idempotent
 
 T = TypeVar("T")
@@ -201,6 +202,7 @@ class ApplicationContext:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
+    fingerprint_cache: FingerprintCache | None = None
 
     def now_epoch(self) -> float:
         try:

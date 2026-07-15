@@ -10,6 +10,7 @@ from ...domain.workspace import (
     refresh_preview_target,
 )
 from ..context import ApplicationContext
+from ..fingerprint_cache import compute_validity_token
 from .base_status import collect_workspace_base_status
 from .refresh_preview import refresh_binding, require_refresh_snapshot
 
@@ -107,7 +108,13 @@ class WorkspaceRefresher:
 
                 merged = self.ctx.git.merge_no_ff(path, repo, preview_target)
                 if merged.status == "conflict":
+                    cache = self.ctx.fingerprint_cache
+                    if cache is not None:
+                        cache.invalidate(command.workspace_id)
                     recovered_fingerprint = self.ctx.git.fingerprint(path)
+                    if cache is not None:
+                        token = compute_validity_token(self.ctx.git, path)
+                        cache.set(command.workspace_id, recovered_fingerprint, token)
                     recovered = (
                         merged.head_sha == old_head
                         and recovered_fingerprint == old_fingerprint
