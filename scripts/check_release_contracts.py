@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import difflib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,19 @@ PLAN_PATH = ROOT / "docs/plans/repoforge-production-architecture-tunnel-plan.md"
 
 def _encoded(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _emit_github_error(message: str) -> None:
+    """Expose a bounded contract diff to check annotations used by RepoForge evidence."""
+
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    bounded = message[:12_000]
+    escaped = bounded.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(
+        "::error file=docs/contracts/release-contract-v1.json,"
+        f"title=Public release contract drift::{escaped}"
+    )
 
 
 def main() -> int:
@@ -61,8 +75,10 @@ def main() -> int:
             tofile="generated release contract",
             lineterm="",
         )
+        diff_text = "\n".join(diff)
         print("public release contract drift detected:", file=sys.stderr)
-        print("\n".join(diff), file=sys.stderr)
+        print(diff_text, file=sys.stderr)
+        _emit_github_error(diff_text)
         print(
             "Review compatibility and run `uv run python scripts/check_release_contracts.py --write` "
             "only when the contract change is intentional.",
