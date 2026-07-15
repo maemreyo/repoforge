@@ -1,12 +1,13 @@
 import hashlib
 from dataclasses import dataclass
-from typing import Any
 
 from ...domain.errors import SecurityError, WorkspaceError
+from ...domain.execution_environment import EnvironmentIdentityRequest
 from ...domain.policy import normalize_relative_path
 from ...domain.verification import get_profile
 from ...domain.workspace import VerificationReceipt
 from ...ports.command import CommandResult
+from ...ports.execution_environment import ApprovedExecution
 from ..context import ApplicationContext
 
 
@@ -23,18 +24,18 @@ class WorkspaceRunProfileResult:
     description: str
     verification: bool
     fingerprint: str
-    commands: list[dict[str, Any]]
-    change_metrics: dict[str, Any]
+    commands: list[dict[str, object]]
+    change_metrics: dict[str, object]
     satisfies_commit_gate: bool
     working_directory: str | None = None
 
 
 class WorkspaceProfileRunner:
     def __init__(self, ctx: ApplicationContext):
-        self.ctx = ctx
+        self.ctx: ApplicationContext = ctx
 
     @staticmethod
-    def public(r: CommandResult) -> dict[str, Any]:
+    def public(r: CommandResult) -> dict[str, object]:
         return {
             "argv": list(r.argv),
             "returncode": r.returncode,
@@ -43,7 +44,7 @@ class WorkspaceProfileRunner:
         }
 
     @staticmethod
-    def receipt(r: CommandResult) -> dict[str, Any]:
+    def receipt(r: CommandResult) -> dict[str, object]:
         return {
             "argv": list(r.argv),
             "returncode": r.returncode,
@@ -62,7 +63,7 @@ class WorkspaceProfileRunner:
                 raise SecurityError("Profile working_directory cannot be a symlink")
             command_cwd = unresolved.resolve(strict=False)
             try:
-                command_cwd.relative_to(path.resolve(strict=True))
+                _ = command_cwd.relative_to(path.resolve(strict=True))
             except ValueError as exc:
                 raise SecurityError("Profile working_directory escapes workspace") from exc
             if not command_cwd.is_dir():
@@ -76,33 +77,42 @@ class WorkspaceProfileRunner:
                 timeout = (
                     profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
                 )
-                results = [
-                    (
-                        self.ctx.execution_environment.execute(
-                            command,
-                            cwd=command_cwd,
-                            timeout=timeout,
-                        ).result
-                        if self.ctx.execution_environment is not None
-                        else self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
+                environment_hash: str | None = None
+                if self.ctx.execution_environment is not None:
+                    request = EnvironmentIdentityRequest(
+                        workspace_root=path,
+                        command_cwd=command_cwd,
+                        commands=profile.commands,
+                        working_directory_policy=profile.working_directory or ".",
                     )
-                    for command in profile.commands
-                ]
-                self.ctx.git.changed_paths(path, repo)
+                    self.ctx.execution_environment.prepare(request)
+                    try:
+                        identity = self.ctx.execution_environment.identity(request)
+                        receipts = [
+                            self.ctx.execution_environment.execute(
+                                ApprovedExecution(command, request, identity, timeout)
+                            )
+                            for command in profile.commands
+                        ]
+                    finally:
+                        self.ctx.execution_environment.cleanup(request)
+                    results = [receipt.result for receipt in receipts]
+                    environment_hash = identity.identity_hash
+                else:
+                    results = [
+                        self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
+                        for command in profile.commands
+                    ]
+                _ = self.ctx.git.changed_paths(path, repo)
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
                 fp = self.ctx.git.fingerprint(path)
                 if profile.verification:
-                    environment_identity_hash = (
-                        self.ctx.execution_environment.identity(cwd=path).identity_hash
-                        if self.ctx.execution_environment is not None
-                        else None
-                    )
                     fresh.last_verification = VerificationReceipt(
                         profile.name,
                         fp,
                         self.ctx.clock.now_iso(),
                         [self.receipt(r) for r in results],
-                        environment_identity_hash,
+                        environment_hash,
                     )
                     self.ctx.store.save(fresh)
                 return WorkspaceRunProfileResult(

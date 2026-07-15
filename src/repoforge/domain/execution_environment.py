@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 _ENVIRONMENT_IDENTITY_SCHEMA_VERSION = 1
 
@@ -32,6 +33,40 @@ class EnvironmentAdapterKind(str, Enum):
     NATIVE_REVIEWED = "native_reviewed"
     DEV_CONTAINER = "dev_container"
     HERMETIC_CONTAINER = "hermetic_container"
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentIdentityRequest:
+    """Reviewed profile inputs that determine one execution identity."""
+
+    workspace_root: Path
+    command_cwd: Path
+    commands: tuple[tuple[str, ...], ...]
+    working_directory_policy: str
+    network_policy: NetworkPolicy = NetworkPolicy.EXTERNAL
+    filesystem_capability: FilesystemCapability = FilesystemCapability.WORKSPACE_WRITE
+    lockfiles: tuple[str, ...] = (
+        "uv.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "package-lock.json",
+        "Cargo.lock",
+        "go.sum",
+        "Gemfile.lock",
+    )
+    manifests: tuple[str, ...] = (
+        "pyproject.toml",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+    )
+
+    @property
+    def tools(self) -> tuple[str, ...]:
+        """Return first argv elements in stable first-use order."""
+        return tuple(dict.fromkeys(command[0] for command in self.commands))
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +103,7 @@ class EnvironmentIdentity:
     lockfile_digests: tuple[tuple[str, str], ...] = ()
     manifest_digests: tuple[tuple[str, str], ...] = ()
     approved_env_var_names: tuple[str, ...] = ()
+    approved_env_value_hashes: tuple[tuple[str, str], ...] = ()
     network_policy: NetworkPolicy = NetworkPolicy.NONE
     filesystem_capability: FilesystemCapability = FilesystemCapability.READ
     working_directory_policy_hash: str = ""
@@ -75,9 +111,7 @@ class EnvironmentIdentity:
     def __post_init__(self) -> None:
         if self.schema_version != _ENVIRONMENT_IDENTITY_SCHEMA_VERSION:
             raise ValueError(f"Unsupported schema version: {self.schema_version}")
-        if not isinstance(self.adapter_kind, EnvironmentAdapterKind):
-            raise ValueError("adapter_kind must be an EnvironmentAdapterKind")
-        if not self.adapter_version or not isinstance(self.adapter_version, str):
+        if not self.adapter_version:
             raise ValueError("adapter_version must be a non-empty string")
         for name, digest in self.lockfile_digests:
             if not _NONEMPTY_NAME.fullmatch(name):
@@ -92,10 +126,9 @@ class EnvironmentIdentity:
         for name in self.approved_env_var_names:
             if not _NONEMPTY_NAME.fullmatch(name):
                 raise ValueError(f"Invalid env var name: {name!r}")
-        if not isinstance(self.network_policy, NetworkPolicy):
-            raise ValueError("network_policy must be a NetworkPolicy")
-        if not isinstance(self.filesystem_capability, FilesystemCapability):
-            raise ValueError("filesystem_capability must be a FilesystemCapability")
+        for name, digest in self.approved_env_value_hashes:
+            if not _NONEMPTY_NAME.fullmatch(name) or not _SHA256.fullmatch(digest):
+                raise ValueError(f"Invalid environment value hash for {name!r}")
         if self.working_directory_policy_hash and not _SHA256.fullmatch(
             self.working_directory_policy_hash
         ):
@@ -125,6 +158,7 @@ class EnvironmentIdentity:
             "lockfile_digests": sorted(self.lockfile_digests),
             "manifest_digests": sorted(self.manifest_digests),
             "approved_env_var_names": sorted(self.approved_env_var_names),
+            "approved_env_value_hashes": sorted(self.approved_env_value_hashes),
             "network_policy": self.network_policy.value,
             "filesystem_capability": self.filesystem_capability.value,
             "working_directory_policy_hash": self.working_directory_policy_hash,
@@ -142,6 +176,7 @@ class EnvironmentIdentity:
             and self.runtime_version
             and self.tools
             and not any(t.version is None for t in self.tools)
+            and self.network_policy is not NetworkPolicy.EXTERNAL
         )
 
 

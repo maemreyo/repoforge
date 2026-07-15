@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes forty-two focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes forty-three focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -10,8 +10,10 @@ Execution environments are internal application contracts, not MCP tools. `Execu
 encapsulates doctor, idempotent prepare/cleanup, deterministic identity, approved-command execution,
 and declared artifact collection. The native reviewed adapter delegates to the existing constrained
 command executor, preserving profile argv, working directory, timeout, output bounds, and failure
-behavior. Its identity includes normalized platform/architecture, runtime/tool versions, recognized
-lockfile and manifest digests, network/filesystem policy, and adapter version. It excludes source
+behavior. Its identity includes normalized platform/architecture, versions of known safely inspectable
+profile tools, reviewed environment names and value hashes, recognized lockfile and manifest digests,
+working-directory/network/filesystem policy, and adapter version. Unknown executables produce partial
+identity without an extra probe. It excludes source
 bodies, command output, full environment bodies, secrets, and absolute user paths. Verification
 receipts add an optional `environment_identity_hash`; legacy receipts without this field remain valid.
 

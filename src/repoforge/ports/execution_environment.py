@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from ..domain.execution_environment import EnvironmentIdentity
+from ..domain.execution_environment import EnvironmentIdentity, EnvironmentIdentityRequest
 from .command import CommandResult
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArtifactResult:
     """Declared artifact collected after execution."""
 
@@ -21,7 +21,7 @@ class ArtifactResult:
     kind: str = "file"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExecutionReceipt:
     """Receipt bound to a single command execution."""
 
@@ -29,8 +29,17 @@ class ExecutionReceipt:
     identity_hash: str
     result: CommandResult
     artifacts: tuple[ArtifactResult, ...] = ()
-    working_directory: str = ""
     mutation_detected: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedExecution:
+    """One profile-approved command bound to a precomputed identity."""
+
+    argv: tuple[str, ...]
+    request: EnvironmentIdentityRequest
+    identity: EnvironmentIdentity
+    timeout: int
 
 
 class ExecutionEnvironmentPort(Protocol):
@@ -40,18 +49,18 @@ class ExecutionEnvironmentPort(Protocol):
     and binds every execution to an environment identity hash for receipts.
     """
 
-    def doctor(self) -> tuple[str, ...]:
+    def doctor(self, request: EnvironmentIdentityRequest) -> tuple[str, ...]:
         """Return health warnings about the environment (empty = healthy)."""
         ...
 
-    def prepare(self, *, cwd: Path, extra_env: Mapping[str, str] | None = None) -> None:
+    def prepare(self, request: EnvironmentIdentityRequest) -> None:
         """Prepare the environment for execution.
 
         Idempotent. Must not modify source outside declared policy.
         """
         ...
 
-    def identity(self, *, cwd: Path | None = None) -> EnvironmentIdentity:
+    def identity(self, request: EnvironmentIdentityRequest) -> EnvironmentIdentity:
         """Fingerprint the current execution environment for an optional workspace.
 
         Must be deterministic, secret-free, and safe for audit/receipts.
@@ -60,14 +69,7 @@ class ExecutionEnvironmentPort(Protocol):
 
     def execute(
         self,
-        argv: Sequence[str],
-        *,
-        cwd: Path,
-        input_text: str | None = None,
-        timeout: int | None = None,
-        check: bool = True,
-        extra_env: Mapping[str, str] | None = None,
-        output_limit: int | None = None,
+        execution: ApprovedExecution,
     ) -> ExecutionReceipt:
         """Execute an approved command in this environment.
 
@@ -76,12 +78,12 @@ class ExecutionEnvironmentPort(Protocol):
         ...
 
     def collect_artifacts(
-        self, artifact_paths: Sequence[str], *, cwd: Path
+        self, artifact_paths: Sequence[str], *, workspace_root: Path
     ) -> tuple[ArtifactResult, ...]:
         """Collect declared artifacts from the workspace after execution."""
         ...
 
-    def cleanup(self, *, cwd: Path) -> None:
+    def cleanup(self, request: EnvironmentIdentityRequest) -> None:
         """Clean up temporary or environment-specific state.
 
         Idempotent. Must not modify source outside declared policy.

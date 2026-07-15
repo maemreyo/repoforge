@@ -319,7 +319,10 @@ def build_application(
     config.server.state_root.mkdir(parents=True, exist_ok=True)
     clock = o.clock or SystemClock()
     command = o.command or SubprocessCommandExecutor(config.server)
-    execution_environment = o.execution_environment or NativeReviewedAdapter(command)
+    execution_environment = o.execution_environment or NativeReviewedAdapter(
+        command,
+        max_artifact_bytes=config.server.max_file_bytes,
+    )
     store = o.store or JsonWorkspaceStore(config.server.state_root)
     locks = o.locks or FcntlLockManager(config.server.state_root / "locks")
     gate = o.gate or InProcessOperationGate()
