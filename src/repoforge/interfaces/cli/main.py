@@ -1143,11 +1143,15 @@ def _runtime_command(args: argparse.Namespace) -> int:
             if args.foreground:
                 return launcher.start(config_path, foreground=True, extra_env=runtime_environment)
             pid = launcher.start(config_path, foreground=False, extra_env=runtime_environment)
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 15.0
             observed = None
             while time.monotonic() < deadline:
-                observed = build_runtime_store(runtime_path).read()
-                if observed is not None:
+                # A record already on disk from a previous run belongs to a
+                # different process; only a record whose pid matches the
+                # worker we just spawned reflects this start attempt.
+                candidate = build_runtime_store(runtime_path).read()
+                if candidate is not None and candidate.pid == pid:
+                    observed = candidate
                     break
                 try:
                     os.kill(pid, 0)
