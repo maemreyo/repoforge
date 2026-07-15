@@ -13,6 +13,7 @@ from .adapters.audit import JsonlAuditSink as JsonlAuditSink
 from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
 from .adapters.configuration import ConfigGenerationStore
+from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import LocalFileSystem
 from .adapters.git import GitCliRepository
 from .adapters.github import GhCliGateway
@@ -100,6 +101,7 @@ from .ports import (
     CommandExecutor,
     ConfigurationStore,
     ExecutableLocator,
+    ExecutionEnvironmentPort,
     FileSystem,
     GitRepository,
     IdempotencyStore,
@@ -130,6 +132,7 @@ from .ports import (
 @dataclass(frozen=True, slots=True)
 class AdapterOverrides:
     command: CommandExecutor | None = None
+    execution_environment: ExecutionEnvironmentPort | None = None
     store: WorkspaceStore | None = None
     locks: LockManager | None = None
     gate: OperationGate | None = None
@@ -316,6 +319,10 @@ def build_application(
     config.server.state_root.mkdir(parents=True, exist_ok=True)
     clock = o.clock or SystemClock()
     command = o.command or SubprocessCommandExecutor(config.server)
+    execution_environment = o.execution_environment or NativeReviewedAdapter(
+        command,
+        max_artifact_bytes=config.server.max_file_bytes,
+    )
     store = o.store or JsonWorkspaceStore(config.server.state_root)
     locks = o.locks or FcntlLockManager(config.server.state_root / "locks")
     gate = o.gate or InProcessOperationGate()
@@ -356,6 +363,7 @@ def build_application(
         clock=clock,
         ids=ids,
         executables=executables,
+        execution_environment=execution_environment,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,

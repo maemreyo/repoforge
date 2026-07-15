@@ -21,6 +21,7 @@ from ..ports import (
     Clock,
     CommandExecutor,
     ExecutableLocator,
+    ExecutionEnvironmentPort,
     FileSystem,
     GitRepository,
     IdempotencyStore,
@@ -201,6 +202,7 @@ class ApplicationContext:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
+    execution_environment: ExecutionEnvironmentPort | None = None
 
     def now_epoch(self) -> float:
         try:
