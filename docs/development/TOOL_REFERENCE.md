@@ -31,6 +31,24 @@ identity without an extra probe. It excludes source
 bodies, command output, full environment bodies, secrets, and absolute user paths. Verification
 receipts add an optional `environment_identity_hash`; legacy receipts without this field remain valid.
 
+## Client capability negotiation
+
+Client capabilities are connection-scoped internal contracts, not repository authority and not an MCP
+tool. The MCP adapter captures the current session's `InitializeRequestParams` and normalizes protocol
+version, client identity, Apps/UI resources, form and URL elicitation, Tasks, progress and cancellation
+notifications, tool search and deferred discovery, resource subscriptions, extension versions, and
+bounded compatibility flags. Missing, partial, malformed, unknown, and legacy declarations fail closed;
+RepoForge never probes an optional protocol method that the client did not negotiate.
+
+`CapabilityPolicy` is the single application decision point for extension emission. Unsupported Apps
+fall back to bounded structured results with stable action IDs. Unsupported elicitation returns
+`INPUT_REQUIRED` with one stable decision ID and bounded allowed options. Unsupported MCP Tasks use the
+existing durable RepoForge operation ID with `operation_status` and, when supported by the operation,
+`operation_cancel`. Unsupported tool search exposes the complete safe static tool surface, while missing
+progress notifications use status polling by operation ID. These fallbacks preserve existing repository,
+filesystem, command, verification, and publication policy; capability data can never grant or widen
+access.
+
 ## Local runtime commands
 
 `rf runtime status` is a local operator command, not an MCP tool. It compares the reviewed lock
