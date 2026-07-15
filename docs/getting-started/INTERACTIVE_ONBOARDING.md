@@ -36,28 +36,32 @@ rf onboard /absolute/projects/root --defaults safe
 rf onboard /absolute/projects/root --defaults none
 ```
 
-- `ask` is the interactive default. It shows fail-closed recommendations in a multi-select list with the recommendations selected initially.
-- `safe` applies all available fail-closed recommendations and proceeds to genuinely ambiguous choices.
+- `safe` is the interactive default. It applies all available fail-closed recommendations and asks only genuinely ambiguous choices.
+- `ask` is the explicit opt-in for the previous question-by-question behavior. It shows fail-closed recommendations in a multi-select list with the recommendations selected initially.
 - `none` asks every unresolved decision.
 
 Recommendations can disable networked setup, autofix, risky commands, publishing, or writable handling of special repository features. They never guess among multiple remotes, package managers, base branches, monorepo scopes, or working directories.
 
 ## Review flow
 
-The interactive review is presented as one batch:
+The default interactive review is one batch:
 
 1. Discovery
 2. Safe defaults
-3. Ambiguous decisions
-4. Repository summaries and exact approvals
-5. Source configuration diff
-6. Apply
+3. Any genuinely ambiguous decision
+4. One consolidated review of every repository policy, decision, reason, and source-config diff
 
-Repository approvals are not preselected, and the final apply confirmation defaults to no. `--plan-only` stops after the configuration diff.
+At the review prompt, press Enter to accept the whole batch, `e` to change one selected decision through its existing bounded prompt, or `q` to abort. Aborting a newly started session writes no configuration generation or runtime state and removes its provisional session and lock records. Aborting a resumed session preserves it for later use. `--plan-only` stops after rendering this review.
 
 ## Automation
 
-`--non-interactive` never loads Rich or InquirerPy and never infers decisions. Supply exact decisions and approvals:
+`--yes` is the zero-prompt counterpart to accepting the default interactive review. It applies only fail-closed recommendations and exact proposal approvals; if a decision remains ambiguous, it returns exit code `3` without writing configuration or runtime state:
+
+```bash
+rf onboard /absolute/projects/root --yes --tunnel-id tunnel_...
+```
+
+`--non-interactive` remains available for fully specified automation and never loads Rich or InquirerPy. Supply exact decisions and approvals when not using `--yes`:
 
 ```bash
 rf onboard /absolute/projects/root \
@@ -68,4 +72,4 @@ rf onboard /absolute/projects/root \
   --approve approve:PROPOSAL_ID
 ```
 
-Passing `--defaults safe` or `--defaults ask` with `--non-interactive` is rejected so automated runs remain deterministic and auditable.
+`--defaults ask` remains interactive-only. `--defaults safe` is accepted with `--non-interactive` only for compatibility; it does not infer decisions unless `--yes` is also supplied.

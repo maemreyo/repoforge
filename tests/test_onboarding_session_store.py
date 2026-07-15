@@ -38,3 +38,15 @@ def test_store_rejects_corrupt_payload(tmp_path: Path) -> None:
     path.write_text("{bad", encoding="utf-8")
     with pytest.raises(ConfigError, match="SESSION_CORRUPT"):
         store.read("a" * 24)
+
+
+def test_store_discards_provisional_session_and_lock_artifact(tmp_path: Path) -> None:
+    locks = FcntlLockManager(tmp_path / "locks")
+    store = JsonOnboardingStore(tmp_path, locks)
+    session = store.create(make_session())
+    lock_path = locks.path_for(f"onboarding-{session.session_id}")
+
+    store.discard(session.session_id)
+
+    assert store.read(session.session_id) is None
+    assert not lock_path.exists()
