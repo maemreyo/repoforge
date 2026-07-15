@@ -115,6 +115,17 @@ EXTERNAL_WRITE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 )
 
+_WORKSPACE_CREATE_DESCRIPTION = (
+    "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\n"
+    "retries. Create one workspace per issue; pass issue_ids only when several dependent\n"
+    "(stacked) issues are deliberately worked in this same workspace. issue_ids is\n"
+    "display-only metadata, not validated against any tracker."
+)
+_WORKSPACE_LIST_DESCRIPTION = (
+    "Use this when resuming work or finding active RepoForge workspaces; each entry reports age,\n"
+    "dirty state, and linked issue_ids to help decide what to reuse or remove."
+)
+
 
 def _canonical_ast_value(value: object) -> object:
     """Serialize selected AST nodes without Python-minor-specific pretty-printing."""
@@ -405,6 +416,7 @@ def create_server(
 
     @mcp.tool(
         title="Create isolated coding workspace",
+        description=_WORKSPACE_CREATE_DESCRIPTION,
         annotations=LOCAL_CREATE,
         structured_output=True,
     )
@@ -428,7 +440,12 @@ def create_server(
             tuple(issue_ids or ()),
         )
 
-    @mcp.tool(title="List coding workspaces", annotations=READ_ONLY, structured_output=True)
+    @mcp.tool(
+        title="List coding workspaces",
+        description=_WORKSPACE_LIST_DESCRIPTION,
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
     def workspace_list() -> dict[str, Any]:
         """Use this when resuming work or finding active RepoForge workspaces; each entry reports age,
         dirty state, and linked issue_ids to help decide what to reuse or remove."""
