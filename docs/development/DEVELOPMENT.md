@@ -114,6 +114,18 @@ When configuration fields or defaults change:
 5. document required operator actions;
 6. verify that permissions were not silently broadened.
 
+### Repository policy presets
+
+A resolved repository table can set `policy = "strict" | "standard" | "relaxed"`. The typed loader expands the selected preset into the reviewed lock, then lets explicitly supplied repository fields win. A path-only repository table uses `strict`; existing expanded repository tables remain compatible without a preset.
+
+| Preset | Read-only | Publishing | Changed files | Diff lines | Changed bytes |
+| --- | --- | --- | ---: | ---: | ---: |
+| `strict` | yes | no | 25 | 2,000 | 5 MiB |
+| `standard` | no | no | 75 | 6,000 | 10 MiB |
+| `relaxed` | no | yes | 150 | 12,000 | 25 MiB |
+
+All presets preserve hard safety invariants: protected branches, canonical path enforcement, denied paths, and symlink/submodule escape protections. `relaxed` is not an unrestricted policy.
+
 ## Documentation changes
 
 Documentation should be written in clear professional English. Keep commands executable, avoid

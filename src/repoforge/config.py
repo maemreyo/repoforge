@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import tomli as tomllib
 
@@ -56,8 +57,53 @@ DEFAULT_DENIED_PATHS = (
     "**/*credential*",
     ".github/workflows/**",
 )
+DEFAULT_PROTECTED_BRANCHES = ("main", "master", "develop", "production")
+_POLICY_PRESETS: dict[str, dict[str, bool | int]] = {
+    "strict": {
+        "read_only": True,
+        "publish_enabled": False,
+        "require_verification_before_commit": True,
+        "fetch_before_workspace": False,
+        "max_changed_files": 25,
+        "max_diff_lines": 2_000,
+        "max_total_changed_bytes": 5 * 1024 * 1024,
+    },
+    "standard": {
+        "read_only": False,
+        "publish_enabled": False,
+        "require_verification_before_commit": True,
+        "fetch_before_workspace": False,
+        "max_changed_files": 75,
+        "max_diff_lines": 6_000,
+        "max_total_changed_bytes": 10 * 1024 * 1024,
+    },
+    "relaxed": {
+        "read_only": False,
+        "publish_enabled": True,
+        "require_verification_before_commit": True,
+        "fetch_before_workspace": True,
+        "max_changed_files": 150,
+        "max_diff_lines": 12_000,
+        "max_total_changed_bytes": 25 * 1024 * 1024,
+    },
+}
 _SAFE_BRANCH_COMPONENT = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SAFE_REPO_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def policy_preset_reference() -> tuple[tuple[str, bool, bool, int, int, int], ...]:
+    """Return the stable, reviewable values expanded from named repository presets."""
+    return tuple(
+        (
+            name,
+            bool(values["read_only"]),
+            bool(values["publish_enabled"]),
+            int(values["max_changed_files"]),
+            int(values["max_diff_lines"]),
+            int(values["max_total_changed_bytes"]),
+        )
+        for name, values in _POLICY_PRESETS.items()
+    )
 
 
 @dataclass(frozen=True)
@@ -179,6 +225,18 @@ def _safe_remote(value: str, context: str) -> str:
     return value
 
 
+def _resolve_repository_preset(raw: dict[str, Any], repo_id: str) -> dict[str, Any]:
+    policy = raw.get("policy")
+    if policy is None:
+        # A path-only table is the new minimal form. Existing expanded tables retain
+        # their historical field defaults until an operator explicitly selects a preset.
+        return {**_POLICY_PRESETS["strict"], **raw} if set(raw) == {"path"} else raw
+    if not isinstance(policy, str) or policy not in _POLICY_PRESETS:
+        allowed = ", ".join(("strict", "standard", "relaxed"))
+        raise ConfigError(f"repositories.{repo_id}.policy must be one of: {allowed}")
+    return {**_POLICY_PRESETS[policy], **raw}
+
+
 def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
     if raw is None:
         return {}
@@ -237,13 +295,16 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
     return profiles
 
 
-def _enum_value(enum_type: type[Any], value: Any, context: str) -> Any:
+_EnumValue = TypeVar("_EnumValue", bound=Enum)
+
+
+def _enum_value(enum_type: type[_EnumValue], value: Any, context: str) -> _EnumValue:
     if not isinstance(value, str):
         raise ConfigError(f"{context} must be a string")
     try:
         return enum_type(value)
     except ValueError as exc:
-        allowed = sorted(item.value for item in enum_type)
+        allowed = sorted(str(item.value) for item in enum_type)
         raise ConfigError(f"{context} must be one of {allowed}") from exc
 
 
@@ -481,7 +542,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     for repo_id, repo_raw_any in repositories_raw.items():
         if not _SAFE_REPO_ID.fullmatch(repo_id):
             raise ConfigError(f"Unsafe repository id: {repo_id!r}")
-        repo_raw = _expect_mapping(repo_raw_any, f"repositories.{repo_id}")
+        repo_raw = _resolve_repository_preset(
+            _expect_mapping(repo_raw_any, f"repositories.{repo_id}"), repo_id
+        )
         if "path" not in repo_raw:
             raise ConfigError(f"repositories.{repo_id}.path is required")
         default_base = _safe_ref(
@@ -508,7 +571,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 f"{branch_prefix!r}"
             )
         protected = _tuple_of_strings(
-            repo_raw.get("protected_branches", ["main", "master", "develop", "production"]),
+            repo_raw.get("protected_branches", list(DEFAULT_PROTECTED_BRANCHES)),
             f"repositories.{repo_id}.protected_branches",
         )
         profiles = _load_profiles(repo_raw.get("profiles"), repo_id)
