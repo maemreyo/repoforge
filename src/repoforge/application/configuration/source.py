@@ -99,15 +99,22 @@ def render_source(config: SourceConfiguration) -> str:
                 "[[repo]]",
                 f"id = {json.dumps(repo.repo_id)}",
                 f"path = {json.dumps(repo.path)}",
-                f"policy_template = {json.dumps(repo.policy_template)}",
-                "decisions = ["
-                + ", ".join(json.dumps(f"{key}={value}") for key, value in repo.decisions)
-                + "]",
-                "policy_overrides = ["
-                + ", ".join(json.dumps(f"{key}={value}") for key, value in repo.policy_overrides)
-                + "]",
             ]
         )
+        if repo.policy_template != "standard":
+            lines.append(f"policy_template = {json.dumps(repo.policy_template)}")
+        if repo.decisions:
+            lines.append(
+                "decisions = ["
+                + ", ".join(json.dumps(f"{key}={value}") for key, value in repo.decisions)
+                + "]"
+            )
+        if repo.policy_overrides:
+            lines.append(
+                "policy_overrides = ["
+                + ", ".join(json.dumps(f"{key}={value}") for key, value in repo.policy_overrides)
+                + "]"
+            )
         if repo.proposal_id:
             lines.append(f"proposal_id = {json.dumps(repo.proposal_id)}")
     return "\n".join(lines).rstrip() + "\n"

@@ -25,6 +25,9 @@ def test_local_only_source_round_trips_without_tunnel_section() -> None:
     )
     text = render_source(source)
     assert "[tunnel]" not in text
+    assert "policy_template" not in text
+    assert "decisions" not in text
+    assert "policy_overrides" not in text
     assert parse_source(text) == source
 
 
