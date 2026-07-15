@@ -6,6 +6,7 @@ from pathlib import Path
 from ...domain.errors import ErrorCode, WorkspaceError
 from ...domain.workspace import WORKSPACE_REFRESH_RECEIPTS, WorkspaceRefreshBinding
 from ..context import ApplicationContext
+from ..fingerprint_cache import read_fingerprint
 from .base_status import collect_workspace_base_status
 
 
@@ -39,12 +40,13 @@ class WorkspaceRefreshPreviewResult:
 
 def require_refresh_snapshot(
     ctx: ApplicationContext,
+    workspace_id: str,
     path: Path,
     expected_head_sha: str,
     expected_fingerprint: str,
 ) -> tuple[str, str]:
     head = ctx.git.head_sha(path)
-    fingerprint = ctx.git.fingerprint(path)
+    fingerprint = read_fingerprint(ctx.fingerprint_cache, workspace_id, ctx.git, path).fingerprint
     if head != expected_head_sha or fingerprint != expected_fingerprint:
         raise WorkspaceError(
             "STALE_REFRESH_PREVIEW: workspace HEAD or fingerprint changed",
@@ -92,6 +94,7 @@ class WorkspaceRefreshPreviewer:
                 record = self.ctx.store.load(command.workspace_id)
                 head, fingerprint = require_refresh_snapshot(
                     self.ctx,
+                    command.workspace_id,
                     path,
                     command.expected_head_sha,
                     command.expected_fingerprint,
@@ -105,6 +108,7 @@ class WorkspaceRefreshPreviewer:
                 )
                 require_refresh_snapshot(
                     self.ctx,
+                    command.workspace_id,
                     path,
                     command.expected_head_sha,
                     command.expected_fingerprint,

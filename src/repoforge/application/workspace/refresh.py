@@ -10,7 +10,7 @@ from ...domain.workspace import (
     refresh_preview_target,
 )
 from ..context import ApplicationContext
-from ..fingerprint_cache import compute_validity_token
+from ..fingerprint_cache import prime_fingerprint
 from .base_status import collect_workspace_base_status
 from .refresh_preview import refresh_binding, require_refresh_snapshot
 
@@ -68,6 +68,7 @@ class WorkspaceRefresher:
                     raise WorkspaceError("Protected or base branches cannot be refreshed")
                 old_head, old_fingerprint = require_refresh_snapshot(
                     self.ctx,
+                    command.workspace_id,
                     path,
                     command.expected_head_sha,
                     command.expected_fingerprint,
@@ -108,13 +109,12 @@ class WorkspaceRefresher:
 
                 merged = self.ctx.git.merge_no_ff(path, repo, preview_target)
                 if merged.status == "conflict":
-                    cache = self.ctx.fingerprint_cache
-                    if cache is not None:
-                        cache.invalidate(command.workspace_id)
-                    recovered_fingerprint = self.ctx.git.fingerprint(path)
-                    if cache is not None:
-                        token = compute_validity_token(self.ctx.git, path)
-                        cache.set(command.workspace_id, recovered_fingerprint, token)
+                    recovered_fingerprint = prime_fingerprint(
+                        self.ctx.fingerprint_cache,
+                        command.workspace_id,
+                        self.ctx.git,
+                        path,
+                    ).fingerprint
                     recovered = (
                         merged.head_sha == old_head
                         and recovered_fingerprint == old_fingerprint
@@ -151,6 +151,12 @@ class WorkspaceRefresher:
                     if merged.head_sha != old_head:
                         try:
                             self.ctx.git.reset_hard(path, old_head)
+                            _ = prime_fingerprint(
+                                self.ctx.fingerprint_cache,
+                                command.workspace_id,
+                                self.ctx.git,
+                                path,
+                            )
                         except Exception as rollback_exc:
                             raise WorkspaceError(
                                 "Workspace refresh merged but registry persistence and rollback both failed",
@@ -160,6 +166,12 @@ class WorkspaceRefresher:
                         "Workspace refresh registry update failed; Git state was restored",
                         retryable=True,
                     ) from exc
+                _ = prime_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    command.workspace_id,
+                    self.ctx.git,
+                    path,
+                )
                 return WorkspaceRefreshResult(
                     command.workspace_id,
                     merged.status,

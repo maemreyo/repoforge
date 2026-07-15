@@ -100,6 +100,23 @@ def test_workspace_status_recomputes_when_a_dirty_tracked_file_changes_outside_r
     assert executor.full_fingerprint_scans == 2
 
 
+def test_workspace_status_recomputes_when_spaced_untracked_file_changes_outside_repoforge(
+    tmp_path: Path,
+) -> None:
+    service, executor = _service_with_counting_executor(tmp_path)
+    created = service.workspace_create("demo", "fingerprint-cache-spaced-untracked")
+    workspace_id = created["workspace_id"]
+    external = Path(created["path"]).joinpath("external file.txt")
+    external.write_text("first\n")
+    before = service.workspace_status(workspace_id)
+
+    external.write_text("other\n")
+    after = service.workspace_status(workspace_id)
+
+    assert after["workspace_fingerprint"] != before["workspace_fingerprint"]
+    assert executor.full_fingerprint_scans == 2
+
+
 def test_apply_patch_primes_cached_post_mutation_fingerprint(tmp_path: Path) -> None:
     service, executor = _service_with_counting_executor(tmp_path)
     workspace_id = service.workspace_create("demo", "fingerprint-cache-patch")["workspace_id"]

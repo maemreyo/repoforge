@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final
 
 if TYPE_CHECKING:
     from ..ports.git import GitRepository
@@ -27,12 +27,13 @@ class FingerprintLookup:
     duration_ms: float
 
 
+@final
 class FingerprintCache:
     """Stores workspace fingerprints guarded by the caller's workspace lock."""
 
     def __init__(self) -> None:
         self._data: dict[str, CachedFingerprint] = {}
-        self._lock = threading.Lock()
+        self._lock: threading.Lock = threading.Lock()
 
     def get(self, workspace_id: str) -> CachedFingerprint | None:
         with self._lock:
@@ -44,14 +45,22 @@ class FingerprintCache:
 
     def invalidate(self, workspace_id: str) -> None:
         with self._lock:
-            self._data.pop(workspace_id, None)
+            _ = self._data.pop(workspace_id, None)
 
 
 def _status_path_metadata(path: Path, status: bytes) -> bytes:
     digest = hashlib.sha256()
     for entry in (item for item in status.split(b"\0") if item):
-        if entry.startswith((b"1 ", b"2 ", b"u ", b"? ")):
-            raw_path = entry.split(b" ")[-1]
+        raw_path: bytes | None = None
+        if entry.startswith(b"1 "):
+            raw_path = entry.split(b" ", 8)[8]
+        elif entry.startswith(b"2 "):
+            raw_path = entry.split(b" ", 9)[9]
+        elif entry.startswith(b"u "):
+            raw_path = entry.split(b" ", 10)[10]
+        elif entry.startswith(b"? "):
+            raw_path = entry[2:]
+        if raw_path is not None:
             candidate = path / os.fsdecode(raw_path)
             try:
                 metadata = candidate.lstat()
@@ -59,7 +68,10 @@ def _status_path_metadata(path: Path, status: bytes) -> bytes:
                 digest.update(b"\0missing\0")
             else:
                 digest.update(
-                    f"{metadata.st_mode}:{metadata.st_size}:{metadata.st_mtime_ns}".encode()
+                    (
+                        f"{metadata.st_dev}:{metadata.st_ino}:{metadata.st_mode}:"
+                        f"{metadata.st_size}:{metadata.st_mtime_ns}:{metadata.st_ctime_ns}"
+                    ).encode()
                 )
         digest.update(b"\0")
     return digest.digest()
