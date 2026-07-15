@@ -195,9 +195,9 @@ automatically expire or remove workspaces.
 
 | Tool | Purpose |
 |---|---|
-| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. |
-| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, and explicit mutation reporting. |
-| `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. |
+| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. |
+| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, and explicit mutation reporting. Cheaper than a full profile run for iterating on a single failing path during development. |
+| `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. Run this once per workspace, right before commit — not on every edit. |
 | `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. |
 | `workspace_push` | Push the workspace branch without force and record the pushed commit SHA. |
 | `workspace_create_draft_pr` | Create a draft pull request with configured labels, reviewers, and maintainer-edit policy. |
@@ -207,6 +207,15 @@ automatically expire or remove workspaces.
 | `workspace_pr_watch` | Start a durable, cancellable, resumable watch bound to the exact pushed workspace and PR head; use operation tools for status and cancellation. |
 | `workspace_pr_check_details` | Resolve one exact `check-run:<id>` selector into bounded Check Run identity, status, attempt, failed-step, annotation, and source metadata. |
 | `workspace_pr_failure_evidence` | Return a redacted, bounded failure excerpt, class, hash, retryability, source coverage, uncertainty, and truncation metadata for one selected Check Run. |
+
+Repository `risk.ordered_profiles` typically ranges from a fast `quick` profile through an intermediate
+`test` profile up to a slower `full` profile, plus optional single-target diagnostics. Use the cheapest
+option that answers the question during the edit-test loop — `quick` or `workspace_run_diagnostic` — and
+run `full` (or the repository default passed to `workspace_verify`) only once, right before
+`workspace_commit`. Repeating the full profile on every edit wastes its entire timeout budget on runs
+that were always going to fail early; a `quick` or diagnostic failure surfaces the same problem sooner
+and cheaper. `workspace_commit` still requires the exact tree that the most recent successful
+`workspace_verify` receipt covers.
 
 A diagnostic profile is part of the reviewed repository configuration. It fixes the executable and argv
 template, selector kind, working directory, timeout, local-only network declaration, mutability, parser,

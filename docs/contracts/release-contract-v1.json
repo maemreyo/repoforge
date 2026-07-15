@@ -77,7 +77,7 @@
   },
   "contract_version": 1,
   "mcp": {
-    "server_instructions_sha256": "845ae7608db08e572694092f7ca317afaf098a0415325acdb3dd1f48fec57500",
+    "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
     "tool_surface_hash": "e5819068e2bfc890c219494fa29de5329e773b4e11a2c60d5f05bddf5df0e9f1",
     "tools": [
       {
@@ -1756,7 +1756,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile; the response carries a fresh fingerprint and head_sha for the next locked call.",
+        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "profile_name": {

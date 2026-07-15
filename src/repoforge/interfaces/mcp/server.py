@@ -89,7 +89,7 @@ class _ServiceErrorBoundary:
             ) from exc
 
 
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. Run workspace_verify before commit; never claim\nverification succeeded unless the tool returned success. Commit, push, and create only draft pull\nrequests. Never merge, force-push, modify protected branches, request secrets, or bypass\npath/change-budget policies. Use workspace_restore_paths to safely undo selected uncommitted mistakes\nafter refreshing status. Use workspace_list to review workspace age, dirty state, and issue_ids before\nremoving or reusing a workspace.".strip()
+SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull (or repository-default) verification profile for one run via workspace_verify immediately before\ncommit; never claim verification succeeded unless the tool returned success. Commit, push, and create\nonly draft pull requests. Never merge, force-push, modify protected branches, request secrets, or\nbypass path/change-budget policies. Use workspace_restore_paths to safely undo selected uncommitted\nmistakes after refreshing status. Use workspace_list to review workspace age, dirty state, and\nissue_ids before removing or reusing a workspace.".strip()
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
@@ -565,7 +565,7 @@ def create_server(
         structured_output=True,
     )
     def workspace_run_profile(workspace_id: str, profile_name: str) -> dict[str, Any]:
-        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile; the response carries a fresh fingerprint and head_sha for the next locked call."""
+        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call."""
         return bounded_service.call("workspace_run_profile", workspace_id, profile_name)
 
     @mcp.tool(
