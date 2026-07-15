@@ -23,6 +23,11 @@ from .domain.diagnostics import (
 from .domain.errors import ConfigError
 from .domain.provider_config import load_provider_manifests
 from .domain.provider_manifest import ProviderManifest
+from .domain.resource_budget import (
+    DEFAULT_RESOURCE_BUDGET,
+    RESOURCE_BUDGET_FIELDS,
+    ResourceBudget,
+)
 from .domain.risk import RiskPolicy, default_risk_policy
 from .domain.user_paths import (
     DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
@@ -117,39 +122,6 @@ class ProfileConfig:
     verification: bool = False
     timeout_seconds: int | None = None
     working_directory: str | None = None
-
-
-@dataclass(frozen=True)
-class ResourceBudget:
-    max_cpu_seconds_per_operation: int = 900
-    max_memory_bytes: int = 2 * 1024 * 1024 * 1024
-    max_disk_bytes: int = 10 * 1024 * 1024 * 1024
-    max_subprocesses: int = 8
-    max_concurrent_operations: int = 4
-    max_queued_operations: int = 32
-    max_network_bytes: int = 100 * 1024 * 1024
-    max_output_bytes: int = 120_000
-    task_ttl_seconds: int = 86_400
-    max_cache_bytes: int = 2 * 1024 * 1024 * 1024
-    max_index_bytes: int = 2 * 1024 * 1024 * 1024
-    max_provider_requests: int = 100
-
-
-DEFAULT_RESOURCE_BUDGET = ResourceBudget()
-_RESOURCE_BUDGET_FIELDS = (
-    "max_cpu_seconds_per_operation",
-    "max_memory_bytes",
-    "max_disk_bytes",
-    "max_subprocesses",
-    "max_concurrent_operations",
-    "max_queued_operations",
-    "max_network_bytes",
-    "max_output_bytes",
-    "task_ttl_seconds",
-    "max_cache_bytes",
-    "max_index_bytes",
-    "max_provider_requests",
-)
 
 
 @dataclass(frozen=True)
@@ -251,11 +223,11 @@ def _load_resource_budget(
     if raw is None:
         return defaults
     table = _expect_mapping(raw, context)
-    unknown = sorted(set(table) - set(_RESOURCE_BUDGET_FIELDS))
+    unknown = sorted(set(table) - set(RESOURCE_BUDGET_FIELDS))
     if unknown:
         raise ConfigError(f"{context} contains unsupported budget fields: {unknown}")
     values: dict[str, int] = {}
-    for field_name in _RESOURCE_BUDGET_FIELDS:
+    for field_name in RESOURCE_BUDGET_FIELDS:
         default = getattr(defaults, field_name)
         configured = _positive_int(table.get(field_name), default, f"{context}.{field_name}")
         if ceiling is not None and configured > getattr(ceiling, field_name):

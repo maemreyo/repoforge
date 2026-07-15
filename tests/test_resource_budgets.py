@@ -6,8 +6,10 @@ import pytest
 
 from repoforge.application.configuration.document import parse_resolved, render_resolved
 from repoforge.application.service import CodingService
-from repoforge.config import load_config
+from repoforge.config import DEFAULT_RESOURCE_BUDGET, load_config
+from repoforge.domain.config_generation import CapabilityDeltaKind, classify_capability_delta
 from repoforge.domain.errors import ConfigError
+from repoforge.domain.resource_budget import RESOURCE_BUDGET_FIELDS
 
 
 def _config_text(repo: Path, server_budget: str = "", repository_budget: str = "") -> str:
@@ -138,3 +140,53 @@ def test_resolved_config_renders_resource_budget_tables_deterministically() -> N
     assert "[server.resource_budget]" in rendered
     assert "[repositories.demo.resource_budget]" in rendered
     assert rendered.index("[server.resource_budget]") < rendered.index("[repositories.demo]")
+
+
+def test_resource_budget_delta_classifies_tightening_as_restriction() -> None:
+    current = """[server]
+[server.resource_budget]
+max_output_bytes = 65536
+[repositories.demo]
+path = "/tmp/demo"
+"""
+    candidate = current.replace("max_output_bytes = 65536", "max_output_bytes = 4096")
+
+    delta = classify_capability_delta(current, candidate)
+
+    assert delta.kind is CapabilityDeltaKind.RESTRICTION
+    assert {change.path for change in delta.changes} == {
+        "server.resource_budget.max_output_bytes",
+        "repositories.demo.resource_budget.max_output_bytes",
+    }
+
+
+def test_resource_budget_delta_classifies_relaxing_as_expansion() -> None:
+    current = """[server]
+[server.resource_budget]
+max_output_bytes = 4096
+[repositories.demo]
+path = "/tmp/demo"
+[repositories.demo.resource_budget]
+max_output_bytes = 1024
+"""
+    candidate = current.replace("max_output_bytes = 1024", "max_output_bytes = 2048")
+
+    delta = classify_capability_delta(current, candidate)
+
+    assert delta.kind is CapabilityDeltaKind.EXPANSION
+    assert delta.changes[0].path == "repositories.demo.resource_budget.max_output_bytes"
+
+
+def test_omitted_budget_is_equivalent_to_explicit_conservative_defaults() -> None:
+    current = """[server]
+[repositories.demo]
+path = "/tmp/demo"
+"""
+    budget_lines = "\n".join(
+        f"{field} = {getattr(DEFAULT_RESOURCE_BUDGET, field)}" for field in RESOURCE_BUDGET_FIELDS
+    )
+    candidate = current.replace(
+        "[repositories.demo]", f"[server.resource_budget]\n{budget_lines}\n[repositories.demo]"
+    )
+
+    assert classify_capability_delta(current, candidate).kind is CapabilityDeltaKind.EQUIVALENT

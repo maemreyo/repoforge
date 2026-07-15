@@ -11,6 +11,12 @@ from typing import Any
 
 import tomli as tomllib
 
+from .resource_budget import (
+    DEFAULT_RESOURCE_BUDGET,
+    RESOURCE_BUDGET_FIELDS,
+    resource_budget_values,
+)
+
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -144,6 +150,24 @@ def canonical_config(text: str) -> dict[str, Any]:
         raise ValueError("Resolved configuration must be a TOML table")
     result = json.loads(json.dumps(value))
     result.pop("repoforge_lock", None)
+    default_budget = resource_budget_values(DEFAULT_RESOURCE_BUDGET)
+    server = result.setdefault("server", {})
+    if isinstance(server, dict):
+        raw_server_budget = server.get("resource_budget", {})
+        if isinstance(raw_server_budget, dict):
+            server_budget = {**default_budget, **raw_server_budget}
+            server["resource_budget"] = server_budget
+            repositories = result.get("repositories", {})
+            if isinstance(repositories, dict):
+                for repository in repositories.values():
+                    if not isinstance(repository, dict):
+                        continue
+                    raw_repository_budget = repository.get("resource_budget", {})
+                    if isinstance(raw_repository_budget, dict):
+                        repository["resource_budget"] = {
+                            **server_budget,
+                            **raw_repository_budget,
+                        }
     return dict(result)
 
 
@@ -448,6 +472,61 @@ def _record_number(
         )
 
 
+def _record_resource_budget_changes(
+    changes: list[CapabilityChange],
+    path: str,
+    before: object,
+    after: object,
+    *,
+    before_defaults: dict[str, int],
+    after_defaults: dict[str, int],
+) -> None:
+    if before is not None and not isinstance(before, dict):
+        changes.append(
+            CapabilityChange(
+                path,
+                before,
+                after,
+                CapabilityDeltaKind.INCOMPATIBLE,
+                "resource budget changed to a non-table value",
+            )
+        )
+        return
+    if after is not None and not isinstance(after, dict):
+        changes.append(
+            CapabilityChange(
+                path,
+                before,
+                after,
+                CapabilityDeltaKind.INCOMPATIBLE,
+                "resource budget changed to a non-table value",
+            )
+        )
+        return
+    left = {**before_defaults, **(before or {})}
+    right = {**after_defaults, **(after or {})}
+    unknown = sorted((set(left) | set(right)) - set(RESOURCE_BUDGET_FIELDS))
+    if unknown:
+        changes.append(
+            CapabilityChange(
+                path,
+                tuple(unknown),
+                tuple(unknown),
+                CapabilityDeltaKind.INCOMPATIBLE,
+                "resource budget contains unknown fields",
+            )
+        )
+        return
+    for field in RESOURCE_BUDGET_FIELDS:
+        _record_number(
+            changes,
+            f"{path}.{field}",
+            left.get(field, 0),
+            right.get(field, 0),
+            reason="resource budget",
+        )
+
+
 _REPO_RECOGNIZED = {
     "path",
     "display_name",
@@ -471,6 +550,7 @@ _REPO_RECOGNIZED = {
     "no_maintainer_edit",
     "profiles",
     "diagnostics",
+    "resource_budget",
 }
 _SERVER_RECOGNIZED = {
     "workspace_root",
@@ -483,6 +563,7 @@ _SERVER_RECOGNIZED = {
     "max_batch_files",
     "path_prefixes",
     "allowed_environment",
+    "resource_budget",
 }
 
 
@@ -556,6 +637,25 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
     changes: list[CapabilityChange] = []
     before_repos = _repo_map(before)
     after_repos = _repo_map(after)
+    before_server = before.get("server", {}) if isinstance(before.get("server"), dict) else {}
+    after_server = after.get("server", {}) if isinstance(after.get("server"), dict) else {}
+    default_budget = resource_budget_values(DEFAULT_RESOURCE_BUDGET)
+    before_server_budget = {
+        **default_budget,
+        **(
+            before_server.get("resource_budget", {})
+            if isinstance(before_server.get("resource_budget"), dict)
+            else {}
+        ),
+    }
+    after_server_budget = {
+        **default_budget,
+        **(
+            after_server.get("resource_budget", {})
+            if isinstance(after_server.get("resource_budget"), dict)
+            else {}
+        ),
+    }
     _record_set_change(
         changes,
         "repositories",
@@ -645,6 +745,14 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             )
         _record_profile_changes(changes, prefix + ".profiles", left, right)
         _record_diagnostic_changes(changes, prefix + ".diagnostics", left, right)
+        _record_resource_budget_changes(
+            changes,
+            prefix + ".resource_budget",
+            left.get("resource_budget"),
+            right.get("resource_budget"),
+            before_defaults=before_server_budget,
+            after_defaults=after_server_budget,
+        )
         for field, reason in (
             ("max_changed_files", "changed-file budget"),
             ("max_diff_lines", "diff-line budget"),
@@ -698,8 +806,6 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             reason="network fetch capability changed",
         )
 
-    before_server = before.get("server", {}) if isinstance(before.get("server"), dict) else {}
-    after_server = after.get("server", {}) if isinstance(after.get("server"), dict) else {}
     if before_server.get("workspace_root") != after_server.get(
         "workspace_root"
     ) or before_server.get("state_root") != after_server.get("state_root"):
@@ -740,6 +846,14 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             after_server.get(field, 0),
             reason=reason,
         )
+    _record_resource_budget_changes(
+        changes,
+        "server.resource_budget",
+        before_server.get("resource_budget"),
+        after_server.get("resource_budget"),
+        before_defaults=default_budget,
+        after_defaults=default_budget,
+    )
 
     residual_before = _unclassified(before)
     residual_after = _unclassified(after)
