@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
-    "tool_surface_hash": "e5819068e2bfc890c219494fa29de5329e773b4e11a2c60d5f05bddf5df0e9f1",
+    "tool_surface_hash": "58a72cecd1299b5b84c854f609362166264b6e9a085b92398c191d79ef8cfd9d",
     "tools": [
       {
         "annotations": {

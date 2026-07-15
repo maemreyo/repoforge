@@ -365,7 +365,9 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
     metrics = JsonMetricsSink(tmp_path, locks, FixedClock())
     assert metrics.snapshot() == {"version": 2, "operations": {}, "buckets": {}}
 
-    path.write_text(json.dumps({"version": 2, "operations": {}, "buckets": "not-a-dict"}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"version": 2, "operations": {}, "buckets": "not-a-dict"}), encoding="utf-8"
+    )
     assert metrics.snapshot()["buckets"] == {}
 
     path.write_text(json.dumps({"version": 2, "operations": "not-a-dict"}), encoding="utf-8")

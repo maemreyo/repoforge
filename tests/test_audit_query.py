@@ -75,9 +75,7 @@ def test_read_audit_events_missing_file_returns_empty(tmp_path: Path) -> None:
 def test_read_audit_events_skips_malformed_lines(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     path.write_text(
-        '{"action": "ok", "success": true, "details": {}}\n'
-        "not-json\n"
-        "[1, 2, 3]\n",
+        '{"action": "ok", "success": true, "details": {}}\nnot-json\n[1, 2, 3]\n',
         encoding="utf-8",
     )
     events = read_audit_events(path, limit=10)
@@ -127,9 +125,7 @@ def test_summarize_operation_metrics_matches_real_metrics_sink(tmp_path: Path) -
     locks = InMemoryLockManager()
     metrics = JsonMetricsSink(tmp_path, locks)
     metrics.record("workspace_commit", success=True, duration_ms=42.0, error_code=None)
-    metrics.record(
-        "workspace_commit", success=False, duration_ms=8.0, error_code="STALE_STATE"
-    )
+    metrics.record("workspace_commit", success=False, duration_ms=8.0, error_code="STALE_STATE")
 
     rows = summarize_operation_metrics(metrics.snapshot())
     assert len(rows) == 1
@@ -149,17 +145,13 @@ def test_summarize_operation_metrics_since_aggregates_only_matching_day_buckets(
 
     clock.value = "2026-07-14T00:00:00+00:00"
     metrics.record("workspace_commit", success=True, duration_ms=10.0, error_code=None)
-    metrics.record(
-        "workspace_commit", success=False, duration_ms=30.0, error_code="STALE_STATE"
-    )
+    metrics.record("workspace_commit", success=False, duration_ms=30.0, error_code="STALE_STATE")
 
     clock.value = "2026-07-15T00:00:00+00:00"
     metrics.record("workspace_commit", success=True, duration_ms=1_000.0, error_code=None)
 
     # Window covers only 07-14: the 07-13 and 07-15 calls must not be counted.
-    rows = summarize_operation_metrics(
-        metrics.snapshot(), since="2026-07-14", until="2026-07-14"
-    )
+    rows = summarize_operation_metrics(metrics.snapshot(), since="2026-07-14", until="2026-07-14")
     assert len(rows) == 1
     row = rows[0]
     assert row["action"] == "workspace_commit"
@@ -276,7 +268,5 @@ def test_summarize_operation_metrics_since_matches_manual_jsonl_aggregation(
         actual = rows[action]
         assert actual["count"] == expected["count"]
         assert actual["failures"] == expected["failures"]
-        assert actual["duration_ms_avg"] == round(
-            expected["duration_total"] / expected["count"], 3
-        )
+        assert actual["duration_ms_avg"] == round(expected["duration_total"] / expected["count"], 3)
         assert actual["duration_ms_max"] == expected["duration_max"]

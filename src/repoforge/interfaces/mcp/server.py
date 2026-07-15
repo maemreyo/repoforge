@@ -115,6 +115,35 @@ EXTERNAL_WRITE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 )
 
+_WORKSPACE_CREATE_DESCRIPTION = (
+    "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\n"
+    "retries. Create one workspace per issue; pass issue_ids only when several dependent\n"
+    "(stacked) issues are deliberately worked in this same workspace. issue_ids is\n"
+    "display-only metadata, not validated against any tracker."
+)
+_WORKSPACE_LIST_DESCRIPTION = (
+    "Use this when resuming work or finding active RepoForge workspaces; each entry reports age,\n"
+    "dirty state, and linked issue_ids to help decide what to reuse or remove."
+)
+
+
+def _canonical_ast_value(value: object) -> object:
+    """Serialize selected AST nodes without Python-minor-specific pretty-printing."""
+
+    if isinstance(value, ast.AST):
+        return {
+            "node": type(value).__name__,
+            "fields": {
+                name: _canonical_ast_value(field_value)
+                for name, field_value in sorted(ast.iter_fields(value))
+            },
+        }
+    if isinstance(value, list):
+        return [_canonical_ast_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_canonical_ast_value(item) for item in value]
+    return value
+
 
 def tool_surface_hash() -> str:
     module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
@@ -137,19 +166,30 @@ def tool_surface_hash() -> str:
         )
         if decorator is None:
             continue
-        keywords = {k.arg: ast.unparse(k.value) for k in decorator.keywords if k.arg is not None}
+        keywords = {
+            keyword.arg: _canonical_ast_value(keyword.value)
+            for keyword in decorator.keywords
+            if keyword.arg is not None
+        }
         tools.append(
             {
                 "name": node.name,
-                "arguments": ast.unparse(node.args),
-                "returns": ast.unparse(node.returns) if node.returns else "",
-                "title": keywords.get("title", ""),
-                "annotations": keywords.get("annotations", ""),
-                "structured_output": keywords.get("structured_output", ""),
+                "arguments": _canonical_ast_value(node.args),
+                "returns": _canonical_ast_value(node.returns),
+                "title": keywords.get("title"),
+                "annotations": keywords.get("annotations"),
+                "structured_output": keywords.get("structured_output"),
             }
         )
     return hashlib.sha256(
-        json.dumps(sorted(tools, key=lambda x: x["name"]), sort_keys=True).encode()
+        json.dumps(
+            {
+                "schema_version": 2,
+                "tools": sorted(tools, key=lambda item: item["name"]),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
 
 
@@ -359,6 +399,7 @@ def create_server(
 
     @mcp.tool(
         title="Create isolated coding workspace",
+        description=_WORKSPACE_CREATE_DESCRIPTION,
         annotations=LOCAL_CREATE,
         structured_output=True,
     )
@@ -382,7 +423,12 @@ def create_server(
             tuple(issue_ids or ()),
         )
 
-    @mcp.tool(title="List coding workspaces", annotations=READ_ONLY, structured_output=True)
+    @mcp.tool(
+        title="List coding workspaces",
+        description=_WORKSPACE_LIST_DESCRIPTION,
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
     def workspace_list() -> dict[str, Any]:
         """Use this when resuming work or finding active RepoForge workspaces; each entry reports age,
         dirty state, and linked issue_ids to help decide what to reuse or remove."""
