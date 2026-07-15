@@ -49,6 +49,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "repo_issue_next",
             "repo_issue_spec",
             "repo_pr_read",
+            "repo_task_context",
             "workspace_create",
             "workspace_list",
             "workspace_status",

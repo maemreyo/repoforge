@@ -77,8 +77,8 @@
   },
   "contract_version": 1,
   "mcp": {
-    "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
-    "tool_surface_hash": "07a7c67287cc0fa49f603e6b4f2c8847ff377b3b6895dfbd5b320b67d38d5adf",
+    "server_instructions_sha256": "f0724bcb7eca9ba8a6f86da1eaab6007214743ce601bd113c29814b510dc0d37",
+    "tool_surface_hash": "939b0cbd088865113ae1eb2ab01c02a5e02a41dd17536908f17f2146cd1ef011",
     "tools": [
       {
         "annotations": {
@@ -873,6 +873,59 @@
           "type": "object"
         },
         "title": "Inspect repository status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "Use this when starting or resuming a task to assemble repository context, one\nticket's specification, workspace status, and recent commits in a single bounded call\ninstead of chaining repo_context, repo_issue_spec, workspace_status, and\nrepo_recent_commits. Pass issue_number and/or workspace_id to include those sections;\nomitting either yields an explicit null, not an error. A supplied workspace_id must\nbelong to repo_id or the call fails closed. The ticket section reuses the same\nshort-lived local GitHub read cache as repo_issue_spec. Each section is independently\nbounded and reports its own `truncated` flag, and the whole bundle is capped at 96 KB,\ntruncating recent_commits first, then ticket, then workspace, then repository last.",
+        "inputSchema": {
+          "properties": {
+            "issue_number": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Issue Number"
+            },
+            "repo_id": {
+              "title": "Repo Id",
+              "type": "string"
+            },
+            "workspace_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Workspace Id"
+            }
+          },
+          "required": [
+            "repo_id"
+          ],
+          "title": "repo_task_contextArguments",
+          "type": "object"
+        },
+        "name": "repo_task_context",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "repo_task_contextDictOutput",
+          "type": "object"
+        },
+        "title": "Read bounded task-context bundle"
       },
       {
         "annotations": {

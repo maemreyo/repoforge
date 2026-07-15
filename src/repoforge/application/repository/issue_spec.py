@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ...config import RepositoryConfig
 from ...domain.tickets import TicketGraph, TicketLiveMetadata
 from ..context import ApplicationContext
 from ..tickets.graph import compare_live_ticket_metadata
@@ -51,25 +52,44 @@ class RepositoryIssueSpecReader:
         if c.issue_number <= 0:
             raise ValueError("issue_number must be positive")
         repo = self.ctx.repo(c.repo_id)
-        graph = load_repo_ticket_graph(repo.path)
-        node = None
-        if graph is not None:
-            node = next((item for item in graph.nodes if item.number == c.issue_number), None)
-
-        def load_live() -> tuple[dict[str, Any], bool]:
-            return self.ctx.github_read(
-                "issue",
-                c.repo_id,
-                c.issue_number,
-                fresh=c.fresh,
-                loader=lambda: self.ctx.github.issue_read(repo.path, c.issue_number),
-            )
 
         live_payload, cache_hit = self.ctx.audited(
             "repo_issue_spec",
             {"repo_id": c.repo_id, "issue_number": c.issue_number},
-            load_live,
+            lambda: self._load_live(c, repo),
         )
+        return self._assemble(c, repo, live_payload, cache_hit)
+
+    def compute(self, c: RepositoryIssueSpecCommand) -> RepositoryIssueSpecResult:
+        """Pure application logic with no audit event, for embedding in a larger audited bundle."""
+        if c.issue_number <= 0:
+            raise ValueError("issue_number must be positive")
+        repo = self.ctx.repo(c.repo_id)
+        live_payload, cache_hit = self._load_live(c, repo)
+        return self._assemble(c, repo, live_payload, cache_hit)
+
+    def _load_live(
+        self, c: RepositoryIssueSpecCommand, repo: RepositoryConfig
+    ) -> tuple[dict[str, Any], bool]:
+        return self.ctx.github_read(
+            "issue",
+            c.repo_id,
+            c.issue_number,
+            fresh=c.fresh,
+            loader=lambda: self.ctx.github.issue_read(repo.path, c.issue_number),
+        )
+
+    def _assemble(
+        self,
+        c: RepositoryIssueSpecCommand,
+        repo: RepositoryConfig,
+        live_payload: dict[str, Any],
+        cache_hit: bool,
+    ) -> RepositoryIssueSpecResult:
+        graph = load_repo_ticket_graph(repo.path)
+        node = None
+        if graph is not None:
+            node = next((item for item in graph.nodes if item.number == c.issue_number), None)
 
         comments: list[dict[str, Any]] = []
         raw_comments = live_payload.get("comments")

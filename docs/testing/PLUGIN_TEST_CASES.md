@@ -29,6 +29,10 @@ arguments, confirmation prompts, results and unexpected tool calls.
    the same file, then show me the diff.” Expected: one `workspace_replace_text` call with an `edits`
    list carrying all four ordered entries and a single shared `expected_sha256`, not four separate
    `workspace_replace_text` calls.
+10. **Session resume** — “I'm resuming work on issue #460 in my existing work-frontier workspace
+    `<workspace_id>`. Get me caught up in one call.” Expected: one `repo_task_context` call passing both
+    `issue_number: 460` and `workspace_id`; no separate `repo_context`, `repo_issue_spec`, or
+    `workspace_status` calls for the same warm-start.
 
 ## Indirect
 

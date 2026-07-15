@@ -46,6 +46,7 @@ from .repository.status import (
     RepositoryStatusCommand,
     RepositoryStatusReader,
 )
+from .repository.task_context import RepoTaskContextCommand, RepoTaskContextReader
 from .repository.tree import RepositoryTreeCommand, RepositoryTreeReader
 from .workspace.apply_patch import (
     WorkspaceApplyPatchCommand,
@@ -196,6 +197,7 @@ class CodingService:
         self._issue_next = RepositoryIssueNextReader(ctx)
         self._issue_spec = RepositoryIssueSpecReader(ctx)
         self._repo_pr = PullRequestReader(ctx)
+        self._task_context = RepoTaskContextReader(ctx)
         self._create = WorkspaceCreator(ctx)
         self._list = WorkspaceLister(ctx)
         self._status = WorkspaceStatusReader(ctx)
@@ -408,6 +410,18 @@ class CodingService:
 
     def repo_pr_read(self, repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
         return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number, fresh)))
+
+    def repo_task_context(
+        self,
+        repo_id: str,
+        issue_number: int | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._task_context.execute(
+                RepoTaskContextCommand(repo_id, issue_number, workspace_id)
+            )
+        )
 
     def workspace_create(
         self,

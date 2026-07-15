@@ -90,7 +90,7 @@ class _ServiceErrorBoundary:
             ) from exc
 
 
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull (or repository-default) verification profile for one run via workspace_verify immediately before\ncommit; never claim verification succeeded unless the tool returned success. Commit, push, and create\nonly draft pull requests. Never merge, force-push, modify protected branches, request secrets, or\nbypass path/change-budget policies. Use workspace_restore_paths to safely undo selected uncommitted\nmistakes after refreshing status. Use workspace_list to review workspace age, dirty state, and\nissue_ids before removing or reusing a workspace.".strip()
+SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull (or repository-default) verification profile for one run via workspace_verify immediately before\ncommit; never claim verification succeeded unless the tool returned success. Commit, push, and create\nonly draft pull requests. Never merge, force-push, modify protected branches, request secrets, or\nbypass path/change-budget policies. Use workspace_restore_paths to safely undo selected uncommitted\nmistakes after refreshing status. Use workspace_list to review workspace age, dirty state, and\nissue_ids before removing or reusing a workspace.".strip()
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
@@ -424,6 +424,27 @@ def create_server(
         local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read before
         acting on checks or reviews that must not be stale."""
         return bounded_service.call("repo_pr_read", repo_id, pr_number, fresh)
+
+    @mcp.tool(
+        title="Read bounded task-context bundle",
+        annotations=EXTERNAL_READ,
+        structured_output=True,
+    )
+    def repo_task_context(
+        repo_id: str,
+        issue_number: int | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this when starting or resuming a task to assemble repository context, one
+        ticket's specification, workspace status, and recent commits in a single bounded call
+        instead of chaining repo_context, repo_issue_spec, workspace_status, and
+        repo_recent_commits. Pass issue_number and/or workspace_id to include those sections;
+        omitting either yields an explicit null, not an error. A supplied workspace_id must
+        belong to repo_id or the call fails closed. The ticket section reuses the same
+        short-lived local GitHub read cache as repo_issue_spec. Each section is independently
+        bounded and reports its own `truncated` flag, and the whole bundle is capped at 96 KB,
+        truncating recent_commits first, then ticket, then workspace, then repository last."""
+        return bounded_service.call("repo_task_context", repo_id, issue_number, workspace_id)
 
     @mcp.tool(
         title="Create isolated coding workspace",

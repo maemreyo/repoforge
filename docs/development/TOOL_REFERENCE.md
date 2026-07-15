@@ -1,6 +1,6 @@
 # RepoForge tool reference
 
-RepoForge exposes forty-three focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes forty-seven focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
@@ -203,6 +203,22 @@ CLI equivalents are `rf operation status ID`, `rf operation list`, and `rf opera
 | `repo_issue_read` | Read a GitHub issue through `gh` with bounded output. |
 | `repo_issue_spec` | Read one roadmap ticket's manifest node, live GitHub issue, drift, and comment references. |
 | `repo_pr_read` | Read pull-request metadata, files, commits, checks, and reviews through `gh`. |
+| `repo_task_context` | Assemble one bounded warm-start bundle (`repository`, `ticket`, `workspace`, `recent_commits`) for resuming or starting a task in a single call. |
+
+`repo_task_context(repo_id, issue_number=None, workspace_id=None)` replaces the observed 6-8 call
+bootstrap ritual (`repo_list` → `repo_context` → `repo_issue_read`/`repo_issue_spec` →
+`workspace_status`/`workspace_tree`/`workspace_search`) with one bounded call. Each of its four
+sections reuses the exact application logic of `repo_context`, `repo_issue_spec`,
+`workspace_status`, and `repo_recent_commits` (last 5 entries) — it grants no new visibility and
+enforces the same path, redaction, and read bounds as those tools. `ticket` is present only when
+`issue_number` is given and reuses the same short-lived GitHub read cache as `repo_issue_spec`
+(`cache_hit` inside the section); `workspace` is present only when `workspace_id` is given, and a
+`workspace_id` that does not belong to `repo_id` fails closed. The `ticket` section is independently
+bounded to 16 KB, and the whole serialized bundle is hard-capped at 96 KB; on overflow, sections are
+truncated in this order — `recent_commits` first, then `ticket`, then `workspace`, then `repository`
+last — and every truncated section carries an explicit `truncated: true` flag. The call produces
+exactly one audit event (`repo_task_context`) with each present section's `duration_ms`, not one
+event per embedded section.
 
 `repo_issue_read`, `repo_issue_spec`, and `repo_pr_read` serve a repeat read of the same issue or
 pull request within a short TTL (`server.github_read_cache_ttl_seconds`, default 120 seconds, bounded
