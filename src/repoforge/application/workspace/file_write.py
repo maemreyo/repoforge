@@ -65,6 +65,8 @@ class WorkspaceFileWriter:
                         "File does not exist; use expected_sha256='<new>' to create it"
                     )
                 self.ctx.filesystem.write_bytes_atomic(path, data, preserve_mode=True)
+                if self.ctx.fingerprint_cache is not None:
+                    self.ctx.fingerprint_cache.invalidate(c.workspace_id)
                 sha = hashlib.sha256(data).hexdigest()
                 stat = self.ctx.git.diff_stat(workspace)
                 return WorkspaceFileWriteResult(c.workspace_id, normalized, sha, len(data), stat)

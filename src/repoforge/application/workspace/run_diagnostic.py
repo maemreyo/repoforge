@@ -13,6 +13,7 @@ from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityEr
 from ...domain.policy import normalize_relative_path
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
+from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from .diagnostic_parser import parse_diagnostic
 from .diagnostic_selector import resolve_diagnostic_selector
 
@@ -150,6 +151,14 @@ class WorkspaceDiagnosticRunner:
         _, repo, _ = self.ctx.workspace(command.workspace_id)
         profile = _profile(repo, command.diagnostic_id)
 
+        audit_details: dict[str, object] = {
+            "workspace_id": command.workspace_id,
+            "diagnostic_id": command.diagnostic_id,
+            "selector_kind": profile.selector.kind.value,
+            "mutability": profile.mutability.value,
+            "parser": profile.parser.value,
+        }
+
         def operation() -> WorkspaceRunDiagnosticResult:
             with self.ctx.locks.lock(command.workspace_id):
                 fresh, locked_repo, locked_workspace = self.ctx.workspace(command.workspace_id)
@@ -157,7 +166,19 @@ class WorkspaceDiagnosticRunner:
                 command_cwd = _command_cwd(locked_workspace, locked_profile)
                 before_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
                 before_states = _path_state(locked_workspace, before_paths)
-                before_fingerprint = self.ctx.git.fingerprint(locked_workspace)
+                before = read_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    command.workspace_id,
+                    self.ctx.git,
+                    locked_workspace,
+                )
+                before_fingerprint = before.fingerprint
+                audit_details.update(
+                    {
+                        "fingerprint_source": before.source,
+                        "fingerprint_duration_ms": before.duration_ms,
+                    }
+                )
                 if (
                     command.expected_fingerprint is not None
                     and command.expected_fingerprint != before_fingerprint
@@ -192,7 +213,14 @@ class WorkspaceDiagnosticRunner:
                 try:
                     after_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
                 except SecurityError as exc:
-                    after_fingerprint = self.ctx.git.fingerprint(locked_workspace)
+                    after = prime_fingerprint(
+                        self.ctx.fingerprint_cache,
+                        command.workspace_id,
+                        self.ctx.git,
+                        locked_workspace,
+                    )
+                    after_fingerprint = after.fingerprint
+                    audit_details["post_mutation_fingerprint_duration_ms"] = after.duration_ms
                     if (
                         fresh.last_verification is not None
                         and after_fingerprint != before_fingerprint
@@ -205,7 +233,14 @@ class WorkspaceDiagnosticRunner:
                         mutation_possible=True,
                     ) from exc
                 after_states = _path_state(locked_workspace, after_paths)
-                after_fingerprint = self.ctx.git.fingerprint(locked_workspace)
+                after = prime_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    command.workspace_id,
+                    self.ctx.git,
+                    locked_workspace,
+                )
+                after_fingerprint = after.fingerprint
+                audit_details["post_mutation_fingerprint_duration_ms"] = after.duration_ms
                 fingerprint_changed = after_fingerprint != before_fingerprint
                 touched_paths = sorted(
                     path
@@ -299,13 +334,7 @@ class WorkspaceDiagnosticRunner:
 
         return self.ctx.audited(
             "workspace_run_diagnostic",
-            {
-                "workspace_id": command.workspace_id,
-                "diagnostic_id": command.diagnostic_id,
-                "selector_kind": profile.selector.kind.value,
-                "mutability": profile.mutability.value,
-                "parser": profile.parser.value,
-            },
+            audit_details,
             operation,
             mutating=True,
         )

@@ -80,6 +80,19 @@ class GitCliRepository:
             ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=path
         ).stdout
 
+    def status_porcelain_v2(self, path: Path) -> bytes:
+        return self._executor.run_bytes(
+            [
+                "git",
+                "status",
+                "--porcelain=v2",
+                "--untracked-files=all",
+                "-z",
+            ],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        )
+
     def status_short_branch(self, path: Path) -> str:
         return self._executor.run(["git", "status", "--short", "--branch"], cwd=path).combined
 

@@ -9,6 +9,7 @@ from ...domain.workspace import VerificationReceipt
 from ...ports.command import CommandResult
 from ...ports.execution_environment import ApprovedExecution
 from ..context import ApplicationContext
+from ..fingerprint_cache import prime_fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +106,13 @@ class WorkspaceProfileRunner:
                     ]
                 _ = self.ctx.git.changed_paths(path, repo)
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
-                fp = self.ctx.git.fingerprint(path)
+                fingerprint = prime_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    c.workspace_id,
+                    self.ctx.git,
+                    path,
+                )
+                fp = fingerprint.fingerprint
                 if profile.verification:
                     fresh.last_verification = VerificationReceipt(
                         profile.name,
