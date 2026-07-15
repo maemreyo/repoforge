@@ -94,6 +94,27 @@ def test_unsupported_ecosystem_is_read_only_not_executable() -> None:
     assert any(item.code == "UNSUPPORTED_ECOSYSTEM" for item in proposal.findings)
 
 
+def test_unsupported_ecosystem_can_be_explicitly_kept_writable() -> None:
+    """A freshly created, still-empty project has no detectable ecosystem yet,
+    but the operator may deliberately choose write/publish access anyway
+    (e.g. to scaffold it) rather than accept the safe read-only default.
+    """
+    proposal = build_repository_proposal(
+        _facts(manifests=(), lockfiles=(), scripts=()),
+        overrides={"read_only": "false"},
+    )
+    assert proposal.policy.mode is not EnrollmentMode.READ_ONLY
+    assert proposal.policy.publish_enabled is True
+    assert any(item.code == "UNSUPPORTED_ECOSYSTEM" for item in proposal.findings)
+
+
+def test_read_only_true_override_still_forces_read_only() -> None:
+    proposal = build_repository_proposal(_facts(), overrides={"read_only": "true"})
+    assert proposal.policy.mode is EnrollmentMode.READ_ONLY
+    assert proposal.policy.profiles == ()
+    assert proposal.policy.publish_enabled is False
+
+
 def test_local_probe_collects_facts_without_running_discovered_scripts(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
