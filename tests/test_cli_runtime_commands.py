@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import importlib
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,11 +37,11 @@ def _generation(number: int = 2) -> ConfigGeneration:
     )
 
 
-def _record(phase: RuntimePhase = RuntimePhase.STARTING) -> RuntimeRecord:
+def _record(phase: RuntimePhase = RuntimePhase.STARTING, *, pid: int = 10) -> RuntimeRecord:
     return RuntimeRecord(
         1,
         phase,
-        10,
+        pid,
         "d" * 64,
         2 if phase is RuntimePhase.HEALTHY else None,
         2,
@@ -179,12 +180,12 @@ def test_runtime_start_foreground_background_and_duplicate(
         {"REPOFORGE_TUNNEL_ID": "t", "REPOFORGE_TUNNEL_PROFILE": "p"},
     )
 
-    observed = _record(RuntimePhase.HEALTHY)
+    observed = _record(RuntimePhase.HEALTHY, pid=123)
     runtime_store = RuntimeStore([None, observed])
     monkeypatch.setattr(cli, "build_runtime_store", lambda path: runtime_store)
     assert cli._runtime_command(_args(tmp_path / "config", "start")) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "healthy" and payload["pid"] == 10
+    assert payload["status"] == "healthy" and payload["pid"] == 123
     assert store.staged
 
     monkeypatch.setattr(
@@ -192,6 +193,38 @@ def test_runtime_start_foreground_background_and_duplicate(
     )
     with pytest.raises(ConfigError, match="ALREADY_RUNNING"):
         cli._runtime_command(_args(tmp_path / "config", "start"))
+
+
+def test_runtime_start_ignores_a_stale_record_from_a_previous_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A record already on disk from a prior, unrelated start attempt (e.g. one
+    that failed before CONTROL_PLANE_API_KEY was set) must never be reported
+    as the outcome of a fresh start; only a record whose pid matches the
+    worker just spawned reflects this attempt.
+    """
+    store = Store(tmp_path)
+    monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
+    monkeypatch.setattr(cli, "_locks", lambda: Locks())
+    fresh_pid = os.getpid()  # guaranteed alive for the duration of this test
+
+    class Launcher:
+        def start(self, path: Path, *, foreground: bool, extra_env: dict[str, str]) -> int:
+            return fresh_pid
+
+    monkeypatch.setattr(cli, "build_runtime_launcher", lambda: Launcher())
+
+    stale = _record(RuntimePhase.FAILED, pid=999_999)  # never alive, previous attempt
+    fresh = _record(RuntimePhase.HEALTHY, pid=fresh_pid)
+    # The store keeps returning the stale record (as a real file on disk
+    # would) until the new supervisor overwrites it with a fresh one.
+    runtime_store = RuntimeStore([stale, stale, stale, fresh])
+    monkeypatch.setattr(cli, "build_runtime_store", lambda path: runtime_store)
+
+    assert cli._runtime_command(_args(tmp_path / "config", "start")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "healthy"
+    assert payload["pid"] == fresh_pid
 
 
 def test_runtime_reload_restart_and_unknown(
