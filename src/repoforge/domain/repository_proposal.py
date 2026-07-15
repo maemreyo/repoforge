@@ -751,7 +751,9 @@ def build_repository_proposal(
             DetectionFinding(
                 "UNSUPPORTED_ECOSYSTEM",
                 "warning",
-                "No safe executable verification profile was inferred; enrollment is read-only.",
+                "No safe executable verification profile was inferred; enrollment is "
+                "read-only unless writable is explicitly confirmed with the read_only "
+                "policy override.",
             )
         )
     if (
@@ -771,6 +773,11 @@ def build_repository_proposal(
             raise ValueError("Policy override read_only must be true or false")
         if read_only_override == "true":
             mode = EnrollmentMode.READ_ONLY
+        elif read_only_override == "false":
+            # An explicit operator choice to stay writable overrides every
+            # automatic read-only trigger above (unsupported ecosystem or a
+            # read-only-leaning decision on remote/base/monorepo/etc.).
+            mode = template
     if any(
         decisions.get(code) == "block"
         for code in (
