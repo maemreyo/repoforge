@@ -212,9 +212,18 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         assert spec_result["live"]["title"] == "Implement safer workflow"
         await call("repo_pr_read", {"repo_id": "demo", "pr_number": 2})
 
-        created = await call("workspace_create", {"repo_id": "demo", "task_slug": "MCP contract"})
+        created = await call(
+            "workspace_create",
+            {"repo_id": "demo", "task_slug": "MCP contract", "issue_ids": ["42", "#43"]},
+        )
+        assert created["issue_ids"] == ["42", "#43"]
         workspace_id = str(created["workspace_id"])
-        await call("workspace_list", {})
+        listed = await call("workspace_list", {})
+        listed_entry = next(
+            item for item in listed["workspaces"] if item["workspace_id"] == workspace_id
+        )
+        assert listed_entry["issue_ids"] == ["42", "#43"]
+        assert listed_entry["dirty"] is False
         diagnostic_status = await call("workspace_status", {"workspace_id": workspace_id})
         base_status = await call("workspace_base_status", {"workspace_id": workspace_id})
         assert base_status["staleness"] == "current"

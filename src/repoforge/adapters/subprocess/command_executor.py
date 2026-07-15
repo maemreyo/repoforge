@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ...config import ServerConfig
-from ...domain.errors import CommandError
+from ...domain.errors import CommandError, ErrorCode
 from ...ports.command import CommandResult
 
 
@@ -67,9 +67,16 @@ class SubprocessCommandExecutor:
                 start_new_session=True,
             )
         except FileNotFoundError as exc:
-            raise CommandError(f"Executable not found: {argv[0]}") from exc
+            raise CommandError(
+                f"Executable not found: {argv[0]}",
+                code=ErrorCode.NOT_FOUND,
+                details={"executable": argv[0]},
+            ) from exc
         except OSError as exc:
-            raise CommandError(f"Cannot execute {' '.join(argv)}: {exc}") from exc
+            raise CommandError(
+                f"Cannot execute {' '.join(argv)}: {exc}",
+                code=ErrorCode.COMMAND_FAILED,
+            ) from exc
         try:
             return (process, process.communicate(input_data, timeout=timeout))
         except subprocess.TimeoutExpired as exc:
@@ -80,7 +87,11 @@ class SubprocessCommandExecutor:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
-            raise CommandError(f"Command timed out after {timeout}s: {' '.join(argv)}") from exc
+            raise CommandError(
+                f"Command timed out after {timeout}s: {' '.join(argv)}",
+                code=ErrorCode.COMMAND_TIMEOUT,
+                details={"timeout_seconds": timeout},
+            ) from exc
 
     def run(
         self,
@@ -120,7 +131,9 @@ class SubprocessCommandExecutor:
         )
         if check and result.returncode != 0:
             raise CommandError(
-                f"Command failed with exit code {result.returncode}: {' '.join(argv)}\n{result.combined or '<no output>'}"
+                f"Command failed with exit code {result.returncode}: {' '.join(argv)}\n{result.combined or '<no output>'}",
+                code=ErrorCode.COMMAND_FAILED,
+                details={"command": argv[0], "exit_code": result.returncode},
             )
         return result
 
@@ -145,7 +158,9 @@ class SubprocessCommandExecutor:
             raise CommandError("Binary command returned text output")
         if process.returncode != 0:
             raise CommandError(
-                f"Command failed with exit code {process.returncode}: {' '.join(argv)}\n{stderr.decode('utf-8', errors='replace')}"
+                f"Command failed with exit code {process.returncode}: {' '.join(argv)}\n{stderr.decode('utf-8', errors='replace')}",
+                code=ErrorCode.COMMAND_FAILED,
+                details={"exit_code": process.returncode},
             )
         if len(stdout) > max_bytes:
             raise CommandError(

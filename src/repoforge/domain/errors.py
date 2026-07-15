@@ -150,6 +150,11 @@ _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
     ("COMMAND_TIMEOUT", ErrorCode.COMMAND_TIMEOUT, True),
 )
 
+_CODE_DEFAULT_RETRYABLE: dict[ErrorCode, bool] = {}
+for _prefix, _prefix_code, _prefix_retryable in _PREFIX_CODES:
+    _CODE_DEFAULT_RETRYABLE.setdefault(_prefix_code, _prefix_retryable)
+del _prefix, _prefix_code, _prefix_retryable
+
 
 class RepoForgeError(RuntimeError):
     default_code = ErrorCode.INTERNAL_ERROR
@@ -166,9 +171,15 @@ class RepoForgeError(RuntimeError):
         details: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
-        inferred_code, inferred_retryable = _infer_code(message, self.default_code)
-        self.code = code or inferred_code
-        self.retryable = inferred_retryable if retryable is None else retryable
+        if code is not None:
+            self.code = code
+            self.retryable = (
+                _CODE_DEFAULT_RETRYABLE.get(code, False) if retryable is None else retryable
+            )
+        else:
+            inferred_code, inferred_retryable = _infer_code(message, self.default_code)
+            self.code = inferred_code
+            self.retryable = inferred_retryable if retryable is None else retryable
         self.safe_next_action = safe_next_action
         self.unchanged_state = unchanged_state
         self.correlation_id = correlation_id

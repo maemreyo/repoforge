@@ -89,7 +89,7 @@ class _ServiceErrorBoundary:
             ) from exc
 
 
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nPrefer exact text replacement or a small validated patch. Review workspace_diff after every meaningful\nchange. Run workspace_verify before commit; never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status.".strip()
+SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list and repo_context, then create one workspace per task. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull (or repository-default) verification profile for one run via workspace_verify immediately before\ncommit; never claim verification succeeded unless the tool returned success. Commit, push, and create\nonly draft pull requests. Never merge, force-push, modify protected branches, request secrets, or\nbypass path/change-budget policies. Use workspace_restore_paths to safely undo selected uncommitted\nmistakes after refreshing status. Use workspace_list to review workspace age, dirty state, and\nissue_ids before removing or reusing a workspace.".strip()
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
@@ -367,13 +367,25 @@ def create_server(
         task_slug: str,
         base: str | None = None,
         idempotency_key: str | None = None,
+        issue_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Use this before editing to create an isolated ai/* worktree; use an idempotency key for retries."""
-        return bounded_service.call("workspace_create", repo_id, task_slug, base, idempotency_key)
+        """Use this before editing to create an isolated ai/* worktree; use an idempotency key for
+        retries. Create one workspace per issue; pass issue_ids only when several dependent
+        (stacked) issues are deliberately worked in this same workspace. issue_ids is
+        display-only metadata, not validated against any tracker."""
+        return bounded_service.call(
+            "workspace_create",
+            repo_id,
+            task_slug,
+            base,
+            idempotency_key,
+            tuple(issue_ids or ()),
+        )
 
     @mcp.tool(title="List coding workspaces", annotations=READ_ONLY, structured_output=True)
     def workspace_list() -> dict[str, Any]:
-        """Use this when resuming work or finding active RepoForge workspaces."""
+        """Use this when resuming work or finding active RepoForge workspaces; each entry reports age,
+        dirty state, and linked issue_ids to help decide what to reuse or remove."""
         return bounded_service.call(
             "workspace_list",
         )
@@ -553,7 +565,7 @@ def create_server(
         structured_output=True,
     )
     def workspace_run_profile(workspace_id: str, profile_name: str) -> dict[str, Any]:
-        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile; the response carries a fresh fingerprint and head_sha for the next locked call."""
+        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call."""
         return bounded_service.call("workspace_run_profile", workspace_id, profile_name)
 
     @mcp.tool(

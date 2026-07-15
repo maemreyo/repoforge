@@ -56,7 +56,9 @@ from ...bootstrap import (
     clear_runtime_state,
     default_state_root,
     id_generator,
+    read_audit_events,
     read_runtime_log,
+    summarize_operation_metrics,
     system_clock,
     write_private_file,
     write_runtime_state,
@@ -1428,6 +1430,13 @@ def build_parser() -> argparse.ArgumentParser:
     show_config.add_argument("--origin", action="store_true")
     commands.add_parser("doctor")
     commands.add_parser("list-workspaces")
+    audit = commands.add_parser("audit")
+    audit_sub = audit.add_subparsers(dest="audit_command")
+    audit.add_argument("--last", type=int, default=20)
+    audit.add_argument("--action")
+    audit.add_argument("--failed", action="store_true")
+    audit.add_argument("--slow", type=float, default=None)
+    audit_sub.add_parser("stats")
     operation = commands.add_parser("operation")
     operation_sub = operation.add_subparsers(dest="operation_command", required=True)
     operation_status = operation_sub.add_parser("status")
@@ -1639,6 +1648,30 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result["ok"] else 1
         if args.command == "list-workspaces":
             _json(service.workspace_list())
+            return 0
+        if args.command == "audit":
+            if getattr(args, "audit_command", None) == "stats":
+                if service.metrics is None:
+                    raise ConfigError("Operation metrics are not available for this configuration")
+                _json(
+                    {
+                        "path": str(service.metrics.path),
+                        "operations": summarize_operation_metrics(service.metrics.snapshot()),
+                    }
+                )
+                return 0
+            _json(
+                {
+                    "path": str(service.audit.path),
+                    "events": read_audit_events(
+                        service.audit.path,
+                        limit=args.last,
+                        action=args.action,
+                        only_failed=args.failed,
+                        min_duration_ms=args.slow,
+                    ),
+                }
+            )
             return 0
         parser.error(f"Unknown command: {args.command}")
     except (PersonalCodingMCPError, ConfigError, ValueError, OSError) as exc:

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
+from .adapters.audit.query import read_audit_events as read_audit_events
+from .adapters.audit.query import summarize_operation_metrics as summarize_operation_metrics
 from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
 from .adapters.configuration import ConfigGenerationStore

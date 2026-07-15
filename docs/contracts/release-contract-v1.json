@@ -77,8 +77,8 @@
   },
   "contract_version": 1,
   "mcp": {
-    "server_instructions_sha256": "1f3b2e74de31f6c0b64a5f7aa6866324b36805a270fc56d9b0448e9acd89cab4",
-    "tool_surface_hash": "9963b22156c65f4c57663a99fd5c05fee8087b04b0c5708138adb206ba6af272",
+    "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
+    "tool_surface_hash": "e5819068e2bfc890c219494fa29de5329e773b4e11a2c60d5f05bddf5df0e9f1",
     "tools": [
       {
         "annotations": {
@@ -994,7 +994,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this before editing to create an isolated ai/* worktree; use an idempotency key for retries.",
+        "description": "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\nretries. Create one workspace per issue; pass issue_ids only when several dependent\n(stacked) issues are deliberately worked in this same workspace. issue_ids is\ndisplay-only metadata, not validated against any tracker.",
         "inputSchema": {
           "properties": {
             "base": {
@@ -1020,6 +1020,21 @@
               ],
               "default": null,
               "title": "Idempotency Key"
+            },
+            "issue_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Issue Ids"
             },
             "repo_id": {
               "title": "Repo Id",
@@ -1137,7 +1152,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use this when resuming work or finding active RepoForge workspaces.",
+        "description": "Use this when resuming work or finding active RepoForge workspaces; each entry reports age,\ndirty state, and linked issue_ids to help decide what to reuse or remove.",
         "inputSchema": {
           "properties": {},
           "title": "workspace_listArguments",
@@ -1741,7 +1756,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile; the response carries a fresh fingerprint and head_sha for the next locked call.",
+        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "profile_name": {

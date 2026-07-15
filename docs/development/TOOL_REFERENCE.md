@@ -55,6 +55,23 @@ size verification, item/artifact/total-byte quotas, and deterministic pagination
 count, and byte bounds but accepts protected evidence IDs so assessments, plans, tasks, and receipts can
 prevent referenced evidence from being pruned. Corruption, unsupported future schemas, missing artifacts,
 and quota exhaustion fail closed with stable error codes.
+## Client capability negotiation
+
+Client capabilities are connection-scoped internal contracts, not repository authority and not an MCP
+tool. The MCP adapter captures the current session's `InitializeRequestParams` and normalizes protocol
+version, client identity, Apps/UI resources, form and URL elicitation, Tasks, progress and cancellation
+notifications, tool search and deferred discovery, resource subscriptions, extension versions, and
+bounded compatibility flags. Missing, partial, malformed, unknown, and legacy declarations fail closed;
+RepoForge never probes an optional protocol method that the client did not negotiate.
+
+`CapabilityPolicy` is the single application decision point for extension emission. Unsupported Apps
+fall back to bounded structured results with stable action IDs. Unsupported elicitation returns
+`INPUT_REQUIRED` with one stable decision ID and bounded allowed options. Unsupported MCP Tasks use the
+existing durable RepoForge operation ID with `operation_status` and, when supported by the operation,
+`operation_cancel`. Unsupported tool search exposes the complete safe static tool surface, while missing
+progress notifications use status polling by operation ID. These fallbacks preserve existing repository,
+filesystem, command, verification, and publication policy; capability data can never grant or widen
+access.
 
 ## Local runtime commands
 
@@ -92,7 +109,23 @@ When a managed runtime is active, accepted repository additions and refreshes re
 a failed expansion restores the prior validated generation. A repository removal is restrictive: failed
 activation leaves the restricted configuration on disk and never restores removed repository access.
 
-## Repository proposal commands
+## Local audit and metrics commands
+
+`rf audit` and `rf audit stats` are local operator commands, not MCP tools. They only read state that
+every consumer call (MCP or CLI) already durably records through `ApplicationContext.audited`; they add
+no new persistence or instrumentation.
+
+`rf audit --last N --action NAME --failed --slow MS` returns up to `N` (bounded 1-1000, default 20) most
+recent private audit events, most recent first, from the active configuration's `audit.jsonl`. `--action`
+filters to one action name, `--failed` returns only failed calls, and `--slow MS` returns only calls
+whose recorded `duration_ms` is at least `MS`. Each returned event includes its `correlation_id`,
+`duration_ms`, and, for failures, `error_code` and `error_type`; audit bodies remain redacted exactly as
+written by the audit sink.
+
+`rf audit stats` renders the active configuration's aggregate `operation-metrics.json` as one row per
+action: call count, failure count and rate, average and maximum `duration_ms`, and up to three most
+frequent failure error codes, sorted slowest-average-first. Use it to find which tool is failing most or
+taking the longest before diving into `rf audit --action NAME --slow MS` for individual calls.
 
 `rf repo inspect PATH` and `rf repo propose PATH` inspect local repository facts and return a
 structured `pending_approval` proposal without changing configuration or running discovered commands.
@@ -163,8 +196,8 @@ rather than silently widening output.
 
 | Tool | Purpose |
 |---|---|
-| `workspace_create` | Create one isolated worktree and unique `ai/*` branch from an allowlisted base. |
-| `workspace_list` | List workspaces managed by the local RepoForge registry. |
+| `workspace_create` | Create one isolated worktree and unique `ai/*` branch from an allowlisted base; accepts an optional bounded `issue_ids` list. |
+| `workspace_list` | List workspaces managed by the local RepoForge registry, including age, dirty/clean state, and linked `issue_ids`. |
 | `workspace_status` | Return HEAD, branch, Git status, workspace fingerprint, verification state, and change metrics. |
 | `workspace_base_status` | Fetch the configured remote base and return exact workspace-base, local-base, remote-base, HEAD, ahead/behind, path-overlap, publication, outage, and staleness evidence. |
 | `workspace_refresh_preview` | Produce a read-only preview bound to the exact HEAD, fingerprint, recorded workspace base, latest remote-base SHA, merge strategy, and predicted conflict paths. |
@@ -177,6 +210,14 @@ back to the exact reviewed HEAD and fingerprint. A successful refresh invalidate
 assessment, architecture, and execution-plan receipts. When it creates a merge commit, the workspace
 must pass exact-tree verification and `workspace_commit` must approve that controlled commit before a
 normal non-force push can publish it.
+
+`issue_ids` is optional, free-form, display-only metadata (up to 16 entries, each at most 64
+characters); RepoForge never validates it against GitHub or any other tracker, and it cannot be changed
+after `workspace_create`. The default workflow is one issue per workspace. Pass every dependent issue ID
+at creation time only for a deliberate chain of stacked issues worked sequentially in the same worktree.
+`workspace_list` and `workspace_status` surface `issue_ids` alongside `created_at` and the dirty/clean
+Git state so an operator or agent can decide what is safe to reuse or remove; RepoForge does not
+automatically expire or remove workspaces.
 
 ## Read, search, and edit
 
@@ -196,9 +237,9 @@ normal non-force push can publish it.
 
 | Tool | Purpose |
 |---|---|
-| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. |
-| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, and explicit mutation reporting. |
-| `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. |
+| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. |
+| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, and explicit mutation reporting. Cheaper than a full profile run for iterating on a single failing path during development. |
+| `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. Run this once per workspace, right before commit — not on every edit. |
 | `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. |
 | `workspace_push` | Push the workspace branch without force and record the pushed commit SHA. |
 | `workspace_create_draft_pr` | Create a draft pull request with configured labels, reviewers, and maintainer-edit policy. |
@@ -208,6 +249,15 @@ normal non-force push can publish it.
 | `workspace_pr_watch` | Start a durable, cancellable, resumable watch bound to the exact pushed workspace and PR head; use operation tools for status and cancellation. |
 | `workspace_pr_check_details` | Resolve one exact `check-run:<id>` selector into bounded Check Run identity, status, attempt, failed-step, annotation, and source metadata. |
 | `workspace_pr_failure_evidence` | Return a redacted, bounded failure excerpt, class, hash, retryability, source coverage, uncertainty, and truncation metadata for one selected Check Run. |
+
+Repository `risk.ordered_profiles` typically ranges from a fast `quick` profile through an intermediate
+`test` profile up to a slower `full` profile, plus optional single-target diagnostics. Use the cheapest
+option that answers the question during the edit-test loop — `quick` or `workspace_run_diagnostic` — and
+run `full` (or the repository default passed to `workspace_verify`) only once, right before
+`workspace_commit`. Repeating the full profile on every edit wastes its entire timeout budget on runs
+that were always going to fail early; a `quick` or diagnostic failure surfaces the same problem sooner
+and cheaper. `workspace_commit` still requires the exact tree that the most recent successful
+`workspace_verify` receipt covers.
 
 A diagnostic profile is part of the reviewed repository configuration. It fixes the executable and argv
 template, selector kind, working directory, timeout, local-only network declaration, mutability, parser,

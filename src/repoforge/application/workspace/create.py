@@ -6,7 +6,7 @@ from typing import cast
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
 from ...domain.policy import slugify, validate_branch
-from ...domain.workspace import WorkspaceRecord
+from ...domain.workspace import WorkspaceRecord, normalize_issue_ids
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
 
@@ -17,6 +17,7 @@ class WorkspaceCreateCommand:
     task_slug: str
     base: str | None = None
     idempotency_key: str | None = None
+    issue_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,7 @@ class WorkspaceCreateResult:
     next_step: str = (
         "Inspect files, make changes, run a verification profile, then review the diff."
     )
+    issue_ids: tuple[str, ...] = ()
 
 
 class WorkspaceCreator:
@@ -38,6 +40,7 @@ class WorkspaceCreator:
 
     def execute(self, c: WorkspaceCreateCommand) -> WorkspaceCreateResult:
         repo = self.ctx.repo(c.repo_id)
+        issue_ids = normalize_issue_ids(c.issue_ids)
         base = c.base or repo.default_base
         if base not in repo.allowed_base_branches:
             raise SecurityError(
@@ -96,6 +99,7 @@ class WorkspaceCreator:
                 base,
                 self.ctx.git.head_sha(destination),
                 next_step,
+                tuple(existing.metadata.get("issue_ids", ())),
             )
 
         def op() -> WorkspaceCreateResult:
@@ -115,6 +119,8 @@ class WorkspaceCreator:
                 "repository_policy_snapshot": repository_policy_snapshot(repo),
                 "workspace_base_sha": head,
             }
+            if issue_ids:
+                metadata["issue_ids"] = list(issue_ids)
             if key_hash:
                 metadata["workspace_create_idempotency"] = key_hash
             record = WorkspaceRecord(
@@ -138,10 +144,22 @@ class WorkspaceCreator:
                     ) from exc
                 raise
             return WorkspaceCreateResult(
-                workspace_id, repo.repo_id, str(destination), branch, base, head, next_step
+                workspace_id,
+                repo.repo_id,
+                str(destination),
+                branch,
+                base,
+                head,
+                next_step,
+                issue_ids,
             )
 
-        request = {"repo_id": c.repo_id, "task_slug": c.task_slug, "base": base}
+        request = {
+            "repo_id": c.repo_id,
+            "task_slug": c.task_slug,
+            "base": base,
+            "issue_ids": list(issue_ids),
+        }
         return cast(
             WorkspaceCreateResult,
             self.ctx.idempotent(
@@ -154,6 +172,7 @@ class WorkspaceCreator:
                     "base": base,
                     "branch": branch,
                     "workspace_id": workspace_id,
+                    "issue_ids": list(issue_ids),
                 },
                 serialize=to_data,
                 deserialize=lambda value: WorkspaceCreateResult(**value),

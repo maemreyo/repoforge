@@ -1,7 +1,7 @@
 import hashlib
 from dataclasses import dataclass
 
-from ...domain.errors import SecurityError, WorkspaceError
+from ...domain.errors import CommandError, SecurityError, WorkspaceError
 from ...domain.execution_environment import EnvironmentIdentityRequest
 from ...domain.policy import normalize_relative_path
 from ...domain.verification import get_profile
@@ -73,6 +73,14 @@ class WorkspaceProfileRunner:
                     f"Profile working_directory does not exist: {profile.working_directory}"
                 )
 
+        def record_command_failure(
+            exc: CommandError, command: tuple[str, ...], steps_completed: int
+        ) -> None:
+            fallback = command[0] if command else None
+            audit_details["failed_command"] = exc.details.get("command", fallback)
+            audit_details["exit_code"] = exc.details.get("exit_code")
+            audit_details["steps_completed"] = steps_completed
+
         def op() -> WorkspaceRunProfileResult:
             with self.ctx.locks.lock(c.workspace_id):
                 fresh = self.ctx.store.load(c.workspace_id)
@@ -90,21 +98,31 @@ class WorkspaceProfileRunner:
                     self.ctx.execution_environment.prepare(request)
                     try:
                         identity = self.ctx.execution_environment.identity(request)
-                        receipts = [
-                            self.ctx.execution_environment.execute(
-                                ApprovedExecution(command, request, identity, timeout)
-                            )
-                            for command in profile.commands
-                        ]
+                        receipts = []
+                        for step, command in enumerate(profile.commands):
+                            try:
+                                receipts.append(
+                                    self.ctx.execution_environment.execute(
+                                        ApprovedExecution(command, request, identity, timeout)
+                                    )
+                                )
+                            except CommandError as exc:
+                                record_command_failure(exc, command, step)
+                                raise
                     finally:
                         self.ctx.execution_environment.cleanup(request)
                     results = [receipt.result for receipt in receipts]
                     environment_hash = identity.identity_hash
                 else:
-                    results = [
-                        self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
-                        for command in profile.commands
-                    ]
+                    results = []
+                    for step, command in enumerate(profile.commands):
+                        try:
+                            results.append(
+                                self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
+                            )
+                        except CommandError as exc:
+                            record_command_failure(exc, command, step)
+                            raise
                 _ = self.ctx.git.changed_paths(path, repo)
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
                 fingerprint = prime_fingerprint(
@@ -136,8 +154,12 @@ class WorkspaceProfileRunner:
                     profile.working_directory,
                 )
 
+        audit_details: dict[str, object] = {
+            "workspace_id": c.workspace_id,
+            "profile": c.profile_name,
+        }
         return self.ctx.audited(
             "workspace_run_profile",
-            {"workspace_id": c.workspace_id, "profile": c.profile_name},
+            audit_details,
             op,
         )

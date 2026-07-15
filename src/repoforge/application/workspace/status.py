@@ -25,6 +25,7 @@ class WorkspaceStatusResult:
     change_metrics: dict[str, Any]
     clean: bool
     last_verification: dict[str, Any] | None
+    issue_ids: list[str]
 
 
 class WorkspaceStatusReader:
@@ -73,6 +74,7 @@ class WorkspaceStatusReader:
                     self.ctx.git.change_metrics(path, repo),
                     not bool(self.ctx.git.status_porcelain(path).strip()),
                     last,
+                    list(record.metadata.get("issue_ids", ())),
                 )
 
         return self.ctx.audited("workspace_status", audit_details, op)
