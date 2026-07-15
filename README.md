@@ -343,9 +343,15 @@ rf runtime logs --tail 100
 
 rf config history
 rf config rollback 3
+rf config get repositories.demo.max_diff_lines
+rf config set repositories.demo.max_diff_lines 5000
+rf config edit
+rf show-config --origin
 
 rf diagnostics bundle
 ```
+
+`rf config get/set` address one resolved policy value with a dotted key, `repositories.<repo_id>.<field>`, for `max_changed_files`, `max_diff_lines`, `max_total_changed_bytes`, and `read_only`. `set` writes the change through the same reviewed proposal-and-generation pipeline as `rf repo refresh`, so it prints `pending_approval`/`input_required` and an approval token exactly like refresh when the change needs one. `rf config edit` opens the small hand-authored source file (tunnel and repository list) in `$EDITOR`/`$VISUAL`, validates it on save, and reports whether the accepted generation is now stale; it never touches the generated lock. `rf show-config --origin` annotates each of those four fields per repository with `file` (explicit override), `preset:<name>`, or `default`.
 
 ---
 

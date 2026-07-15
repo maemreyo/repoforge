@@ -7,6 +7,8 @@ import contextlib
 import hashlib
 import json
 import os
+import shlex
+import subprocess
 import tempfile
 import time
 from dataclasses import asdict
@@ -199,6 +201,155 @@ def _source_for_display(store: ConfigurationStore) -> SourceConfiguration:
                 for repo in sorted(config.repositories.values(), key=lambda item: item.repo_id)
             ),
         )
+
+
+# Fields exposed through `rf config get/set`: a deliberately narrow slice of the
+# known `--policy-override` keys that map 1:1 onto a scalar RepositoryConfig
+# attribute. `allowed_paths`, `denied_paths_add`, and `working_directory` are
+# excluded because they have additive or non-repository-level semantics that
+# do not fit a plain get/set of one resolved value.
+_CONFIG_SCALAR_KEYS: dict[str, type] = {
+    "max_changed_files": int,
+    "max_diff_lines": int,
+    "max_total_changed_bytes": int,
+    "read_only": bool,
+}
+
+
+def _parse_config_key(key: str) -> tuple[str, str]:
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "repositories" or parts[2] not in _CONFIG_SCALAR_KEYS:
+        raise ConfigError(
+            "Config key must be 'repositories.<repo_id>.<field>' where <field> is one of: "
+            + ", ".join(sorted(_CONFIG_SCALAR_KEYS))
+        )
+    return parts[1], parts[2]
+
+
+def _repo_source_or_none(source: SourceConfiguration, repo_id: str) -> SourceRepository | None:
+    return next((item for item in source.repositories if item.repo_id == repo_id), None)
+
+
+def _config_key_origin(source: SourceConfiguration, repo_id: str, field: str) -> str:
+    repo = _repo_source_or_none(source, repo_id)
+    if repo is None:
+        raise ConfigError(f"Unknown repository id: {repo_id}")
+    if any(name == field for name, _ in repo.policy_overrides):
+        return "file"
+    if repo.policy_template != "standard":
+        return f"preset:{repo.policy_template}"
+    return "default"
+
+
+def _config_origins(store: ConfigurationStore) -> dict[str, dict[str, str]]:
+    source = _source_for_display(store)
+    return {
+        repo.repo_id: {
+            field: _config_key_origin(source, repo.repo_id, field) for field in _CONFIG_SCALAR_KEYS
+        }
+        for repo in source.repositories
+    }
+
+
+def _config_get(config_path: Path, key: str) -> int:
+    repo_id, field = _parse_config_key(key)
+    store = _ensure_generation(config_path)
+    source = _source_for_display(store)
+    origin = _config_key_origin(source, repo_id, field)
+    current = store.current()
+    resolved_path = store.resolved_path(current.generation) if current else config_path
+    config = load_config(resolved_path)
+    if repo_id not in config.repositories:
+        raise ConfigError(f"Unknown repository id: {repo_id}")
+    value = getattr(config.repositories[repo_id], field)
+    _json({"key": key, "value": value, "origin": origin})
+    return 0
+
+
+def _coerce_config_value(field: str, raw_value: str) -> bool | int:
+    value_type = _CONFIG_SCALAR_KEYS[field]
+    if value_type is bool:
+        lowered = raw_value.strip().lower()
+        if lowered not in {"true", "false"}:
+            raise ConfigError(f"Value for {field} must be 'true' or 'false'; got {raw_value!r}")
+        return lowered == "true"
+    try:
+        return int(raw_value)
+    except ValueError:
+        raise ConfigError(f"Value for {field} must be an integer; got {raw_value!r}") from None
+
+
+def _config_set(config_path: Path, args: argparse.Namespace) -> int:
+    repo_id, field = _parse_config_key(args.key)
+    typed_value = _coerce_config_value(field, args.value)
+    override_value = str(typed_value).lower() if isinstance(typed_value, bool) else str(typed_value)
+    refresh_args = argparse.Namespace(
+        config=str(config_path),
+        repo_id=repo_id,
+        decision=[],
+        policy_override=[f"{repo_id}.{field}={override_value}"],
+        approve=list(args.approve),
+        accept=True,
+        template=None,
+        activate=args.activate,
+        wait=True,
+        rollback_on_failure=True,
+    )
+    return _repo_refresh(refresh_args)
+
+
+def _config_edit(config_path: Path) -> int:
+    if not config_path.is_file():
+        raise ConfigError(f"Configuration file not found: {config_path}")
+    editor_command = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if not editor_command:
+        raise ConfigError(
+            "Set $EDITOR or $VISUAL to use `rf config edit`; no interactive editor is configured."
+        )
+    original = config_path.read_text(encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".toml", delete=False, dir=str(config_path.parent), encoding="utf-8"
+    ) as handle:
+        handle.write(original)
+        buffer_path = Path(handle.name)
+    try:
+        completed = subprocess.run([*shlex.split(editor_command), str(buffer_path)], check=False)
+        if completed.returncode != 0:
+            raise ConfigError(
+                f"Editor exited with status {completed.returncode}; the configuration was not changed."
+            )
+        edited = buffer_path.read_text(encoding="utf-8")
+        if edited == original:
+            _json({"status": "unchanged", "config": str(config_path)})
+            return 0
+        try:
+            parse_source(edited)
+        except ValueError as exc:
+            sidecar = config_path.with_name(config_path.name + ".rej")
+            sidecar.write_text(edited, encoding="utf-8")
+            raise ConfigError(
+                f"Edited configuration is invalid and was not saved: {exc}. "
+                f"The attempted edit was preserved at {sidecar}."
+            ) from exc
+        config_path.write_text(edited, encoding="utf-8")
+        store = _store(config_path)
+        current = store.current()
+        stale = current is None or current.source_sha256 != sha256_text(edited)
+        _json(
+            {
+                "status": "saved",
+                "config": str(config_path),
+                "stale": stale,
+                "safe_next_action": (
+                    "Run `rf repo refresh --accept` to regenerate the resolved configuration."
+                    if stale
+                    else "The accepted generation already matches this source."
+                ),
+            }
+        )
+        return 0
+    finally:
+        buffer_path.unlink(missing_ok=True)
 
 
 def _runtime_environment(args: argparse.Namespace) -> dict[str, str]:
@@ -1261,7 +1412,16 @@ def build_parser() -> argparse.ArgumentParser:
     rollback = config_sub.add_parser("rollback")
     rollback.add_argument("generation", type=int)
     rollback.add_argument("--approve")
-    commands.add_parser("show-config")
+    config_get = config_sub.add_parser("get")
+    config_get.add_argument("key")
+    config_set = config_sub.add_parser("set")
+    config_set.add_argument("key")
+    config_set.add_argument("value")
+    config_set.add_argument("--approve", action="append", default=[])
+    config_set.add_argument("--activate", choices=["auto", "always", "never"], default="auto")
+    config_sub.add_parser("edit")
+    show_config = commands.add_parser("show-config")
+    show_config.add_argument("--origin", action="store_true")
     commands.add_parser("doctor")
     commands.add_parser("list-workspaces")
     operation = commands.add_parser("operation")
@@ -1341,6 +1501,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.config_command == "path":
                 _json(_resolved_paths(config_path))
                 return 0
+            if args.config_command == "get":
+                return _config_get(config_path, args.key)
+            if args.config_command == "set":
+                return _config_set(config_path, args)
+            if args.config_command == "edit":
+                return _config_edit(config_path)
             store = _ensure_generation(config_path)
             if args.config_command == "history":
                 _json(
@@ -1452,15 +1618,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
         if args.command == "show-config":
-            _json(
-                service.repo_list()
-                | {
-                    "source": str(config_path),
-                    "generation": active_generation.generation
-                    if (active_generation := store.active())
-                    else None,
-                }
-            )
+            payload = service.repo_list() | {
+                "source": str(config_path),
+                "generation": active_generation.generation
+                if (active_generation := store.active())
+                else None,
+            }
+            if args.origin:
+                payload["origins"] = _config_origins(store)
+            _json(payload)
             return 0
         if args.command == "doctor":
             result = service.doctor()
