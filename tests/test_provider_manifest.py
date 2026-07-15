@@ -177,6 +177,28 @@ class TestProviderManifest:
         )
         assert m1.manifest_hash == m2.manifest_hash
 
+    def test_supports_required_capabilities(self) -> None:
+        manifest = ProviderManifest(
+            provider_id="test",
+            kind=ProviderKind.ANALYZER,
+            version="1.0.0",
+            executable="/bin/test",
+            supported_capabilities=("lint", "security"),
+        )
+        assert manifest.supports(("lint",))
+        assert not manifest.supports(("format",))
+
+    def test_major_version_compatibility(self) -> None:
+        manifest = ProviderManifest(
+            provider_id="test",
+            kind=ProviderKind.ANALYZER,
+            version="2.17.0",
+            executable="/bin/test",
+        )
+        assert manifest.is_compatible_with("2.0.1")
+        assert not manifest.is_compatible_with("3.0.0")
+        assert not manifest.is_compatible_with("")
+
     def test_manifest_hash_changes_with_version(self) -> None:
         m1 = ProviderManifest(
             provider_id="test",
@@ -276,6 +298,18 @@ class TestConfigProviderRegistry:
         registry = ConfigProviderRegistry()
         assert registry.list_providers() == ()
         assert registry.get_provider("nonexistent") is None
+
+    def test_duplicate_provider_ids_rejected(self) -> None:
+        from repoforge.adapters.provider.config_registry import ConfigProviderRegistry
+
+        provider = ProviderManifest(
+            provider_id="duplicate",
+            kind=ProviderKind.ANALYZER,
+            version="1.0.0",
+            executable="/bin/test",
+        )
+        with pytest.raises(ValueError, match="duplicate provider_id"):
+            ConfigProviderRegistry(providers=(provider, provider))
 
     def test_single_provider(self) -> None:
         from repoforge.adapters.provider.config_registry import ConfigProviderRegistry

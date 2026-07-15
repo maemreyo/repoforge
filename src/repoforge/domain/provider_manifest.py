@@ -166,6 +166,14 @@ class ProviderManifest:
     def has_fallback(self) -> bool:
         return bool(self.fallback_provider_id)
 
+    def supports(self, required_capabilities: tuple[str, ...]) -> bool:
+        return set(required_capabilities).issubset(self.supported_capabilities)
+
+    def is_compatible_with(self, requested_version: str) -> bool:
+        if not requested_version or not _VERSION_STRING.fullmatch(requested_version):
+            return False
+        return self.version.split(".", 1)[0] == requested_version.split(".", 1)[0]
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderHealth:
