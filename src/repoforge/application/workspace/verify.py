@@ -3,7 +3,11 @@ from typing import Any
 
 from ...domain.verification import select_verification_profile
 from ..context import ApplicationContext
-from .run_profile import WorkspaceProfileRunner, WorkspaceRunProfileCommand
+from .run_profile import (
+    WorkspaceProfileRunner,
+    WorkspaceRunProfileCommand,
+    WorkspaceRunProfileResult,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +30,9 @@ class WorkspaceVerifier:
         record, repo, _ = self.ctx.workspace(c.workspace_id)
         profile, used_default = select_verification_profile(repo, c.profile_name)
         r = self.runner.execute(WorkspaceRunProfileCommand(c.workspace_id, profile.name))
+        # workspace_verify never requests a background run, so this is always the
+        # synchronous result shape.
+        assert isinstance(r, WorkspaceRunProfileResult)
         return WorkspaceVerifyResult(
             {
                 "workspace_id": r.workspace_id,

@@ -212,7 +212,11 @@ class CodingService:
         self._refresh_preview = WorkspaceRefreshPreviewer(ctx)
         self._refresh = WorkspaceRefresher(ctx)
         self._diff = WorkspaceDiffReader(ctx)
-        self._profile = WorkspaceProfileRunner(ctx)
+        self._profile = WorkspaceProfileRunner(
+            ctx,
+            operations=self.operations,
+            background_tasks=self.application.background_tasks,
+        )
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
         self._verify = WorkspaceVerifier(ctx)
         self._commit = WorkspaceCommitter(ctx)
@@ -246,11 +250,12 @@ class CodingService:
         operation_id: str,
         expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
-        return _result(
-            self._operation_cancel.execute(
-                OperationCancelCommand(operation_id, expected_updated_at)
-            )
+        result = self._operation_cancel.execute(
+            OperationCancelCommand(operation_id, expected_updated_at)
         )
+        if result.cancellation_requested and result.operation.kind == "workspace_run_profile":
+            self._profile.request_live_cancel(operation_id)
+        return _result(result)
 
     def repo_list(self) -> dict[str, Any]:
         return _result(self._repo_list.execute(RepositoryListCommand()))
@@ -568,9 +573,13 @@ class CodingService:
     def workspace_diff(self, workspace_id: str, staged: bool = False) -> dict[str, Any]:
         return _result(self._diff.execute(WorkspaceDiffCommand(workspace_id, staged)))
 
-    def workspace_run_profile(self, workspace_id: str, profile_name: str) -> dict[str, Any]:
+    def workspace_run_profile(
+        self, workspace_id: str, profile_name: str, background: bool = False
+    ) -> dict[str, Any]:
         return _result(
-            self._profile.execute(WorkspaceRunProfileCommand(workspace_id, profile_name))
+            self._profile.execute(
+                WorkspaceRunProfileCommand(workspace_id, profile_name, background)
+            )
         )
 
     def workspace_run_diagnostic(

@@ -12,6 +12,7 @@ from typing import Any
 
 from ...config import ServerConfig
 from ...domain.errors import CommandError, ErrorCode
+from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 
 
@@ -52,6 +53,7 @@ class SubprocessCommandExecutor:
         text: bool,
         timeout: int,
         extra_env: Mapping[str, str] | None,
+        cancel_token: CancellationToken | None = None,
     ) -> tuple[subprocess.Popen[Any], tuple[str | bytes, str | bytes]]:
         try:
             process = subprocess.Popen(
@@ -77,21 +79,27 @@ class SubprocessCommandExecutor:
                 f"Cannot execute {' '.join(argv)}: {exc}",
                 code=ErrorCode.COMMAND_FAILED,
             ) from exc
+        if cancel_token is not None:
+            cancel_token.bind(process)
         try:
-            return (process, process.communicate(input_data, timeout=timeout))
-        except subprocess.TimeoutExpired as exc:
             try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=2)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
-            raise CommandError(
-                f"Command timed out after {timeout}s: {' '.join(argv)}",
-                code=ErrorCode.COMMAND_TIMEOUT,
-                details={"timeout_seconds": timeout},
-            ) from exc
+                return (process, process.communicate(input_data, timeout=timeout))
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait(timeout=2)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                raise CommandError(
+                    f"Command timed out after {timeout}s: {' '.join(argv)}",
+                    code=ErrorCode.COMMAND_TIMEOUT,
+                    details={"timeout_seconds": timeout},
+                ) from exc
+        finally:
+            if cancel_token is not None:
+                cancel_token.release()
 
     def run(
         self,
@@ -103,6 +111,7 @@ class SubprocessCommandExecutor:
         check: bool = True,
         extra_env: Mapping[str, str] | None = None,
         output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> CommandResult:
         if not argv or not all(isinstance(x, str) and x for x in argv):
             raise CommandError("Command argv must contain non-empty strings")
@@ -115,6 +124,7 @@ class SubprocessCommandExecutor:
             text=True,
             timeout=actual_timeout,
             extra_env=extra_env,
+            cancel_token=cancel_token,
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise CommandError("Text command returned binary output")
@@ -130,10 +140,20 @@ class SubprocessCommandExecutor:
             stderr_truncated,
         )
         if check and result.returncode != 0:
+            cancelled = cancel_token is not None and cancel_token.is_cancelled()
+            message = (
+                f"Command was cancelled by operator request: {' '.join(argv)}"
+                if cancelled
+                else f"Command failed with exit code {result.returncode}: {' '.join(argv)}\n{result.combined or '<no output>'}"
+            )
             raise CommandError(
-                f"Command failed with exit code {result.returncode}: {' '.join(argv)}\n{result.combined or '<no output>'}",
+                message,
                 code=ErrorCode.COMMAND_FAILED,
-                details={"command": argv[0], "exit_code": result.returncode},
+                details={
+                    "command": argv[0],
+                    "exit_code": result.returncode,
+                    **({"cancelled": True} if cancelled else {}),
+                },
             )
         return result
 

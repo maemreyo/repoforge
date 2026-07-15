@@ -1,3 +1,5 @@
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -5,6 +7,7 @@ import pytest
 from repoforge.adapters.subprocess import SubprocessCommandExecutor
 from repoforge.config import ServerConfig
 from repoforge.domain.errors import CommandError, ErrorCode
+from repoforge.ports.cancellation import CancellationToken
 
 
 def _executor(tmp_path: Path) -> SubprocessCommandExecutor:
@@ -77,3 +80,64 @@ def test_run_bytes_nonzero_exit_is_command_failed(tmp_path: Path) -> None:
     err = excinfo.value
     assert err.code is ErrorCode.COMMAND_FAILED
     assert err.details["exit_code"] == 1
+
+
+def test_cancel_token_terminates_a_running_process_group(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "sleep_long.py"
+    script.write_text("import time\ntime.sleep(30)\n")
+    token = CancellationToken()
+
+    def cancel_soon() -> None:
+        time.sleep(0.3)
+        token.cancel()
+
+    threading.Thread(target=cancel_soon, daemon=True).start()
+
+    started = time.monotonic()
+    with pytest.raises(CommandError) as excinfo:
+        executor.run(["python3", str(script)], cwd=tmp_path, timeout=30, cancel_token=token)
+    elapsed = time.monotonic() - started
+
+    err = excinfo.value
+    assert err.code is ErrorCode.COMMAND_FAILED
+    assert err.details.get("cancelled") is True
+    assert err.details["exit_code"] is not None and err.details["exit_code"] != 0
+    assert "cancelled" in str(err).lower()
+    # The process was killed almost immediately, nowhere near its own 30s timeout.
+    assert elapsed < 5.0
+
+
+def test_cancel_token_before_bind_is_honored_immediately_on_bind(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "sleep_long2.py"
+    script.write_text("import time\ntime.sleep(30)\n")
+    token = CancellationToken()
+    token.cancel()  # Request cancellation before the process even starts.
+
+    started = time.monotonic()
+    with pytest.raises(CommandError) as excinfo:
+        executor.run(["python3", str(script)], cwd=tmp_path, timeout=30, cancel_token=token)
+    elapsed = time.monotonic() - started
+
+    assert excinfo.value.details.get("cancelled") is True
+    assert elapsed < 5.0
+
+
+def test_cancel_token_is_released_after_the_process_exits(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    token = CancellationToken()
+    result = executor.run(["echo", "done"], cwd=tmp_path, cancel_token=token)
+    assert result.returncode == 0
+    assert token.is_cancelled() is False
+    # release() already ran; calling cancel() now must not raise or affect anything.
+    token.cancel()
+    assert token.is_cancelled() is True
+
+
+def test_uncancelled_token_does_not_change_success_behavior(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    token = CancellationToken()
+    result = executor.run(["echo", "hello"], cwd=tmp_path, cancel_token=token)
+    assert result.returncode == 0
+    assert "hello" in result.stdout

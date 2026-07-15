@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..domain.execution_environment import EnvironmentIdentity, EnvironmentIdentityRequest
+from .cancellation import CancellationToken
 from .command import CommandResult
 
 
@@ -40,6 +41,7 @@ class ApprovedExecution:
     request: EnvironmentIdentityRequest
     identity: EnvironmentIdentity
     timeout: int
+    cancel_token: CancellationToken | None = None
 
 
 class ExecutionEnvironmentPort(Protocol):

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .cancellation import CancellationToken
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -37,6 +39,7 @@ class CommandExecutor(Protocol):
         check: bool = True,
         extra_env: Mapping[str, str] | None = None,
         output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> CommandResult: ...
 
     def run_bytes(

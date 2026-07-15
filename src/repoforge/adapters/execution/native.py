@@ -65,11 +65,21 @@ class NativeReviewedAdapter:
         execution: ApprovedExecution,
     ) -> ExecutionReceipt:
         """Execute an approved command with the precomputed profile identity."""
-        result = self._executor.run(
-            execution.argv,
-            cwd=execution.request.command_cwd,
-            timeout=execution.timeout,
-        )
+        # cancel_token is passed only when set so unrelated CommandExecutor fakes that
+        # predate cancellation support keep working unmodified.
+        if execution.cancel_token is None:
+            result = self._executor.run(
+                execution.argv,
+                cwd=execution.request.command_cwd,
+                timeout=execution.timeout,
+            )
+        else:
+            result = self._executor.run(
+                execution.argv,
+                cwd=execution.request.command_cwd,
+                timeout=execution.timeout,
+                cancel_token=execution.cancel_token,
+            )
         return ExecutionReceipt(execution.argv, execution.identity.identity_hash, result)
 
     def collect_artifacts(

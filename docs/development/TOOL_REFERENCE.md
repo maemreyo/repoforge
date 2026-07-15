@@ -264,7 +264,7 @@ automatically expire or remove workspaces.
 
 | Tool | Purpose |
 |---|---|
-| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. |
+| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. Pass `background=true` for a long profile to hold the workspace lock and run it as a durable, cancellable operation instead of blocking the call; poll with `operation_status`. |
 | `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, and explicit mutation reporting. Cheaper than a full profile run for iterating on a single failing path during development. |
 | `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. Run this once per workspace, right before commit — not on every edit. |
 | `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. |
@@ -300,6 +300,19 @@ fingerprint change invalidates a prior verification receipt. Missing tools, time
 contract drift, dependency/environment failures, output truncation, stale fingerprints, and unexpected
 mutation are explicit. Diagnostics do not update golden files, grant commit eligibility, replace
 `workspace_verify`, or imply an operating-system network sandbox.
+
+With `background=false` (the default), `workspace_run_profile` behavior and result shape are unchanged.
+With `background=true`, RepoForge validates inputs and acquires the workspace lock eagerly (failing fast
+with `LOCK_TIMEOUT` naming the running operation if another mutation already holds it), creates a durable
+`workspace_run_profile` operation, and returns `{operation_id, phase: "running", safe_next_action}`
+immediately instead of blocking. The workspace lock is held for the entire background run — the same
+mutual-exclusion semantics as the synchronous call — so a same-workspace mutation still fails closed while
+it runs; a different workspace's operations proceed concurrently up to `server.max_background_profiles`
+(default 2) simultaneous background profiles server-wide. On completion the verification receipt, audit
+event, and metrics are written exactly as the synchronous path writes them. `operation_cancel` terminates
+the running command's process group, releases the lock, marks the operation `cancelled`, and leaves no
+receipt. Background `workspace_run_profile` operations are not resumable across a server restart; an
+orphaned run surfaces as `orphaned` with its lock already released by the operating system.
 
 Call `workspace_pr_checks` first and reuse an exact `check-run:<id>` selector; URLs, API paths,
 job IDs, and arbitrary `gh` arguments are not accepted. Details and failure evidence require the

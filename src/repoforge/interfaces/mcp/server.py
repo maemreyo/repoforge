@@ -630,9 +630,13 @@ def create_server(
         annotations=LOCAL_MUTATE,
         structured_output=True,
     )
-    def workspace_run_profile(workspace_id: str, profile_name: str) -> dict[str, Any]:
-        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call."""
-        return bounded_service.call("workspace_run_profile", workspace_id, profile_name)
+    def workspace_run_profile(
+        workspace_id: str, profile_name: str, background: bool = False
+    ) -> dict[str, Any]:
+        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
+        return bounded_service.call(
+            "workspace_run_profile", workspace_id, profile_name, background
+        )
 
     @mcp.tool(
         title="Run reviewed workspace diagnostic",

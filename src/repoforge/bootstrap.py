@@ -165,6 +165,7 @@ class Application:
     pr_check_watches: PrCheckWatchCoordinator
     workflow_recorder: WorkflowRecorder
     workflow_replay: WorkflowReplayEngine
+    background_tasks: BackgroundTaskRunner
 
 
 def default_state_root() -> Path:
@@ -403,6 +404,7 @@ def build_application(
         pr_check_watches,
         workflow_recorder,
         workflow_replay,
+        background_tasks,
     )
 
 

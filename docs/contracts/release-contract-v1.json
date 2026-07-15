@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
-    "tool_surface_hash": "0d02ec8caba251a993629f76e55673695df55f117d3e6ff1f90a104ca3a210e4",
+    "tool_surface_hash": "a973c298ae6e03c82c2ca90428cf787cffb35654fd7f3a60e810582432d71c7e",
     "tools": [
       {
         "annotations": {
@@ -1836,9 +1836,14 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call.",
+        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes.",
         "inputSchema": {
           "properties": {
+            "background": {
+              "default": false,
+              "title": "Background",
+              "type": "boolean"
+            },
             "profile_name": {
               "title": "Profile Name",
               "type": "string"

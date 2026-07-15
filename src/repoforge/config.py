@@ -171,6 +171,7 @@ class ServerConfig:
     runtime_log_backup_count: int = 3
     idempotency_stale_seconds: int = 900
     idempotency_lock_timeout_seconds: int = 2
+    max_background_profiles: int = 2
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
@@ -556,6 +557,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("idempotency_lock_timeout_seconds"),
             2,
             "server.idempotency_lock_timeout_seconds",
+        ),
+        max_background_profiles=_positive_int(
+            server_raw.get("max_background_profiles"),
+            2,
+            "server.max_background_profiles",
         ),
         path_prefixes=_tuple_of_strings(server_raw.get("path_prefixes"), "server.path_prefixes")
         or DEFAULT_PATH_PREFIXES,

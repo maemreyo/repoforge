@@ -778,6 +778,7 @@ runtime_log_max_bytes = 2345
 runtime_log_backup_count = 5
 idempotency_stale_seconds = 321
 idempotency_lock_timeout_seconds = 7
+max_background_profiles = 9
 
 [repositories.demo]
 path = "{repo}"
@@ -792,7 +793,8 @@ path = "{repo}"
         server.runtime_log_backup_count,
         server.idempotency_stale_seconds,
         server.idempotency_lock_timeout_seconds,
-    ) == (1234, 4, 2345, 5, 321, 7)
+        server.max_background_profiles,
+    ) == (1234, 4, 2345, 5, 321, 7, 9)
 
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
@@ -801,6 +803,35 @@ path = "{repo}"
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="audit_backup_count"):
+        load_config(config_path)
+
+
+def test_phase6_max_background_profiles_defaults_and_rejects_invalid_values(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo-config-bg"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config_path = tmp_path / "config-bg.toml"
+    config_path.write_text(
+        f'''[server]
+workspace_root = "{tmp_path / "workspaces-config-bg"}"
+state_root = "{tmp_path / "state-config-bg"}"
+
+[repositories.demo]
+path = "{repo}"
+''',
+        encoding="utf-8",
+    )
+    assert load_config(config_path).server.max_background_profiles == 2
+
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "[server]", "[server]\nmax_background_profiles = 0"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="max_background_profiles"):
         load_config(config_path)
 
 

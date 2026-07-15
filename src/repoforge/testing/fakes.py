@@ -16,6 +16,7 @@ from pathlib import Path
 from ..domain.errors import ErrorCode, RepoForgeError
 from ..domain.operation_task import OperationTask
 from ..domain.workspace import WorkspaceRecord
+from ..ports.cancellation import CancellationToken
 from ..ports.command import CommandResult
 from ..ports.operation_gate import GateState
 from ..ports.operation_store import OperationRecordPage
@@ -107,8 +108,9 @@ class ScriptedCommandExecutor:
         check: bool = True,
         extra_env: Mapping[str, str] | None = None,
         output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> CommandResult:
-        del input_text, timeout, check, extra_env, output_limit
+        del input_text, timeout, check, extra_env, output_limit, cancel_token
         self.injector.hit("command.run")
         self.calls.append(tuple(argv))
         if not self._responses:
