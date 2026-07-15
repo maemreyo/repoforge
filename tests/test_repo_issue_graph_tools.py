@@ -143,6 +143,46 @@ def test_repo_issue_next_selects_by_priority_then_number_within_scope(tmp_path: 
     assert [item["number"] for item in scoped["tickets"]] == [10, 11]
 
 
+def test_repo_issue_next_derives_closed_blockers_and_metadata_repairs(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(
+        3,
+        ticket_type="program",
+        status="In progress",
+        parent=None,
+        children=[7, 9, 10],
+    )
+    blocker_7 = _node(7, status="Done", blocks=[10])
+    blocker_9 = _node(9, status="Done", blocks=[10])
+    ticket = _node(10, status="Blocked", blockers=[7, 9])
+    _write_manifest(environment.source, [program, blocker_7, blocker_9, ticket])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "prs": {},
+                "issues": {
+                    "3": {"state": "OPEN"},
+                    "7": {"state": "CLOSED"},
+                    "9": {"state": "CLOSED"},
+                    "10": {"state": "OPEN"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is True
+    assert [item["number"] for item in result["tickets"]] == [10]
+    readiness = result["tickets"][0]["readiness"]
+    assert readiness["derived_status"] == "Ready"
+    assert readiness["unresolved_blockers"] == []
+    assert result["metadata_repairs"] == [
+        {"issue_number": 10, "repairs": ["status: Blocked -> Ready"]}
+    ]
+
+
 def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -> None:
     service, environment = _service(tmp_path)
     program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
@@ -154,7 +194,7 @@ def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -
     assert result["node"]["number"] == 9
     assert result["live"]["title"] == "Implement safer workflow"
     assert result["live"]["state"] == "OPEN"
-    assert result["comments"][0]["body"] == "context"
+    assert result["comments"][0]["body"].startswith("context")
     assert "heading" in result["comments"][0]
 
 

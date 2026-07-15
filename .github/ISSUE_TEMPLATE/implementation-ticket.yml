@@ -23,7 +23,7 @@ body:
     id: status
     attributes:
       label: Status
-      options: [Backlog, Ready, In progress, Blocked, In review, Done]
+      options: [Backlog, Ready, In progress, Blocked, In review, Done, Superseded]
     validations: {required: true}
   - type: input
     id: parent

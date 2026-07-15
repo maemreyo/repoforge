@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f67a4031da1eae11b44f4172b5d760811c1c25c6d61744d9d87b383fac0c0e49",
-    "tool_surface_hash": "e5819068e2bfc890c219494fa29de5329e773b4e11a2c60d5f05bddf5df0e9f1",
+    "tool_surface_hash": "c663518c01537aa387d2ce5d3fda91fa616dd409b8cdb8fad3c2f8e87ce3a746",
     "tools": [
       {
         "annotations": {
@@ -428,15 +428,40 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Use this to pick the next selectable implementation ticket by validated status, closed blockers, and priority; a stale or invalid manifest is reported as diagnostics instead of an empty result.",
+        "description": "Use this to derive selectable tickets from bounded live issue state, complete specs, closed blockers, active parents, WIP limits, and deterministic delivery order without editing GitHub.",
         "inputSchema": {
           "properties": {
+            "initiative_wip_limit": {
+              "default": 2,
+              "title": "Initiative Wip Limit",
+              "type": "integer"
+            },
             "limit": {
               "default": 1,
               "title": "Limit",
+              "type": "integer"
+            },
+            "p0_wip_limit": {
+              "default": 2,
+              "title": "P0 Wip Limit",
+              "type": "integer"
+            },
+            "p1_wip_limit": {
+              "default": 3,
+              "title": "P1 Wip Limit",
+              "type": "integer"
+            },
+            "p2_wip_limit": {
+              "default": 4,
+              "title": "P2 Wip Limit",
+              "type": "integer"
+            },
+            "p3_wip_limit": {
+              "default": 4,
+              "title": "P3 Wip Limit",
               "type": "integer"
             },
             "repo_id": {

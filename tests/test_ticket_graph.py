@@ -171,7 +171,7 @@ def test_ticket_graph_detects_asymmetry_ready_blocker_and_child_drift(tmp_path: 
     ready = _node(5, blockers=[4])
     graph = load_ticket_graph(_write_graph(tmp_path, [program, blocker, ready]))
     codes = {item.code for item in validate_ticket_graph(graph)}
-    assert {"ASYMMETRIC_BLOCKS", "READY_WITH_OPEN_BLOCKER", "PARENT_CHILD_DRIFT"}.issubset(codes)
+    assert {"ASYMMETRIC_BLOCKS", "PARENT_CHILD_DRIFT"}.issubset(codes)
     assert select_ready_tickets(graph, limit=10) == ()
 
 

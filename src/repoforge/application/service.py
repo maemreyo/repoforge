@@ -366,10 +366,29 @@ class CodingService:
         )
 
     def repo_issue_next(
-        self, repo_id: str, root_issue: int | None = None, limit: int = 1
+        self,
+        repo_id: str,
+        root_issue: int | None = None,
+        limit: int = 1,
+        p0_wip_limit: int = 2,
+        p1_wip_limit: int = 3,
+        p2_wip_limit: int = 4,
+        p3_wip_limit: int = 4,
+        initiative_wip_limit: int = 2,
     ) -> dict[str, Any]:
         return _result(
-            self._issue_next.execute(RepositoryIssueNextCommand(repo_id, root_issue, limit))
+            self._issue_next.execute(
+                RepositoryIssueNextCommand(
+                    repo_id,
+                    root_issue,
+                    limit,
+                    p0_wip_limit,
+                    p1_wip_limit,
+                    p2_wip_limit,
+                    p3_wip_limit,
+                    initiative_wip_limit,
+                )
+            )
         )
 
     def repo_issue_spec(self, repo_id: str, issue_number: int) -> dict[str, Any]:

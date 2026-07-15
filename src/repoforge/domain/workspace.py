@@ -110,7 +110,9 @@ def normalize_issue_ids(values: Sequence[str] | None) -> tuple[str, ...]:
     if not values:
         return ()
     if len(values) > MAX_ISSUE_IDS:
-        raise WorkspaceError(f"issue_ids accepts at most {MAX_ISSUE_IDS} entries: got {len(values)}")
+        raise WorkspaceError(
+            f"issue_ids accepts at most {MAX_ISSUE_IDS} entries: got {len(values)}"
+        )
     normalized: list[str] = []
     for raw in values:
         value = raw.strip()
