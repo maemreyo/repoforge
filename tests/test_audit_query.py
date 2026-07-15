@@ -145,17 +145,13 @@ def test_summarize_operation_metrics_since_aggregates_only_matching_day_buckets(
 
     clock.value = "2026-07-14T00:00:00+00:00"
     metrics.record("workspace_commit", success=True, duration_ms=10.0, error_code=None)
-    metrics.record(
-        "workspace_commit", success=False, duration_ms=30.0, error_code="STALE_STATE"
-    )
+    metrics.record("workspace_commit", success=False, duration_ms=30.0, error_code="STALE_STATE")
 
     clock.value = "2026-07-15T00:00:00+00:00"
     metrics.record("workspace_commit", success=True, duration_ms=1_000.0, error_code=None)
 
     # Window covers only 07-14: the 07-13 and 07-15 calls must not be counted.
-    rows = summarize_operation_metrics(
-        metrics.snapshot(), since="2026-07-14", until="2026-07-14"
-    )
+    rows = summarize_operation_metrics(metrics.snapshot(), since="2026-07-14", until="2026-07-14")
     assert len(rows) == 1
     row = rows[0]
     assert row["action"] == "workspace_commit"
@@ -272,7 +268,5 @@ def test_summarize_operation_metrics_since_matches_manual_jsonl_aggregation(
         actual = rows[action]
         assert actual["count"] == expected["count"]
         assert actual["failures"] == expected["failures"]
-        assert actual["duration_ms_avg"] == round(
-            expected["duration_total"] / expected["count"], 3
-        )
+        assert actual["duration_ms_avg"] == round(expected["duration_total"] / expected["count"], 3)
         assert actual["duration_ms_max"] == expected["duration_max"]

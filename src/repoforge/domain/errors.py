@@ -64,6 +64,12 @@ class ErrorCode(str, Enum):
     CHECK_SELECTOR_INVALID = "CHECK_SELECTOR_INVALID"
     CHECK_EVIDENCE_STALE = "CHECK_EVIDENCE_STALE"
     CHECK_EVIDENCE_UNAVAILABLE = "CHECK_EVIDENCE_UNAVAILABLE"
+    EVIDENCE_INVALID = "EVIDENCE_INVALID"
+    EVIDENCE_CORRUPT = "EVIDENCE_CORRUPT"
+    EVIDENCE_SCHEMA_UNSUPPORTED = "EVIDENCE_SCHEMA_UNSUPPORTED"
+    EVIDENCE_ARTIFACT_DIGEST_MISMATCH = "EVIDENCE_ARTIFACT_DIGEST_MISMATCH"
+    EVIDENCE_ARTIFACT_MISSING = "EVIDENCE_ARTIFACT_MISSING"
+    EVIDENCE_QUOTA_EXCEEDED = "EVIDENCE_QUOTA_EXCEEDED"
     OPERATION_INVALID = "OPERATION_INVALID"
     OPERATION_NOT_FOUND = "OPERATION_NOT_FOUND"
     OPERATION_STALE = "OPERATION_STALE"
@@ -262,6 +268,12 @@ def operation_error_from_exception(
         ErrorCode.CHECK_SELECTOR_INVALID: "The supplied value is not an opaque CI selector issued by RepoForge.",
         ErrorCode.CHECK_EVIDENCE_STALE: "The selected Check Run does not match the exact pushed workspace commit.",
         ErrorCode.CHECK_EVIDENCE_UNAVAILABLE: "GitHub did not return the primary Check Run evidence required for this read.",
+        ErrorCode.EVIDENCE_INVALID: "The normalized evidence violates a typed identity, provenance, scope, timestamp, or bounds invariant.",
+        ErrorCode.EVIDENCE_CORRUPT: "The private evidence record is malformed, unsafe, or inconsistent with its checksum or identity.",
+        ErrorCode.EVIDENCE_SCHEMA_UNSUPPORTED: "The evidence record or frame uses a future schema this build cannot safely interpret.",
+        ErrorCode.EVIDENCE_ARTIFACT_DIGEST_MISMATCH: "The provider artifact bytes do not match the exact content-addressed reference.",
+        ErrorCode.EVIDENCE_ARTIFACT_MISSING: "A referenced provider artifact is not present in the private content-addressed store.",
+        ErrorCode.EVIDENCE_QUOTA_EXCEEDED: "Persisting the evidence would exceed a reviewed item, artifact, or total-byte quota.",
         ErrorCode.OPERATION_INVALID: "The operation request violates a typed identity, progress, scope, or bounds invariant.",
         ErrorCode.OPERATION_NOT_FOUND: "No durable operation exists for the supplied identifier.",
         ErrorCode.OPERATION_STALE: "Another writer changed the durable operation after the caller's reviewed timestamp.",

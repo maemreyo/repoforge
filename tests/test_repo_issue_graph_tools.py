@@ -56,7 +56,9 @@ def _service(tmp_path: Path):
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
     audit_path = root / "state" / "audit.jsonl"
-    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line]
+    events = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line
+    ]
     return [event for event in events if event["action"] == action]
 
 

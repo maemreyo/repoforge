@@ -338,9 +338,7 @@ def test_audit_stats_since_rejects_malformed_date(
     )
     monkeypatch.setattr(cli, "CodingService", lambda config: service)
 
-    code = cli.main(
-        ["--config", str(store.source_path), "audit", "stats", "--since", "not-a-date"]
-    )
+    code = cli.main(["--config", str(store.source_path), "audit", "stats", "--since", "not-a-date"])
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "failed"
