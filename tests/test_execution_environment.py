@@ -91,9 +91,7 @@ class TestEnvironmentIdentity:
                 ToolVersion(name="python", version="3.10.12"),
                 ToolVersion(name="git", version="2.40.0"),
             ),
-            lockfile_digests=(
-                ("uv.lock", hashlib.sha256(b"lock").hexdigest()),
-            ),
+            lockfile_digests=(("uv.lock", hashlib.sha256(b"lock").hexdigest()),),
             manifest_digests=(("pyproject.toml", hashlib.sha256(b"manifest").hexdigest()),),
             approved_env_var_names=("PATH", "HOME"),
             network_policy=NetworkPolicy.RESTRICTED,
@@ -197,7 +195,9 @@ class TestEnvironmentIdentity:
             EnvironmentIdentity(network_policy="invalid")  # type: ignore[arg-type]
 
     def test_invalid_filesystem_capability(self) -> None:
-        with pytest.raises(ValueError, match="filesystem_capability must be a FilesystemCapability"):
+        with pytest.raises(
+            ValueError, match="filesystem_capability must be a FilesystemCapability"
+        ):
             EnvironmentIdentity(filesystem_capability="invalid")  # type: ignore[arg-type]
 
     def test_invalid_working_directory_policy_hash(self) -> None:
@@ -284,9 +284,7 @@ class TestRealPlatformIdentity:
             architecture=platform.machine().lower(),
             python_version=sys.version.split()[0],
             runtime_version=f"python/{sys.version.split()[0]}",
-            tools=(
-                ToolVersion(name="python", version=sys.version.split()[0]),
-            ),
+            tools=(ToolVersion(name="python", version=sys.version.split()[0]),),
         )
         h = ident.identity_hash
         assert isinstance(h, str)
@@ -479,4 +477,3 @@ class TestNativeAdapterProfileCompatibility:
         adapter = NativeReviewedAdapter(fake)
         adapter.execute(["sleep", "1"], cwd=Path("/tmp"), timeout=30)
         assert list(fake.called[0][1]) == ["sleep", "1"]
-

@@ -49,7 +49,6 @@ class ToolVersion:
             raise ValueError(f"Invalid tool digest: {self.digest!r}")
 
 
-
 @dataclass(frozen=True, slots=True)
 class EnvironmentIdentity:
     """Fingerprint of a native execution environment for cache and receipt binding.
@@ -100,7 +99,9 @@ class EnvironmentIdentity:
         if self.working_directory_policy_hash and not _SHA256.fullmatch(
             self.working_directory_policy_hash
         ):
-            raise ValueError(f"Invalid working_directory_policy_hash: {self.working_directory_policy_hash!r}")
+            raise ValueError(
+                f"Invalid working_directory_policy_hash: {self.working_directory_policy_hash!r}"
+            )
 
     @property
     def identity_hash(self) -> str:
