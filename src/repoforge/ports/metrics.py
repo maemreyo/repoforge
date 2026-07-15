@@ -17,6 +17,7 @@ class MetricsSink(Protocol):
         success: bool,
         duration_ms: float,
         error_code: str | None,
+        result_bytes: int | None = None,
     ) -> None: ...
 
     def snapshot(self) -> dict[str, Any]: ...

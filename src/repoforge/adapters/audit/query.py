@@ -24,6 +24,7 @@ def read_audit_events(
     action: str | None = None,
     only_failed: bool = False,
     min_duration_ms: float | None = None,
+    min_bytes: float | None = None,
 ) -> list[dict[str, Any]]:
     """Return up to `limit` matching audit events, most recent first."""
     if limit <= 0 or limit > 1000:
@@ -58,6 +59,11 @@ def read_audit_events(
             duration = details.get("duration_ms") if isinstance(details, dict) else None
             if not isinstance(duration, (int, float)) or duration < min_duration_ms:
                 continue
+        if min_bytes is not None:
+            details = event.get("details")
+            result_bytes = details.get("result_bytes") if isinstance(details, dict) else None
+            if not isinstance(result_bytes, (int, float)) or result_bytes < min_bytes:
+                continue
         matched.append(event)
         if len(matched) >= limit:
             break
@@ -72,6 +78,9 @@ def _rows_from_operations(operations: dict[str, Any]) -> list[dict[str, Any]]:
         count = int(stats.get("count", 0) or 0)
         failures = int(stats.get("failures", 0) or 0)
         duration_total = float(stats.get("duration_ms_total", 0.0) or 0.0)
+        # `.get(..., 0)` tolerates a legacy stat entry recorded before result-size
+        # tracking existed, so it reports 0 rather than raising.
+        result_bytes_total = float(stats.get("result_bytes_total", 0) or 0)
         categories = stats.get("failure_categories")
         top_error_codes = (
             sorted(categories.items(), key=lambda item: item[1], reverse=True)[:3]
@@ -86,6 +95,8 @@ def _rows_from_operations(operations: dict[str, Any]) -> list[dict[str, Any]]:
                 "failure_rate": round(failures / count, 4) if count else 0.0,
                 "duration_ms_avg": round(duration_total / count, 3) if count else 0.0,
                 "duration_ms_max": float(stats.get("duration_ms_max", 0.0) or 0.0),
+                "result_bytes_avg": round(result_bytes_total / count, 3) if count else 0.0,
+                "result_bytes_max": int(stats.get("result_bytes_max", 0) or 0),
                 "top_error_codes": [list(item) for item in top_error_codes],
             }
         )
@@ -100,6 +111,8 @@ def _empty_bucket_stat() -> dict[str, Any]:
         "failures": 0,
         "duration_ms_total": 0.0,
         "duration_ms_max": 0.0,
+        "result_bytes_total": 0,
+        "result_bytes_max": 0,
         "failure_categories": {},
     }
 
@@ -111,6 +124,12 @@ def _merge_bucket_stat(target: dict[str, Any], source: dict[str, Any]) -> None:
     target["duration_ms_total"] += float(source.get("duration_ms_total", 0.0) or 0.0)
     target["duration_ms_max"] = max(
         float(target["duration_ms_max"]), float(source.get("duration_ms_max", 0.0) or 0.0)
+    )
+    # `.get(..., 0)` tolerates a legacy day bucket recorded before result-size
+    # tracking existed, so it merges as 0 rather than raising.
+    target["result_bytes_total"] += float(source.get("result_bytes_total", 0) or 0)
+    target["result_bytes_max"] = max(
+        float(target["result_bytes_max"]), float(source.get("result_bytes_max", 0) or 0)
     )
     categories = source.get("failure_categories")
     if isinstance(categories, dict):

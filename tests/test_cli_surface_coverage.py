@@ -234,6 +234,46 @@ def test_main_dispatches_all_command_families(
     assert stats_payload["operations"] == []
 
 
+def test_audit_min_bytes_filters_events_by_result_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = FakeStore(tmp_path)
+    store.source_path.write_text("x", encoding="utf-8")
+    store.active_resolved_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
+    monkeypatch.setattr(cli, "load_config", lambda path: object())
+    service = FakeService()
+    audit_path = tmp_path / "state" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "action": "workspace_diff",
+                    "success": True,
+                    "details": {"duration_ms": 1.0, "result_bytes": 100},
+                },
+                {
+                    "action": "workspace_status",
+                    "success": True,
+                    "details": {"duration_ms": 1.0, "result_bytes": 50_000},
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    service.audit = SimpleNamespace(path=audit_path)
+    service.metrics = None
+    monkeypatch.setattr(cli, "CodingService", lambda config: service)
+
+    code = cli.main(["--config", str(store.source_path), "audit", "--min-bytes", "1000"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [event["action"] for event in payload["events"]] == ["workspace_status"]
+
+
 def test_audit_stats_requires_configured_metrics_sink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -274,6 +314,8 @@ def test_audit_stats_since_aggregates_the_requested_bucket_window(
                     "failures": 1,
                     "duration_ms_total": 1_000.0,
                     "duration_ms_max": 500.0,
+                    "result_bytes_total": 5_000,
+                    "result_bytes_max": 1_000,
                     "failure_categories": {"STALE_STATE": 1},
                 }
             },
@@ -285,6 +327,8 @@ def test_audit_stats_since_aggregates_the_requested_bucket_window(
                         "failures": 1,
                         "duration_ms_total": 40.0,
                         "duration_ms_max": 30.0,
+                        "result_bytes_total": 300,
+                        "result_bytes_max": 250,
                         "failure_categories": {"STALE_STATE": 1},
                     }
                 }
@@ -317,6 +361,8 @@ def test_audit_stats_since_aggregates_the_requested_bucket_window(
             "failure_rate": 0.5,
             "duration_ms_avg": 20.0,
             "duration_ms_max": 30.0,
+            "result_bytes_avg": 150.0,
+            "result_bytes_max": 250,
             "top_error_codes": [["STALE_STATE", 1]],
         }
     ]

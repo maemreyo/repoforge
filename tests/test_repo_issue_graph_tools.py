@@ -244,6 +244,7 @@ def test_repo_issue_graph_produces_exactly_one_bounded_audit_event(tmp_path: Pat
         "truncated",
         "correlation_id",
         "duration_ms",
+        "result_bytes",
     }
     assert "title" not in json.dumps(details)
     assert "#9" not in json.dumps(details)
@@ -297,6 +298,7 @@ def test_repo_issue_next_produces_exactly_one_bounded_audit_event(tmp_path: Path
         "ticket_count",
         "correlation_id",
         "duration_ms",
+        "result_bytes",
     }
     assert "title" not in json.dumps(details)
 

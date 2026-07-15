@@ -12,6 +12,11 @@ lock-guarded JSON file:
 A version-1 file (``operations`` only) loads without error; lifetime totals
 keep accumulating and ``buckets`` starts empty, then fills in as new calls
 are recorded.
+
+Each per-action stat also carries ``result_bytes_total``/``result_bytes_max``,
+the compact-JSON size of successful results, alongside the existing duration
+aggregates. A file recorded before these fields existed loads compatibly:
+missing values default to ``0`` and continue accumulating from there.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ def _empty_stat() -> dict[str, Any]:
         "failures": 0,
         "duration_ms_total": 0.0,
         "duration_ms_max": 0.0,
+        "result_bytes_total": 0,
+        "result_bytes_max": 0,
         "failure_categories": {},
     }
 
@@ -115,6 +122,7 @@ class JsonMetricsSink:
         success: bool,
         rounded_duration_ms: float,
         error_code: str | None,
+        result_bytes: int | None = None,
     ) -> None:
         current = container.setdefault(action, _empty_stat())
         current["count"] = int(current["count"]) + 1
@@ -124,6 +132,15 @@ class JsonMetricsSink:
             float(current["duration_ms_total"]) + rounded_duration_ms, 3
         )
         current["duration_ms_max"] = max(float(current["duration_ms_max"]), rounded_duration_ms)
+        if result_bytes is not None:
+            # `.get(..., 0)` tolerates a legacy stat entry recorded before these
+            # fields existed, so a v1/v2 file without them still accumulates correctly.
+            current["result_bytes_total"] = int(current.get("result_bytes_total", 0)) + int(
+                result_bytes
+            )
+            current["result_bytes_max"] = max(
+                int(current.get("result_bytes_max", 0)), int(result_bytes)
+            )
         if not success:
             category = error_code or "INTERNAL_ERROR"
             categories = current["failure_categories"]
@@ -150,7 +167,13 @@ class JsonMetricsSink:
         success: bool,
         duration_ms: float,
         error_code: str | None,
+        result_bytes: int | None = None,
     ) -> None:
+        normalized_bytes = (
+            int(result_bytes)
+            if isinstance(result_bytes, (int, float)) and result_bytes >= 0
+            else None
+        )
         with self._locks.lock("operation-metrics", timeout_seconds=2):
             payload = self.snapshot()
             rounded = round(max(0.0, float(duration_ms)), 3)
@@ -160,6 +183,7 @@ class JsonMetricsSink:
                 success=success,
                 rounded_duration_ms=rounded,
                 error_code=error_code,
+                result_bytes=normalized_bytes,
             )
             today_text = self._clock.now_iso()[:10]
             try:
@@ -174,6 +198,7 @@ class JsonMetricsSink:
                     success=success,
                     rounded_duration_ms=rounded,
                     error_code=error_code,
+                    result_bytes=normalized_bytes,
                 )
                 self._prune_buckets(buckets, today)
             payload["version"] = _SCHEMA_VERSION

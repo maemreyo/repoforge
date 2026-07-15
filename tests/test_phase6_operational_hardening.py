@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from repoforge.adapters.audit import JsonlAuditSink
+from repoforge.adapters.audit.query import read_audit_events
 from repoforge.adapters.observability import JsonMetricsSink
 from repoforge.adapters.persistence import JsonIdempotencyStore
 from repoforge.adapters.runtime.tunnel_cli import TunnelCliClient
@@ -268,6 +269,8 @@ def test_metrics_sink_aggregates_duration_and_failure_category(tmp_path: Path) -
         "failures": 1,
         "duration_ms_total": 20.0,
         "duration_ms_max": 12.5,
+        "result_bytes_total": 0,
+        "result_bytes_max": 0,
         "failure_categories": {"COMMAND_TIMEOUT": 1},
     }
     assert metrics.path.stat().st_mode & 0o777 == 0o600
@@ -292,6 +295,8 @@ def test_metrics_sink_records_into_the_correct_day_bucket(tmp_path: Path) -> Non
         "failures": 1,
         "duration_ms_total": 40.0,
         "duration_ms_max": 30.0,
+        "result_bytes_total": 0,
+        "result_bytes_max": 0,
         "failure_categories": {"STALE_STATE": 1},
     }
     assert buckets["2026-07-15"]["workspace_commit"]["count"] == 1
@@ -550,6 +555,74 @@ def test_audited_operation_records_metrics_and_structured_unchanged_state(tmp_pa
     metric = ctx.metrics.snapshot()["operations"]["workspace_push"]
     assert metric["failures"] == 1
     assert metric["failure_categories"] == {"COMMAND_TIMEOUT": 1}
+
+
+def test_audited_success_records_result_bytes_matching_compact_json_of_the_result(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    payload = {"b": 2, "a": [1, 2, 3], "path": Path("x")}
+    expected_bytes = len(
+        json.dumps(
+            {"b": 2, "a": [1, 2, 3], "path": "x"}, separators=(",", ":"), default=str
+        ).encode("utf-8")
+    )
+
+    result = ctx.audited("workspace_status", {"workspace_id": "demo"}, lambda: payload)
+
+    assert result == payload
+    events = read_audit_events(ctx.audit.path, limit=1, action="workspace_status")
+    assert len(events) == 1
+    assert events[0]["success"] is True
+    assert events[0]["details"]["result_bytes"] == expected_bytes
+    assert expected_bytes > 0
+
+    metric = ctx.metrics.snapshot()["operations"]["workspace_status"]
+    assert metric["result_bytes_total"] == expected_bytes
+    assert metric["result_bytes_max"] == expected_bytes
+
+
+def test_audited_success_with_unserializable_result_records_null_bytes_and_still_succeeds(
+    tmp_path: Path,
+) -> None:
+    class _Unrenderable:
+        def __str__(self) -> str:
+            raise RuntimeError("cannot render for audit")
+
+    ctx = _context(tmp_path)
+    marker = _Unrenderable()
+
+    result = ctx.audited("workspace_status", {"workspace_id": "demo"}, lambda: marker)
+
+    assert result is marker
+    events = read_audit_events(ctx.audit.path, limit=1, action="workspace_status")
+    assert len(events) == 1
+    assert events[0]["success"] is True
+    assert events[0]["details"]["result_bytes"] is None
+
+    metric = ctx.metrics.snapshot()["operations"]["workspace_status"]
+    assert metric["count"] == 1
+    assert metric["result_bytes_total"] == 0
+    assert metric["result_bytes_max"] == 0
+
+
+def test_audited_success_audit_details_never_contain_result_content(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    secret_result = {
+        "token": "super-secret-do-not-log",
+        "items": [f"item-{index}" for index in range(50)],
+    }
+
+    ctx.audited("workspace_status", {"workspace_id": "demo"}, lambda: secret_result)
+
+    raw = ctx.audit.path.read_text(encoding="utf-8")
+    assert "super-secret-do-not-log" not in raw
+    assert "item-0" not in raw
+
+    events = read_audit_events(ctx.audit.path, limit=1, action="workspace_status")
+    details = events[0]["details"]
+    assert set(details) & {"token", "items"} == set()
+    assert isinstance(details["result_bytes"], int)
 
 
 def test_doctor_redacts_secrets_before_direct_cli_or_service_rendering(tmp_path: Path) -> None:

@@ -200,7 +200,12 @@ def test_repo_list_produces_exactly_one_bounded_audit_event(forge_env: ForgeEnvi
     assert event["details"]["repo_count"] == 1
     # Bounded: only a count plus the standard correlation/duration fields, never the
     # full repository listing (paths, profiles, diagnostics) that the result contains.
-    assert set(event["details"]) == {"repo_count", "correlation_id", "duration_ms"}
+    assert set(event["details"]) == {
+        "repo_count",
+        "correlation_id",
+        "duration_ms",
+        "result_bytes",
+    }
 
 
 def test_workspace_list_produces_exactly_one_bounded_audit_event(
@@ -215,7 +220,12 @@ def test_workspace_list_produces_exactly_one_bounded_audit_event(
     event = events[0]
     assert event["success"] is True
     assert event["details"]["workspace_count"] == 1
-    assert set(event["details"]) == {"workspace_count", "correlation_id", "duration_ms"}
+    assert set(event["details"]) == {
+        "workspace_count",
+        "correlation_id",
+        "duration_ms",
+        "result_bytes",
+    }
 
 
 def test_workspace_list_audits_failure_without_leaking_internal_error_state(

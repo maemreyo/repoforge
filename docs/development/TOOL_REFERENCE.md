@@ -130,17 +130,21 @@ activation leaves the restricted configuration on disk and never restores remove
 every consumer call (MCP or CLI) already durably records through `ApplicationContext.audited`; they add
 no new persistence or instrumentation.
 
-`rf audit --last N --action NAME --failed --slow MS` returns up to `N` (bounded 1-1000, default 20) most
-recent private audit events, most recent first, from the active configuration's `audit.jsonl`. `--action`
-filters to one action name, `--failed` returns only failed calls, and `--slow MS` returns only calls
-whose recorded `duration_ms` is at least `MS`. Each returned event includes its `correlation_id`,
-`duration_ms`, and, for failures, `error_code` and `error_type`; audit bodies remain redacted exactly as
-written by the audit sink.
+`rf audit --last N --action NAME --failed --slow MS --min-bytes N` returns up to `N` (bounded 1-1000,
+default 20) most recent private audit events, most recent first, from the active configuration's
+`audit.jsonl`. `--action` filters to one action name, `--failed` returns only failed calls, `--slow MS`
+returns only calls whose recorded `duration_ms` is at least `MS`, and `--min-bytes N` returns only
+successful calls whose recorded `result_bytes` is at least `N`. Each returned event includes its
+`correlation_id`, `duration_ms`, and, for successes, `result_bytes` — the compact-JSON size of the
+result, never the result content itself — and, for failures, `error_code` and `error_type`; audit bodies
+remain redacted exactly as written by the audit sink.
 
 `rf audit stats` renders the active configuration's aggregate `operation-metrics.json` as one row per
-action: call count, failure count and rate, average and maximum `duration_ms`, and up to three most
-frequent failure error codes, sorted slowest-average-first. Use it to find which tool is failing most or
-taking the longest before diving into `rf audit --action NAME --slow MS` for individual calls.
+action: call count, failure count and rate, average and maximum `duration_ms`, average and maximum
+`result_bytes`, and up to three most frequent failure error codes, sorted slowest-average-first. Use it
+to find which tool is failing most, taking the longest, or returning the largest results — the dominant
+cost for an LLM consumer is often context-window size, not wall-clock time — before diving into
+`rf audit --action NAME --slow MS` or `--min-bytes N` for individual calls.
 
 `operation-metrics.json` keeps lifetime `operations` totals (unbounded in time, for backward
 compatibility with schema version 1 files) alongside bounded `buckets`: one aggregate per action per

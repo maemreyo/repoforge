@@ -61,6 +61,32 @@ def test_read_audit_events_filters_by_min_duration(tmp_path: Path) -> None:
     assert events[0]["details"]["duration_ms"] == 5_000.0
 
 
+def test_read_audit_events_filters_by_min_bytes(tmp_path: Path) -> None:
+    clock = FixedClock("2026-07-15T00:00:00+00:00")
+    sink = JsonlAuditSink(tmp_path, clock)
+    sink.record(
+        "workspace_diff", success=True, details={"duration_ms": 1.0, "result_bytes": 100}
+    )
+    sink.record(
+        "workspace_status", success=True, details={"duration_ms": 1.0, "result_bytes": 50_000}
+    )
+
+    events = read_audit_events(sink.path, limit=10, min_bytes=1_000.0)
+    assert len(events) == 1
+    assert events[0]["action"] == "workspace_status"
+    assert events[0]["details"]["result_bytes"] == 50_000
+
+
+def test_read_audit_events_min_bytes_skips_events_missing_result_bytes(tmp_path: Path) -> None:
+    clock = FixedClock("2026-07-15T00:00:00+00:00")
+    sink = JsonlAuditSink(tmp_path, clock)
+    # A failure event, or a legacy success event, has no result_bytes at all.
+    sink.record("workspace_verify", success=False, details={"duration_ms": 1.0})
+
+    events = read_audit_events(sink.path, limit=10, min_bytes=0.0)
+    assert events == []
+
+
 def test_read_audit_events_rejects_out_of_bound_limit(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="between 1 and 1000"):
         read_audit_events(tmp_path / "audit.jsonl", limit=0)
@@ -270,3 +296,67 @@ def test_summarize_operation_metrics_since_matches_manual_jsonl_aggregation(
         assert actual["failures"] == expected["failures"]
         assert actual["duration_ms_avg"] == round(expected["duration_total"] / expected["count"], 3)
         assert actual["duration_ms_max"] == expected["duration_max"]
+
+
+def test_metrics_file_without_result_bytes_fields_loads_and_accumulates_and_since_still_works(
+    tmp_path: Path,
+) -> None:
+    """Migration: a metrics file recorded before result_bytes existed loads compatibly
+    (missing fields default to 0), keeps accumulating new result_bytes correctly, and
+    `rf audit stats --since`/`--until` continues to work over the mixed data."""
+    path = tmp_path / "operation-metrics.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "operations": {
+                    "workspace_status": {
+                        "count": 3,
+                        "successes": 3,
+                        "failures": 0,
+                        "duration_ms_total": 30.0,
+                        "duration_ms_max": 15.0,
+                        "failure_categories": {},
+                    }
+                },
+                "buckets": {
+                    "2026-07-13": {
+                        "workspace_status": {
+                            "count": 1,
+                            "successes": 1,
+                            "failures": 0,
+                            "duration_ms_total": 5.0,
+                            "duration_ms_max": 5.0,
+                            "failure_categories": {},
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    locks = InMemoryLockManager()
+    clock = FixedClock("2026-07-13T00:00:00+00:00")
+    metrics = JsonMetricsSink(tmp_path, locks, clock)
+
+    # Legacy entries (no result_bytes fields at all) degrade to 0, never crash.
+    lifetime_rows = summarize_operation_metrics(metrics.snapshot())
+    assert lifetime_rows[0]["count"] == 3
+    assert lifetime_rows[0]["result_bytes_avg"] == 0.0
+    assert lifetime_rows[0]["result_bytes_max"] == 0
+
+    metrics.record(
+        "workspace_status", success=True, duration_ms=1.0, error_code=None, result_bytes=200
+    )
+    snapshot = metrics.snapshot()
+    lifetime = snapshot["operations"]["workspace_status"]
+    assert lifetime["count"] == 4
+    assert lifetime["result_bytes_total"] == 200
+    assert lifetime["result_bytes_max"] == 200
+
+    windowed_rows = summarize_operation_metrics(snapshot, since="2026-07-13", until="2026-07-13")
+    assert windowed_rows[0]["count"] == 2
+    assert windowed_rows[0]["result_bytes_avg"] == 100.0
+    assert windowed_rows[0]["result_bytes_max"] == 200

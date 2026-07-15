@@ -34,6 +34,7 @@ from ..ports import (
     PullRequestGateway,
     WorkspaceStore,
 )
+from .dto import to_data
 from .fingerprint_cache import FingerprintCache
 from .idempotency import execute_idempotent
 
@@ -251,7 +252,13 @@ class ApplicationContext:
         return (record, repo, path)
 
     def record_metric(
-        self, action: str, *, success: bool, duration_ms: float, error_code: str | None
+        self,
+        action: str,
+        *,
+        success: bool,
+        duration_ms: float,
+        error_code: str | None,
+        result_bytes: int | None = None,
     ) -> None:
         if self.metrics is None:
             return
@@ -261,6 +268,7 @@ class ApplicationContext:
                 success=success,
                 duration_ms=duration_ms,
                 error_code=error_code,
+                result_bytes=result_bytes,
             )
 
     def audited(
@@ -353,6 +361,15 @@ class ApplicationContext:
             self.record_metric(action, success=False, duration_ms=duration, error_code=code)
             raise
         duration = round((time.monotonic() - started) * 1000, 3)
+        result_bytes: int | None
+        try:
+            result_bytes = len(
+                json.dumps(to_data(result), separators=(",", ":"), default=str).encode("utf-8")
+            )
+        except Exception:
+            # Audit must never break a succeeding operation just because its result
+            # happens to be unserializable; record the size as unknown instead.
+            result_bytes = None
         self.audit.record(
             action,
             success=True,
@@ -360,9 +377,16 @@ class ApplicationContext:
                 **details,
                 "correlation_id": correlation,
                 "duration_ms": duration,
+                "result_bytes": result_bytes,
             },
         )
-        self.record_metric(action, success=True, duration_ms=duration, error_code=None)
+        self.record_metric(
+            action,
+            success=True,
+            duration_ms=duration,
+            error_code=None,
+            result_bytes=result_bytes,
+        )
         return result
 
     def idempotent(

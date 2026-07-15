@@ -1436,6 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--action")
     audit.add_argument("--failed", action="store_true")
     audit.add_argument("--slow", type=float, default=None)
+    audit.add_argument("--min-bytes", type=float, default=None)
     stats = audit_sub.add_parser("stats")
     stats.add_argument("--since")
     stats.add_argument("--until")
@@ -1677,6 +1678,7 @@ def main(argv: list[str] | None = None) -> int:
                         action=args.action,
                         only_failed=args.failed,
                         min_duration_ms=args.slow,
+                        min_bytes=args.min_bytes,
                     ),
                 }
             )
