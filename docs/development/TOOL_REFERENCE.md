@@ -4,6 +4,17 @@ RepoForge exposes forty-two focused MCP tools. Each tool has one clear responsib
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
 
+## Execution environments
+
+Execution environments are internal application contracts, not MCP tools. `ExecutionEnvironmentPort`
+encapsulates doctor, idempotent prepare/cleanup, deterministic identity, approved-command execution,
+and declared artifact collection. The native reviewed adapter delegates to the existing constrained
+command executor, preserving profile argv, working directory, timeout, output bounds, and failure
+behavior. Its identity includes normalized platform/architecture, runtime/tool versions, recognized
+lockfile and manifest digests, network/filesystem policy, and adapter version. It excludes source
+bodies, command output, full environment bodies, secrets, and absolute user paths. Verification
+receipts add an optional `environment_identity_hash`; legacy receipts without this field remain valid.
+
 ## Local runtime commands
 
 `rf runtime status` is a local operator command, not an MCP tool. It compares the reviewed lock
