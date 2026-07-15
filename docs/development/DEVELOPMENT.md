@@ -114,6 +114,11 @@ When configuration fields or defaults change:
 5. document required operator actions;
 6. verify that permissions were not silently broadened.
 
+Resource budgets are configured in `[server.resource_budget]`. Repository-specific
+`[repositories.<repo_id>.resource_budget]` tables inherit server values and may only tighten them.
+Budgets constrain local resource pressure; they do not reduce required verification or expand
+repository, command, network, or publication authority.
+
 ## Documentation changes
 
 Documentation should be written in clear professional English. Keep commands executable, avoid

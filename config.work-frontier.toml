@@ -31,6 +31,22 @@ allowed_environment = [
   "DOCKER_HOST",
 ]
 
+# Resource budgets limit local execution pressure; they never reduce required
+# verification or grant command, network, repository, or publication authority.
+[server.resource_budget]
+max_cpu_seconds_per_operation = 900
+max_memory_bytes = 2147483648
+max_disk_bytes = 10737418240
+max_subprocesses = 8
+max_concurrent_operations = 4
+max_queued_operations = 32
+max_network_bytes = 104857600
+max_output_bytes = 120000
+task_ttl_seconds = 86400
+max_cache_bytes = 2147483648
+max_index_bytes = 2147483648
+max_provider_requests = 100
+
 [repositories.work-frontier]
 path = "/Users/trung.ngo/Documents/zaob-dev/work-frontier"
 display_name = "Work Frontier"

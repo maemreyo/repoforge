@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import tomli as tomllib
 
@@ -58,6 +59,7 @@ DEFAULT_DENIED_PATHS = (
 )
 _SAFE_BRANCH_COMPONENT = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SAFE_REPO_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+E = TypeVar("E", bound=Enum)
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,39 @@ class ProfileConfig:
     verification: bool = False
     timeout_seconds: int | None = None
     working_directory: str | None = None
+
+
+@dataclass(frozen=True)
+class ResourceBudget:
+    max_cpu_seconds_per_operation: int = 900
+    max_memory_bytes: int = 2 * 1024 * 1024 * 1024
+    max_disk_bytes: int = 10 * 1024 * 1024 * 1024
+    max_subprocesses: int = 8
+    max_concurrent_operations: int = 4
+    max_queued_operations: int = 32
+    max_network_bytes: int = 100 * 1024 * 1024
+    max_output_bytes: int = 120_000
+    task_ttl_seconds: int = 86_400
+    max_cache_bytes: int = 2 * 1024 * 1024 * 1024
+    max_index_bytes: int = 2 * 1024 * 1024 * 1024
+    max_provider_requests: int = 100
+
+
+DEFAULT_RESOURCE_BUDGET = ResourceBudget()
+_RESOURCE_BUDGET_FIELDS = (
+    "max_cpu_seconds_per_operation",
+    "max_memory_bytes",
+    "max_disk_bytes",
+    "max_subprocesses",
+    "max_concurrent_operations",
+    "max_queued_operations",
+    "max_network_bytes",
+    "max_output_bytes",
+    "task_ttl_seconds",
+    "max_cache_bytes",
+    "max_index_bytes",
+    "max_provider_requests",
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +133,7 @@ class RepositoryConfig:
     risk_policy: RiskPolicy = field(
         default_factory=lambda: default_risk_policy(final_profile="full")
     )
+    resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -118,6 +154,7 @@ class ServerConfig:
     idempotency_lock_timeout_seconds: int = 2
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
+    resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -155,6 +192,28 @@ def _positive_int(value: Any, default: int, context: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ConfigError(f"{context} must be a positive integer")
     return value
+
+
+def _load_resource_budget(
+    raw: Any,
+    context: str,
+    defaults: ResourceBudget = DEFAULT_RESOURCE_BUDGET,
+    ceiling: ResourceBudget | None = None,
+) -> ResourceBudget:
+    if raw is None:
+        return defaults
+    table = _expect_mapping(raw, context)
+    unknown = sorted(set(table) - set(_RESOURCE_BUDGET_FIELDS))
+    if unknown:
+        raise ConfigError(f"{context} contains unsupported budget fields: {unknown}")
+    values: dict[str, int] = {}
+    for field_name in _RESOURCE_BUDGET_FIELDS:
+        default = getattr(defaults, field_name)
+        configured = _positive_int(table.get(field_name), default, f"{context}.{field_name}")
+        if ceiling is not None and configured > getattr(ceiling, field_name):
+            raise ConfigError(f"{context}.{field_name} cannot exceed its inherited server limit")
+        values[field_name] = configured
+    return ResourceBudget(**values)
 
 
 def _boolean(value: Any, default: bool, context: str) -> bool:
@@ -237,13 +296,13 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
     return profiles
 
 
-def _enum_value(enum_type: type[Any], value: Any, context: str) -> Any:
+def _enum_value(enum_type: type[E], value: Any, context: str) -> E:
     if not isinstance(value, str):
         raise ConfigError(f"{context} must be a string")
     try:
         return enum_type(value)
     except ValueError as exc:
-        allowed = sorted(item.value for item in enum_type)
+        allowed = sorted(str(item.value) for item in enum_type)
         raise ConfigError(f"{context} must be one of {allowed}") from exc
 
 
@@ -473,6 +532,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("allowed_environment"), "server.allowed_environment"
         )
         or DEFAULT_ALLOWED_ENVIRONMENT,
+        resource_budget=_load_resource_budget(
+            server_raw.get("resource_budget"),
+            "server.resource_budget",
+        ),
     )
     repositories_raw = _expect_mapping(raw.get("repositories"), "repositories")
     if not repositories_raw:
@@ -541,6 +604,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             profiles=profiles,
             diagnostics=diagnostics,
         )
+        resource_budget = _load_resource_budget(
+            repo_raw.get("resource_budget"),
+            f"repositories.{repo_id}.resource_budget",
+            defaults=server.resource_budget,
+            ceiling=server.resource_budget,
+        )
         repositories[repo_id] = RepositoryConfig(
             repo_id=repo_id,
             path=_expand_path(str(repo_raw["path"]), base_dir=base_dir),
@@ -605,5 +674,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             profiles=profiles,
             diagnostics=diagnostics,
             risk_policy=risk_policy,
+            resource_budget=resource_budget,
         )
     return AppConfig(source_path=config_path, server=server, repositories=repositories)
