@@ -1,8 +1,35 @@
 # RepoForge tool reference
 
-RepoForge exposes forty-two focused MCP tools. Each tool has one clear responsibility, and read
+RepoForge exposes forty-three focused MCP tools. Each tool has one clear responsibility, and read
 operations are separated from write operations so ChatGPT can apply an appropriate confirmation
 flow.
+
+## Provider registry
+
+Provider manifests and the provider registry are internal application contracts, not MCP tools.
+`ProviderManifest` records the reviewed provider ID, kind, version, digest-pinned executable or image,
+supported languages/capabilities, health-probe arguments, coverage/confidence model,
+network/filesystem requirements, output limits, and declared fallback. Provider manifests live only in
+immutable resolved configuration in this stage; the minimal editable source format has no provider
+enrollment path. `ConfigProviderRegistry` accepts only explicitly configured manifests, rejects
+duplicate IDs and invalid fallback graphs, orders listings deterministically, and never promotes a
+discovered binary into capability. Static availability checks resolve only configured executables and
+verify their SHA-256 without executing provider code. Image availability and health-probe execution are
+deferred to the provider lifecycle stage. Provider configuration is advisory evidence only and cannot
+authorize repository, filesystem, command, network, or publishing access.
+
+## Execution environments
+
+Execution environments are internal application contracts, not MCP tools. `ExecutionEnvironmentPort`
+encapsulates doctor, idempotent prepare/cleanup, deterministic identity, approved-command execution,
+and declared artifact collection. The native reviewed adapter delegates to the existing constrained
+command executor, preserving profile argv, working directory, timeout, output bounds, and failure
+behavior. Its identity includes normalized platform/architecture, versions of known safely inspectable
+profile tools, reviewed environment names and value hashes, recognized lockfile and manifest digests,
+working-directory/network/filesystem policy, and adapter version. Unknown executables produce partial
+identity without an extra probe. It excludes source
+bodies, command output, full environment bodies, secrets, and absolute user paths. Verification
+receipts add an optional `environment_identity_hash`; legacy receipts without this field remain valid.
 
 ## Local runtime commands
 
