@@ -30,6 +30,7 @@ class WorkspaceApplyPatchResult:
     input_format: str
     normalized_patch_sha256: str
     repair_actions: tuple[str, ...]
+    head_sha: str
 
 
 class WorkspacePatchApplier:
@@ -116,6 +117,7 @@ class WorkspacePatchApplier:
                     normalized.input_format,
                     normalized.normalized_sha256,
                     normalized.repair_actions,
+                    self.ctx.git.head_sha(path),
                 )
 
         return self.ctx.audited(

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ..context import ApplicationContext
+from ..fingerprint_cache import prime_fingerprint
 
 _SHA = re.compile("^[a-f0-9]{64}$")
 
@@ -26,6 +27,8 @@ class WorkspaceFileWriteResult:
     sha256: str
     size_bytes: int
     diff_stat: str
+    workspace_fingerprint: str
+    head_sha: str
 
 
 class WorkspaceFileWriter:
@@ -65,11 +68,18 @@ class WorkspaceFileWriter:
                         "File does not exist; use expected_sha256='<new>' to create it"
                     )
                 self.ctx.filesystem.write_bytes_atomic(path, data, preserve_mode=True)
-                if self.ctx.fingerprint_cache is not None:
-                    self.ctx.fingerprint_cache.invalidate(c.workspace_id)
                 sha = hashlib.sha256(data).hexdigest()
                 stat = self.ctx.git.diff_stat(workspace)
-                return WorkspaceFileWriteResult(c.workspace_id, normalized, sha, len(data), stat)
+                fingerprint = prime_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    c.workspace_id,
+                    self.ctx.git,
+                    workspace,
+                ).fingerprint
+                head_sha = self.ctx.git.head_sha(workspace)
+                return WorkspaceFileWriteResult(
+                    c.workspace_id, normalized, sha, len(data), stat, fingerprint, head_sha
+                )
 
         return self.ctx.audited(
             "workspace_write_file",

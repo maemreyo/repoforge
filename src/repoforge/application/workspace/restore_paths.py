@@ -24,6 +24,7 @@ class WorkspaceRestorePathsResult:
     removed_untracked: list[str]
     workspace_fingerprint: str
     change_metrics: dict[str, Any]
+    head_sha: str
 
 
 class WorkspacePathsRestorer:
@@ -79,6 +80,7 @@ class WorkspacePathsRestorer:
                     removed,
                     after.fingerprint,
                     self.ctx.git.change_metrics(path, repo),
+                    self.ctx.git.head_sha(path),
                 )
 
         return self.ctx.audited(

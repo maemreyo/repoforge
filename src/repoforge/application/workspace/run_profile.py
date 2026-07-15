@@ -28,6 +28,7 @@ class WorkspaceRunProfileResult:
     commands: list[dict[str, object]]
     change_metrics: dict[str, object]
     satisfies_commit_gate: bool
+    head_sha: str
     working_directory: str | None = None
 
 
@@ -131,6 +132,7 @@ class WorkspaceProfileRunner:
                     [self.public(r) for r in results],
                     metrics,
                     profile.verification,
+                    self.ctx.git.head_sha(path),
                     profile.working_directory,
                 )
 

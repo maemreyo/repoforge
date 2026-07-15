@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ..context import ApplicationContext
+from ..fingerprint_cache import prime_fingerprint
 
 _SHA = re.compile("^[a-f0-9]{64}$")
 
@@ -28,6 +29,8 @@ class WorkspaceReplaceTextResult:
     sha256: str
     replacements: int
     diff_stat: str
+    workspace_fingerprint: str
+    head_sha: str
 
 
 class WorkspaceTextReplacer:
@@ -78,12 +81,23 @@ class WorkspaceTextReplacer:
                 if len(encoded) > self.ctx.config.server.max_file_bytes:
                     raise SecurityError("Updated content exceeds max_file_bytes")
                 self.ctx.filesystem.write_bytes_atomic(path, encoded, preserve_mode=True)
-                if self.ctx.fingerprint_cache is not None:
-                    self.ctx.fingerprint_cache.invalidate(c.workspace_id)
                 sha = hashlib.sha256(encoded).hexdigest()
                 stat = self.ctx.git.diff_stat(workspace)
+                fingerprint = prime_fingerprint(
+                    self.ctx.fingerprint_cache,
+                    c.workspace_id,
+                    self.ctx.git,
+                    workspace,
+                ).fingerprint
+                head_sha = self.ctx.git.head_sha(workspace)
                 return WorkspaceReplaceTextResult(
-                    c.workspace_id, normalized, sha, c.expected_occurrences, stat
+                    c.workspace_id,
+                    normalized,
+                    sha,
+                    c.expected_occurrences,
+                    stat,
+                    fingerprint,
+                    head_sha,
                 )
 
         return self.ctx.audited(

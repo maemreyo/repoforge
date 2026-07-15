@@ -407,7 +407,7 @@ def create_server(
     def workspace_write_file(
         workspace_id: str, relative_path: str, content: str, expected_sha256: str
     ) -> dict[str, Any]:
-        """Use this to create or fully replace one UTF-8 file with optimistic locking."""
+        """Use this to create or fully replace one UTF-8 file with optimistic locking; the response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between."""
         return bounded_service.call(
             "workspace_write_file", workspace_id, relative_path, content, expected_sha256
         )
@@ -425,7 +425,7 @@ def create_server(
         expected_sha256: str,
         expected_occurrences: int = 1,
     ) -> dict[str, Any]:
-        """Use this for a precise replacement after validating the file SHA and occurrence count."""
+        """Use this for a precise replacement after validating the file SHA and occurrence count; the response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
         return bounded_service.call(
             "workspace_replace_text",
             workspace_id,
@@ -447,7 +447,7 @@ def create_server(
         expected_head_sha: str,
         expected_workspace_fingerprint: str,
     ) -> dict[str, Any]:
-        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_replace_text for one exact edit or workspace_write_file for full reviewed content."""
+        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_replace_text for one exact edit or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
         return bounded_service.call(
             "workspace_apply_patch",
             workspace_id,
@@ -466,7 +466,7 @@ def create_server(
         relative_paths: list[str],
         expected_workspace_fingerprint: str,
     ) -> dict[str, Any]:
-        """Use this to undo selected uncommitted tracked changes or remove selected untracked files."""
+        """Use this to undo selected uncommitted tracked changes or remove selected untracked files; the response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
         return bounded_service.call(
             "workspace_restore_paths", workspace_id, relative_paths, expected_workspace_fingerprint
         )
@@ -500,7 +500,7 @@ def create_server(
         expected_head_sha: str,
         expected_fingerprint: str,
     ) -> dict[str, Any]:
-        """Use this to merge the exact reviewed base target without rebase, force push, or remote write."""
+        """Use this to merge the exact reviewed base target without rebase, force push, or remote write; the response carries a fresh workspace_fingerprint for the next locked call."""
         return bounded_service.call(
             "workspace_refresh",
             workspace_id,
@@ -520,7 +520,7 @@ def create_server(
         structured_output=True,
     )
     def workspace_run_profile(workspace_id: str, profile_name: str) -> dict[str, Any]:
-        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile."""
+        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile; the response carries a fresh fingerprint and head_sha for the next locked call."""
         return bounded_service.call("workspace_run_profile", workspace_id, profile_name)
 
     @mcp.tool(
@@ -534,7 +534,7 @@ def create_server(
         selector: str | None = None,
         expected_fingerprint: str | None = None,
     ) -> dict[str, Any]:
-        """Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input."""
+        """Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed."""
         return bounded_service.call(
             "workspace_run_diagnostic",
             workspace_id,

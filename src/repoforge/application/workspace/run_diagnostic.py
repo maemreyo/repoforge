@@ -47,6 +47,7 @@ class WorkspaceRunDiagnosticResult:
     fingerprint_before: str
     fingerprint_after: str
     fingerprint_changed: bool
+    head_sha: str
     changed_paths: list[str]
     unexpected_paths: list[str]
     change_metrics: dict[str, Any]
@@ -324,6 +325,7 @@ class WorkspaceDiagnosticRunner:
                     fingerprint_before=before_fingerprint,
                     fingerprint_after=after_fingerprint,
                     fingerprint_changed=fingerprint_changed,
+                    head_sha=self.ctx.git.head_sha(locked_workspace),
                     changed_paths=sorted(after_paths),
                     unexpected_paths=[],
                     change_metrics=metrics,

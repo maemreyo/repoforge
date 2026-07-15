@@ -36,6 +36,7 @@ class WorkspaceRefreshResult:
     recovered: bool
     force_push_required: bool
     next_step: str
+    workspace_fingerprint: str
 
 
 def _stale_refresh(message: str) -> WorkspaceError:
@@ -137,6 +138,7 @@ class WorkspaceRefresher:
                         True,
                         False,
                         "Resolve the reported upstream conflict in a reviewed change, then preview again.",
+                        recovered_fingerprint,
                     )
 
                 invalidated = invalidate_workspace_refresh_receipts(record)
@@ -166,12 +168,12 @@ class WorkspaceRefresher:
                         "Workspace refresh registry update failed; Git state was restored",
                         retryable=True,
                     ) from exc
-                _ = prime_fingerprint(
+                final_fingerprint = prime_fingerprint(
                     self.ctx.fingerprint_cache,
                     command.workspace_id,
                     self.ctx.git,
                     path,
-                )
+                ).fingerprint
                 return WorkspaceRefreshResult(
                     command.workspace_id,
                     merged.status,
@@ -188,6 +190,7 @@ class WorkspaceRefresher:
                         if merged.head_sha != old_head
                         else "The reviewed base was already integrated; re-run verification before publishing."
                     ),
+                    final_fingerprint,
                 )
 
         return self.ctx.audited(
