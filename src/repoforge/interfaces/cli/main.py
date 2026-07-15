@@ -1436,7 +1436,9 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--action")
     audit.add_argument("--failed", action="store_true")
     audit.add_argument("--slow", type=float, default=None)
-    audit_sub.add_parser("stats")
+    stats = audit_sub.add_parser("stats")
+    stats.add_argument("--since")
+    stats.add_argument("--until")
     operation = commands.add_parser("operation")
     operation_sub = operation.add_subparsers(dest="operation_command", required=True)
     operation_status = operation_sub.add_parser("status")
@@ -1653,12 +1655,18 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, "audit_command", None) == "stats":
                 if service.metrics is None:
                     raise ConfigError("Operation metrics are not available for this configuration")
-                _json(
-                    {
-                        "path": str(service.metrics.path),
-                        "operations": summarize_operation_metrics(service.metrics.snapshot()),
-                    }
-                )
+                since = getattr(args, "since", None)
+                until = getattr(args, "until", None)
+                stats_payload: dict[str, Any] = {
+                    "path": str(service.metrics.path),
+                    "operations": summarize_operation_metrics(
+                        service.metrics.snapshot(), since=since, until=until
+                    ),
+                }
+                if since is not None or until is not None:
+                    stats_payload["since"] = since
+                    stats_payload["until"] = until
+                _json(stats_payload)
                 return 0
             _json(
                 {

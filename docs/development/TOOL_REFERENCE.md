@@ -128,6 +128,14 @@ action: call count, failure count and rate, average and maximum `duration_ms`, a
 frequent failure error codes, sorted slowest-average-first. Use it to find which tool is failing most or
 taking the longest before diving into `rf audit --action NAME --slow MS` for individual calls.
 
+`operation-metrics.json` keeps lifetime `operations` totals (unbounded in time, for backward
+compatibility with schema version 1 files) alongside bounded `buckets`: one aggregate per action per
+UTC day, retained for 30 days and pruned on every write. `rf audit stats --since DATE` (optionally with
+`--until DATE`, both `YYYY-MM-DD`) aggregates only the matching daily buckets instead of the lifetime
+totals, so an operator can isolate the days after a fix shipped and compare its failure rate or latency
+against the period before — without the lifetime totals diluting the comparison. `rf audit stats` with
+no `--since`/`--until` is unchanged and still reports the lifetime totals.
+
 `rf repo inspect PATH` and `rf repo propose PATH` inspect local repository facts and return a
 structured `pending_approval` proposal without changing configuration or running discovered commands.
 Detected verification profiles are classified as an `expansion`. The `repo propose` proposal ID binds

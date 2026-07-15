@@ -1,21 +1,61 @@
-"""Crash-safe bounded aggregate operation metrics."""
+"""Crash-safe bounded aggregate operation metrics.
+
+Persists two views of the same recorded calls in one private, atomic,
+lock-guarded JSON file:
+
+- ``operations``: lifetime totals per action, unbounded in time (unchanged
+  since schema version 1, kept for backward compatibility).
+- ``buckets``: per-day totals per action, bounded to a fixed retention
+  window (pruned on every write) so a before/after comparison across a
+  shipped fix is possible without unbounded growth.
+
+A version-1 file (``operations`` only) loads without error; lifetime totals
+keep accumulating and ``buckets`` starts empty, then fills in as new calls
+are recorded.
+"""
 
 from __future__ import annotations
 
 import json
 import os
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from ...ports.clock import Clock
 from ...ports.locking import LockManager
+from ..system import SystemClock
+
+_SCHEMA_VERSION = 2
+DEFAULT_RETENTION_DAYS = 30
+
+
+def _empty_stat() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "successes": 0,
+        "failures": 0,
+        "duration_ms_total": 0.0,
+        "duration_ms_max": 0.0,
+        "failure_categories": {},
+    }
 
 
 class JsonMetricsSink:
-    def __init__(self, state_root: Path, locks: LockManager):
+    def __init__(
+        self,
+        state_root: Path,
+        locks: LockManager,
+        clock: Clock | None = None,
+        *,
+        retention_days: int = DEFAULT_RETENTION_DAYS,
+    ):
         self.path = state_root / "operation-metrics.json"
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.path.parent, 0o700)
         self._locks = locks
+        self._clock = clock or SystemClock()
+        self._retention_days = max(1, int(retention_days))
 
     @staticmethod
     def _fsync_dir(path: Path) -> None:
@@ -32,7 +72,7 @@ class JsonMetricsSink:
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"version": 1, "operations": {}}
+        return {"version": _SCHEMA_VERSION, "operations": {}, "buckets": {}}
 
     def snapshot(self) -> dict[str, Any]:
         if not self.path.is_file():
@@ -43,7 +83,12 @@ class JsonMetricsSink:
             return self._empty()
         if not isinstance(raw, dict) or not isinstance(raw.get("operations"), dict):
             return self._empty()
-        return raw
+        buckets = raw.get("buckets")
+        return {
+            "version": _SCHEMA_VERSION,
+            "operations": raw["operations"],
+            "buckets": buckets if isinstance(buckets, dict) else {},
+        }
 
     def _write(self, payload: dict[str, Any]) -> None:
         temporary = self.path.with_name(
@@ -62,6 +107,42 @@ class JsonMetricsSink:
         finally:
             temporary.unlink(missing_ok=True)
 
+    @staticmethod
+    def _apply(
+        container: dict[str, Any],
+        action: str,
+        *,
+        success: bool,
+        rounded_duration_ms: float,
+        error_code: str | None,
+    ) -> None:
+        current = container.setdefault(action, _empty_stat())
+        current["count"] = int(current["count"]) + 1
+        key = "successes" if success else "failures"
+        current[key] = int(current[key]) + 1
+        current["duration_ms_total"] = round(
+            float(current["duration_ms_total"]) + rounded_duration_ms, 3
+        )
+        current["duration_ms_max"] = max(float(current["duration_ms_max"]), rounded_duration_ms)
+        if not success:
+            category = error_code or "INTERNAL_ERROR"
+            categories = current["failure_categories"]
+            categories[category] = int(categories.get(category, 0)) + 1
+
+    def _prune_buckets(self, buckets: dict[str, Any], today: date) -> None:
+        cutoff = today - timedelta(days=self._retention_days - 1)
+        stale = []
+        for day in buckets:
+            try:
+                day_date = date.fromisoformat(day)
+            except (TypeError, ValueError):
+                stale.append(day)
+                continue
+            if day_date < cutoff:
+                stale.append(day)
+        for day in stale:
+            del buckets[day]
+
     def record(
         self,
         action: str,
@@ -72,26 +153,28 @@ class JsonMetricsSink:
     ) -> None:
         with self._locks.lock("operation-metrics", timeout_seconds=2):
             payload = self.snapshot()
-            operations = payload.setdefault("operations", {})
-            current = operations.setdefault(
-                action,
-                {
-                    "count": 0,
-                    "successes": 0,
-                    "failures": 0,
-                    "duration_ms_total": 0.0,
-                    "duration_ms_max": 0.0,
-                    "failure_categories": {},
-                },
-            )
-            current["count"] = int(current["count"]) + 1
-            key = "successes" if success else "failures"
-            current[key] = int(current[key]) + 1
             rounded = round(max(0.0, float(duration_ms)), 3)
-            current["duration_ms_total"] = round(float(current["duration_ms_total"]) + rounded, 3)
-            current["duration_ms_max"] = max(float(current["duration_ms_max"]), rounded)
-            if not success:
-                category = error_code or "INTERNAL_ERROR"
-                categories = current["failure_categories"]
-                categories[category] = int(categories.get(category, 0)) + 1
+            self._apply(
+                payload.setdefault("operations", {}),
+                action,
+                success=success,
+                rounded_duration_ms=rounded,
+                error_code=error_code,
+            )
+            today_text = self._clock.now_iso()[:10]
+            try:
+                today = date.fromisoformat(today_text)
+            except ValueError:
+                today = None
+            buckets = payload.setdefault("buckets", {})
+            if today is not None:
+                self._apply(
+                    buckets.setdefault(today_text, {}),
+                    action,
+                    success=success,
+                    rounded_duration_ms=rounded,
+                    error_code=error_code,
+                )
+                self._prune_buckets(buckets, today)
+            payload["version"] = _SCHEMA_VERSION
             self._write(payload)

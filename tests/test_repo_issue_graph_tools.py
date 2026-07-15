@@ -54,6 +54,12 @@ def _service(tmp_path: Path):
     return CodingService(load_config(environment.config_path)), environment
 
 
+def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
+    audit_path = root / "state" / "audit.jsonl"
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line]
+    return [event for event in events if event["action"] == action]
+
+
 def test_repo_issue_graph_reports_no_manifest_when_absent(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     result = service.repo_issue_graph("demo")
@@ -165,3 +171,106 @@ def test_repo_issue_spec_works_without_a_manifest_node(tmp_path: Path) -> None:
     assert result["node"] is None
     assert result["drift"] == []
     assert result["live"]["title"] == "Implement safer workflow"
+
+
+def test_repo_issue_graph_produces_exactly_one_bounded_audit_event(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ticket = _node(9)
+    _write_manifest(environment.source, [program, ticket])
+
+    service.repo_issue_graph("demo", status="Ready")
+
+    events = _audit_events(environment.root, "repo_issue_graph")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is True
+    details = event["details"]
+    assert details["repo_id"] == "demo"
+    assert details["status"] == "Ready"
+    assert details["node_count"] == 1
+    assert details["manifest_found"] is True
+    # Bounded: no ticket titles or bodies, only identifiers/filters and counts.
+    assert set(details) == {
+        "repo_id",
+        "root_issue",
+        "status",
+        "priority",
+        "initiative",
+        "manifest_found",
+        "node_count",
+        "truncated",
+        "correlation_id",
+        "duration_ms",
+    }
+    assert "title" not in json.dumps(details)
+    assert "#9" not in json.dumps(details)
+
+
+def test_repo_issue_graph_audits_failure_for_an_invalid_initiative(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ticket = _node(9)
+    _write_manifest(environment.source, [program, ticket])
+
+    with pytest.raises(TicketGraphError, match="not an initiative"):
+        service.repo_issue_graph("demo", initiative=9)
+
+    events = _audit_events(environment.root, "repo_issue_graph")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is False
+    assert event["details"]["initiative"] == 9
+    assert event["details"]["error_type"] == "TicketGraphError"
+    # No ticket titles or graph payloads leak into the failure audit details.
+    assert "title" not in json.dumps(event["details"])
+
+
+def test_repo_issue_next_produces_exactly_one_bounded_audit_event(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, priority="P0", status="Ready")
+    _write_manifest(environment.source, [program, ready])
+
+    result = service.repo_issue_next("demo", limit=5)
+    assert result["tickets"][0]["number"] == 9
+
+    events = _audit_events(environment.root, "repo_issue_next")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is True
+    details = event["details"]
+    assert details["repo_id"] == "demo"
+    assert details["limit"] == 5
+    assert details["ticket_count"] == 1
+    assert details["manifest_found"] is True
+    assert details["valid"] is True
+    # Bounded: no ticket titles or bodies in the audit trail.
+    assert set(details) == {
+        "repo_id",
+        "root_issue",
+        "limit",
+        "manifest_found",
+        "valid",
+        "ticket_count",
+        "correlation_id",
+        "duration_ms",
+    }
+    assert "title" not in json.dumps(details)
+
+
+def test_repo_issue_next_audits_failure_for_an_out_of_range_limit(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, priority="P0", status="Ready")
+    _write_manifest(environment.source, [program, ready])
+
+    with pytest.raises(TicketGraphError, match="limit must be between"):
+        service.repo_issue_next("demo", limit=0)
+
+    events = _audit_events(environment.root, "repo_issue_next")
+    assert len(events) == 1
+    event = events[0]
+    assert event["success"] is False
+    assert event["details"]["limit"] == 0
+    assert event["details"]["error_type"] == "TicketGraphError"
