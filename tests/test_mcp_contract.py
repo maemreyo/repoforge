@@ -35,6 +35,9 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "repo_commit_read",
             "repo_compare",
             "repo_issue_read",
+            "repo_issue_graph",
+            "repo_issue_next",
+            "repo_issue_spec",
             "repo_pr_read",
             "workspace_create",
             "workspace_list",
@@ -200,6 +203,13 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         assert comparison["merge_base_sha"] == snapshot["commit_sha"]
         assert comparison["total_files"] == 0
         await call("repo_issue_read", {"repo_id": "demo", "issue_number": 1})
+        graph_result = await call("repo_issue_graph", {"repo_id": "demo"})
+        assert graph_result["manifest_found"] is False
+        next_result = await call("repo_issue_next", {"repo_id": "demo"})
+        assert next_result["manifest_found"] is False
+        spec_result = await call("repo_issue_spec", {"repo_id": "demo", "issue_number": 1})
+        assert spec_result["manifest_found"] is False
+        assert spec_result["live"]["title"] == "Implement safer workflow"
         await call("repo_pr_read", {"repo_id": "demo", "pr_number": 2})
 
         created = await call("workspace_create", {"repo_id": "demo", "task_slug": "MCP contract"})

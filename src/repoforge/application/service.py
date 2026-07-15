@@ -31,7 +31,10 @@ from .repository.context import (
 from .repository.doctor import Doctor, DoctorCommand
 from .repository.file_read import RepositoryFileReadCommand, RepositoryFileReader
 from .repository.files_read import RepositoryFilesReadCommand, RepositoryFilesReader
+from .repository.issue_graph import RepositoryIssueGraphCommand, RepositoryIssueGraphReader
+from .repository.issue_next import RepositoryIssueNextCommand, RepositoryIssueNextReader
 from .repository.issue_read import IssueReadCommand, IssueReader
+from .repository.issue_spec import RepositoryIssueSpecCommand, RepositoryIssueSpecReader
 from .repository.list import RepositoryListCommand, RepositoryLister
 from .repository.pr_read import PullRequestReadCommand, PullRequestReader
 from .repository.recent_commits import (
@@ -188,6 +191,9 @@ class CodingService:
         self._repo_search = RepositorySearcher(ctx)
         self._recent = RecentCommitsReader(ctx)
         self._issue = IssueReader(ctx)
+        self._issue_graph = RepositoryIssueGraphReader(ctx)
+        self._issue_next = RepositoryIssueNextReader(ctx)
+        self._issue_spec = RepositoryIssueSpecReader(ctx)
         self._repo_pr = PullRequestReader(ctx)
         self._create = WorkspaceCreator(ctx)
         self._list = WorkspaceLister(ctx)
@@ -344,6 +350,30 @@ class CodingService:
 
     def repo_issue_read(self, repo_id: str, issue_number: int) -> dict[str, Any]:
         return _result(self._issue.execute(IssueReadCommand(repo_id, issue_number)))
+
+    def repo_issue_graph(
+        self,
+        repo_id: str,
+        root_issue: int | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        initiative: int | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._issue_graph.execute(
+                RepositoryIssueGraphCommand(repo_id, root_issue, status, priority, initiative)
+            )
+        )
+
+    def repo_issue_next(
+        self, repo_id: str, root_issue: int | None = None, limit: int = 1
+    ) -> dict[str, Any]:
+        return _result(
+            self._issue_next.execute(RepositoryIssueNextCommand(repo_id, root_issue, limit))
+        )
+
+    def repo_issue_spec(self, repo_id: str, issue_number: int) -> dict[str, Any]:
+        return _result(self._issue_spec.execute(RepositoryIssueSpecCommand(repo_id, issue_number)))
 
     def repo_pr_read(self, repo_id: str, pr_number: int) -> dict[str, Any]:
         return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number)))
