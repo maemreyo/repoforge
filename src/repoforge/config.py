@@ -11,11 +11,11 @@ from typing import Any, TypeVar
 
 import tomli as tomllib
 
+from .domain.adhoc import ExecutionMode, validate_adhoc_runners
 from .domain.command_source import (
     derive_command_source_paths,
     validate_command_source_paths,
 )
-from .domain.adhoc import ExecutionMode, validate_adhoc_runners
 from .domain.diagnostics import (
     DiagnosticMutability,
     DiagnosticNetworkPolicy,
