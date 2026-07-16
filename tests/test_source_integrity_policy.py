@@ -26,6 +26,8 @@ def test_repository_uses_documented_executable_integrity_policy_not_manual_manif
         if (
             not path.is_file()
             or ".git" in path.parts
+            or ".claude" in path.parts
+            or ".venv" in path.parts
             or path == Path(__file__)
             or path.is_relative_to(root / "docs/superpowers/plans")
         ):

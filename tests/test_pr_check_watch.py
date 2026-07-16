@@ -287,6 +287,8 @@ def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_even
         "correlation_id",
         "duration_ms",
         "result_bytes",
+        "is_mutating",
+        "repo_id",
     }
     assert "Watch checks" not in json.dumps(details)
     assert "Test body" not in json.dumps(details)

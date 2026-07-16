@@ -315,6 +315,7 @@ def test_repo_list_produces_exactly_one_bounded_audit_event(forge_env: ForgeEnvi
         "correlation_id",
         "duration_ms",
         "result_bytes",
+        "is_mutating",
     }
 
 
@@ -335,6 +336,7 @@ def test_workspace_list_produces_exactly_one_bounded_audit_event(
         "correlation_id",
         "duration_ms",
         "result_bytes",
+        "is_mutating",
     }
 
 

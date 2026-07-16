@@ -8,6 +8,7 @@ from typing import Any
 
 import tomli as tomllib
 
+from ...domain.policy_patch import RepositoryPolicyPatch
 from ...domain.repository_proposal import RepositoryProposal
 from ...domain.user_paths import DEFAULT_STATE_ROOT, DEFAULT_WORKSPACE_ROOT
 
@@ -95,6 +96,63 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
     if default_profile:
         repo["default_verification_profile"] = default_profile
     repositories[proposal.repo_id] = repo
+    return result
+
+
+def apply_policy_patch(
+    document: dict[str, Any], repo_id: str, patch: RepositoryPolicyPatch
+) -> dict[str, Any]:
+    """Layer one repository's durable policy patch over its template-derived entry."""
+
+    if patch.is_empty():
+        return deepcopy(document)
+    result = deepcopy(document)
+    repositories = result.get("repositories")
+    if not isinstance(repositories, dict) or repo_id not in repositories:
+        raise ValueError(f"Unknown repository id: {repo_id}")
+    repo = repositories[repo_id]
+    if not isinstance(repo, dict):
+        raise ValueError(f"repositories.{repo_id} must be a table")
+    profiles = repo.setdefault("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError(f"repositories.{repo_id}.profiles must be a table")
+    for profile in patch.profiles:
+        profiles[profile.name] = profile.as_table()
+    for name in patch.remove_profiles:
+        profiles.pop(name, None)
+    default_profile = repo.get("default_verification_profile")
+    verification_profiles = sorted(
+        name
+        for name, table in profiles.items()
+        if isinstance(table, dict) and table.get("verification") is True
+    )
+    if default_profile not in profiles or (
+        verification_profiles and default_profile not in verification_profiles
+    ):
+        fallback = (
+            "full"
+            if "full" in verification_profiles
+            else (verification_profiles[0] if verification_profiles else None)
+        )
+        if fallback is None:
+            repo.pop("default_verification_profile", None)
+            repo["require_verification_before_commit"] = False
+        else:
+            repo["default_verification_profile"] = fallback
+    diagnostics = repo.setdefault("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        raise ValueError(f"repositories.{repo_id}.diagnostics must be a table")
+    for name, table in patch.diagnostics:
+        diagnostics[name] = deepcopy(table)
+    for name in patch.remove_diagnostics:
+        diagnostics.pop(name, None)
+    formatters = repo.setdefault("formatters", {})
+    if not isinstance(formatters, dict):
+        raise ValueError(f"repositories.{repo_id}.formatters must be a table")
+    for name, table in patch.formatters:
+        formatters[name] = deepcopy(table)
+    for name in patch.remove_formatters:
+        formatters.pop(name, None)
     return result
 
 

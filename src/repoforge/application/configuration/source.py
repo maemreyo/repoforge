@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import tomli as tomllib
+
+from ...domain.policy_patch import PolicyPatchError, RepositoryPolicyPatch
 
 SOURCE_CONFIG_VERSION = 2
 
@@ -20,6 +23,7 @@ class SourceRepository:
     policy_template: str = "standard"
     decisions: tuple[tuple[str, str], ...] = ()
     policy_overrides: tuple[tuple[str, str], ...] = ()
+    policy_patch: RepositoryPolicyPatch = field(default_factory=RepositoryPolicyPatch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +69,10 @@ def parse_source(text: str) -> SourceConfiguration:
             raise ValueError("repo.policy_overrides must be an array of KEY=VALUE strings")
         decisions = tuple(sorted(tuple(value.split("=", 1)) for value in raw_decisions))
         overrides = tuple(sorted(tuple(value.split("=", 1)) for value in raw_overrides))
+        try:
+            policy_patch = RepositoryPolicyPatch.from_table(item.get("policy_patch"))
+        except PolicyPatchError as exc:
+            raise ValueError(f"repo {item['id']} policy_patch is invalid: {exc}") from exc
         result.append(
             SourceRepository(
                 str(item["id"]),
@@ -73,9 +81,40 @@ def parse_source(text: str) -> SourceConfiguration:
                 str(item.get("policy_template", "standard")),
                 decisions,
                 overrides,
+                policy_patch,
             )
         )
     return SourceConfiguration(tunnel_id, profile, tuple(result))
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise ValueError(f"Unsupported TOML value in policy patch: {type(value).__name__}")
+
+
+_BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_TOML_KEY.fullmatch(key) else json.dumps(key, ensure_ascii=False)
+
+
+def _render_patch_table(prefix: str, table: dict[str, Any], lines: list[str]) -> None:
+    scalar_keys = [key for key in sorted(table) if not isinstance(table[key], dict)]
+    nested_keys = [key for key in sorted(table) if isinstance(table[key], dict)]
+    if scalar_keys or not nested_keys:
+        lines.extend(["", f"[{prefix}]"])
+        for key in scalar_keys:
+            lines.append(f"{_toml_key(key)} = {_toml_value(table[key])}")
+    for key in nested_keys:
+        _render_patch_table(f"{prefix}.{_toml_key(key)}", table[key], lines)
 
 
 def render_source(config: SourceConfiguration) -> str:
@@ -117,6 +156,8 @@ def render_source(config: SourceConfiguration) -> str:
             )
         if repo.proposal_id:
             lines.append(f"proposal_id = {json.dumps(repo.proposal_id)}")
+        if not repo.policy_patch.is_empty():
+            _render_patch_table("repo.policy_patch", repo.policy_patch.as_table(), lines)
     return "\n".join(lines).rstrip() + "\n"
 
 

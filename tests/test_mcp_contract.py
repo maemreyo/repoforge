@@ -143,6 +143,9 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_pr_failure_evidence",
             "workspace_pr_watch",
             "workspace_remove",
+            "config_inspect",
+            "runtime_logs_read",
+            "repo_policy_apply",
         }
         assert names == expected
         assert "run_shell" not in names

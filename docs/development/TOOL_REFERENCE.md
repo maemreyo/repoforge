@@ -182,6 +182,35 @@ the requested snapshot against its source before atomically restoring both files
 partial, stale, or modified snapshot and reports the activation impact after restoration.
 Snapshot retention is bounded to the newest ten complete generations.
 
+## Configuration administration (agent-facing)
+
+| Tool | Purpose |
+|---|---|
+| `config_inspect` | Read the accepted and active generations, restart status, one repository's effective policy (profiles with exact commands, diagnostic and formatter names, budgets, allowed and denied paths, stored decisions, overrides, and policy patch), plus pending policy changes. Read-only. |
+| `runtime_logs_read` | Read bounded, redacted operational evidence: the local JSONL audit trail (`source="audit"`, filterable by action, failures only, or minimum duration) or the managed runtime log tail (`source="runtime"`). At most 200 entries per call. Read-only. |
+| `repo_policy_apply` | Request one repository's policy change (set/remove command profiles, diagnostics, formatters, or known policy overrides) through the reviewed immutable-generation pipeline. Supports `dry_run` previews. |
+
+`repo_policy_apply` is gated by the capability delta of the rendered candidate, enforced
+independently by the generation store:
+
+- `equivalent` changes create no generation;
+- `metadata_only` and `restriction` changes are accepted immediately and hot reloaded in
+  process when the transport supports it;
+- `expansion` and `incompatible` changes are never applied on the model's authority. They are
+  persisted as a pending change under the private state root, and the response instructs the
+  model to relay `rf config approve <change_id>` to the operator. The approval token never
+  transits the model conversation.
+
+Accepted changes are recorded as a durable per-repository `policy_patch` in the editable source
+configuration, so custom profiles, diagnostics, and formatters survive `rf repo refresh`. Every
+candidate is validated with the full configuration loader before acceptance and fails closed.
+
+CLI equivalents are `rf config pending`, `rf config approve CHANGE_ID [--activate auto|always|never]`,
+and `rf config reject CHANGE_ID`. Approving a stale change (the accepted generation or source moved
+on) discards it and asks the agent to re-propose from current state. On transports without an
+in-process runtime (bare `create_server` embedding), these tools return a structured
+`CONFIG_ADMIN_UNAVAILABLE` error instead of acting.
+
 ## Durable operations
 
 | Tool | Purpose |

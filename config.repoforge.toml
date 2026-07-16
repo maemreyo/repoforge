@@ -1,78 +1,28 @@
-# RepoForge configuration for developing RepoForge with RepoForge.
-# Install a runtime copy at ~/.config/repoforge/config.toml or merge this
-# repository table into an existing multi-repository config.
+# RepoForge source configuration for developing RepoForge with RepoForge.
+#
+# This is the modern v2 *source* format: you declare repositories, decisions, and a
+# durable policy patch; `rf setup` / `rf repo refresh --accept` expand it into reviewed
+# immutable generations (server bounds, budgets, and path policy come from the reviewed
+# templates and defaults). Enroll it with:
+#
+#   rf setup --config ~/.config/repoforge/config.toml   # or merge the [[repo]] below
+#   rf repo refresh repoforge --accept
+#
+# The legacy resolved `[server]`/`[repositories.*]` format previously shown here is
+# still accepted for serve/doctor/runtime, but repository mutation and agent-driven
+# policy changes require this source format. Risk-scoring thresholds are not part of
+# the source format; generated configurations use the reviewed defaults.
+version = 2
 
-[server]
-workspace_root = "~/.local/share/repoforge/workspaces"
-state_root = "~/.local/state/repoforge"
-max_file_bytes = 2000000
-max_tool_output_chars = 120000
-default_command_timeout_seconds = 120
-verification_timeout_seconds = 1800
-max_fingerprint_bytes = 52428800
-max_batch_files = 20
-path_prefixes = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-allowed_environment = [
-  "HOME",
-  "PATH",
-  "LANG",
-  "LC_ALL",
-  "SSH_AUTH_SOCK",
-  "GH_HOST",
-  "GIT_SSH_COMMAND",
-  "COREPACK_HOME",
-  "PNPM_HOME",
-  "UV_CACHE_DIR",
-  "XDG_CACHE_HOME",
-]
+# Omit [tunnel] for local-only stdio operation.
+# [tunnel]
+# id = "tunnel_replace_me"
+# profile = "repoforge"
 
-# Resource budgets limit local execution pressure; they never reduce required
-# verification or grant command, network, repository, or publication authority.
-[server.resource_budget]
-max_cpu_seconds_per_operation = 900
-max_memory_bytes = 2147483648
-max_disk_bytes = 10737418240
-max_subprocesses = 8
-max_concurrent_operations = 4
-max_queued_operations = 32
-max_network_bytes = 104857600
-max_output_bytes = 120000
-task_ttl_seconds = 86400
-max_cache_bytes = 2147483648
-max_index_bytes = 2147483648
-max_provider_requests = 100
-
-[repositories.repoforge]
+[[repo]]
+id = "repoforge"
 path = "/Users/trung.ngo/Documents/zaob-dev/repoforge"
-display_name = "RepoForge"
-remote = "origin"
-default_base = "main"
-allowed_base_branches = ["main"]
-branch_prefix = "ai/"
-protected_branches = ["main", "master", "develop", "production"]
-require_verification_before_commit = true
-fetch_before_workspace = true
-default_verification_profile = "full"
-max_changed_files = 80
-max_diff_lines = 8000
-max_total_changed_bytes = 10485760
-allowed_paths = []
-denied_paths = [
-  ".git",
-  ".git/**",
-  ".env",
-  ".env.*",
-  "**/.env",
-  "**/.env.*",
-  "**/*.pem",
-  "**/*.key",
-  "**/*secret*",
-  "**/*credential*",
-  ".github/workflows/**",
-]
-pr_labels = []
-pr_reviewers = []
-no_maintainer_edit = false
+decisions = ["dependency_install=exclude", "existing_worktrees=use_new_isolated"]
 
 # GitHub is the operational ticket source. Project fields are an optional overlay;
 # native sub-issues rooted at #3 define membership even without a Project target.
@@ -105,7 +55,49 @@ public_contract_globs = [
 manifest_globs = ["**/uv.lock", "pyproject.toml", "**/package-lock.json", "**/pnpm-lock.yaml"]
 docs_globs = ["*.md", "docs/**"]
 
-[repositories.repoforge.diagnostics.pytest-target]
+# Reviewed customizations survive `rf repo refresh` and are applied on top of the
+# template-derived proposal. The hand-tuned profiles below supersede the auto-detected
+# Makefile/pytest candidates, which are removed to keep one authoritative set.
+[repo.policy_patch]
+remove_profiles = ["make-check", "make-test", "python-test"]
+
+[repo.policy_patch.profiles.setup]
+description = "Synchronize the locked RepoForge development environment"
+verification = false
+timeout_seconds = 900
+commands = [["make", "setup"]]
+
+[repo.policy_patch.profiles.quick]
+description = "Run Ruff and strict Mypy without the full test/build gate"
+verification = true
+timeout_seconds = 600
+commands = [["make", "lint"], ["make", "typecheck"]]
+
+[repo.policy_patch.profiles.test]
+description = "Run the RepoForge test suite with branch coverage enforcement"
+verification = true
+timeout_seconds = 900
+commands = [["make", "test"]]
+
+[repo.policy_patch.profiles.build]
+description = "Build the RepoForge wheel and source distribution"
+verification = true
+timeout_seconds = 600
+commands = [["make", "build"]]
+
+[repo.policy_patch.profiles.ticket-graph]
+description = "Validate the checked-in roadmap graph and show the next Ready tickets"
+verification = true
+timeout_seconds = 120
+commands = [["make", "tickets"]]
+
+[repo.policy_patch.profiles.full]
+description = "Run ticket governance, lint, strict typing, tests with coverage, and package builds"
+verification = true
+timeout_seconds = 1800
+commands = [["make", "check"]]
+
+[repo.policy_patch.diagnostics.pytest-target]
 summary = "Run one tracked pytest path or node without changing verification profiles"
 argv = ["uv", "run", "--extra", "dev", "pytest", "{selector}", "-q"]
 selector_kind = "pytest_node"
@@ -115,7 +107,7 @@ mutability = "read_only"
 parser = "pytest"
 output_limit = 12000
 
-[repositories.repoforge.diagnostics.release-contract-diff]
+[repo.policy_patch.diagnostics.release-contract-diff]
 summary = "Check the reviewed release contract without updating it"
 argv = ["uv", "run", "--extra", "dev", "python", "scripts/check_release_contracts.py"]
 selector_kind = "none"
@@ -125,7 +117,7 @@ mutability = "read_only"
 parser = "release_contract"
 output_limit = 8000
 
-[repositories.repoforge.formatters.ruff-format]
+[repo.policy_patch.formatters.ruff-format]
 summary = "Check or format policy-allowed changed Python files with Ruff"
 check_argv = ["uv", "run", "--extra", "dev", "ruff", "format", "--check", "--"]
 fix_argv = ["uv", "run", "--extra", "dev", "ruff", "format", "--"]
@@ -136,42 +128,3 @@ max_paths = 1000
 baseline_cache_ttl_seconds = 3600
 network_policy = "local_only"
 parser = "ruff_format"
-
-[repositories.repoforge.profiles.setup]
-description = "Synchronize the locked RepoForge development environment"
-verification = false
-timeout_seconds = 900
-commands = [["make", "setup"]]
-
-[repositories.repoforge.profiles.quick]
-description = "Run Ruff and strict Mypy without the full test/build gate"
-verification = true
-timeout_seconds = 600
-commands = [
-  ["make", "lint"],
-  ["make", "typecheck"],
-]
-
-[repositories.repoforge.profiles.test]
-description = "Run the RepoForge test suite with branch coverage enforcement"
-verification = true
-timeout_seconds = 900
-commands = [["make", "test"]]
-
-[repositories.repoforge.profiles.build]
-description = "Build the RepoForge wheel and source distribution"
-verification = true
-timeout_seconds = 600
-commands = [["make", "build"]]
-
-[repositories.repoforge.profiles.ticket-graph]
-description = "Validate the checked-in roadmap graph and show the next Ready tickets"
-verification = true
-timeout_seconds = 120
-commands = [["make", "tickets"]]
-
-[repositories.repoforge.profiles.full]
-description = "Run ticket governance, lint, strict typing, tests with coverage, and package builds"
-verification = true
-timeout_seconds = 1800
-commands = [["make", "check"]]

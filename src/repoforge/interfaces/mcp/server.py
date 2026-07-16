@@ -10,6 +10,7 @@ import os
 import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -18,11 +19,13 @@ from mcp.types import Tool as McpTool
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from ...application.config_admin import ConfigAdminService
+from ...application.config_admin.service import ProfileDefinition
 from ...application.runtime.hot_reload import AtomicServiceRouter
 from ...application.service import CodingService
 from ...application.workspace.edit import FileEdit
 from ...config import load_config
-from ...domain.errors import operation_error_from_exception
+from ...domain.errors import ConfigError, operation_error_from_exception
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
 from ...domain.tool_contract import ToolContractRegistry, default_tool_contract_registry
@@ -182,7 +185,7 @@ class _ServiceErrorBoundary:
             ) from exc
 
 
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull verification profile for one workspace_run_profile call immediately before commit; omit\nprofile_name to use the repository default. Never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.".strip()
+SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull verification profile for one workspace_run_profile call immediately before commit; omit\nprofile_name to use the repository default. Never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.\nWhen helping the operator set up or debug RepoForge itself, start with config_inspect for the\nreviewed policy and runtime_logs_read for bounded redacted evidence. Propose configuration changes\nonly through repo_policy_apply (dry_run first): restrictions apply immediately, while any capability\nexpansion returns pending_approval with an `rf config approve <change_id>` instruction the operator\nmust run in a terminal -- relay that instruction and never claim the change is active until\nconfig_inspect shows the new generation.".strip()
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
@@ -328,12 +331,24 @@ def tool_surface_hash(contract_version: int | None = None) -> str:
     ).hexdigest()
 
 
+class _UnavailableConfigAdmin:
+    """Fail closed with a structured error when no admin service is wired."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise ConfigError(
+            "CONFIG_ADMIN_UNAVAILABLE: configuration administration is not available on "
+            "this transport. Ask the operator to run the server through `rf serve` or the "
+            "managed runtime, or to use the `rf config` CLI instead."
+        )
+
+
 def create_server(
     config_path: str | Path | None = None,
     *,
     service: CodingService | None = None,
     router: AtomicServiceRouter | None = None,
     contract_version: int | None = None,
+    admin: ConfigAdminService | None = None,
 ) -> FastMCP:
     if service is not None and router is not None:
         raise ValueError("create_server accepts either service or router, not both")
@@ -341,6 +356,7 @@ def create_server(
         None if router is not None else CodingService(load_config(config_path))
     )
     bounded_service = _ServiceErrorBoundary(raw_service, router=router)
+    bounded_admin = _ServiceErrorBoundary(admin if admin is not None else _UnavailableConfigAdmin())
     mcp = ContractAwareFastMCP(
         "RepoForge",
         instructions=SERVER_INSTRUCTIONS,
@@ -1036,5 +1052,79 @@ def create_server(
     def workspace_remove(workspace_id: str, delete_local_branch: bool = False) -> dict[str, Any]:
         """Use this only after work is complete to remove a clean local worktree; remote data is untouched."""
         return bounded_service.call("workspace_remove", workspace_id, delete_local_branch)
+
+    @mcp.tool(
+        title="Inspect reviewed configuration",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def config_inspect(repo_id: str | None = None) -> dict[str, Any]:
+        """Use this when helping with setup or debugging to read the accepted and active
+        configuration generations, one repository's effective policy (profiles with their
+        exact commands, diagnostics, formatters, budgets, allowed and denied paths), and
+        any policy changes still waiting for operator approval."""
+        return bounded_admin.call("config_inspect", repo_id)
+
+    @mcp.tool(
+        title="Read bounded operational logs",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def runtime_logs_read(
+        source: str = "audit",
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        action: str | None = None,
+        only_failed: bool = False,
+        min_duration_ms: float | None = None,
+    ) -> dict[str, Any]:
+        """Use this when diagnosing server or tool failures to read the redacted local
+        audit trail (source="audit"; filter by action name, failures only, or minimum
+        duration) or the managed runtime log tail (source="runtime"). Output is bounded
+        and never contains secrets or file bodies."""
+        return bounded_admin.call(
+            "runtime_logs_read",
+            source,
+            limit,
+            action,
+            only_failed,
+            min_duration_ms,
+        )
+
+    @mcp.tool(
+        title="Request gated repository policy change",
+        annotations=LOCAL_MUTATE,
+        structured_output=True,
+    )
+    def repo_policy_apply(
+        repo_id: str,
+        set_profiles: list[ProfileDefinition] | None = None,
+        remove_profiles: list[str] | None = None,
+        set_diagnostics: dict[str, dict[str, Any]] | None = None,
+        remove_diagnostics: list[str] | None = None,
+        set_formatters: dict[str, dict[str, Any]] | None = None,
+        remove_formatters: list[str] | None = None,
+        policy_overrides: dict[str, str] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Use this to change one repository's command profiles, diagnostics, formatters,
+        or policy overrides through the reviewed immutable-generation pipeline. Pass
+        dry_run=true first to preview the capability delta. Restrictions and metadata-only
+        changes are applied immediately and hot reloaded; any capability expansion is only
+        stored as a pending change that the operator must approve in a terminal with
+        `rf config approve <change_id>` -- report that instruction and never claim an
+        expansion is active until config_inspect shows the new generation."""
+        profiles = [asdict(item) for item in (set_profiles or [])]
+        return bounded_admin.call(
+            "repo_policy_apply",
+            repo_id,
+            set_profiles=profiles,
+            remove_profiles=remove_profiles,
+            set_diagnostics=set_diagnostics,
+            remove_diagnostics=remove_diagnostics,
+            set_formatters=set_formatters,
+            remove_formatters=remove_formatters,
+            policy_overrides=policy_overrides,
+            dry_run=dry_run,
+        )
 
     return mcp

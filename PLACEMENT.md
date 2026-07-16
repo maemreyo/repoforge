@@ -24,18 +24,19 @@ The supplied Work Frontier configuration has two useful placements:
 config.work-frontier.toml
 ```
 
-2. Install the runtime copy used by RepoForge:
-
-```text
-~/.config/repoforge/config.toml
-```
-
-Install it with:
+2. Enroll it into the reviewed runtime configuration. The example is a v2 *source*
+   config, so it must pass through the generation pipeline rather than being copied
+   over `~/.config/repoforge/config.toml` directly:
 
 ```sh
 mkdir -p ~/.config/repoforge
 cp config.work-frontier.toml ~/.config/repoforge/config.toml
+rf repo refresh work-frontier --accept
 ```
+
+To add Work Frontier to an existing multi-repository configuration instead, merge its
+`[[repo]]` entry (including the `[repo.policy_patch.*]` tables) into
+`~/.config/repoforge/config.toml` and run the same `rf repo refresh` command.
 
 Do not place RepoForge's `AGENTS.md` inside Work Frontier. Work Frontier already has its own
 repository-specific root `AGENTS.md`, which should remain authoritative for that codebase.

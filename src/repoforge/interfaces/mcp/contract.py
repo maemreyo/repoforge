@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from typing import Any, cast
 
 from ... import __version__
@@ -25,15 +26,15 @@ async def build_release_contract() -> dict[str, Any]:
         contract_version=registry.current_version,
     )
     tools = await server.list_tools()
+
+    def _normalise(tool: Any) -> dict[str, Any]:
+        raw: dict[str, Any] = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if isinstance(raw.get("description"), str):
+            raw["description"] = inspect.cleandoc(raw["description"])
+        return raw
+
     normalized_tools = sorted(
-        (
-            tool.model_dump(
-                mode="json",
-                by_alias=True,
-                exclude_none=True,
-            )
-            for tool in tools
-        ),
+        (_normalise(tool) for tool in tools),
         key=lambda item: str(item["name"]),
     )
     legacy_server = create_server(
@@ -43,15 +44,7 @@ async def build_release_contract() -> dict[str, Any]:
     legacy_tools = await legacy_server.list_tools()
     alias_names = {alias.alias for alias in registry.aliases}
     legacy_alias_tools = sorted(
-        (
-            tool.model_dump(
-                mode="json",
-                by_alias=True,
-                exclude_none=True,
-            )
-            for tool in legacy_tools
-            if tool.name in alias_names
-        ),
+        (_normalise(tool) for tool in legacy_tools if tool.name in alias_names),
         key=lambda item: str(item["name"]),
     )
     return {
