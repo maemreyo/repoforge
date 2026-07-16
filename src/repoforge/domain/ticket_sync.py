@@ -133,6 +133,11 @@ class TicketProjectSnapshot:
     issue_identities: dict[int, TicketIssueIdentity]
     sub_issues: frozenset[tuple[int, int]]
     blocked_by: frozenset[tuple[int, int]]
+    #: True when the bounded issue-identity page scan or the bounded Project item-list
+    #: fetch could not confirm it observed every relevant record. A planner must not
+    #: read a missing identity or item as confirmed drift when either flag is set.
+    identities_truncated: bool = False
+    items_truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,3 +169,7 @@ class TicketSyncConflict:
 class TicketSyncPlan:
     changes: tuple[TicketSyncChange, ...]
     conflicts: tuple[TicketSyncConflict, ...]
+    #: True when the plan was computed from a snapshot that could not confirm it
+    #: observed every identity or item; changes/conflicts implying an issue or item is
+    #: missing may instead be an artifact of a bounded, incomplete fetch, not real drift.
+    snapshot_incomplete: bool = False

@@ -8,6 +8,7 @@ policy is enforced identically for a cached or a freshly read payload.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -15,6 +16,7 @@ class GitHubReadCache(Protocol):
     def get(
         self,
         repo_id: str,
+        repo_path: Path,
         kind: str,
         number: int,
         *,
@@ -25,6 +27,7 @@ class GitHubReadCache(Protocol):
     def put(
         self,
         repo_id: str,
+        repo_path: Path,
         kind: str,
         number: int,
         payload: dict[str, Any],

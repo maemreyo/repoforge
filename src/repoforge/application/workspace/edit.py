@@ -191,10 +191,13 @@ class WorkspaceEditor:
                 )
             buffer = buffer.replace(edit.old_text, edit.new_text, edit.expected_occurrences)
             replacements += edit.expected_occurrences
+            if len(buffer.encode("utf-8")) > self.ctx.config.server.max_file_bytes:
+                raise SecurityError(
+                    f"{normalized}: edits[{edit_index}]: intermediate content exceeds "
+                    "max_file_bytes"
+                )
 
         encoded = buffer.encode("utf-8")
-        if len(encoded) > self.ctx.config.server.max_file_bytes:
-            raise SecurityError(f"Updated content exceeds max_file_bytes: {normalized}")
         return _PreparedFile(path, normalized, data, encoded, replacements)
 
     def _write_all(self, prepared: list[_PreparedFile]) -> None:

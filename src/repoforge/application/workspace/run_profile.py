@@ -530,7 +530,25 @@ class WorkspaceProfileRunner:
                 lock_cm.__exit__(None, None, None)
             finish_terminal(failure, result)
 
-        scheduled = background_tasks.submit(operation_id, run)
+        try:
+            scheduled = background_tasks.submit(operation_id, run)
+        except Exception as exc:
+            # A raised exception from submit() must not leave the operation stuck in
+            # RUNNING while holding the workspace lock forever; unwind exactly like a
+            # rejected submission (unregister -> release lock -> fail closed) before
+            # propagating the original failure.
+            self._unregister_cancel_token(operation_id)
+            lock_cm.__exit__(None, None, None)
+            with contextlib.suppress(Exception):
+                operations.fail(
+                    operation_id,
+                    error_code=ErrorCode.INTERNAL_ERROR.value,
+                    error_message=_safe_error_message(
+                        f"Background task runner raised while accepting the profile run: {exc}"
+                    ),
+                )
+            raise
+
         if not scheduled:
             # An operation_id collision is not expected to happen in practice (the id space
             # is a random 24-byte hex string); fail closed rather than run silently untracked.

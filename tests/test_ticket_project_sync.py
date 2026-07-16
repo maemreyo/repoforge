@@ -211,6 +211,33 @@ def test_planner_preserves_unmanaged_state_and_reports_managed_drift() -> None:
     assert all(change.payload.get("issue") != 97 for change in plan.changes)
 
 
+def test_planner_flags_snapshot_incomplete_instead_of_asserting_confirmed_drift() -> None:
+    """A truncated snapshot must not be indistinguishable from a fully-observed one that
+    happens to be missing an identity/item: the planner still proposes the same additive
+    changes (dropping them silently would hide real work), but it must also surface
+    `snapshot_incomplete` so a caller does not read them as confirmed drift."""
+    base = _empty_snapshot()
+    truncated = TicketProjectSnapshot(
+        project_id=base.project_id,
+        project_title=base.project_title,
+        fields=base.fields,
+        items=base.items,
+        views=base.views,
+        issue_identities=base.issue_identities,
+        sub_issues=base.sub_issues,
+        blocked_by=base.blocked_by,
+        identities_truncated=True,
+    )
+
+    complete_plan = plan_ticket_project_sync(_graph(), base)
+    truncated_plan = plan_ticket_project_sync(_graph(), truncated)
+
+    assert complete_plan.snapshot_incomplete is False
+    assert truncated_plan.snapshot_incomplete is True
+    assert truncated_plan.changes == complete_plan.changes
+    assert truncated_plan.conflicts == complete_plan.conflicts
+
+
 def test_planner_is_noop_when_managed_projection_matches() -> None:
     graph = _graph()
     initial = plan_ticket_project_sync(graph, _empty_snapshot())
