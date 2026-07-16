@@ -15,6 +15,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from repoforge import __version__
+
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
     apply_policy_patch,
@@ -1506,7 +1508,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output", choices=("json", "human"), default=os.environ.get("REPOFORGE_OUTPUT", "json")
     )
-    parser.add_argument("--version", action="version", version="RepoForge 2.0.2")
+    parser.add_argument("--version", action="version", version=f"RepoForge {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve")
     webhook = commands.add_parser("webhook", help="Optional GitHub webhook cache invalidation")
