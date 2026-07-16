@@ -166,6 +166,7 @@ class ConfigAdminService:
         read_audit: Callable[..., list[dict[str, Any]]],
         read_log: Callable[[Path, int], list[str]],
         reload_runtime: Callable[[int], dict[str, Any]] | None = None,
+        read_runtime_status: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         self._store = store
         self._proposals = proposals
@@ -176,6 +177,7 @@ class ConfigAdminService:
         self._read_audit = read_audit
         self._read_log = read_log
         self._reload_runtime = reload_runtime
+        self._read_runtime_status = read_runtime_status
         self.pending = PendingPolicyChangeStore(store.root / "pending-policy-changes")
 
     # -- reads ---------------------------------------------------------------
@@ -252,6 +254,7 @@ class ConfigAdminService:
             "restart_required": active is None or active.generation != current.generation,
             "capability_delta_of_accepted": current.delta.value,
             "repositories": repositories,
+            "runtime_health": self._read_runtime_status() if self._read_runtime_status else None,
             "pending_changes": self.pending.summaries(),
         }
 

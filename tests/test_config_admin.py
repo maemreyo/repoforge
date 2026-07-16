@@ -283,7 +283,12 @@ def test_apply_policy_patch_repairs_default_verification_profile(tmp_path: Path)
 # ---------------------------------------------------------------------------
 
 
-def _admin(tmp_path: Path, *, reload_calls: list[int] | None = None) -> ConfigAdminService:
+def _admin(
+    tmp_path: Path,
+    *,
+    reload_calls: list[int] | None = None,
+    runtime_status: dict[str, object] | None = None,
+) -> ConfigAdminService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
     source_path = tmp_path / "config.toml"
@@ -331,6 +336,7 @@ def _admin(tmp_path: Path, *, reload_calls: list[int] | None = None) -> ConfigAd
         read_audit=read_audit_events,
         read_log=read_runtime_log,
         reload_runtime=reload_runtime,
+        read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
     )
 
 
@@ -349,6 +355,25 @@ def test_config_inspect_reports_source_ticket_graph_drift(tmp_path: Path) -> Non
     assert inspected["source"]["repository"] == "acme/demo"
     assert inspected["accepted"] is None
     assert inspected["drift"] == "source_only"
+
+
+def test_config_inspect_includes_runtime_health_without_raw_runtime_state(tmp_path: Path) -> None:
+    admin = _admin(
+        tmp_path,
+        runtime_status={
+            "state": "healthy",
+            "package_version_skew": False,
+            "client_rediscovery_recommended": True,
+        },
+    )
+
+    inspected = admin.config_inspect("demo")
+
+    assert inspected["runtime_health"] == {
+        "state": "healthy",
+        "package_version_skew": False,
+        "client_rediscovery_recommended": True,
+    }
 
 
 def test_restriction_is_applied_immediately_with_hot_reload(tmp_path: Path) -> None:
@@ -559,6 +584,9 @@ async def test_config_admin_tools_round_trip_through_protocol(tmp_path: Path) ->
     async with create_connected_server_and_client_session(server) as session:
         inspected = await session.call_tool("config_inspect", {"repo_id": "demo"})
         assert inspected.isError is False
+        assert inspected.structuredContent is not None
+        assert "client_capabilities" in inspected.structuredContent
+        assert "features" in inspected.structuredContent["client_capabilities"]
         preview = await session.call_tool(
             "repo_policy_apply",
             {

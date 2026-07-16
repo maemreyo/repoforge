@@ -1059,11 +1059,14 @@ def create_server(
         structured_output=True,
     )
     def config_inspect(repo_id: str | None = None) -> dict[str, Any]:
-        """Use this when helping with setup or debugging to read the accepted and active
-        configuration generations, one repository's effective policy (profiles with their
-        exact commands, diagnostics, formatters, budgets, allowed and denied paths), and
-        any policy changes still waiting for operator approval."""
-        return bounded_admin.call("config_inspect", repo_id)
+        """Use this when helping with setup or debugging to read accepted/effective policy,
+        runtime package/generation/tool-surface health, connection-scoped negotiated client
+        capabilities, and policy changes still waiting for operator approval."""
+        payload = bounded_admin.call("config_inspect", repo_id)
+        payload["client_capabilities"] = client_capabilities_from_context(
+            mcp.get_context()
+        ).as_dict()
+        return payload
 
     @mcp.tool(
         title="Read bounded operational logs",

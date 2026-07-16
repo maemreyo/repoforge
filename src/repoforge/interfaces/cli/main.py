@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import asdict
@@ -88,6 +90,7 @@ from ...domain.errors import (
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
+from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
@@ -1132,20 +1135,32 @@ def _repo_remove(args: argparse.Namespace) -> int:
     return 0
 
 
-def _tool_surface_rediscovery(record_hash: str | None) -> dict[str, object]:
+def _current_tool_surface_hash() -> str | None:
     try:
         from ..mcp.server import tool_surface_hash
 
-        current_hash: str | None = tool_surface_hash()
+        return tool_surface_hash()
     except Exception:
-        current_hash = None
-    changed = bool(record_hash and current_hash and record_hash != current_hash)
+        return None
+
+
+def _current_runtime_identity() -> dict[str, str | None]:
+    spec = importlib.util.find_spec("repoforge")
+    origin = spec.origin if spec is not None else None
+    install_origin: str | None = None
+    if origin:
+        normalized = origin.replace("\\", "/")
+        install_origin = (
+            "wheel"
+            if "/site-packages/" in normalized
+            else "source"
+            if "/src/repoforge/" in normalized
+            else "environment"
+        )
     return {
-        "current_tool_surface_hash": current_hash,
-        "plugin_rediscovery_recommended": changed,
-        "plugin_rediscovery_reason": (
-            f"MCP tool surface changed from {record_hash} to {current_hash}" if changed else None
-        ),
+        "package_version": __version__,
+        "executable": sys.executable or None,
+        "install_origin": install_origin,
     }
 
 
@@ -1155,33 +1170,45 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
     accepted = store.current()
     active = store.active()
     activation_target = store.activation_target()
+    phase = record.phase.value if record else "stopped"
+    current_identity = _current_runtime_identity()
+    snapshot = assess_runtime_health(
+        running=RuntimeIdentity(
+            record.package_version if record else None,
+            record.executable if record else None,
+            record.install_origin if record else None,
+        ),
+        current=RuntimeIdentity(
+            current_identity.get("package_version"),
+            current_identity.get("executable"),
+            current_identity.get("install_origin"),
+        ),
+        running_tool_surface_hash=record.tool_surface_hash if record else None,
+        current_tool_surface_hash=_current_tool_surface_hash(),
+        accepted_generation=accepted.generation if accepted else None,
+        active_generation=record.active_generation if record else None,
+        phase=phase,
+    )
+    health = snapshot.as_dict()
     return {
-        "state": record.phase.value if record else "stopped",
+        "state": phase,
         "pid": record.pid if record else None,
         "child_pid": record.child_pid if record else None,
         "accepted_generation": accepted.generation if accepted else None,
         "disk_active_generation": active.generation if active else None,
         "activation_target_generation": activation_target.generation if activation_target else None,
         "active_generation": record.active_generation if record else None,
-        "restart_required": bool(
-            accepted and (not record or record.active_generation != accepted.generation)
-        ),
         "health": list(record.health) if record else [],
         "tunnel_profile": record.tunnel_profile if record else None,
         "tunnel_profile_fingerprint": record.tunnel_profile_fingerprint if record else None,
         "tool_surface_hash": record.tool_surface_hash if record else None,
-        **_tool_surface_rediscovery(record.tool_surface_hash if record else None),
+        "plugin_rediscovery_recommended": health["client_rediscovery_recommended"],
+        "plugin_rediscovery_reason": health["rediscovery_reason"],
         "restart_count": record.restart_count if record else 0,
         "last_error_code": record.last_error_code if record else None,
         "last_error": record.last_error if record else None,
         "correlation_id": record.correlation_id if record else None,
-        "safe_next_action": (
-            "Runtime is healthy."
-            if record and record.phase is RuntimePhase.HEALTHY
-            else "Run `rf runtime reload` after correcting the reported failure."
-            if record and record.phase in {RuntimePhase.FAILED, RuntimePhase.FAIL_CLOSED}
-            else "Run `rf runtime start` or inspect logs."
-        ),
+        **health,
     }
 
 
@@ -1450,6 +1477,7 @@ def _serve(config_path: Path) -> int:
         reload_runtime=reload_in_process,
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_runtime_status=lambda: _runtime_status(store),
     )
     try:
         create_server(router=router, admin=admin).run(transport="stdio")
