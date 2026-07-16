@@ -37,7 +37,7 @@ class RepositoryIssueSpecResult:
     comments: list[dict[str, Any]]
     cache_hit: bool
     graph_cache_hit: bool
-    observed_at: str
+    observed_at: str | None
     evidence_complete: bool
 
 
@@ -139,6 +139,6 @@ class RepositoryIssueSpecReader:
             comments,
             cache_hit,
             graph_cache_hit,
-            snapshot.observed_at if snapshot is not None else self.ctx.clock.now_iso(),
+            snapshot.observed_at if snapshot is not None else None,
             snapshot.evidence_complete if snapshot is not None else False,
         )
