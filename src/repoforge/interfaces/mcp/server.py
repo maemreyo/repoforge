@@ -850,9 +850,12 @@ def create_server(
         workspace_id: str,
         profile_name: str | None = None,
         background: bool = False,
+        force_rerun: bool = False,
     ) -> dict[str, Any]:
-        """Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
-        return bounded_service.call("workspace_run_profile", workspace_id, profile_name, background)
+        """Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Deterministic failures may be reused only when every reviewed binding is unchanged; set force_rerun=true to bypass that evidence reuse and execute commands again. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
+        return bounded_service.call(
+            "workspace_run_profile", workspace_id, profile_name, background, force_rerun
+        )
 
     @mcp.tool(
         title="Run reviewed workspace diagnostic",
@@ -868,8 +871,9 @@ def create_server(
         expectation: str | None = None,
         expected_failure_class: str | None = None,
         selector2: str | list[str] | None = None,
+        force_rerun: bool = False,
     ) -> dict[str, Any]:
-        """Use this to run one typed repository-reviewed diagnostic; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed. Pass a single string or a bounded list of strings for a multi-value selector; use selector2 only when the diagnostic declares a second named placeholder. Call repo_task_context or repo_status first to see each enrolled diagnostic's selector schema (kind, character classes, max_values, expansion) before constructing a call."""
+        """Use this to run one typed repository-reviewed diagnostic; deterministic failures may be reused only when every reviewed binding is unchanged, and force_rerun=true bypasses that evidence reuse. The response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed. Pass a single string or a bounded list of strings for a multi-value selector; use selector2 only when the diagnostic declares a second named placeholder. Call repo_task_context or repo_status first to see each enrolled diagnostic's selector schema (kind, character classes, max_values, expansion) before constructing a call."""
         return bounded_service.call(
             "workspace_run_diagnostic",
             workspace_id,
@@ -880,6 +884,7 @@ def create_server(
             expectation,
             expected_failure_class,
             selector2,
+            force_rerun,
         )
 
     @mcp.tool(

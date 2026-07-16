@@ -94,6 +94,28 @@ def _add_slow_profile(env: ForgeEnvironment) -> None:
     env.config_path.write_text(text + _SLOW_PROFILE_TOML, encoding="utf-8")
 
 
+def _add_counting_failure_profile(env: ForgeEnvironment, counter: Path) -> None:
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); "
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "sys.exit(7)"
+    )
+    command = ["python3", "-c", script]
+    profile = (
+        "\n[repositories.demo.profiles.counting-failure]\n"
+        'description = "Count background failure reuse"\n'
+        "verification = true\n"
+        f"commands = {json.dumps([command])}\n"
+        "\n[[repositories.demo.profiles.counting-failure.steps]]\n"
+        'id = "static"\n'
+        'kind = "static_analysis"\n'
+        f"command = {json.dumps(command)}\n"
+    )
+    text = env.config_path.read_text(encoding="utf-8")
+    env.config_path.write_text(text + profile, encoding="utf-8")
+
+
 def _set_server_field(env: ForgeEnvironment, line: str) -> None:
     text = env.config_path.read_text(encoding="utf-8")
     assert "path_prefixes = " in text
@@ -218,6 +240,35 @@ def test_profile_failure_reports_step_domain_and_not_run_steps(
 # ---------------------------------------------------------------------------
 # background=true admission, locking, and lifecycle (deterministic, manual runner)
 # ---------------------------------------------------------------------------
+
+
+def test_background_reused_failure_keeps_operation_reference(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    counter = tmp_path / "background-reuse-attempts.txt"
+    _add_counting_failure_profile(forge_env, counter)
+    service, runner = _manual_service(forge_env)
+    workspace_id = service.workspace_create("demo", "background reused failure")["workspace_id"]
+
+    with pytest.raises(RepoForgeError):
+        service.workspace_run_profile(workspace_id, "counting-failure")
+    assert counter.read_text(encoding="utf-8") == "1"
+
+    admission = service.workspace_run_profile(
+        workspace_id,
+        "counting-failure",
+        background=True,
+    )
+    assert set(admission) == {"operation_id", "phase", "safe_next_action"}
+    runner.run(admission["operation_id"])
+
+    final = service.operation_status(admission["operation_id"])
+    assert final["state"] == "failed"
+    assert final["error_code"] == ErrorCode.COMMAND_FAILED.value
+    assert counter.read_text(encoding="utf-8") == "1"
+    events = _audit_events(forge_env.root, "workspace_run_profile")
+    assert events[-1]["details"]["failure_reused"] is True
 
 
 def test_background_admission_returns_fast_and_holds_the_workspace_lock(
@@ -357,6 +408,7 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
             "workspace_id",
             "profile",
             "used_default",
+            "force_rerun",
             "correlation_id",
             "duration_ms",
             "result_bytes",

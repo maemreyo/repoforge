@@ -954,6 +954,111 @@ def _runtime_profile(
     )
 
 
+def test_deterministic_diagnostic_failure_is_reused_and_forceable(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "dedupe-diagnostic-failure")["workspace_id"]
+    counter = tmp_path / "diagnostic-attempts.txt"
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); "
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "sys.exit(7)"
+    )
+    profile = _runtime_profile(
+        "counting-failure",
+        ("python3", "-c", script),
+    )
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+
+    first = service.workspace_run_diagnostic(workspace_id, profile.diagnostic_id)
+    assert first["outcome"] == "failed"
+    assert first["failure_reused"] is False
+    assert counter.read_text(encoding="utf-8") == "1"
+
+    second = service.workspace_run_diagnostic(workspace_id, profile.diagnostic_id)
+    assert second["outcome"] == "failed"
+    assert second["failure_reused"] is True
+    assert second["reuse_binding"]
+    assert counter.read_text(encoding="utf-8") == "1"
+    assert service.workspace_status(workspace_id)["last_verification"] is None
+
+    forced = service.workspace_run_diagnostic(
+        workspace_id,
+        profile.diagnostic_id,
+        force_rerun=True,
+    )
+    assert forced["failure_reused"] is False
+    assert counter.read_text(encoding="utf-8") == "2"
+
+
+def test_flaky_truncated_and_timeout_diagnostics_are_not_reused(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "diagnostic reuse exclusions")["workspace_id"]
+
+    flaky_counter = tmp_path / "flaky-attempts.txt"
+    flaky_script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(flaky_counter)!r}); "
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "print('1 failed in 0.01s\\nFAILED demo.py::test_flaky'); sys.exit(1)"
+    )
+    flaky = _runtime_profile(
+        "flaky-failure",
+        ("python3", "-c", flaky_script),
+        parser=DiagnosticParserKind.PYTEST,
+    )
+    service.config.repositories["demo"].diagnostics[flaky.diagnostic_id] = flaky
+    for _ in range(2):
+        result = service.workspace_run_diagnostic(workspace_id, flaky.diagnostic_id)
+        assert result["failure_class"] == "test_failure"
+        assert result["failure_reused"] is False
+    assert flaky_counter.read_text(encoding="utf-8") == "2"
+
+    truncated_counter = tmp_path / "truncated-attempts.txt"
+    truncated_script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(truncated_counter)!r}); "
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "print('x'*5000); sys.exit(1)"
+    )
+    truncated = _runtime_profile(
+        "truncated-failure",
+        ("python3", "-c", truncated_script),
+        output_limit=100,
+    )
+    service.config.repositories["demo"].diagnostics[truncated.diagnostic_id] = truncated
+    for _ in range(2):
+        result = service.workspace_run_diagnostic(workspace_id, truncated.diagnostic_id)
+        assert result["output_truncated"] is True
+        assert result["failure_reused"] is False
+    assert truncated_counter.read_text(encoding="utf-8") == "2"
+
+    timeout_counter = tmp_path / "timeout-attempts.txt"
+    timeout_script = (
+        "from pathlib import Path; import time; "
+        f"p=Path({str(timeout_counter)!r}); "
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "time.sleep(2)"
+    )
+    timeout = _runtime_profile(
+        "timeout-failure",
+        ("python3", "-c", timeout_script),
+        timeout_seconds=1,
+    )
+    service.config.repositories["demo"].diagnostics[timeout.diagnostic_id] = timeout
+    for _ in range(2):
+        with pytest.raises(RepoForgeError) as timed_out:
+            service.workspace_run_diagnostic(workspace_id, timeout.diagnostic_id)
+        assert timed_out.value.code is ErrorCode.DIAGNOSTIC_TIMEOUT
+    assert timeout_counter.read_text(encoding="utf-8") == "2"
+
+
 def test_workspace_diagnostic_evaluates_tdd_expectations(
     forge_env: ForgeEnvironment,
 ) -> None:

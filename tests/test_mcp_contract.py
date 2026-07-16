@@ -182,6 +182,14 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             assert "idempotency_key" in mutation.inputSchema["properties"]
             assert "idempotency_key" not in mutation.inputSchema.get("required", [])
             assert "idempotency key" in mutation.description.lower()
+        for verification_name in (
+            "workspace_run_profile",
+            "workspace_run_diagnostic",
+        ):
+            verification = tools[verification_name]
+            assert "force_rerun" in verification.inputSchema["properties"]
+            assert "force_rerun" not in verification.inputSchema.get("required", [])
+            assert "force_rerun" in verification.description
         for search_name in ("repo_search", "workspace_search"):
             search_schema = tools[search_name].inputSchema["properties"]
             assert search_schema["context_lines"]["minimum"] == 0
@@ -199,6 +207,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_id",
             "profile_name",
             "background",
+            "force_rerun",
         }
         assert tools["workspace_create"].description == (
             "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\n"
@@ -223,6 +232,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "expectation",
             "expected_failure_class",
             "selector2",
+            "force_rerun",
         }
         hygiene = tools["workspace_hygiene_status"]
         assert hygiene.annotations.readOnlyHint is True

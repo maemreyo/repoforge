@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,11 +13,16 @@ from repoforge.application.service import CodingService
 from repoforge.config import load_config
 from repoforge.domain.errors import RepoForgeError
 from repoforge.domain.retry_guidance import (
+    FAILURE_REUSE_METADATA_KEY,
+    MAX_REUSABLE_FAILURE_BYTES,
     MAX_TRACKED_TARGETS,
+    FailureReuseBinding,
     FailureSignature,
     clear,
     fast_fail_guidance,
     record_and_compare,
+    record_reusable_failure,
+    reusable_failure,
 )
 
 _ALWAYS_FAIL_PROFILE = (
@@ -24,6 +31,44 @@ _ALWAYS_FAIL_PROFILE = (
     "verification = true\n"
     'commands = [["python3", "-c", "import sys; sys.exit(1)"]]\n'
 )
+
+
+def _counting_typed_failure_profile(
+    counter: Path,
+    *,
+    profile_name: str,
+    step_kind: str,
+    message: str = "",
+) -> str:
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); "
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        f"print({message!r}); "
+        "sys.exit(7)"
+    )
+    command = json.dumps(["python3", "-c", script])
+    commands = json.dumps([["python3", "-c", script]])
+    return (
+        f"\n[repositories.demo.profiles.{profile_name}]\n"
+        'description = "Deterministic counted failure"\n'
+        "verification = true\n"
+        f"commands = {commands}\n"
+        f"\n[[repositories.demo.profiles.{profile_name}.steps]]\n"
+        'id = "step"\n'
+        f"kind = {json.dumps(step_kind)}\n"
+        f"command = {command}\n"
+    )
+
+
+def _counting_fail_profile(counter: Path) -> str:
+    return _counting_typed_failure_profile(
+        counter,
+        profile_name="counting_fail",
+        step_kind="static_analysis",
+    )
+
+
 _MISSING_TOOL_PROFILE = (
     "\n[repositories.demo.profiles.missing_tool]\n"
     'description = "References a nonexistent executable"\n'
@@ -166,9 +211,157 @@ def test_fast_fail_guidance_only_below_threshold() -> None:
     assert fast_fail_guidance(15.0, threshold_seconds=10.0) is None
 
 
+def _reuse_binding() -> FailureReuseBinding:
+    return FailureReuseBinding(
+        fingerprint="1" * 64,
+        target_identity="2" * 64,
+        command_source_identity="3" * 64,
+        config_identity="4" * 64,
+        environment_identity="5" * 64,
+    )
+
+
+def test_reusable_failure_requires_exact_complete_binding() -> None:
+    metadata: dict[str, object] = {}
+    binding = _reuse_binding()
+    evidence = {
+        "error_code": "COMMAND_FAILED",
+        "exit_code": 1,
+        "failure_domain": "static_analysis",
+        "complete": True,
+    }
+
+    assert record_reusable_failure(
+        metadata,
+        target="profile:full",
+        binding=binding,
+        evidence=evidence,
+    )
+    assert (
+        reusable_failure(
+            metadata,
+            target="profile:full",
+            binding=binding,
+        )
+        == evidence
+    )
+
+    for field in (
+        "fingerprint",
+        "target_identity",
+        "command_source_identity",
+        "config_identity",
+        "environment_identity",
+    ):
+        assert (
+            reusable_failure(
+                metadata,
+                target="profile:full",
+                binding=replace(binding, **{field: "f" * 64}),
+            )
+            is None
+        )
+
+
+def test_reusable_failure_rejects_incomplete_oversized_and_corrupt_evidence() -> None:
+    binding = _reuse_binding()
+    metadata: dict[str, object] = {}
+
+    assert not record_reusable_failure(
+        metadata,
+        target="profile:full",
+        binding=binding,
+        evidence={"error_code": "COMMAND_FAILED", "complete": False},
+    )
+    assert not record_reusable_failure(
+        metadata,
+        target="profile:full",
+        binding=binding,
+        evidence={
+            "error_code": "COMMAND_FAILED",
+            "complete": True,
+            "chunks": ["x" * MAX_REUSABLE_FAILURE_BYTES] * 3,
+        },
+    )
+
+    metadata[FAILURE_REUSE_METADATA_KEY] = {
+        "profile:full": {"version": 999, "binding": {}, "evidence": "broken"}
+    }
+    assert reusable_failure(metadata, target="profile:full", binding=binding) is None
+
+
 # ---------------------------------------------------------------------------
 # Real-workspace integration tests
 # ---------------------------------------------------------------------------
+
+
+def test_unchanged_deterministic_profile_failure_is_reused_and_forceable(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    counter = tmp_path / "profile-attempts.txt"
+    _append(forge_env, _counting_fail_profile(counter))
+    _set_fast_fail_threshold(forge_env, 0)
+    service = _reload_service(forge_env)
+    created = service.workspace_create("demo", "dedupe-profile-failure")
+    workspace_id = created["workspace_id"]
+
+    with pytest.raises(RepoForgeError) as first:
+        service.workspace_run_profile(workspace_id, "counting_fail")
+    assert counter.read_text(encoding="utf-8") == "1"
+    assert first.value.details.get("failure_reused") is not True
+    assert service.workspace_status(workspace_id)["last_verification"] is None
+
+    with pytest.raises(RepoForgeError) as second:
+        service.workspace_run_profile(workspace_id, "counting_fail")
+    assert counter.read_text(encoding="utf-8") == "1"
+    assert second.value.details["failure_reused"] is True
+    assert second.value.details["reuse_binding"]
+    assert service.workspace_status(workspace_id)["last_verification"] is None
+
+    with pytest.raises(RepoForgeError):
+        service.workspace_run_profile(workspace_id, "counting_fail", force_rerun=True)
+    assert counter.read_text(encoding="utf-8") == "2"
+
+    Path(created["path"], "scratch.txt").write_text("mutation\n", encoding="utf-8")
+    with pytest.raises(RepoForgeError):
+        service.workspace_run_profile(workspace_id, "counting_fail")
+    assert counter.read_text(encoding="utf-8") == "3"
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "step_kind", "message"),
+    [
+        ("counting_business", "business_tests", "1 failed in 0.01s"),
+        ("counting_network", "static_analysis", "connection refused"),
+    ],
+)
+def test_flaky_or_network_shaped_profile_failure_is_not_reused(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+    profile_name: str,
+    step_kind: str,
+    message: str,
+) -> None:
+    counter = tmp_path / f"{profile_name}-attempts.txt"
+    _append(
+        forge_env,
+        _counting_typed_failure_profile(
+            counter,
+            profile_name=profile_name,
+            step_kind=step_kind,
+            message=message,
+        ),
+    )
+    _set_fast_fail_threshold(forge_env, 0)
+    service = _reload_service(forge_env)
+    workspace_id = service.workspace_create("demo", profile_name)["workspace_id"]
+
+    for _ in range(2):
+        with pytest.raises(RepoForgeError) as failure:
+            service.workspace_run_profile(workspace_id, profile_name)
+        assert failure.value.details.get("failure_reused") is not True
+    assert counter.read_text(encoding="utf-8") == "2"
 
 
 def test_two_consecutive_failures_without_edits_carry_retry_guidance(

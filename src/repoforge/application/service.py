@@ -654,10 +654,16 @@ class CodingService:
         workspace_id: str,
         profile_name: str | None = None,
         background: bool = False,
+        force_rerun: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._profile.execute(
-                WorkspaceRunProfileCommand(workspace_id, profile_name, background)
+                WorkspaceRunProfileCommand(
+                    workspace_id,
+                    profile_name,
+                    background,
+                    force_rerun,
+                )
             )
         )
 
@@ -671,6 +677,7 @@ class CodingService:
         expectation: str | None = None,
         expected_failure_class: str | None = None,
         selector2: str | list[str] | None = None,
+        force_rerun: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._diagnostic.execute(
@@ -683,6 +690,7 @@ class CodingService:
                     expectation,
                     expected_failure_class,
                     selector2,
+                    force_rerun,
                 )
             )
         )

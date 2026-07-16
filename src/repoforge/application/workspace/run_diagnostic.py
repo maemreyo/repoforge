@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ...domain.command_source import derive_command_source_paths
 from ...domain.diagnostics import (
     DiagnosticExpectation,
     DiagnosticFailureClass,
@@ -16,13 +17,41 @@ from ...domain.diagnostics import (
     validate_diagnostic_expectation,
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
+from ...domain.execution_environment import (
+    EnvironmentIdentityRequest,
+    FilesystemCapability,
+    NetworkPolicy,
+)
 from ...domain.policy import normalize_relative_path
+from ...domain.retry_guidance import (
+    clear_reusable_failure,
+    record_reusable_failure,
+    reusable_failure,
+)
 from ...domain.verification import VerificationIntent
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
+from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
+from ..verification_reuse import (
+    command_source_identity,
+    config_identity,
+    diagnostic_target_identity,
+    failure_reuse_binding,
+)
 from .diagnostic_parser import evaluate_diagnostic_expectation, parse_diagnostic
 from .diagnostic_selector import SelectorInput, resolve_diagnostic_selector
+
+_REUSABLE_DIAGNOSTIC_FAILURES = frozenset(
+    {
+        DiagnosticFailureClass.COLLECTION_ERROR.value,
+        DiagnosticFailureClass.SYNTAX_ERROR.value,
+        DiagnosticFailureClass.IMPORT_ERROR.value,
+        DiagnosticFailureClass.DEPENDENCY_MISSING.value,
+        DiagnosticFailureClass.CONTRACT_DRIFT.value,
+        DiagnosticFailureClass.DIAGNOSTIC_FAILURE.value,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +64,7 @@ class WorkspaceRunDiagnosticCommand:
     expectation: DiagnosticExpectation | str | None = None
     expected_failure_class: DiagnosticFailureClass | str | None = None
     selector2: SelectorInput = None
+    force_rerun: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +102,8 @@ class WorkspaceRunDiagnosticResult:
     verification_invalidated: bool
     satisfies_commit_gate: bool
     next_safe_actions: list[dict[str, object]]
+    failure_reused: bool = False
+    reuse_binding: str | None = None
 
 
 def _diagnostic_error(
@@ -186,6 +218,7 @@ class WorkspaceDiagnosticRunner:
             "expected_failure_class": (
                 expected_failure_class.value if expected_failure_class is not None else None
             ),
+            "force_rerun": command.force_rerun,
         }
 
         def operation() -> WorkspaceRunDiagnosticResult:
@@ -226,6 +259,75 @@ class WorkspaceDiagnosticRunner:
                     repo=locked_repo,
                     git=self.ctx.git,
                 )
+                expected_failure_value = (
+                    expected_failure_class.value if expected_failure_class is not None else None
+                )
+                target_identity_value = diagnostic_target_identity(
+                    locked_profile,
+                    argv=resolved.argv,
+                    resolved_values=resolved.values,
+                    intent=intent.value,
+                    expectation=expectation.value,
+                    expected_failure_class=expected_failure_value,
+                )
+                environment_identity_value: str | None = None
+                if self.ctx.execution_environment is not None:
+                    identity_request = EnvironmentIdentityRequest(
+                        workspace_root=locked_workspace,
+                        command_cwd=command_cwd,
+                        commands=(resolved.argv,),
+                        working_directory_policy=locked_profile.working_directory or ".",
+                        network_policy=NetworkPolicy.NONE,
+                        filesystem_capability=(
+                            FilesystemCapability.READ
+                            if locked_profile.mutability is DiagnosticMutability.READ_ONLY
+                            else FilesystemCapability.WORKSPACE_WRITE
+                        ),
+                    )
+                    try:
+                        environment_identity_value = self.ctx.execution_environment.identity(
+                            identity_request
+                        ).identity_hash
+                    except Exception:
+                        audit_details["failure_reuse_unavailable"] = "environment_identity"
+                reuse_binding = failure_reuse_binding(
+                    fingerprint=before_fingerprint,
+                    target_identity=target_identity_value,
+                    command_source_identity_value=command_source_identity(
+                        locked_workspace,
+                        derive_command_source_paths((resolved.argv,)),
+                    ),
+                    config_identity_value=config_identity(self.ctx.config.source_path),
+                    environment_identity=environment_identity_value,
+                )
+                if not command.force_rerun and reuse_binding is not None:
+                    cached = reusable_failure(
+                        fresh.metadata,
+                        target=f"diagnostic:{locked_profile.diagnostic_id}",
+                        binding=reuse_binding,
+                    )
+                    raw_result = cached.get("result") if cached is not None else None
+                    if isinstance(raw_result, dict):
+                        try:
+                            replayed = WorkspaceRunDiagnosticResult(**raw_result)
+                        except (TypeError, ValueError):
+                            clear_reusable_failure(
+                                fresh.metadata,
+                                target=f"diagnostic:{locked_profile.diagnostic_id}",
+                            )
+                            self.ctx.store.save(fresh)
+                        else:
+                            audit_details.update(
+                                {
+                                    "failure_reused": True,
+                                    "reuse_binding": reuse_binding.digest,
+                                }
+                            )
+                            return replace(
+                                replayed,
+                                failure_reused=True,
+                                reuse_binding=reuse_binding.digest,
+                            )
 
                 result: CommandResult | None = None
                 command_error: CommandError | None = None
@@ -356,7 +458,7 @@ class WorkspaceDiagnosticRunner:
                             "required": False,
                         }
                     )
-                return WorkspaceRunDiagnosticResult(
+                diagnostic_result = WorkspaceRunDiagnosticResult(
                     workspace_id=command.workspace_id,
                     diagnostic_id=locked_profile.diagnostic_id,
                     summary=locked_profile.summary,
@@ -372,9 +474,7 @@ class WorkspaceDiagnosticRunner:
                     parser=locked_profile.parser.value,
                     intent=intent.value,
                     expectation=expectation.value,
-                    expected_failure_class=(
-                        expected_failure_class.value if expected_failure_class is not None else None
-                    ),
+                    expected_failure_class=expected_failure_value,
                     returncode=result.returncode,
                     outcome=parsed.outcome,
                     failure_class=parsed.failure_class,
@@ -395,6 +495,35 @@ class WorkspaceDiagnosticRunner:
                     satisfies_commit_gate=False,
                     next_safe_actions=next_actions,
                 )
+                diagnostic_target = f"diagnostic:{locked_profile.diagnostic_id}"
+                metadata_changed = False
+                if (
+                    reuse_binding is not None
+                    and parsed.outcome == "failed"
+                    and parsed.failure_class in _REUSABLE_DIAGNOSTIC_FAILURES
+                    and not parsed.output_truncated
+                    and not fingerprint_changed
+                ):
+                    metadata_changed = record_reusable_failure(
+                        fresh.metadata,
+                        target=diagnostic_target,
+                        binding=reuse_binding,
+                        evidence={
+                            "complete": True,
+                            "result": to_data(diagnostic_result),
+                        },
+                    )
+                    if metadata_changed:
+                        audit_details["failure_reuse_recorded"] = True
+                        audit_details["reuse_binding"] = reuse_binding.digest
+                elif parsed.outcome == "passed" or fingerprint_changed:
+                    metadata_changed = clear_reusable_failure(
+                        fresh.metadata,
+                        target=diagnostic_target,
+                    )
+                if metadata_changed:
+                    self.ctx.store.save(fresh)
+                return diagnostic_result
 
         return self.ctx.audited(
             "workspace_run_diagnostic",
