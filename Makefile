@@ -40,27 +40,43 @@ default: start
 # =============================================================================
 # START — build + install system-wide + run (the "just run it" command)
 # =============================================================================
-# 1. Builds a fresh wheel from current source
-# 2. Installs it as system-wide `rf` via uv tool
-# 3. Stops any old server if running
-# 4. Starts the new server (background, with API key if provided)
+# Sequence:
+#   1. Builds a fresh wheel from current source
+#   2. Installs it as system-wide `rf` via uv tool
+#   3. Kills any leftover server process (by PID file + process name)
+#   4. Starts the new server (foreground or background)
+#   5. Shows health summary
 #
-#   make start                                # foreground
-#   make start BG=1                           # background (daemon)
-#   CONTROL_PLANE_API_KEY='sk-proj-...' make start   # with API key
+#   make start                                # foreground (Ctrl+C to stop)
+#   make start BG=1                           # background daemon
 # =============================================================================
 
-start: build  # Build + install + start stable release
+define LOG
+	@printf "\n\033[36m══> %s\033[0m\n" "$(1)"
+endef
+
+start: build
+	$(call LOG,Building stable release)
+	$(call LOG,Installing system-wide rf)
 	uv tool install --reinstall dist/repoforge_mcp-*.whl -q
-	-rf runtime stop 2>/dev/null
-	CONTROL_PLANE_API_KEY="$(or $(CONTROL_PLANE_API_KEY),$$CONTROL_PLANE_API_KEY)" rf start $(if $(BG),--background,)
-	@echo ""
-	@echo "─── Server PID: $$(rf runtime status 2>/dev/null | grep -o '"pid": [0-9]*' | head -1 | grep -o '[0-9]*') ───"
-	@echo "  rf --version = $$(rf --version)"
-	@echo "  make status  to check health"
-	@echo "  make logs    to tail logs"
-	@echo "  make stop    to stop"
-	@echo "───────────────────────────────────────────────────"
+	$(call LOG,Killing old server if running)
+	@-rf runtime stop 2>/dev/null
+	@-pkill -f "rf start" 2>/dev/null; sleep 1
+	$(call LOG,Starting server (v$$(rf --version)))
+	CONTROL_PLANE_API_KEY="$(or $(CONTROL_PLANE_API_KEY),$$CONTROL_PLANE_API_KEY)" \
+		rf start $(if $(BG),--background,)
+	@sleep 3
+	$(call LOG,Checking health)
+	@rf runtime status 2>/dev/null || echo "  (still warming up — run make status)"
+	@printf "\n\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
+	@printf "\033[32m  ✓ v$$(rf --version)\033[0m\n"
+	@printf "\033[32m  PID: $$(rf runtime status 2>/dev/null | grep -o '"pid": [0-9]*' | head -1 | grep -o '[0-9]*')\033[0m\n"
+	@printf "\033[32m  ───────────────────────────────────────────\033[0m\n"
+	@printf "\033[32m  make status   check health\033[0m\n"
+	@printf "\033[32m  make logs     tail logs\033[0m\n"
+	@printf "\033[32m  make stop     stop server\033[0m\n"
+	@printf "\033[32m  make restart  restart (keeps BG)\033[0m\n"
+	@printf "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
 
 # =============================================================================
 # LOCAL DEV SERVER — runs from project venv (your latest code, no install)
