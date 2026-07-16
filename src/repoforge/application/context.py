@@ -42,7 +42,7 @@ from ..ports import (
 )
 from .dto import to_data
 from .fingerprint_cache import FingerprintCache
-from .idempotency import execute_idempotent
+from .idempotency import IdempotencyEffectBoundary, execute_idempotent
 from .nudges import AdoptionNudgeTracker
 
 T = TypeVar("T")
@@ -494,6 +494,7 @@ class ApplicationContext:
         details: dict[str, Any] | None = None,
         serialize: Callable[[T], Any] | None = None,
         deserialize: Callable[[Any], T] | None = None,
+        effect_boundary: IdempotencyEffectBoundary | None = None,
     ) -> T:
         return execute_idempotent(
             self,
@@ -504,4 +505,5 @@ class ApplicationContext:
             details=details,
             serialize=serialize,
             deserialize=deserialize,
+            effect_boundary=effect_boundary,
         )

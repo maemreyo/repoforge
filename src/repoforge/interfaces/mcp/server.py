@@ -732,11 +732,20 @@ def create_server(
         structured_output=True,
     )
     def workspace_write_file(
-        workspace_id: str, relative_path: str, content: str, expected_sha256: str
+        workspace_id: str,
+        relative_path: str,
+        content: str,
+        expected_sha256: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Use this to create or fully replace one UTF-8 file with optimistic locking; the response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between."""
+        """Use this to create or fully replace one UTF-8 file with optimistic locking; use an idempotency key for safe retries. The response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between."""
         return bounded_service.call(
-            "workspace_write_file", workspace_id, relative_path, content, expected_sha256
+            "workspace_write_file",
+            workspace_id,
+            relative_path,
+            content,
+            expected_sha256,
+            idempotency_key,
         )
 
     @mcp.tool(
@@ -744,9 +753,13 @@ def create_server(
         annotations=LOCAL_DESTRUCTIVE,
         structured_output=True,
     )
-    def workspace_edit(workspace_id: str, files: list[FileEdit]) -> dict[str, Any]:
-        """Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
-        return bounded_service.call("workspace_edit", workspace_id, files)
+    def workspace_edit(
+        workspace_id: str,
+        files: list[FileEdit],
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; use an idempotency key for safe retries. Pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
+        return bounded_service.call("workspace_edit", workspace_id, files, idempotency_key)
 
     @mcp.tool(
         title="Apply validated patch",
@@ -758,14 +771,16 @@ def create_server(
         patch: str,
         expected_head_sha: str,
         expected_workspace_fingerprint: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
+        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use an idempotency key for safe retries. Use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
         return bounded_service.call(
             "workspace_apply_patch",
             workspace_id,
             patch,
             expected_head_sha,
             expected_workspace_fingerprint,
+            idempotency_key,
         )
 
     @mcp.tool(

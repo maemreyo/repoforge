@@ -29,6 +29,7 @@ class ErrorCode(str, Enum):
     ALREADY_EXISTS = "ALREADY_EXISTS"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
+    IDEMPOTENCY_UNCERTAIN = "IDEMPOTENCY_UNCERTAIN"
     STATE_PERSISTENCE_FAILED = "STATE_PERSISTENCE_FAILED"
     STATE_INVALID = "STATE_INVALID"
     STATE_NOT_FOUND = "STATE_NOT_FOUND"
@@ -149,6 +150,7 @@ _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
     ("INPUT_REQUIRED", ErrorCode.INPUT_REQUIRED, False),
     ("IDEMPOTENCY_CONFLICT", ErrorCode.IDEMPOTENCY_CONFLICT, False),
     ("IDEMPOTENCY_IN_PROGRESS", ErrorCode.IDEMPOTENCY_IN_PROGRESS, True),
+    ("IDEMPOTENCY_UNCERTAIN", ErrorCode.IDEMPOTENCY_UNCERTAIN, False),
     ("STATE_PERSISTENCE_FAILED", ErrorCode.STATE_PERSISTENCE_FAILED, True),
     ("COMMAND_TIMEOUT", ErrorCode.COMMAND_TIMEOUT, True),
 )
@@ -248,6 +250,7 @@ def operation_error_from_exception(
         ErrorCode.ALREADY_RUNNING: "An identity-validated runtime already owns the supervisor lock.",
         ErrorCode.IDEMPOTENCY_CONFLICT: "The same idempotency key was already bound to different reviewed input.",
         ErrorCode.IDEMPOTENCY_IN_PROGRESS: "Another process is still executing the same keyed operation.",
+        ErrorCode.IDEMPOTENCY_UNCERTAIN: "The local mutation may have completed but its durable result receipt was not recorded.",
         ErrorCode.STATE_PERSISTENCE_FAILED: "RepoForge could not durably record required local operational state.",
         ErrorCode.STATE_INVALID: "The state collection, identifier, payload, or bound violates the reusable durable-state contract.",
         ErrorCode.STATE_NOT_FOUND: "No durable state record exists for the supplied identifier.",

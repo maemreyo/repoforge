@@ -137,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "2982de5c1b811e76daa9c38db079c3ec8f4d70e2684f84d5f424b1f2a2cc80b4",
+    "tool_surface_hash": "a390b2b3ad3c130aa143d16cee8ad897322362050d1bfdef4cb09911fe89cfbc",
     "tools": [
       {
         "annotations": {
@@ -146,7 +146,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use this when helping with setup or debugging to read the accepted and active\nconfiguration generations, one repository's effective policy (profiles with their\nexact commands, diagnostics, formatters, budgets, allowed and denied paths), and\nany policy changes still waiting for operator approval.",
+        "description": "Use this when helping with setup or debugging to read accepted/effective policy,\nruntime package/generation/tool-surface health, connection-scoped negotiated client\ncapabilities, and policy changes still waiting for operator approval.",
         "inputSchema": {
           "properties": {
             "repo_id": {
@@ -1352,7 +1352,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
+        "description": "Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use an idempotency key for safe retries. Use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "expected_head_sha": {
@@ -1362,6 +1362,18 @@
             "expected_workspace_fingerprint": {
               "title": "Expected Workspace Fingerprint",
               "type": "string"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
             },
             "patch": {
               "title": "Patch",
@@ -1617,7 +1629,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
+        "description": "Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; use an idempotency key for safe retries. Pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "files": {
@@ -1671,6 +1683,18 @@
               },
               "title": "Files",
               "type": "array"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
             },
             "workspace_id": {
               "title": "Workspace Id",
@@ -2684,7 +2708,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this to create or fully replace one UTF-8 file with optimistic locking; the response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between.",
+        "description": "Use this to create or fully replace one UTF-8 file with optimistic locking; use an idempotency key for safe retries. The response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between.",
         "inputSchema": {
           "properties": {
             "content": {
@@ -2694,6 +2718,18 @@
             "expected_sha256": {
               "title": "Expected Sha256",
               "type": "string"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
             },
             "relative_path": {
               "title": "Relative Path",

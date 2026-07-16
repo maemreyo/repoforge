@@ -173,6 +173,15 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
         edit_item = file_item["properties"]["edits"]["items"]
         assert edit_item["type"] == "object"
         assert set(edit_item["required"]) == {"old_text", "new_text"}
+        for mutation_name in (
+            "workspace_write_file",
+            "workspace_edit",
+            "workspace_apply_patch",
+        ):
+            mutation = tools[mutation_name]
+            assert "idempotency_key" in mutation.inputSchema["properties"]
+            assert "idempotency_key" not in mutation.inputSchema.get("required", [])
+            assert "idempotency key" in mutation.description.lower()
         for search_name in ("repo_search", "workspace_search"):
             search_schema = tools[search_name].inputSchema["properties"]
             assert search_schema["context_lines"]["minimum"] == 0

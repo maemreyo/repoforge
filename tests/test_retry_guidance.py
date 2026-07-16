@@ -258,6 +258,13 @@ def test_success_path_is_unaffected_by_retry_guidance(forge_env: ForgeEnvironmen
         "command_source_dirty",
         "command_source_dirty_paths",
         "command_source_warning",
+        "completed_steps",
+        "failed_step",
+        "failure_domain",
+        "not_run_steps",
+        "business_tests_ran",
+        "valid_tdd_red_evidence",
+        "hygiene_receipt",
         "working_directory",
     }
 

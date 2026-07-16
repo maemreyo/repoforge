@@ -549,16 +549,34 @@ class CodingService:
         )
 
     def workspace_write_file(
-        self, workspace_id: str, relative_path: str, content: str, expected_sha256: str
+        self,
+        workspace_id: str,
+        relative_path: str,
+        content: str,
+        expected_sha256: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._write.execute(
-                WorkspaceFileWriteCommand(workspace_id, relative_path, content, expected_sha256)
+                WorkspaceFileWriteCommand(
+                    workspace_id,
+                    relative_path,
+                    content,
+                    expected_sha256,
+                    idempotency_key,
+                )
             )
         )
 
-    def workspace_edit(self, workspace_id: str, files: list[FileEdit]) -> dict[str, Any]:
-        return _result(self._edit.execute(WorkspaceEditCommand(workspace_id, tuple(files))))
+    def workspace_edit(
+        self,
+        workspace_id: str,
+        files: list[FileEdit],
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._edit.execute(WorkspaceEditCommand(workspace_id, tuple(files), idempotency_key))
+        )
 
     def workspace_apply_patch(
         self,
@@ -566,6 +584,7 @@ class CodingService:
         patch: str,
         expected_head_sha: str,
         expected_workspace_fingerprint: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._patch.execute(
@@ -574,6 +593,7 @@ class CodingService:
                     patch,
                     expected_head_sha,
                     expected_workspace_fingerprint,
+                    idempotency_key,
                 )
             )
         )

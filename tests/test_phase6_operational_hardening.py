@@ -19,6 +19,7 @@ from repoforge.adapters.persistence import JsonIdempotencyStore
 from repoforge.adapters.runtime.tunnel_cli import TunnelCliClient
 from repoforge.application.context import ApplicationContext
 from repoforge.application.diagnostics.bundle import build_diagnostics_bundle
+from repoforge.application.idempotency import IdempotencyEffectBoundary
 from repoforge.application.repository.doctor import Doctor, DoctorCommand
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig, load_config
 from repoforge.domain.errors import ConfigError, ErrorCode
@@ -473,6 +474,119 @@ def test_idempotency_replays_completed_result_and_rejects_conflict(tmp_path: Pat
     assert error.value.retryable is False
 
 
+def test_idempotency_preserves_uncertain_state_after_effect_before_receipt(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    calls = 0
+
+    effect = IdempotencyEffectBoundary()
+
+    def operation() -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        effect.begin()
+        return {"mutated": True}
+
+    def fail_serialization(result: dict[str, Any]) -> dict[str, Any]:
+        del result
+        raise RuntimeError("response serialization failed")
+
+    with pytest.raises(ConfigError) as lost_response:
+        ctx.idempotent(
+            "workspace_write_file",
+            "mutation-key-12345678",
+            {"workspace_id": "demo", "path": "hello.txt"},
+            operation,
+            serialize=fail_serialization,
+            effect_boundary=effect,
+        )
+    assert lost_response.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    assert lost_response.value.retryable is False
+
+    assert ctx.idempotency is not None
+    record = ctx.idempotency.load(
+        "workspace_write_file", hash_idempotency_key("mutation-key-12345678")
+    )
+    assert record is not None
+    assert record.state is IdempotencyState.UNCERTAIN
+    assert calls == 1
+
+    with pytest.raises(ConfigError) as uncertain:
+        ctx.idempotent(
+            "workspace_write_file",
+            "mutation-key-12345678",
+            {"workspace_id": "demo", "path": "hello.txt"},
+            operation,
+        )
+    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    assert uncertain.value.retryable is False
+    assert "inspect" in uncertain.value.safe_next_action.lower()
+    assert calls == 1
+
+
+def test_idempotency_pre_effect_failure_releases_key_for_safe_retry(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    effect = IdempotencyEffectBoundary()
+
+    with pytest.raises(RuntimeError, match="pre-effect"):
+        ctx.idempotent(
+            "workspace_write_file",
+            "pre-effect-key-12345678",
+            {"workspace_id": "demo", "path": "hello.txt"},
+            lambda: (_ for _ in ()).throw(RuntimeError("pre-effect")),
+            effect_boundary=effect,
+        )
+
+    assert ctx.idempotency is not None
+    assert (
+        ctx.idempotency.load(
+            "workspace_write_file", hash_idempotency_key("pre-effect-key-12345678")
+        )
+        is None
+    )
+    recovered = ctx.idempotent(
+        "workspace_write_file",
+        "pre-effect-key-12345678",
+        {"workspace_id": "demo", "path": "hello.txt"},
+        lambda: {"mutated": True},
+        effect_boundary=IdempotencyEffectBoundary(),
+    )
+    assert recovered == {"mutated": True}
+
+
+def test_stale_local_mutation_claim_transitions_to_uncertain(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    assert ctx.idempotency is not None
+    key = "stale-local-key-12345678"
+    request = {"workspace_id": "demo", "path": "hello.txt"}
+    ctx.idempotency.save(
+        IdempotencyRecord(
+            "workspace_write_file",
+            hash_idempotency_key(key),
+            request_fingerprint(request),
+            IdempotencyState.IN_PROGRESS,
+            "1970-01-01T00:00:00+00:00",
+            0.0,
+            "stale-local-correlation",
+        )
+    )
+
+    with pytest.raises(ConfigError) as uncertain:
+        ctx.idempotent(
+            "workspace_write_file",
+            key,
+            request,
+            lambda: {"unreachable": True},
+            effect_boundary=IdempotencyEffectBoundary(),
+        )
+
+    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    record = ctx.idempotency.load("workspace_write_file", hash_idempotency_key(key))
+    assert record is not None
+    assert record.state is IdempotencyState.UNCERTAIN
+
+
 def test_idempotency_in_progress_is_retryable_and_stale_claim_recovers(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     assert ctx.idempotency is not None
@@ -533,8 +647,19 @@ def test_automatic_retry_policy_is_limited_to_keyed_proven_operations() -> None:
     assert not automatic_retry_allowed(
         "workspace_push", ErrorCode.COMMAND_TIMEOUT, has_idempotency_key=False
     )
-    assert not automatic_retry_allowed(
+    assert automatic_retry_allowed(
         "workspace_write_file", ErrorCode.COMMAND_TIMEOUT, has_idempotency_key=True
+    )
+    assert automatic_retry_allowed(
+        "workspace_edit", ErrorCode.LOCK_TIMEOUT, has_idempotency_key=True
+    )
+    assert automatic_retry_allowed(
+        "workspace_apply_patch",
+        ErrorCode.STATE_PERSISTENCE_FAILED,
+        has_idempotency_key=True,
+    )
+    assert not automatic_retry_allowed(
+        "workspace_write_file", ErrorCode.IDEMPOTENCY_UNCERTAIN, has_idempotency_key=True
     )
     assert not automatic_retry_allowed(
         "workspace_push", ErrorCode.SECURITY_POLICY_VIOLATION, has_idempotency_key=True

@@ -5,11 +5,15 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from ...domain.errors import SecurityError, WorkspaceError
+from ...domain.operations import request_fingerprint
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ..context import ApplicationContext
+from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint
+from ..idempotency import IdempotencyEffectBoundary
 
 _SHA = re.compile("^[a-f0-9]{64}$")
 
@@ -46,6 +50,7 @@ class FileEdit:
 class WorkspaceEditCommand:
     workspace_id: str
     files: tuple[FileEdit, ...]
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +76,16 @@ class _PreparedFile:
     original: bytes
     encoded: bytes
     replacements: int
+
+
+def _deserialize_edit_result(value: Any) -> WorkspaceEditResult:
+    return WorkspaceEditResult(
+        workspace_id=str(value["workspace_id"]),
+        files=tuple(WorkspaceEditFileResult(**item) for item in value["files"]),
+        diff_stat=str(value["diff_stat"]),
+        workspace_fingerprint=str(value["workspace_fingerprint"]),
+        head_sha=str(value["head_sha"]),
+    )
 
 
 class WorkspaceEditor:
@@ -126,12 +141,34 @@ class WorkspaceEditor:
                 raise SecurityError("Reading through symlinks is not allowed")
             resolved.append((path, normalized))
 
+        effect = IdempotencyEffectBoundary()
+
+        canonical_files = [
+            {
+                "path": normalized,
+                "expected_sha256": entry.expected_sha256,
+                "edits": to_data(entry.edits),
+            }
+            for (_path, normalized), entry in zip(resolved, files, strict=True)
+        ]
+        mutation_request = {
+            "operation": "workspace_edit",
+            "repo_id": repo.repo_id,
+            "workspace_id": c.workspace_id,
+            "payload_sha256": request_fingerprint(canonical_files),
+            "files": [
+                {"path": item["path"], "expected_sha256": item["expected_sha256"]}
+                for item in canonical_files
+            ],
+        }
+
         def op() -> WorkspaceEditResult:
             with self.ctx.locks.lock(c.workspace_id):
                 prepared = [
                     self._prepare(path, normalized, entry)
                     for (path, normalized), entry in zip(resolved, files, strict=True)
                 ]
+                effect.begin()
                 self._write_all(prepared)
                 stat = self.ctx.git.diff_stat(workspace)
                 fingerprint = prime_fingerprint(
@@ -156,10 +193,18 @@ class WorkspaceEditor:
                     head_sha,
                 )
 
-        return self.ctx.audited(
-            "workspace_edit",
-            {"workspace_id": c.workspace_id, "paths": [entry.path for entry in files]},
-            op,
+        return cast(
+            WorkspaceEditResult,
+            self.ctx.idempotent(
+                "workspace_edit",
+                c.idempotency_key,
+                mutation_request,
+                op,
+                details={"workspace_id": c.workspace_id, "paths": [entry.path for entry in files]},
+                serialize=to_data,
+                deserialize=_deserialize_edit_result,
+                effect_boundary=effect,
+            ),
         )
 
     def _prepare(self, path: Path, normalized: str, entry: FileEdit) -> _PreparedFile:

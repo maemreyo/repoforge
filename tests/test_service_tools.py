@@ -7,7 +7,7 @@ import pytest
 from conftest import ForgeEnvironment, create_forge_environment
 
 from repoforge.application.workspace.edit import FileEdit, TextEdit
-from repoforge.domain.errors import SecurityError, WorkspaceError
+from repoforge.domain.errors import ConfigError, ErrorCode, SecurityError, WorkspaceError
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -16,6 +16,109 @@ def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
         json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line
     ]
     return [event for event in events if event["action"] == action]
+
+
+def test_workspace_write_file_replays_keyed_result_and_rejects_conflict(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "keyed-write")["workspace_id"]
+
+    first = service.workspace_write_file(
+        workspace_id,
+        "keyed.txt",
+        "first\n",
+        "<new>",
+        idempotency_key="workspace-write-key-0001",
+    )
+    replayed = service.workspace_write_file(
+        workspace_id,
+        "keyed.txt",
+        "first\n",
+        "<new>",
+        idempotency_key="workspace-write-key-0001",
+    )
+
+    assert replayed == first
+    with pytest.raises(ConfigError) as conflict:
+        service.workspace_write_file(
+            workspace_id,
+            "keyed.txt",
+            "different\n",
+            "<new>",
+            idempotency_key="workspace-write-key-0001",
+        )
+    assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+
+def test_workspace_edit_replays_keyed_result_and_rejects_conflict(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "keyed-edit")["workspace_id"]
+    hello = service.workspace_read_file(workspace_id, "hello.txt")
+    files = [FileEdit("hello.txt", hello["sha256"], (TextEdit("hello", "keyed edit"),))]
+
+    first = service.workspace_edit(
+        workspace_id,
+        files,
+        idempotency_key="workspace-edit-key-0001",
+    )
+    replayed = service.workspace_edit(
+        workspace_id,
+        [FileEdit("./hello.txt", hello["sha256"], (TextEdit("hello", "keyed edit"),))],
+        idempotency_key="workspace-edit-key-0001",
+    )
+
+    assert replayed == first
+    with pytest.raises(ConfigError) as conflict:
+        service.workspace_edit(
+            workspace_id,
+            [FileEdit("hello.txt", hello["sha256"], (TextEdit("hello", "different"),))],
+            idempotency_key="workspace-edit-key-0001",
+        )
+    assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+
+def test_workspace_apply_patch_replays_keyed_result_and_rejects_conflict(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "keyed-patch")["workspace_id"]
+    status = service.workspace_status(workspace_id)
+    patch = """diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello
++keyed patch
+"""
+
+    first = service.workspace_apply_patch(
+        workspace_id,
+        patch,
+        status["head_sha"],
+        status["workspace_fingerprint"],
+        idempotency_key="workspace-patch-key-0001",
+    )
+    replayed = service.workspace_apply_patch(
+        workspace_id,
+        patch,
+        status["head_sha"],
+        status["workspace_fingerprint"],
+        idempotency_key="workspace-patch-key-0001",
+    )
+
+    assert replayed == first
+    with pytest.raises(ConfigError) as conflict:
+        service.workspace_apply_patch(
+            workspace_id,
+            patch.replace("keyed patch", "different patch"),
+            status["head_sha"],
+            status["workspace_fingerprint"],
+            idempotency_key="workspace-patch-key-0001",
+        )
+    assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
 
 def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
