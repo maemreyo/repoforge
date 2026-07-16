@@ -25,6 +25,8 @@ from ..ports import (
     FileSystem,
     GitHubReadCache,
     GitRepository,
+    HygieneBaselineCache,
+    HygieneGateway,
     IdempotencyStore,
     IdGenerator,
     LockManager,
@@ -164,6 +166,7 @@ _MUTATING_ACTIONS = {
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
+    "workspace_format_changed",
     "workspace_run_adhoc",
     "workspace_verify",
     "workspace_commit",
@@ -176,6 +179,7 @@ _MUTATING_ACTIONS = {
 _PUBLISH_ACTIONS = {
     "ticket_project_sync_apply",
     "workspace_push",
+    "workspace_format_changed",
     "workspace_create_draft_pr",
     "workspace_update_draft_pr",
 }
@@ -189,6 +193,7 @@ _POLICY_WRITE_ACTIONS = {
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
+    "workspace_format_changed",
     "workspace_run_adhoc",
     "workspace_verify",
     "workspace_commit",
@@ -220,6 +225,8 @@ class ApplicationContext:
     execution_environment: ExecutionEnvironmentPort | None = None
     provider_registry: ProviderRegistry | None = None
     github_read_cache: GitHubReadCache | None = None
+    hygiene: HygieneGateway | None = None
+    hygiene_cache: HygieneBaselineCache | None = None
     nudge_tracker: AdoptionNudgeTracker | None = None
     ticket_projects: TicketProjectGateway | None = None
 

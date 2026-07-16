@@ -23,10 +23,12 @@ def test_mcp_tool_surface_remains_reviewed_and_unique() -> None:
             for decorator in node.decorator_list
         )
     ]
-    assert len(tools) == 48
+    assert len(tools) == 50
     assert len(tools) == len(set(tools))
     assert {
         "workspace_run_diagnostic",
+        "workspace_hygiene_status",
+        "workspace_format_changed",
         "workspace_base_status",
         "workspace_refresh",
         "workspace_refresh_preview",

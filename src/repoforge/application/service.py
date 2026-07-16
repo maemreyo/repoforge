@@ -84,6 +84,14 @@ from .workspace.files_read import (
     WorkspaceFilesReadCommand,
     WorkspaceFilesReader,
 )
+from .workspace.format_changed import (
+    WorkspaceChangedFormatter,
+    WorkspaceFormatChangedCommand,
+)
+from .workspace.hygiene_status import (
+    WorkspaceHygieneStatusCommand,
+    WorkspaceHygieneStatusReader,
+)
 from .workspace.list import WorkspaceListCommand, WorkspaceLister
 from .workspace.pr_check_details import (
     WorkspacePrCheckDetailsCommand,
@@ -233,6 +241,8 @@ class CodingService:
             background_tasks=self.application.background_tasks,
         )
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
+        self._hygiene_status = WorkspaceHygieneStatusReader(ctx)
+        self._format_changed = WorkspaceChangedFormatter(ctx)
         self._adhoc = WorkspaceAdhocRunner(
             ctx,
             operations=self.operations,
@@ -662,6 +672,31 @@ class CodingService:
                     tuple(argv) if isinstance(argv, list) else argv,
                     working_directory,
                     background,
+                )
+            )
+        )
+
+    def workspace_hygiene_status(
+        self,
+        workspace_id: str,
+        formatter_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._hygiene_status.execute(WorkspaceHygieneStatusCommand(workspace_id, formatter_id))
+        )
+
+    def workspace_format_changed(
+        self,
+        workspace_id: str,
+        expected_fingerprint: str,
+        formatter_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._format_changed.execute(
+                WorkspaceFormatChangedCommand(
+                    workspace_id,
+                    expected_fingerprint,
+                    formatter_id,
                 )
             )
         )

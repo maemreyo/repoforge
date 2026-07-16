@@ -23,11 +23,13 @@ from .adapters.filesystem import LocalFileSystem
 from .adapters.git import GitCliRepository
 from .adapters.github import GhCliGateway
 from .adapters.github.ticket_project import GhTicketProjectGateway
+from .adapters.hygiene import CommandHygieneGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
     JsonGitHubReadCache,
+    JsonHygieneBaselineCache,
     JsonIdempotencyStore,
     JsonOnboardingStore,
     JsonOperationResultStore,
@@ -116,6 +118,8 @@ from .ports import (
     FileSystem,
     GitHubReadCache,
     GitRepository,
+    HygieneBaselineCache,
+    HygieneGateway,
     IdempotencyStore,
     IdGenerator,
     LockManager,
@@ -164,6 +168,8 @@ class AdapterOverrides:
     operations: OperationStore | None = None
     operation_results: OperationResultStore | None = None
     github_read_cache: GitHubReadCache | None = None
+    hygiene: HygieneGateway | None = None
+    hygiene_cache: HygieneBaselineCache | None = None
     pr_check_watches: PrCheckWatchStore | None = None
     background_tasks: BackgroundTaskRunner | None = None
     sleeper: Sleeper | None = None
@@ -386,6 +392,8 @@ def build_application(
         max_result_bytes=config.server.max_tool_output_chars,
     )
     github_read_cache = o.github_read_cache or JsonGitHubReadCache(config.server.state_root, locks)
+    hygiene = o.hygiene or CommandHygieneGateway(command)
+    hygiene_cache = o.hygiene_cache or JsonHygieneBaselineCache(config.server.state_root, locks)
     pr_check_watch_store = o.pr_check_watches or JsonPrCheckWatchStore(
         config.server.state_root,
         locks,
@@ -418,6 +426,8 @@ def build_application(
         operation_store=operation_store,
         operation_result_store=operation_result_store,
         github_read_cache=github_read_cache,
+        hygiene=hygiene,
+        hygiene_cache=hygiene_cache,
         ticket_projects=ticket_projects,
     )
     operations = OperationManager(context)
