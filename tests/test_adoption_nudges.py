@@ -93,7 +93,9 @@ def test_pr_checks_repeated_poll_nudge_is_scoped_to_its_own_workspace(
     assert "workspace_pr_watch" not in first_other["next_step"]
 
 
-def test_pr_checks_poll_nudge_resets_once_checks_resolve(forge_env: ForgeEnvironment) -> None:
+def test_pr_checks_poll_nudge_resets_once_checks_resolve(
+    forge_env: ForgeEnvironment,
+) -> None:
     workspace_id, _ = _publish_workspace(forge_env)
     _update_state(forge_env, _pending_checks_state())
 
@@ -171,7 +173,9 @@ def test_pr_checks_optional_failing_check_does_not_nudge_failure_evidence(
     assert "workspace_pr_failure_evidence" not in result["next_step"]
 
 
-def test_pr_checks_all_green_result_carries_no_nudge(forge_env: ForgeEnvironment) -> None:
+def test_pr_checks_all_green_result_carries_no_nudge(
+    forge_env: ForgeEnvironment,
+) -> None:
     workspace_id, _ = _publish_workspace(forge_env)
 
     result = forge_env.service.workspace_pr_checks(workspace_id)
@@ -197,7 +201,9 @@ def test_read_file_nudges_exactly_at_fifth_consecutive_single_read(
     assert f'workspace_read_files(workspace_id="{workspace_id}"' in fifth["next_step"]
 
 
-def test_read_file_nudge_is_scoped_to_its_own_workspace(forge_env: ForgeEnvironment) -> None:
+def test_read_file_nudge_is_scoped_to_its_own_workspace(
+    forge_env: ForgeEnvironment,
+) -> None:
     workspace_one = forge_env.service.workspace_create("demo", "read nudge one")["workspace_id"]
     workspace_two = forge_env.service.workspace_create("demo", "read nudge two")["workspace_id"]
 
@@ -228,9 +234,7 @@ def test_read_files_batch_resets_the_single_read_nudge_counter(
 def test_read_file_nudge_does_not_fire_when_batching_is_used_instead(
     forge_env: ForgeEnvironment,
 ) -> None:
-    workspace_id = forge_env.service.workspace_create("demo", "read nudge instead")[
-        "workspace_id"
-    ]
+    workspace_id = forge_env.service.workspace_create("demo", "read nudge instead")["workspace_id"]
 
     for _ in range(3):
         forge_env.service.workspace_read_files(workspace_id, ["hello.txt", "README.md"])
@@ -261,13 +265,12 @@ def test_tracker_history_per_workspace_is_bounded_to_its_threshold() -> None:
         tracker.observe_single_file_read("workspace-a", now)
         now += 0.01
 
-    assert (
-        len(tracker._file_reads._data["workspace-a"])
-        <= AdoptionNudgeTracker.FILE_READ_THRESHOLD
-    )
+    assert len(tracker._file_reads._data["workspace-a"]) <= AdoptionNudgeTracker.FILE_READ_THRESHOLD
 
 
-def test_nudge_details_never_appear_in_audit_payloads(forge_env: ForgeEnvironment) -> None:
+def test_nudge_details_never_appear_in_audit_payloads(
+    forge_env: ForgeEnvironment,
+) -> None:
     workspace_id, _ = _publish_workspace(forge_env)
     _update_state(forge_env, _pending_checks_state())
     for _ in range(3):

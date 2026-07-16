@@ -83,7 +83,7 @@ class WorkspaceFileReader:
                 next_step = (
                     "Recent reads have repeatedly targeted this workspace one file at a time; "
                     f'call workspace_read_files(workspace_id="{c.workspace_id}", '
-                    'relative_paths=[...]) to batch several files in one call instead of '
+                    "relative_paths=[...]) to batch several files in one call instead of "
                     "repeating workspace_read_file."
                 )
             return WorkspaceFileReadResult(

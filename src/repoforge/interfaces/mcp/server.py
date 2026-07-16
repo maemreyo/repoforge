@@ -126,6 +126,43 @@ _WORKSPACE_LIST_DESCRIPTION = (
     "Use this when resuming work or finding active RepoForge workspaces; each entry reports age,\n"
     "dirty state, and linked issue_ids to help decide what to reuse or remove."
 )
+_MULTILINE_TOOL_DESCRIPTIONS = {
+    "repo_search": (
+        "Use this to locate literal text in an immutable reviewed repository snapshot. Pass\n"
+        "context_lines (0-5) to also return that many surrounding lines on each side of a match\n"
+        "instead of a follow-up repo_read_file call; context lines are marked with `-` instead of\n"
+        "`:` after the path and line number, and still count toward max_results."
+    ),
+    "repo_issue_read": (
+        "Use this when implementation requirements are defined by a GitHub issue. A recent\n"
+        "read of the same issue in this session may be served from a short-lived local cache\n"
+        "(marked `cache_hit: true`); pass `fresh=true` to force a live read, e.g. before acting\n"
+        "on a check or review that must not be stale."
+    ),
+    "repo_pr_read": (
+        "Use this when reviewing an existing pull request, checks, commits, files, or reviews.\n"
+        "A recent read of the same pull request in this session may be served from a short-lived\n"
+        "local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read before\n"
+        "acting on checks or reviews that must not be stale."
+    ),
+    "repo_task_context": (
+        "Use this when starting or resuming a task to assemble repository context, one\n"
+        "ticket's specification, workspace status, and recent commits in a single bounded call\n"
+        "instead of chaining repo_context, repo_issue_spec, workspace_status, and\n"
+        "repo_recent_commits. Pass issue_number and/or workspace_id to include those sections;\n"
+        "omitting either yields an explicit null, not an error. A supplied workspace_id must\n"
+        "belong to repo_id or the call fails closed. The ticket section reuses the same\n"
+        "short-lived local GitHub read cache as repo_issue_spec. Each section is independently\n"
+        "bounded and reports its own `truncated` flag, and the whole bundle is capped at 96 KB,\n"
+        "truncating recent_commits first, then ticket, then workspace, then repository last."
+    ),
+    "workspace_search": (
+        "Use this when locating literal text in allowed workspace files; it is not a shell tool.\n"
+        "Pass context_lines (0-5) to also return that many surrounding lines on each side of a\n"
+        "match instead of a follow-up workspace_read_file call; context lines are marked with `-`\n"
+        "instead of `:` after the path and line number, and still count toward max_results."
+    ),
+}
 
 
 def _canonical_ast_value(value: object) -> object:
@@ -334,7 +371,10 @@ def create_server(
         )
 
     @mcp.tool(
-        title="Search committed repository code", annotations=READ_ONLY, structured_output=True
+        title="Search committed repository code",
+        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_search"],
+        annotations=READ_ONLY,
+        structured_output=True,
     )
     def repo_search(
         repo_id: str,
@@ -357,7 +397,12 @@ def create_server(
         """Use this when recent history or commit conventions are relevant to the task."""
         return bounded_service.call("repo_recent_commits", repo_id, limit)
 
-    @mcp.tool(title="Read GitHub issue", annotations=EXTERNAL_READ, structured_output=True)
+    @mcp.tool(
+        title="Read GitHub issue",
+        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_issue_read"],
+        annotations=EXTERNAL_READ,
+        structured_output=True,
+    )
     def repo_issue_read(repo_id: str, issue_number: int, fresh: bool = False) -> dict[str, Any]:
         """Use this when implementation requirements are defined by a GitHub issue. A recent
         read of the same issue in this session may be served from a short-lived local cache
@@ -417,6 +462,7 @@ def create_server(
 
     @mcp.tool(
         title="Read GitHub pull request",
+        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_pr_read"],
         annotations=EXTERNAL_READ,
         structured_output=True,
     )
@@ -429,6 +475,7 @@ def create_server(
 
     @mcp.tool(
         title="Read bounded task-context bundle",
+        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_task_context"],
         annotations=EXTERNAL_READ,
         structured_output=True,
     )
@@ -531,7 +578,12 @@ def create_server(
             "workspace_read_files", workspace_id, relative_paths, start_line, end_line
         )
 
-    @mcp.tool(title="Search workspace code", annotations=READ_ONLY, structured_output=True)
+    @mcp.tool(
+        title="Search workspace code",
+        description=_MULTILINE_TOOL_DESCRIPTIONS["workspace_search"],
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
     def workspace_search(
         workspace_id: str,
         query: str,
