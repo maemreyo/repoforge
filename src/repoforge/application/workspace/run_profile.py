@@ -22,15 +22,23 @@ from ...domain.retry_guidance import (
     clear as clear_retry_guidance,
 )
 from ...domain.verification import get_profile, select_verification_profile
+from ...domain.verification_steps import (
+    HygieneBaselinePolicy,
+    VerificationStep,
+    VerificationStepKind,
+    compile_legacy_steps,
+    no_regression_receipt,
+)
 from ...domain.workspace import VerificationReceipt, is_commit_sha
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
-from ...ports.execution_environment import ApprovedExecution
+from ...ports.execution_environment import ApprovedExecution, ExecutionReceipt
 from ..context import ApplicationContext
 from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..operations.manager import OperationManager
+from .hygiene_status import WorkspaceHygieneStatusCommand, WorkspaceHygieneStatusReader
 
 _KIND = "workspace_run_profile"
 
@@ -76,6 +84,13 @@ class WorkspaceRunProfileResult:
     command_source_dirty: bool
     command_source_dirty_paths: list[str]
     command_source_warning: str | None
+    completed_steps: list[dict[str, object]]
+    failed_step: dict[str, object] | None
+    failure_domain: str | None
+    not_run_steps: list[dict[str, object]]
+    business_tests_ran: bool
+    valid_tdd_red_evidence: bool
+    hygiene_receipt: dict[str, object] | None
     working_directory: str | None = None
 
 
@@ -170,6 +185,7 @@ class WorkspaceProfileRunner:
         else:
             profile = get_profile(repo, c.profile_name)
             used_default = False
+        steps = profile.steps or compile_legacy_steps(profile.commands)
         command_cwd = path
         if profile.working_directory:
             relative = normalize_relative_path(profile.working_directory)
@@ -222,12 +238,33 @@ class WorkspaceProfileRunner:
                 audit_details["command_source_dirty_paths"] = list(command_source_dirty_paths)
 
             def record_command_failure(
-                exc: CommandError, command: tuple[str, ...], steps_completed: int
+                exc: CommandError, verification_step: VerificationStep, step_index: int
             ) -> None:
+                command = verification_step.command
                 fallback = command[0] if command else None
+                completed_steps = [item.public() for item in steps[:step_index]]
+                failed_step = verification_step.public()
+                not_run_steps = [item.public() for item in steps[step_index + 1 :]]
+                business_tests_ran = any(
+                    item.kind is VerificationStepKind.BUSINESS_TESTS
+                    for item in steps[: step_index + 1]
+                )
+                exc.details.update(
+                    {
+                        "completed_steps": completed_steps,
+                        "failed_step": failed_step,
+                        "failure_domain": verification_step.kind.value,
+                        "not_run_steps": not_run_steps,
+                        "business_tests_ran": business_tests_ran,
+                        "valid_tdd_red_evidence": False,
+                    }
+                )
                 audit_details["failed_command"] = exc.details.get("command", fallback)
                 audit_details["exit_code"] = exc.details.get("exit_code")
-                audit_details["steps_completed"] = steps_completed
+                audit_details["steps_completed"] = step_index
+                audit_details["failed_step"] = failed_step
+                audit_details["failure_domain"] = verification_step.kind.value
+                audit_details["business_tests_ran"] = business_tests_ran
                 if exc.details.get("cancelled"):
                     audit_details["cancelled"] = True
                 if exc.details.get("cancelled"):
@@ -248,7 +285,7 @@ class WorkspaceProfileRunner:
                 error_code = exc.code.value
                 raw_exit_code = exc.details.get("exit_code")
                 exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
-                signature = FailureSignature(error_code, steps_completed, exit_code)
+                signature = FailureSignature(error_code, step_index, exit_code)
                 repeat, repeat_guidance = record_and_compare(
                     fresh.metadata,
                     target=target,
@@ -274,6 +311,44 @@ class WorkspaceProfileRunner:
 
             timeout = profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
             environment_hash: str | None = None
+            hygiene_receipt_data: dict[str, object] | None = None
+
+            def accepted_no_regression_step(
+                verification_step: VerificationStep,
+            ) -> CommandResult | None:
+                nonlocal hygiene_receipt_data
+                if (
+                    profile.baseline_policy is not HygieneBaselinePolicy.NO_REGRESSION
+                    or verification_step.kind is not VerificationStepKind.HYGIENE
+                ):
+                    return None
+                status = WorkspaceHygieneStatusReader(self.ctx)._read(
+                    WorkspaceHygieneStatusCommand(c.workspace_id)
+                )
+                receipt = no_regression_receipt(
+                    base_sha=status.base_sha,
+                    workspace_fingerprint=status.workspace_fingerprint,
+                    formatter_contract_hash=status.formatter_contract_hash,
+                    environment_identity=status.environment_identity,
+                    preexisting_count=len(status.preexisting),
+                    introduced_count=len(status.introduced),
+                    changed_path_finding_count=len(status.changed_path_findings),
+                    output_truncated=status.output_truncated,
+                )
+                if receipt is None:
+                    return None
+                hygiene_receipt_data = receipt.as_dict()
+                audit_details["baseline_policy"] = profile.baseline_policy.value
+                audit_details["hygiene_receipt_hash"] = receipt.receipt_hash
+                audit_details["preexisting_hygiene_findings"] = receipt.preexisting_count
+                return CommandResult(
+                    verification_step.command,
+                    str(command_cwd),
+                    0,
+                    "Accepted by the reviewed no_regression hygiene policy.",
+                    "",
+                )
+
             if self.ctx.execution_environment is not None:
                 request = EnvironmentIdentityRequest(
                     workspace_root=path,
@@ -285,7 +360,14 @@ class WorkspaceProfileRunner:
                 try:
                     identity = self.ctx.execution_environment.identity(request)
                     receipts = []
-                    for step, command in enumerate(profile.commands):
+                    for step_index, verification_step in enumerate(steps):
+                        command = verification_step.command
+                        accepted = accepted_no_regression_step(verification_step)
+                        if accepted is not None:
+                            receipts.append(
+                                ExecutionReceipt(command, identity.identity_hash, accepted)
+                            )
+                            continue
                         if on_before_command is not None:
                             on_before_command()
                         try:
@@ -297,7 +379,7 @@ class WorkspaceProfileRunner:
                                 )
                             )
                         except CommandError as exc:
-                            record_command_failure(exc, command, step)
+                            record_command_failure(exc, verification_step, step_index)
                             raise
                 finally:
                     self.ctx.execution_environment.cleanup(request)
@@ -305,7 +387,12 @@ class WorkspaceProfileRunner:
                 environment_hash = identity.identity_hash
             else:
                 results = []
-                for step, command in enumerate(profile.commands):
+                for step_index, verification_step in enumerate(steps):
+                    command = verification_step.command
+                    accepted = accepted_no_regression_step(verification_step)
+                    if accepted is not None:
+                        results.append(accepted)
+                        continue
                     if on_before_command is not None:
                         on_before_command()
                     try:
@@ -323,7 +410,7 @@ class WorkspaceProfileRunner:
                                 )
                             )
                     except CommandError as exc:
-                        record_command_failure(exc, command, step)
+                        record_command_failure(exc, verification_step, step_index)
                         raise
             _ = self.ctx.git.changed_paths(path, repo)
             metrics = self.ctx.git.enforce_change_budget(path, repo)
@@ -369,6 +456,15 @@ class WorkspaceProfileRunner:
                 command_source_dirty=command_source_dirty,
                 command_source_dirty_paths=list(command_source_dirty_paths),
                 command_source_warning=command_source_warning,
+                completed_steps=[step.public() for step in steps],
+                failed_step=None,
+                failure_domain=None,
+                not_run_steps=[],
+                business_tests_ran=any(
+                    step.kind is VerificationStepKind.BUSINESS_TESTS for step in steps
+                ),
+                valid_tdd_red_evidence=False,
+                hygiene_receipt=hygiene_receipt_data,
             )
 
         audit_details: dict[str, object] = {

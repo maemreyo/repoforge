@@ -48,6 +48,12 @@ from .domain.user_paths import (
 from .domain.user_paths import (
     DEFAULT_WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT,
 )
+from .domain.verification_steps import (
+    HygieneBaselinePolicy,
+    VerificationStep,
+    VerificationStepKind,
+    compile_legacy_steps,
+)
 
 DEFAULT_PATH_PREFIXES = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
 DEFAULT_ALLOWED_ENVIRONMENT = (
@@ -135,6 +141,8 @@ class ProfileConfig:
     timeout_seconds: int | None = None
     working_directory: str | None = None
     command_source_paths: tuple[str, ...] = ()
+    steps: tuple[VerificationStep, ...] = ()
+    baseline_policy: HygieneBaselinePolicy = HygieneBaselinePolicy.STRICT_CLEAN
 
 
 @dataclass(frozen=True)
@@ -380,19 +388,88 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
                 timeout_raw, 1, f"profile {repo_id}.{name}.timeout_seconds"
             )
         raw_commands = profile.get("commands")
-        if not isinstance(raw_commands, list) or not raw_commands:
-            raise ConfigError(f"profile {repo_id}.{name} must contain at least one command")
         commands: list[tuple[str, ...]] = []
-        for index, command in enumerate(raw_commands):
-            if (
-                not isinstance(command, list)
-                or not command
-                or not all(isinstance(arg, str) and arg for arg in command)
-            ):
+        if raw_commands is not None:
+            if not isinstance(raw_commands, list) or not raw_commands:
                 raise ConfigError(
-                    f"profile {repo_id}.{name}.commands[{index}] must be a non-empty string array"
+                    f"profile {repo_id}.{name}.commands must be a non-empty command array"
                 )
-            commands.append(tuple(command))
+            for index, command in enumerate(raw_commands):
+                if (
+                    not isinstance(command, list)
+                    or not command
+                    or not all(isinstance(arg, str) and arg for arg in command)
+                ):
+                    raise ConfigError(
+                        f"profile {repo_id}.{name}.commands[{index}] must be a non-empty string array"
+                    )
+                commands.append(tuple(command))
+
+        raw_steps = profile.get("steps")
+        steps: list[VerificationStep] = []
+        if raw_steps is not None:
+            if not isinstance(raw_steps, list) or not raw_steps:
+                raise ConfigError(f"profile {repo_id}.{name}.steps must be a non-empty table array")
+            step_ids: set[str] = set()
+            for index, raw_step in enumerate(raw_steps):
+                context = f"profile {repo_id}.{name}.steps[{index}]"
+                step = _expect_mapping(raw_step, context)
+                unknown = sorted(set(step) - {"id", "kind", "command"})
+                if unknown:
+                    raise ConfigError(f"{context} has unsupported fields: {unknown}")
+                step_id = step.get("id")
+                if not isinstance(step_id, str):
+                    raise ConfigError(f"{context}.id must be a string")
+                if step_id in step_ids:
+                    raise ConfigError(
+                        f"profile {repo_id}.{name}.steps contains duplicate id {step_id!r}"
+                    )
+                step_ids.add(step_id)
+                kind_raw = step.get("kind")
+                try:
+                    kind = VerificationStepKind(kind_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ConfigError(
+                        f"{context}.kind must be one of "
+                        f"{[item.value for item in VerificationStepKind]}"
+                    ) from exc
+                command_raw = step.get("command")
+                if (
+                    not isinstance(command_raw, list)
+                    or not command_raw
+                    or not all(isinstance(arg, str) and arg for arg in command_raw)
+                ):
+                    raise ConfigError(f"{context}.command must be a non-empty string array")
+                try:
+                    steps.append(VerificationStep(step_id, kind, tuple(command_raw)))
+                except ValueError as exc:
+                    raise ConfigError(f"Invalid {context}: {exc}") from exc
+
+        if not commands and not steps:
+            raise ConfigError(f"profile {repo_id}.{name} must contain commands or steps")
+        if steps:
+            step_commands = [step.command for step in steps]
+            if commands and commands != step_commands:
+                raise ConfigError(f"profile {repo_id}.{name}.commands must match steps commands")
+            commands = step_commands
+        else:
+            steps = list(compile_legacy_steps(tuple(commands)))
+
+        baseline_raw = profile.get("baseline_policy", HygieneBaselinePolicy.STRICT_CLEAN.value)
+        try:
+            baseline_policy = HygieneBaselinePolicy(baseline_raw)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"profile {repo_id}.{name}.baseline_policy must be one of "
+                f"{[item.value for item in HygieneBaselinePolicy]}"
+            ) from exc
+        if baseline_policy is HygieneBaselinePolicy.NO_REGRESSION and not any(
+            step.kind is VerificationStepKind.HYGIENE for step in steps
+        ):
+            raise ConfigError(
+                f"profile {repo_id}.{name}.baseline_policy=no_regression requires a hygiene step"
+            )
+
         command_source_context = f"repositories.{repo_id}.profiles.{name}.command_source_paths"
         declared_source_paths = _tuple_of_strings(
             profile.get("command_source_paths"), command_source_context
@@ -409,6 +486,8 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
             timeout_seconds=timeout_seconds,
             working_directory=working_directory,
             command_source_paths=command_source_paths,
+            steps=tuple(steps),
+            baseline_policy=baseline_policy,
         )
     return profiles
 

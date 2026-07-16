@@ -41,6 +41,11 @@ from repoforge.domain.policy_patch import (
 )
 from repoforge.domain.repository_detection import ManifestFact, RemoteFact, RepositoryFacts
 from repoforge.domain.repository_proposal import EnrollmentMode
+from repoforge.domain.verification_steps import (
+    HygieneBaselinePolicy,
+    VerificationStep,
+    VerificationStepKind,
+)
 from repoforge.interfaces.mcp.server import create_server
 from repoforge.testing import FixedClock, SequenceIdGenerator
 
@@ -127,8 +132,28 @@ def test_policy_patch_table_round_trip() -> None:
 
 
 def test_source_round_trips_policy_patch() -> None:
+    commands = (("ruff", "format", "--check", "."), ("pytest", "-q"))
     patch = RepositoryPolicyPatch(
-        profiles=(_profile("debug.v2", (("echo", "ok"),)),),
+        profiles=(
+            ProfilePatch(
+                "debug.v2",
+                "test profile",
+                commands,
+                steps=(
+                    VerificationStep(
+                        "format",
+                        VerificationStepKind.HYGIENE,
+                        commands[0],
+                    ),
+                    VerificationStep(
+                        "tests",
+                        VerificationStepKind.BUSINESS_TESTS,
+                        commands[1],
+                    ),
+                ),
+                baseline_policy=HygieneBaselinePolicy.NO_REGRESSION,
+            ),
+        ),
         remove_diagnostics=("stale",),
     )
     config = SourceConfiguration(

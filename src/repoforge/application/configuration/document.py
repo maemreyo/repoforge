@@ -204,6 +204,12 @@ def _toml(value: object) -> str:
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
         return "[" + ", ".join(_toml(item) for item in value) + "]"
+    if isinstance(value, dict):
+        entries = ", ".join(
+            f"{json.dumps(str(key), ensure_ascii=False)} = {_toml(value[key])}"
+            for key in sorted(value)
+        )
+        return "{ " + entries + " }"
     raise TypeError(f"Unsupported TOML value: {type(value).__name__}")
 
 
@@ -313,6 +319,7 @@ def render_resolved(
                         "verification",
                         "timeout_seconds",
                         "working_directory",
+                        "baseline_policy",
                     ):
                         if key in profile and isinstance(profile[key], (str, int, bool)):
                             lines.append(f"{key} = {_toml(profile[key])}")
@@ -323,6 +330,9 @@ def render_resolved(
                             if isinstance(command, list):
                                 lines.append(f"  {_toml(command)},")
                         lines.append("]")
+                    steps = profile.get("steps")
+                    if isinstance(steps, list):
+                        lines.append(f"steps = {_toml(steps)}")
             diagnostics = raw.get("diagnostics", {})
             if isinstance(diagnostics, dict):
                 for diagnostic_id in sorted(diagnostics):

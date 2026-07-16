@@ -19,6 +19,57 @@ from repoforge.config import load_config
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.testing.fakes import ManualBackgroundTaskRunner
 
+_NO_REGRESSION_PROFILE_TOML = """
+
+[repositories.demo.profiles.no-regression]
+description = "Permit pre-existing hygiene debt while keeping business tests strict"
+verification = true
+baseline_policy = "no_regression"
+commands = [
+  ["python3", "-c", "import sys; sys.exit(9)"],
+  ["python3", "-c", "print('business tests ran')"],
+]
+
+[[repositories.demo.profiles.no-regression.steps]]
+id = "format"
+kind = "hygiene"
+command = ["python3", "-c", "import sys; sys.exit(9)"]
+
+[[repositories.demo.profiles.no-regression.steps]]
+id = "tests"
+kind = "business_tests"
+command = ["python3", "-c", "print('business tests ran')"]
+"""
+
+
+_STRUCTURED_FAILURE_PROFILE_TOML = """
+
+[repositories.demo.profiles.structured-failure]
+description = "Expose structured step failure evidence"
+verification = true
+commands = [
+  ["python3", "-c", "print('static ok')"],
+  ["python3", "-c", "import sys; sys.exit(3)"],
+  ["python3", "-c", "print('build should not run')"],
+]
+
+[[repositories.demo.profiles.structured-failure.steps]]
+id = "lint"
+kind = "static_analysis"
+command = ["python3", "-c", "print('static ok')"]
+
+[[repositories.demo.profiles.structured-failure.steps]]
+id = "tests"
+kind = "business_tests"
+command = ["python3", "-c", "import sys; sys.exit(3)"]
+
+[[repositories.demo.profiles.structured-failure.steps]]
+id = "build"
+kind = "build"
+command = ["python3", "-c", "print('build should not run')"]
+"""
+
+
 _SLOW_PROFILE_TOML = (
     "\n[repositories.demo.profiles.slow]\n"
     'description = "Sleep briefly for background/cancellation tests"\n'
@@ -26,6 +77,16 @@ _SLOW_PROFILE_TOML = (
     'commands = [["python3", "-c", "import time; time.sleep(2)"]]\n'
     "timeout_seconds = 30\n"
 )
+
+
+def _add_no_regression_profile(env: ForgeEnvironment) -> None:
+    text = env.config_path.read_text(encoding="utf-8")
+    env.config_path.write_text(text + _NO_REGRESSION_PROFILE_TOML, encoding="utf-8")
+
+
+def _add_structured_failure_profile(env: ForgeEnvironment) -> None:
+    text = env.config_path.read_text(encoding="utf-8")
+    env.config_path.write_text(text + _STRUCTURED_FAILURE_PROFILE_TOML, encoding="utf-8")
 
 
 def _add_slow_profile(env: ForgeEnvironment) -> None:
@@ -98,10 +159,60 @@ def test_background_false_keeps_synchronous_contract(forge_env: ForgeEnvironment
         "command_source_dirty_paths",
         "command_source_warning",
         "working_directory",
+        "completed_steps",
+        "failed_step",
+        "failure_domain",
+        "not_run_steps",
+        "business_tests_ran",
+        "valid_tdd_red_evidence",
+        "hygiene_receipt",
     }
     assert implicit == explicit
     assert implicit["profile"] == "quick"
     assert implicit["verification"] is False
+    assert implicit["completed_steps"] == [{"id": "step-1", "kind": "unknown"}]
+    assert implicit["failed_step"] is None
+    assert implicit["not_run_steps"] == []
+    assert implicit["business_tests_ran"] is False
+    assert implicit["valid_tdd_red_evidence"] is False
+
+
+def test_no_regression_profile_uses_hygiene_evidence_but_runs_business_tests(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _add_no_regression_profile(forge_env)
+    service = _reload_service(forge_env)
+    workspace_id = service.workspace_create("demo", "no regression hygiene")["workspace_id"]
+
+    result = service.workspace_run_profile(workspace_id, "no-regression")
+
+    assert result["hygiene_receipt"] is not None
+    assert result["commands"][0]["returncode"] == 0
+    assert "no_regression" in result["commands"][0]["stdout"]
+    assert result["commands"][1]["returncode"] == 0
+    assert result["business_tests_ran"] is True
+    assert result["satisfies_commit_gate"] is True
+
+
+def test_profile_failure_reports_step_domain_and_not_run_steps(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _add_structured_failure_profile(forge_env)
+    service = _reload_service(forge_env)
+    workspace_id = service.workspace_create("demo", "structured step evidence")["workspace_id"]
+
+    with pytest.raises(RepoForgeError) as failure:
+        service.workspace_run_profile(workspace_id, "structured-failure")
+
+    assert failure.value.details["completed_steps"] == [{"id": "lint", "kind": "static_analysis"}]
+    assert failure.value.details["failed_step"] == {
+        "id": "tests",
+        "kind": "business_tests",
+    }
+    assert failure.value.details["failure_domain"] == "business_tests"
+    assert failure.value.details["not_run_steps"] == [{"id": "build", "kind": "build"}]
+    assert failure.value.details["business_tests_ran"] is True
+    assert failure.value.details["valid_tdd_red_evidence"] is False
 
 
 # ---------------------------------------------------------------------------

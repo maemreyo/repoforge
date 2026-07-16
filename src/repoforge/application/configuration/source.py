@@ -223,6 +223,11 @@ def _toml_value(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        entries = ", ".join(
+            f"{_toml_key(str(key))} = {_toml_value(value[key])}" for key in sorted(value)
+        )
+        return "{ " + entries + " }"
     raise ValueError(f"Unsupported TOML value in policy patch: {type(value).__name__}")
 
 
