@@ -77,8 +77,8 @@
   },
   "contract_version": 1,
   "mcp": {
-    "server_instructions_sha256": "f0724bcb7eca9ba8a6f86da1eaab6007214743ce601bd113c29814b510dc0d37",
-    "tool_surface_hash": "9349c870216410239be949da8927571930f0d244037b0b86af6c5c6c634fe2d2",
+    "server_instructions_sha256": "e6f9486e84a56539abd8af5113336929422de61fea3827acdb8e3261816a607a",
+    "tool_surface_hash": "1d33cbb72d5e6d052ee2f7f01e60b823920872a0a0eefa89679038bcfdc8ec2f",
     "tools": [
       {
         "annotations": {
@@ -1824,6 +1824,60 @@
           "type": "object"
         },
         "title": "Restore selected workspace paths"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this only in a repository the owner has explicitly configured with execution_mode=\"relaxed\", when no enrolled workspace_run_diagnostic template fits. argv is a bounded list (no shell, no shell metacharacters expanded) whose first element must be one of the repository's configured adhoc_runners. The result is evidence only: it is fully audited but never satisfies require_verification_before_commit -- run an enrolled verification profile on the exact tree immediately before workspace_commit. In a strict-mode repository this call returns a structured EXECUTION_MODE_STRICT error naming the enrolled-diagnostic and configuration alternatives instead of running anything. Set background=true for a long-running command; poll with operation_status.",
+        "inputSchema": {
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Argv",
+              "type": "array"
+            },
+            "background": {
+              "default": false,
+              "title": "Background",
+              "type": "boolean"
+            },
+            "working_directory": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Working Directory"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "argv"
+          ],
+          "title": "workspace_run_adhocArguments",
+          "type": "object"
+        },
+        "name": "workspace_run_adhoc",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_run_adhocDictOutput",
+          "type": "object"
+        },
+        "title": "Run audited ad-hoc command"
       },
       {
         "annotations": {
