@@ -56,6 +56,7 @@ from ...bootstrap import (
     clear_runtime_state,
     default_state_root,
     id_generator,
+    prune_audit_log,
     read_audit_events,
     read_runtime_log,
     summarize_command_source_stats,
@@ -1475,6 +1476,12 @@ def build_parser() -> argparse.ArgumentParser:
     stats = audit_sub.add_parser("stats")
     stats.add_argument("--since")
     stats.add_argument("--until")
+    prune_parser = audit_sub.add_parser("prune")
+    prune_parser.add_argument(
+        "--before",
+        required=True,
+        help="Remove events older than this ISO-8601 timestamp (e.g. '2026-07-16T08:00:00+00:00')",
+    )
     operation = commands.add_parser("operation")
     operation_sub = operation.add_subparsers(dest="operation_command", required=True)
     operation_status = operation_sub.add_parser("status")
@@ -1713,6 +1720,15 @@ def main(argv: list[str] | None = None) -> int:
             _json(service.workspace_list())
             return 0
         if args.command == "audit":
+            if getattr(args, "audit_command", None) == "prune":
+                pruned = prune_audit_log(service.audit.path, before=args.before)
+                _json(
+                    {
+                        "pruned": pruned,
+                        "path": str(service.audit.path),
+                    }
+                )
+                return 0
             if getattr(args, "audit_command", None) == "stats":
                 if service.metrics is None:
                     raise ConfigError("Operation metrics are not available for this configuration")

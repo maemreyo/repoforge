@@ -59,7 +59,7 @@ class ContractAwareFastMCP(FastMCP[None]):
         """Recursively inline ``$defs`` references so clients see concrete types."""
         defs = schema.get("$defs", {})
 
-        def _resolve(value: Any) -> Any:
+        def _resolve(value: object) -> Any:
             if isinstance(value, dict):
                 ref = value.get("$ref", "")
                 if ref.startswith("#/$defs/"):
@@ -72,7 +72,7 @@ class ContractAwareFastMCP(FastMCP[None]):
                 return [_resolve(item) for item in value]
             return value
 
-        resolved = _resolve(schema)
+        resolved = cast("dict[str, Any]", _resolve(schema))
         resolved.pop("$defs", None)
         return cast(dict[str, Any], resolved)
 
