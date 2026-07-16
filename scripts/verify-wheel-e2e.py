@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.config import load_config
 
 
@@ -170,12 +171,15 @@ commands = [[{_toml(sys.executable)}, "-c", "from pathlib import Path; assert Pa
         workspace_id = str(created["workspace_id"])
         workspace_path = Path(str(created["path"]))
         original = service.workspace_read_file(workspace_id, "hello.txt")
-        service.workspace_replace_text(
+        service.workspace_edit(
             workspace_id,
-            "hello.txt",
-            "hello",
-            "changed by installed wheel",
-            str(original["sha256"]),
+            [
+                FileEdit(
+                    "hello.txt",
+                    str(original["sha256"]),
+                    (TextEdit("hello", "changed by installed wheel"),),
+                )
+            ],
         )
         verification = service.workspace_verify(workspace_id)
         assert verification["satisfies_commit_gate"] is True

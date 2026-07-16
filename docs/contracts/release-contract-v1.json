@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f0724bcb7eca9ba8a6f86da1eaab6007214743ce601bd113c29814b510dc0d37",
-    "tool_surface_hash": "d455f0c6f785965585e261baaf16ae4acacbde08404f91f4ec95d3a9f00c5228",
+    "tool_surface_hash": "d3fbadeaac021a7cf1cd7efa4dd235a0380f3b90611f509a2e07959bad5323b7",
     "tools": [
       {
         "annotations": {
@@ -985,7 +985,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_replace_text for one exact edit or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
+        "description": "Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
           "properties": {
             "expected_head_sha": {
@@ -1242,6 +1242,96 @@
           "type": "object"
         },
         "title": "Inspect workspace diff"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
+        "inputSchema": {
+          "$defs": {
+            "FileEdit": {
+              "description": "One file's ordered edits within a batched `workspace_edit` call.",
+              "properties": {
+                "edits": {
+                  "items": {
+                    "$ref": "#/$defs/TextEdit"
+                  },
+                  "title": "Edits",
+                  "type": "array"
+                },
+                "expected_sha256": {
+                  "title": "Expected Sha256",
+                  "type": "string"
+                },
+                "path": {
+                  "title": "Path",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "expected_sha256",
+                "edits"
+              ],
+              "title": "FileEdit",
+              "type": "object"
+            },
+            "TextEdit": {
+              "description": "One ordered exact-replacement entry within a `workspace_edit` file entry.",
+              "properties": {
+                "expected_occurrences": {
+                  "default": 1,
+                  "title": "Expected Occurrences",
+                  "type": "integer"
+                },
+                "new_text": {
+                  "title": "New Text",
+                  "type": "string"
+                },
+                "old_text": {
+                  "title": "Old Text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "old_text",
+                "new_text"
+              ],
+              "title": "TextEdit",
+              "type": "object"
+            }
+          },
+          "properties": {
+            "files": {
+              "items": {
+                "$ref": "#/$defs/FileEdit"
+              },
+              "title": "Files",
+              "type": "array"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "files"
+          ],
+          "title": "workspace_editArguments",
+          "type": "object"
+        },
+        "name": "workspace_edit",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_editDictOutput",
+          "type": "object"
+        },
+        "title": "Edit files"
       },
       {
         "annotations": {
@@ -1692,115 +1782,6 @@
           "type": "object"
         },
         "title": "Remove local workspace"
-      },
-      {
-        "annotations": {
-          "destructiveHint": true,
-          "idempotentHint": false,
-          "openWorldHint": false,
-          "readOnlyHint": false
-        },
-        "description": "Use this for a precise replacement after validating the file SHA and occurrence count; pass a single old_text/new_text pair for one edit, or a bounded ordered edits list (up to 20) to apply several replacements against the same file atomically under one lock and fingerprint cycle. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
-        "inputSchema": {
-          "$defs": {
-            "TextEdit": {
-              "description": "One ordered exact-replacement entry within a batched `workspace_replace_text` call.",
-              "properties": {
-                "expected_occurrences": {
-                  "default": 1,
-                  "title": "Expected Occurrences",
-                  "type": "integer"
-                },
-                "new_text": {
-                  "title": "New Text",
-                  "type": "string"
-                },
-                "old_text": {
-                  "title": "Old Text",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "old_text",
-                "new_text"
-              ],
-              "title": "TextEdit",
-              "type": "object"
-            }
-          },
-          "properties": {
-            "edits": {
-              "anyOf": [
-                {
-                  "items": {
-                    "$ref": "#/$defs/TextEdit"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Edits"
-            },
-            "expected_occurrences": {
-              "default": 1,
-              "title": "Expected Occurrences",
-              "type": "integer"
-            },
-            "expected_sha256": {
-              "default": "",
-              "title": "Expected Sha256",
-              "type": "string"
-            },
-            "new_text": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "New Text"
-            },
-            "old_text": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Old Text"
-            },
-            "relative_path": {
-              "title": "Relative Path",
-              "type": "string"
-            },
-            "workspace_id": {
-              "title": "Workspace Id",
-              "type": "string"
-            }
-          },
-          "required": [
-            "workspace_id",
-            "relative_path"
-          ],
-          "title": "workspace_replace_textArguments",
-          "type": "object"
-        },
-        "name": "workspace_replace_text",
-        "outputSchema": {
-          "additionalProperties": true,
-          "title": "workspace_replace_textDictOutput",
-          "type": "object"
-        },
-        "title": "Replace exact text"
       },
       {
         "annotations": {

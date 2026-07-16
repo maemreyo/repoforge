@@ -290,7 +290,7 @@ automatically expire or remove workspaces.
 | `workspace_read_files` | Read the same bounded range from multiple files, subject to `max_batch_files`. |
 | `workspace_search` | Run bounded literal repository search with an optional path glob and optional `context_lines` (0-5) of surrounding lines per match. |
 | `workspace_write_file` | Create or replace a complete UTF-8 file using optimistic SHA locking. |
-| `workspace_replace_text` | Perform an exact replacement with a file SHA and expected occurrence count, or a bounded ordered `edits` list (at most 20) applied atomically against the same file under one lock and fingerprint cycle. |
+| `workspace_edit` | Perform exact-text replacements across one or more files (at most 20), each pinned to its own file SHA and carrying a bounded ordered `edits` list (at most 20 per file), validated and applied atomically under one lock and fingerprint cycle. |
 | `workspace_apply_patch` | Apply a validated git-style unified diff or OpenAI apply_patch envelope against an expected HEAD and workspace fingerprint; deterministic repairs remain policy-checked and auditable by hash. |
 | `workspace_restore_paths` | Restore selected tracked paths or remove selected untracked files. |
 | `workspace_diff` | Return the diff, diff stat, untracked patch, and change-budget metrics. |

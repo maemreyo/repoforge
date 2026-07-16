@@ -130,7 +130,7 @@ def inspect_patch(text: str) -> PatchInspection:
         raise _error(
             "Patch input is empty",
             code=ErrorCode.PATCH_FORMAT_UNSUPPORTED,
-            safe_next_action="Use workspace_write_file for full content, workspace_replace_text for one exact replacement, or provide a reviewed patch.",
+            safe_next_action="Use workspace_write_file for full content, workspace_edit for one exact replacement, or provide a reviewed patch.",
             details={"accepted_formats": ["unified_diff", "openai_apply_patch"]},
         )
     if len(text) > _MAX_PATCH_CHARS:
@@ -156,7 +156,7 @@ def inspect_patch(text: str) -> PatchInspection:
         code=ErrorCode.PATCH_FORMAT_UNSUPPORTED,
         safe_next_action=(
             "Provide a git-style unified diff or an OpenAI *** Begin Patch envelope. "
-            "For full-file content use workspace_write_file; for one exact edit use workspace_replace_text."
+            "For full-file content use workspace_write_file; for one exact edit use workspace_edit."
         ),
         details={"accepted_formats": ["unified_diff", "openai_apply_patch"]},
     )
@@ -213,7 +213,7 @@ def _context_error(
         code=code,
         safe_next_action=(
             "Read the exact current file and regenerate the hunk with unique surrounding context, "
-            "or use workspace_replace_text for one exact replacement."
+            "or use workspace_edit for one exact replacement."
         ),
         details={
             "target_path": path,

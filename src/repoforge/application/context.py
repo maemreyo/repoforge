@@ -158,7 +158,7 @@ _MUTATING_ACTIONS = {
     "ticket_project_sync_change",
     "workspace_create",
     "workspace_write_file",
-    "workspace_replace_text",
+    "workspace_edit",
     "workspace_apply_patch",
     "workspace_restore_paths",
     "workspace_refresh",
@@ -182,7 +182,7 @@ _PUBLISH_ACTIONS = {
 _POLICY_WRITE_ACTIONS = {
     "ticket_project_sync_apply",
     "workspace_write_file",
-    "workspace_replace_text",
+    "workspace_edit",
     "workspace_apply_patch",
     "workspace_restore_paths",
     "workspace_refresh",

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.config import load_config
 
 
@@ -199,10 +200,11 @@ def test_complete_service_lifecycle_and_adapters(tmp_path: Path) -> None:
     assert hello["content"] == "1: hello"
     assert len(service.workspace_read_files(workspace_id, ["hello.txt", "README.md"])["files"]) == 2
     assert service.workspace_search(workspace_id, "Repository")["matches"]
-    replaced = service.workspace_replace_text(
-        workspace_id, "hello.txt", "hello", "changed hello", hello["sha256"]
+    replaced = service.workspace_edit(
+        workspace_id,
+        [FileEdit("hello.txt", hello["sha256"], (TextEdit("hello", "changed hello"),))],
     )
-    assert replaced["replacements"] == 1
+    assert replaced["files"][0]["replacements"] == 1
     created_file = service.workspace_write_file(workspace_id, "notes.txt", "temporary\n", "<new>")
     assert created_file["path"] == "notes.txt"
     current_status = service.workspace_status(workspace_id)

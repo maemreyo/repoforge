@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment
 
+from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.domain.errors import SecurityError, WorkspaceError
 
 
@@ -70,14 +71,11 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
     search = service.workspace_search(workspace_id, "Repository")
     assert search["matches"]
 
-    replaced = service.workspace_replace_text(
+    replaced = service.workspace_edit(
         workspace_id,
-        "hello.txt",
-        "hello",
-        "changed hello",
-        hello["sha256"],
+        [FileEdit("hello.txt", hello["sha256"], (TextEdit("hello", "changed hello"),))],
     )
-    assert replaced["replacements"] == 1
+    assert replaced["files"][0]["replacements"] == 1
     created_file = service.workspace_write_file(workspace_id, "notes.txt", "temporary\n", "<new>")
     assert created_file["path"] == "notes.txt"
 

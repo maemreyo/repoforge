@@ -67,6 +67,11 @@ from .workspace.create_draft_pr import (
     WorkspaceCreateDraftPrCommand,
 )
 from .workspace.diff import WorkspaceDiffCommand, WorkspaceDiffReader
+from .workspace.edit import (
+    FileEdit,
+    WorkspaceEditCommand,
+    WorkspaceEditor,
+)
 from .workspace.file_read import (
     WorkspaceFileReadCommand,
     WorkspaceFileReader,
@@ -104,11 +109,6 @@ from .workspace.refresh_preview import (
     WorkspaceRefreshPreviewer,
 )
 from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
-from .workspace.replace_text import (
-    TextEdit,
-    WorkspaceReplaceTextCommand,
-    WorkspaceTextReplacer,
-)
 from .workspace.restore_paths import (
     WorkspacePathsRestorer,
     WorkspaceRestorePathsCommand,
@@ -217,7 +217,7 @@ class CodingService:
         self._reads = WorkspaceFilesReader(ctx)
         self._search = WorkspaceSearcher(ctx)
         self._write = WorkspaceFileWriter(ctx)
-        self._replace = WorkspaceTextReplacer(ctx)
+        self._edit = WorkspaceEditor(ctx)
         self._patch = WorkspacePatchApplier(ctx)
         self._restore = WorkspacePathsRestorer(ctx)
         self._refresh_preview = WorkspaceRefreshPreviewer(ctx)
@@ -532,28 +532,9 @@ class CodingService:
             )
         )
 
-    def workspace_replace_text(
-        self,
-        workspace_id: str,
-        relative_path: str,
-        old_text: str | None = None,
-        new_text: str | None = None,
-        expected_sha256: str = "",
-        expected_occurrences: int = 1,
-        edits: list[TextEdit] | None = None,
-    ) -> dict[str, Any]:
+    def workspace_edit(self, workspace_id: str, files: list[FileEdit]) -> dict[str, Any]:
         return _result(
-            self._replace.execute(
-                WorkspaceReplaceTextCommand(
-                    workspace_id=workspace_id,
-                    relative_path=relative_path,
-                    expected_sha256=expected_sha256,
-                    old_text=old_text,
-                    new_text=new_text,
-                    expected_occurrences=expected_occurrences,
-                    edits=tuple(edits) if edits is not None else None,
-                )
-            )
+            self._edit.execute(WorkspaceEditCommand(workspace_id, tuple(files)))
         )
 
     def workspace_apply_patch(

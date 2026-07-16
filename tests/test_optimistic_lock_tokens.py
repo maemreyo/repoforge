@@ -12,6 +12,7 @@ from pathlib import Path
 from conftest import create_forge_environment
 
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.config import load_config
 
 _README_PATCH = "\n".join(
@@ -52,8 +53,9 @@ def test_write_apply_replace_restore_chain_uses_only_returned_tokens(tmp_path: P
     assert applied["workspace_fingerprint"] != write["workspace_fingerprint"]
 
     hello = service.workspace_read_file(workspace_id, "hello.txt")
-    replaced = service.workspace_replace_text(
-        workspace_id, "hello.txt", "hello", "hello, chained", hello["sha256"]
+    replaced = service.workspace_edit(
+        workspace_id,
+        [FileEdit("hello.txt", hello["sha256"], (TextEdit("hello", "hello, chained"),))],
     )
     assert "workspace_fingerprint" in replaced
     assert "head_sha" in replaced
