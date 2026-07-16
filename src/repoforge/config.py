@@ -206,6 +206,8 @@ class ServerConfig:
     idempotency_lock_timeout_seconds: int = 2
     max_background_profiles: int = 2
     fast_fail_threshold_seconds: float = 10.0
+    stale_workspace_candidate_threshold: int = 3
+    stale_workspace_min_age_seconds: float = 3_600.0
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
@@ -860,6 +862,20 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             0.0,
             3_600.0,
             "server.fast_fail_threshold_seconds",
+        ),
+        stale_workspace_candidate_threshold=_bounded_int(
+            server_raw.get("stale_workspace_candidate_threshold"),
+            3,
+            1,
+            1_000,
+            "server.stale_workspace_candidate_threshold",
+        ),
+        stale_workspace_min_age_seconds=_bounded_float(
+            server_raw.get("stale_workspace_min_age_seconds"),
+            3_600.0,
+            0.0,
+            30 * 24 * 3_600.0,
+            "server.stale_workspace_min_age_seconds",
         ),
         github_read_cache_ttl_seconds=_bounded_int(
             server_raw.get("github_read_cache_ttl_seconds"),
