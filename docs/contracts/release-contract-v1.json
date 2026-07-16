@@ -2723,7 +2723,7 @@
       }
     ]
   },
-  "package_version": "2.0.0",
+  "package_version": "2.1.0",
   "runtime": {
     "control_protocol_version": 1,
     "diagnostics_schema_version": 1
