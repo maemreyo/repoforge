@@ -1335,7 +1335,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output", choices=("json", "human"), default=os.environ.get("REPOFORGE_OUTPUT", "json")
     )
-    parser.add_argument("--version", action="version", version="RepoForge 2.0.0")
+    parser.add_argument("--version", action="version", version="RepoForge 2.0.2")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve")
     start_alias = commands.add_parser(
