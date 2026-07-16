@@ -36,6 +36,7 @@ from .adapters.persistence import (
     JsonOperationResultStore,
     JsonOperationStore,
     JsonPrCheckWatchStore,
+    JsonTaskStore,
     JsonWorkflowRecordingStore,
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
@@ -99,6 +100,7 @@ from .application.operations import OperationManager, recover_operations
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.supervisor import RuntimeSupervisor
+from .application.tasks import TaskCapsuleService
 from .application.workflow import (
     RecordedCategoryReplayAdapter,
     WorkflowRecorder,
@@ -141,6 +143,7 @@ from .ports import (
     RuntimeLauncher,
     RuntimeStore,
     Sleeper,
+    TaskStore,
     TicketGraphGateway,
     TicketProjectGateway,
     TunnelClient,
@@ -275,6 +278,29 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
 
 def build_operation_gate() -> OperationGate:
     return InProcessOperationGate()
+
+
+def build_task_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> TaskStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonTaskStore(root, locks or build_lock_manager(root))
+
+
+def build_task_service(
+    state_root: Path | None = None,
+    *,
+    locks: LockManager | None = None,
+    clock: Clock | None = None,
+    ids: IdGenerator | None = None,
+) -> TaskCapsuleService:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    selected_locks = locks or build_lock_manager(root)
+    return TaskCapsuleService(
+        store=build_task_store(root, locks=selected_locks),
+        clock=clock or system_clock(),
+        ids=ids or id_generator(),
+    )
 
 
 def build_runtime_store(path: Path) -> RuntimeStore:

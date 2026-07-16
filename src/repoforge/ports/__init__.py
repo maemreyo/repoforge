@@ -60,6 +60,7 @@ from .runtime_control import (
 )
 from .sleeper import Sleeper
 from .state_repository import StateRepository
+from .task_store import TaskStore
 from .ticket_graph import TicketGraphGateway
 from .ticket_project import TicketProjectGateway
 from .tunnel import TunnelClient, TunnelProfileStore
@@ -132,6 +133,7 @@ __all__ = [
     "RuntimeStore",
     "Sleeper",
     "StateRepository",
+    "TaskStore",
     "TicketGraphGateway",
     "TicketProjectGateway",
     "TunnelClient",
