@@ -7,6 +7,8 @@ from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ..context import ApplicationContext
 
+_DEFAULT_NEXT_STEP = "Continue reading or editing files as needed."
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceFileReadCommand:
@@ -27,6 +29,7 @@ class WorkspaceFileReadResult:
     end_line: int
     content: str
     truncated: bool
+    next_step: str = _DEFAULT_NEXT_STEP
 
 
 class WorkspaceFileReader:
@@ -72,6 +75,17 @@ class WorkspaceFileReader:
             selected = lines[start - 1 : end]
             numbered = "\n".join((f"{n}: {line}" for n, line in enumerate(selected, start=start)))
             content, truncated = self._bound(numbered, self.ctx.config.server.max_tool_output_chars)
+            next_step = _DEFAULT_NEXT_STEP
+            tracker = self.ctx.nudge_tracker
+            if tracker is not None and tracker.observe_single_file_read(
+                c.workspace_id, self.ctx.now_epoch()
+            ):
+                next_step = (
+                    "Recent reads have repeatedly targeted this workspace one file at a time; "
+                    f'call workspace_read_files(workspace_id="{c.workspace_id}", '
+                    'relative_paths=[...]) to batch several files in one call instead of '
+                    "repeating workspace_read_file."
+                )
             return WorkspaceFileReadResult(
                 c.workspace_id,
                 normalized,
@@ -82,6 +96,7 @@ class WorkspaceFileReader:
                 min(end, len(lines)),
                 content,
                 truncated,
+                next_step,
             )
 
         return self.ctx.audited(

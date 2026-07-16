@@ -365,6 +365,27 @@ only compact counts and exact selectors, resumes eligible active work after rest
 when workspace, pushed SHA, PR number, or PR head identity changes. No tool reruns checks, dispatches
 workflows, merges, or otherwise administers GitHub Actions.
 
+`workspace_pr_checks` and `workspace_read_file` carry an additive `next_step` field with a stable
+default and three bounded, advisory, session-local nudges that name a cheaper or more durable tool at
+the exact moment a repetitive or state-based pattern occurs, without changing any schema, behavior, or
+enforcement:
+
+- `workspace_pr_checks` polled while still pending for the same `workspace_id` a third time within a
+  trailing 10-minute window names `workspace_pr_watch` with a concrete example call instead of a fourth
+  poll.
+- a `workspace_pr_checks` result whose summary contains a failing *required* check names
+  `workspace_pr_check_details` and `workspace_pr_failure_evidence` with the exact selector for the first
+  failing required check — this fires immediately on the first such result, with no repetition
+  threshold, since it reflects check state rather than call frequency.
+- `workspace_read_file` called a fifth consecutive time against the same `workspace_id` within a
+  trailing 1-minute window names `workspace_read_files` batching; calling `workspace_read_files` for that
+  workspace resets the count.
+
+These thresholds are tracked in a small bounded, in-memory, per-service-instance structure that is never
+persisted, never grows without bound across a long session touching many workspaces or files, and is
+never included in any audit payload — it only ever selects which advisory sentence an existing result
+field already carries.
+
 ## Deliberately unsupported capabilities
 
 RepoForge does not expose tools for:

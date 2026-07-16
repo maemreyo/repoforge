@@ -38,6 +38,7 @@ from ..ports import (
 from .dto import to_data
 from .fingerprint_cache import FingerprintCache
 from .idempotency import execute_idempotent
+from .nudges import AdoptionNudgeTracker
 
 T = TypeVar("T")
 
@@ -210,6 +211,7 @@ class ApplicationContext:
     execution_environment: ExecutionEnvironmentPort | None = None
     provider_registry: ProviderRegistry | None = None
     github_read_cache: GitHubReadCache | None = None
+    nudge_tracker: AdoptionNudgeTracker | None = None
 
     def now_epoch(self) -> float:
         try:

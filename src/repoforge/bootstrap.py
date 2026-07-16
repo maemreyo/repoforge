@@ -80,6 +80,7 @@ from .adapters.system import UuidGenerator
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
 from .application.fingerprint_cache import FingerprintCache
+from .application.nudges import AdoptionNudgeTracker
 from .application.onboarding.activation import ConfigurationActivator
 from .application.onboarding.candidate import smoke_candidate
 from .application.onboarding.coordinator import OnboardingCoordinator
@@ -376,6 +377,7 @@ def build_application(
     context = ApplicationContext(
         config=config,
         fingerprint_cache=FingerprintCache(),
+        nudge_tracker=AdoptionNudgeTracker(),
         commands=command,
         git=git,
         github=github,

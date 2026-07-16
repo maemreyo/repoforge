@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from repoforge.application.service import CodingService
+from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
+from repoforge.ports.clock import Clock
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -145,6 +147,8 @@ if args[:2] == ["pr", "checks"]:
         {{"name": "unit", "state": "SUCCESS", "bucket": "pass", "link": "https://github.com/owner/demo/actions/runs/1001/job/101", "workflow": "CI", "description": "ok", "startedAt": "", "completedAt": ""}},
         {{"name": "lint", "state": "SKIPPED", "bucket": "skipping", "link": "https://github.com/owner/demo/actions/runs/1002/job/102", "workflow": "CI", "description": "skipped", "startedAt": "", "completedAt": ""}},
     ]
+    if "--required" in args:
+        checks = [item for item in checks if item.get("required", True)]
     print(json.dumps(checks))
     raise SystemExit(0)
 if args[:2] == ["pr", "view"]:
@@ -243,6 +247,7 @@ def create_forge_environment(
     max_batch_files: int = 20,
     max_changed_files: int = 20,
     require_verification: bool = True,
+    clock: Clock | None = None,
 ) -> ForgeEnvironment:
     remote = tmp_path / "remote.git"
     git("init", "--bare", str(remote), cwd=tmp_path)
@@ -327,7 +332,12 @@ output_limit = 2000
 ''',
         encoding="utf-8",
     )
-    service = CodingService(load_config(config_path))
+    config = load_config(config_path)
+    if clock is None:
+        service = CodingService(config)
+    else:
+        application = build_application(config, overrides=AdapterOverrides(clock=clock))
+        service = CodingService(config, application=application)
     return ForgeEnvironment(
         root=tmp_path,
         remote=remote,

@@ -66,6 +66,12 @@ class WorkspaceFilesReader:
                             "message": str(exc),
                         }
                     )
+            # Batching is the efficient pattern the read_file-repetition nudge exists to
+            # steer callers toward, so using it here always clears this workspace's
+            # single-file-read tracking -- both any drift the internal per-file reads
+            # above just caused, and any progress accumulated by prior single reads.
+            if self.ctx.nudge_tracker is not None:
+                self.ctx.nudge_tracker.reset_file_reads(c.workspace_id)
             return WorkspaceFilesReadResult(c.workspace_id, files, errors, len(unique), len(files))
 
         return self.ctx.audited(
