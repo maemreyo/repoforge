@@ -853,9 +853,7 @@ class GitCliRepository:
                 if parsed is None:
                     if executor_truncated:
                         continue
-                    raise CommandError(
-                        "Git returned an invalid committed snapshot search result"
-                    )
+                    raise CommandError("Git returned an invalid committed snapshot search result")
                 raw_path, line_number, content = parsed.groups()
                 try:
                     normalized = assert_path_allowed(raw_path, repo)
@@ -889,7 +887,9 @@ class GitCliRepository:
                 first_line_number = 0
             blocks.append((normalized, first_line_number, rendered))
         blocks.sort(key=lambda item: (item[0], item[1]))
-        context_lines_out = [rendered_line for _, _, rendered in blocks for rendered_line in rendered]
+        context_lines_out = [
+            rendered_line for _, _, rendered in blocks for rendered_line in rendered
+        ]
         truncated = executor_truncated or len(context_lines_out) > max_results
         return context_lines_out[:max_results], truncated
 

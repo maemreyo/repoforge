@@ -359,9 +359,7 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._repo_search.execute(
-                RepositorySearchCommand(
-                    repo_id, query, ref, path_glob, max_results, context_lines
-                )
+                RepositorySearchCommand(repo_id, query, ref, path_glob, max_results, context_lines)
             )
         )
 
