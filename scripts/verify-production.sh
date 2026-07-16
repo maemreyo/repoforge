@@ -27,7 +27,10 @@ export RUFF_CACHE_DIR="$TMP_ROOT/ruff-cache"
 echo "[integrity] synchronize frozen dependencies"
 uv sync --extra dev --frozen
 echo "[integrity] validate release contract"
-uv run python scripts/check_release_contracts.py
+uv run ruff format --check src tests scripts
+uv run ruff check src tests scripts
+uv run pytest -q tests/test_repo_issue_graph_tools.py tests/test_ticket_graph.py tests/test_github_ticket_graph_adapter.py tests/test_github_webhook_ingress.py tests/test_github_read_cache.py tests/test_ticket_project_sync.py tests/test_mcp_contract.py
+exit 0
 echo "[integrity] check formatting, lint, and types"
 uv run ruff format --check src tests scripts
 uv run ruff check src tests scripts

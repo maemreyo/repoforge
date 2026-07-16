@@ -1,4 +1,4 @@
-.PHONY: setup lint typecheck test build check production-check doctor smoke inspector
+.PHONY: setup lint typecheck test build check tickets doctor smoke inspector install-hooks
 
 setup:
 	uv sync --extra dev
@@ -16,10 +16,10 @@ build:
 	uv build
 
 check:
-	sh ./scripts/verify-agent.sh
-
-production-check:
 	./scripts/verify-production.sh --allow-dirty
+
+tickets:
+	uv run python scripts/validate_ticket_graph.py --next --limit 7
 
 doctor:
 	uv run rf doctor
@@ -30,3 +30,9 @@ smoke:
 
 inspector:
 	./scripts/inspect-mcp.sh
+
+install-hooks:
+	@echo "Installing pre-push hook..."
+	@cp scripts/pre-push.sh .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-push
+	@echo "Installed .git/hooks/pre-push"
