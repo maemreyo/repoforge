@@ -137,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "0d23210cfd512d84479735c184da3acb816134983d7eb2328db22b63fa90697e",
+    "tool_surface_hash": "ae623e581380d28268a3b6afd40c66252bdcb2f6593884329e6d8e66bbb9d67c",
     "tools": [
       {
         "annotations": {
@@ -853,11 +853,15 @@
           "properties": {
             "context_lines": {
               "default": 0,
+              "maximum": 5,
+              "minimum": 0,
               "title": "Context Lines",
               "type": "integer"
             },
             "max_results": {
               "default": 200,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Max Results",
               "type": "integer"
             },
@@ -1311,63 +1315,55 @@
         },
         "description": "Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
-          "$defs": {
-            "FileEdit": {
-              "description": "One file's ordered edits within a batched `workspace_edit` call.",
-              "properties": {
-                "edits": {
-                  "items": {
-                    "$ref": "#/$defs/TextEdit"
-                  },
-                  "title": "Edits",
-                  "type": "array"
-                },
-                "expected_sha256": {
-                  "title": "Expected Sha256",
-                  "type": "string"
-                },
-                "path": {
-                  "title": "Path",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "path",
-                "expected_sha256",
-                "edits"
-              ],
-              "title": "FileEdit",
-              "type": "object"
-            },
-            "TextEdit": {
-              "description": "One ordered exact-replacement entry within a `workspace_edit` file entry.",
-              "properties": {
-                "expected_occurrences": {
-                  "default": 1,
-                  "title": "Expected Occurrences",
-                  "type": "integer"
-                },
-                "new_text": {
-                  "title": "New Text",
-                  "type": "string"
-                },
-                "old_text": {
-                  "title": "Old Text",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "old_text",
-                "new_text"
-              ],
-              "title": "TextEdit",
-              "type": "object"
-            }
-          },
           "properties": {
             "files": {
               "items": {
-                "$ref": "#/$defs/FileEdit"
+                "description": "One file's ordered edits within a batched `workspace_edit` call.",
+                "properties": {
+                  "edits": {
+                    "items": {
+                      "description": "One ordered exact-replacement entry within a `workspace_edit` file entry.",
+                      "properties": {
+                        "expected_occurrences": {
+                          "default": 1,
+                          "title": "Expected Occurrences",
+                          "type": "integer"
+                        },
+                        "new_text": {
+                          "title": "New Text",
+                          "type": "string"
+                        },
+                        "old_text": {
+                          "title": "Old Text",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "old_text",
+                        "new_text"
+                      ],
+                      "title": "TextEdit",
+                      "type": "object"
+                    },
+                    "title": "Edits",
+                    "type": "array"
+                  },
+                  "expected_sha256": {
+                    "title": "Expected Sha256",
+                    "type": "string"
+                  },
+                  "path": {
+                    "title": "Path",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "expected_sha256",
+                  "edits"
+                ],
+                "title": "FileEdit",
+                "type": "object"
               },
               "title": "Files",
               "type": "array"
@@ -2201,11 +2197,15 @@
           "properties": {
             "context_lines": {
               "default": 0,
+              "maximum": 5,
+              "minimum": 0,
               "title": "Context Lines",
               "type": "integer"
             },
             "max_results": {
               "default": 200,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Max Results",
               "type": "integer"
             },

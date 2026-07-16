@@ -8,7 +8,7 @@ persistence and never touches Git, GitHub, or a workspace.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -269,7 +269,9 @@ def prune_audit_log(
     except ValueError as exc:
         raise ConfigError(f"Invalid --before date {before!r}; expected ISO-8601") from exc
     if cutoff.tzinfo is None:
-        raise ConfigError("--before must include a timezone offset (e.g. 2026-07-16T08:00:00+00:00)")
+        raise ConfigError(
+            "--before must include a timezone offset (e.g. 2026-07-16T08:00:00+00:00)"
+        )
     if not path.is_file():
         return 0
     try:

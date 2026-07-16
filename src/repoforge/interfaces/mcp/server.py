@@ -11,7 +11,7 @@ import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import Tool as McpTool
@@ -59,11 +59,11 @@ class ContractAwareFastMCP(FastMCP[None]):
         """Recursively inline ``$defs`` references so clients see concrete types."""
         defs = schema.get("$defs", {})
 
-        def _resolve(value: Any) -> Any:
+        def _resolve(value: object) -> Any:
             if isinstance(value, dict):
                 ref = value.get("$ref", "")
                 if ref.startswith("#/$defs/"):
-                    key = ref[len("#/$defs/"):]
+                    key = ref[len("#/$defs/") :]
                     resolved = defs.get(key)
                     if resolved is not None:
                         return _resolve(resolved)
@@ -72,7 +72,7 @@ class ContractAwareFastMCP(FastMCP[None]):
                 return [_resolve(item) for item in value]
             return value
 
-        resolved = _resolve(schema)
+        resolved = cast("dict[str, Any]", _resolve(schema))
         resolved.pop("$defs", None)
         return resolved
 
