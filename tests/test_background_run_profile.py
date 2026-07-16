@@ -250,6 +250,8 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
             "duration_ms",
             "result_bytes",
             "command_source_dirty",
+            "is_mutating",
+            "repo_id",
         }
     )
     assert sync_details["profile"] == bg_details["profile"] == "slow"

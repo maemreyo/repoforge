@@ -293,6 +293,8 @@ def test_nudge_details_never_appear_in_audit_payloads(
             "correlation_id",
             "duration_ms",
             "result_bytes",
+            "is_mutating",
+            "repo_id",
         }
     for event in read_events:
         assert set(event["details"]) <= {
@@ -301,4 +303,6 @@ def test_nudge_details_never_appear_in_audit_payloads(
             "correlation_id",
             "duration_ms",
             "result_bytes",
+            "is_mutating",
+            "repo_id",
         }
