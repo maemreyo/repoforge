@@ -292,6 +292,33 @@ class ApplicationContext:
                 result_bytes=result_bytes,
             )
 
+    def _resolve_repo_id(self, details: dict[str, Any]) -> str | None:
+        """Extract ``repo_id`` from *details* or derive it from ``workspace_id``."""
+        repo_id = details.get("repo_id")
+        if isinstance(repo_id, str):
+            return repo_id
+        workspace_id = details.get("workspace_id")
+        if isinstance(workspace_id, str):
+            try:
+                record = self.store.load(workspace_id)
+                return record.repo_id
+            except Exception:
+                return None
+        return None
+
+    def _enrich_audit_details(
+        self,
+        details: dict[str, Any],
+        *,
+        is_mutating: bool,
+        correlation: str,
+    ) -> None:
+        """Mutate *details* with standardised insight fields."""
+        details["is_mutating"] = is_mutating
+        repo_id = self._resolve_repo_id(details)
+        if repo_id is not None:
+            details["repo_id"] = repo_id
+
     def audited(
         self,
         action: str,
@@ -358,6 +385,9 @@ class ApplicationContext:
             except ValueError:
                 normalized_code = ErrorCode.INTERNAL_ERROR
             try:
+                self._enrich_audit_details(
+                    details, is_mutating=is_mutating, correlation=correlation
+                )
                 self.audit.record(
                     action,
                     success=False,
@@ -391,6 +421,7 @@ class ApplicationContext:
             # Audit must never break a succeeding operation just because its result
             # happens to be unserializable; record the size as unknown instead.
             result_bytes = None
+        self._enrich_audit_details(details, is_mutating=is_mutating, correlation=correlation)
         self.audit.record(
             action,
             success=True,
