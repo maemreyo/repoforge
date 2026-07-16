@@ -84,6 +84,7 @@ def _minimal_repository_stub(payload: dict[str, Any]) -> None:
     payload["engines"] = {}
     payload["scripts"] = {}
     payload["instruction_files"] = []
+    payload["diagnostic_pack_suggestions"] = []
 
 
 def _minimal_ticket_stub(payload: dict[str, Any]) -> None:

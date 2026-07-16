@@ -193,6 +193,19 @@ class WorkspaceProfileRunner:
                     audit_details["cancelled"] = True
                 if exc.details.get("cancelled"):
                     return
+                if repo.diagnostics:
+                    diagnostic_ids = sorted(repo.diagnostics)
+                    exc.details["available_diagnostics"] = diagnostic_ids
+                    targeted_hint = (
+                        "A reviewed targeted alternative is enrolled for this repository "
+                        f"({', '.join(diagnostic_ids)}); prefer workspace_run_diagnostic to iterate "
+                        "instead of rerunning the full profile."
+                    )
+                    exc.safe_next_action = (
+                        f"{exc.safe_next_action} {targeted_hint}"
+                        if exc.safe_next_action
+                        else targeted_hint
+                    )
                 error_code = exc.code.value
                 raw_exit_code = exc.details.get("exit_code")
                 exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None

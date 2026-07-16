@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f0724bcb7eca9ba8a6f86da1eaab6007214743ce601bd113c29814b510dc0d37",
-    "tool_surface_hash": "d3fbadeaac021a7cf1cd7efa4dd235a0380f3b90611f509a2e07959bad5323b7",
+    "tool_surface_hash": "9349c870216410239be949da8927571930f0d244037b0b86af6c5c6c634fe2d2",
     "tools": [
       {
         "annotations": {
@@ -1832,7 +1832,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this to run one typed repository-reviewed diagnostic for RED, GREEN, or other bounded evidence without supplying argv or shell input; non-test failures never count as valid TDD RED.",
+        "description": "Use this to run one typed repository-reviewed diagnostic; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed. Pass a single string or a bounded list of strings for a multi-value selector; use selector2 only when the diagnostic declares a second named placeholder. Call repo_task_context or repo_status first to see each enrolled diagnostic's selector schema (kind, character classes, max_values, expansion) before constructing a call.",
         "inputSchema": {
           "properties": {
             "diagnostic_id": {
@@ -1893,11 +1893,35 @@
                   "type": "string"
                 },
                 {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
                   "type": "null"
                 }
               ],
               "default": null,
               "title": "Selector"
+            },
+            "selector2": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Selector2"
             },
             "workspace_id": {
               "title": "Workspace Id",

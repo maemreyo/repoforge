@@ -163,6 +163,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "intent",
             "expectation",
             "expected_failure_class",
+            "selector2",
         }
         for name in ("workspace_base_status", "workspace_refresh_preview"):
             annotations = tools[name].annotations
