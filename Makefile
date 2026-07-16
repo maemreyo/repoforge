@@ -49,6 +49,7 @@ default: start
 #
 #   make start                                # foreground (Ctrl+C to stop)
 #   make start BG=1                           # background daemon
+#   make start WATCH=1                        # daemon + live-tail logs (implies BG=1)
 # =============================================================================
 
 define LOG
@@ -63,20 +64,20 @@ start: build
 	@-rf runtime stop 2>/dev/null
 	@-pkill -f "rf start" 2>/dev/null; sleep 1
 	$(call LOG,Starting server (v$$(rf --version)))
+	BG_FLAG=$(if $(or $(BG),$(WATCH)),--background,)
 	CONTROL_PLANE_API_KEY="$(or $(CONTROL_PLANE_API_KEY),$$CONTROL_PLANE_API_KEY)" \
-		rf start $(if $(BG),--background,)
-	@sleep 3
-	$(call LOG,Checking health)
-	@rf runtime status 2>/dev/null || echo "  (still warming up — run make status)"
-	@printf "\n\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
-	@printf "\033[32m  ✓ v$$(rf --version)\033[0m\n"
-	@printf "\033[32m  PID: $$(rf runtime status 2>/dev/null | grep -o '"pid": [0-9]*' | head -1 | grep -o '[0-9]*')\033[0m\n"
-	@printf "\033[32m  ───────────────────────────────────────────\033[0m\n"
-	@printf "\033[32m  make status   check health\033[0m\n"
-	@printf "\033[32m  make logs     tail logs\033[0m\n"
-	@printf "\033[32m  make stop     stop server\033[0m\n"
-	@printf "\033[32m  make restart  restart (keeps BG)\033[0m\n"
-	@printf "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
+		rf start $$BG_FLAG
+	$(if $(WATCH),,@sleep 3; $(call LOG,Checking health); rf runtime status 2>/dev/null || echo "  (still warming up — run make status)")
+	$(if $(WATCH),,@printf "\n\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m  ✓ v$$(rf --version)\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m  PID: $$(rf runtime status 2>/dev/null | grep -o '"pid": [0-9]*' | head -1 | grep -o '[0-9]*')\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m  ───────────────────────────────────────────\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m  make status   check health\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m  make watch    live-tail logs\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m  make stop     stop server\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m  make restart  restart (keeps BG)\033[0m\n")
+	$(if $(WATCH),,@printf "\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n")
+	$(if $(WATCH),@$(MAKE) -s watch 2>/dev/null,)
 
 # =============================================================================
 # LOCAL DEV SERVER — runs from project venv (your latest code, no install)
