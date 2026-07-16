@@ -13,3 +13,4 @@ config.toml
 .DS_Store
 .omo/run-continuation/**
 .omo/ralph-loop.local.md
+.env

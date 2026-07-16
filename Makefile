@@ -1,5 +1,11 @@
 # =============================================================================
 # RepoForge Makefile
+
+# ── Load .env if present (like JS dotenv) ──────────────────────────────────
+ifneq ($(wildcard .env),)
+    include .env
+    export
+endif
 #
 # Quick start:
 #   make                # alias for make start
@@ -17,9 +23,12 @@
 #   make test           # Run tests with coverage
 #   make clean          # Remove build artifacts
 #
-# API key:
-#   Export CONTROL_PLANE_API_KEY in your shell or .env, or pass inline:
-#     CONTROL_PLANE_API_KEY='sk-proj-...' make start
+# API key (like JS dotenv):
+#   cp .env.example .env
+#   # then edit .env and fill in CONTROL_PLANE_API_KEY
+#   make start          # .env loaded automatically
+#   # or inline:
+#   CONTROL_PLANE_API_KEY='sk-proj-...' make start
 # =============================================================================
 
 .PHONY: default start dev-server restart status stop logs doctor
