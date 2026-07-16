@@ -23,7 +23,7 @@ def _publish_workspace(env: ForgeEnvironment) -> tuple[str, str]:
         "changed for CI evidence\n",
         hello["sha256"],
     )
-    service.workspace_verify(workspace_id)
+    service.workspace_run_profile(workspace_id)
     committed = service.workspace_commit(workspace_id, "Prepare CI evidence")
     service.workspace_push(workspace_id)
     service.workspace_create_draft_pr(workspace_id, "CI evidence", "Test CI evidence")

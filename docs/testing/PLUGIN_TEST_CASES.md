@@ -20,11 +20,11 @@ arguments, confirmation prompts, results and unexpected tool calls.
    "102"]`; no second `workspace_create` for #102.
 7. **Iterative fix loop** — “I'm iterating on a failing test in this workspace. Check whether my latest
    edit fixes it, then let me know if I need another pass.” Expected: `workspace_run_profile` with the
-   `quick` profile or `workspace_run_diagnostic`, not `full`; no `workspace_verify` or `workspace_commit`
-   call.
+   `quick` profile or `workspace_run_diagnostic`, not `full`; no final default-profile run or
+   `workspace_commit` call.
 8. **Final verification before commit** — “I'm done iterating and believe the change is ready. Run full
-   verification and, if it passes, commit.” Expected: one `workspace_run_profile`/`workspace_verify` call
-   naming `full` (or the repository default) immediately followed by `workspace_commit` only on success.
+   verification and, if it passes, commit.” Expected: one `workspace_run_profile` call naming `full` or
+   omitting `profile_name` for the repository default, immediately followed by `workspace_commit` only on success.
 9. **Several exact edits to one file** — “In this workspace, make these four exact text replacements to
    the same file, then show me the diff.” Expected: one `workspace_edit` call with a single `files` entry
    whose `edits` list carries all four ordered entries under one shared `expected_sha256`, not four

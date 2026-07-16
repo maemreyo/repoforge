@@ -43,7 +43,7 @@ def _commit_workspace_hello(env: ForgeEnvironment, workspace_id: str, content: s
         content,
         str(current["sha256"]),
     )
-    env.service.workspace_verify(workspace_id)
+    env.service.workspace_run_profile(workspace_id)
     return str(env.service.workspace_commit(workspace_id, "change workspace hello")["head_sha"])
 
 
@@ -165,7 +165,7 @@ def test_preview_is_read_only_and_refresh_creates_a_controlled_merge_commit(
     with pytest.raises(WorkspaceError, match="verified commit gate"):
         service.workspace_push(workspace_id)
 
-    verified = service.workspace_verify(workspace_id)
+    verified = service.workspace_run_profile(workspace_id)
     assert verified["satisfies_commit_gate"] is True
     adopted = service.workspace_commit(workspace_id, "approve refreshed merge")
     assert adopted["head_sha"] == refreshed["head_sha"]

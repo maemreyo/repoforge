@@ -64,7 +64,6 @@ def test_service_is_a_delegating_facade() -> None:
         "restore_paths",
         "diff",
         "run_profile",
-        "verify",
         "commit",
         "push",
         "create_draft_pr",

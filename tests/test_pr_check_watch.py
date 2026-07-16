@@ -89,7 +89,7 @@ def _published_workspace(env: ForgeEnvironment) -> str:
         workspace_id,
         [FileEdit("hello.txt", current["sha256"], (TextEdit("hello", "changed for watch"),))],
     )
-    env.service.workspace_verify(workspace_id)
+    env.service.workspace_run_profile(workspace_id)
     env.service.workspace_commit(workspace_id, "Prepare PR watch")
     env.service.workspace_push(workspace_id)
     env.service.workspace_create_draft_pr(workspace_id, "Watch checks", "Test body")
