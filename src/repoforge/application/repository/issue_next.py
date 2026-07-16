@@ -79,12 +79,7 @@ def _read_live_states(
             states = tuple(pool.map(read_one, issue_numbers))
         return tuple(sorted(states, key=lambda item: item.number))
 
-    return ctx.audited(
-        "repo_issue_next_live",
-        {"issue_count": len(issue_numbers)},
-        read_all,
-        mutating=False,
-    )
+    return read_all()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +112,6 @@ class RepositoryIssueNextReader:
         self.ctx = ctx
 
     def execute(self, c: RepositoryIssueNextCommand) -> RepositoryIssueNextResult:
-        repo = self.ctx.repo(c.repo_id)
         details: dict[str, object] = {
             "repo_id": c.repo_id,
             "root_issue": c.root_issue,
@@ -127,6 +121,7 @@ class RepositoryIssueNextReader:
         def op() -> RepositoryIssueNextResult:
             if not isinstance(c.limit, int) or isinstance(c.limit, bool) or not 1 <= c.limit <= 100:
                 raise TicketGraphError("limit must be between 1 and 100")
+            repo = self.ctx.repo(c.repo_id)
             graph = load_repo_ticket_graph(repo.path)
             if graph is None:
                 details["manifest_found"] = False

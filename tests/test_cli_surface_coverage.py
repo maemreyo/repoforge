@@ -361,7 +361,7 @@ def test_audit_stats_since_aggregates_the_requested_bucket_window(
             "failure_rate": 0.5,
             "duration_ms_avg": 20.0,
             "duration_ms_max": 30.0,
-            "result_bytes_avg": 150.0,
+            "result_bytes_avg": 300.0,
             "result_bytes_max": 250,
             "top_error_codes": [["STALE_STATE", 1]],
         }

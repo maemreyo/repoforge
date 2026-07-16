@@ -30,6 +30,7 @@ from ..ports import (
     LockManager,
     MetricsSink,
     OperationGate,
+    OperationResultStore,
     OperationStore,
     ProviderRegistry,
     PullRequestGateway,
@@ -212,6 +213,7 @@ class ApplicationContext:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
+    operation_result_store: OperationResultStore | None = None
     fingerprint_cache: FingerprintCache | None = None
     execution_environment: ExecutionEnvironmentPort | None = None
     provider_registry: ProviderRegistry | None = None

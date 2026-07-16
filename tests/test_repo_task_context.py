@@ -94,6 +94,19 @@ def test_bundle_includes_ticket_without_a_workspace(forge_env: ForgeEnvironment)
     assert bundle["workspace"] is None
 
 
+def test_bundle_uses_workspace_branch_for_recent_commits(forge_env: ForgeEnvironment) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "workspace commit context")["workspace_id"]
+    workspace_path = Path(service.workspace_status(workspace_id)["path"])
+    (workspace_path / "workspace-only.txt").write_text("workspace only\n", encoding="utf-8")
+    git("add", "workspace-only.txt", cwd=workspace_path)
+    git("commit", "-m", "workspace-only context commit", cwd=workspace_path)
+
+    bundle = service.repo_task_context("demo", workspace_id=workspace_id)
+
+    assert bundle["recent_commits"]["commits"][0]["subject"] == "workspace-only context commit"
+
+
 # ---------------------------------------------------------------------------
 # Exactly one audit event per call, carrying per-section durations, and no nested
 # audit events from the reused use cases.

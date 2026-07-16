@@ -7,11 +7,10 @@ never grants authorization, and a stale (TTL-expired), corrupt, or
 oversized entry is always treated as a miss so callers fall back to a live
 read without raising.
 
-Eviction bounds the entry count with the least-recently-*stored* entry
-evicted first: a plain cache hit never rewrites the file (keeping reads
-fast and lock-free), so recency is tracked from the last time an entry was
-fetched live and written, which is precisely when eviction matters for
-bounding growth.
+Eviction is persistent least-recently-used: every valid hit refreshes a
+small ``last_accessed_at`` field under the cache lock, while TTL freshness
+continues to be measured from ``stored_at`` so repeated reads never extend
+the lifetime of stale GitHub evidence.
 """
 
 from __future__ import annotations
@@ -78,6 +77,16 @@ class JsonGitHubReadCache:
     def _empty() -> dict[str, Any]:
         return {"version": _SCHEMA_VERSION, "entries": {}}
 
+    @staticmethod
+    def _entry_recency(item: tuple[str, Any]) -> float:
+        raw = item[1]
+        if not isinstance(raw, dict):
+            return 0.0
+        value = raw.get("last_accessed_at", raw.get("stored_at", 0.0))
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return 0.0
+        return float(value)
+
     def _load(self) -> dict[str, Any]:
         if not self._path.is_file():
             return self._empty()
@@ -121,22 +130,26 @@ class JsonGitHubReadCache:
             key = self._key(repo_id, kind, number)
             if key is None:
                 return None
-            document = self._load()
-            entry = document["entries"].get(key)
-            if not isinstance(entry, dict):
-                return None
-            stored_at = entry.get("stored_at")
-            payload = entry.get("payload")
-            if (
-                not isinstance(stored_at, (int, float))
-                or isinstance(stored_at, bool)
-                or not isinstance(payload, dict)
-            ):
-                return None
-            age = float(now_epoch) - float(stored_at)
-            if age > float(ttl_seconds):
-                return None
-            return dict(payload)
+            with self._locks.lock("github-read-cache", timeout_seconds=2):
+                document = self._load()
+                entry = document["entries"].get(key)
+                if not isinstance(entry, dict):
+                    return None
+                stored_at = entry.get("stored_at")
+                payload = entry.get("payload")
+                if (
+                    not isinstance(stored_at, (int, float))
+                    or isinstance(stored_at, bool)
+                    or not isinstance(payload, dict)
+                ):
+                    return None
+                age = float(now_epoch) - float(stored_at)
+                if age > float(ttl_seconds):
+                    return None
+                entry["last_accessed_at"] = float(now_epoch)
+                document["version"] = _SCHEMA_VERSION
+                self._write(document)
+                return dict(payload)
         except Exception:
             # A corrupt or otherwise unreadable cache entry is exactly a cache
             # miss: the caller always falls back to a live read, never an error.
@@ -164,14 +177,13 @@ class JsonGitHubReadCache:
             with self._locks.lock("github-read-cache", timeout_seconds=2):
                 document = self._load()
                 entries = document["entries"]
-                entries[key] = {"payload": payload, "stored_at": float(now_epoch)}
+                entries[key] = {
+                    "payload": payload,
+                    "stored_at": float(now_epoch),
+                    "last_accessed_at": float(now_epoch),
+                }
                 if len(entries) > self._max_entries:
-                    ordered = sorted(
-                        entries.items(),
-                        key=lambda item: (
-                            item[1].get("stored_at", 0.0) if isinstance(item[1], dict) else 0.0
-                        ),
-                    )
+                    ordered = sorted(entries.items(), key=self._entry_recency)
                     overflow = len(entries) - self._max_entries
                     for stale_key, _ in ordered[:overflow]:
                         entries.pop(stale_key, None)

@@ -10,6 +10,7 @@ from conftest import create_forge_environment
 
 from repoforge.application.service import CodingService
 from repoforge.config import load_config
+from repoforge.domain.errors import ConfigError
 from repoforge.domain.tickets import TicketGraphError
 
 
@@ -56,10 +57,22 @@ def _service(tmp_path: Path):
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
     audit_path = root / "state" / "audit.jsonl"
+    if not audit_path.is_file():
+        return []
     events = [
         json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line
     ]
     return [event for event in events if event["action"] == action]
+
+
+def _audit_events_with_prefix(root: Path, prefix: str) -> list[dict[str, object]]:
+    audit_path = root / "state" / "audit.jsonl"
+    if not audit_path.is_file():
+        return []
+    events = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line
+    ]
+    return [event for event in events if str(event.get("action", "")).startswith(prefix)]
 
 
 def test_repo_issue_graph_reports_no_manifest_when_absent(tmp_path: Path) -> None:
@@ -302,6 +315,9 @@ def test_repo_issue_next_produces_exactly_one_bounded_audit_event(tmp_path: Path
     }
     assert "title" not in json.dumps(details)
 
+    all_issue_next_events = _audit_events_with_prefix(environment.root, "repo_issue_next")
+    assert [event["action"] for event in all_issue_next_events] == ["repo_issue_next"]
+
 
 def test_repo_issue_next_audits_failure_for_an_out_of_range_limit(tmp_path: Path) -> None:
     service, environment = _service(tmp_path)
@@ -318,3 +334,17 @@ def test_repo_issue_next_audits_failure_for_an_out_of_range_limit(tmp_path: Path
     assert event["success"] is False
     assert event["details"]["limit"] == 0
     assert event["details"]["error_type"] == "TicketGraphError"
+
+
+def test_repo_issue_next_audits_unknown_repository_failure(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+
+    with pytest.raises(ConfigError, match="Unknown repository id"):
+        service.repo_issue_next("missing", limit=1)
+
+    events = _audit_events_with_prefix(environment.root, "repo_issue_next")
+    assert len(events) == 1
+    assert events[0]["action"] == "repo_issue_next"
+    assert events[0]["success"] is False
+    assert events[0]["details"]["repo_id"] == "missing"
+    assert events[0]["details"]["error_type"] == "ConfigError"

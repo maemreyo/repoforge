@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Closed the remaining contract gaps in the recent agent-effectiveness work: `repo_issue_next` now emits one outer audit event even for repository-resolution failures; the GitHub read cache is a true persistent LRU without extending TTL freshness; result-size averages use only successful payloads whose size was actually observed; background profile admission is atomic across workspaces and completed structured results are stored privately, boundedly, and resolved by `operation_status`; `repo_task_context` reads recent commits from the supplied workspace branch; and the checked-in roadmap now marks the verified closed tickets as Done.
 - Added an additive `next_step` field to `workspace_pr_checks` and `workspace_read_file` carrying a
   stable default plus three bounded, advisory, session-local nudges that name a cheaper or more durable
   tool at the exact moment an inefficient pattern occurs, inside the structured field an agent already

@@ -159,6 +159,30 @@ def test_summarize_operation_metrics_matches_real_metrics_sink(tmp_path: Path) -
     assert rows[0]["top_error_codes"] == [["STALE_STATE", 1]]
 
 
+def test_result_bytes_average_uses_only_observed_successful_payloads(tmp_path: Path) -> None:
+    metrics = JsonMetricsSink(tmp_path, InMemoryLockManager())
+    metrics.record(
+        "workspace_diff",
+        success=True,
+        duration_ms=1.0,
+        error_code=None,
+        result_bytes=10_000,
+    )
+    for _ in range(9):
+        metrics.record(
+            "workspace_diff",
+            success=False,
+            duration_ms=1.0,
+            error_code="COMMAND_FAILED",
+        )
+
+    snapshot = metrics.snapshot()
+    stats = snapshot["operations"]["workspace_diff"]
+    assert stats["count"] == 10
+    assert stats["result_bytes_count"] == 1
+    assert summarize_operation_metrics(snapshot)[0]["result_bytes_avg"] == 10_000.0
+
+
 def test_summarize_operation_metrics_since_aggregates_only_matching_day_buckets(
     tmp_path: Path,
 ) -> None:
@@ -353,8 +377,9 @@ def test_metrics_file_without_result_bytes_fields_loads_and_accumulates_and_sinc
     assert lifetime["count"] == 4
     assert lifetime["result_bytes_total"] == 200
     assert lifetime["result_bytes_max"] == 200
+    assert lifetime["result_bytes_count"] == 1
 
     windowed_rows = summarize_operation_metrics(snapshot, since="2026-07-13", until="2026-07-13")
     assert windowed_rows[0]["count"] == 2
-    assert windowed_rows[0]["result_bytes_avg"] == 100.0
+    assert windowed_rows[0]["result_bytes_avg"] == 200.0
     assert windowed_rows[0]["result_bytes_max"] == 200

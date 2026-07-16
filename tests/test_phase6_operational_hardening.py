@@ -271,6 +271,7 @@ def test_metrics_sink_aggregates_duration_and_failure_category(tmp_path: Path) -
         "duration_ms_max": 12.5,
         "result_bytes_total": 0,
         "result_bytes_max": 0,
+        "result_bytes_count": 0,
         "failure_categories": {"COMMAND_TIMEOUT": 1},
     }
     assert metrics.path.stat().st_mode & 0o777 == 0o600
@@ -297,6 +298,7 @@ def test_metrics_sink_records_into_the_correct_day_bucket(tmp_path: Path) -> Non
         "duration_ms_max": 30.0,
         "result_bytes_total": 0,
         "result_bytes_max": 0,
+        "result_bytes_count": 0,
         "failure_categories": {"STALE_STATE": 1},
     }
     assert buckets["2026-07-15"]["workspace_commit"]["count"] == 1
@@ -368,7 +370,7 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
 
     path.write_text("not json", encoding="utf-8")
     metrics = JsonMetricsSink(tmp_path, locks, FixedClock())
-    assert metrics.snapshot() == {"version": 2, "operations": {}, "buckets": {}}
+    assert metrics.snapshot() == {"version": 3, "operations": {}, "buckets": {}}
 
     path.write_text(
         json.dumps({"version": 2, "operations": {}, "buckets": "not-a-dict"}), encoding="utf-8"
@@ -376,7 +378,7 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
     assert metrics.snapshot()["buckets"] == {}
 
     path.write_text(json.dumps({"version": 2, "operations": "not-a-dict"}), encoding="utf-8")
-    assert metrics.snapshot() == {"version": 2, "operations": {}, "buckets": {}}
+    assert metrics.snapshot() == {"version": 3, "operations": {}, "buckets": {}}
 
     metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
     assert metrics.snapshot()["operations"]["workspace_status"]["count"] == 1
@@ -580,6 +582,7 @@ def test_audited_success_records_result_bytes_matching_compact_json_of_the_resul
     metric = ctx.metrics.snapshot()["operations"]["workspace_status"]
     assert metric["result_bytes_total"] == expected_bytes
     assert metric["result_bytes_max"] == expected_bytes
+    assert metric["result_bytes_count"] == 1
 
 
 def test_audited_success_with_unserializable_result_records_null_bytes_and_still_succeeds(
@@ -604,6 +607,7 @@ def test_audited_success_with_unserializable_result_records_null_bytes_and_still
     assert metric["count"] == 1
     assert metric["result_bytes_total"] == 0
     assert metric["result_bytes_max"] == 0
+    assert metric["result_bytes_count"] == 0
 
 
 def test_audited_success_audit_details_never_contain_result_content(tmp_path: Path) -> None:

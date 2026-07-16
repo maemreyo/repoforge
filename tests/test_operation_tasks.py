@@ -10,6 +10,7 @@ import pytest
 from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from repoforge.adapters.persistence.json_operation_result_store import JsonOperationResultStore
 from repoforge.adapters.persistence.json_operation_store import JsonOperationStore
 from repoforge.application.operations.recovery import recover_operations
 from repoforge.application.service import CodingService
@@ -254,6 +255,36 @@ def test_json_operation_store_is_private_atomic_and_compare_and_swap(tmp_path: P
 
     store.delete(task.operation_id)
     assert store.read(task.operation_id) is None
+
+
+def test_json_operation_result_store_is_private_bounded_and_restart_safe(tmp_path: Path) -> None:
+    operation_id = "op-000000000000000000000001"
+    locks = InMemoryLockManager()
+    store = JsonOperationResultStore(tmp_path, locks, max_result_bytes=1_000)
+    result = {
+        "workspace_id": "workspace-1",
+        "profile": "full",
+        "commands": [{"argv": ["pytest"], "returncode": 0, "stdout": "ok", "stderr": ""}],
+    }
+
+    store.save(operation_id, result)
+    root = tmp_path / "operation-results"
+    path = root / f"{operation_id}.json"
+    assert path.is_file()
+    assert os.stat(root).st_mode & 0o777 == 0o700
+    assert os.stat(path).st_mode & 0o777 == 0o600
+    assert store.read(operation_id) == result
+    assert JsonOperationResultStore(tmp_path, InMemoryLockManager()).read(operation_id) == result
+
+    with pytest.raises(RepoForgeError) as oversized:
+        JsonOperationResultStore(tmp_path, locks, max_result_bytes=128).save(
+            operation_id,
+            {"payload": "x" * 1_000},
+        )
+    assert oversized.value.code is ErrorCode.STATE_TOO_LARGE
+
+    store.delete(operation_id)
+    assert store.read(operation_id) is None
 
 
 def test_json_operation_store_rejects_corruption_future_schema_and_identity_mismatch(

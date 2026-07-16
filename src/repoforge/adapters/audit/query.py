@@ -17,6 +17,21 @@ from ...domain.errors import ConfigError
 _MAX_SCAN_BYTES = 20_000_000
 
 
+def _result_bytes_count(stats: dict[str, Any]) -> int:
+    raw = stats.get("result_bytes_count")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    total = stats.get("result_bytes_total", 0)
+    maximum = stats.get("result_bytes_max", 0)
+    if (
+        isinstance(total, (int, float))
+        and isinstance(maximum, (int, float))
+        and (total > 0 or maximum > 0)
+    ):
+        return max(0, int(stats.get("successes", 0) or 0))
+    return 0
+
+
 def read_audit_events(
     path: Path,
     *,
@@ -81,6 +96,7 @@ def _rows_from_operations(operations: dict[str, Any]) -> list[dict[str, Any]]:
         # `.get(..., 0)` tolerates a legacy stat entry recorded before result-size
         # tracking existed, so it reports 0 rather than raising.
         result_bytes_total = float(stats.get("result_bytes_total", 0) or 0)
+        result_bytes_count = _result_bytes_count(stats)
         categories = stats.get("failure_categories")
         top_error_codes = (
             sorted(categories.items(), key=lambda item: item[1], reverse=True)[:3]
@@ -95,7 +111,9 @@ def _rows_from_operations(operations: dict[str, Any]) -> list[dict[str, Any]]:
                 "failure_rate": round(failures / count, 4) if count else 0.0,
                 "duration_ms_avg": round(duration_total / count, 3) if count else 0.0,
                 "duration_ms_max": float(stats.get("duration_ms_max", 0.0) or 0.0),
-                "result_bytes_avg": round(result_bytes_total / count, 3) if count else 0.0,
+                "result_bytes_avg": (
+                    round(result_bytes_total / result_bytes_count, 3) if result_bytes_count else 0.0
+                ),
                 "result_bytes_max": int(stats.get("result_bytes_max", 0) or 0),
                 "top_error_codes": [list(item) for item in top_error_codes],
             }
@@ -113,6 +131,7 @@ def _empty_bucket_stat() -> dict[str, Any]:
         "duration_ms_max": 0.0,
         "result_bytes_total": 0,
         "result_bytes_max": 0,
+        "result_bytes_count": 0,
         "failure_categories": {},
     }
 
@@ -131,6 +150,7 @@ def _merge_bucket_stat(target: dict[str, Any], source: dict[str, Any]) -> None:
     target["result_bytes_max"] = max(
         float(target["result_bytes_max"]), float(source.get("result_bytes_max", 0) or 0)
     )
+    target["result_bytes_count"] += _result_bytes_count(source)
     categories = source.get("failure_categories")
     if isinstance(categories, dict):
         target_categories = target["failure_categories"]

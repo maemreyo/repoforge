@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -139,6 +142,17 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
     final = service.operation_status(operation_id)
     assert final["state"] == "succeeded"
     assert final["result_reference"] == f"workspace_run_profile:{operation_id}"
+    result_payload = final["result"]
+    assert result_payload["workspace_id"] == workspace_id
+    assert result_payload["profile"] == "slow"
+    assert result_payload["verification"] is True
+    assert result_payload["satisfies_commit_gate"] is True
+    assert len(result_payload["head_sha"]) == 40
+    assert len(result_payload["fingerprint"]) == 64
+    assert result_payload["commands"]
+
+    restarted = CodingService(load_config(forge_env.config_path))
+    assert restarted.operation_status(operation_id)["result"] == result_payload
 
     # The lock is released once the run finishes.
     with locks.lock(workspace_id, timeout_seconds=0.5):
@@ -262,6 +276,48 @@ def test_background_admission_over_cap_is_retryable_and_states_the_cap(
     retried = service.workspace_run_profile(second_id, "slow", background=True)
     runner.run(retried["operation_id"])
     assert service.operation_status(retried["operation_id"])["state"] == "succeeded"
+
+
+def test_background_global_cap_admission_is_atomic_across_workspaces(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _add_slow_profile(forge_env)
+    _set_server_field(forge_env, "max_background_profiles = 1")
+    service, runner = _manual_service(forge_env)
+    first_id = service.workspace_create("demo", "atomic cap first")["workspace_id"]
+    second_id = service.workspace_create("demo", "atomic cap second")["workspace_id"]
+
+    original_list = service.operations.list_records
+    snapshots_ready = threading.Barrier(2)
+
+    def synchronized_snapshot(*, max_records: int = 2_000):
+        page = original_list(max_records=max_records)
+        with contextlib.suppress(threading.BrokenBarrierError):
+            snapshots_ready.wait(timeout=0.3)
+        return page
+
+    monkeypatch.setattr(service.operations, "list_records", synchronized_snapshot)
+
+    def admit(workspace_id: str) -> tuple[str, object]:
+        try:
+            return "accepted", service.workspace_run_profile(workspace_id, "slow", background=True)
+        except RepoForgeError as exc:
+            return "rejected", exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(admit, (first_id, second_id)))
+
+    accepted = [value for status, value in outcomes if status == "accepted"]
+    rejected = [value for status, value in outcomes if status == "rejected"]
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert isinstance(rejected[0], RepoForgeError)
+    assert rejected[0].code is ErrorCode.RUNTIME_UNAVAILABLE
+
+    operation_id = accepted[0]["operation_id"]
+    runner.run(operation_id)
+    assert service.operation_status(operation_id)["state"] == "succeeded"
 
 
 def _start_background_profile_in_subprocess(

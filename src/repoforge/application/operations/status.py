@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .dto import OperationSummary, operation_summary
+from .dto import OperationStatusView, operation_status_view
 from .manager import OperationManager
 
 
@@ -17,9 +17,17 @@ class OperationStatusReader:
     def __init__(self, operations: OperationManager):
         self.operations = operations
 
-    def execute(self, command: OperationStatusCommand) -> OperationSummary:
+    def execute(self, command: OperationStatusCommand) -> OperationStatusView:
+        def read() -> OperationStatusView:
+            task = self.operations.status(command.operation_id)
+            result = None
+            result_store = self.operations.ctx.operation_result_store
+            if result_store is not None and task.result_reference is not None:
+                result = result_store.read(command.operation_id)
+            return operation_status_view(task, result)
+
         return self.operations.ctx.audited(
             "operation_status",
             {"operation_id": command.operation_id},
-            lambda: operation_summary(self.operations.status(command.operation_id)),
+            read,
         )

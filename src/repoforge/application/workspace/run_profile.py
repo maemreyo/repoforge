@@ -15,6 +15,7 @@ from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ...ports.execution_environment import ApprovedExecution
 from ..context import ApplicationContext
+from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint
 from ..operations.manager import OperationManager
 
@@ -266,31 +267,12 @@ class WorkspaceProfileRunner:
     ) -> WorkspaceRunProfileBackgroundResult:
         operations = self.operations
         background_tasks = self.background_tasks
-        if operations is None or background_tasks is None:
+        result_store = self.ctx.operation_result_store
+        if operations is None or background_tasks is None or result_store is None:
             raise RepoForgeError(
-                "Background workspace_run_profile requires the durable operations manager "
-                "and background task runner to be configured",
+                "Background workspace_run_profile requires the durable operations manager, "
+                "operation result store, and background task runner to be configured",
                 code=ErrorCode.CONFIG_INVALID,
-            )
-
-        cap = self.ctx.config.server.max_background_profiles
-        running = sum(
-            1
-            for task in operations.list_records(max_records=2_000).records
-            if task.kind == _KIND and task.state is OperationState.RUNNING
-        )
-        if running >= cap:
-            raise RepoForgeError(
-                f"Background workspace_run_profile is at its configured concurrency cap "
-                f"of {cap} running operation(s)",
-                code=ErrorCode.RUNTIME_UNAVAILABLE,
-                retryable=True,
-                safe_next_action=(
-                    f"Wait for a running background profile to finish (max_background_profiles"
-                    f"={cap}) and retry, or poll operation_list with "
-                    f"scope='workspace:{c.workspace_id}' for progress."
-                ),
-                details={"max_background_profiles": cap, "running": running},
             )
 
         lock_cm = self.ctx.locks.lock(
@@ -322,27 +304,50 @@ class WorkspaceProfileRunner:
 
         now = self.ctx.clock.now_iso()
         try:
-            task = operations.create(
-                kind=_KIND,
-                phase="queued",
-                cancel_supported=True,
-                workspace_id=c.workspace_id,
-                now=now,
-            )
-        except Exception:
-            lock_cm.__exit__(None, None, None)
-            raise
-        try:
-            task = operations.start(task.operation_id, now=now)
-        except Exception:
-            # The operation record was created but never reached "running"; fail it
-            # closed rather than leaving a PENDING record that recovery does not scan.
-            with contextlib.suppress(Exception):
-                operations.fail(
-                    task.operation_id,
-                    error_code=ErrorCode.INTERNAL_ERROR.value,
-                    error_message="Background admission could not transition to running",
+            with self.ctx.locks.lock(
+                "background-profile-admission",
+                timeout_seconds=2,
+                metadata={"purpose": "background_profile_admission"},
+            ):
+                cap = self.ctx.config.server.max_background_profiles
+                running = sum(
+                    1
+                    for candidate in operations.list_records(max_records=2_000).records
+                    if candidate.kind == _KIND and candidate.state is OperationState.RUNNING
                 )
+                if running >= cap:
+                    raise RepoForgeError(
+                        f"Background workspace_run_profile is at its configured concurrency cap "
+                        f"of {cap} running operation(s)",
+                        code=ErrorCode.RUNTIME_UNAVAILABLE,
+                        retryable=True,
+                        safe_next_action=(
+                            f"Wait for a running background profile to finish "
+                            f"(max_background_profiles={cap}) and retry, or poll "
+                            f"operation_list with scope='workspace:{c.workspace_id}' for progress."
+                        ),
+                        details={"max_background_profiles": cap, "running": running},
+                    )
+                task = operations.create(
+                    kind=_KIND,
+                    phase="queued",
+                    cancel_supported=True,
+                    workspace_id=c.workspace_id,
+                    now=now,
+                )
+                try:
+                    task = operations.start(task.operation_id, now=now)
+                except Exception:
+                    # The operation record was created but never reached "running"; fail it
+                    # closed rather than leaving a PENDING record that recovery does not scan.
+                    with contextlib.suppress(Exception):
+                        operations.fail(
+                            task.operation_id,
+                            error_code=ErrorCode.INTERNAL_ERROR.value,
+                            error_message="Background admission could not transition to running",
+                        )
+                    raise
+        except Exception:
             lock_cm.__exit__(None, None, None)
             raise
 
@@ -360,37 +365,62 @@ class WorkspaceProfileRunner:
                     details={"cancelled": True},
                 )
 
-        def finish_terminal(exc: Exception | None) -> None:
+        def finish_terminal(
+            exc: Exception | None,
+            result: WorkspaceRunProfileResult | None,
+        ) -> None:
             finish_now = self.ctx.clock.now_iso()
             try:
                 current = operations.status(operation_id)
             except RepoForgeError:
                 return
-            if exc is None:
-                with contextlib.suppress(RepoForgeError):
+            if exc is None and result is not None:
+                try:
+                    result_store.save(operation_id, to_data(result))
                     operations.succeed(
                         operation_id,
                         result_reference=f"{_KIND}:{operation_id}",
                         now=finish_now,
                     )
+                except Exception as persist_exc:
+                    with contextlib.suppress(Exception):
+                        result_store.delete(operation_id)
+                    with contextlib.suppress(RepoForgeError):
+                        operations.fail(
+                            operation_id,
+                            error_code=ErrorCode.STATE_PERSISTENCE_FAILED.value,
+                            error_message=_safe_error_message(str(persist_exc)),
+                            retryability=OperationRetryability.MANUAL,
+                            now=finish_now,
+                        )
                 return
+            with contextlib.suppress(Exception):
+                result_store.delete(operation_id)
             if current.cancellation_requested_at is not None or cancel_token.is_cancelled():
                 with contextlib.suppress(RepoForgeError):
                     operations.cancelled(operation_id, now=finish_now)
                 return
+            failure = exc or RepoForgeError(
+                "Background profile completed without a result",
+                code=ErrorCode.INTERNAL_ERROR,
+            )
             code = str(
-                getattr(getattr(exc, "code", None), "value", getattr(exc, "code", "INTERNAL_ERROR"))
+                getattr(
+                    getattr(failure, "code", None),
+                    "value",
+                    getattr(failure, "code", "INTERNAL_ERROR"),
+                )
             )
             try:
                 normalized = ErrorCode(code)
             except ValueError:
                 normalized = ErrorCode.INTERNAL_ERROR
-            retryable = bool(getattr(exc, "retryable", False))
+            retryable = bool(getattr(failure, "retryable", False))
             with contextlib.suppress(RepoForgeError):
                 operations.fail(
                     operation_id,
                     error_code=normalized.value,
-                    error_message=_safe_error_message(str(exc)),
+                    error_message=_safe_error_message(str(failure)),
                     retryability=(
                         OperationRetryability.AUTOMATIC
                         if retryable
@@ -401,9 +431,10 @@ class WorkspaceProfileRunner:
 
         def run() -> None:
             failure: Exception | None = None
+            result: WorkspaceRunProfileResult | None = None
             try:
                 try:
-                    self.ctx.audited(
+                    result = self.ctx.audited(
                         "workspace_run_profile",
                         audit_details,
                         lambda: run_body(cancel_token, on_before_command),
@@ -415,7 +446,7 @@ class WorkspaceProfileRunner:
                 # documented order: terminate/finish -> release lock -> mark terminal.
                 self._unregister_cancel_token(operation_id)
                 lock_cm.__exit__(None, None, None)
-            finish_terminal(failure)
+            finish_terminal(failure, result)
 
         scheduled = background_tasks.submit(operation_id, run)
         if not scheduled:

@@ -37,6 +37,7 @@ from .metrics import MetricsSink
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
 from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
+from .operation_result_store import OperationResultStore
 from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
@@ -101,6 +102,7 @@ __all__ = [
     "OnboardingStore",
     "OperationGate",
     "OperationRecordPage",
+    "OperationResultStore",
     "OperationStore",
     "OperatorIO",
     "PrCheckWatchPage",

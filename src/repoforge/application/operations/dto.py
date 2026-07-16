@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from ...domain.operation_task import OperationTask
 
@@ -34,6 +35,28 @@ class OperationSummary:
     workspace_id: str | None
     snapshot_binding: OperationSnapshotView | None
     result_reference: str | None
+    error_code: str | None
+    error_message: str | None
+    retryability: str
+    cancel_supported: bool
+    cancellation_requested_at: str | None
+    created_at: str
+    updated_at: str
+    expires_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class OperationStatusView:
+    operation_id: str
+    kind: str
+    state: str
+    phase: str
+    progress: OperationProgressView
+    task_id: str | None
+    workspace_id: str | None
+    snapshot_binding: OperationSnapshotView | None
+    result_reference: str | None
+    result: dict[str, Any] | None
     error_code: str | None
     error_message: str | None
     retryability: str
@@ -77,4 +100,31 @@ def operation_summary(task: OperationTask) -> OperationSummary:
         created_at=task.created_at,
         updated_at=task.updated_at,
         expires_at=task.expires_at,
+    )
+
+
+def operation_status_view(
+    task: OperationTask,
+    result: dict[str, Any] | None,
+) -> OperationStatusView:
+    summary = operation_summary(task)
+    return OperationStatusView(
+        operation_id=summary.operation_id,
+        kind=summary.kind,
+        state=summary.state,
+        phase=summary.phase,
+        progress=summary.progress,
+        task_id=summary.task_id,
+        workspace_id=summary.workspace_id,
+        snapshot_binding=summary.snapshot_binding,
+        result_reference=summary.result_reference,
+        result=result,
+        error_code=summary.error_code,
+        error_message=summary.error_message,
+        retryability=summary.retryability,
+        cancel_supported=summary.cancel_supported,
+        cancellation_requested_at=summary.cancellation_requested_at,
+        created_at=summary.created_at,
+        updated_at=summary.updated_at,
+        expires_at=summary.expires_at,
     )

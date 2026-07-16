@@ -13,6 +13,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, TypeVar
 
 from ...domain.errors import WorkspaceError
@@ -165,8 +166,9 @@ class RepoTaskContextReader:
         self.ctx.repo(c.repo_id)
 
         # Fail closed: a supplied workspace must actually belong to the requested repository.
+        workspace_path: Path | None = None
         if c.workspace_id is not None:
-            record, _repo, _path = self.ctx.workspace(c.workspace_id)
+            record, _repo, workspace_path = self.ctx.workspace(c.workspace_id)
             if record.repo_id != c.repo_id:
                 raise WorkspaceError(
                     f"Workspace {c.workspace_id!r} belongs to repository {record.repo_id!r}, "
@@ -212,8 +214,15 @@ class RepoTaskContextReader:
             self._timed(
                 details,
                 "recent_commits",
-                lambda: self._commits_reader.compute(
-                    RecentCommitsCommand(c.repo_id, limit=_RECENT_COMMITS_LIMIT)
+                lambda: (
+                    self._commits_reader.compute_from_path(
+                        RecentCommitsCommand(c.repo_id, limit=_RECENT_COMMITS_LIMIT),
+                        workspace_path,
+                    )
+                    if workspace_path is not None
+                    else self._commits_reader.compute(
+                        RecentCommitsCommand(c.repo_id, limit=_RECENT_COMMITS_LIMIT)
+                    )
                 ),
             )
         )

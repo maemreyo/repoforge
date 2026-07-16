@@ -285,16 +285,18 @@ def test_cache_ttl_expiry_is_a_miss(tmp_path: Path) -> None:
     assert cache.get("demo", "pr", 2, ttl_seconds=60, now_epoch=1_061.0) is None
 
 
-def test_cache_lru_eviction_bounds_entry_count(tmp_path: Path) -> None:
+def test_cache_lru_eviction_refreshes_recency_on_hit(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager(), max_entries=2)
     cache.put("demo", "issue", 1, {"number": 1}, now_epoch=1_000.0)
     cache.put("demo", "issue", 2, {"number": 2}, now_epoch=1_001.0)
-    cache.put("demo", "issue", 3, {"number": 3}, now_epoch=1_002.0)
 
-    # The least-recently-stored entry (1) is evicted to keep the bound of 2.
-    assert cache.get("demo", "issue", 1, ttl_seconds=1_000_000, now_epoch=1_002.0) is None
-    assert cache.get("demo", "issue", 2, ttl_seconds=1_000_000, now_epoch=1_002.0) is not None
-    assert cache.get("demo", "issue", 3, ttl_seconds=1_000_000, now_epoch=1_002.0) is not None
+    # Reading entry 1 makes entry 2 the least recently used item.
+    assert cache.get("demo", "issue", 1, ttl_seconds=1_000_000, now_epoch=1_002.0) is not None
+    cache.put("demo", "issue", 3, {"number": 3}, now_epoch=1_003.0)
+
+    assert cache.get("demo", "issue", 1, ttl_seconds=1_000_000, now_epoch=1_004.0) is not None
+    assert cache.get("demo", "issue", 2, ttl_seconds=1_000_000, now_epoch=1_004.0) is None
+    assert cache.get("demo", "issue", 3, ttl_seconds=1_000_000, now_epoch=1_004.0) is not None
 
 
 def test_cache_corrupt_file_falls_back_to_miss_without_raising(tmp_path: Path) -> None:

@@ -31,7 +31,7 @@ from ...ports.clock import Clock
 from ...ports.locking import LockManager
 from ..system import SystemClock
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 DEFAULT_RETENTION_DAYS = 30
 
 
@@ -44,8 +44,24 @@ def _empty_stat() -> dict[str, Any]:
         "duration_ms_max": 0.0,
         "result_bytes_total": 0,
         "result_bytes_max": 0,
+        "result_bytes_count": 0,
         "failure_categories": {},
     }
+
+
+def _legacy_result_bytes_count(stats: dict[str, Any]) -> int:
+    raw = stats.get("result_bytes_count")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    total = stats.get("result_bytes_total", 0)
+    maximum = stats.get("result_bytes_max", 0)
+    if (
+        isinstance(total, (int, float))
+        and isinstance(maximum, (int, float))
+        and (total > 0 or maximum > 0)
+    ):
+        return max(0, int(stats.get("successes", 0) or 0))
+    return 0
 
 
 class JsonMetricsSink:
@@ -125,6 +141,7 @@ class JsonMetricsSink:
         result_bytes: int | None = None,
     ) -> None:
         current = container.setdefault(action, _empty_stat())
+        current["result_bytes_count"] = _legacy_result_bytes_count(current)
         current["count"] = int(current["count"]) + 1
         key = "successes" if success else "failures"
         current[key] = int(current[key]) + 1
@@ -141,6 +158,7 @@ class JsonMetricsSink:
             current["result_bytes_max"] = max(
                 int(current.get("result_bytes_max", 0)), int(result_bytes)
             )
+            current["result_bytes_count"] = int(current["result_bytes_count"]) + 1
         if not success:
             category = error_code or "INTERNAL_ERROR"
             categories = current["failure_categories"]

@@ -27,6 +27,7 @@ from .adapters.persistence import (
     JsonGitHubReadCache,
     JsonIdempotencyStore,
     JsonOnboardingStore,
+    JsonOperationResultStore,
     JsonOperationStore,
     JsonPrCheckWatchStore,
     JsonWorkflowRecordingStore,
@@ -119,6 +120,7 @@ from .ports import (
     OnboardingEnvironment,
     OnboardingStore,
     OperationGate,
+    OperationResultStore,
     OperationStore,
     PrCheckWatchStore,
     ProcessInspector,
@@ -157,6 +159,7 @@ class AdapterOverrides:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operations: OperationStore | None = None
+    operation_results: OperationResultStore | None = None
     github_read_cache: GitHubReadCache | None = None
     pr_check_watches: PrCheckWatchStore | None = None
     background_tasks: BackgroundTaskRunner | None = None
@@ -318,6 +321,13 @@ def build_operation_store(
     return JsonOperationStore(state_root, locks or build_lock_manager(state_root))
 
 
+def build_operation_result_store(
+    state_root: Path,
+    locks: LockManager | None = None,
+) -> OperationResultStore:
+    return JsonOperationResultStore(state_root, locks or build_lock_manager(state_root))
+
+
 def build_github_read_cache(
     state_root: Path,
     locks: LockManager | None = None,
@@ -367,6 +377,11 @@ def build_application(
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    operation_result_store = o.operation_results or JsonOperationResultStore(
+        config.server.state_root,
+        locks,
+        max_result_bytes=config.server.max_tool_output_chars,
+    )
     github_read_cache = o.github_read_cache or JsonGitHubReadCache(config.server.state_root, locks)
     pr_check_watch_store = o.pr_check_watches or JsonPrCheckWatchStore(
         config.server.state_root,
@@ -398,6 +413,7 @@ def build_application(
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,
+        operation_result_store=operation_result_store,
         github_read_cache=github_read_cache,
         ticket_projects=ticket_projects,
     )

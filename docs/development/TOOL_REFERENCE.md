@@ -141,9 +141,11 @@ remain redacted exactly as written by the audit sink.
 
 `rf audit stats` renders the active configuration's aggregate `operation-metrics.json` as one row per
 action: call count, failure count and rate, average and maximum `duration_ms`, average and maximum
-`result_bytes`, and up to three most frequent failure error codes, sorted slowest-average-first. Use it
-to find which tool is failing most, taking the longest, or returning the largest results — the dominant
-cost for an LLM consumer is often context-window size, not wall-clock time — before diving into
+`result_bytes`, and up to three most frequent failure error codes, sorted slowest-average-first. The
+result-size average divides only by successful payloads whose compact-JSON size was actually observed;
+failed calls and successful unserializable results do not dilute it. Use the report to find which tool is
+failing most, taking the longest, or returning the largest results — the dominant cost for an LLM
+consumer is often context-window size, not wall-clock time — before diving into
 `rf audit --action NAME --slow MS` or `--min-bytes N` for individual calls.
 
 `operation-metrics.json` keeps lifetime `operations` totals (unbounded in time, for backward
@@ -172,7 +174,7 @@ Snapshot retention is bounded to the newest ten complete generations.
 
 | Tool | Purpose |
 |---|---|
-| `operation_status` | Read one exact durable operation with bounded phase, progress, result-reference, error, retryability, cancellation, and timestamp metadata. |
+| `operation_status` | Read one exact durable operation with bounded phase, progress, result-reference, structured result when available, error, retryability, cancellation, and timestamp metadata. |
 | `operation_list` | List at most one hundred operations, optionally filtered by `task:<id>`, `workspace:<id>`, or state, with deterministic cursor pagination. |
 | `operation_cancel` | Idempotently request cancellation using an optional optimistic `expected_updated_at`; it does not mark the operation terminal. |
 
@@ -182,7 +184,9 @@ Writes use cross-process locking, atomic replacement, fsync, `0600` files, and c
 `orphaned`, and terminal records older than seven days are pruned. Public interfaces cannot create
 operations or update progress; those capabilities are internal foundations for approved future
 consumers. Operation records never contain source bodies, patches, raw logs, secrets, or environment
-bodies.
+bodies. A completed operation may keep its bounded structured result in a separate private
+`operation-results/` record; `operation_status` resolves it, while `operation_list` remains compact and
+returns lifecycle summaries only.
 
 CLI equivalents are `rf operation status ID`, `rf operation list`, and `rf operation cancel ID`.
 
@@ -210,7 +214,9 @@ bootstrap ritual (`repo_list` → `repo_context` → `repo_issue_read`/`repo_iss
 `workspace_status`/`workspace_tree`/`workspace_search`) with one bounded call. Each of its four
 sections reuses the exact application logic of `repo_context`, `repo_issue_spec`,
 `workspace_status`, and `repo_recent_commits` (last 5 entries) — it grants no new visibility and
-enforces the same path, redaction, and read bounds as those tools. `ticket` is present only when
+enforces the same path, redaction, and read bounds as those tools. When `workspace_id` is supplied,
+`recent_commits` is read from that validated workspace branch; otherwise it uses the configured
+repository source/default branch as before. `ticket` is present only when
 `issue_number` is given and reuses the same short-lived GitHub read cache as `repo_issue_spec`
 (`cache_hit` inside the section); `workspace` is present only when `workspace_id` is given, and a
 `workspace_id` that does not belong to `repo_id` fails closed. The `ticket` section is independently
@@ -227,8 +233,10 @@ to 60-300) from a private, bounded, local cache instead of calling `gh` again; a
 issue number since both read the same live GitHub issue. The cache is evidence only: it never grants
 authorization, and repository, path, and branch policy are enforced identically for a cached or a live
 result. Pass `fresh=true` on any of the three tools to force a live `gh` read and refresh the cached
-entry, for example immediately before acting on a check or review that must not be stale. A stale
-(TTL-expired) or corrupt cache entry always falls back to a live read rather than failing.
+entry, for example immediately before acting on a check or review that must not be stale. A valid hit
+refreshes persistent LRU recency for eviction, but TTL age remains anchored to the last live fetch, so
+repeated hits never extend evidence freshness. A stale (TTL-expired) or corrupt cache entry always falls
+back to a live read rather than failing.
 
 The committed repository tools never checkout or read working-tree file contents. An omitted snapshot
 `ref` resolves to the configured default base branch; explicit refs may be reviewed base branches,
@@ -345,12 +353,14 @@ with `LOCK_TIMEOUT` naming the running operation if another mutation already hol
 `workspace_run_profile` operation, and returns `{operation_id, phase: "running", safe_next_action}`
 immediately instead of blocking. The workspace lock is held for the entire background run — the same
 mutual-exclusion semantics as the synchronous call — so a same-workspace mutation still fails closed while
-it runs; a different workspace's operations proceed concurrently up to `server.max_background_profiles`
-(default 2) simultaneous background profiles server-wide. On completion the verification receipt, audit
-event, and metrics are written exactly as the synchronous path writes them. `operation_cancel` terminates
-the running command's process group, releases the lock, marks the operation `cancelled`, and leaves no
-receipt. Background `workspace_run_profile` operations are not resumable across a server restart; an
-orphaned run surfaces as `orphaned` with its lock already released by the operating system.
+it runs. Admission across different workspaces is serialized around the configured global count, so no two
+concurrent requests can overrun `server.max_background_profiles` (default 2). On completion the
+verification receipt, audit event, and metrics are written exactly as the synchronous path writes them,
+and the bounded structured profile result is persisted privately for retrieval through `operation_status`.
+`operation_cancel` terminates the running command's process group, releases the lock, marks the operation
+`cancelled`, and leaves no receipt or stored result. Background `workspace_run_profile` operations are not
+resumable across a server restart; an orphaned run surfaces as `orphaned` with its lock already released by
+the operating system.
 
 Call `workspace_pr_checks` first and reuse an exact `check-run:<id>` selector; URLs, API paths,
 job IDs, and arbitrary `gh` arguments are not accepted. Details and failure evidence require the

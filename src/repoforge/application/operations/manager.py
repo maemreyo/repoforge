@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import (
     OperationCancellationDecision,
@@ -267,6 +269,13 @@ class OperationManager:
 
     def delete(self, operation_id: str) -> None:
         existing = self.status(operation_id)
+
+        def delete() -> None:
+            self.store.delete(operation_id)
+            if self.ctx.operation_result_store is not None:
+                with contextlib.suppress(RepoForgeError):
+                    self.ctx.operation_result_store.delete(operation_id)
+
         self.ctx.audited(
             "operation_delete",
             {
@@ -275,6 +284,6 @@ class OperationManager:
                 "state": existing.state.value,
                 "updated_at": existing.updated_at,
             },
-            lambda: self.store.delete(operation_id),
+            delete,
             mutating=True,
         )
