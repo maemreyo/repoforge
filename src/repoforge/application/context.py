@@ -36,6 +36,7 @@ from ..ports import (
     OperationStore,
     ProviderRegistry,
     PullRequestGateway,
+    TicketGraphGateway,
     TicketProjectGateway,
     WorkspaceStore,
 )
@@ -228,6 +229,7 @@ class ApplicationContext:
     hygiene: HygieneGateway | None = None
     hygiene_cache: HygieneBaselineCache | None = None
     nudge_tracker: AdoptionNudgeTracker | None = None
+    ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
 
     def now_epoch(self) -> float:

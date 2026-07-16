@@ -14,6 +14,7 @@ from ..ports import (
     LockManager,
     MetricsSink,
     OperationGate,
+    TicketGraphGateway,
     TicketProjectGateway,
     WorkspaceStore,
 )
@@ -172,6 +173,7 @@ class CodingService:
         gate: OperationGate | None = None,
         metrics: MetricsSink | None = None,
         idempotency: IdempotencyStore | None = None,
+        ticket_graphs: TicketGraphGateway | None = None,
         ticket_projects: TicketProjectGateway | None = None,
         application: Application | None = None,
     ):
@@ -185,6 +187,7 @@ class CodingService:
                 gate=gate,
                 metrics=metrics,
                 idempotency=idempotency,
+                ticket_graphs=ticket_graphs,
                 ticket_projects=ticket_projects,
             ),
         )
@@ -395,10 +398,13 @@ class CodingService:
         status: str | None = None,
         priority: str | None = None,
         initiative: int | None = None,
+        fresh: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._issue_graph.execute(
-                RepositoryIssueGraphCommand(repo_id, root_issue, status, priority, initiative)
+                RepositoryIssueGraphCommand(
+                    repo_id, root_issue, status, priority, initiative, fresh
+                )
             )
         )
 
@@ -412,6 +418,7 @@ class CodingService:
         p2_wip_limit: int = 4,
         p3_wip_limit: int = 4,
         initiative_wip_limit: int = 2,
+        fresh: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._issue_next.execute(
@@ -424,6 +431,7 @@ class CodingService:
                     p2_wip_limit,
                     p3_wip_limit,
                     initiative_wip_limit,
+                    fresh,
                 )
             )
         )

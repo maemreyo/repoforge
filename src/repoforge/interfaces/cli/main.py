@@ -1297,6 +1297,37 @@ def _serve(config_path: Path) -> int:
     return 0
 
 
+def _webhook_serve(config_path: Path) -> int:
+    from ..http.github_webhooks import serve_github_webhooks
+
+    store = _ensure_generation(config_path)
+    generation = store.activation_target() or store.active() or store.current()
+    if generation is None:
+        raise ConfigError("No accepted configuration generation")
+    config = load_config(store.resolved_path(generation.generation))
+    if not config.server.github_webhook_enabled:
+        raise ConfigError("GitHub webhook ingress is disabled in the reviewed configuration")
+    secret = os.environ.get(config.server.github_webhook_secret_env)
+    if not secret:
+        raise ConfigError(
+            f"GitHub webhook secret environment variable {config.server.github_webhook_secret_env} is missing"
+        )
+    application = build_application(config)
+    cache = application.context.github_read_cache
+    if cache is None:
+        raise ConfigError("GitHub read cache is unavailable")
+    _json(
+        {
+            "status": "listening",
+            "bind": config.server.github_webhook_bind,
+            "port": config.server.github_webhook_port,
+            "path": "/github/webhooks",
+        }
+    )
+    serve_github_webhooks(config, cache, secret.encode("utf-8"))
+    return 0
+
+
 def _normalize_global_config(argv: list[str]) -> list[str]:
     """Preserve legacy ``rf COMMAND --config PATH`` invocation order.
 
@@ -1339,6 +1370,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="RepoForge 2.0.2")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve")
+    webhook = commands.add_parser("webhook", help="Optional GitHub webhook cache invalidation")
+    webhook_sub = webhook.add_subparsers(dest="webhook_command", required=True)
+    webhook_sub.add_parser("serve", help="Serve the signed loopback webhook endpoint")
     start_alias = commands.add_parser(
         "start", help="Foreground compatibility alias for runtime start"
     )
@@ -1493,6 +1527,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "serve":
             return _serve(config_path)
+        if args.command == "webhook" and args.webhook_command == "serve":
+            return _webhook_serve(config_path)
         if args.command == "start":
             args.runtime_command = "start"
             args.foreground = not args.background

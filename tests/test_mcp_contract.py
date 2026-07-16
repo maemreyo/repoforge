@@ -163,6 +163,24 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             assert evidence_tool.annotations.openWorldHint is False
 
         tools = {tool.name: tool for tool in result.tools}
+        workspace_edit_schema = tools["workspace_edit"].inputSchema
+        file_item = workspace_edit_schema["properties"]["files"]["items"]
+        assert file_item["type"] == "object"
+        assert set(file_item["required"]) == {"path", "expected_sha256", "edits"}
+        edit_item = file_item["properties"]["edits"]["items"]
+        assert edit_item["type"] == "object"
+        assert set(edit_item["required"]) == {"old_text", "new_text"}
+        for search_name in ("repo_search", "workspace_search"):
+            search_schema = tools[search_name].inputSchema["properties"]
+            assert search_schema["context_lines"]["minimum"] == 0
+            assert search_schema["context_lines"]["maximum"] == 5
+            assert search_schema["max_results"]["minimum"] == 1
+            assert search_schema["max_results"]["maximum"] == 200
+        for graph_name in ("repo_issue_graph", "repo_issue_next"):
+            fresh_schema = tools[graph_name].inputSchema["properties"]["fresh"]
+            assert fresh_schema["type"] == "boolean"
+            assert fresh_schema["default"] is False
+
         run_profile = tools["workspace_run_profile"]
         assert "profile_name" not in run_profile.inputSchema.get("required", [])
         assert set(run_profile.inputSchema["properties"]) == {
@@ -415,11 +433,16 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         assert comparison["total_files"] == 0
         await call("repo_issue_read", {"repo_id": "demo", "issue_number": 1})
         graph_result = await call("repo_issue_graph", {"repo_id": "demo"})
-        assert graph_result["manifest_found"] is False
+        assert graph_result["source"] == "github"
+        assert graph_result["evidence_complete"] is False
+        assert graph_result["node_count"] == 0
         next_result = await call("repo_issue_next", {"repo_id": "demo"})
-        assert next_result["manifest_found"] is False
+        assert next_result["source"] == "github"
+        assert next_result["valid"] is False
+        assert next_result["diagnostics"][0]["code"] == "GRAPH_NOT_CONFIGURED"
         spec_result = await call("repo_issue_spec", {"repo_id": "demo", "issue_number": 1})
-        assert spec_result["manifest_found"] is False
+        assert spec_result["source"] == "github"
+        assert spec_result["graph_member"] is False
         assert spec_result["live"]["title"] == "Implement safer workflow"
         await call("repo_pr_read", {"repo_id": "demo", "pr_number": 2})
 

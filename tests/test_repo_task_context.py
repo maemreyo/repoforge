@@ -61,6 +61,7 @@ def test_bundle_matches_standalone_tools_field_for_field(forge_env: ForgeEnviron
     assert bundle["workspace_id"] == workspace_id
     assert bundle["truncated"] is False
     assert bundle["repository"] == {**context_result, "truncated": False}
+    assert spec_result["observed_at"] is None
     assert bundle["ticket"] == {**spec_result, "truncated": False}
     assert bundle["workspace"] == {**status_result, "truncated": False}
     assert bundle["recent_commits"] == {**commits_result, "truncated": False}

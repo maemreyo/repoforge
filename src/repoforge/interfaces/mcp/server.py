@@ -514,17 +514,22 @@ def create_server(
         on a check or review that must not be stale."""
         return bounded_service.call("repo_issue_read", repo_id, issue_number, fresh)
 
-    @mcp.tool(title="Query the roadmap ticket graph", annotations=READ_ONLY, structured_output=True)
+    @mcp.tool(
+        title="Query the GitHub-native ticket graph",
+        annotations=EXTERNAL_READ,
+        structured_output=True,
+    )
     def repo_issue_graph(
         repo_id: str,
         root_issue: int | None = None,
         status: str | None = None,
         priority: str | None = None,
         initiative: int | None = None,
+        fresh: bool = False,
     ) -> dict[str, Any]:
-        """Use this to list or filter the checked-in roadmap ticket graph without searching GitHub comments; it is offline, bounded, and cannot assign, edit, or close an issue."""
+        """Use this to list or filter native GitHub sub-issues and blocked-by relationships. Reads are bounded and cached briefly; pass fresh=true to bypass the cache."""
         return bounded_service.call(
-            "repo_issue_graph", repo_id, root_issue, status, priority, initiative
+            "repo_issue_graph", repo_id, root_issue, status, priority, initiative, fresh
         )
 
     @mcp.tool(
@@ -541,8 +546,9 @@ def create_server(
         p2_wip_limit: int = 4,
         p3_wip_limit: int = 4,
         initiative_wip_limit: int = 2,
+        fresh: bool = False,
     ) -> dict[str, Any]:
-        """Use this to derive selectable tickets from bounded live issue state, complete specs, closed blockers, active parents, WIP limits, and deterministic delivery order without editing GitHub."""
+        """Use this to derive selectable tickets from one bounded GitHub-native graph snapshot, complete specs, closed blockers, active parents, WIP limits, and deterministic delivery order. Pass fresh=true to bypass the cache."""
         return bounded_service.call(
             "repo_issue_next",
             repo_id,
@@ -553,15 +559,16 @@ def create_server(
             p2_wip_limit,
             p3_wip_limit,
             initiative_wip_limit,
+            fresh,
         )
 
     @mcp.tool(
-        title="Read one roadmap ticket's specification references",
+        title="Read one ticket's specification and graph evidence",
         annotations=EXTERNAL_READ,
         structured_output=True,
     )
     def repo_issue_spec(repo_id: str, issue_number: int, fresh: bool = False) -> dict[str, Any]:
-        """Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat. The live issue portion may be served from a short-lived local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read."""
+        """Use this before implementing one ticket to combine its live GitHub contract, GitHub-native graph membership and metadata drift, and comment references without reconstructing prior chat. Evidence may be served from short-lived caches; pass `fresh=true` to force live reads."""
         return bounded_service.call("repo_issue_spec", repo_id, issue_number, fresh)
 
     @mcp.tool(

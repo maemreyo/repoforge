@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from ...domain.tickets import (
     TicketDeliveryMetadata,
     TicketDiagnostic,
     TicketGraphError,
+    TicketGraphSnapshot,
     TicketLiveState,
     TicketReadinessAssessment,
     TicketReadinessPolicy,
@@ -17,11 +16,9 @@ from ..context import ApplicationContext
 from ..tickets.graph import ticket_subtree_numbers, validate_ticket_graph
 from ..tickets.live import ticket_live_state_from_issue
 from ..tickets.readiness import derive_ticket_readiness
-from ..tickets.repo_manifest import load_repo_ticket_graph
-from .issue_graph import node_payload
+from .issue_graph import node_payload, read_github_ticket_snapshot
 
 _MAX_LIVE_ISSUES = 200
-_MAX_LIVE_WORKERS = 8
 
 
 def _diagnostic_payload(item: TicketDiagnostic) -> dict[str, Any]:
@@ -56,30 +53,24 @@ def _unavailable_live_state(number: int) -> TicketLiveState:
     )
 
 
-def _read_live_states(
-    ctx: ApplicationContext,
-    repo_path: Path,
-    issue_numbers: tuple[int, ...],
-) -> tuple[TicketLiveState, ...]:
-    if not issue_numbers or len(issue_numbers) > _MAX_LIVE_ISSUES:
-        raise TicketGraphError(
-            f"derived readiness requires between 1 and {_MAX_LIVE_ISSUES} bounded live issues"
+def _live_states(snapshot: TicketGraphSnapshot) -> tuple[TicketLiveState, ...]:
+    by_number = {
+        issue.number: ticket_live_state_from_issue(
+            {
+                "number": issue.number,
+                "title": issue.title,
+                "state": issue.state,
+                "body": issue.body,
+                "comments": [],
+            },
+            expected_number=issue.number,
         )
-
-    def read_one(number: int) -> TicketLiveState:
-        try:
-            payload = ctx.github.issue_read(repo_path, number)
-            return ticket_live_state_from_issue(payload, expected_number=number)
-        except Exception:
-            return _unavailable_live_state(number)
-
-    def read_all() -> tuple[TicketLiveState, ...]:
-        workers = min(_MAX_LIVE_WORKERS, len(issue_numbers))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            states = tuple(pool.map(read_one, issue_numbers))
-        return tuple(sorted(states, key=lambda item: item.number))
-
-    return read_all()
+        for issue in snapshot.live_issues
+    }
+    return tuple(
+        by_number.get(node.number, _unavailable_live_state(node.number))
+        for node in snapshot.graph.nodes
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,12 +83,17 @@ class RepositoryIssueNextCommand:
     p2_wip_limit: int = 4
     p3_wip_limit: int = 4
     initiative_wip_limit: int = 2
+    fresh: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class RepositoryIssueNextResult:
     repo_id: str
-    manifest_found: bool
+    source: str
+    cache_hit: bool
+    observed_at: str
+    evidence_complete: bool
+    unavailable: list[int]
     valid: bool
     diagnostics: list[dict[str, Any]]
     tickets: list[dict[str, Any]]
@@ -106,7 +102,7 @@ class RepositoryIssueNextResult:
 
 
 class RepositoryIssueNextReader:
-    """Derive advisory delivery readiness from the graph and bounded live issue state."""
+    """Derive advisory readiness from one consistent GitHub graph observation."""
 
     def __init__(self, ctx: ApplicationContext):
         self.ctx = ctx
@@ -116,33 +112,88 @@ class RepositoryIssueNextReader:
             "repo_id": c.repo_id,
             "root_issue": c.root_issue,
             "limit": c.limit,
+            "fresh": c.fresh,
         }
+
+        def result(
+            snapshot: TicketGraphSnapshot,
+            cache_hit: bool,
+            *,
+            valid: bool,
+            diagnostics: list[dict[str, Any]],
+            tickets: list[dict[str, Any]],
+            assessments: list[dict[str, Any]],
+            repairs: list[dict[str, Any]],
+        ) -> RepositoryIssueNextResult:
+            return RepositoryIssueNextResult(
+                c.repo_id,
+                "github",
+                cache_hit,
+                snapshot.observed_at,
+                snapshot.evidence_complete,
+                list(snapshot.unavailable),
+                valid,
+                diagnostics,
+                tickets,
+                assessments,
+                repairs,
+            )
 
         def op() -> RepositoryIssueNextResult:
             if not isinstance(c.limit, int) or isinstance(c.limit, bool) or not 1 <= c.limit <= 100:
                 raise TicketGraphError("limit must be between 1 and 100")
             repo = self.ctx.repo(c.repo_id)
-            graph = load_repo_ticket_graph(repo.path)
-            if graph is None:
-                details["manifest_found"] = False
-                details["valid"] = False
-                details["ticket_count"] = 0
-                return RepositoryIssueNextResult(c.repo_id, False, False, [], [], [], [])
-
+            if repo.ticket_graph is None and c.root_issue is None:
+                details.update(
+                    source="github",
+                    cache_hit=False,
+                    evidence_complete=False,
+                    valid=False,
+                    diagnostic_count=1,
+                    ticket_count=0,
+                )
+                return RepositoryIssueNextResult(
+                    c.repo_id,
+                    "github",
+                    False,
+                    self.ctx.clock.now_iso(),
+                    False,
+                    [],
+                    False,
+                    [
+                        {
+                            "code": "GRAPH_NOT_CONFIGURED",
+                            "issue_number": 0,
+                            "message": "Configure repositories.<id>.ticket_graph.root_issue",
+                        }
+                    ],
+                    [],
+                    [],
+                    [],
+                )
+            snapshot, cache_hit = read_github_ticket_snapshot(
+                self.ctx,
+                repo,
+                root_issue=c.root_issue,
+                fresh=c.fresh,
+            )
+            graph = snapshot.graph
+            details["source"] = "github"
+            details["cache_hit"] = cache_hit
+            details["evidence_complete"] = snapshot.evidence_complete
             diagnostics = validate_ticket_graph(graph)
             if diagnostics:
-                details["manifest_found"] = True
                 details["valid"] = False
                 details["diagnostic_count"] = len(diagnostics)
                 details["ticket_count"] = 0
-                return RepositoryIssueNextResult(
-                    c.repo_id,
-                    True,
-                    False,
-                    [_diagnostic_payload(item) for item in diagnostics],
-                    [],
-                    [],
-                    [],
+                return result(
+                    snapshot,
+                    cache_hit,
+                    valid=False,
+                    diagnostics=[_diagnostic_payload(item) for item in diagnostics],
+                    tickets=[],
+                    assessments=[],
+                    repairs=[],
                 )
             if len(graph.nodes) > _MAX_LIVE_ISSUES:
                 diagnostic = TicketDiagnostic(
@@ -153,18 +204,17 @@ class RepositoryIssueNextReader:
                         f"to {_MAX_LIVE_ISSUES}"
                     ),
                 )
-                details["manifest_found"] = True
                 details["valid"] = False
                 details["diagnostic_count"] = 1
                 details["ticket_count"] = 0
-                return RepositoryIssueNextResult(
-                    c.repo_id,
-                    True,
-                    False,
-                    [_diagnostic_payload(diagnostic)],
-                    [],
-                    [],
-                    [],
+                return result(
+                    snapshot,
+                    cache_hit,
+                    valid=False,
+                    diagnostics=[_diagnostic_payload(diagnostic)],
+                    tickets=[],
+                    assessments=[],
+                    repairs=[],
                 )
 
             scope = (
@@ -179,25 +229,19 @@ class RepositoryIssueNextReader:
                 p3_limit=c.p3_wip_limit,
                 initiative_limit=c.initiative_wip_limit,
             )
-            live_states = _read_live_states(
-                self.ctx,
-                repo.path,
-                tuple(sorted(node.number for node in graph.nodes)),
-            )
-            report = derive_ticket_readiness(graph, live_states, policy=policy)
+            report = derive_ticket_readiness(graph, _live_states(snapshot), policy=policy)
             if report.diagnostics:
-                details["manifest_found"] = True
                 details["valid"] = False
                 details["diagnostic_count"] = len(report.diagnostics)
                 details["ticket_count"] = 0
-                return RepositoryIssueNextResult(
-                    c.repo_id,
-                    True,
-                    False,
-                    [_diagnostic_payload(item) for item in report.diagnostics],
-                    [],
-                    [],
-                    [],
+                return result(
+                    snapshot,
+                    cache_hit,
+                    valid=False,
+                    diagnostics=[_diagnostic_payload(item) for item in report.diagnostics],
+                    tickets=[],
+                    assessments=[],
+                    repairs=[],
                 )
 
             nodes = {node.number: node for node in graph.nodes}
@@ -218,17 +262,16 @@ class RepositoryIssueNextReader:
                 for item in report.assessments
                 if item.number in scope and item.metadata_repairs
             ]
-            details["manifest_found"] = True
             details["valid"] = True
             details["ticket_count"] = len(tickets)
-            return RepositoryIssueNextResult(
-                c.repo_id,
-                True,
-                True,
-                [],
-                tickets,
-                assessment_payloads,
-                repairs,
+            return result(
+                snapshot,
+                cache_hit,
+                valid=True,
+                diagnostics=[],
+                tickets=tickets,
+                assessments=assessment_payloads,
+                repairs=repairs,
             )
 
         return self.ctx.audited("repo_issue_next", details, op)

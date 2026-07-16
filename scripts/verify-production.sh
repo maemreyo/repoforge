@@ -26,8 +26,6 @@ export RUFF_CACHE_DIR="$TMP_ROOT/ruff-cache"
 
 echo "[integrity] synchronize frozen dependencies"
 uv sync --extra dev --frozen
-echo "[integrity] validate ticket graph"
-uv run python scripts/validate_ticket_graph.py
 echo "[integrity] validate release contract"
 uv run python scripts/check_release_contracts.py
 echo "[integrity] check formatting, lint, and types"

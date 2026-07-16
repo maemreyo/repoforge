@@ -34,3 +34,11 @@ class GitHubReadCache(Protocol):
         *,
         now_epoch: float,
     ) -> None: ...
+
+    def invalidate(
+        self,
+        repo_id: str,
+        repo_path: Path,
+        *,
+        kind: str | None = None,
+    ) -> int: ...

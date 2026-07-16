@@ -215,12 +215,9 @@ def test_select_ready_tickets_scopes_to_a_root_issue_subtree(tmp_path: Path) -> 
         select_ready_tickets(graph, limit=10, root_issue=999)
 
 
-def test_checked_in_ticket_graph_and_issue_forms_are_complete() -> None:
+def test_operational_graph_is_not_checked_in_and_issue_forms_are_complete() -> None:
     root = Path(__file__).parents[1]
-    graph = load_ticket_graph(root / "docs/roadmaps/REPOFORGE_TICKET_GRAPH.json")
-    assert graph.program_issue == 3
-    assert len(graph.nodes) >= 80
-    assert validate_ticket_graph(graph) == ()
+    assert not (root / "docs/roadmaps/REPOFORGE_TICKET_GRAPH.json").exists()
 
     required = {
         "Type",

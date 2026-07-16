@@ -186,15 +186,17 @@ See [SECURITY.md](SECURITY.md) for the detailed threat model and limitations.
 - Inspect Git status, remotes, branch state, manifests, scripts, and project instructions.
 - Read recent commits, GitHub issues, pull requests, reviews, and checks.
 
-### Ticket project synchronization
+### GitHub-native ticket graph
 
-- Compare the checked-in ticket graph with one existing GitHub Project V2.
-- Plan managed fields, project items, field values, views, sub-issues, and blocked-by relationships.
-- Default to a read-only dry-run with scope, project-access, rate-limit, conflict, and drift evidence.
-- Apply one stable idempotent change at a time, stop safely on partial failure, and preserve unmanaged state.
+- Derive the ticket tree from native GitHub sub-issues and blocked-by relationships.
+- Overlay optional Project V2 Status, Priority, Type, and Initiative fields.
+- Reuse one bounded graph snapshot for readiness instead of one live call per tracked issue.
+- Keep GitHub authoritative; no checked-in graph needs to be regenerated after ticket edits.
+- Optionally invalidate graph caches from signed GitHub webhooks.
 
-See [GitHub ticket project synchronization](docs/operations/TICKET_PROJECT_SYNC.md) for permissions,
-recovery, managed fields and views, and the explicit manual fallback for Project view sorting.
+See [ticket governance](docs/development/TICKET_GOVERNANCE.md),
+[Project consistency](docs/operations/TICKET_PROJECT_SYNC.md), and
+[webhook cache invalidation](docs/operations/GITHUB_WEBHOOKS.md).
 
 ### Isolated workspace lifecycle
 
@@ -342,13 +344,14 @@ rf repo remove repository-id
 
 Repository inspection and preview operations do not execute discovered commands. Capability expansion requires explicit approval of the current proposal.
 
-Synchronize the checked-in ticket graph with an existing GitHub Project and native issue relationships. The first command is read-only; the second performs the reviewed external writes:
+Inspect GitHub-native ticket and Project consistency without external writes:
 
 ```bash
 rf tickets sync --repo-id repoforge --owner maemreyo --project-number 7
-rf tickets sync --repo-id repoforge --owner maemreyo --project-number 7 --apply \
-  --idempotency-key repoforge-ticket-sync-2026-07-16
 ```
+
+The legacy `--apply` mode is retired. Make ticket, relationship, and Project changes
+directly in GitHub.
 
 ### Manage the runtime
 
@@ -434,9 +437,9 @@ make test
 make build
 ```
 
-`make tickets` validates `docs/roadmaps/REPOFORGE_TICKET_GRAPH.json` and prints the next deterministic Ready tickets. Add `--live-repo owner/name` to `scripts/validate_ticket_graph.py` for an optional bounded, read-only GitHub drift check.
+Ticket readiness is derived from GitHub sub-issues and blocked-by relationships; no checked-in graph file needs manual synchronization.
 
-Run the standard local gate:
+Run the fast standard gate used by agent workspaces:
 
 ```bash
 make check
@@ -445,7 +448,7 @@ make check
 Run the production release gate:
 
 ```bash
-scripts/verify-production.sh
+make production-check
 ```
 
 During development on a dirty tree:
