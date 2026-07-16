@@ -768,9 +768,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
     patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
     for proposal in proposals:
         document = apply_proposal(document, proposal)
-        document = apply_policy_patch(
-            document, proposal.repo_id, patch_by_id[proposal.repo_id]
-        )
+        document = apply_policy_patch(document, proposal.repo_id, patch_by_id[proposal.repo_id])
         fingerprint_map[proposal.repo_id] = proposal.facts_fingerprint
     fingerprints = tuple(sorted(fingerprint_map.items()))
     proposal_id = _combined_proposal_id(proposals)
@@ -1396,9 +1394,7 @@ def _serve(config_path: Path) -> int:
 
     def reload_in_process(generation: int) -> dict[str, object]:
         active = store.active()
-        store.stage_activation(
-            generation, expected_active=active.generation if active else None
-        )
+        store.stage_activation(generation, expected_active=active.generation if active else None)
         try:
             result = reloader.reload(
                 generation,
@@ -1418,9 +1414,7 @@ def _serve(config_path: Path) -> int:
     server_config = getattr(
         load_config(store.resolved_path(initial_generation.generation)), "server", None
     )
-    audit_state_root = (
-        server_config.state_root if server_config is not None else _state_root()
-    )
+    audit_state_root = server_config.state_root if server_config is not None else _state_root()
     admin = ConfigAdminService(
         store=store,
         proposals=RepositoryProposalService(_probe()),
@@ -1610,9 +1604,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub.add_parser("pending")
     config_approve = config_sub.add_parser("approve")
     config_approve.add_argument("change_id")
-    config_approve.add_argument(
-        "--activate", choices=("auto", "always", "never"), default="auto"
-    )
+    config_approve.add_argument("--activate", choices=("auto", "always", "never"), default="auto")
     config_reject = config_sub.add_parser("reject")
     config_reject.add_argument("change_id")
     show_config = commands.add_parser("show-config")
