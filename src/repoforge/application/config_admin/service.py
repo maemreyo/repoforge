@@ -47,6 +47,7 @@ from ...ports.ids import IdGenerator
 from ..configuration.document import (
     apply_policy_patch,
     apply_proposal,
+    apply_ticket_graph,
     parse_resolved,
     render_resolved,
 )
@@ -200,6 +201,22 @@ class ConfigAdminService:
             if not isinstance(entry, dict):
                 continue
             source_item = source_by_id.get(name)
+            source_graph = (
+                source_item.ticket_graph.as_table()
+                if source_item is not None and source_item.ticket_graph is not None
+                else None
+            )
+            accepted_raw = entry.get("ticket_graph")
+            accepted_graph = dict(accepted_raw) if isinstance(accepted_raw, dict) else None
+            graph_drift = (
+                "none"
+                if source_graph == accepted_graph
+                else "source_only"
+                if source_graph is not None and accepted_graph is None
+                else "accepted_only"
+                if source_graph is None and accepted_graph is not None
+                else "mismatch"
+            )
             repositories[name] = {
                 "path": entry.get("path"),
                 "read_only": entry.get("read_only", False),
@@ -221,6 +238,11 @@ class ConfigAdminService:
                 "decisions": dict(source_item.decisions) if source_item else {},
                 "policy_overrides": dict(source_item.policy_overrides) if source_item else {},
                 "policy_patch": source_item.policy_patch.as_table() if source_item else {},
+                "ticket_graph": {
+                    "source": source_graph,
+                    "accepted": accepted_graph,
+                    "drift": graph_drift,
+                },
             }
         return {
             "status": "ok",
@@ -340,6 +362,7 @@ class ConfigAdminService:
                     item.decisions,
                     tuple(sorted(merged_overrides.items())),
                     merged_patch,
+                    item.ticket_graph,
                 )
                 if item.repo_id == repo_id
                 else item
@@ -349,6 +372,7 @@ class ConfigAdminService:
         source_text = render_source(updated_source)
         document = parse_resolved(self._store.read_resolved_text(current.generation))
         document = apply_proposal(document, proposal)
+        document = apply_ticket_graph(document, repo_id, source_item.ticket_graph)
         try:
             document = apply_policy_patch(document, repo_id, merged_patch)
         except ValueError as exc:

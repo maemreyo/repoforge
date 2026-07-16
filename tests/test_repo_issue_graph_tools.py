@@ -83,10 +83,17 @@ class FixtureTicketGraphGateway:
             )
             for node in graph.nodes
         )
-        return TicketGraphSnapshot(graph, "2026-07-16T00:00:00+00:00", True, (), False, live)
+        return TicketGraphSnapshot(
+            graph,
+            "2026-07-16T00:00:00+00:00",
+            bool(state_payload.get("evidence_complete", True)),
+            tuple(int(item) for item in state_payload.get("unavailable", [])),
+            bool(state_payload.get("truncated", False)),
+            live,
+        )
 
 
-def _service(tmp_path: Path):
+def _service(tmp_path: Path, *, configured: bool = True):
     environment = create_forge_environment(tmp_path)
     _write_manifest(
         environment.source,
@@ -95,7 +102,9 @@ def _service(tmp_path: Path):
     config = load_config(environment.config_path)
     repo = replace(
         config.repositories["demo"],
-        ticket_graph=GitHubTicketGraphConfig(root_issue=3, repository="owner/demo"),
+        ticket_graph=(
+            GitHubTicketGraphConfig(root_issue=3, repository="owner/demo") if configured else None
+        ),
     )
     config = replace(config, repositories={"demo": repo})
     gateway = FixtureTicketGraphGateway(environment.source, environment.gh_state)
@@ -120,6 +129,31 @@ def _audit_events_with_prefix(root: Path, prefix: str) -> list[dict[str, object]
         json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line
     ]
     return [event for event in events if str(event.get("action", "")).startswith(prefix)]
+
+
+def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path, configured=False)
+
+    result = service.repo_issue_graph("demo")
+
+    assert result["valid"] is False
+    assert result["nodes"] == []
+    assert result["diagnostics"] == [
+        {
+            "code": "GRAPH_NOT_CONFIGURED",
+            "issue_number": 0,
+            "message": "Configure repositories.demo.ticket_graph.root_issue",
+        }
+    ]
+    assert result["coverage"] == {
+        "configured_root": None,
+        "observed_root": None,
+        "observed_nodes": 0,
+        "unavailable": [],
+        "truncated": False,
+        "evidence_complete": False,
+    }
+    assert "rf repo refresh demo" in result["safe_next_action"]
 
 
 def test_repo_issue_graph_uses_github_snapshot_without_production_manifest(tmp_path: Path) -> None:
@@ -171,6 +205,36 @@ def test_repo_issue_graph_rejects_a_non_initiative_scope(tmp_path: Path) -> None
 
     with pytest.raises(TicketGraphError, match="not an initiative"):
         service.repo_issue_graph("demo", initiative=9)
+
+
+def test_repo_issue_next_fails_closed_when_graph_evidence_is_incomplete(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, status="Ready")
+    _write_manifest(environment.source, [program, ready])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
+                "evidence_complete": False,
+                "unavailable": [9],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is False
+    assert result["tickets"] == []
+    assert result["assessments"] == []
+    assert result["diagnostics"] == [
+        {
+            "code": "GRAPH_EVIDENCE_INCOMPLETE",
+            "issue_number": 3,
+            "message": "GitHub ticket graph evidence is incomplete; unavailable issues: 9",
+        }
+    ]
 
 
 def test_repo_issue_next_reports_diagnostics_for_an_invalid_manifest(tmp_path: Path) -> None:

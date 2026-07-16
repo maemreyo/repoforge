@@ -134,6 +134,50 @@ def test_source_round_trips_policy_patch() -> None:
     assert parse_source(text) == config
 
 
+def test_source_round_trips_ticket_graph_metadata() -> None:
+    text = """version = 2
+[[repo]]
+id = "demo"
+path = "/tmp/demo"
+
+[repositories.demo.ticket_graph]
+root_issue = 3
+repository = "acme/demo"
+project_owner = "acme"
+project_number = 7
+project_owner_type = "organization"
+status_field = "Delivery Status"
+priority_field = "Delivery Priority"
+initiative_field = "Initiative"
+type_field = "Ticket Type"
+"""
+
+    parsed = parse_source(text)
+    graph = parsed.repositories[0].ticket_graph
+
+    assert graph is not None
+    assert graph.root_issue == 3
+    assert graph.repository == "acme/demo"
+    assert graph.project_owner == "acme"
+    assert graph.project_number == 7
+    assert graph.status_field == "Delivery Status"
+    assert parse_source(render_source(parsed)) == parsed
+
+
+def test_source_rejects_ticket_graph_for_unknown_repository() -> None:
+    text = """version = 2
+[[repo]]
+id = "demo"
+path = "/tmp/demo"
+
+[repositories.missing.ticket_graph]
+root_issue = 3
+"""
+
+    with pytest.raises(ValueError, match="unknown repository"):
+        parse_source(text)
+
+
 def test_source_rejects_invalid_policy_patch() -> None:
     text = (
         'version = 2\n[[repo]]\nid = "demo"\npath = "/tmp/demo"\n'
@@ -288,6 +332,23 @@ def _admin(tmp_path: Path, *, reload_calls: list[int] | None = None) -> ConfigAd
         read_log=read_runtime_log,
         reload_runtime=reload_runtime,
     )
+
+
+def test_config_inspect_reports_source_ticket_graph_drift(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    source_path = tmp_path / "config.toml"
+    source_path.write_text(
+        source_path.read_text(encoding="utf-8")
+        + '\n[repositories.demo.ticket_graph]\nroot_issue = 3\nrepository = "acme/demo"\n',
+        encoding="utf-8",
+    )
+
+    inspected = admin.config_inspect("demo")["repositories"]["demo"]["ticket_graph"]
+
+    assert inspected["source"]["root_issue"] == 3
+    assert inspected["source"]["repository"] == "acme/demo"
+    assert inspected["accepted"] is None
+    assert inspected["drift"] == "source_only"
 
 
 def test_restriction_is_applied_immediately_with_hot_reload(tmp_path: Path) -> None:

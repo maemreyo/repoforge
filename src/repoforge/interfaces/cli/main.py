@@ -21,6 +21,7 @@ from ...application.config_admin import ConfigAdminService, PendingPolicyChangeS
 from ...application.configuration.document import (
     apply_policy_patch,
     apply_proposal,
+    apply_ticket_graph,
     parse_resolved,
     remove_repository,
     render_resolved,
@@ -29,6 +30,7 @@ from ...application.configuration.paths import resolve_repoforge_paths
 from ...application.configuration.source import (
     SourceConfiguration,
     SourceRepository,
+    SourceTicketGraph,
     add_source_repository,
     parse_source,
     remove_source_repository,
@@ -205,7 +207,25 @@ def _source_for_display(store: ConfigurationStore) -> SourceConfiguration:
             os.environ.get("REPOFORGE_TUNNEL_ID", "legacy-unconfigured"),
             os.environ.get("REPOFORGE_TUNNEL_PROFILE", "repoforge"),
             tuple(
-                SourceRepository(repo.repo_id, str(repo.path))
+                SourceRepository(
+                    repo.repo_id,
+                    str(repo.path),
+                    ticket_graph=(
+                        SourceTicketGraph(
+                            root_issue=repo.ticket_graph.root_issue,
+                            repository=repo.ticket_graph.repository,
+                            project_owner=repo.ticket_graph.project_owner,
+                            project_number=repo.ticket_graph.project_number,
+                            project_owner_type=repo.ticket_graph.project_owner_type,
+                            status_field=repo.ticket_graph.status_field,
+                            priority_field=repo.ticket_graph.priority_field,
+                            initiative_field=repo.ticket_graph.initiative_field,
+                            type_field=repo.ticket_graph.type_field,
+                        )
+                        if repo.ticket_graph is not None
+                        else None
+                    ),
+                )
                 for repo in sorted(config.repositories.values(), key=lambda item: item.repo_id)
             ),
         )
@@ -758,6 +778,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
                 tuple(sorted(effective_inputs[item.repo_id][0].items())),
                 tuple(sorted(effective_inputs[item.repo_id][1].items())),
                 item.policy_patch,
+                item.ticket_graph,
             )
             if item.repo_id in proposal_by_id
             else item
@@ -768,8 +789,10 @@ def _repo_refresh(args: argparse.Namespace) -> int:
     document = parse_resolved(store.read_resolved_text())
     fingerprint_map = current.repository_fingerprint_map()
     patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
+    graph_by_id = {item.repo_id: item.ticket_graph for item in source.repositories}
     for proposal in proposals:
         document = apply_proposal(document, proposal)
+        document = apply_ticket_graph(document, proposal.repo_id, graph_by_id[proposal.repo_id])
         document = apply_policy_patch(document, proposal.repo_id, patch_by_id[proposal.repo_id])
         fingerprint_map[proposal.repo_id] = proposal.facts_fingerprint
     fingerprints = tuple(sorted(fingerprint_map.items()))

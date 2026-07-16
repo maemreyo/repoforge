@@ -11,6 +11,7 @@ import tomli as tomllib
 from ...domain.policy_patch import RepositoryPolicyPatch
 from ...domain.repository_proposal import RepositoryProposal
 from ...domain.user_paths import DEFAULT_STATE_ROOT, DEFAULT_WORKSPACE_ROOT
+from .source import SourceTicketGraph
 
 RESOLVED_CONFIG_FORMAT_VERSION = 3
 
@@ -57,6 +58,12 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
     if not isinstance(repositories, dict):
         raise ValueError("repositories must be a table")
     policy = proposal.policy
+    existing = repositories.get(proposal.repo_id)
+    existing_ticket_graph = (
+        deepcopy(existing.get("ticket_graph"))
+        if isinstance(existing, dict) and isinstance(existing.get("ticket_graph"), dict)
+        else None
+    )
     profile_map: dict[str, Any] = {}
     for profile in policy.profiles:
         profile_map[profile.name] = {
@@ -95,6 +102,8 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
     }
     if default_profile:
         repo["default_verification_profile"] = default_profile
+    if existing_ticket_graph is not None:
+        repo["ticket_graph"] = existing_ticket_graph
     repositories[proposal.repo_id] = repo
     return result
 
@@ -153,6 +162,25 @@ def apply_policy_patch(
         formatters[name] = deepcopy(table)
     for name in patch.remove_formatters:
         formatters.pop(name, None)
+    return result
+
+
+def apply_ticket_graph(
+    document: dict[str, Any], repo_id: str, ticket_graph: SourceTicketGraph | None
+) -> dict[str, Any]:
+    """Layer human-owned GitHub ticket metadata over one resolved repository entry."""
+
+    result = deepcopy(document)
+    repositories = result.get("repositories")
+    if not isinstance(repositories, dict) or repo_id not in repositories:
+        raise ValueError(f"Unknown repository id: {repo_id}")
+    repo = repositories[repo_id]
+    if not isinstance(repo, dict):
+        raise ValueError(f"repositories.{repo_id} must be a table")
+    if ticket_graph is None:
+        repo.pop("ticket_graph", None)
+    else:
+        repo["ticket_graph"] = ticket_graph.as_table()
     return result
 
 
@@ -247,7 +275,14 @@ def render_resolved(
             for key in sorted(
                 k
                 for k in raw
-                if k not in {"profiles", "diagnostics", "formatters", "resource_budget"}
+                if k
+                not in {
+                    "profiles",
+                    "diagnostics",
+                    "formatters",
+                    "resource_budget",
+                    "ticket_graph",
+                }
             ):
                 value = raw[key]
                 if isinstance(value, (str, int, bool, list)):
@@ -258,6 +293,13 @@ def render_resolved(
                 for key in sorted(resource_budget):
                     value = resource_budget[key]
                     if isinstance(value, int):
+                        lines.append(f"{key} = {_toml(value)}")
+            ticket_graph = raw.get("ticket_graph")
+            if isinstance(ticket_graph, dict):
+                lines.extend(["", f"[repositories.{repo_id}.ticket_graph]"])
+                for key in sorted(ticket_graph):
+                    value = ticket_graph[key]
+                    if isinstance(value, (str, int)) and not isinstance(value, bool):
                         lines.append(f"{key} = {_toml(value)}")
             profiles = raw.get("profiles", {})
             if isinstance(profiles, dict):
