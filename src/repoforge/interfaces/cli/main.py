@@ -58,6 +58,7 @@ from ...bootstrap import (
     id_generator,
     read_audit_events,
     read_runtime_log,
+    summarize_command_source_stats,
     summarize_operation_metrics,
     system_clock,
     write_private_file,
@@ -1686,6 +1687,7 @@ def main(argv: list[str] | None = None) -> int:
                     "operations": summarize_operation_metrics(
                         service.metrics.snapshot(), since=since, until=until
                     ),
+                    "command_source": summarize_command_source_stats(service.audit.path),
                 }
                 if since is not None or until is not None:
                     stats_payload["since"] = since

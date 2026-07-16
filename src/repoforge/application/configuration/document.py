@@ -233,6 +233,13 @@ def render_resolved(
                     for key in (
                         "summary",
                         "selector_kind",
+                        "selector_max_length",
+                        "selector_max_values",
+                        "selector_expansion",
+                        "selector_separator",
+                        "selector_prefix",
+                        "selector_suffix",
+                        "selector_allow_leading_dash",
                         "timeout_seconds",
                         "network_policy",
                         "mutability",
@@ -242,10 +249,44 @@ def render_resolved(
                     ):
                         if key in diagnostic and isinstance(diagnostic[key], (str, int, bool)):
                             lines.append(f"{key} = {_toml(diagnostic[key])}")
-                    for key in ("argv", "selector_values", "artifact_paths"):
+                    for key in (
+                        "argv",
+                        "selector_values",
+                        "selector_char_classes",
+                        "artifact_paths",
+                    ):
                         value = diagnostic.get(key)
                         if isinstance(value, list):
                             lines.append(f"{key} = {_toml(value)}")
+                    selectors = diagnostic.get("selectors")
+                    if isinstance(selectors, dict):
+                        for extra_name in sorted(selectors):
+                            extra = selectors[extra_name]
+                            if not isinstance(extra, dict):
+                                continue
+                            lines.extend(
+                                [
+                                    "",
+                                    f"[repositories.{repo_id}.diagnostics.{diagnostic_id}"
+                                    f".selectors.{extra_name}]",
+                                ]
+                            )
+                            for key in (
+                                "kind",
+                                "max_length",
+                                "max_values",
+                                "expansion",
+                                "separator",
+                                "prefix",
+                                "suffix",
+                                "allow_leading_dash",
+                            ):
+                                if key in extra and isinstance(extra[key], (str, int, bool)):
+                                    lines.append(f"{key} = {_toml(extra[key])}")
+                            for key in ("values", "char_classes"):
+                                value = extra.get(key)
+                                if isinstance(value, list):
+                                    lines.append(f"{key} = {_toml(value)}")
             formatters = raw.get("formatters", {})
             if isinstance(formatters, dict):
                 for formatter_id in sorted(formatters):

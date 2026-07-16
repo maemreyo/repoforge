@@ -22,18 +22,19 @@ from ...ports.command import CommandResult
 from ..context import ApplicationContext
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from .diagnostic_parser import evaluate_diagnostic_expectation, parse_diagnostic
-from .diagnostic_selector import resolve_diagnostic_selector
+from .diagnostic_selector import SelectorInput, resolve_diagnostic_selector
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRunDiagnosticCommand:
     workspace_id: str
     diagnostic_id: str
-    selector: str | None = None
+    selector: SelectorInput = None
     expected_fingerprint: str | None = None
     intent: VerificationIntent | str | None = None
     expectation: DiagnosticExpectation | str | None = None
     expected_failure_class: DiagnosticFailureClass | str | None = None
+    selector2: SelectorInput = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class WorkspaceRunDiagnosticResult:
     summary: str
     selector_kind: str
     resolved_selector: str | None
+    resolved_selectors: dict[str, list[str]]
     argv: list[str]
     working_directory: str
     network_policy: str
@@ -219,6 +221,7 @@ class WorkspaceDiagnosticRunner:
                 resolved = resolve_diagnostic_selector(
                     locked_profile,
                     command.selector,
+                    command.selector2,
                     workspace=locked_workspace,
                     repo=locked_repo,
                     git=self.ctx.git,
@@ -359,6 +362,9 @@ class WorkspaceDiagnosticRunner:
                     summary=locked_profile.summary,
                     selector_kind=locked_profile.selector.kind.value,
                     resolved_selector=resolved.value,
+                    resolved_selectors={
+                        name: list(values) for name, values in resolved.values.items() if values
+                    },
                     argv=list(result.argv),
                     working_directory=str(command_cwd.relative_to(locked_workspace) or "."),
                     network_policy=locked_profile.network_policy.value,

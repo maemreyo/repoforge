@@ -260,7 +260,7 @@ def test_audit_records_success_for_both_hit_and_miss(tmp_path: Path) -> None:
 
 def test_cache_file_and_directory_are_private(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
-    cache.put("demo", "issue", 1, {"number": 1}, now_epoch=1_000.0)
+    cache.put("demo", tmp_path, "issue", 1, {"number": 1}, now_epoch=1_000.0)
     path = tmp_path / "github-read-cache.json"
     assert os.stat(path).st_mode & 0o777 == 0o600
     assert os.stat(path.parent).st_mode & 0o777 == 0o700
@@ -268,35 +268,60 @@ def test_cache_file_and_directory_are_private(tmp_path: Path) -> None:
 
 def test_cache_get_put_roundtrip(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
-    cache.put("demo", "issue", 1, {"number": 1, "title": "hello"}, now_epoch=1_000.0)
-    result = cache.get("demo", "issue", 1, ttl_seconds=120, now_epoch=1_010.0)
+    cache.put("demo", tmp_path, "issue", 1, {"number": 1, "title": "hello"}, now_epoch=1_000.0)
+    result = cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_010.0)
     assert result == {"number": 1, "title": "hello"}
 
 
 def test_cache_miss_for_unknown_key(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
-    assert cache.get("demo", "issue", 99, ttl_seconds=120, now_epoch=1_000.0) is None
+    assert cache.get("demo", tmp_path, "issue", 99, ttl_seconds=120, now_epoch=1_000.0) is None
+
+
+def test_cache_miss_when_repository_path_differs(tmp_path: Path) -> None:
+    """A `repo_id` repointed at a different checkout must never serve the prior
+    checkout's cached entry, even within TTL."""
+    cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
+    old_repo = tmp_path / "old-repo"
+    new_repo = tmp_path / "new-repo"
+    old_repo.mkdir()
+    new_repo.mkdir()
+    cache.put(
+        "demo", old_repo, "issue", 1, {"number": 1, "title": "old repo issue"}, now_epoch=1_000.0
+    )
+
+    assert cache.get("demo", old_repo, "issue", 1, ttl_seconds=120, now_epoch=1_001.0) is not None
+    assert cache.get("demo", new_repo, "issue", 1, ttl_seconds=120, now_epoch=1_001.0) is None
 
 
 def test_cache_ttl_expiry_is_a_miss(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
-    cache.put("demo", "pr", 2, {"number": 2}, now_epoch=1_000.0)
-    assert cache.get("demo", "pr", 2, ttl_seconds=60, now_epoch=1_050.0) is not None
-    assert cache.get("demo", "pr", 2, ttl_seconds=60, now_epoch=1_061.0) is None
+    cache.put("demo", tmp_path, "pr", 2, {"number": 2}, now_epoch=1_000.0)
+    assert cache.get("demo", tmp_path, "pr", 2, ttl_seconds=60, now_epoch=1_050.0) is not None
+    assert cache.get("demo", tmp_path, "pr", 2, ttl_seconds=60, now_epoch=1_061.0) is None
 
 
 def test_cache_lru_eviction_refreshes_recency_on_hit(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager(), max_entries=2)
-    cache.put("demo", "issue", 1, {"number": 1}, now_epoch=1_000.0)
-    cache.put("demo", "issue", 2, {"number": 2}, now_epoch=1_001.0)
+    cache.put("demo", tmp_path, "issue", 1, {"number": 1}, now_epoch=1_000.0)
+    cache.put("demo", tmp_path, "issue", 2, {"number": 2}, now_epoch=1_001.0)
 
     # Reading entry 1 makes entry 2 the least recently used item.
-    assert cache.get("demo", "issue", 1, ttl_seconds=1_000_000, now_epoch=1_002.0) is not None
-    cache.put("demo", "issue", 3, {"number": 3}, now_epoch=1_003.0)
+    assert (
+        cache.get("demo", tmp_path, "issue", 1, ttl_seconds=1_000_000, now_epoch=1_002.0)
+        is not None
+    )
+    cache.put("demo", tmp_path, "issue", 3, {"number": 3}, now_epoch=1_003.0)
 
-    assert cache.get("demo", "issue", 1, ttl_seconds=1_000_000, now_epoch=1_004.0) is not None
-    assert cache.get("demo", "issue", 2, ttl_seconds=1_000_000, now_epoch=1_004.0) is None
-    assert cache.get("demo", "issue", 3, ttl_seconds=1_000_000, now_epoch=1_004.0) is not None
+    assert (
+        cache.get("demo", tmp_path, "issue", 1, ttl_seconds=1_000_000, now_epoch=1_004.0)
+        is not None
+    )
+    assert cache.get("demo", tmp_path, "issue", 2, ttl_seconds=1_000_000, now_epoch=1_004.0) is None
+    assert (
+        cache.get("demo", tmp_path, "issue", 3, ttl_seconds=1_000_000, now_epoch=1_004.0)
+        is not None
+    )
 
 
 def test_cache_corrupt_file_falls_back_to_miss_without_raising(tmp_path: Path) -> None:
@@ -304,11 +329,13 @@ def test_cache_corrupt_file_falls_back_to_miss_without_raising(tmp_path: Path) -
     path = tmp_path / "github-read-cache.json"
     path.write_text("{not valid json", encoding="utf-8")
 
-    assert cache.get("demo", "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
+    assert cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
 
     # A corrupt file must not prevent future writes from succeeding.
-    cache.put("demo", "issue", 1, {"number": 1}, now_epoch=1_000.0)
-    assert cache.get("demo", "issue", 1, ttl_seconds=120, now_epoch=1_000.0) == {"number": 1}
+    cache.put("demo", tmp_path, "issue", 1, {"number": 1}, now_epoch=1_000.0)
+    assert cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_000.0) == {
+        "number": 1
+    }
 
 
 def test_cache_malformed_entry_shape_falls_back_to_miss(tmp_path: Path) -> None:
@@ -318,25 +345,25 @@ def test_cache_malformed_entry_shape_falls_back_to_miss(tmp_path: Path) -> None:
         json.dumps({"version": 1, "entries": {"demo:issue:1": {"payload": "not-a-dict"}}}),
         encoding="utf-8",
     )
-    assert cache.get("demo", "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
+    assert cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
 
     path.write_text(
         json.dumps({"version": 1, "entries": "not-a-dict"}),
         encoding="utf-8",
     )
-    assert cache.get("demo", "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
+    assert cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
 
 
 def test_cache_put_skips_oversized_entry_without_raising(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager(), max_entry_bytes=100)
-    cache.put("demo", "issue", 1, {"number": 1, "body": "x" * 1_000}, now_epoch=1_000.0)
-    assert cache.get("demo", "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
+    cache.put("demo", tmp_path, "issue", 1, {"number": 1, "body": "x" * 1_000}, now_epoch=1_000.0)
+    assert cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
 
 
 def test_cache_put_skips_non_serializable_payload_without_raising(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
-    cache.put("demo", "issue", 1, {"bad": object()}, now_epoch=1_000.0)
-    assert cache.get("demo", "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
+    cache.put("demo", tmp_path, "issue", 1, {"bad": object()}, now_epoch=1_000.0)
+    assert cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
 
 
 # --------------------------------------------------------------------------

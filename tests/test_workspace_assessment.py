@@ -11,6 +11,7 @@ from repoforge.application.workspace.assessment import (
     WorkspaceAssessmentCommand,
     WorkspaceAssessmentReader,
 )
+from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.domain.assessment import (
     AssessmentCoverage,
     AssessmentEvidenceStatus,
@@ -26,12 +27,9 @@ def _changed_workspace(env: ForgeEnvironment) -> str:
     created = env.service.workspace_create("demo", "assessment")
     workspace_id = created["workspace_id"]
     current = env.service.workspace_read_file(workspace_id, "hello.txt")
-    env.service.workspace_replace_text(
+    env.service.workspace_edit(
         workspace_id,
-        "hello.txt",
-        "hello",
-        "assessment change",
-        current["sha256"],
+        [FileEdit("hello.txt", current["sha256"], (TextEdit("hello", "assessment change"),))],
     )
     return workspace_id
 

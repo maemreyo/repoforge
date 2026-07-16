@@ -12,6 +12,7 @@ from repoforge.adapters.persistence.json_pr_check_watch_store import (
     JsonPrCheckWatchStore,
 )
 from repoforge.application.operations.recovery import recover_operations
+from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.application.workspace.pr_watch import (
     PrCheckWatchCoordinator,
     WorkspacePrWatchCommand,
@@ -84,12 +85,9 @@ def _published_workspace(env: ForgeEnvironment) -> str:
     created = env.service.workspace_create("demo", "watch checks")
     workspace_id = created["workspace_id"]
     current = env.service.workspace_read_file(workspace_id, "hello.txt")
-    env.service.workspace_replace_text(
+    env.service.workspace_edit(
         workspace_id,
-        "hello.txt",
-        "hello",
-        "changed for watch",
-        current["sha256"],
+        [FileEdit("hello.txt", current["sha256"], (TextEdit("hello", "changed for watch"),))],
     )
     env.service.workspace_verify(workspace_id)
     env.service.workspace_commit(workspace_id, "Prepare PR watch")

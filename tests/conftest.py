@@ -248,6 +248,8 @@ def create_forge_environment(
     max_changed_files: int = 20,
     require_verification: bool = True,
     clock: Clock | None = None,
+    execution_mode: str = "strict",
+    adhoc_runners: tuple[str, ...] = (),
 ) -> ForgeEnvironment:
     remote = tmp_path / "remote.git"
     git("init", "--bare", str(remote), cwd=tmp_path)
@@ -309,6 +311,8 @@ denied_paths = [".git", ".git/**", ".env", ".github/workflows/**", "**/*.pem"]
 pr_labels = ["agent"]
 pr_reviewers = ["reviewer"]
 no_maintainer_edit = true
+execution_mode = "{execution_mode}"
+adhoc_runners = {json.dumps(list(adhoc_runners))}
 
 [repositories.demo.profiles.quick]
 description = "Fast non-gating check"

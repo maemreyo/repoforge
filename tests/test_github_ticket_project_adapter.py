@@ -242,6 +242,105 @@ def test_snapshot_reads_project_fields_items_issue_ids_and_declared_edges(tmp_pa
     assert all(call[:2] == ("gh", "api") for call in executor.calls[4:])
 
 
+def test_snapshot_flags_truncated_issue_identity_scan_and_item_fetch(tmp_path: Path) -> None:
+    """A bounded issue-identity page scan or item-list fetch that never confirmed it saw
+    every relevant record must flag `identities_truncated`/`items_truncated` rather than
+    silently reporting a snapshot the planner would treat as ground truth."""
+    gateway, executor = _gateway(tmp_path)
+
+    def issue_page(argv: tuple[str, ...]) -> CommandResult:
+        endpoint = next(item for item in argv if "page=" in item)
+        page = int(endpoint.rsplit("page=", 1)[1])
+        start = 5 + (page - 1) * 100
+        records = [
+            {"number": start + i, "id": 5000 + start + i, "node_id": f"ISSUE_{start + i}"}
+            for i in range(100)
+        ]
+        return _result(json.dumps(records))
+
+    item_limit = len(_graph().nodes) + 100  # matches gateway.snapshot's own computation
+    items_page = [
+        {
+            "id": f"ITEM_{number}",
+            "content": {"number": number, "repository": "maemreyo/repoforge"},
+            "fieldValues": [],
+        }
+        for number in range(5, 5 + item_limit)
+    ]
+
+    executor.enqueue(
+        _result("maemreyo/repoforge\n"),
+        _result(json.dumps({"id": "PVT_1", "title": "Delivery"})),
+        _result(json.dumps({"fields": []})),
+        _result(json.dumps({"items": items_page})),
+        _result(json.dumps({"data": {"node": {"views": {"nodes": []}}}})),
+        *([issue_page] * 20),  # exhausts _MAX_ISSUE_PAGES without ever finding #1-#4
+        _result(json.dumps([])),  # sub-issues for parent #1
+        _result(json.dumps([])),  # sub-issues for parent #2
+        _result(json.dumps([])),  # blocked-by for #3
+    )
+
+    snapshot = gateway.snapshot(tmp_path, _target(), _graph())
+
+    assert snapshot.identities_truncated is True
+    assert snapshot.items_truncated is True
+    assert snapshot.issue_identities == {}
+
+
+def test_snapshot_excludes_items_from_other_repositories_and_missing_repository_identity(
+    tmp_path: Path,
+) -> None:
+    """A multi-repo Project can reuse the same issue number across repositories; an item
+    must be excluded (not mapped by number alone) unless its repository identity is
+    present and matches this repository, even when that identity is missing entirely."""
+    gateway, executor = _gateway(tmp_path)
+    executor.enqueue(
+        _result("maemreyo/repoforge\n"),
+        _result(json.dumps({"id": "PVT_1", "title": "Delivery"})),
+        _result(json.dumps({"fields": []})),
+        _result(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "id": "ITEM_own",
+                            "content": {"number": 4, "repository": "maemreyo/repoforge"},
+                            "fieldValues": [],
+                        },
+                        {
+                            "id": "ITEM_other_repo",
+                            "content": {"number": 3, "repository": "maemreyo/other-repo"},
+                            "fieldValues": [],
+                        },
+                        {
+                            "id": "ITEM_no_repo",
+                            "content": {"number": 2},
+                            "fieldValues": [],
+                        },
+                    ]
+                }
+            )
+        ),
+        _result(json.dumps({"data": {"node": {"views": {"nodes": []}}}})),
+        _result(
+            json.dumps(
+                [
+                    {"number": number, "id": 1000 + number, "node_id": f"ISSUE_{number}"}
+                    for number in range(1, 5)
+                ]
+            )
+        ),
+        _result(json.dumps([])),
+        _result(json.dumps([])),
+        _result(json.dumps([])),
+    )
+
+    snapshot = gateway.snapshot(tmp_path, _target(), _graph())
+
+    assert set(snapshot.items) == {4}
+    assert snapshot.items[4].item_id == "ITEM_own"
+
+
 def test_apply_change_uses_constrained_native_commands_and_view_fallback(tmp_path: Path) -> None:
     gateway, executor = _gateway(tmp_path)
     field = TicketSyncChange.create(

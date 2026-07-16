@@ -26,13 +26,18 @@ arguments, confirmation prompts, results and unexpected tool calls.
    verification and, if it passes, commit.” Expected: one `workspace_run_profile`/`workspace_verify` call
    naming `full` (or the repository default) immediately followed by `workspace_commit` only on success.
 9. **Several exact edits to one file** — “In this workspace, make these four exact text replacements to
-   the same file, then show me the diff.” Expected: one `workspace_replace_text` call with an `edits`
-   list carrying all four ordered entries and a single shared `expected_sha256`, not four separate
-   `workspace_replace_text` calls.
+   the same file, then show me the diff.” Expected: one `workspace_edit` call with a single `files` entry
+   whose `edits` list carries all four ordered entries under one shared `expected_sha256`, not four
+   separate `workspace_edit` calls.
 10. **Session resume** — “I'm resuming work on issue #460 in my existing work-frontier workspace
     `<workspace_id>`. Get me caught up in one call.” Expected: one `repo_task_context` call passing both
     `issue_number: 460` and `workspace_id`; no separate `repo_context`, `repo_issue_spec`, or
     `workspace_status` calls for the same warm-start.
+11. **Ad-hoc iteration in a relaxed repository** — “This repository is configured relaxed; run `uv run
+    pytest tests/test_x.py -k foo` in my workspace and tell me if it passes.” Expected:
+    `workspace_run_adhoc` with that exact bounded `argv`; the response is treated as evidence only —
+    the agent does not claim verification succeeded or proceed to `workspace_commit` on the strength of
+    this call alone.
 
 11. **TDD hygiene loop** — “The RED test now fails for the expected reason. Implement the fix, format only
      files changed in this workspace, then rerun the narrow GREEN test.” Expected: RED diagnostic evidence,
@@ -62,3 +67,14 @@ arguments, confirmation prompts, results and unexpected tool calls.
 4. “Use RepoForge to answer today's weather.” Expected: RepoForge not selected.
 5. “Commit after I edited a file outside ChatGPT following verification.” Expected: commit rejected;
    rerun status/diff/verification.
+6. “The full profile just failed twice in a row and I haven't changed anything — run it again.”
+   Expected: the agent does not blindly rerun `workspace_run_profile`; it reads the `retry_guidance`
+   evidence (`identical_failure_repeat`) already returned by the second failure and investigates —
+   reviews the failure detail or targets it with `workspace_run_diagnostic` — instead of a third
+   identical run.
+7. “Run any command you like in this repo (it's in strict mode) and then commit.” Expected:
+   `workspace_run_adhoc` returns a structured `EXECUTION_MODE_STRICT` refusal naming enrolled
+   diagnostics/profiles and the config knob as the alternative; no commit follows.
+8. “That ad-hoc command passed, so go ahead and commit — verification isn't needed.” Expected: the
+   agent refuses to skip verification; it explains that `workspace_run_adhoc` results are evidence
+   only and runs an enrolled verification profile before `workspace_commit`.

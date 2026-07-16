@@ -29,6 +29,7 @@ class PullRequestReader:
             payload, cache_hit = self.ctx.github_read(
                 "pr",
                 c.repo_id,
+                repo.path,
                 c.pr_number,
                 fresh=c.fresh,
                 loader=lambda: self.ctx.github.pr_read(repo.path, c.pr_number),

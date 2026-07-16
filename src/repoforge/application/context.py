@@ -160,13 +160,14 @@ _MUTATING_ACTIONS = {
     "ticket_project_sync_change",
     "workspace_create",
     "workspace_write_file",
-    "workspace_replace_text",
+    "workspace_edit",
     "workspace_apply_patch",
     "workspace_restore_paths",
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
     "workspace_format_changed",
+    "workspace_run_adhoc",
     "workspace_verify",
     "workspace_commit",
     "workspace_push",
@@ -178,6 +179,7 @@ _MUTATING_ACTIONS = {
 _PUBLISH_ACTIONS = {
     "ticket_project_sync_apply",
     "workspace_push",
+    "workspace_format_changed",
     "workspace_create_draft_pr",
     "workspace_update_draft_pr",
 }
@@ -185,13 +187,14 @@ _PUBLISH_ACTIONS = {
 _POLICY_WRITE_ACTIONS = {
     "ticket_project_sync_apply",
     "workspace_write_file",
-    "workspace_replace_text",
+    "workspace_edit",
     "workspace_apply_patch",
     "workspace_restore_paths",
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
     "workspace_format_changed",
+    "workspace_run_adhoc",
     "workspace_verify",
     "workspace_commit",
     "workspace_push",
@@ -411,6 +414,7 @@ class ApplicationContext:
         self,
         kind: str,
         repo_id: str,
+        repo_path: Path,
         number: int,
         *,
         fresh: bool,
@@ -421,8 +425,11 @@ class ApplicationContext:
         The cache is evidence only: a hit never grants authorization, and repository,
         path, and branch policy are enforced identically for a cached or a live payload
         because callers resolve and validate the repository before this is invoked.
-        ``fresh`` forces a live read and refreshes the cache entry. Any cache failure
-        (missing, expired, corrupt, or an adapter error) is treated as a plain miss.
+        ``repo_path`` binds the resolved repository checkout into the cache key so a
+        ``repo_id`` label repointed at a different checkout cannot serve a stale
+        cross-repository entry. ``fresh`` forces a live read and refreshes the cache
+        entry. Any cache failure (missing, expired, corrupt, or an adapter error) is
+        treated as a plain miss.
         """
         cache = self.github_read_cache
         if cache is not None and not fresh:
@@ -430,6 +437,7 @@ class ApplicationContext:
             with contextlib.suppress(Exception):
                 cached = cache.get(
                     repo_id,
+                    repo_path,
                     kind,
                     number,
                     ttl_seconds=self.config.server.github_read_cache_ttl_seconds,
@@ -440,7 +448,7 @@ class ApplicationContext:
         payload = loader()
         if cache is not None:
             with contextlib.suppress(Exception):
-                cache.put(repo_id, kind, number, payload, now_epoch=self.now_epoch())
+                cache.put(repo_id, repo_path, kind, number, payload, now_epoch=self.now_epoch())
         return payload, False
 
     def idempotent(

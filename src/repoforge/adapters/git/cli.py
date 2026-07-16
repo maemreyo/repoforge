@@ -1642,7 +1642,7 @@ class GitCliRepository:
                 code=ErrorCode.PATCH_APPLY_FAILED,
                 safe_next_action=(
                     "Refresh workspace_status and workspace_read_file, then regenerate the patch. "
-                    "Use workspace_replace_text for one exact replacement or workspace_write_file "
+                    "Use workspace_edit for one exact replacement or workspace_write_file "
                     "for complete reviewed file content."
                 ),
                 retryable=False,

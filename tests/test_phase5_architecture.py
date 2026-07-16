@@ -59,7 +59,7 @@ def test_service_is_a_delegating_facade() -> None:
         "files_read",
         "search",
         "file_write",
-        "replace_text",
+        "edit",
         "apply_patch",
         "restore_paths",
         "diff",

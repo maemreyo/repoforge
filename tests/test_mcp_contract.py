@@ -104,7 +104,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_read_files",
             "workspace_search",
             "workspace_write_file",
-            "workspace_replace_text",
+            "workspace_edit",
             "workspace_apply_patch",
             "workspace_restore_paths",
             "workspace_diff",
@@ -112,6 +112,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_run_diagnostic",
             "workspace_hygiene_status",
             "workspace_format_changed",
+            "workspace_run_adhoc",
             "workspace_verify",
             "workspace_commit",
             "workspace_push",
@@ -165,6 +166,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "intent",
             "expectation",
             "expected_failure_class",
+            "selector2",
         }
         hygiene = tools["workspace_hygiene_status"]
         assert hygiene.annotations.readOnlyHint is True
@@ -373,6 +375,18 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         )
         assert hygiene["status"] == "available"
         assert hygiene["formatter_id"] == "test-format"
+
+        # This fixture's "demo" repository is enrolled strict (the default); exercise
+        # workspace_run_adhoc's structured refusal path through the protocol boundary.
+        adhoc_refusal = await session.call_tool(
+            "workspace_run_adhoc",
+            {"workspace_id": workspace_id, "argv": ["python3", "--version"]},
+        )
+        assert adhoc_refusal.isError is True
+        adhoc_refusal_text = "\n".join(
+            item.text for item in adhoc_refusal.content if getattr(item, "type", None) == "text"
+        )
+        assert "EXECUTION_MODE_STRICT" in adhoc_refusal_text
         await call("workspace_tree", {"workspace_id": workspace_id, "max_entries": 50})
         hello = await call(
             "workspace_read_file",
@@ -403,14 +417,16 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             "README.md:3:Repository instructions.",
         ]
         await call(
-            "workspace_replace_text",
+            "workspace_edit",
             {
                 "workspace_id": workspace_id,
-                "relative_path": "hello.txt",
-                "old_text": "hello",
-                "new_text": "changed via MCP",
-                "expected_sha256": hello["sha256"],
-                "expected_occurrences": 1,
+                "files": [
+                    {
+                        "path": "hello.txt",
+                        "expected_sha256": hello["sha256"],
+                        "edits": [{"old_text": "hello", "new_text": "changed via MCP"}],
+                    }
+                ],
             },
         )
         await call(
@@ -496,14 +512,16 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
 
 
 @pytest.mark.anyio
-async def test_workspace_replace_text_batch_edits_through_mcp_protocol(
+async def test_workspace_edit_batch_edits_through_mcp_protocol(
     forge_env: ForgeEnvironment,
 ) -> None:
-    """The additive `edits` parameter applies several ordered replacements in one call.
+    """`workspace_edit`'s `files`/`edits` shape applies several ordered replacements,
+    across one or more files, in one call.
 
-    Regression coverage for issue #142: one `workspace_replace_text` call with a bounded
-    `edits` list must apply every entry atomically under one lock/fingerprint cycle, and a
-    failing entry must reject the whole call by index without touching the file.
+    Regression coverage for issue #142 (multi-file generalization): one `workspace_edit`
+    call with a bounded `files` list, each carrying a bounded `edits` list, must apply
+    every entry atomically under one lock/fingerprint cycle, and a failing entry anywhere
+    must reject the whole call without touching any file.
     """
     server = create_server(forge_env.config_path)
     async with create_connected_server_and_client_session(server) as session:
@@ -514,9 +532,7 @@ async def test_workspace_replace_text_batch_edits_through_mcp_protocol(
             assert result.structuredContent is not None
             return result.structuredContent
 
-        created = await call(
-            "workspace_create", {"repo_id": "demo", "task_slug": "batch replace text"}
-        )
+        created = await call("workspace_create", {"repo_id": "demo", "task_slug": "batch edit"})
         workspace_id = str(created["workspace_id"])
         hello = await call(
             "workspace_read_file",
@@ -524,33 +540,43 @@ async def test_workspace_replace_text_batch_edits_through_mcp_protocol(
         )
 
         batch_result = await call(
-            "workspace_replace_text",
+            "workspace_edit",
             {
                 "workspace_id": workspace_id,
-                "relative_path": "hello.txt",
-                "expected_sha256": hello["sha256"],
-                "edits": [
-                    {"old_text": "hello", "new_text": "hi there"},
-                    {"old_text": "hi there", "new_text": "hi there, batched"},
+                "files": [
+                    {
+                        "path": "hello.txt",
+                        "expected_sha256": hello["sha256"],
+                        "edits": [
+                            {"old_text": "hello", "new_text": "hi there"},
+                            {"old_text": "hi there", "new_text": "hi there, batched"},
+                        ],
+                    }
                 ],
             },
         )
-        assert batch_result["replacements"] == 2
-        assert batch_result["edits"] == [
-            {"index": 0, "replacements": 1},
-            {"index": 1, "replacements": 1},
+        assert batch_result["files"] == [
+            {
+                "path": "hello.txt",
+                "sha256": batch_result["files"][0]["sha256"],
+                "replacements": 2,
+            }
         ]
 
         status_before_failure = await call("workspace_status", {"workspace_id": workspace_id})
         failing = await session.call_tool(
-            "workspace_replace_text",
+            "workspace_edit",
             {
                 "workspace_id": workspace_id,
-                "relative_path": "hello.txt",
-                "expected_sha256": batch_result["sha256"],
-                "edits": [
-                    {"old_text": "hi there, batched", "new_text": "changed once more"},
-                    {"old_text": "text that does not exist", "new_text": "unreachable"},
+                "files": [
+                    {
+                        "path": "hello.txt",
+                        "expected_sha256": batch_result["files"][0]["sha256"],
+                        "edits": [
+                            {"old_text": "hi there, batched", "new_text": "changed once more"},
+                            {"old_text": "text that does not exist", "new_text": "unreachable"},
+                        ],
+                    }
                 ],
             },
         )
@@ -567,12 +593,16 @@ async def test_workspace_replace_text_batch_edits_through_mcp_protocol(
         assert status_after_failure["head_sha"] == status_before_failure["head_sha"]
 
         too_many_edits = await session.call_tool(
-            "workspace_replace_text",
+            "workspace_edit",
             {
                 "workspace_id": workspace_id,
-                "relative_path": "hello.txt",
-                "expected_sha256": batch_result["sha256"],
-                "edits": [{"old_text": "hi", "new_text": "hi"} for _ in range(21)],
+                "files": [
+                    {
+                        "path": "hello.txt",
+                        "expected_sha256": batch_result["files"][0]["sha256"],
+                        "edits": [{"old_text": "hi", "new_text": "hi"} for _ in range(21)],
+                    }
+                ],
             },
         )
         assert too_many_edits.isError is True

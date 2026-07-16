@@ -67,6 +67,11 @@ from .workspace.create_draft_pr import (
     WorkspaceCreateDraftPrCommand,
 )
 from .workspace.diff import WorkspaceDiffCommand, WorkspaceDiffReader
+from .workspace.edit import (
+    FileEdit,
+    WorkspaceEditCommand,
+    WorkspaceEditor,
+)
 from .workspace.file_read import (
     WorkspaceFileReadCommand,
     WorkspaceFileReader,
@@ -112,14 +117,13 @@ from .workspace.refresh_preview import (
     WorkspaceRefreshPreviewer,
 )
 from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
-from .workspace.replace_text import (
-    TextEdit,
-    WorkspaceReplaceTextCommand,
-    WorkspaceTextReplacer,
-)
 from .workspace.restore_paths import (
     WorkspacePathsRestorer,
     WorkspaceRestorePathsCommand,
+)
+from .workspace.run_adhoc import (
+    WorkspaceAdhocRunner,
+    WorkspaceRunAdhocCommand,
 )
 from .workspace.run_diagnostic import (
     WorkspaceDiagnosticRunner,
@@ -225,7 +229,7 @@ class CodingService:
         self._reads = WorkspaceFilesReader(ctx)
         self._search = WorkspaceSearcher(ctx)
         self._write = WorkspaceFileWriter(ctx)
-        self._replace = WorkspaceTextReplacer(ctx)
+        self._edit = WorkspaceEditor(ctx)
         self._patch = WorkspacePatchApplier(ctx)
         self._restore = WorkspacePathsRestorer(ctx)
         self._refresh_preview = WorkspaceRefreshPreviewer(ctx)
@@ -239,6 +243,11 @@ class CodingService:
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
         self._hygiene_status = WorkspaceHygieneStatusReader(ctx)
         self._format_changed = WorkspaceChangedFormatter(ctx)
+        self._adhoc = WorkspaceAdhocRunner(
+            ctx,
+            operations=self.operations,
+            background_tasks=self.application.background_tasks,
+        )
         self._verify = WorkspaceVerifier(ctx)
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
@@ -542,29 +551,8 @@ class CodingService:
             )
         )
 
-    def workspace_replace_text(
-        self,
-        workspace_id: str,
-        relative_path: str,
-        old_text: str | None = None,
-        new_text: str | None = None,
-        expected_sha256: str = "",
-        expected_occurrences: int = 1,
-        edits: list[TextEdit] | None = None,
-    ) -> dict[str, Any]:
-        return _result(
-            self._replace.execute(
-                WorkspaceReplaceTextCommand(
-                    workspace_id=workspace_id,
-                    relative_path=relative_path,
-                    expected_sha256=expected_sha256,
-                    old_text=old_text,
-                    new_text=new_text,
-                    expected_occurrences=expected_occurrences,
-                    edits=tuple(edits) if edits is not None else None,
-                )
-            )
-        )
+    def workspace_edit(self, workspace_id: str, files: list[FileEdit]) -> dict[str, Any]:
+        return _result(self._edit.execute(WorkspaceEditCommand(workspace_id, tuple(files))))
 
     def workspace_apply_patch(
         self,
@@ -648,11 +636,12 @@ class CodingService:
         self,
         workspace_id: str,
         diagnostic_id: str,
-        selector: str | None = None,
+        selector: str | list[str] | None = None,
         expected_fingerprint: str | None = None,
         intent: str | None = None,
         expectation: str | None = None,
         expected_failure_class: str | None = None,
+        selector2: str | list[str] | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._diagnostic.execute(
@@ -664,6 +653,25 @@ class CodingService:
                     intent,
                     expectation,
                     expected_failure_class,
+                    selector2,
+                )
+            )
+        )
+
+    def workspace_run_adhoc(
+        self,
+        workspace_id: str,
+        argv: list[str],
+        working_directory: str | None = None,
+        background: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._adhoc.execute(
+                WorkspaceRunAdhocCommand(
+                    workspace_id,
+                    tuple(argv) if isinstance(argv, list) else argv,
+                    working_directory,
+                    background,
                 )
             )
         )

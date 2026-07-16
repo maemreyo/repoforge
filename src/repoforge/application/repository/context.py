@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import RepositoryConfig
+from ...domain.diagnostic_packs import detect_ecosystems, ecosystem_diagnostic_packs
+from ...domain.diagnostics import DiagnosticProfileConfig, DiagnosticSelectorConfig
 from ...domain.errors import SecurityError
 from ...domain.policy import assert_path_allowed
 from ..context import ApplicationContext
@@ -28,6 +30,57 @@ class RepositoryContextResult:
     instruction_files: list[dict[str, Any]]
     profiles: list[str]
     default_verification_profile: str | None
+    diagnostics: list[dict[str, Any]]
+    diagnostic_pack_suggestions: list[dict[str, Any]]
+
+
+def _selector_schema(selector: DiagnosticSelectorConfig) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "name": selector.name,
+        "kind": selector.kind.value,
+        "max_values": selector.max_values,
+        "expansion": selector.expansion,
+    }
+    if selector.values:
+        schema["values"] = list(selector.values)
+    if selector.char_classes:
+        schema["char_classes"] = list(selector.char_classes)
+        schema["max_length"] = selector.max_length
+    if selector.prefix is not None:
+        schema["prefix"] = selector.prefix
+    if selector.suffix is not None:
+        schema["suffix"] = selector.suffix
+    if selector.separator is not None:
+        schema["separator"] = selector.separator
+    if selector.allow_leading_dash:
+        schema["allow_leading_dash"] = True
+    return schema
+
+
+def _diagnostic_schema(diagnostic: DiagnosticProfileConfig) -> dict[str, Any]:
+    return {
+        "diagnostic_id": diagnostic.diagnostic_id,
+        "summary": diagnostic.summary,
+        "mutability": diagnostic.mutability.value,
+        "selectors": [
+            _selector_schema(selector)
+            for selector in diagnostic.selectors
+            if selector.kind.value != "none"
+        ],
+    }
+
+
+def _pack_suggestion_payload(root_files: list[str]) -> list[dict[str, Any]]:
+    ecosystems = detect_ecosystems(tuple(root_files))
+    return [
+        {
+            "ecosystem": pack.ecosystem,
+            "diagnostic_id": pack.diagnostic_id,
+            "summary": pack.summary,
+            "config_snippet": pack.config_snippet,
+        }
+        for pack in ecosystem_diagnostic_packs(ecosystems)
+    ]
 
 
 class RepositoryContextReader:
@@ -101,16 +154,23 @@ class RepositoryContextReader:
             manager = str(declared) if declared is not None else None
             raw_engines = package.get("engines")
             engines = raw_engines if isinstance(raw_engines, dict) else {}
+        root_files = self.ctx.git.root_files(repo.path, repo)
+        diagnostics = [
+            _diagnostic_schema(diagnostic) for _, diagnostic in sorted(repo.diagnostics.items())
+        ]
+        pack_suggestions = [] if diagnostics else _pack_suggestion_payload(root_files)
         return RepositoryContextResult(
             c.repo_id,
             repo.display_name or c.repo_id,
             str(repo.path),
             repo.default_base,
-            self.ctx.git.root_files(repo.path, repo),
+            root_files,
             manager,
             engines,
             scripts,
             instructions,
             sorted(repo.profiles),
             repo.default_verification_profile,
+            diagnostics,
+            pack_suggestions,
         )

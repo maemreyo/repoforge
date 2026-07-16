@@ -11,10 +11,19 @@ Eviction is persistent least-recently-used: every valid hit refreshes a
 small ``last_accessed_at`` field under the cache lock, while TTL freshness
 continues to be measured from ``stored_at`` so repeated reads never extend
 the lifetime of stale GitHub evidence.
+
+The cache key binds a repository-path fingerprint alongside ``repo_id``: a
+config's ``repo_id`` label is only a name, and if it is ever repointed at a
+different local checkout (a config edit, reload, or repository migration)
+while an old entry is still within its TTL, the label alone would let a
+stale cross-repository payload be served under the new repository's
+issue/PR number. Hashing the resolved repository path into the key makes
+that repointing a guaranteed cache miss instead.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -60,7 +69,7 @@ class JsonGitHubReadCache:
             os.close(descriptor)
 
     @staticmethod
-    def _key(repo_id: str, kind: str, number: int) -> str | None:
+    def _key(repo_id: str, repo_path: Path, kind: str, number: int) -> str | None:
         if (
             not isinstance(repo_id, str)
             or not isinstance(kind, str)
@@ -71,7 +80,12 @@ class JsonGitHubReadCache:
             or number <= 0
         ):
             return None
-        return f"{repo_id}:{kind}:{number}"
+        try:
+            resolved_path = str(Path(repo_path).resolve())
+        except OSError:
+            return None
+        fingerprint = hashlib.sha256(resolved_path.encode("utf-8")).hexdigest()[:16]
+        return f"{repo_id}:{fingerprint}:{kind}:{number}"
 
     @staticmethod
     def _empty() -> dict[str, Any]:
@@ -120,6 +134,7 @@ class JsonGitHubReadCache:
     def get(
         self,
         repo_id: str,
+        repo_path: Path,
         kind: str,
         number: int,
         *,
@@ -127,7 +142,7 @@ class JsonGitHubReadCache:
         now_epoch: float,
     ) -> dict[str, Any] | None:
         try:
-            key = self._key(repo_id, kind, number)
+            key = self._key(repo_id, repo_path, kind, number)
             if key is None:
                 return None
             with self._locks.lock("github-read-cache", timeout_seconds=2):
@@ -158,6 +173,7 @@ class JsonGitHubReadCache:
     def put(
         self,
         repo_id: str,
+        repo_path: Path,
         kind: str,
         number: int,
         payload: dict[str, Any],
@@ -165,7 +181,7 @@ class JsonGitHubReadCache:
         now_epoch: float,
     ) -> None:
         try:
-            key = self._key(repo_id, kind, number)
+            key = self._key(repo_id, repo_path, kind, number)
             if key is None or not isinstance(payload, dict):
                 return
             try:
