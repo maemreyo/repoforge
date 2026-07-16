@@ -96,10 +96,15 @@ class AdoptionNudgeTracker:
     PR_CHECK_POLL_THRESHOLD: Final[int] = 3
     FILE_READ_WINDOW_SECONDS: Final[float] = 60.0
     FILE_READ_THRESHOLD: Final[int] = 5
+    # Issue #169: a repeated identical ad-hoc argv shape within a workspace suggests
+    # the command belongs in an enrolled workspace_run_diagnostic template instead.
+    ADHOC_ARGV_WINDOW_SECONDS: Final[float] = 3_600.0
+    ADHOC_ARGV_THRESHOLD: Final[int] = 3
 
     def __init__(self) -> None:
         self._pr_check_polls = _BoundedEventWindow(self.PR_CHECK_POLL_THRESHOLD)
         self._file_reads = _BoundedEventWindow(self.FILE_READ_THRESHOLD)
+        self._adhoc_argv = _BoundedEventWindow(self.ADHOC_ARGV_THRESHOLD)
 
     def observe_pending_pr_check_poll(self, workspace_id: str, now_epoch: float) -> bool:
         """Record one pending poll; report whether the nudge threshold is met."""
@@ -120,3 +125,11 @@ class AdoptionNudgeTracker:
     def reset_file_reads(self, workspace_id: str) -> None:
         """Forget tracked single-file reads once batching is used for this workspace."""
         self._file_reads.reset(workspace_id)
+
+    def observe_adhoc_argv(self, workspace_id: str, argv_shape_key: str, now_epoch: float) -> bool:
+        """Record one ad-hoc run of this argv shape; report whether it has recurred enough
+        to suggest enrolling it as a reviewed diagnostic template."""
+        count = self._adhoc_argv.observe(
+            f"{workspace_id}:{argv_shape_key}", now_epoch, self.ADHOC_ARGV_WINDOW_SECONDS
+        )
+        return count >= self.ADHOC_ARGV_THRESHOLD

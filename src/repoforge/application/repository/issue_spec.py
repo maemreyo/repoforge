@@ -74,6 +74,7 @@ class RepositoryIssueSpecReader:
         return self.ctx.github_read(
             "issue",
             c.repo_id,
+            repo.path,
             c.issue_number,
             fresh=c.fresh,
             loader=lambda: self.ctx.github.issue_read(repo.path, c.issue_number),

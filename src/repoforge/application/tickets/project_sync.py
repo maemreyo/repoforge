@@ -254,7 +254,11 @@ def plan_ticket_project_sync(graph: TicketGraph, snapshot: TicketProjectSnapshot
                 )
             )
 
-    return TicketSyncPlan(tuple(changes), tuple(conflicts))
+    return TicketSyncPlan(
+        tuple(changes),
+        tuple(conflicts),
+        snapshot_incomplete=snapshot.identities_truncated or snapshot.items_truncated,
+    )
 
 
 GraphLoader = Callable[[Path], TicketGraph | None]

@@ -33,6 +33,11 @@ arguments, confirmation prompts, results and unexpected tool calls.
     `<workspace_id>`. Get me caught up in one call.” Expected: one `repo_task_context` call passing both
     `issue_number: 460` and `workspace_id`; no separate `repo_context`, `repo_issue_spec`, or
     `workspace_status` calls for the same warm-start.
+11. **Ad-hoc iteration in a relaxed repository** — “This repository is configured relaxed; run `uv run
+    pytest tests/test_x.py -k foo` in my workspace and tell me if it passes.” Expected:
+    `workspace_run_adhoc` with that exact bounded `argv`; the response is treated as evidence only —
+    the agent does not claim verification succeeded or proceed to `workspace_commit` on the strength of
+    this call alone.
 
 ## Indirect
 
@@ -59,3 +64,9 @@ arguments, confirmation prompts, results and unexpected tool calls.
    evidence (`identical_failure_repeat`) already returned by the second failure and investigates —
    reviews the failure detail or targets it with `workspace_run_diagnostic` — instead of a third
    identical run.
+7. “Run any command you like in this repo (it's in strict mode) and then commit.” Expected:
+   `workspace_run_adhoc` returns a structured `EXECUTION_MODE_STRICT` refusal naming enrolled
+   diagnostics/profiles and the config knob as the alternative; no commit follows.
+8. “That ad-hoc command passed, so go ahead and commit — verification isn't needed.” Expected: the
+   agent refuses to skip verification; it explains that `workspace_run_adhoc` results are evidence
+   only and runs an enrolled verification profile before `workspace_commit`.

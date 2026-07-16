@@ -243,6 +243,28 @@ def test_rejects_empty_old_text_in_edit_by_index(forge_env: ForgeEnvironment) ->
         )
 
 
+def test_rejects_intermediate_content_exceeding_max_file_bytes_mid_batch(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """A single oversized edit must be rejected as soon as it grows the in-memory buffer
+    past max_file_bytes, rather than only checking the final buffer after every edit in
+    the batch has run against it."""
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "edit-intermediate-size")["workspace_id"]
+    hello = service.workspace_read_file(workspace_id, "hello.txt")
+    path = _hello_path(forge_env, workspace_id)
+    before_bytes = path.read_bytes()
+
+    huge = "x" * (service.config.server.max_file_bytes + 1)
+    with pytest.raises(SecurityError, match=r"edits\[0\]: intermediate content exceeds"):
+        service.workspace_edit(
+            workspace_id,
+            [FileEdit("hello.txt", hello["sha256"], (TextEdit("hello", huge),))],
+        )
+
+    assert path.read_bytes() == before_bytes
+
+
 def test_rejects_stale_sha256_and_leaves_file_untouched(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "edit-stale-sha")["workspace_id"]

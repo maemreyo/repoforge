@@ -110,6 +110,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_diff",
             "workspace_run_profile",
             "workspace_run_diagnostic",
+            "workspace_run_adhoc",
             "workspace_verify",
             "workspace_commit",
             "workspace_push",
@@ -163,6 +164,7 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "intent",
             "expectation",
             "expected_failure_class",
+            "selector2",
         }
         for name in ("workspace_base_status", "workspace_refresh_preview"):
             annotations = tools[name].annotations
@@ -342,6 +344,17 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         assert diagnostic_result["expectation_met"] is True
         assert diagnostic_result["business_tests_ran"] is True
         assert diagnostic_result["valid_tdd_red_evidence"] is False
+        # This fixture's "demo" repository is enrolled strict (the default); exercise
+        # workspace_run_adhoc's structured refusal path through the protocol boundary.
+        adhoc_refusal = await session.call_tool(
+            "workspace_run_adhoc",
+            {"workspace_id": workspace_id, "argv": ["python3", "--version"]},
+        )
+        assert adhoc_refusal.isError is True
+        adhoc_refusal_text = "\n".join(
+            item.text for item in adhoc_refusal.content if getattr(item, "type", None) == "text"
+        )
+        assert "EXECUTION_MODE_STRICT" in adhoc_refusal_text
         await call("workspace_tree", {"workspace_id": workspace_id, "max_entries": 50})
         hello = await call(
             "workspace_read_file",

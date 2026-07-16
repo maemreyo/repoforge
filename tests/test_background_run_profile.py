@@ -166,6 +166,43 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
     assert receipt["profile"] == "slow"
 
 
+def test_background_submit_raising_releases_lock_and_fails_the_operation(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If `background_tasks.submit(...)` raises instead of returning False, the operation
+    must not be left stuck in RUNNING while holding the workspace lock forever."""
+    _add_slow_profile(forge_env)
+    service, runner = _manual_service(forge_env)
+    created = service.workspace_create("demo", "submit raises")
+    workspace_id = created["workspace_id"]
+
+    def raising_submit(key: str, task: object) -> bool:
+        raise RuntimeError("executor pool exhausted")
+
+    monkeypatch.setattr(runner, "submit", raising_submit)
+
+    with pytest.raises(RuntimeError, match="executor pool exhausted"):
+        service.workspace_run_profile(workspace_id, "slow", background=True)
+
+    # The workspace lock must not be leaked when admission fails after the operation
+    # record already transitioned to RUNNING.
+    locks = service.application.context.locks
+    with locks.lock(workspace_id, timeout_seconds=0.5):
+        pass
+
+    # The operation fails closed instead of being left stuck in RUNNING.
+    records = [
+        record
+        for record in service.operations.list_records(max_records=10).records
+        if record.workspace_id == workspace_id
+    ]
+    assert len(records) == 1
+    status = service.operation_status(records[0].operation_id)
+    assert status["state"] == "failed"
+    assert status["error_code"] == "INTERNAL_ERROR"
+
+
 def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
     forge_env: ForgeEnvironment,
 ) -> None:

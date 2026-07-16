@@ -396,8 +396,13 @@ class GhTicketProjectGateway:
             if (
                 not isinstance(number, int)
                 or isinstance(number, bool)
-                or (isinstance(repository, str) and repository != slug)
+                or not isinstance(repository, str)
+                or repository != slug
             ):
+                # Fail closed on a missing/unparseable repository identity rather than
+                # mapping by issue number alone: a multi-repo Project can carry the same
+                # issue number for different repositories, and defaulting to "include"
+                # would let this snapshot silently point a mutation at the wrong repo's item.
                 continue
             values: dict[str, str] = {}
             raw_values = raw.get("fieldValues")
@@ -456,8 +461,15 @@ class GhTicketProjectGateway:
         cwd: Path,
         slug: str,
         wanted: set[int],
-    ) -> dict[int, TicketIssueIdentity]:
+    ) -> tuple[dict[int, TicketIssueIdentity], bool]:
+        """Return identities found plus whether the bounded page scan may have missed some.
+
+        `truncated` is True only when the scan exhausted `_MAX_ISSUE_PAGES` without either
+        finding every wanted issue or reaching a short (final) page -- i.e. more issues may
+        exist beyond the bound that this scan never looked at.
+        """
         identities: dict[int, TicketIssueIdentity] = {}
+        truncated = True
         for page in range(1, _MAX_ISSUE_PAGES + 1):
             records = self._list(
                 self._api(
@@ -480,8 +492,9 @@ class GhTicketProjectGateway:
                 ):
                     identities[number] = TicketIssueIdentity(number, node_id, database_id)
             if wanted.issubset(identities) or len(records) < 100:
+                truncated = False
                 break
-        return identities
+        return identities, truncated
 
     def snapshot(
         self,
@@ -497,13 +510,15 @@ class GhTicketProjectGateway:
         title = project.get("title")
         field_records = self._field_records(cwd, target)
         fields = self._parse_fields(field_records)
-        items = self._parse_items(
-            self._item_records(cwd, target, limit=len(graph.nodes) + 100),
-            slug,
-        )
+        item_limit = len(graph.nodes) + 100
+        raw_items = self._item_records(cwd, target, limit=item_limit)
+        # `gh project item-list --limit` returns at most the bounded limit; a full page at
+        # that bound means the Project may hold more items this fetch never observed.
+        items_truncated = len(raw_items) >= max(1, min(item_limit, 1000))
+        items = self._parse_items(raw_items, slug)
         views = self._parse_views(self._view_records(cwd, project_id))
         wanted = {node.number for node in graph.nodes}
-        identities = self._issue_identities(cwd, slug, wanted)
+        identities, identities_truncated = self._issue_identities(cwd, slug, wanted)
 
         sub_issues: set[tuple[int, int]] = set()
         parent_numbers = sorted({node.parent for node in graph.nodes if node.parent is not None})
@@ -547,6 +562,8 @@ class GhTicketProjectGateway:
             identities,
             frozenset(sub_issues),
             frozenset(blocked_by),
+            identities_truncated=identities_truncated,
+            items_truncated=items_truncated,
         )
 
     @staticmethod
