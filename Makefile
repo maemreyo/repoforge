@@ -32,7 +32,7 @@ endif
 # =============================================================================
 
 .PHONY: default start dev-server restart status stop logs doctor
-.PHONY: setup lint typecheck test build install release
+.PHONY: setup lint typecheck test build check install release
 .PHONY: smoke clean
 
 default: start
@@ -138,6 +138,9 @@ typecheck:  # Type-check the full source tree
 
 test:  # Run full test suite with coverage
 	uv run pytest --cov=repoforge --cov-report=term-missing
+
+check:  # Authoritative full verification gate for dirty development workspaces
+	scripts/verify-production.sh --allow-dirty
 
 # =============================================================================
 # RELEASE & INSTALL

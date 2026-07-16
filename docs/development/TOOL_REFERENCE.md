@@ -186,9 +186,9 @@ Snapshot retention is bounded to the newest ten complete generations.
 
 | Tool | Purpose |
 |---|---|
-| `config_inspect` | Read the accepted and active generations, restart status, one repository's effective policy (profiles with exact commands, diagnostic and formatter names, budgets, allowed and denied paths, stored decisions, overrides, and policy patch), plus pending policy changes. Read-only. |
+| `config_inspect` | Read the accepted and active generations, restart status, one repository's effective policy (profiles with exact commands, diagnostic and formatter names, execution mode, ad-hoc runner allowlist and timeout, budgets, allowed and denied paths, stored decisions, overrides, and policy patch), plus pending policy changes. Read-only. |
 | `runtime_logs_read` | Read bounded, redacted operational evidence: the local JSONL audit trail (`source="audit"`, filterable by action, failures only, or minimum duration) or the managed runtime log tail (`source="runtime"`). At most 200 entries per call. Read-only. |
-| `repo_policy_apply` | Request one repository's policy change (set/remove command profiles, diagnostics, formatters, or known policy overrides) through the reviewed immutable-generation pipeline. Supports `dry_run` previews. |
+| `repo_policy_apply` | Request one repository's policy change (set/remove command profiles, diagnostics, formatters, relaxed execution mode, ad-hoc runners and timeout, or known policy overrides) through the reviewed immutable-generation pipeline. Supports `dry_run` previews. |
 
 `repo_policy_apply` is gated by the capability delta of the rendered candidate, enforced
 independently by the generation store:
@@ -202,8 +202,11 @@ independently by the generation store:
   transits the model conversation.
 
 Accepted changes are recorded as a durable per-repository `policy_patch` in the editable source
-configuration, so custom profiles, diagnostics, and formatters survive `rf repo refresh`. Every
-candidate is validated with the full configuration loader before acceptance and fails closed.
+configuration, so custom profiles, diagnostics, formatters, and relaxed-execution policy survive
+`rf repo refresh`. Enabling relaxed mode, adding an ad-hoc runner, or increasing its timeout is a
+capability expansion requiring terminal approval; disabling relaxed mode, removing a runner, or
+reducing its timeout is a restriction. Every candidate is validated with the full configuration
+loader before acceptance and fails closed.
 
 CLI equivalents are `rf config pending`, `rf config approve CHANGE_ID [--activate auto|always|never]`,
 and `rf config reject CHANGE_ID`. Approving a stale change (the accepted generation or source moved
