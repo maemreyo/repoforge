@@ -438,10 +438,10 @@ def allowed_join_separators() -> tuple[str, ...]:
 
 
 __all__ = [
-    "DiagnosticExpectation",
-    "DiagnosticFailureClass",
     "MAX_ARGV_ELEMENTS",
     "PYTEST_NODE_CHAR_CLASSES",
+    "DiagnosticExpectation",
+    "DiagnosticFailureClass",
     "DiagnosticMutability",
     "DiagnosticNetworkPolicy",
     "DiagnosticParserKind",
