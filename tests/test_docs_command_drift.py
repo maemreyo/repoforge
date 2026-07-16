@@ -5,6 +5,7 @@ import re
 import shlex
 from pathlib import Path
 
+from repoforge.application.configuration.source import parse_source
 from repoforge.interfaces.cli.main import build_parser
 
 ROOT = Path(__file__).parents[1]
@@ -104,3 +105,21 @@ def test_example_config_matches_current_source_schema() -> None:
     assert "[[repo]]" in text
     assert 'id = "example-repository"' in text
     assert "[repositories." not in text
+
+
+def test_make_check_remains_the_stable_full_verification_contract() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "check:" in makefile
+    assert "scripts/verify-production.sh --allow-dirty" in makefile
+
+
+def test_repoforge_source_config_enables_reviewed_relaxed_execution() -> None:
+    source = parse_source((ROOT / "config.repoforge.toml").read_text(encoding="utf-8"))
+    repository = source.repositories[0]
+
+    assert dict(repository.decisions)["risky_commands"] == "exclude"
+    assert repository.policy_patch.execution_mode == "relaxed"
+    assert repository.policy_patch.adhoc_runners == ("uv", "python3", "make")
+    assert repository.policy_patch.adhoc_timeout_seconds == 600
+    assert "ticket-graph" in repository.policy_patch.remove_profiles

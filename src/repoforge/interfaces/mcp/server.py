@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import Tool as McpTool
@@ -1103,12 +1103,15 @@ def create_server(
         remove_diagnostics: list[str] | None = None,
         set_formatters: dict[str, dict[str, Any]] | None = None,
         remove_formatters: list[str] | None = None,
+        execution_mode: Literal["strict", "relaxed"] | None = None,
+        adhoc_runners: list[str] | None = None,
+        adhoc_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] | None = None,
         policy_overrides: dict[str, str] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Use this to change one repository's command profiles, diagnostics, formatters,
-        or policy overrides through the reviewed immutable-generation pipeline. Pass
-        dry_run=true first to preview the capability delta. Restrictions and metadata-only
+        relaxed-execution policy, or policy overrides through the reviewed immutable-generation
+        pipeline. Pass dry_run=true first to preview the capability delta. Restrictions and metadata-only
         changes are applied immediately and hot reloaded; any capability expansion is only
         stored as a pending change that the operator must approve in a terminal with
         `rf config approve <change_id>` -- report that instruction and never claim an
@@ -1123,6 +1126,9 @@ def create_server(
             remove_diagnostics=remove_diagnostics,
             set_formatters=set_formatters,
             remove_formatters=remove_formatters,
+            execution_mode=execution_mode,
+            adhoc_runners=adhoc_runners,
+            adhoc_timeout_seconds=adhoc_timeout_seconds,
             policy_overrides=policy_overrides,
             dry_run=dry_run,
         )

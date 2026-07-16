@@ -113,6 +113,12 @@ def apply_policy_patch(
     repo = repositories[repo_id]
     if not isinstance(repo, dict):
         raise ValueError(f"repositories.{repo_id} must be a table")
+    if patch.execution_mode is not None:
+        repo["execution_mode"] = patch.execution_mode
+    if patch.adhoc_runners is not None:
+        repo["adhoc_runners"] = list(patch.adhoc_runners)
+    if patch.adhoc_timeout_seconds is not None:
+        repo["adhoc_timeout_seconds"] = patch.adhoc_timeout_seconds
     profiles = repo.setdefault("profiles", {})
     if not isinstance(profiles, dict):
         raise ValueError(f"repositories.{repo_id}.profiles must be a table")
