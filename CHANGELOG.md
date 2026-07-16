@@ -5,6 +5,27 @@
 - Published concrete nested `workspace_edit` input items plus `context_lines` and `max_results` numeric bounds in the frozen MCP release contract, so clients can validate calls locally instead of discovering these constraints through failed tool calls.
 - Replaced the checked-in production ticket graph with bounded GitHub-native traversal of sub-issues, blocked-by relationships, live issue state, and optional Project V2 metadata; graph, readiness, and issue-spec tools now share cached snapshot evidence with `fresh=true` bypass, and the legacy Project apply path is retired so GitHub remains authoritative.
 - Added an opt-in loopback `rf webhook serve` ingress for signed `issues`, `sub_issues`, `issue_dependencies`, and `projects_v2_item` deliveries; it validates and deduplicates bounded payloads and invalidates only the affected repository's graph cache.
+- Added agent-facing configuration administration, gated by capability delta. Three new MCP tools:
+  `config_inspect` (read generations, one repository's effective policy, and pending changes),
+  `runtime_logs_read` (bounded redacted audit-trail and runtime-log reads for debugging), and
+  `repo_policy_apply` (set/remove command profiles, diagnostics, formatters, or known policy
+  overrides through the reviewed immutable-generation pipeline, with `dry_run` previews).
+  Restrictions and metadata-only changes are accepted immediately and hot reloaded in process;
+  capability expansions are never applied on the model's authority — they are persisted as a
+  pending change the operator approves out of band with the new `rf config pending`,
+  `rf config approve CHANGE_ID`, and `rf config reject CHANGE_ID` commands, and the approval token
+  never transits the model conversation. Accepted customizations are recorded as a durable
+  per-repository `policy_patch` in the editable source configuration (round-tripped by
+  `parse_source`/`render_source`), so custom profiles, diagnostics, and formatters now survive
+  `rf repo refresh` instead of being regenerated away. Every candidate is validated with the full
+  configuration loader before acceptance and fails closed; on transports without an in-process
+  runtime the tools return a structured `CONFIG_ADMIN_UNAVAILABLE` error.
+- Modernized the tracked example configurations: `config.repoforge.toml` and
+  `config.work-frontier.toml` are now v2 *source* configs whose hand-tuned profiles,
+  diagnostics, and formatters ride in `[repo.policy_patch]` tables instead of the legacy
+  resolved `[server]`/`[repositories.*]` layout; `PLACEMENT.md` now routes installation
+  through `rf repo refresh --accept`, and the superseded personal `config.local-dev.toml`
+  was removed. Legacy resolved configs remain supported for serve/doctor/runtime only.
 - Fixed a cross-repository Project-item mapping bug: `GhTicketProjectGateway` mapped GitHub Project V2 items by issue number alone whenever the item's repository identity was missing or unparseable, which could point a Project sync mutation at the wrong repository's issue in a multi-repo Project. It now fails closed (excludes the item from the snapshot) unless the repository identity is present and matches.
 - Fixed a stuck-`RUNNING`/leaked-lock bug in `workspace_run_profile`'s background path: if `background_tasks.submit(...)` raised instead of returning `False`, the workspace lock was never released and the operation record was left `RUNNING` forever. The submit call is now wrapped so a raised exception unwinds identically to a rejected submission (unregister the cancel token, release the lock, fail the operation closed) before propagating.
 - Added `identities_truncated`/`items_truncated` to `TicketProjectSnapshot` and a derived `snapshot_incomplete` flag on `TicketSyncPlan`: a bounded issue-identity page scan or Project item-list fetch that could not confirm it observed every record now says so, instead of the sync planner reading a missing identity/item as confirmed drift.

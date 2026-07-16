@@ -1,0 +1,521 @@
+"""Agent-facing configuration administration: patches, delta gating, approval flow."""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
+
+from repoforge.adapters.configuration import ConfigGenerationStore
+from repoforge.adapters.locking import FcntlLockManager
+from repoforge.application.config_admin import ConfigAdminService
+from repoforge.application.configuration.document import (
+    apply_policy_patch,
+    apply_proposal,
+    parse_resolved,
+    render_resolved,
+)
+from repoforge.application.configuration.source import (
+    SourceConfiguration,
+    SourceRepository,
+    parse_source,
+    render_source,
+)
+from repoforge.application.repository_admin.proposals import RepositoryProposalService
+from repoforge.bootstrap import read_audit_events, read_runtime_log
+from repoforge.domain.config_generation import sha256_text
+from repoforge.domain.errors import ConfigError
+from repoforge.domain.policy_patch import (
+    PolicyPatchError,
+    ProfilePatch,
+    RepositoryPolicyPatch,
+)
+from repoforge.domain.repository_detection import ManifestFact, RemoteFact, RepositoryFacts
+from repoforge.domain.repository_proposal import EnrollmentMode
+from repoforge.interfaces.mcp.server import create_server
+from repoforge.testing import FixedClock, SequenceIdGenerator
+
+cli = importlib.import_module("repoforge.interfaces.cli.main")
+
+NOW = "2026-07-16T00:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# Domain: RepositoryPolicyPatch validation and merge semantics
+# ---------------------------------------------------------------------------
+
+
+def _profile(
+    name: str = "debug", commands: tuple[tuple[str, ...], ...] = (("echo", "ok"),)
+) -> ProfilePatch:
+    return ProfilePatch(name, "test profile", commands)
+
+
+def test_profile_patch_validates_names_commands_and_bounds() -> None:
+    with pytest.raises(PolicyPatchError, match="profile name"):
+        ProfilePatch("bad name!", "", (("echo",),))
+    with pytest.raises(PolicyPatchError, match="at least one command"):
+        ProfilePatch("empty", "", ())
+    with pytest.raises(PolicyPatchError, match="non-empty"):
+        ProfilePatch("blank", "", (("",),))
+    with pytest.raises(PolicyPatchError, match="timeout_seconds"):
+        ProfilePatch("slow", "", (("echo",),), timeout_seconds=0)
+    with pytest.raises(PolicyPatchError, match="safe relative path"):
+        ProfilePatch("escape", "", (("echo",),), working_directory="../up")
+    normalized = ProfilePatch("ok", "", (("echo",),), working_directory="apps/web/")
+    assert normalized.working_directory == "apps/web"
+
+
+def test_policy_patch_rejects_unrenderable_keys_and_conflicts() -> None:
+    with pytest.raises(PolicyPatchError, match="unrenderable or unsupported"):
+        RepositoryPolicyPatch(diagnostics=(("d", {"argv": ["x"], "shell": "sh"}),))
+    with pytest.raises(PolicyPatchError, match="check_argv"):
+        RepositoryPolicyPatch(formatters=(("f", {"summary": "no check argv"}),))
+    with pytest.raises(PolicyPatchError, match="both set and remove"):
+        RepositoryPolicyPatch(profiles=(_profile("x"),), remove_profiles=("x",))
+    with pytest.raises(PolicyPatchError, match="duplicate"):
+        RepositoryPolicyPatch(profiles=(_profile("x"), _profile("x")))
+
+
+def test_policy_patch_merge_layering() -> None:
+    base = RepositoryPolicyPatch(profiles=(_profile("a"), _profile("b")), remove_profiles=("gone",))
+    update = RepositoryPolicyPatch(
+        profiles=(_profile("b", (("make", "b2"),)), _profile("c")),
+        remove_profiles=("a",),
+    )
+    merged = base.merge(update)
+    names = {profile.name: profile for profile in merged.profiles}
+    assert set(names) == {"b", "c"}
+    assert names["b"].commands == (("make", "b2"),)
+    assert set(merged.remove_profiles) == {"gone", "a"}
+    revived = merged.merge(RepositoryPolicyPatch(profiles=(_profile("a"),)))
+    assert "a" not in revived.remove_profiles
+    assert "a" in {profile.name for profile in revived.profiles}
+
+
+def test_policy_patch_table_round_trip() -> None:
+    patch = RepositoryPolicyPatch(
+        profiles=(_profile("debug", (("uv", "run", "pytest", "-x"),)),),
+        diagnostics=(
+            (
+                "dx",
+                {
+                    "argv": ["echo", "{selector}"],
+                    "selector_kind": "values",
+                    "selector_values": ["a"],
+                },
+            ),
+        ),
+        formatters=(("fx", {"check_argv": ["ruff", "format", "--check"]}),),
+        remove_profiles=("legacy",),
+    )
+    assert RepositoryPolicyPatch.from_table(patch.as_table()) == patch
+
+
+# ---------------------------------------------------------------------------
+# Source configuration round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_source_round_trips_policy_patch() -> None:
+    patch = RepositoryPolicyPatch(
+        profiles=(_profile("debug.v2", (("echo", "ok"),)),),
+        remove_diagnostics=("stale",),
+    )
+    config = SourceConfiguration(
+        "tunnel", "repoforge", (SourceRepository("demo", "/tmp/demo", policy_patch=patch),)
+    )
+    text = render_source(config)
+    assert parse_source(text) == config
+
+
+def test_source_rejects_invalid_policy_patch() -> None:
+    text = (
+        'version = 2\n[[repo]]\nid = "demo"\npath = "/tmp/demo"\n'
+        '[repo.policy_patch.profiles.bad]\ndescription = "x"\n'
+    )
+    with pytest.raises(ValueError, match="policy_patch is invalid"):
+        parse_source(text)
+
+
+# ---------------------------------------------------------------------------
+# Resolved document merge
+# ---------------------------------------------------------------------------
+
+
+def _facts(root: Path) -> RepositoryFacts:
+    return RepositoryFacts(
+        root=root,
+        common_dir=root / ".git",
+        repo_id="demo",
+        display_name="demo",
+        current_branch="main",
+        default_branch_candidates=("main",),
+        remotes=(RemoteFact("origin", "fetch", "push"),),
+        manifests=(
+            ManifestFact("package.json", "javascript", "pnpm", True, ("lint", "test", "build")),
+        ),
+        lockfiles=("pnpm-lock.yaml",),
+        toolchain_declarations=("pnpm@10",),
+        scripts=("lint", "test", "build"),
+        make_targets=(),
+        instruction_files=("README.md",),
+        ci_files=(),
+        workspace_packages=(),
+        submodules=(),
+        lfs_tracked=False,
+        shallow=False,
+        detached=False,
+        symlink_count=0,
+        large_file_count=0,
+        binary_file_count=0,
+        tracked_file_count=10,
+        total_tracked_bytes=1000,
+        existing_worktrees=(str(root),),
+        policy_files=(),
+        scan_truncated=False,
+        warnings=(),
+    )
+
+
+class _FakeProbe:
+    def __init__(self, root: Path) -> None:
+        self._root = root
+
+    def inspect(self, path: Path, *, repo_id: str | None = None) -> RepositoryFacts:
+        return _facts(self._root)
+
+
+def _proposal(root: Path) -> Any:
+    return RepositoryProposalService(_FakeProbe(root)).propose(
+        root,
+        repo_id="demo",
+        decisions={"dependency_install": "exclude"},
+        template=EnrollmentMode.STANDARD,
+        overrides={},
+    )
+
+
+def test_apply_policy_patch_sets_and_removes_entries(tmp_path: Path) -> None:
+    proposal = _proposal(tmp_path / "demo")
+    document = apply_proposal(parse_resolved(None), proposal)
+    profiles = document["repositories"]["demo"]["profiles"]
+    assert "full" in profiles
+    patch = RepositoryPolicyPatch(
+        profiles=(ProfilePatch("debug", "One-off", (("pnpm", "run", "lint"),)),),
+        remove_profiles=("quick",),
+        diagnostics=(("dx", {"argv": ["pnpm", "run", "test"]}),),
+    )
+    updated = apply_policy_patch(document, "demo", patch)
+    repo = updated["repositories"]["demo"]
+    assert "debug" in repo["profiles"] and "quick" not in repo["profiles"]
+    assert repo["diagnostics"]["dx"]["argv"] == ["pnpm", "run", "test"]
+    with pytest.raises(ValueError, match="Unknown repository id"):
+        apply_policy_patch(document, "missing", patch)
+
+
+def test_apply_policy_patch_repairs_default_verification_profile(tmp_path: Path) -> None:
+    proposal = _proposal(tmp_path / "demo")
+    document = apply_proposal(parse_resolved(None), proposal)
+    repo = document["repositories"]["demo"]
+    assert repo["default_verification_profile"] == "full"
+    removed_all = apply_policy_patch(
+        document,
+        "demo",
+        RepositoryPolicyPatch(remove_profiles=("full",)),
+    )
+    repo = removed_all["repositories"]["demo"]
+    assert repo["default_verification_profile"] != "full"
+    assert repo["default_verification_profile"] in repo["profiles"]
+
+
+# ---------------------------------------------------------------------------
+# ConfigAdminService gating pipeline against a real generation store
+# ---------------------------------------------------------------------------
+
+
+def _admin(tmp_path: Path, *, reload_calls: list[int] | None = None) -> ConfigAdminService:
+    repo_root = tmp_path / "demo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    source_path = tmp_path / "config.toml"
+    source = SourceConfiguration(
+        None,
+        "repoforge",
+        (
+            SourceRepository(
+                "demo",
+                str(repo_root),
+                decisions=(("dependency_install", "exclude"),),
+            ),
+        ),
+    )
+    source_path.write_text(render_source(source), encoding="utf-8")
+    store = ConfigGenerationStore(
+        source_path, tmp_path / "state", FcntlLockManager(tmp_path / "locks")
+    )
+    proposal = _proposal(repo_root)
+    document = apply_proposal(parse_resolved(None), proposal)
+    resolved = render_resolved(
+        document,
+        generation=1,
+        source_path=str(source_path),
+        source_sha256=sha256_text(store.read_source_text()),
+        created_at=NOW,
+        reason="test bootstrap",
+        proposal_id=None,
+        repository_fingerprints=(("demo", proposal.facts_fingerprint),),
+    )
+    store.import_legacy(store.read_source_text(), resolved, created_at=NOW)
+
+    def reload_runtime(generation: int) -> dict[str, Any]:
+        if reload_calls is not None:
+            reload_calls.append(generation)
+        return {"status": "hot_reloaded", "active_generation": generation}
+
+    return ConfigAdminService(
+        store=store,
+        proposals=RepositoryProposalService(_FakeProbe(repo_root)),
+        clock=FixedClock(NOW),
+        ids=SequenceIdGenerator(),
+        audit_log_path=tmp_path / "state" / "audit.jsonl",
+        runtime_log_path=tmp_path / "state" / "managed-runtime.log",
+        read_audit=read_audit_events,
+        read_log=read_runtime_log,
+        reload_runtime=reload_runtime,
+    )
+
+
+def test_restriction_is_applied_immediately_with_hot_reload(tmp_path: Path) -> None:
+    reload_calls: list[int] = []
+    admin = _admin(tmp_path, reload_calls=reload_calls)
+    result = admin.repo_policy_apply("demo", remove_profiles=["quick"])
+    assert result["status"] == "applied"
+    assert result["capability_delta"] == "restriction"
+    assert result["generation"] == 2
+    assert reload_calls == [2]
+    inspected = admin.config_inspect("demo")
+    assert "quick" not in inspected["repositories"]["demo"]["profiles"]
+    assert inspected["repositories"]["demo"]["policy_patch"]["remove_profiles"] == ["quick"]
+    # The durable source now carries the patch, so a later refresh preserves it.
+    persisted = parse_source(admin._store.read_source_text())
+    assert persisted.repositories[0].policy_patch.remove_profiles == ("quick",)
+
+
+def test_expansion_requires_operator_approval_and_never_applies(tmp_path: Path) -> None:
+    reload_calls: list[int] = []
+    admin = _admin(tmp_path, reload_calls=reload_calls)
+    result = admin.repo_policy_apply(
+        "demo",
+        set_profiles=[
+            {"name": "debug", "commands": [["pnpm", "run", "debug:server"]], "description": "d"}
+        ],
+    )
+    assert result["status"] == "pending_approval"
+    assert result["capability_delta"] == "expansion"
+    change_id = result["change_id"]
+    assert change_id.startswith("chg-")
+    assert f"rf config approve {change_id}" in result["safe_next_action"]
+    assert reload_calls == []
+    assert admin._store.current().generation == 1
+    pending = admin.pending.summaries()
+    assert [item["change_id"] for item in pending] == [change_id]
+    # The unapproved patch is not persisted in the editable source.
+    persisted = parse_source(admin._store.read_source_text())
+    assert persisted.repositories[0].policy_patch.is_empty()
+
+
+def test_dry_run_previews_without_state_change(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    result = admin.repo_policy_apply(
+        "demo",
+        set_profiles=[{"name": "debug", "commands": [["pnpm", "run", "x"]]}],
+        dry_run=True,
+    )
+    assert result["status"] == "preview"
+    assert result["requires_operator_approval"] is True
+    assert admin.pending.summaries() == []
+    assert admin._store.current().generation == 1
+
+
+def test_apply_requires_at_least_one_change_and_known_repo(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    with pytest.raises(ConfigError, match="at least one change"):
+        admin.repo_policy_apply("demo")
+    with pytest.raises(ConfigError, match="Unknown repository id"):
+        admin.repo_policy_apply("missing", remove_profiles=["quick"])
+    with pytest.raises(ConfigError, match="Invalid policy patch"):
+        admin.repo_policy_apply("demo", set_profiles=[{"name": "bad name!", "commands": [["x"]]}])
+
+
+def test_invalid_candidate_fails_closed_before_accept(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    # A verification profile removal that leaves a broken diagnostic reference is caught by
+    # load_config validation on the rendered candidate: use an invalid selector kind.
+    with pytest.raises(ConfigError):
+        admin.repo_policy_apply(
+            "demo",
+            set_diagnostics={"dx": {"argv": ["echo"], "selector_kind": "not-a-kind"}},
+        )
+    assert admin._store.current().generation == 1
+    assert admin.pending.summaries() == []
+
+
+def test_runtime_logs_read_bounds_sources_and_filters(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    audit_path = tmp_path / "state" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        {"action": "workspace_commit", "success": True, "details": {"duration_ms": 5}},
+        {"action": "workspace_run_profile", "success": False, "details": {"duration_ms": 900}},
+    ]
+    audit_path.write_text("\n".join(json.dumps(item) for item in events) + "\n", encoding="utf-8")
+    (tmp_path / "state" / "managed-runtime.log").write_text("one\ntwo\n", encoding="utf-8")
+
+    failed = admin.runtime_logs_read("audit", limit=10, only_failed=True)
+    assert [item["action"] for item in failed["events"]] == ["workspace_run_profile"]
+    runtime = admin.runtime_logs_read("runtime", limit=1)
+    assert runtime["lines"] == ["two"]
+    with pytest.raises(ConfigError, match="source"):
+        admin.runtime_logs_read("secrets")
+    with pytest.raises(ConfigError, match="limit"):
+        admin.runtime_logs_read("audit", limit=0)
+
+
+# ---------------------------------------------------------------------------
+# CLI approve / reject / pending against the same store
+# ---------------------------------------------------------------------------
+
+
+def _cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli, "_state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr(cli, "_locks", lambda: FcntlLockManager(tmp_path / "locks"))
+
+
+def test_cli_approve_accepts_pending_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    admin = _admin(tmp_path)
+    result = admin.repo_policy_apply(
+        "demo",
+        set_profiles=[{"name": "debug", "commands": [["pnpm", "run", "debug:server"]]}],
+    )
+    change_id = result["change_id"]
+    _cli_env(monkeypatch, tmp_path)
+    code = cli._config_approve(
+        tmp_path / "config.toml",
+        argparse.Namespace(change_id=change_id, activate="never"),
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "approved"
+    assert payload["generation"]["generation"] == 2
+    assert payload["generation"]["approval"]["actor"]
+    assert admin.pending.summaries() == []
+    inspected = admin.config_inspect("demo")
+    assert "debug" in inspected["repositories"]["demo"]["profiles"]
+    persisted = parse_source(admin._store.read_source_text())
+    assert {profile.name for profile in persisted.repositories[0].policy_patch.profiles} == {
+        "debug"
+    }
+
+
+def test_cli_approve_discards_stale_pending_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    admin = _admin(tmp_path)
+    pending = admin.repo_policy_apply(
+        "demo",
+        set_profiles=[{"name": "debug", "commands": [["pnpm", "run", "debug:server"]]}],
+    )
+    # A concurrent restriction moves the accepted generation forward first.
+    applied = admin.repo_policy_apply("demo", remove_profiles=["quick"])
+    assert applied["status"] == "applied"
+    _cli_env(monkeypatch, tmp_path)
+    with pytest.raises(ConfigError, match="stale"):
+        cli._config_approve(
+            tmp_path / "config.toml",
+            argparse.Namespace(change_id=pending["change_id"], activate="never"),
+        )
+    assert admin.pending.summaries() == []
+
+
+def test_cli_pending_and_reject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    admin = _admin(tmp_path)
+    result = admin.repo_policy_apply(
+        "demo",
+        set_profiles=[{"name": "debug", "commands": [["pnpm", "run", "debug:server"]]}],
+    )
+    _cli_env(monkeypatch, tmp_path)
+    assert cli._config_pending(tmp_path / "config.toml") == 0
+    listing = json.loads(capsys.readouterr().out)
+    assert [item["change_id"] for item in listing["pending_changes"]] == [result["change_id"]]
+    assert cli._config_reject(tmp_path / "config.toml", result["change_id"]) == 0
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["status"] == "rejected"
+    assert admin.pending.summaries() == []
+    assert admin._store.current().generation == 1
+    with pytest.raises(ConfigError, match="Unknown pending policy change"):
+        cli._config_reject(tmp_path / "config.toml", result["change_id"])
+
+
+# ---------------------------------------------------------------------------
+# MCP protocol surface
+# ---------------------------------------------------------------------------
+
+
+class _FakeCodingService:
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith(("repo_", "workspace_", "operation_")):
+            return lambda *args, **kwargs: {"name": name}
+        raise AttributeError(name)
+
+
+@pytest.mark.anyio
+async def test_config_admin_tools_are_registered_and_fail_closed_without_admin() -> None:
+    server = create_server(service=_FakeCodingService())  # type: ignore[arg-type]
+    async with create_connected_server_and_client_session(server) as session:
+        tools = {tool.name for tool in (await session.list_tools()).tools}
+        assert {"config_inspect", "runtime_logs_read", "repo_policy_apply"} <= tools
+        result = await session.call_tool("config_inspect", {})
+    assert result.isError is True
+    rendered = "\n".join(
+        item.text for item in result.content if getattr(item, "type", None) == "text"
+    )
+    assert "CONFIG_ADMIN_UNAVAILABLE" in rendered
+
+
+@pytest.mark.anyio
+async def test_config_admin_tools_round_trip_through_protocol(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    server = create_server(service=_FakeCodingService(), admin=admin)  # type: ignore[arg-type]
+    async with create_connected_server_and_client_session(server) as session:
+        inspected = await session.call_tool("config_inspect", {"repo_id": "demo"})
+        assert inspected.isError is False
+        preview = await session.call_tool(
+            "repo_policy_apply",
+            {
+                "repo_id": "demo",
+                "set_profiles": [{"name": "debug", "commands": [["pnpm", "run", "debug:server"]]}],
+                "dry_run": True,
+            },
+        )
+        assert preview.isError is False
+        assert preview.structuredContent is not None
+        assert preview.structuredContent["status"] == "preview"
+        assert preview.structuredContent["capability_delta"] == "expansion"
+        applied = await session.call_tool(
+            "repo_policy_apply",
+            {"repo_id": "demo", "remove_profiles": ["quick"]},
+        )
+        assert applied.isError is False
+        assert applied.structuredContent is not None
+        assert applied.structuredContent["status"] == "applied"
+        logs = await session.call_tool("runtime_logs_read", {"source": "runtime", "limit": 5})
+        assert logs.isError is False

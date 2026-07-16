@@ -16,7 +16,12 @@ Its main controls are:
   are not implemented;
 - pull requests are always created as drafts;
 - optional verification gating binds a successful check to the exact working-tree fingerprint;
-- tool and command activity is written to a local JSONL audit log.
+- tool and command activity is written to a local JSONL audit log;
+- model-requested configuration changes (`repo_policy_apply`) pass through the same immutable
+  generation pipeline as the CLI and are gated by capability delta: restrictions and
+  metadata-only edits apply immediately, while any capability expansion (new commands, broader
+  paths) is only stored as a pending change the operator must approve out of band with
+  `rf config approve`; the approval token never passes through the model conversation.
 
 ## Important limitations
 

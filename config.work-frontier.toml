@@ -1,146 +1,83 @@
-# RepoForge configuration for the current Work Frontier repository.
+# RepoForge source configuration for the Work Frontier repository.
 #
-# Source clone:
-# /Users/trung.ngo/Documents/zaob-dev/work-frontier
+# Source clone: /Users/trung.ngo/Documents/zaob-dev/work-frontier
 #
-# Install as:
-# ~/.config/repoforge/config.toml
+# This is the modern v2 *source* format. Enroll it (or merge the [[repo]] entry into an
+# existing multi-repository source config) with:
+#
+#   rf setup --config ~/.config/repoforge/config.toml
+#   rf repo refresh work-frontier --accept
+#
+# Server bounds, budgets, and path policy come from the reviewed templates and defaults;
+# the durable policy patch below carries the repository's hand-tuned command profiles
+# and survives `rf repo refresh`.
+version = 2
 
-[server]
-workspace_root = "~/.local/share/repoforge/workspaces"
-state_root = "~/.local/state/repoforge"
-max_file_bytes = 2000000
-max_tool_output_chars = 120000
-default_command_timeout_seconds = 120
-verification_timeout_seconds = 3600
-max_fingerprint_bytes = 52428800
-max_batch_files = 20
-path_prefixes = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-allowed_environment = [
-  "HOME",
-  "PATH",
-  "LANG",
-  "LC_ALL",
-  "SSH_AUTH_SOCK",
-  "GH_HOST",
-  "GIT_SSH_COMMAND",
-  "COREPACK_HOME",
-  "PNPM_HOME",
-  "UV_CACHE_DIR",
-  "XDG_CACHE_HOME",
-  "DOCKER_HOST",
-]
+# Omit [tunnel] for local-only stdio operation.
+# [tunnel]
+# id = "tunnel_replace_me"
+# profile = "repoforge"
 
-# Resource budgets limit local execution pressure; they never reduce required
-# verification or grant command, network, repository, or publication authority.
-[server.resource_budget]
-max_cpu_seconds_per_operation = 900
-max_memory_bytes = 2147483648
-max_disk_bytes = 10737418240
-max_subprocesses = 8
-max_concurrent_operations = 4
-max_queued_operations = 32
-max_network_bytes = 104857600
-max_output_bytes = 120000
-task_ttl_seconds = 86400
-max_cache_bytes = 2147483648
-max_index_bytes = 2147483648
-max_provider_requests = 100
-
-[repositories.work-frontier]
+[[repo]]
+id = "work-frontier"
 path = "/Users/trung.ngo/Documents/zaob-dev/work-frontier"
-display_name = "Work Frontier"
-remote = "origin"
-default_base = "main"
-allowed_base_branches = ["main"]
-branch_prefix = "ai/"
-protected_branches = ["main", "master", "develop", "production"]
-require_verification_before_commit = true
-fetch_before_workspace = true
-default_verification_profile = "full"
+decisions = ["dependency_install=exclude", "existing_worktrees=use_new_isolated"]
 
-# Generous enough for planned implementation work, but low enough to catch
-# accidental generated trees, dependency directories, or scope explosions.
-max_changed_files = 150
-max_diff_lines = 12000
-max_total_changed_bytes = 26214400
-
-# Empty means all repository paths are eligible unless denied below.
-allowed_paths = []
-
-denied_paths = [
-  ".git",
-  ".git/**",
-  ".env",
-  ".env.*",
-  "**/.env",
-  "**/.env.*",
-  "**/*.pem",
-  "**/*.key",
-  "**/*secret*",
-  "**/*credential*",
-  ".github/workflows/**",
-]
-
-pr_labels = []
-pr_reviewers = []
-no_maintainer_edit = false
-
-[repositories.work-frontier.profiles.setup]
+[repo.policy_patch.profiles.setup]
 description = "Install the exact locked Python and Node dependencies"
 verification = false
 timeout_seconds = 1800
 commands = [["make", "bootstrap"]]
 
-[repositories.work-frontier.profiles.fix]
+[repo.policy_patch.profiles.fix]
 description = "Apply the repository's safe Python and frontend fixes; inspect the diff afterward"
 verification = false
 timeout_seconds = 1800
 commands = [["make", "fix"]]
 
-[repositories.work-frontier.profiles.quick]
+[repo.policy_patch.profiles.quick]
 description = "Fast pre-push gate: static checks, contract/registry drift checks, architecture checks, and unit tests"
 verification = true
 timeout_seconds = 1800
 commands = [["make", "check"]]
 
-[repositories.work-frontier.profiles.test]
+[repo.policy_patch.profiles.test]
 description = "Run all Python and frontend unit tests"
 verification = true
 timeout_seconds = 1800
 commands = [["make", "test"]]
 
-[repositories.work-frontier.profiles.preflight]
+[repo.policy_patch.profiles.preflight]
 description = "Run ADR-006 foundation validation and behavioral tests"
 verification = true
 timeout_seconds = 600
 commands = [["make", "check-preflight"]]
 
-[repositories.work-frontier.profiles.architecture]
+[repo.policy_patch.profiles.architecture]
 description = "Enforce canonical Python import boundaries"
 verification = true
 timeout_seconds = 600
 commands = [["make", "check-architecture"]]
 
-[repositories.work-frontier.profiles.contracts]
+[repo.policy_patch.profiles.contracts]
 description = "Fail when generated contract artifacts drift"
 verification = true
 timeout_seconds = 600
 commands = [["make", "check-contracts"]]
 
-[repositories.work-frontier.profiles.registry]
+[repo.policy_patch.profiles.registry]
 description = "Fail when the machine-readable harness registry drifts"
 verification = true
 timeout_seconds = 600
 commands = [["make", "check-harness-registry"]]
 
-[repositories.work-frontier.profiles.full]
+[repo.policy_patch.profiles.full]
 description = "Full local CI-equivalent gate, including PostgreSQL migration and MinIO storage smokes"
 verification = true
 timeout_seconds = 3600
 commands = [["make", "verify"]]
 
-[repositories.work-frontier.profiles.recertify]
+[repo.policy_patch.profiles.recertify]
 description = "Run the registered foundation closure and write exact-revision supersession evidence"
 verification = true
 timeout_seconds = 3600

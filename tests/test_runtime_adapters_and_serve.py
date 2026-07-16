@@ -311,7 +311,7 @@ def test_serve_control_handler_covers_health_drain_resume_and_fail_closed(
     )
     monkeypatch.setattr(cli, "clear_runtime_state", lambda path, pid: captured.update(cleared=pid))
     monkeypatch.setattr(mcp_module, "tool_surface_hash", lambda: "surface")
-    monkeypatch.setattr(mcp_module, "create_server", lambda *, router: MCP())
+    monkeypatch.setattr(mcp_module, "create_server", lambda *, router, admin=None: MCP())
 
     assert cli._serve(tmp_path / "config.toml") == 0
     assert captured["closed"] is True and captured["cleared"] == 55

@@ -15,7 +15,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
+    apply_policy_patch,
     apply_proposal,
     parse_resolved,
     remove_repository,
@@ -300,6 +302,105 @@ def _config_set(config_path: Path, args: argparse.Namespace) -> int:
         rollback_on_failure=True,
     )
     return _repo_refresh(refresh_args)
+
+
+def _pending_store(config_path: Path) -> PendingPolicyChangeStore:
+    store = _ensure_generation(config_path)
+    return PendingPolicyChangeStore(store.root / "pending-policy-changes")
+
+
+def _config_pending(config_path: Path) -> int:
+    pending = _pending_store(config_path)
+    summaries = pending.summaries()
+    _json(
+        {
+            "status": "ok",
+            "pending_changes": summaries,
+            "safe_next_action": (
+                "Review a change, then run `rf config approve <change_id>` or "
+                "`rf config reject <change_id>`."
+                if summaries
+                else "No agent-proposed policy changes are waiting for approval."
+            ),
+        }
+    )
+    return 0
+
+
+def _config_approve(config_path: Path, args: argparse.Namespace) -> int:
+    store = _ensure_generation(config_path)
+    pending = PendingPolicyChangeStore(store.root / "pending-policy-changes")
+    record = pending.load(args.change_id)
+    proposal_id = str(record["proposal_id"])
+    now = system_clock().now_iso()
+    approval_token = f"approve:{proposal_id}"
+    try:
+        generation = store.accept(
+            ConfigMutation(
+                str(record["source_text"]),
+                str(record["resolved_text"]),
+                tuple(
+                    (str(repo_id), str(fingerprint))
+                    for repo_id, fingerprint in record.get("repository_fingerprints", [])
+                ),
+                str(record["reason"]),
+                now,
+                int(record["expected_generation"]),
+                str(record["expected_source_sha256"]),
+                proposal_id,
+                ApprovalEvent(
+                    os.environ.get("USER", "local-user"),
+                    now,
+                    proposal_id,
+                    sha256_text(approval_token),
+                ),
+                correlation_id=id_generator().new_hex(24),
+            )
+        )
+    except ConfigError as exc:
+        if str(exc).startswith(("STALE_CONFIG_GENERATION", "Configuration changed concurrently")):
+            pending.delete(args.change_id)
+            raise ConfigError(
+                f"{exc}. The pending change was discarded as stale; ask the agent to "
+                "propose it again from the current configuration."
+            ) from exc
+        raise
+    pending.delete(args.change_id)
+    activation = _activate(
+        store,
+        config_path,
+        generation,
+        mode=args.activate,
+        wait=True,
+        rollback_on_failure=True,
+    )
+    _json(
+        {
+            **activation,
+            "status": "approved",
+            "activation_status": activation.get("status"),
+            "change_id": args.change_id,
+            "repo_id": record.get("repo_id"),
+            "capability_delta": record.get("capability_delta"),
+            "generation": asdict(generation),
+        }
+    )
+    return 0
+
+
+def _config_reject(config_path: Path, change_id: str) -> int:
+    pending = _pending_store(config_path)
+    record = pending.load(change_id)
+    pending.delete(change_id)
+    _json(
+        {
+            "status": "rejected",
+            "change_id": change_id,
+            "repo_id": record.get("repo_id"),
+            "unchanged_state": ["configuration", "runtime"],
+        }
+    )
+    return 0
 
 
 def _config_edit(config_path: Path) -> int:
@@ -654,6 +755,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
                 effective_inputs[item.repo_id][2],
                 tuple(sorted(effective_inputs[item.repo_id][0].items())),
                 tuple(sorted(effective_inputs[item.repo_id][1].items())),
+                item.policy_patch,
             )
             if item.repo_id in proposal_by_id
             else item
@@ -663,8 +765,12 @@ def _repo_refresh(args: argparse.Namespace) -> int:
     source_text = render_source(updated_source)
     document = parse_resolved(store.read_resolved_text())
     fingerprint_map = current.repository_fingerprint_map()
+    patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
     for proposal in proposals:
         document = apply_proposal(document, proposal)
+        document = apply_policy_patch(
+            document, proposal.repo_id, patch_by_id[proposal.repo_id]
+        )
         fingerprint_map[proposal.repo_id] = proposal.facts_fingerprint
     fingerprints = tuple(sorted(fingerprint_map.items()))
     proposal_id = _combined_proposal_id(proposals)
@@ -1287,8 +1393,47 @@ def _serve(config_path: Path) -> int:
         runtime_state_path, initial_generation.generation, tool_surface_hash()
     )
     state_holder["state"] = state
+
+    def reload_in_process(generation: int) -> dict[str, object]:
+        active = store.active()
+        store.stage_activation(
+            generation, expected_active=active.generation if active else None
+        )
+        try:
+            result = reloader.reload(
+                generation,
+                expected_active=router.active_generation,
+                correlation_id=id_generator().new_hex(24),
+            )
+        except Exception:
+            store.clear_activation_target(expected_generation=generation)
+            raise
+        record_activation(result.active_generation)
+        return {
+            "status": result.status,
+            "previous_generation": result.previous_generation,
+            "active_generation": result.active_generation,
+        }
+
+    server_config = getattr(
+        load_config(store.resolved_path(initial_generation.generation)), "server", None
+    )
+    audit_state_root = (
+        server_config.state_root if server_config is not None else _state_root()
+    )
+    admin = ConfigAdminService(
+        store=store,
+        proposals=RepositoryProposalService(_probe()),
+        clock=system_clock(),
+        ids=id_generator(),
+        audit_log_path=audit_state_root / "audit.jsonl",
+        runtime_log_path=store.root / "managed-runtime.log",
+        reload_runtime=reload_in_process,
+        read_audit=read_audit_events,
+        read_log=read_runtime_log,
+    )
     try:
-        create_server(router=router).run(transport="stdio")
+        create_server(router=router, admin=admin).run(transport="stdio")
     finally:
         router.close(timeout_seconds=30.0)
         control.close()
@@ -1462,6 +1607,14 @@ def build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("--approve", action="append", default=[])
     config_set.add_argument("--activate", choices=["auto", "always", "never"], default="auto")
     config_sub.add_parser("edit")
+    config_sub.add_parser("pending")
+    config_approve = config_sub.add_parser("approve")
+    config_approve.add_argument("change_id")
+    config_approve.add_argument(
+        "--activate", choices=("auto", "always", "never"), default="auto"
+    )
+    config_reject = config_sub.add_parser("reject")
+    config_reject.add_argument("change_id")
     show_config = commands.add_parser("show-config")
     show_config.add_argument("--origin", action="store_true")
     commands.add_parser("doctor")
@@ -1578,6 +1731,12 @@ def main(argv: list[str] | None = None) -> int:
                 return _config_set(config_path, args)
             if args.config_command == "edit":
                 return _config_edit(config_path)
+            if args.config_command == "pending":
+                return _config_pending(config_path)
+            if args.config_command == "approve":
+                return _config_approve(config_path, args)
+            if args.config_command == "reject":
+                return _config_reject(config_path, args.change_id)
             store = _ensure_generation(config_path)
             if args.config_command == "history":
                 _json(

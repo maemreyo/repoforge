@@ -18,3 +18,13 @@ path = "/absolute/path/to/repository"
 # policy_template = "strict"
 # decisions = []
 # policy_overrides = []
+
+# Reviewed policy customizations (custom profiles, diagnostics, formatters) live in a
+# durable per-repository patch that survives `rf repo refresh`. It is written by approved
+# `repo_policy_apply` changes; edit by hand only with review.
+# [repo.policy_patch]
+# remove_profiles = []
+# [repo.policy_patch.profiles.debug]
+# description = "One-off debug run"
+# verification = false
+# commands = [["pnpm", "run", "debug:server"]]
