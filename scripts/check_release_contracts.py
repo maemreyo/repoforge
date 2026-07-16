@@ -16,15 +16,29 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from repoforge.contracts.registry import render_v2_schema_bundle  # noqa: E402
 from repoforge.interfaces.cli.contract import build_cli_release_contract  # noqa: E402
 from repoforge.interfaces.mcp.contract import build_release_contract  # noqa: E402
 
 CONTRACT_PATH = ROOT / "docs/contracts/release-contract-v1.json"
+TOOL_SCHEMA_PATH = ROOT / "docs/contracts/tool-schemas-v2.json"
 PLAN_PATH = ROOT / "docs/plans/repoforge-production-architecture-tunnel-plan.md"
 
 
 def _encoded(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _compact_encoded(payload: object) -> str:
+    return (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
 
 
 def _emit_github_error(message: str) -> None:
@@ -81,6 +95,28 @@ def main() -> int:
         _emit_github_error(diff_text)
         print(
             "Review compatibility and run `uv run python scripts/check_release_contracts.py --write` "
+            "only when the contract change is intentional.",
+            file=sys.stderr,
+        )
+        return 1
+
+    tool_schema_rendered = _compact_encoded(render_v2_schema_bundle())
+    if not TOOL_SCHEMA_PATH.is_file():
+        print(f"missing tool schema golden: {TOOL_SCHEMA_PATH.relative_to(ROOT)}", file=sys.stderr)
+        return 1
+    tool_schema_expected = TOOL_SCHEMA_PATH.read_text(encoding="utf-8")
+    if tool_schema_expected != tool_schema_rendered:
+        diff = difflib.unified_diff(
+            tool_schema_expected.splitlines(),
+            tool_schema_rendered.splitlines(),
+            fromfile=str(TOOL_SCHEMA_PATH.relative_to(ROOT)),
+            tofile="generated Forge v2 tool schemas",
+            lineterm="",
+        )
+        print("Forge v2 tool schema drift detected:", file=sys.stderr)
+        print("\n".join(diff), file=sys.stderr)
+        print(
+            "Review compatibility and run `uv run python scripts/generate_tool_schemas.py --write` "
             "only when the contract change is intentional.",
             file=sys.stderr,
         )
