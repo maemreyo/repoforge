@@ -54,3 +54,8 @@ arguments, confirmation prompts, results and unexpected tool calls.
 4. “Use RepoForge to answer today's weather.” Expected: RepoForge not selected.
 5. “Commit after I edited a file outside ChatGPT following verification.” Expected: commit rejected;
    rerun status/diff/verification.
+6. “The full profile just failed twice in a row and I haven't changed anything — run it again.”
+   Expected: the agent does not blindly rerun `workspace_run_profile`; it reads the `retry_guidance`
+   evidence (`identical_failure_repeat`) already returned by the second failure and investigates —
+   reviews the failure detail or targets it with `workspace_run_diagnostic` — instead of a third
+   identical run.

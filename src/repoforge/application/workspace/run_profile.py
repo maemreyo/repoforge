@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -8,6 +9,17 @@ from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityEr
 from ...domain.execution_environment import EnvironmentIdentityRequest
 from ...domain.operation_task import OperationRetryability, OperationState
 from ...domain.policy import normalize_relative_path
+from ...domain.retry_guidance import (
+    NOT_FOUND_CODES,
+    FailureSignature,
+    RetryGuidance,
+    fast_fail_guidance,
+    not_found_guidance,
+    record_and_compare,
+)
+from ...domain.retry_guidance import (
+    clear as clear_retry_guidance,
+)
 from ...domain.verification import get_profile
 from ...domain.workspace import VerificationReceipt
 from ...ports.background_tasks import BackgroundTaskRunner
@@ -16,10 +28,28 @@ from ...ports.command import CommandResult
 from ...ports.execution_environment import ApprovedExecution
 from ..context import ApplicationContext
 from ..dto import to_data
-from ..fingerprint_cache import prime_fingerprint
+from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..operations.manager import OperationManager
 
 _KIND = "workspace_run_profile"
+
+
+def _apply_retry_guidance(
+    exc: RepoForgeError,
+    *,
+    guidances: list[RetryGuidance],
+    repeat: int,
+) -> None:
+    if not guidances:
+        return
+    exc.details["retry_guidance"] = {
+        "identical_failure_repeat": repeat,
+        "statements": [g.statement for g in guidances],
+    }
+    combined_action = " ".join(g.safe_next_action for g in guidances)
+    exc.safe_next_action = (
+        f"{exc.safe_next_action} {combined_action}" if exc.safe_next_action else combined_action
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,21 +169,57 @@ class WorkspaceProfileRunner:
                     f"Profile working_directory does not exist: {profile.working_directory}"
                 )
 
-        def record_command_failure(
-            exc: CommandError, command: tuple[str, ...], steps_completed: int
-        ) -> None:
-            fallback = command[0] if command else None
-            audit_details["failed_command"] = exc.details.get("command", fallback)
-            audit_details["exit_code"] = exc.details.get("exit_code")
-            audit_details["steps_completed"] = steps_completed
-            if exc.details.get("cancelled"):
-                audit_details["cancelled"] = True
+        target = f"profile:{profile.name}"
 
         def run_body(
             cancel_token: CancellationToken | None,
             on_before_command: Callable[[], None] | None,
         ) -> WorkspaceRunProfileResult:
             fresh = self.ctx.store.load(c.workspace_id)
+            run_started = time.monotonic()
+            before = read_fingerprint(
+                self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, path
+            )
+            before_fingerprint = before.fingerprint
+
+            def record_command_failure(
+                exc: CommandError, command: tuple[str, ...], steps_completed: int
+            ) -> None:
+                fallback = command[0] if command else None
+                audit_details["failed_command"] = exc.details.get("command", fallback)
+                audit_details["exit_code"] = exc.details.get("exit_code")
+                audit_details["steps_completed"] = steps_completed
+                if exc.details.get("cancelled"):
+                    audit_details["cancelled"] = True
+                if exc.details.get("cancelled"):
+                    return
+                error_code = exc.code.value
+                raw_exit_code = exc.details.get("exit_code")
+                exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
+                signature = FailureSignature(error_code, steps_completed, exit_code)
+                repeat, repeat_guidance = record_and_compare(
+                    fresh.metadata,
+                    target=target,
+                    fingerprint=before_fingerprint,
+                    signature=signature,
+                )
+                self.ctx.store.save(fresh)
+                audit_details["retry_repeat"] = repeat
+                guidances: list[RetryGuidance] = []
+                if error_code in NOT_FOUND_CODES:
+                    guidances.append(not_found_guidance())
+                elif repeat_guidance is not None:
+                    guidances.append(repeat_guidance)
+                if profile.verification:
+                    duration_seconds = time.monotonic() - run_started
+                    fast_guidance = fast_fail_guidance(
+                        duration_seconds,
+                        threshold_seconds=self.ctx.config.server.fast_fail_threshold_seconds,
+                    )
+                    if fast_guidance is not None:
+                        guidances.append(fast_guidance)
+                _apply_retry_guidance(exc, guidances=guidances, repeat=repeat)
+
             timeout = profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
             environment_hash: str | None = None
             if self.ctx.execution_environment is not None:
@@ -216,6 +282,7 @@ class WorkspaceProfileRunner:
                 path,
             )
             fp = fingerprint.fingerprint
+            cleared_retry_history = clear_retry_guidance(fresh.metadata, target=target)
             if profile.verification:
                 fresh.last_verification = VerificationReceipt(
                     profile.name,
@@ -224,6 +291,8 @@ class WorkspaceProfileRunner:
                     [self.receipt(r) for r in results],
                     environment_hash,
                 )
+                self.ctx.store.save(fresh)
+            elif cleared_retry_history:
                 self.ctx.store.save(fresh)
             return WorkspaceRunProfileResult(
                 c.workspace_id,

@@ -172,6 +172,7 @@ class ServerConfig:
     idempotency_stale_seconds: int = 900
     idempotency_lock_timeout_seconds: int = 2
     max_background_profiles: int = 2
+    fast_fail_threshold_seconds: float = 10.0
     path_prefixes: tuple[str, ...] = DEFAULT_PATH_PREFIXES
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
@@ -222,6 +223,20 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int, context: 
     if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
         raise ConfigError(f"{context} must be an integer between {minimum} and {maximum}")
     return value
+
+
+def _bounded_float(
+    value: Any, default: float, minimum: float, maximum: float, context: str
+) -> float:
+    if value is None:
+        return default
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not minimum <= float(value) <= maximum
+    ):
+        raise ConfigError(f"{context} must be a number between {minimum} and {maximum}")
+    return float(value)
 
 
 def _load_resource_budget(
@@ -571,6 +586,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("max_background_profiles"),
             2,
             "server.max_background_profiles",
+        ),
+        fast_fail_threshold_seconds=_bounded_float(
+            server_raw.get("fast_fail_threshold_seconds"),
+            10.0,
+            0.0,
+            3_600.0,
+            "server.fast_fail_threshold_seconds",
         ),
         github_read_cache_ttl_seconds=_bounded_int(
             server_raw.get("github_read_cache_ttl_seconds"),
