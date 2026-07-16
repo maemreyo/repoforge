@@ -99,8 +99,18 @@ status:  # Show server health, PID, generation, tool surface hash
 stop:  # Stop the running server
 	uv run rf runtime stop
 
-logs:  # Tail the managed runtime log
-	uv run rf runtime logs
+logs:  # Show last 20 lines of runtime log
+	uv run rf runtime logs --tail 20
+
+watch:  # Live-tail runtime logs (follow mode, Ctrl+C to stop)
+	@LOG=$$(uv run rf runtime logs --tail 1 2>/dev/null | grep -o '"path":"[^"]*"' | cut -d'"' -f4); \
+	if [ -n "$$LOG" ] && [ -f "$$LOG" ]; then \
+		echo "Tailing $$LOG"; \
+		tail -f "$$LOG"; \
+	else \
+		echo "No runtime log file found (server not running?)" >&2; \
+		exit 1; \
+	fi
 
 doctor:  # Health check on all repos, paths, and dependencies
 	uv run rf doctor
