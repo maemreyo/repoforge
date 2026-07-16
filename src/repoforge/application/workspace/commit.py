@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from ...config import RepositoryConfig
+from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import WorkspaceError
 from ...domain.publishing import validate_commit_message
 from ..context import ApplicationContext
@@ -20,6 +22,15 @@ class WorkspaceCommitResult:
     head_sha: str
     verified_profile: str | None
     change_metrics: dict[str, Any]
+    command_source_paths_committed: list[str]
+
+
+def _all_command_source_paths(repo: RepositoryConfig) -> tuple[str, ...]:
+    """The union of every enrolled profile's command-source paths for this repository."""
+    union: set[str] = set()
+    for profile in repo.profiles.values():
+        union.update(profile.command_source_paths)
+    return tuple(sorted(union))
 
 
 class WorkspaceCommitter:
@@ -29,11 +40,21 @@ class WorkspaceCommitter:
     def execute(self, c: WorkspaceCommitCommand) -> WorkspaceCommitResult:
         _, repo, path = self.ctx.workspace(c.workspace_id)
         message = validate_commit_message(c.message)
+        audit_details: dict[str, object] = {
+            "workspace_id": c.workspace_id,
+            "message_length": len(message),
+        }
 
         def op() -> WorkspaceCommitResult:
             with self.ctx.locks.lock(c.workspace_id):
                 fresh = self.ctx.store.load(c.workspace_id)
-                self.ctx.git.changed_paths(path, repo)
+                committed_paths = self.ctx.git.changed_paths(path, repo)
+                command_source_union = _all_command_source_paths(repo)
+                command_source_paths_committed = list(
+                    dirty_command_source_paths(frozenset(committed_paths), command_source_union)
+                )
+                if command_source_paths_committed:
+                    audit_details["command_source_paths_committed"] = command_source_paths_committed
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
                 dirty = bool(self.ctx.git.status_porcelain(path).strip())
                 current_head = self.ctx.git.head_sha(path)
@@ -75,11 +96,17 @@ class WorkspaceCommitter:
                         f"Commit {head} succeeded but workspace registry update failed; do not push until state is repaired"
                     ) from exc
                 return WorkspaceCommitResult(
-                    c.workspace_id, fresh.branch, show, head, profile, metrics
+                    c.workspace_id,
+                    fresh.branch,
+                    show,
+                    head,
+                    profile,
+                    metrics,
+                    command_source_paths_committed,
                 )
 
         return self.ctx.audited(
             "workspace_commit",
-            {"workspace_id": c.workspace_id, "message_length": len(message)},
+            audit_details,
             op,
         )

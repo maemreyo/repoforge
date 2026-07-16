@@ -85,6 +85,50 @@ def read_audit_events(
     return matched
 
 
+def summarize_command_source_stats(path: Path) -> list[dict[str, Any]]:
+    """Aggregate dirty vs. clean ``workspace_run_profile`` run counts per profile (issue #170).
+
+    Reads only the ``command_source_dirty``/``profile`` fields already written to each
+    ``workspace_run_profile`` audit event's ``details`` -- no new persistence, and no
+    behavior change if those fields are absent (e.g. a legacy event, or a profile with no
+    declared/derived command-source paths never stamps dirty, only clean).
+    """
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - _MAX_SCAN_BYTES))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigError(f"Cannot read audit log {path}: {exc}") from exc
+    counts: dict[str, dict[str, int]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("action") != "workspace_run_profile":
+            continue
+        details = event.get("details")
+        if not isinstance(details, dict):
+            continue
+        profile = details.get("profile")
+        dirty = details.get("command_source_dirty")
+        if not isinstance(profile, str) or not isinstance(dirty, bool):
+            continue
+        bucket = counts.setdefault(profile, {"dirty": 0, "clean": 0})
+        bucket["dirty" if dirty else "clean"] += 1
+    return [
+        {"profile": profile, "dirty": data["dirty"], "clean": data["clean"]}
+        for profile, data in sorted(counts.items())
+    ]
+
+
 def _rows_from_operations(operations: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for action, stats in operations.items():
