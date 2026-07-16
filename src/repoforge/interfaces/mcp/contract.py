@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import textwrap
+import inspect
 from typing import Any, cast
 
 from ... import __version__
@@ -30,7 +30,7 @@ async def build_release_contract() -> dict[str, Any]:
     def _normalise(tool: Any) -> dict[str, Any]:
         raw: dict[str, Any] = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
         if isinstance(raw.get("description"), str):
-            raw["description"] = textwrap.dedent(raw["description"])
+            raw["description"] = inspect.cleandoc(raw["description"])
         return raw
 
     normalized_tools = sorted(
