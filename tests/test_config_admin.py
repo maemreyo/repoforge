@@ -27,7 +27,11 @@ from repoforge.application.configuration.source import (
     render_source,
 )
 from repoforge.application.repository_admin.proposals import RepositoryProposalService
-from repoforge.bootstrap import read_audit_events, read_runtime_log
+from repoforge.bootstrap import (
+    build_pending_policy_change_store,
+    read_audit_events,
+    read_runtime_log,
+)
 from repoforge.domain.config_generation import sha256_text
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.policy_patch import (
@@ -331,6 +335,9 @@ def _admin(
         proposals=RepositoryProposalService(_FakeProbe(repo_root)),
         clock=FixedClock(NOW),
         ids=SequenceIdGenerator(),
+        pending=build_pending_policy_change_store(
+            store.root, locks=FcntlLockManager(tmp_path / "locks")
+        ),
         audit_log_path=tmp_path / "state" / "audit.jsonl",
         runtime_log_path=tmp_path / "state" / "managed-runtime.log",
         read_audit=read_audit_events,
@@ -338,6 +345,69 @@ def _admin(
         reload_runtime=reload_runtime,
         read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
     )
+
+
+def test_shared_approval_queue_migrates_legacy_payload_and_retains_decision(
+    tmp_path: Path,
+) -> None:
+    approvals_module = importlib.import_module("repoforge.application.approvals")
+    persistence_module = importlib.import_module(
+        "repoforge.adapters.persistence.json_approval_store"
+    )
+    legacy_root = tmp_path / "state" / "pending-policy-changes"
+    legacy_root.mkdir(parents=True)
+    record = {
+        "change_id": "chg-0123456789abcdef0123",
+        "repo_id": "demo",
+        "reason": "expand profile capability",
+        "created_at": NOW,
+        "capability_delta": "expansion",
+        "changes": [{"path": "profiles.debug", "direction": "expansion"}],
+        "source_text": "version = 2\n",
+        "resolved_text": "schema_version = 3\n",
+        "repository_fingerprints": [["demo", "f" * 64]],
+        "expected_generation": 1,
+        "expected_source_sha256": "a" * 64,
+        "proposal_id": "chg-0123456789abcdef0123",
+    }
+    (legacy_root / "chg-0123456789abcdef0123.json").write_text(json.dumps(record), encoding="utf-8")
+    locks = FcntlLockManager(tmp_path / "locks")
+    approvals = persistence_module.JsonApprovalStore(tmp_path / "state", locks)
+    payloads = persistence_module.JsonApprovalPayloadStore(tmp_path / "state", locks)
+
+    queue = approvals_module.PendingPolicyChangeStore(
+        approvals=approvals,
+        payloads=payloads,
+        legacy_root=legacy_root,
+    )
+
+    assert queue.summaries() == [
+        {
+            "change_id": record["change_id"],
+            "repo_id": "demo",
+            "reason": record["reason"],
+            "created_at": NOW,
+            "capability_delta": "expansion",
+            "changes": record["changes"],
+            "expected_generation": 1,
+        }
+    ]
+    assert queue.load(record["change_id"]) == record
+    request = approvals.read(record["change_id"])
+    assert request is not None
+    assert request.value.status.value == "pending"
+    assert "source_text" not in json.dumps(request.value.summary(), sort_keys=True)
+    assert not list(legacy_root.glob("*.json"))
+
+    queue.reject(record["change_id"], actor="operator", decided_at=NOW)
+
+    decided = approvals.read(record["change_id"])
+    assert decided is not None
+    assert decided.value.status.value == "declined"
+    assert decided.value.decision is not None
+    assert decided.value.decision.actor == "operator"
+    assert payloads.read(record["change_id"]) is None
+    assert queue.summaries() == []
 
 
 def test_config_inspect_reports_source_ticket_graph_drift(tmp_path: Path) -> None:

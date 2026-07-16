@@ -1,5 +1,6 @@
 """Protocols only; concrete implementations live under adapters/."""
 
+from .approval_store import ApprovalPayloadStore, ApprovalStore
 from .audit import AuditSink
 from .background_tasks import BackgroundTaskRunner
 from .capabilities import ExecutableLocator
@@ -77,6 +78,8 @@ from .workflow_replay import (
 from .workspace_store import WorkspaceStore
 
 __all__ = [
+    "ApprovalPayloadStore",
+    "ApprovalStore",
     "ApprovedExecution",
     "ArtifactResult",
     "AuditSink",

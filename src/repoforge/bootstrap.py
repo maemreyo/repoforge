@@ -29,6 +29,8 @@ from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
+    JsonApprovalPayloadStore,
+    JsonApprovalStore,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -86,6 +88,7 @@ from .adapters.runtime.local_runtime import (
 from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandExecutor
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
+from .application.approvals import PendingPolicyChangeStore
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
 from .application.fingerprint_cache import FingerprintCache
@@ -111,6 +114,8 @@ from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
 from .ports import (
+    ApprovalPayloadStore,
+    ApprovalStore,
     AuditSink,
     BackgroundTaskRunner,
     Clock,
@@ -278,6 +283,32 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
 
 def build_operation_gate() -> OperationGate:
     return InProcessOperationGate()
+
+
+def build_approval_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> ApprovalStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonApprovalStore(root, locks or build_lock_manager(root))
+
+
+def build_approval_payload_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> ApprovalPayloadStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonApprovalPayloadStore(root, locks or build_lock_manager(root))
+
+
+def build_pending_policy_change_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> PendingPolicyChangeStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    selected_locks = locks or build_lock_manager(root)
+    return PendingPolicyChangeStore(
+        approvals=build_approval_store(root, locks=selected_locks),
+        payloads=build_approval_payload_store(root, locks=selected_locks),
+        legacy_root=root / "pending-policy-changes",
+    )
 
 
 def build_task_store(

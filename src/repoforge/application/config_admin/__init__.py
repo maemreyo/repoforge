@@ -1,2 +1,2 @@
+from ..approvals import PendingPolicyChangeStore as PendingPolicyChangeStore
 from .service import ConfigAdminService as ConfigAdminService
-from .service import PendingPolicyChangeStore as PendingPolicyChangeStore

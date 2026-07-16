@@ -56,6 +56,7 @@ from ...bootstrap import (
     build_lock_manager,
     build_metrics_sink,
     build_operation_gate,
+    build_pending_policy_change_store,
     build_repository_probe,
     build_runtime_control_client,
     build_runtime_control_server,
@@ -331,7 +332,7 @@ def _config_set(config_path: Path, args: argparse.Namespace) -> int:
 
 def _pending_store(config_path: Path) -> PendingPolicyChangeStore:
     store = _ensure_generation(config_path)
-    return PendingPolicyChangeStore(store.root / "pending-policy-changes")
+    return build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root))
 
 
 def _config_pending(config_path: Path) -> int:
@@ -354,7 +355,7 @@ def _config_pending(config_path: Path) -> int:
 
 def _config_approve(config_path: Path, args: argparse.Namespace) -> int:
     store = _ensure_generation(config_path)
-    pending = PendingPolicyChangeStore(store.root / "pending-policy-changes")
+    pending = build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root))
     record = pending.load(args.change_id)
     proposal_id = str(record["proposal_id"])
     now = system_clock().now_iso()
@@ -384,13 +385,21 @@ def _config_approve(config_path: Path, args: argparse.Namespace) -> int:
         )
     except ConfigError as exc:
         if str(exc).startswith(("STALE_CONFIG_GENERATION", "Configuration changed concurrently")):
-            pending.delete(args.change_id)
+            pending.invalidate(
+                args.change_id,
+                actor=os.environ.get("USER", "local-user"),
+                decided_at=now,
+            )
             raise ConfigError(
                 f"{exc}. The pending change was discarded as stale; ask the agent to "
                 "propose it again from the current configuration."
             ) from exc
         raise
-    pending.delete(args.change_id)
+    pending.approve(
+        args.change_id,
+        actor=os.environ.get("USER", "local-user"),
+        decided_at=now,
+    )
     activation = _activate(
         store,
         config_path,
@@ -416,7 +425,11 @@ def _config_approve(config_path: Path, args: argparse.Namespace) -> int:
 def _config_reject(config_path: Path, change_id: str) -> int:
     pending = _pending_store(config_path)
     record = pending.load(change_id)
-    pending.delete(change_id)
+    pending.reject(
+        change_id,
+        actor=os.environ.get("USER", "local-user"),
+        decided_at=system_clock().now_iso(),
+    )
     _json(
         {
             "status": "rejected",
@@ -1472,6 +1485,7 @@ def _serve(config_path: Path) -> int:
         proposals=RepositoryProposalService(_probe()),
         clock=system_clock(),
         ids=id_generator(),
+        pending=build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root)),
         audit_log_path=audit_state_root / "audit.jsonl",
         runtime_log_path=store.root / "managed-runtime.log",
         reload_runtime=reload_in_process,

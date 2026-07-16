@@ -1,3 +1,4 @@
+from .json_approval_store import JsonApprovalPayloadStore, JsonApprovalStore
 from .json_github_read_cache import JsonGitHubReadCache
 from .json_hygiene_cache import JsonHygieneBaselineCache
 from .json_idempotency_store import JsonIdempotencyStore
@@ -10,6 +11,8 @@ from .json_workflow_recording_store import JsonWorkflowRecordingStore
 from .json_workspace_store import JsonWorkspaceStore
 
 __all__ = [
+    "JsonApprovalPayloadStore",
+    "JsonApprovalStore",
     "JsonGitHubReadCache",
     "JsonHygieneBaselineCache",
     "JsonIdempotencyStore",

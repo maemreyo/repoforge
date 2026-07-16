@@ -19,8 +19,6 @@ Gating contract (enforced twice — here for UX, and independently by
 
 from __future__ import annotations
 
-import json
-import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -44,6 +42,7 @@ from ...domain.repository_proposal import EnrollmentMode
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
 from ...ports.ids import IdGenerator
+from ..approvals import PendingPolicyChangeStore
 from ..configuration.document import (
     apply_policy_patch,
     apply_proposal,
@@ -60,7 +59,6 @@ from ..configuration.source import (
 from ..repository_admin.proposals import RepositoryProposalService
 
 _AUTO_APPLY_DELTAS = frozenset({CapabilityDeltaKind.METADATA_ONLY, CapabilityDeltaKind.RESTRICTION})
-_MAX_PENDING_CHANGES = 20
 _MAX_LOG_LIMIT = 200
 
 
@@ -76,81 +74,6 @@ class ProfileDefinition:
     working_directory: str | None = None
 
 
-class PendingPolicyChangeStore:
-    """Durable queue of agent-proposed capability expansions awaiting operator approval."""
-
-    def __init__(self, root: Path) -> None:
-        self._root = root
-
-    @property
-    def root(self) -> Path:
-        return self._root
-
-    def _path(self, change_id: str) -> Path:
-        if not change_id or any(char in change_id for char in "/\\.") or len(change_id) > 64:
-            raise ConfigError(f"Invalid pending change id: {change_id!r}")
-        return self._root / f"{change_id}.json"
-
-    def save(self, record: dict[str, Any]) -> None:
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        existing = self.entries()
-        if len(existing) >= _MAX_PENDING_CHANGES:
-            raise ConfigError(
-                "PENDING_CHANGES_FULL: too many unapproved policy changes; approve or "
-                "reject existing ones with `rf config pending` first"
-            )
-        path = self._path(str(record["change_id"]))
-        temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-        temporary.write_text(
-            json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-
-    def load(self, change_id: str) -> dict[str, Any]:
-        path = self._path(change_id)
-        if not path.is_file():
-            raise ConfigError(f"Unknown pending policy change: {change_id}")
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ConfigError(f"Invalid pending policy change {change_id}: {exc}") from exc
-        if not isinstance(record, dict) or record.get("change_id") != change_id:
-            raise ConfigError(f"Invalid pending policy change {change_id}")
-        return record
-
-    def delete(self, change_id: str) -> None:
-        self._path(change_id).unlink(missing_ok=True)
-
-    def entries(self) -> list[dict[str, Any]]:
-        if not self._root.is_dir():
-            return []
-        records: list[dict[str, Any]] = []
-        for path in sorted(self._root.glob("*.json")):
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(record, dict) and record.get("change_id"):
-                records.append(record)
-        return records
-
-    def summaries(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "change_id": record.get("change_id"),
-                "repo_id": record.get("repo_id"),
-                "reason": record.get("reason"),
-                "created_at": record.get("created_at"),
-                "capability_delta": record.get("capability_delta"),
-                "changes": record.get("changes", []),
-                "expected_generation": record.get("expected_generation"),
-            }
-            for record in self.entries()
-        ]
-
-
 class ConfigAdminService:
     """Bounded configuration inspection, log reads, and gated policy mutation."""
 
@@ -161,6 +84,7 @@ class ConfigAdminService:
         proposals: RepositoryProposalService,
         clock: Clock,
         ids: IdGenerator,
+        pending: PendingPolicyChangeStore,
         audit_log_path: Path,
         runtime_log_path: Path,
         read_audit: Callable[..., list[dict[str, Any]]],
@@ -172,13 +96,13 @@ class ConfigAdminService:
         self._proposals = proposals
         self._clock = clock
         self._ids = ids
+        self.pending = pending
         self._audit_log_path = audit_log_path
         self._runtime_log_path = runtime_log_path
         self._read_audit = read_audit
         self._read_log = read_log
         self._reload_runtime = reload_runtime
         self._read_runtime_status = read_runtime_status
-        self.pending = PendingPolicyChangeStore(store.root / "pending-policy-changes")
 
     # -- reads ---------------------------------------------------------------
 
