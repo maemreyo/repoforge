@@ -1,4 +1,4 @@
-.PHONY: setup lint typecheck test build check tickets doctor smoke inspector
+.PHONY: setup lint typecheck test build check tickets doctor smoke inspector install-hooks
 
 setup:
 	uv sync --extra dev
@@ -30,3 +30,9 @@ smoke:
 
 inspector:
 	./scripts/inspect-mcp.sh
+
+install-hooks:
+	@echo "Installing pre-push hook..."
+	@cp scripts/pre-push.sh .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-push
+	@echo "Installed .git/hooks/pre-push"
