@@ -44,7 +44,7 @@ Run the complete project gate with:
 ./scripts/test-all.sh
 ```
 
-`make check` is the fast agent gate: release contracts, Ruff, strict mypy, and the test files changed from `HEAD` (falling back to the MCP contract test). `make production-check` retains full coverage shards, package build, and isolated wheel verification for releases.
+`make check` is the fast agent gate: release contracts, Ruff, strict mypy, and test files changed on the branch or working tree (falling back to the MCP contract test). Set `REPOFORGE_BASE_REF` when the base is not `origin/main`. `make production-check` retains full coverage shards, package build, and isolated wheel verification for releases.
 The production authority is `scripts/verify-production.sh`; use `--allow-dirty` only while iterating.
 Its ordered guarantees are documented in [INTEGRITY_POLICY.md](INTEGRITY_POLICY.md), while issue
 metadata and tracking rules are documented in [TICKET_GOVERNANCE.md](TICKET_GOVERNANCE.md).

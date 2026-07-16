@@ -74,7 +74,7 @@ class ContractAwareFastMCP(FastMCP[None]):
 
         resolved = cast("dict[str, Any]", _resolve(schema))
         resolved.pop("$defs", None)
-        return cast(dict[str, Any], resolved)
+        return resolved
 
     async def list_tools(self) -> list[McpTool]:
         tools = await super().list_tools()

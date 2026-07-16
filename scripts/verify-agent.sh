@@ -18,7 +18,13 @@ uv run python scripts/check_release_contracts.py
 ) &
 STATIC_PID=$!
 (
-  TEST_FILES=$(git diff --name-only --diff-filter=AM HEAD -- 'tests/test_*.py')
+  BASE_REF=${REPOFORGE_BASE_REF:-origin/main}
+  TEST_FILES=$(
+    {
+      git diff --name-only --diff-filter=AM "$BASE_REF"...HEAD -- 'tests/test_*.py'
+      git diff --name-only --diff-filter=AM HEAD -- 'tests/test_*.py'
+    } | sort -u
+  )
   if [ -n "$TEST_FILES" ]; then
     # Test paths are repository-controlled and cannot contain whitespace.
     uv run pytest -q $TEST_FILES
