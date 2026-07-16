@@ -1,34 +1,100 @@
 # =============================================================================
 # RepoForge Makefile
 #
-#   make setup          Install dev dependencies
-#   make lint           Run ruff linter
-#   make typecheck      Run mypy type checking
-#   make test           Run tests with coverage
-#   make build          Build source + wheel dist/
+# Quick start:
+#   make                # alias for make start
+#   make start          # Build + install + run stable release (one step)
+#   make dev-server     # Run dev server from venv (foreground, Ctrl+C)
+#   make restart        # Restart already-running server
+#   make status         # Check server health
+#   make stop           # Stop server
+#   make logs           # Tail runtime logs
+#   make doctor         # Health check
 #
-#   make dev-server     Start local dev server (foreground, Ctrl+C to stop)
-#   make restart        Restart running server (keeps background mode)
-#   make status         Check server health
-#   make stop           Stop server
-#   make logs           Tail runtime logs
-#   make doctor         Run rf doctor health check
+#   make release        # Full release: bump → verify → tag → GitHub Release
+#   make install        # Install pre-built wheel as system-wide `rf`
+#   make build          # Build source + wheel into dist/
+#   make test           # Run tests with coverage
+#   make clean          # Remove build artifacts
 #
-#   make release        Full release: bump → verify → tag → GitHub Release
-#   make install        Install built wheel as system-wide `rf`
-#   make clean          Remove build artifacts
+# API key:
+#   Export CONTROL_PLANE_API_KEY in your shell or .env, or pass inline:
+#     CONTROL_PLANE_API_KEY='sk-proj-...' make start
 # =============================================================================
 
-.PHONY: setup lint typecheck test build
-.PHONY: dev-server restart status stop logs doctor smoke
-.PHONY: release install clean
+.PHONY: default start dev-server restart status stop logs doctor
+.PHONY: setup lint typecheck test build install release
+.PHONY: smoke clean
 
-# --- Dev environment ---------------------------------------------------------
+default: start
+
+# =============================================================================
+# START — build + install system-wide + run (the "just run it" command)
+# =============================================================================
+# 1. Builds a fresh wheel from current source
+# 2. Installs it as system-wide `rf` via uv tool
+# 3. Stops any old server if running
+# 4. Starts the new server (background, with API key if provided)
+#
+#   make start                                # foreground
+#   make start BG=1                           # background (daemon)
+#   CONTROL_PLANE_API_KEY='sk-proj-...' make start   # with API key
+# =============================================================================
+
+start: build  # Build + install + start stable release
+	uv tool install --reinstall dist/repoforge_mcp-*.whl -q
+	-rf runtime stop 2>/dev/null
+	CONTROL_PLANE_API_KEY="$(or $(CONTROL_PLANE_API_KEY),$$CONTROL_PLANE_API_KEY)" rf start $(if $(BG),--background,)
+	@echo ""
+	@echo "─── Server PID: $$(rf runtime status 2>/dev/null | grep -o '"pid": [0-9]*' | head -1 | grep -o '[0-9]*') ───"
+	@echo "  rf --version = $$(rf --version)"
+	@echo "  make status  to check health"
+	@echo "  make logs    to tail logs"
+	@echo "  make stop    to stop"
+	@echo "───────────────────────────────────────────────────"
+
+# =============================================================================
+# LOCAL DEV SERVER — runs from project venv (your latest code, no install)
+# =============================================================================
+# Run in a terminal tab, Ctrl+C to stop. Good for iterating on code.
+
+dev-server:  # Start dev server (foreground, project venv)
+	uv run rf start
+
+# =============================================================================
+# RUNTIME CONTROLS
+# =============================================================================
+
+restart:  # Gracefully restart the running server
+	uv run rf runtime restart
+
+status:  # Show server health, PID, generation, tool surface hash
+	uv run rf runtime status
+
+stop:  # Stop the running server
+	uv run rf runtime stop
+
+logs:  # Tail the managed runtime log
+	uv run rf runtime logs
+
+doctor:  # Health check on all repos, paths, and dependencies
+	uv run rf doctor
+
+smoke:  # Quick test (set REPO_ID=xxx to filter)
+	@test -n "$(REPO_ID)" || (echo "Set REPO_ID to a configured repo id" >&2; exit 2)
+	uv run rf repo list
+
+# =============================================================================
+# DEV ENVIRONMENT
+# =============================================================================
 
 setup:  # Install dev dependencies (run once after clone)
 	uv sync --extra dev
 
-lint:  # Lint all source and test files
+build:  # Build source + wheel into dist/
+	uv build
+
+lint:  # Lint all source files
 	uv run ruff check .
 
 typecheck:  # Type-check the full source tree
@@ -37,53 +103,19 @@ typecheck:  # Type-check the full source tree
 test:  # Run full test suite with coverage
 	uv run pytest --cov=repoforge --cov-report=term-missing
 
-build:  # Build source distribution and wheel into dist/
-	uv build
+# =============================================================================
+# RELEASE & INSTALL
+# =============================================================================
 
-# --- Local server (development) ----------------------------------------------
-# These use `uv run rf` → project venv → your latest local code.
-# Run `make dev-server` in a terminal tab to see live logs.
+install: build  # Build + install wheel as system-wide rf
+	uv tool install --reinstall dist/repoforge_mcp-*.whl -q
 
-dev-server:  # Start dev server in foreground (Ctrl+C to stop; auto-reloads on restart)
-	uv run rf start
-
-restart:  # Gracefully restart the running server (new code, same background mode)
-	uv run rf runtime restart
-
-status:  # Show server health, PID, generation, tool surface hash
-	uv run rf runtime status
-
-stop:  # Stop the running server gracefully
-	uv run rf runtime stop
-
-logs:  # Tail the managed runtime log
-	uv run rf runtime logs
-
-doctor:  # Run health checks on all repos, paths, and dependencies
-	uv run rf doctor
-
-smoke:  # Quick smoke test: list repos (set REPO_ID=xxx to filter)
-	@test -n "$(REPO_ID)" || (echo "Set REPO_ID to a configured repository id" >&2; exit 2)
-	uv run rf repo list
-
-# --- Release ------------------------------------------------------------------
-# Bump version, run production gate, tag, push, create GitHub Release.
-# Usage:  make release BUMP=patch   (default: minor)
-#         make release BUMP=minor
-#         make release BUMP=major
-
-release:  # Full release pipeline: bump → verify → tag → GitHub Release
+release:  # Full release: bump → verify → tag → GitHub Release
 	scripts/release.sh $(BUMP)
 
-# --- Install stable release ---------------------------------------------------
-# Installs the freshly-built wheel as the system-wide `rf` command.
-# After this, plain `rf` runs the released version instead of the dev venv.
-# The venv `uv run rf` still stays on your latest code — use whichever you need.
-
-install:  # Install built wheel as system-wide rf via uv tool
-	uv tool install --reinstall dist/repoforge_mcp-*.whl
-
-# --- Cleanup ------------------------------------------------------------------
+# =============================================================================
+# CLEANUP
+# =============================================================================
 
 clean:  # Remove build artifacts
 	rm -rf dist/ *.egg-info __pycache__ .ruff_cache .mypy_cache
