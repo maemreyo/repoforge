@@ -11,11 +11,12 @@ import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import Tool as McpTool
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from ...application.runtime.hot_reload import AtomicServiceRouter
 from ...application.service import CodingService
@@ -53,6 +54,28 @@ class ContractAwareFastMCP(FastMCP[None]):
             return self._contract_registry.current_version
         return self._contract_registry.resolve(capabilities).version
 
+    @staticmethod
+    def _resolve_schema_defs(schema: dict[str, Any]) -> dict[str, Any]:
+        """Recursively inline ``$defs`` references so clients see concrete types."""
+        defs = schema.get("$defs", {})
+
+        def _resolve(value: Any) -> Any:
+            if isinstance(value, dict):
+                ref = value.get("$ref", "")
+                if ref.startswith("#/$defs/"):
+                    key = ref[len("#/$defs/"):]
+                    resolved = defs.get(key)
+                    if resolved is not None:
+                        return _resolve(resolved)
+                return {k: _resolve(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_resolve(item) for item in value]
+            return value
+
+        resolved = _resolve(schema)
+        resolved.pop("$defs", None)
+        return resolved
+
     async def list_tools(self) -> list[McpTool]:
         tools = await super().list_tools()
         version = self._selected_contract_version()
@@ -75,7 +98,12 @@ class ContractAwareFastMCP(FastMCP[None]):
                 continue
             description = f"{alias.notice} {tool.description or ''}".strip()
             visible.append(tool.model_copy(update={"description": description}))
-        return visible
+        # Resolve $defs in every tool's input schema so clients see concrete types.
+        resolved: list[McpTool] = []
+        for tool in visible:
+            schema = self._resolve_schema_defs(tool.inputSchema)
+            resolved.append(tool.model_copy(update={"inputSchema": schema}))
+        return resolved
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         all_tools = await super().list_tools()
@@ -457,8 +485,8 @@ def create_server(
         query: str,
         ref: str | None = None,
         path_glob: str | None = None,
-        max_results: int = 200,
-        context_lines: int = 0,
+        max_results: Annotated[int, Field(ge=1, le=200)] = 200,
+        context_lines: Annotated[int, Field(ge=0, le=5)] = 0,
     ) -> dict[str, Any]:
         """Use this to locate literal text in an immutable reviewed repository snapshot. Pass
         context_lines (0-5) to also return that many surrounding lines on each side of a match
@@ -664,8 +692,8 @@ def create_server(
         workspace_id: str,
         query: str,
         path_glob: str | None = None,
-        max_results: int = 200,
-        context_lines: int = 0,
+        max_results: Annotated[int, Field(ge=1, le=200)] = 200,
+        context_lines: Annotated[int, Field(ge=0, le=5)] = 0,
     ) -> dict[str, Any]:
         """Use this when locating literal text in allowed workspace files; it is not a shell tool.
         Pass context_lines (0-5) to also return that many surrounding lines on each side of a
