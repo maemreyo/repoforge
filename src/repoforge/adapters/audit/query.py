@@ -1,6 +1,6 @@
-"""Bounded, redacted read access to local operational history for debugging.
+"""Bounded, redacted read and prune access to local operational history for debugging.
 
-This module only reads state that :mod:`repoforge.adapters.audit.jsonl` and
+This module only reads or prunes state that :mod:`repoforge.adapters.audit.jsonl` and
 :mod:`repoforge.adapters.observability.json_metrics` already write; it adds no new
 persistence and never touches Git, GitHub, or a workspace.
 """
@@ -8,7 +8,7 @@ persistence and never touches Git, GitHub, or a workspace.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -253,3 +253,56 @@ def summarize_operation_metrics(
                     continue
                 _merge_bucket_stat(aggregated.setdefault(action, _empty_bucket_stat()), stats)
     return _rows_from_operations(aggregated)
+
+
+def prune_audit_log(
+    path: Path,
+    *,
+    before: str,
+) -> int:
+    """Remove audit events older than the ISO-8601 ``before`` timestamp.
+
+    Returns the number of pruned events.
+    """
+    try:
+        cutoff = datetime.fromisoformat(before.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfigError(f"Invalid --before date {before!r}; expected ISO-8601") from exc
+    if cutoff.tzinfo is None:
+        raise ConfigError("--before must include a timezone offset (e.g. 2026-07-16T08:00:00+00:00)")
+    if not path.is_file():
+        return 0
+    try:
+        with path.open("r") as handle:
+            lines = handle.readlines()
+    except OSError as exc:
+        raise ConfigError(f"Cannot read audit log {path}: {exc}") from exc
+
+    kept: list[str] = []
+    pruned = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            pruned += 1
+            continue
+        ts = event.get("timestamp", "")
+        try:
+            event_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            pruned += 1
+            continue
+        if event_time < cutoff:
+            pruned += 1
+        else:
+            kept.append(line + "\n")
+
+    try:
+        with path.open("w") as handle:
+            handle.writelines(kept)
+    except OSError as exc:
+        raise ConfigError(f"Cannot write audit log {path}: {exc}") from exc
+    return pruned
