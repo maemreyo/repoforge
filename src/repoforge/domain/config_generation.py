@@ -209,6 +209,13 @@ def _diagnostic_map(repo: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(name): raw for name, raw in diagnostics.items() if isinstance(raw, dict)}
 
 
+def _formatter_map(repo: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    formatters = repo.get("formatters", {})
+    if not isinstance(formatters, dict):
+        return {}
+    return {str(name): raw for name, raw in formatters.items() if isinstance(raw, dict)}
+
+
 def _argv_identity(value: object) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         return ()
@@ -333,6 +340,73 @@ def _record_diagnostic_changes(
             _record_number(
                 changes,
                 f"{diagnostic_prefix}.{field}",
+                left.get(field, 0),
+                right.get(field, 0),
+                reason=reason,
+            )
+
+
+def _record_formatter_changes(
+    changes: list[CapabilityChange],
+    prefix: str,
+    before_repo: dict[str, Any],
+    after_repo: dict[str, Any],
+) -> None:
+    before = _formatter_map(before_repo)
+    after = _formatter_map(after_repo)
+    _record_set_change(
+        changes,
+        prefix,
+        set(before),
+        set(after),
+        additions=CapabilityDeltaKind.EXPANSION,
+        removals=CapabilityDeltaKind.RESTRICTION,
+        reason="reviewed formatter availability changed",
+    )
+    for formatter_id in sorted(set(before) & set(after)):
+        left = before[formatter_id]
+        right = after[formatter_id]
+        formatter_prefix = f"{prefix}.{formatter_id}"
+        for field, reason in (
+            ("check_argv", "formatter checker executable or argv changed"),
+            ("fix_argv", "formatter fixer executable or argv changed"),
+            ("include_globs", "formatter path scope changed"),
+            ("network_policy", "formatter network policy changed"),
+            ("parser", "formatter output parser changed"),
+        ):
+            left_value = (
+                _argv_identity(left.get(field))
+                if field in {"check_argv", "fix_argv"}
+                else tuple(sorted(_set(left.get(field))))
+                if field == "include_globs"
+                else left.get(field)
+            )
+            right_value = (
+                _argv_identity(right.get(field))
+                if field in {"check_argv", "fix_argv"}
+                else tuple(sorted(_set(right.get(field))))
+                if field == "include_globs"
+                else right.get(field)
+            )
+            if left_value != right_value:
+                changes.append(
+                    CapabilityChange(
+                        f"{formatter_prefix}.{field}",
+                        left_value,
+                        right_value,
+                        CapabilityDeltaKind.INCOMPATIBLE,
+                        reason,
+                    )
+                )
+        for field, reason in (
+            ("timeout_seconds", "formatter process duration"),
+            ("output_limit", "formatter output disclosure bound"),
+            ("max_paths", "formatter path-count bound"),
+            ("baseline_cache_ttl_seconds", "formatter baseline cache lifetime"),
+        ):
+            _record_number(
+                changes,
+                f"{formatter_prefix}.{field}",
                 left.get(field, 0),
                 right.get(field, 0),
                 reason=reason,
@@ -550,6 +624,7 @@ _REPO_RECOGNIZED = {
     "no_maintainer_edit",
     "profiles",
     "diagnostics",
+    "formatters",
     "resource_budget",
 }
 _SERVER_RECOGNIZED = {
@@ -615,10 +690,21 @@ def _metadata(value: dict[str, Any]) -> dict[str, Any]:
             if isinstance(diagnostics, dict)
             else {}
         )
+        formatters = repo.get("formatters", {})
+        formatter_summaries = (
+            {
+                str(name): raw.get("summary")
+                for name, raw in formatters.items()
+                if isinstance(formatters, dict) and isinstance(raw, dict)
+            }
+            if isinstance(formatters, dict)
+            else {}
+        )
         result["repositories"][repo_id] = {
             "display_name": repo.get("display_name"),
             "profile_descriptions": descriptions,
             "diagnostic_summaries": diagnostic_summaries,
+            "formatter_summaries": formatter_summaries,
         }
     return result
 
@@ -745,6 +831,7 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             )
         _record_profile_changes(changes, prefix + ".profiles", left, right)
         _record_diagnostic_changes(changes, prefix + ".diagnostics", left, right)
+        _record_formatter_changes(changes, prefix + ".formatters", left, right)
         _record_resource_budget_changes(
             changes,
             prefix + ".resource_budget",

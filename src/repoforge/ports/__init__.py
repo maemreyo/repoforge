@@ -30,6 +30,13 @@ from .github import (
     PullRequestGateway,
 )
 from .github_read_cache import GitHubReadCache
+from .hygiene import (
+    HygieneBaselineCache,
+    HygieneCacheKey,
+    HygieneFormatReceipt,
+    HygieneGateway,
+    HygieneInspection,
+)
 from .idempotency import IdempotencyStore
 from .ids import IdGenerator
 from .locking import LockManager
@@ -94,6 +101,11 @@ __all__ = [
     "GitMergeResult",
     "GitRepository",
     "GitSnapshotBlob",
+    "HygieneBaselineCache",
+    "HygieneCacheKey",
+    "HygieneFormatReceipt",
+    "HygieneGateway",
+    "HygieneInspection",
     "IdGenerator",
     "IdempotencyStore",
     "LockManager",

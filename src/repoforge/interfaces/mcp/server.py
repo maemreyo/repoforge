@@ -833,6 +833,40 @@ def create_server(
         )
 
     @mcp.tool(
+        title="Read baseline-aware workspace hygiene",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def workspace_hygiene_status(
+        workspace_id: str,
+        formatter_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this to compare exact-base and current-workspace formatter findings without mutating repository or workspace state."""
+        return bounded_service.call(
+            "workspace_hygiene_status",
+            workspace_id,
+            formatter_id,
+        )
+
+    @mcp.tool(
+        title="Format policy-allowed changed paths",
+        annotations=LOCAL_MUTATE,
+        structured_output=True,
+    )
+    def workspace_format_changed(
+        workspace_id: str,
+        expected_fingerprint: str,
+        formatter_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this after editing to run one reviewed formatter over server-derived policy-allowed changed paths only; callers cannot provide argv, executables, environment values, working directories, or path lists."""
+        return bounded_service.call(
+            "workspace_format_changed",
+            workspace_id,
+            expected_fingerprint,
+            formatter_id,
+        )
+
+    @mcp.tool(
         title="Verify workspace (deprecated alias)",
         annotations=LOCAL_MUTATE,
         structured_output=True,

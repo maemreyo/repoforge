@@ -94,6 +94,9 @@ def test_background_false_keeps_synchronous_contract(forge_env: ForgeEnvironment
         "satisfies_commit_gate",
         "used_default",
         "head_sha",
+        "command_source_dirty",
+        "command_source_dirty_paths",
+        "command_source_warning",
         "working_directory",
     }
     assert implicit == explicit
@@ -246,6 +249,7 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
             "correlation_id",
             "duration_ms",
             "result_bytes",
+            "command_source_dirty",
         }
     )
     assert sync_details["profile"] == bg_details["profile"] == "slow"

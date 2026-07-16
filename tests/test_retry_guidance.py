@@ -255,6 +255,9 @@ def test_success_path_is_unaffected_by_retry_guidance(forge_env: ForgeEnvironmen
         "satisfies_commit_gate",
         "used_default",
         "head_sha",
+        "command_source_dirty",
+        "command_source_dirty_paths",
+        "command_source_warning",
         "working_directory",
     }
 

@@ -12,6 +12,10 @@ from typing import Any, TypeVar
 import tomli as tomllib
 
 from .domain.adhoc import ExecutionMode, validate_adhoc_runners
+from .domain.command_source import (
+    derive_command_source_paths,
+    validate_command_source_paths,
+)
 from .domain.diagnostics import (
     DiagnosticMutability,
     DiagnosticNetworkPolicy,
@@ -22,6 +26,11 @@ from .domain.diagnostics import (
     validate_diagnostic_profile,
 )
 from .domain.errors import ConfigError
+from .domain.hygiene import (
+    FormatterPolicy,
+    HygieneNetworkPolicy,
+    HygieneParserKind,
+)
 from .domain.provider_config import load_provider_manifests
 from .domain.provider_manifest import ProviderManifest
 from .domain.resource_budget import (
@@ -123,6 +132,7 @@ class ProfileConfig:
     verification: bool = False
     timeout_seconds: int | None = None
     working_directory: str | None = None
+    command_source_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -150,6 +160,7 @@ class RepositoryConfig:
     no_maintainer_edit: bool = False
     profiles: dict[str, ProfileConfig] = field(default_factory=dict)
     diagnostics: dict[str, DiagnosticProfileConfig] = field(default_factory=dict)
+    formatters: dict[str, FormatterPolicy] = field(default_factory=dict)
     risk_policy: RiskPolicy = field(
         default_factory=lambda: default_risk_policy(final_profile="full")
     )
@@ -345,6 +356,14 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
                     f"profile {repo_id}.{name}.commands[{index}] must be a non-empty string array"
                 )
             commands.append(tuple(command))
+        command_source_context = f"repositories.{repo_id}.profiles.{name}.command_source_paths"
+        declared_source_paths = _tuple_of_strings(
+            profile.get("command_source_paths"), command_source_context
+        )
+        command_source_paths = validate_command_source_paths(
+            declared_source_paths or derive_command_source_paths(tuple(commands)),
+            command_source_context,
+        )
         profiles[name] = ProfileConfig(
             name=name,
             description=description,
@@ -352,6 +371,7 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
             verification=verification,
             timeout_seconds=timeout_seconds,
             working_directory=working_directory,
+            command_source_paths=command_source_paths,
         )
     return profiles
 
@@ -521,6 +541,65 @@ def _load_diagnostics(raw: Any, repo_id: str) -> dict[str, DiagnosticProfileConf
         )
         diagnostics[diagnostic_id] = validate_diagnostic_profile(diagnostic)
     return diagnostics
+
+
+def _load_formatters(raw: Any, repo_id: str) -> dict[str, FormatterPolicy]:
+    if raw is None:
+        return {}
+    table = _expect_mapping(raw, f"repositories.{repo_id}.formatters")
+    formatters: dict[str, FormatterPolicy] = {}
+    for formatter_id, formatter_raw in table.items():
+        policy = _expect_mapping(
+            formatter_raw,
+            f"repositories.{repo_id}.formatters.{formatter_id}",
+        )
+        formatters[str(formatter_id)] = FormatterPolicy(
+            formatter_id=str(formatter_id),
+            summary=str(policy.get("summary", "")),
+            check_argv=_tuple_of_strings(
+                policy.get("check_argv"),
+                f"formatter {repo_id}.{formatter_id}.check_argv",
+            ),
+            fix_argv=_tuple_of_strings(
+                policy.get("fix_argv"),
+                f"formatter {repo_id}.{formatter_id}.fix_argv",
+            ),
+            include_globs=_tuple_of_strings(
+                policy.get("include_globs"),
+                f"formatter {repo_id}.{formatter_id}.include_globs",
+            ),
+            timeout_seconds=_positive_int(
+                policy.get("timeout_seconds"),
+                120,
+                f"formatter {repo_id}.{formatter_id}.timeout_seconds",
+            ),
+            output_limit=_positive_int(
+                policy.get("output_limit"),
+                12_000,
+                f"formatter {repo_id}.{formatter_id}.output_limit",
+            ),
+            max_paths=_positive_int(
+                policy.get("max_paths"),
+                80,
+                f"formatter {repo_id}.{formatter_id}.max_paths",
+            ),
+            baseline_cache_ttl_seconds=_positive_int(
+                policy.get("baseline_cache_ttl_seconds"),
+                3_600,
+                f"formatter {repo_id}.{formatter_id}.baseline_cache_ttl_seconds",
+            ),
+            network_policy=_enum_value(
+                HygieneNetworkPolicy,
+                policy.get("network_policy", "local_only"),
+                f"formatter {repo_id}.{formatter_id}.network_policy",
+            ),
+            parser=_enum_value(
+                HygieneParserKind,
+                policy.get("parser", "ruff_format"),
+                f"formatter {repo_id}.{formatter_id}.parser",
+            ),
+        )
+    return formatters
 
 
 def _load_risk_policy(
@@ -743,6 +822,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         )
         profiles = _load_profiles(repo_raw.get("profiles"), repo_id)
         diagnostics = _load_diagnostics(repo_raw.get("diagnostics"), repo_id)
+        formatters = _load_formatters(repo_raw.get("formatters"), repo_id)
         default_verification_raw = repo_raw.get("default_verification_profile")
         default_verification = (
             str(default_verification_raw) if default_verification_raw is not None else None
@@ -862,6 +942,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ),
             profiles=profiles,
             diagnostics=diagnostics,
+            formatters=formatters,
             risk_policy=risk_policy,
             resource_budget=resource_budget,
             execution_mode=execution_mode,
