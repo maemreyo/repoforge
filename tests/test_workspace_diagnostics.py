@@ -17,6 +17,7 @@ from repoforge.domain.diagnostics import (
     DiagnosticProfileConfig,
     DiagnosticSelectorConfig,
     DiagnosticSelectorKind,
+    validate_diagnostic_profile,
 )
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 from repoforge.domain.workspace import VerificationReceipt
@@ -292,7 +293,7 @@ def _profile(
         argv_template=("pytest", "{selector}", "-q")
         if selector_kind is not DiagnosticSelectorKind.NONE
         else ("python", "scripts/check_release_contracts.py"),
-        selector=DiagnosticSelectorConfig(selector_kind, selector_values),
+        selector=DiagnosticSelectorConfig(kind=selector_kind, values=selector_values),
         working_directory=None,
         timeout_seconds=30,
         network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
@@ -396,6 +397,429 @@ def test_enum_and_none_selector_contracts(forge_env: ForgeEnvironment) -> None:
             git=git,
         )
     assert unexpected.value.code is ErrorCode.DIAGNOSTIC_SELECTOR_INVALID
+
+
+# ---------------------------------------------------------------------------
+# #168: generalized typed diagnostics -- token selectors, multi-value
+# selectors, two named placeholders, and flag-injection defense.
+# ---------------------------------------------------------------------------
+
+
+def _token_profile(
+    *,
+    char_classes: tuple[str, ...] = ("alnum", "underscore"),
+    max_length: int = 32,
+    prefix: str | None = None,
+    suffix: str | None = None,
+    max_values: int = 1,
+    expansion: str = "repeat",
+    separator: str | None = None,
+    allow_leading_dash: bool = False,
+    argv_template: tuple[str, ...] = ("pytest", "-k", "{selector}"),
+) -> DiagnosticProfileConfig:
+    return DiagnosticProfileConfig(
+        diagnostic_id="token-diag",
+        summary="Run pytest filtered by a keyword token",
+        argv_template=argv_template,
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN,
+            char_classes=char_classes,
+            max_length=max_length,
+            prefix=prefix,
+            suffix=suffix,
+            max_values=max_values,
+            expansion=expansion,
+            separator=separator,
+            allow_leading_dash=allow_leading_dash,
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+
+
+def test_token_selector_accepts_allowlisted_characters(forge_env: ForgeEnvironment) -> None:
+    created = forge_env.service.workspace_create("demo", "token selector")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    resolved = resolve_diagnostic_selector(
+        _token_profile(), "test_example", workspace=workspace, repo=repo, git=git
+    )
+    assert resolved.argv == ("pytest", "-k", "test_example")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "bad space",  # space class not enabled
+        "semi;colon",  # shell metacharacter
+        "-leading",  # leading dash rejected by default
+        "x" * 64,  # exceeds max_length=32
+    ],
+)
+def test_token_selector_rejects_disallowed_values(forge_env: ForgeEnvironment, value: str) -> None:
+    created = forge_env.service.workspace_create("demo", "bad token selector")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    with pytest.raises(RepoForgeError) as exc:
+        resolve_diagnostic_selector(
+            _token_profile(), value, workspace=workspace, repo=repo, git=git
+        )
+    assert exc.value.code is ErrorCode.DIAGNOSTIC_SELECTOR_INVALID
+
+
+def test_token_selector_enforces_prefix_and_suffix(forge_env: ForgeEnvironment) -> None:
+    created = forge_env.service.workspace_create("demo", "token prefix selector")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    profile = _token_profile(char_classes=("alnum", "path"), prefix="test_", suffix="_case")
+    resolved = resolve_diagnostic_selector(
+        profile, "test_foo_case", workspace=workspace, repo=repo, git=git
+    )
+    assert resolved.argv == ("pytest", "-k", "test_foo_case")
+    with pytest.raises(RepoForgeError):
+        resolve_diagnostic_selector(profile, "foo_case", workspace=workspace, repo=repo, git=git)
+    with pytest.raises(RepoForgeError):
+        resolve_diagnostic_selector(profile, "test_foo", workspace=workspace, repo=repo, git=git)
+
+
+def _multi_path_profile(
+    *, max_values: int = 8, expansion: str = "repeat", separator: str | None = None
+) -> DiagnosticProfileConfig:
+    return DiagnosticProfileConfig(
+        diagnostic_id="pytest-files",
+        summary="Run tracked pytest files",
+        argv_template=("pytest", "{selector}", "-q"),
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TRACKED_PATH,
+            max_values=max_values,
+            expansion=expansion,
+            separator=separator,
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.PYTEST,
+        output_limit=2_000,
+    )
+
+
+def test_multi_value_repeat_expansion_produces_one_element_per_value(
+    forge_env: ForgeEnvironment,
+) -> None:
+    created = forge_env.service.workspace_create("demo", "multi selector")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    resolved = resolve_diagnostic_selector(
+        _multi_path_profile(),
+        ["hello.txt", "README.md"],
+        workspace=workspace,
+        repo=repo,
+        git=git,
+    )
+    assert resolved.argv == ("pytest", "hello.txt", "README.md", "-q")
+    assert resolved.values["selector"] == ("hello.txt", "README.md")
+
+
+def test_multi_value_selector_rejects_values_beyond_max_values(
+    forge_env: ForgeEnvironment,
+) -> None:
+    created = forge_env.service.workspace_create("demo", "multi selector cap")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    with pytest.raises(RepoForgeError) as exc:
+        resolve_diagnostic_selector(
+            _multi_path_profile(max_values=1),
+            ["hello.txt", "README.md"],
+            workspace=workspace,
+            repo=repo,
+            git=git,
+        )
+    assert exc.value.code is ErrorCode.DIAGNOSTIC_SELECTOR_INVALID
+
+
+def test_multi_value_join_expansion_uses_declared_separator(
+    forge_env: ForgeEnvironment,
+) -> None:
+    created = forge_env.service.workspace_create("demo", "join selector")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    profile = _token_profile(
+        char_classes=("alnum",),
+        max_values=3,
+        expansion="join",
+        separator="|",
+        argv_template=("go", "test", "-run", "{selector}"),
+    )
+    resolved = resolve_diagnostic_selector(
+        profile, ["TestA", "TestB"], workspace=workspace, repo=repo, git=git
+    )
+    assert resolved.argv == ("go", "test", "-run", "TestA|TestB")
+
+
+def test_two_named_selectors_resolve_independently(forge_env: ForgeEnvironment) -> None:
+    created = forge_env.service.workspace_create("demo", "two selectors")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    profile = DiagnosticProfileConfig(
+        diagnostic_id="go-test-pkg",
+        summary="Run go test for one package filtered by name",
+        argv_template=("go", "test", "{selector}", "-run", "{selector:name}"),
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN,
+            char_classes=("alnum", "path"),
+        ),
+        selector2=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN,
+            name="name",
+            char_classes=("alnum",),
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+    resolved = resolve_diagnostic_selector(
+        profile, "./pkg", "TestFoo", workspace=workspace, repo=repo, git=git
+    )
+    assert resolved.argv == ("go", "test", "./pkg", "-run", "TestFoo")
+    assert resolved.values == {"selector": ("./pkg",), "name": ("TestFoo",)}
+
+
+def test_second_selector_rejected_when_not_declared(forge_env: ForgeEnvironment) -> None:
+    created = forge_env.service.workspace_create("demo", "unexpected second selector")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    with pytest.raises(RepoForgeError) as exc:
+        resolve_diagnostic_selector(
+            _token_profile(), "unit", "extra", workspace=workspace, repo=repo, git=git
+        )
+    assert exc.value.code is ErrorCode.DIAGNOSTIC_SELECTOR_INVALID
+
+
+def test_allow_leading_dash_requires_literal_terminator_at_config_load() -> None:
+    profile = DiagnosticProfileConfig(
+        diagnostic_id="bad-dash",
+        summary="bad dash",
+        argv_template=("pytest", "{selector}"),
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN,
+            char_classes=("alnum",),
+            allow_leading_dash=True,
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+    with pytest.raises(ConfigError, match="allow_leading_dash"):
+        validate_diagnostic_profile(profile)
+
+
+def test_allow_leading_dash_with_terminator_permits_leading_dash(
+    forge_env: ForgeEnvironment,
+) -> None:
+    profile = DiagnosticProfileConfig(
+        diagnostic_id="ok-dash",
+        summary="ok dash",
+        argv_template=("pytest", "--", "{selector}"),
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN,
+            char_classes=("alnum", "path"),
+            allow_leading_dash=True,
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+    validate_diagnostic_profile(profile)
+    created = forge_env.service.workspace_create("demo", "dash selector")
+    _, repo, workspace = forge_env.service.application.context.workspace(created["workspace_id"])
+    git = forge_env.service.application.context.git
+    resolved = resolve_diagnostic_selector(profile, "-x", workspace=workspace, repo=repo, git=git)
+    assert resolved.argv == ("pytest", "--", "-x")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_values": 0}, "max_values"),
+        ({"max_values": 17}, "max_values"),
+        ({"expansion": "scatter"}, "expansion"),
+        ({"max_values": 3, "expansion": "join"}, "separator"),
+        ({"max_values": 3, "expansion": "join", "separator": " "}, "separator"),
+        ({"char_classes": ("nope",)}, "char_classes"),
+    ],
+)
+def test_token_selector_config_shape_is_validated_at_load_time(
+    kwargs: dict[str, object], message: str
+) -> None:
+    base = {
+        "char_classes": ("alnum",),
+        "max_length": 32,
+        "max_values": 1,
+        "expansion": "repeat",
+        "separator": None,
+    }
+    base.update(kwargs)
+    profile = DiagnosticProfileConfig(
+        diagnostic_id="bad-shape",
+        summary="bad shape",
+        argv_template=("pytest", "-k", "{selector}"),
+        selector=DiagnosticSelectorConfig(kind=DiagnosticSelectorKind.TOKEN, **base),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+    with pytest.raises(ConfigError, match=message):
+        validate_diagnostic_profile(profile)
+
+
+def test_char_classes_rejected_for_non_token_kind() -> None:
+    profile = DiagnosticProfileConfig(
+        diagnostic_id="bad-kind",
+        summary="bad kind",
+        argv_template=("pytest", "{selector}"),
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.PACKAGE_NAME,
+            char_classes=("alnum",),
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+    with pytest.raises(ConfigError, match="char_classes"):
+        validate_diagnostic_profile(profile)
+
+
+def test_duplicate_selector_names_rejected_at_load_time() -> None:
+    profile = DiagnosticProfileConfig(
+        diagnostic_id="dup",
+        summary="dup",
+        argv_template=("go", "test", "{selector}", "{selector:selector}"),
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN, char_classes=("alnum",)
+        ),
+        selector2=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN, name="selector", char_classes=("alnum",)
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+    with pytest.raises(ConfigError, match="duplicate"):
+        validate_diagnostic_profile(profile)
+
+
+def test_argv_expansion_beyond_bound_rejected_at_load_time() -> None:
+    argv_template = tuple(["pytest", *[f"--flag{i}" for i in range(30)], "{selector}"])
+    profile = DiagnosticProfileConfig(
+        diagnostic_id="too-wide",
+        summary="too wide",
+        argv_template=argv_template,
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN,
+            char_classes=("alnum",),
+            max_values=16,
+            expansion="repeat",
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.TEXT,
+        output_limit=2_000,
+    )
+    with pytest.raises(ConfigError, match="argv"):
+        validate_diagnostic_profile(profile)
+
+
+def test_config_load_supports_token_selector_and_second_named_selector(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
+        """[repositories.demo.diagnostics.go-test-pkg]
+summary = "Run go test for one package filtered by name"
+argv = ["go", "test", "{selector}", "-run", "{selector:name}"]
+selector_kind = "token"
+selector_char_classes = ["alnum", "path"]
+selector_max_length = 128
+timeout_seconds = 60
+network_policy = "local_only"
+mutability = "read_only"
+parser = "text"
+output_limit = 8000
+
+[repositories.demo.diagnostics.go-test-pkg.selectors.name]
+kind = "token"
+char_classes = ["alnum"]
+max_length = 64
+""",
+    )
+    loaded = load_config(config)
+    diagnostic = loaded.repositories["demo"].diagnostics["go-test-pkg"]
+    assert diagnostic.selector.kind is DiagnosticSelectorKind.TOKEN
+    assert diagnostic.selector2 is not None
+    assert diagnostic.selector2.name == "name"
+    assert diagnostic.selector2.kind is DiagnosticSelectorKind.TOKEN
+
+
+def test_repo_context_surfaces_diagnostic_schema_and_pack_suggestions(
+    forge_env: ForgeEnvironment,
+) -> None:
+    context = forge_env.service.repo_context("demo")
+    assert context["diagnostics"], "the demo repo enrolls at least one diagnostic"
+    schema = context["diagnostics"][0]["selectors"][0]
+    assert {"name", "kind", "max_values", "expansion"} <= set(schema)
+    # The demo repo already enrolls diagnostics, so no pack suggestions are surfaced.
+    assert context["diagnostic_pack_suggestions"] == []
+
+
+def test_ecosystem_diagnostic_packs_are_suggested_when_none_enrolled(tmp_path: Path) -> None:
+    from repoforge.domain.diagnostic_packs import (
+        detect_ecosystems,
+        ecosystem_diagnostic_packs,
+    )
+
+    ecosystems = detect_ecosystems(("pyproject.toml", "Makefile", "README.md"))
+    assert ecosystems == {"python", "make"}
+    packs = ecosystem_diagnostic_packs(ecosystems)
+    assert packs, "python/make packs should be suggested"
+    assert all(pack.config_snippet.strip() for pack in packs)
+    # Nothing is ever auto-enrolled: packs are plain strings, never config mutations.
+    assert all(isinstance(pack.config_snippet, str) for pack in packs)
+
+
+def test_full_profile_failure_mentions_available_diagnostics(
+    forge_env: ForgeEnvironment,
+) -> None:
+    created = forge_env.service.workspace_create("demo", "profile failure guidance")
+    workspace_id = created["workspace_id"]
+    # The "full" profile's command asserts hello.txt starts with "changed", which is
+    # false on a freshly created workspace -- it fails deterministically without edits.
+    with pytest.raises(RepoForgeError) as exc:
+        forge_env.service.workspace_run_profile(workspace_id, "full")
+    assert "pytest-target" in (exc.value.safe_next_action or "")
+    assert "workspace_run_diagnostic" in (exc.value.safe_next_action or "")
 
 
 def test_parses_pytest_and_release_contract_output() -> None:

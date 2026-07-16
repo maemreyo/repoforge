@@ -362,6 +362,51 @@ def _enum_value(enum_type: type[EnumValue], value: object, context: str) -> Enum
         raise ConfigError(f"{context} must be one of {allowed}") from exc
 
 
+def _load_selector_config(
+    table: dict[str, Any],
+    *,
+    name: str,
+    context: str,
+) -> DiagnosticSelectorConfig:
+    kind = _enum_value(
+        DiagnosticSelectorKind,
+        table.get("kind", "none"),
+        f"{context}.kind",
+    )
+    values = _tuple_of_strings(table.get("values"), f"{context}.values")
+    char_classes = _tuple_of_strings(table.get("char_classes"), f"{context}.char_classes")
+    max_length = _bounded_int(table.get("max_length"), 128, 1, 512, f"{context}.max_length")
+    prefix = table.get("prefix")
+    if prefix is not None and not isinstance(prefix, str):
+        raise ConfigError(f"{context}.prefix must be a string")
+    suffix = table.get("suffix")
+    if suffix is not None and not isinstance(suffix, str):
+        raise ConfigError(f"{context}.suffix must be a string")
+    max_values = _bounded_int(table.get("max_values"), 1, 1, 16, f"{context}.max_values")
+    expansion_raw = table.get("expansion", "repeat")
+    if not isinstance(expansion_raw, str) or expansion_raw not in ("repeat", "join"):
+        raise ConfigError(f"{context}.expansion must be 'repeat' or 'join'")
+    separator = table.get("separator")
+    if separator is not None and not isinstance(separator, str):
+        raise ConfigError(f"{context}.separator must be a string")
+    allow_leading_dash = table.get("allow_leading_dash", False)
+    if not isinstance(allow_leading_dash, bool):
+        raise ConfigError(f"{context}.allow_leading_dash must be a boolean")
+    return DiagnosticSelectorConfig(
+        kind=kind,
+        name=name,
+        values=values,
+        char_classes=char_classes,
+        max_length=max_length,
+        prefix=prefix,
+        suffix=suffix,
+        max_values=max_values,
+        expansion=expansion_raw,
+        separator=separator,
+        allow_leading_dash=allow_leading_dash,
+    )
+
+
 def _load_diagnostics(raw: Any, repo_id: str) -> dict[str, DiagnosticProfileConfig]:
     if raw is None:
         return {}
@@ -379,15 +424,55 @@ def _load_diagnostics(raw: Any, repo_id: str) -> dict[str, DiagnosticProfileConf
             or not all(isinstance(argument, str) and argument for argument in argv_raw)
         ):
             raise ConfigError(f"diagnostic {repo_id}.{diagnostic_id}.argv must be a string array")
-        selector_kind = _enum_value(
-            DiagnosticSelectorKind,
-            profile.get("selector_kind", "none"),
-            f"diagnostic {repo_id}.{diagnostic_id}.selector_kind",
+
+        # The primary selector is addressed by the bare `{selector}` placeholder and keeps
+        # every legacy top-level `selector_*` key working unchanged.
+        primary_table = {
+            "kind": profile.get("selector_kind", "none"),
+            "values": profile.get("selector_values"),
+            "char_classes": profile.get("selector_char_classes"),
+            "max_length": profile.get("selector_max_length"),
+            "prefix": profile.get("selector_prefix"),
+            "suffix": profile.get("selector_suffix"),
+            "max_values": profile.get("selector_max_values"),
+            "expansion": profile.get("selector_expansion", "repeat"),
+            "separator": profile.get("selector_separator"),
+            "allow_leading_dash": profile.get("selector_allow_leading_dash", False),
+        }
+        selector = _load_selector_config(
+            primary_table,
+            name="selector",
+            context=f"diagnostic {repo_id}.{diagnostic_id}.selector",
         )
-        selector_values = _tuple_of_strings(
-            profile.get("selector_values"),
-            f"diagnostic {repo_id}.{diagnostic_id}.selector_values",
-        )
+
+        # A named second placeholder, `{selector:<name>}`, is declared through an optional
+        # `[...diagnostics.<id>.selectors.<name>]` sub-table -- at most one is supported.
+        selector2: DiagnosticSelectorConfig | None = None
+        selectors_raw = profile.get("selectors")
+        if selectors_raw is not None:
+            selectors_table = _expect_mapping(
+                selectors_raw, f"diagnostic {repo_id}.{diagnostic_id}.selectors"
+            )
+            if len(selectors_table) > 1:
+                raise ConfigError(
+                    f"diagnostic {repo_id}.{diagnostic_id}.selectors declares more than one "
+                    "additional selector; at most two selectors are supported per diagnostic"
+                )
+            for extra_name, extra_raw in selectors_table.items():
+                if not isinstance(extra_name, str) or extra_name == "selector":
+                    raise ConfigError(
+                        f"diagnostic {repo_id}.{diagnostic_id}.selectors has an invalid name: {extra_name!r}"
+                    )
+                extra_table = _expect_mapping(
+                    extra_raw,
+                    f"diagnostic {repo_id}.{diagnostic_id}.selectors.{extra_name}",
+                )
+                selector2 = _load_selector_config(
+                    extra_table,
+                    name=extra_name,
+                    context=f"diagnostic {repo_id}.{diagnostic_id}.selectors.{extra_name}",
+                )
+
         working_directory_raw = profile.get("working_directory")
         if working_directory_raw is not None and not isinstance(working_directory_raw, str):
             raise ConfigError(
@@ -397,7 +482,8 @@ def _load_diagnostics(raw: Any, repo_id: str) -> dict[str, DiagnosticProfileConf
             diagnostic_id=str(diagnostic_id),
             summary=str(profile.get("summary", "")),
             argv_template=tuple(argv_raw),
-            selector=DiagnosticSelectorConfig(selector_kind, selector_values),
+            selector=selector,
+            selector2=selector2,
             working_directory=working_directory_raw,
             timeout_seconds=_positive_int(
                 profile.get("timeout_seconds"),

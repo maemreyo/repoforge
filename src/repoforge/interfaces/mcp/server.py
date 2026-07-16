@@ -718,13 +718,14 @@ def create_server(
     def workspace_run_diagnostic(
         workspace_id: str,
         diagnostic_id: str,
-        selector: str | None = None,
+        selector: str | list[str] | None = None,
         expected_fingerprint: str | None = None,
         intent: str | None = None,
         expectation: str | None = None,
         expected_failure_class: str | None = None,
+        selector2: str | list[str] | None = None,
     ) -> dict[str, Any]:
-        """Use this to run one typed repository-reviewed diagnostic for RED, GREEN, or other bounded evidence without supplying argv or shell input; non-test failures never count as valid TDD RED."""
+        """Use this to run one typed repository-reviewed diagnostic; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed. Pass a single string or a bounded list of strings for a multi-value selector; use selector2 only when the diagnostic declares a second named placeholder. Call repo_task_context or repo_status first to see each enrolled diagnostic's selector schema (kind, character classes, max_values, expansion) before constructing a call."""
         return bounded_service.call(
             "workspace_run_diagnostic",
             workspace_id,
@@ -734,6 +735,7 @@ def create_server(
             intent,
             expectation,
             expected_failure_class,
+            selector2,
         )
 
     @mcp.tool(title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True)
