@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.1.0 — 2026-07-16
+
 - Published concrete nested `workspace_edit` input items plus `context_lines` and `max_results` numeric bounds in the frozen MCP release contract, so clients can validate calls locally instead of discovering these constraints through failed tool calls.
 - Replaced the checked-in production ticket graph with bounded GitHub-native traversal of sub-issues, blocked-by relationships, live issue state, and optional Project V2 metadata; graph, readiness, and issue-spec tools now share cached snapshot evidence with `fresh=true` bypass, and the legacy Project apply path is retired so GitHub remains authoritative.
 - Added an opt-in loopback `rf webhook serve` ingress for signed `issues`, `sub_issues`, `issue_dependencies`, and `projects_v2_item` deliveries; it validates and deduplicates bounded payloads and invalidates only the affected repository's graph cache.

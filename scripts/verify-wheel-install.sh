@@ -21,7 +21,7 @@ import repoforge
 from repoforge.interfaces.cli.main import build_parser
 from repoforge.interfaces.mcp.contract import build_release_contract
 
-assert repoforge.__version__ == "2.0.0"
+assert repoforge.__version__ == "2.1.0"
 parser = build_parser()
 commands = parser._subparsers._group_actions[0].choices
 for required in ("repo", "runtime", "config", "diagnostics", "start", "serve"):
