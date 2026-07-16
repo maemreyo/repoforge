@@ -74,6 +74,12 @@ pr_labels = []
 pr_reviewers = []
 no_maintainer_edit = false
 
+# GitHub is the operational ticket source. Project fields are an optional overlay;
+# native sub-issues rooted at #3 define membership even without a Project target.
+[repositories.repoforge.ticket_graph]
+root_issue = 3
+repository = "maemreyo/repoforge"
+
 [repositories.repoforge.risk]
 low_max = 24
 medium_max = 49

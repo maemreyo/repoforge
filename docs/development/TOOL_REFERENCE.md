@@ -58,19 +58,22 @@ progress notifications use status polling by operation ID. These fallbacks prese
 filesystem, command, verification, and publication policy; capability data can never grant or widen
 access.
 
-## Derived ticket readiness
+## GitHub-native ticket graph and readiness
 
-`repo_issue_next` is an advisory external-read tool. It validates the checked-in graph before any
-network access, then reads at most 200 tracked GitHub issues with at most eight concurrent workers. It
-never assigns, edits, closes, relabels, or reorders an issue. A missing, malformed, or unreadable live
-issue fails closed for that ticket instead of silently trusting stale manifest status.
+`repo_issue_graph` is a bounded advisory external-read tool. It traverses at most 200 issues from the
+configured root through GitHub native sub-issues, reads native blocked-by relationships, and overlays
+optional Project V2 fields. Results identify their `source`, `observed_at`, `cache_hit`,
+`evidence_complete`, `unavailable`, and `truncated` state. Pass `fresh=true` to bypass the
+short-lived graph cache.
 
-For each ticket, RepoForge derives status from live open/closed state, specification completeness,
-unresolved design gates, parent activity, closed blockers, explicit supersession, and configurable WIP
-limits by priority and initiative. Selectable implementation tickets are ordered deterministically by
-priority, delivery wave, delivery sequence, then issue number. Results include the derived and declared
-status, stable reason codes and messages, unresolved blockers, WIP conflicts, and advisory metadata
-repairs. Those repairs are output only; applying them remains a separate human-controlled GitHub action.
+`repo_issue_next` derives readiness from the same graph snapshot and its included live issue bodies;
+it does not issue one additional network call per ticket. It validates parent and dependency edges,
+specification completeness, live state, WIP limits, and deterministic priority order. Missing or partial
+GitHub evidence fails closed for selection. `repo_issue_spec` combines one live issue with graph
+membership and metadata drift when the graph is configured.
+
+All three tools are read-only. Advisory repairs must be made directly in GitHub; RepoForge does not
+regenerate a repository manifest or mutate tickets from graph reads.
 
 ## Shared normalized evidence
 

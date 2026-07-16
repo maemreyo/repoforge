@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from conftest import create_forge_environment
 
 from repoforge.application.service import CodingService
-from repoforge.config import load_config
+from repoforge.application.tickets.graph import load_ticket_graph
+from repoforge.config import GitHubTicketGraphConfig, load_config
 from repoforge.domain.errors import ConfigError
-from repoforge.domain.tickets import TicketGraphError
+from repoforge.domain.tickets import TicketGraphError, TicketGraphSnapshot, TicketLiveMetadata
 
 
 def _write_manifest(
@@ -50,9 +52,54 @@ def _node(
     }
 
 
+class FixtureTicketGraphGateway:
+    def __init__(self, source: Path, gh_state: Path) -> None:
+        self.source = source
+        self.gh_state = gh_state
+        self.calls = 0
+
+    def read(
+        self, cwd: Path, source: GitHubTicketGraphConfig, *, max_items: int
+    ) -> TicketGraphSnapshot:
+        del cwd, source, max_items
+        self.calls += 1
+        graph = load_ticket_graph(self.source / "docs" / "roadmaps" / "REPOFORGE_TICKET_GRAPH.json")
+        state_payload = (
+            json.loads(self.gh_state.read_text(encoding="utf-8"))
+            if self.gh_state.is_file()
+            else {"issues": {}}
+        )
+        issue_states = state_payload.get("issues", {})
+        live = tuple(
+            TicketLiveMetadata(
+                node.number,
+                node.title,
+                str(
+                    issue_states.get(str(node.number), {}).get(
+                        "state", "CLOSED" if node.status.value == "Done" else "OPEN"
+                    )
+                ),
+                "Objective\nAcceptance criteria\nTests",
+            )
+            for node in graph.nodes
+        )
+        return TicketGraphSnapshot(graph, "2026-07-16T00:00:00+00:00", True, (), False, live)
+
+
 def _service(tmp_path: Path):
     environment = create_forge_environment(tmp_path)
-    return CodingService(load_config(environment.config_path)), environment
+    _write_manifest(
+        environment.source,
+        [_node(3, ticket_type="program", status="In progress", parent=None)],
+    )
+    config = load_config(environment.config_path)
+    repo = replace(
+        config.repositories["demo"],
+        ticket_graph=GitHubTicketGraphConfig(root_issue=3, repository="owner/demo"),
+    )
+    config = replace(config, repositories={"demo": repo})
+    gateway = FixtureTicketGraphGateway(environment.source, environment.gh_state)
+    return CodingService(config, ticket_graphs=gateway), environment
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -75,17 +122,14 @@ def _audit_events_with_prefix(root: Path, prefix: str) -> list[dict[str, object]
     return [event for event in events if str(event.get("action", "")).startswith(prefix)]
 
 
-def test_repo_issue_graph_reports_no_manifest_when_absent(tmp_path: Path) -> None:
+def test_repo_issue_graph_uses_github_snapshot_without_production_manifest(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     result = service.repo_issue_graph("demo")
-    assert result == {
-        "repo_id": "demo",
-        "manifest_found": False,
-        "program_issue": None,
-        "nodes": [],
-        "node_count": 0,
-        "truncated": False,
-    }
+    assert result["source"] == "github"
+    assert result["program_issue"] == 3
+    assert result["node_count"] == 1
+    assert result["evidence_complete"] is True
+    assert result["truncated"] is False
 
 
 def test_repo_issue_graph_filters_by_status_priority_and_initiative(tmp_path: Path) -> None:
@@ -102,7 +146,7 @@ def test_repo_issue_graph_filters_by_status_priority_and_initiative(tmp_path: Pa
     )
 
     all_nodes = service.repo_issue_graph("demo")
-    assert all_nodes["manifest_found"] is True
+    assert all_nodes["source"] == "github"
     assert all_nodes["program_issue"] == 3
     assert all_nodes["node_count"] == 6
 
@@ -136,7 +180,7 @@ def test_repo_issue_next_reports_diagnostics_for_an_invalid_manifest(tmp_path: P
     _write_manifest(environment.source, [program, orphan])
 
     result = service.repo_issue_next("demo")
-    assert result["manifest_found"] is True
+    assert result["source"] == "github"
     assert result["valid"] is False
     assert any(item["code"] == "UNKNOWN_BLOCKER" for item in result["diagnostics"])
     assert result["tickets"] == []
@@ -211,7 +255,7 @@ def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -
     _write_manifest(environment.source, [program, ticket])
 
     result = service.repo_issue_spec("demo", 9)
-    assert result["manifest_found"] is True
+    assert result["graph_member"] is True
     assert result["node"]["number"] == 9
     assert result["live"]["title"] == "Implement safer workflow"
     assert result["live"]["state"] == "OPEN"
@@ -222,7 +266,7 @@ def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -
 def test_repo_issue_spec_works_without_a_manifest_node(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     result = service.repo_issue_spec("demo", 999)
-    assert result["manifest_found"] is False
+    assert result["graph_member"] is False
     assert result["node"] is None
     assert result["drift"] == []
     assert result["live"]["title"] == "Implement safer workflow"
@@ -244,7 +288,7 @@ def test_repo_issue_graph_produces_exactly_one_bounded_audit_event(tmp_path: Pat
     assert details["repo_id"] == "demo"
     assert details["status"] == "Ready"
     assert details["node_count"] == 1
-    assert details["manifest_found"] is True
+    assert details["source"] == "github"
     # Bounded: no ticket titles or bodies, only identifiers/filters and counts.
     assert set(details) == {
         "repo_id",
@@ -252,9 +296,12 @@ def test_repo_issue_graph_produces_exactly_one_bounded_audit_event(tmp_path: Pat
         "status",
         "priority",
         "initiative",
-        "manifest_found",
+        "fresh",
+        "source",
+        "cache_hit",
         "node_count",
         "truncated",
+        "evidence_complete",
         "correlation_id",
         "duration_ms",
         "result_bytes",
@@ -299,14 +346,17 @@ def test_repo_issue_next_produces_exactly_one_bounded_audit_event(tmp_path: Path
     assert details["repo_id"] == "demo"
     assert details["limit"] == 5
     assert details["ticket_count"] == 1
-    assert details["manifest_found"] is True
+    assert details["source"] == "github"
     assert details["valid"] is True
     # Bounded: no ticket titles or bodies in the audit trail.
     assert set(details) == {
         "repo_id",
         "root_issue",
         "limit",
-        "manifest_found",
+        "fresh",
+        "source",
+        "cache_hit",
+        "evidence_complete",
         "valid",
         "ticket_count",
         "correlation_id",

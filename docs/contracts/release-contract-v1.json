@@ -137,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "0d23210cfd512d84479735c184da3acb816134983d7eb2328db22b63fa90697e",
+    "tool_surface_hash": "71df339ad8248c1ee7b5819b735e767a3df9f6bbb12e21fd2da4aa034c2e844d",
     "tools": [
       {
         "annotations": {
@@ -410,12 +410,17 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Use this to list or filter the checked-in roadmap ticket graph without searching GitHub comments; it is offline, bounded, and cannot assign, edit, or close an issue.",
+        "description": "Use this to list or filter native GitHub sub-issues and blocked-by relationships. Reads are bounded and cached briefly; pass fresh=true to bypass the cache.",
         "inputSchema": {
           "properties": {
+            "fresh": {
+              "default": false,
+              "title": "Fresh",
+              "type": "boolean"
+            },
             "initiative": {
               "anyOf": [
                 {
@@ -481,7 +486,7 @@
           "title": "repo_issue_graphDictOutput",
           "type": "object"
         },
-        "title": "Query the roadmap ticket graph"
+        "title": "Query the GitHub-native ticket graph"
       },
       {
         "annotations": {
@@ -490,9 +495,14 @@
           "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Use this to derive selectable tickets from bounded live issue state, complete specs, closed blockers, active parents, WIP limits, and deterministic delivery order without editing GitHub.",
+        "description": "Use this to derive selectable tickets from one bounded GitHub-native graph snapshot, complete specs, closed blockers, active parents, WIP limits, and deterministic delivery order. Pass fresh=true to bypass the cache.",
         "inputSchema": {
           "properties": {
+            "fresh": {
+              "default": false,
+              "title": "Fresh",
+              "type": "boolean"
+            },
             "initiative_wip_limit": {
               "default": 2,
               "title": "Initiative Wip Limit",
@@ -600,7 +610,7 @@
           "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat. The live issue portion may be served from a short-lived local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read.",
+        "description": "Use this before implementing one ticket to combine its live GitHub contract, GitHub-native graph membership and metadata drift, and comment references without reconstructing prior chat. Evidence may be served from short-lived caches; pass `fresh=true` to force live reads.",
         "inputSchema": {
           "properties": {
             "fresh": {
@@ -630,7 +640,7 @@
           "title": "repo_issue_specDictOutput",
           "type": "object"
         },
-        "title": "Read one roadmap ticket's specification references"
+        "title": "Read one ticket's specification and graph evidence"
       },
       {
         "annotations": {
@@ -853,11 +863,15 @@
           "properties": {
             "context_lines": {
               "default": 0,
+              "maximum": 5,
+              "minimum": 0,
               "title": "Context Lines",
               "type": "integer"
             },
             "max_results": {
               "default": 200,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Max Results",
               "type": "integer"
             },
@@ -1311,63 +1325,55 @@
         },
         "description": "Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call.",
         "inputSchema": {
-          "$defs": {
-            "FileEdit": {
-              "description": "One file's ordered edits within a batched `workspace_edit` call.",
-              "properties": {
-                "edits": {
-                  "items": {
-                    "$ref": "#/$defs/TextEdit"
-                  },
-                  "title": "Edits",
-                  "type": "array"
-                },
-                "expected_sha256": {
-                  "title": "Expected Sha256",
-                  "type": "string"
-                },
-                "path": {
-                  "title": "Path",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "path",
-                "expected_sha256",
-                "edits"
-              ],
-              "title": "FileEdit",
-              "type": "object"
-            },
-            "TextEdit": {
-              "description": "One ordered exact-replacement entry within a `workspace_edit` file entry.",
-              "properties": {
-                "expected_occurrences": {
-                  "default": 1,
-                  "title": "Expected Occurrences",
-                  "type": "integer"
-                },
-                "new_text": {
-                  "title": "New Text",
-                  "type": "string"
-                },
-                "old_text": {
-                  "title": "Old Text",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "old_text",
-                "new_text"
-              ],
-              "title": "TextEdit",
-              "type": "object"
-            }
-          },
           "properties": {
             "files": {
               "items": {
-                "$ref": "#/$defs/FileEdit"
+                "description": "One file's ordered edits within a batched `workspace_edit` call.",
+                "properties": {
+                  "edits": {
+                    "items": {
+                      "description": "One ordered exact-replacement entry within a `workspace_edit` file entry.",
+                      "properties": {
+                        "expected_occurrences": {
+                          "default": 1,
+                          "title": "Expected Occurrences",
+                          "type": "integer"
+                        },
+                        "new_text": {
+                          "title": "New Text",
+                          "type": "string"
+                        },
+                        "old_text": {
+                          "title": "Old Text",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "old_text",
+                        "new_text"
+                      ],
+                      "title": "TextEdit",
+                      "type": "object"
+                    },
+                    "title": "Edits",
+                    "type": "array"
+                  },
+                  "expected_sha256": {
+                    "title": "Expected Sha256",
+                    "type": "string"
+                  },
+                  "path": {
+                    "title": "Path",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "expected_sha256",
+                  "edits"
+                ],
+                "title": "FileEdit",
+                "type": "object"
               },
               "title": "Files",
               "type": "array"
@@ -2201,11 +2207,15 @@
           "properties": {
             "context_lines": {
               "default": 0,
+              "maximum": 5,
+              "minimum": 0,
               "title": "Context Lines",
               "type": "integer"
             },
             "max_results": {
               "default": 200,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Max Results",
               "type": "integer"
             },

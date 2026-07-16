@@ -21,7 +21,7 @@ from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import LocalFileSystem
 from .adapters.git import GitCliRepository
-from .adapters.github import GhCliGateway
+from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
 from .adapters.github.ticket_project import GhTicketProjectGateway
 from .adapters.hygiene import CommandHygieneGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
@@ -140,6 +140,7 @@ from .ports import (
     RuntimeLauncher,
     RuntimeStore,
     Sleeper,
+    TicketGraphGateway,
     TicketProjectGateway,
     TunnelClient,
     TunnelProfileStore,
@@ -161,6 +162,7 @@ class AdapterOverrides:
     filesystem: FileSystem | None = None
     git: GitRepository | None = None
     github: PullRequestGateway | None = None
+    ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     executables: ExecutableLocator | None = None
     metrics: MetricsSink | None = None
@@ -379,6 +381,7 @@ def build_application(
     filesystem = o.filesystem or LocalFileSystem()
     git = o.git or GitCliRepository(command, config.server)
     github = o.github or GhCliGateway(command, config.server)
+    ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
     ticket_projects = o.ticket_projects or GhTicketProjectGateway(command, config.server)
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
@@ -428,6 +431,7 @@ def build_application(
         github_read_cache=github_read_cache,
         hygiene=hygiene,
         hygiene_cache=hygiene_cache,
+        ticket_graphs=ticket_graphs,
         ticket_projects=ticket_projects,
     )
     operations = OperationManager(context)

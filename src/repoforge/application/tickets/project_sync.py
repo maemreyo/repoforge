@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...domain.errors import ConfigError
-from ...domain.redaction import redact_text
 from ...domain.ticket_sync import (
     MANAGED_FIELDS,
     MANAGED_VIEWS,
@@ -23,7 +22,7 @@ from ...domain.ticket_sync import (
     TicketSyncPlan,
 )
 from ...domain.tickets import TicketGraph, TicketNode
-from .repo_manifest import load_repo_ticket_graph
+from ..repository.issue_graph import read_github_ticket_snapshot
 
 if TYPE_CHECKING:
     from ..context import ApplicationContext
@@ -271,7 +270,7 @@ class TicketProjectSyncer:
         self,
         ctx: ApplicationContext,
         *,
-        graph_loader: GraphLoader = load_repo_ticket_graph,
+        graph_loader: GraphLoader | None = None,
     ) -> None:
         self.ctx = ctx
         self.graph_loader = graph_loader
@@ -299,7 +298,12 @@ class TicketProjectSyncer:
         }
 
         def run() -> TicketProjectSyncResult:
-            preflight = gateway.preflight(repo.path, target, apply=command.apply)
+            if command.apply:
+                raise ConfigError(
+                    "ticket_project_sync apply is retired: edit issues, native sub-issues, "
+                    "blocked-by relationships, and Project fields directly in GitHub"
+                )
+            preflight = gateway.preflight(repo.path, target, apply=False)
             empty_plan = TicketSyncPlan((), ())
             if not preflight.ready:
                 return TicketProjectSyncResult(
@@ -313,105 +317,35 @@ class TicketProjectSyncer:
                     None,
                     (),
                 )
-            graph = self.graph_loader(repo.path)
-            if graph is None:
-                raise ConfigError(
-                    "Repository has no checked-in ticket graph at "
-                    "docs/roadmaps/REPOFORGE_TICKET_GRAPH.json"
+            if self.graph_loader is not None:
+                graph = self.graph_loader(repo.path)
+                if graph is None:
+                    raise ConfigError("Ticket graph fixture is unavailable")
+            else:
+                graph_snapshot, _ = read_github_ticket_snapshot(
+                    self.ctx,
+                    repo,
+                    root_issue=None,
+                    fresh=True,
                 )
+                graph = graph_snapshot.graph
             snapshot = gateway.snapshot(repo.path, target, graph)
             plan = plan_ticket_project_sync(graph, snapshot)
             pending = tuple(change.change_id for change in plan.changes)
-            if not command.apply:
-                return TicketProjectSyncResult(
-                    "noop" if not plan.changes and not plan.conflicts else "planned",
-                    mode,
-                    target,
-                    preflight,
-                    plan,
-                    (),
-                    pending,
-                    None,
-                    (),
-                )
-            if plan.conflicts:
-                return TicketProjectSyncResult(
-                    "conflicts",
-                    mode,
-                    target,
-                    preflight,
-                    plan,
-                    (),
-                    pending,
-                    None,
-                    (),
-                )
-            if not plan.changes:
-                return TicketProjectSyncResult(
-                    "noop", mode, target, preflight, plan, (), (), None, ()
-                )
-
-            base_key = command.idempotency_key or (
-                f"ticket-sync:{command.repo_id}:{target.owner_type.value}:"
-                f"{target.owner}:{target.project_number}"
-            )
-            completed: list[str] = []
-            manual_actions: list[str] = []
-            for index, change in enumerate(plan.changes):
-                key = f"{base_key}:{change.change_id}"
-                request = {
-                    "repo_id": command.repo_id,
-                    "target": {
-                        "owner": target.owner,
-                        "project_number": target.project_number,
-                        "owner_type": target.owner_type.value,
-                    },
-                    "change_id": change.change_id,
-                    "kind": change.kind.value,
-                    "payload": change.payload,
-                }
-
-                def apply_current(selected: TicketSyncChange = change) -> dict[str, Any]:
-                    return gateway.apply_change(repo.path, target, selected)
-
-                try:
-                    result = self.ctx.idempotent(
-                        "ticket_project_sync_change",
-                        key,
-                        request,
-                        apply_current,
-                    )
-                except Exception as exc:
-                    code_value = getattr(getattr(exc, "code", None), "value", None)
-                    code = str(code_value or getattr(exc, "code", None) or "OPERATION_FAILED")
-                    return TicketProjectSyncResult(
-                        "partial_failed",
-                        mode,
-                        target,
-                        preflight,
-                        plan,
-                        tuple(completed),
-                        tuple(item.change_id for item in plan.changes[index + 1 :]),
-                        TicketProjectSyncFailure(
-                            change.change_id,
-                            code,
-                            redact_text(str(exc))[:1000],
-                        ),
-                        tuple(dict.fromkeys(manual_actions)),
-                    )
-                completed.append(change.change_id)
-                if isinstance(result, dict):
-                    manual_actions.extend(self._manual_actions(result))
             return TicketProjectSyncResult(
-                "applied",
+                "noop" if not plan.changes and not plan.conflicts else "planned",
                 mode,
                 target,
                 preflight,
                 plan,
-                tuple(completed),
                 (),
+                pending,
                 None,
-                tuple(dict.fromkeys(manual_actions)),
+                (
+                    ("GitHub is authoritative; make any reported repairs directly in GitHub.",)
+                    if plan.changes or plan.conflicts
+                    else ()
+                ),
             )
 
         return self.ctx.audited(

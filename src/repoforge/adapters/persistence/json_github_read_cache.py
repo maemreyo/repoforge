@@ -209,3 +209,35 @@ class JsonGitHubReadCache:
             # Caching is best-effort evidence only; a persistence failure must
             # never break the live read that produced this payload.
             return
+
+    def invalidate(
+        self,
+        repo_id: str,
+        repo_path: Path,
+        *,
+        kind: str | None = None,
+    ) -> int:
+        """Remove repository-scoped evidence; failures are a safe no-op."""
+        try:
+            if not isinstance(repo_id, str) or not _SAFE_KEY_PART.fullmatch(repo_id):
+                return 0
+            if kind is not None and (
+                not isinstance(kind, str) or not _SAFE_KEY_PART.fullmatch(kind)
+            ):
+                return 0
+            resolved_path = str(Path(repo_path).resolve())
+            fingerprint = hashlib.sha256(resolved_path.encode("utf-8")).hexdigest()[:16]
+            prefix = f"{repo_id}:{fingerprint}:"
+            kind_prefix = f"{prefix}{kind}:" if kind is not None else prefix
+            with self._locks.lock("github-read-cache", timeout_seconds=2):
+                document = self._load()
+                entries = document["entries"]
+                matches = [key for key in entries if key.startswith(kind_prefix)]
+                for key in matches:
+                    entries.pop(key, None)
+                if matches:
+                    document["version"] = _SCHEMA_VERSION
+                    self._write(document)
+                return len(matches)
+        except Exception:
+            return 0

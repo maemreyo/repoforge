@@ -8,8 +8,7 @@ from ...config import RepositoryConfig
 from ...domain.tickets import TicketGraph, TicketLiveMetadata
 from ..context import ApplicationContext
 from ..tickets.graph import compare_live_ticket_metadata
-from ..tickets.repo_manifest import load_repo_ticket_graph
-from .issue_graph import node_payload
+from .issue_graph import node_payload, read_github_ticket_snapshot
 
 _HEADING = re.compile(r"(?m)^#{2,3}\s+(.+)$")
 
@@ -30,20 +29,20 @@ class RepositoryIssueSpecCommand:
 class RepositoryIssueSpecResult:
     repo_id: str
     issue_number: int
-    manifest_found: bool
+    source: str
+    graph_member: bool
     node: dict[str, Any] | None
     live: dict[str, Any]
     drift: list[dict[str, Any]]
     comments: list[dict[str, Any]]
-    cache_hit: bool = False
+    cache_hit: bool
+    graph_cache_hit: bool
+    observed_at: str
+    evidence_complete: bool
 
 
 class RepositoryIssueSpecReader:
-    """Bounded reference bundle for one ticket: manifest node, live issue,
-    drift against the manifest, and comment references (each tagged with
-    its first Markdown heading, if any) so an agent can locate the
-    specification comment without reconstructing prior chat.
-    """
+    """Bounded references for one live issue and its GitHub-native graph metadata."""
 
     def __init__(self, ctx: ApplicationContext):
         self.ctx = ctx
@@ -52,21 +51,17 @@ class RepositoryIssueSpecReader:
         if c.issue_number <= 0:
             raise ValueError("issue_number must be positive")
         repo = self.ctx.repo(c.repo_id)
-
-        live_payload, cache_hit = self.ctx.audited(
+        return self.ctx.audited(
             "repo_issue_spec",
-            {"repo_id": c.repo_id, "issue_number": c.issue_number},
-            lambda: self._load_live(c, repo),
+            {"repo_id": c.repo_id, "issue_number": c.issue_number, "fresh": c.fresh},
+            lambda: self._load(c, repo),
         )
-        return self._assemble(c, repo, live_payload, cache_hit)
 
     def compute(self, c: RepositoryIssueSpecCommand) -> RepositoryIssueSpecResult:
-        """Pure application logic with no audit event, for embedding in a larger audited bundle."""
+        """Application logic without a nested audit event, for task-context bundles."""
         if c.issue_number <= 0:
             raise ValueError("issue_number must be positive")
-        repo = self.ctx.repo(c.repo_id)
-        live_payload, cache_hit = self._load_live(c, repo)
-        return self._assemble(c, repo, live_payload, cache_hit)
+        return self._load(c, self.ctx.repo(c.repo_id))
 
     def _load_live(
         self, c: RepositoryIssueSpecCommand, repo: RepositoryConfig
@@ -80,17 +75,29 @@ class RepositoryIssueSpecReader:
             loader=lambda: self.ctx.github.issue_read(repo.path, c.issue_number),
         )
 
-    def _assemble(
+    def _load(
         self,
         c: RepositoryIssueSpecCommand,
         repo: RepositoryConfig,
-        live_payload: dict[str, Any],
-        cache_hit: bool,
     ) -> RepositoryIssueSpecResult:
-        graph = load_repo_ticket_graph(repo.path)
-        node = None
-        if graph is not None:
-            node = next((item for item in graph.nodes if item.number == c.issue_number), None)
+        live_payload, cache_hit = self._load_live(c, repo)
+        snapshot = None
+        graph_cache_hit = False
+        if repo.ticket_graph is not None and self.ctx.ticket_graphs is not None:
+            snapshot, graph_cache_hit = read_github_ticket_snapshot(
+                self.ctx,
+                repo,
+                root_issue=None,
+                fresh=c.fresh,
+            )
+        node = (
+            next(
+                (item for item in snapshot.graph.nodes if item.number == c.issue_number),
+                None,
+            )
+            if snapshot is not None
+            else None
+        )
 
         comments: list[dict[str, Any]] = []
         raw_comments = live_payload.get("comments")
@@ -104,14 +111,18 @@ class RepositoryIssueSpecReader:
                 )
 
         drift: list[dict[str, Any]] = []
-        if node is not None and graph is not None:
+        if node is not None and snapshot is not None:
             live_metadata = TicketLiveMetadata(
                 c.issue_number,
                 str(live_payload.get("title") or ""),
                 str(live_payload.get("state") or ""),
                 str(live_payload.get("body") or ""),
             )
-            single_node_graph = TicketGraph(graph.schema_version, graph.program_issue, (node,))
+            single_node_graph = TicketGraph(
+                snapshot.graph.schema_version,
+                snapshot.graph.program_issue,
+                (node,),
+            )
             drift = [
                 {"code": item.code, "message": item.message}
                 for item in compare_live_ticket_metadata(single_node_graph, (live_metadata,))
@@ -120,10 +131,14 @@ class RepositoryIssueSpecReader:
         return RepositoryIssueSpecResult(
             c.repo_id,
             c.issue_number,
-            graph is not None,
+            "github",
+            node is not None,
             node_payload(node) if node is not None else None,
             live_payload,
             drift,
             comments,
             cache_hit,
+            graph_cache_hit,
+            snapshot.observed_at if snapshot is not None else self.ctx.clock.now_iso(),
+            snapshot.evidence_complete if snapshot is not None else False,
         )

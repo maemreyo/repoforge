@@ -106,6 +106,8 @@ _POLICY_PRESETS: dict[str, dict[str, bool | int]] = {
 }
 _SAFE_BRANCH_COMPONENT = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SAFE_REPO_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+_SAFE_GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_SAFE_ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 EnumValue = TypeVar("EnumValue", bound=Enum)
 
 
@@ -133,6 +135,21 @@ class ProfileConfig:
     timeout_seconds: int | None = None
     working_directory: str | None = None
     command_source_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class GitHubTicketGraphConfig:
+    """Reviewed GitHub-native source for one repository's operational ticket graph."""
+
+    root_issue: int
+    repository: str | None = None
+    project_owner: str | None = None
+    project_number: int | None = None
+    project_owner_type: str = "organization"
+    status_field: str = "Status"
+    priority_field: str = "Priority"
+    initiative_field: str = "Initiative"
+    type_field: str = "Type"
 
 
 @dataclass(frozen=True)
@@ -168,6 +185,7 @@ class RepositoryConfig:
     execution_mode: ExecutionMode = ExecutionMode.STRICT
     adhoc_runners: tuple[str, ...] = ()
     adhoc_timeout_seconds: int = 300
+    ticket_graph: GitHubTicketGraphConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +210,11 @@ class ServerConfig:
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
     github_read_cache_ttl_seconds: int = 120
+    github_webhook_enabled: bool = False
+    github_webhook_bind: str = "127.0.0.1"
+    github_webhook_port: int = 8766
+    github_webhook_secret_env: str = "REPOFORGE_GITHUB_WEBHOOK_SECRET"
+    github_webhook_max_body_bytes: int = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -282,6 +305,20 @@ def _boolean(value: Any, default: bool, context: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{context} must be true or false")
     return value
+
+
+def _webhook_bind(value: Any) -> str:
+    bind = str(value or "127.0.0.1").strip()
+    if bind not in {"127.0.0.1", "::1", "localhost"}:
+        raise ConfigError("server.github_webhook_bind must be a loopback address")
+    return bind
+
+
+def _environment_name(value: Any, context: str) -> str:
+    name = str(value)
+    if not _SAFE_ENVIRONMENT_NAME.fullmatch(name):
+        raise ConfigError(f"{context} must be an uppercase environment variable name")
+    return name
 
 
 def _safe_ref(value: str, context: str) -> str:
@@ -602,6 +639,67 @@ def _load_formatters(raw: Any, repo_id: str) -> dict[str, FormatterPolicy]:
     return formatters
 
 
+def _load_github_ticket_graph(raw: Any, repo_id: str) -> GitHubTicketGraphConfig | None:
+    if raw is None:
+        return None
+    context = f"repositories.{repo_id}.ticket_graph"
+    table = _expect_mapping(raw, context)
+    allowed = {
+        "root_issue",
+        "repository",
+        "project_owner",
+        "project_number",
+        "project_owner_type",
+        "status_field",
+        "priority_field",
+        "initiative_field",
+        "type_field",
+    }
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(f"{context} contains unsupported fields: {unknown}")
+    if "root_issue" not in table:
+        raise ConfigError(f"{context}.root_issue is required")
+    root_issue = _positive_int(table.get("root_issue"), 1, f"{context}.root_issue")
+    repository_raw = table.get("repository")
+    repository = str(repository_raw).strip() if repository_raw is not None else None
+    if repository is not None and not _SAFE_GITHUB_REPOSITORY.fullmatch(repository):
+        raise ConfigError(f"{context}.repository must use owner/name format")
+    owner_raw = table.get("project_owner")
+    owner = str(owner_raw).strip() if owner_raw is not None else None
+    number_raw = table.get("project_number")
+    number = (
+        _positive_int(number_raw, 1, f"{context}.project_number")
+        if number_raw is not None
+        else None
+    )
+    if (owner is None) != (number is None) or owner == "":
+        raise ConfigError(
+            f"{context}.project_owner and {context}.project_number must be configured together"
+        )
+    owner_type = str(table.get("project_owner_type", "organization"))
+    if owner_type not in {"organization", "user"}:
+        raise ConfigError(f"{context}.project_owner_type must be 'organization' or 'user'")
+
+    def field_name(name: str, default: str) -> str:
+        value = table.get(name, default)
+        if not isinstance(value, str) or not value.strip() or len(value) > 100:
+            raise ConfigError(f"{context}.{name} must be a non-empty bounded string")
+        return value.strip()
+
+    return GitHubTicketGraphConfig(
+        root_issue=root_issue,
+        repository=repository,
+        project_owner=owner,
+        project_number=number,
+        project_owner_type=owner_type,
+        status_field=field_name("status_field", "Status"),
+        priority_field=field_name("priority_field", "Priority"),
+        initiative_field=field_name("initiative_field", "Initiative"),
+        type_field=field_name("type_field", "Type"),
+    )
+
+
 def _load_risk_policy(
     raw: Any,
     repo_id: str,
@@ -770,6 +868,30 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             300,
             "server.github_read_cache_ttl_seconds",
         ),
+        github_webhook_enabled=_boolean(
+            server_raw.get("github_webhook_enabled"),
+            False,
+            "server.github_webhook_enabled",
+        ),
+        github_webhook_bind=_webhook_bind(server_raw.get("github_webhook_bind")),
+        github_webhook_port=_bounded_int(
+            server_raw.get("github_webhook_port"),
+            8766,
+            1,
+            65535,
+            "server.github_webhook_port",
+        ),
+        github_webhook_secret_env=_environment_name(
+            server_raw.get("github_webhook_secret_env", "REPOFORGE_GITHUB_WEBHOOK_SECRET"),
+            "server.github_webhook_secret_env",
+        ),
+        github_webhook_max_body_bytes=_bounded_int(
+            server_raw.get("github_webhook_max_body_bytes"),
+            1_000_000,
+            1_024,
+            10_000_000,
+            "server.github_webhook_max_body_bytes",
+        ),
         path_prefixes=_tuple_of_strings(server_raw.get("path_prefixes"), "server.path_prefixes")
         or DEFAULT_PATH_PREFIXES,
         allowed_environment=_tuple_of_strings(
@@ -823,6 +945,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         profiles = _load_profiles(repo_raw.get("profiles"), repo_id)
         diagnostics = _load_diagnostics(repo_raw.get("diagnostics"), repo_id)
         formatters = _load_formatters(repo_raw.get("formatters"), repo_id)
+        ticket_graph = _load_github_ticket_graph(repo_raw.get("ticket_graph"), repo_id)
         default_verification_raw = repo_raw.get("default_verification_profile")
         default_verification = (
             str(default_verification_raw) if default_verification_raw is not None else None
@@ -948,6 +1071,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             execution_mode=execution_mode,
             adhoc_runners=adhoc_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
+            ticket_graph=ticket_graph,
         )
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(

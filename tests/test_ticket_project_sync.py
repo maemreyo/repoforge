@@ -4,11 +4,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from repoforge.application.tickets.project_sync import (
     TicketProjectSyncCommand,
     TicketProjectSyncer,
     plan_ticket_project_sync,
 )
+from repoforge.domain.errors import ConfigError
 from repoforge.domain.ticket_sync import (
     MANAGED_FIELDS,
     MANAGED_VIEWS,
@@ -407,42 +410,13 @@ def test_sync_dry_run_never_invokes_mutations(tmp_path: Path) -> None:
     assert syncer.ctx.audit_calls == [("ticket_project_sync_plan", False)]
 
 
-def test_sync_stops_before_snapshot_when_preflight_is_not_ready(tmp_path: Path) -> None:
+def test_sync_apply_is_retired_before_any_github_call(tmp_path: Path) -> None:
     gateway = _Gateway(ready=False)
-    result = _syncer(tmp_path, gateway).execute(_command(apply=True))
+    syncer = _syncer(tmp_path, gateway)
 
-    assert result.status == "preflight_failed"
-    assert result.preflight.missing_scopes == ("project",)
-    assert result.pending_change_ids == ()
+    with pytest.raises(ConfigError, match="apply is retired"):
+        syncer.execute(_command(apply=True))
+
     assert gateway.snapshot_calls == 0
     assert gateway.apply_calls == []
-
-
-def test_sync_apply_is_resumable_after_partial_failure(tmp_path: Path) -> None:
-    gateway = _Gateway(fail_once_at=1)
-    syncer = _syncer(tmp_path, gateway)
-    planned = plan_ticket_project_sync(_graph(), _empty_snapshot())
-
-    first = syncer.execute(_command(apply=True))
-
-    assert first.status == "partial_failed"
-    assert first.completed_change_ids == (planned.changes[0].change_id,)
-    assert first.failed is not None
-    assert first.failed.change_id == planned.changes[1].change_id
-    assert planned.changes[1].change_id not in first.pending_change_ids
-    assert gateway.apply_calls == [planned.changes[0].change_id]
-
-    second = syncer.execute(_command(apply=True))
-
-    assert second.status == "applied"
-    assert second.failed is None
-    assert second.pending_change_ids == ()
-    assert gateway.apply_calls.count(planned.changes[0].change_id) == 1
-    assert len(gateway.apply_calls) == len(planned.changes)
-    assert second.manual_actions
-    keys = [
-        key
-        for action, key in syncer.ctx.idempotency_calls
-        if action == "ticket_project_sync_change"
-    ]
-    assert all(key and key.startswith("issue-63-sync:") for key in keys)
+    assert syncer.ctx.audit_calls == [("ticket_project_sync_apply", True)]

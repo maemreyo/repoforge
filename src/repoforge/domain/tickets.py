@@ -1,4 +1,4 @@
-"""Typed roadmap ticket graph contracts."""
+"""Typed GitHub-native ticket graph contracts."""
 
 from __future__ import annotations
 
@@ -63,6 +63,18 @@ class TicketLiveMetadata:
     title: str
     state: str
     body: str
+
+
+@dataclass(frozen=True, slots=True)
+class TicketGraphSnapshot:
+    """One bounded, internally consistent observation of the GitHub ticket graph."""
+
+    graph: TicketGraph
+    observed_at: str
+    evidence_complete: bool
+    unavailable: tuple[int, ...]
+    truncated: bool
+    live_issues: tuple[TicketLiveMetadata, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

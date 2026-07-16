@@ -273,6 +273,20 @@ def test_cache_get_put_roundtrip(tmp_path: Path) -> None:
     assert result == {"number": 1, "title": "hello"}
 
 
+def test_cache_invalidate_is_scoped_by_repository_path_and_kind(tmp_path: Path) -> None:
+    cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
+    other_repo = tmp_path / "other"
+    other_repo.mkdir()
+    cache.put("demo", tmp_path, "graph", 3, {"program": 3}, now_epoch=1_000.0)
+    cache.put("demo", tmp_path, "issue", 3, {"number": 3}, now_epoch=1_000.0)
+    cache.put("demo", other_repo, "graph", 3, {"program": 3}, now_epoch=1_000.0)
+
+    assert cache.invalidate("demo", tmp_path, kind="graph") == 1
+    assert cache.get("demo", tmp_path, "graph", 3, ttl_seconds=120, now_epoch=1_001.0) is None
+    assert cache.get("demo", tmp_path, "issue", 3, ttl_seconds=120, now_epoch=1_001.0) is not None
+    assert cache.get("demo", other_repo, "graph", 3, ttl_seconds=120, now_epoch=1_001.0) is not None
+
+
 def test_cache_miss_for_unknown_key(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager())
     assert cache.get("demo", tmp_path, "issue", 99, ttl_seconds=120, now_epoch=1_000.0) is None

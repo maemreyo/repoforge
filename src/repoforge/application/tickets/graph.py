@@ -321,7 +321,7 @@ def select_ticket_nodes(
     priority: TicketPriority | None = None,
     initiative: int | None = None,
 ) -> tuple[tuple[TicketNode, ...], bool]:
-    """Bounded, deterministic query over the checked-in ticket graph.
+    """Bounded, deterministic query over one resolved ticket graph snapshot.
 
     Returns the matching nodes (sorted by issue number, capped at
     ``_MAX_QUERY_RESULTS``) and whether the result was truncated.

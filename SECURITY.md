@@ -27,3 +27,11 @@ confirmations enabled in ChatGPT.
 Do not add secrets to verification command arguments or to the MCP configuration. Subprocesses
 receive only a small allowlist of environment variables, but commands can still access files that
 the local OS account can access.
+
+## Optional GitHub webhook ingress
+
+The webhook listener is disabled by default and binds to `127.0.0.1` by default. It accepts only
+`issues`, `sub_issues`, `issue_dependencies`, and `projects_v2_item`, verifies
+`X-Hub-Signature-256` before parsing JSON, bounds body and delivery IDs, and can only invalidate
+repository-scoped graph cache entries. It cannot run commands or write to GitHub. Keep the secret in the
+configured environment variable and expose the endpoint only through a trusted TLS proxy or tunnel.

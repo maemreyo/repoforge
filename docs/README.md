@@ -27,7 +27,8 @@ Documentation is grouped by purpose so the `docs/` root remains a stable entry p
 
 ## Operations
 
-- [GitHub ticket project synchronization](operations/TICKET_PROJECT_SYNC.md)
+- [GitHub ticket project consistency](operations/TICKET_PROJECT_SYNC.md)
+- [GitHub webhook cache invalidation](operations/GITHUB_WEBHOOKS.md)
 
 ## Architecture and contracts
 
