@@ -132,7 +132,6 @@ from .workspace.update_draft_pr import (
     DraftPullRequestUpdater,
     WorkspaceUpdateDraftPrCommand,
 )
-from .workspace.verify import WorkspaceVerifier, WorkspaceVerifyCommand
 
 
 def _result(value: object) -> dict[str, Any]:
@@ -238,7 +237,6 @@ class CodingService:
             operations=self.operations,
             background_tasks=self.application.background_tasks,
         )
-        self._verify = WorkspaceVerifier(ctx)
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
         self._create_pr = DraftPullRequestCreator(ctx)
@@ -614,7 +612,10 @@ class CodingService:
         return _result(self._diff.execute(WorkspaceDiffCommand(workspace_id, staged)))
 
     def workspace_run_profile(
-        self, workspace_id: str, profile_name: str, background: bool = False
+        self,
+        workspace_id: str,
+        profile_name: str | None = None,
+        background: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._profile.execute(
@@ -669,7 +670,7 @@ class CodingService:
     def workspace_verify(
         self, workspace_id: str, profile_name: str | None = None
     ) -> dict[str, Any]:
-        return _result(self._verify.execute(WorkspaceVerifyCommand(workspace_id, profile_name)))
+        return self.workspace_run_profile(workspace_id, profile_name)
 
     def workspace_commit(self, workspace_id: str, message: str) -> dict[str, Any]:
         return _result(self._commit.execute(WorkspaceCommitCommand(workspace_id, message)))

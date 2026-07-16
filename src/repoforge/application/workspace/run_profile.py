@@ -20,7 +20,7 @@ from ...domain.retry_guidance import (
 from ...domain.retry_guidance import (
     clear as clear_retry_guidance,
 )
-from ...domain.verification import get_profile
+from ...domain.verification import get_profile, select_verification_profile
 from ...domain.workspace import VerificationReceipt
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
@@ -55,13 +55,14 @@ def _apply_retry_guidance(
 @dataclass(frozen=True, slots=True)
 class WorkspaceRunProfileCommand:
     workspace_id: str
-    profile_name: str
+    profile_name: str | None = None
     background: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRunProfileResult:
     workspace_id: str
+    repo_id: str
     profile: str
     description: str
     verification: bool
@@ -69,6 +70,7 @@ class WorkspaceRunProfileResult:
     commands: list[dict[str, object]]
     change_metrics: dict[str, object]
     satisfies_commit_gate: bool
+    used_default: bool
     head_sha: str
     working_directory: str | None = None
 
@@ -151,8 +153,12 @@ class WorkspaceProfileRunner:
     def execute(
         self, c: WorkspaceRunProfileCommand
     ) -> WorkspaceRunProfileResult | WorkspaceRunProfileBackgroundResult:
-        _, repo, path = self.ctx.workspace(c.workspace_id)
-        profile = get_profile(repo, c.profile_name)
+        record, repo, path = self.ctx.workspace(c.workspace_id)
+        if c.profile_name is None:
+            profile, used_default = select_verification_profile(repo, None)
+        else:
+            profile = get_profile(repo, c.profile_name)
+            used_default = False
         command_cwd = path
         if profile.working_directory:
             relative = normalize_relative_path(profile.working_directory)
@@ -308,21 +314,24 @@ class WorkspaceProfileRunner:
             elif cleared_retry_history:
                 self.ctx.store.save(fresh)
             return WorkspaceRunProfileResult(
-                c.workspace_id,
-                profile.name,
-                profile.description,
-                profile.verification,
-                fp,
-                [self.public(r) for r in results],
-                metrics,
-                profile.verification,
-                self.ctx.git.head_sha(path),
-                profile.working_directory,
+                workspace_id=c.workspace_id,
+                repo_id=record.repo_id,
+                profile=profile.name,
+                description=profile.description,
+                verification=profile.verification,
+                fingerprint=fp,
+                commands=[self.public(r) for r in results],
+                change_metrics=metrics,
+                satisfies_commit_gate=profile.verification,
+                used_default=used_default,
+                head_sha=self.ctx.git.head_sha(path),
+                working_directory=profile.working_directory,
             )
 
         audit_details: dict[str, object] = {
             "workspace_id": c.workspace_id,
-            "profile": c.profile_name,
+            "profile": profile.name,
+            "used_default": used_default,
         }
 
         if not c.background:

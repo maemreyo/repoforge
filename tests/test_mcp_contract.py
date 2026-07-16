@@ -7,12 +7,32 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from repoforge.application.service import CodingService
 from repoforge.config import load_config
 from repoforge.interfaces.mcp import server as mcp_server
+from repoforge.interfaces.mcp.contract import build_release_contract
 from repoforge.interfaces.mcp.server import create_server, tool_surface_hash
 
 
 def test_tool_surface_hash_is_deterministic() -> None:
     assert tool_surface_hash() == tool_surface_hash()
+    assert tool_surface_hash(1) != tool_surface_hash(2)
     assert len(tool_surface_hash()) == 64
+
+
+@pytest.mark.anyio
+async def test_release_contract_carries_current_and_legacy_alias_evidence() -> None:
+    contract = await build_release_contract()
+
+    assert contract["contract_version"] == 2
+    tool_contract = contract["mcp"]["tool_contract"]
+    assert tool_contract["current_version"] == 2
+    assert tool_contract["supported_versions"] == [1, 2]
+    assert [tool["name"] for tool in contract["mcp"]["tools"]].count("workspace_verify") == 0
+    legacy_alias = tool_contract["legacy_alias_tools"][0]
+    canonical = next(
+        tool for tool in contract["mcp"]["tools"] if tool["name"] == "workspace_run_profile"
+    )
+    assert legacy_alias["name"] == "workspace_verify"
+    assert legacy_alias["description"].startswith("Deprecated compatibility alias")
+    assert legacy_alias["annotations"] == canonical["annotations"]
 
 
 def test_tool_surface_hash_does_not_depend_on_ast_unparse(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,7 +131,6 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "workspace_run_profile",
             "workspace_run_diagnostic",
             "workspace_run_adhoc",
-            "workspace_verify",
             "workspace_commit",
             "workspace_push",
             "workspace_create_draft_pr",
@@ -142,6 +161,13 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             assert evidence_tool.annotations.openWorldHint is False
 
         tools = {tool.name: tool for tool in result.tools}
+        run_profile = tools["workspace_run_profile"]
+        assert "profile_name" not in run_profile.inputSchema.get("required", [])
+        assert set(run_profile.inputSchema["properties"]) == {
+            "workspace_id",
+            "profile_name",
+            "background",
+        }
         assert tools["workspace_create"].description == (
             "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\n"
             "retries. Create one workspace per issue; pass issue_ids only when several dependent\n"
@@ -189,6 +215,84 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
         context_result = await session.call_tool("repo_context", {"repo_id": "demo"})
         assert context_result.isError is False
         assert context_result.structuredContent["package_manager"] == "pnpm@10.20.0"
+
+
+@pytest.mark.anyio
+async def test_versioned_verify_alias_window_routes_to_canonical_profile(
+    forge_env: ForgeEnvironment,
+) -> None:
+    current_server = create_server(forge_env.config_path, contract_version=2)
+    async with create_connected_server_and_client_session(current_server) as session:
+        current_tools = {tool.name for tool in (await session.list_tools()).tools}
+        assert "workspace_verify" not in current_tools
+        rejected = await session.call_tool("workspace_verify", {"workspace_id": "missing"})
+        assert rejected.isError is True
+        rendered = "\n".join(
+            item.text for item in rejected.content if getattr(item, "type", None) == "text"
+        )
+        assert "tool contract v2" in rendered
+
+    legacy_server = create_server(forge_env.config_path, contract_version=1)
+    async with create_connected_server_and_client_session(legacy_server) as session:
+        legacy_tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+        alias_tool = legacy_tools["workspace_verify"]
+        canonical_tool = legacy_tools["workspace_run_profile"]
+        assert "Deprecated compatibility alias" in alias_tool.description
+        assert alias_tool.annotations == canonical_tool.annotations
+
+        canonical_workspace = await session.call_tool(
+            "workspace_create",
+            {"repo_id": "demo", "task_slug": "canonical contract verification"},
+        )
+        alias_workspace = await session.call_tool(
+            "workspace_create",
+            {"repo_id": "demo", "task_slug": "legacy contract verification"},
+        )
+        assert canonical_workspace.structuredContent is not None
+        assert alias_workspace.structuredContent is not None
+
+        for created in (canonical_workspace, alias_workspace):
+            workspace_id = created.structuredContent["workspace_id"]
+            current = await session.call_tool(
+                "workspace_read_file",
+                {"workspace_id": workspace_id, "relative_path": "hello.txt"},
+            )
+            assert current.isError is False
+            assert current.structuredContent is not None
+            prepared = await session.call_tool(
+                "workspace_write_file",
+                {
+                    "workspace_id": workspace_id,
+                    "relative_path": "hello.txt",
+                    "content": "changed for verification parity\n",
+                    "expected_sha256": current.structuredContent["sha256"],
+                },
+            )
+            assert prepared.isError is False
+
+        canonical = await session.call_tool(
+            "workspace_run_profile",
+            {"workspace_id": canonical_workspace.structuredContent["workspace_id"]},
+        )
+        alias = await session.call_tool(
+            "workspace_verify",
+            {"workspace_id": alias_workspace.structuredContent["workspace_id"]},
+        )
+        assert canonical.isError is False
+        assert alias.isError is False
+        assert canonical.structuredContent is not None
+        assert alias.structuredContent is not None
+        for key in (
+            "profile",
+            "description",
+            "verification",
+            "commands",
+            "satisfies_commit_gate",
+            "used_default",
+            "repo_id",
+            "working_directory",
+        ):
+            assert alias.structuredContent[key] == canonical.structuredContent[key]
 
 
 @pytest.mark.anyio
@@ -430,7 +534,7 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
             "workspace_run_profile",
             {"workspace_id": workspace_id, "profile_name": "quick"},
         )
-        await call("workspace_verify", {"workspace_id": workspace_id})
+        await call("workspace_run_profile", {"workspace_id": workspace_id})
         committed = await call(
             "workspace_commit",
             {"workspace_id": workspace_id, "message": "Exercise every MCP tool"},

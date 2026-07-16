@@ -84,6 +84,7 @@ def test_background_false_keeps_synchronous_contract(forge_env: ForgeEnvironment
 
     assert set(implicit) == {
         "workspace_id",
+        "repo_id",
         "profile",
         "description",
         "verification",
@@ -91,6 +92,7 @@ def test_background_false_keeps_synchronous_contract(forge_env: ForgeEnvironment
         "commands",
         "change_metrics",
         "satisfies_commit_gate",
+        "used_default",
         "head_sha",
         "working_directory",
     }
@@ -240,12 +242,14 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
         == {
             "workspace_id",
             "profile",
+            "used_default",
             "correlation_id",
             "duration_ms",
             "result_bytes",
         }
     )
     assert sync_details["profile"] == bg_details["profile"] == "slow"
+    assert sync_details["used_default"] is bg_details["used_default"] is False
     assert isinstance(sync_details["result_bytes"], int) and sync_details["result_bytes"] > 0
     assert isinstance(bg_details["result_bytes"], int) and bg_details["result_bytes"] > 0
 

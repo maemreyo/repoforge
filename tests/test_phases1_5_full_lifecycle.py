@@ -234,7 +234,7 @@ def test_complete_service_lifecycle_and_adapters(tmp_path: Path) -> None:
     )
     assert "Developer experience improved" in service.workspace_diff(workspace_id)["diff"]
     assert service.workspace_run_profile(workspace_id, "quick")["satisfies_commit_gate"] is False
-    assert service.workspace_verify(workspace_id)["satisfies_commit_gate"] is True
+    assert service.workspace_run_profile(workspace_id)["satisfies_commit_gate"] is True
     committed = service.workspace_commit(workspace_id, "Improve developer experience")
     pushed = service.workspace_push(workspace_id, idempotency_key="push-workspace-0001")
     assert pushed["head_sha"] == committed["head_sha"]

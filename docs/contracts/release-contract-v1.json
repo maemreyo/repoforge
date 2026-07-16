@@ -75,10 +75,69 @@
     "resolved_format_version": 3,
     "source_version": 2
   },
-  "contract_version": 1,
+  "contract_version": 2,
   "mcp": {
-    "server_instructions_sha256": "e6f9486e84a56539abd8af5113336929422de61fea3827acdb8e3261816a607a",
-    "tool_surface_hash": "1d33cbb72d5e6d052ee2f7f01e60b823920872a0a0eefa89679038bcfdc8ec2f",
+    "server_instructions_sha256": "4786f0ff300569519c26f687e5dd69ce00e47fb2dd7f47755b4a3c684f7575f2",
+    "tool_contract": {
+      "aliases": [
+        {
+          "alias": "workspace_verify",
+          "canonical": "workspace_run_profile",
+          "deprecated_in": 1,
+          "notice": "Deprecated compatibility alias; migrate to workspace_run_profile before tool contract v2.",
+          "removed_in": 2
+        }
+      ],
+      "current_version": 2,
+      "legacy_alias_tools": [
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": false
+          },
+          "description": "Deprecated compatibility alias; migrate to workspace_run_profile before tool contract v2. Use this compatibility alias only while migrating to workspace_run_profile.",
+          "inputSchema": {
+            "properties": {
+              "profile_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Profile Name"
+              },
+              "workspace_id": {
+                "title": "Workspace Id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "workspace_id"
+            ],
+            "title": "workspace_verifyArguments",
+            "type": "object"
+          },
+          "name": "workspace_verify",
+          "outputSchema": {
+            "additionalProperties": true,
+            "title": "workspace_verifyDictOutput",
+            "type": "object"
+          },
+          "title": "Verify workspace (deprecated alias)"
+        }
+      ],
+      "supported_versions": [
+        1,
+        2
+      ]
+    },
+    "tool_surface_hash": "0770136c1cee7fbe9ca9b24e1a25afc8253048d96965f4fc76757ae3d9dfa745",
     "tools": [
       {
         "annotations": {
@@ -2004,7 +2063,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes.",
+        "description": "Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes.",
         "inputSchema": {
           "properties": {
             "background": {
@@ -2013,8 +2072,16 @@
               "type": "boolean"
             },
             "profile_name": {
-              "title": "Profile Name",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Profile Name"
             },
             "workspace_id": {
               "title": "Workspace Id",
@@ -2022,8 +2089,7 @@
             }
           },
           "required": [
-            "workspace_id",
-            "profile_name"
+            "workspace_id"
           ],
           "title": "workspace_run_profileArguments",
           "type": "object"
@@ -2219,47 +2285,6 @@
           "type": "object"
         },
         "title": "Update draft pull request"
-      },
-      {
-        "annotations": {
-          "destructiveHint": false,
-          "idempotentHint": false,
-          "openWorldHint": false,
-          "readOnlyHint": false
-        },
-        "description": "Use this before commit to run the repository-default or explicitly named verification gate.",
-        "inputSchema": {
-          "properties": {
-            "profile_name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Profile Name"
-            },
-            "workspace_id": {
-              "title": "Workspace Id",
-              "type": "string"
-            }
-          },
-          "required": [
-            "workspace_id"
-          ],
-          "title": "workspace_verifyArguments",
-          "type": "object"
-        },
-        "name": "workspace_verify",
-        "outputSchema": {
-          "additionalProperties": true,
-          "title": "workspace_verifyDictOutput",
-          "type": "object"
-        },
-        "title": "Verify workspace"
       },
       {
         "annotations": {

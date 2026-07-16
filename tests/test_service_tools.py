@@ -111,7 +111,7 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
 
     quick = service.workspace_run_profile(workspace_id, "quick")
     assert quick["satisfies_commit_gate"] is False
-    verified = service.workspace_verify(workspace_id)
+    verified = service.workspace_run_profile(workspace_id)
     assert verified["satisfies_commit_gate"] is True
 
     committed = service.workspace_commit(workspace_id, "Improve developer experience")
@@ -137,6 +137,42 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
     removed = service.workspace_remove(workspace_id, delete_local_branch=True)
     assert removed["removed"] is True
     assert removed["remote_branch_untouched"] is True
+
+
+def test_run_profile_default_and_verify_alias_share_canonical_contract(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    canonical_workspace = service.workspace_create("demo", "canonical verification")["workspace_id"]
+    alias_workspace = service.workspace_create("demo", "legacy verification alias")["workspace_id"]
+
+    for workspace_id in (canonical_workspace, alias_workspace):
+        current = service.workspace_read_file(workspace_id, "hello.txt")
+        service.workspace_write_file(
+            workspace_id,
+            "hello.txt",
+            "changed for verification parity\n",
+            current["sha256"],
+        )
+
+    canonical = service.workspace_run_profile(canonical_workspace)
+    alias = service.workspace_verify(alias_workspace)
+
+    assert canonical["used_default"] is True
+    assert canonical["repo_id"] == "demo"
+    for key in (
+        "profile",
+        "description",
+        "verification",
+        "commands",
+        "satisfies_commit_gate",
+        "used_default",
+        "repo_id",
+        "working_directory",
+    ):
+        assert alias[key] == canonical[key]
+    assert len(_audit_events(forge_env.root, "workspace_run_profile")) == 2
+    assert _audit_events(forge_env.root, "workspace_verify") == []
 
 
 def test_batch_limit_and_denied_path(forge_env: ForgeEnvironment) -> None:
@@ -234,7 +270,7 @@ def test_stale_locks_and_verification_invalidation(forge_env: ForgeEnvironment) 
     with pytest.raises(WorkspaceError, match="changed since"):
         service.workspace_write_file(workspace_id, "hello.txt", "changed twice\n", hello["sha256"])
 
-    service.workspace_verify(workspace_id)
+    service.workspace_run_profile(workspace_id)
     current = service.workspace_read_file(workspace_id, "hello.txt")
     service.workspace_write_file(
         workspace_id, "hello.txt", "changed after verify\n", current["sha256"]
@@ -258,7 +294,7 @@ def test_change_budget_blocks_verification_and_commit(tmp_path: Path) -> None:
     service.workspace_write_file(workspace_id, "hello.txt", "changed budget\n", hello["sha256"])
     service.workspace_write_file(workspace_id, "one.txt", "one\n", "<new>")
     with pytest.raises(WorkspaceError, match="Change budget exceeded"):
-        service.workspace_verify(workspace_id)
+        service.workspace_run_profile(workspace_id)
     with pytest.raises(WorkspaceError, match="Change budget exceeded"):
         service.workspace_commit(workspace_id, "Too broad")
 

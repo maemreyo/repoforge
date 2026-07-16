@@ -1,8 +1,8 @@
 # RepoForge tool reference
 
-RepoForge exposes forty-seven focused MCP tools. Each tool has one clear responsibility, and read
-operations are separated from write operations so ChatGPT can apply an appropriate confirmation
-flow.
+RepoForge tool contract v2 exposes forty-six focused MCP tools. Each tool has one clear responsibility,
+and read operations are separated from write operations so ChatGPT can apply an appropriate
+confirmation flow.
 
 ## Provider registry
 
@@ -39,6 +39,15 @@ version, client identity, Apps/UI resources, form and URL elicitation, Tasks, pr
 notifications, tool search and deferred discovery, resource subscriptions, extension versions, and
 bounded compatibility flags. Missing, partial, malformed, unknown, and legacy declarations fail closed;
 RepoForge never probes an optional protocol method that the client did not negotiate.
+
+RepoForge tool contracts are independently versioned from the MCP protocol. Contract v2 is current and
+exposes `workspace_run_profile` as the single verification entry point. Contract v1 remains supported
+for a bounded migration window and exposes `workspace_verify` as a deprecated compatibility alias with
+identical annotations, policy enforcement, and execution behavior. Clients may request one supported
+version with the bounded compatibility flag `repoforge-tool-contract-vN`; conflicting, malformed, or
+unknown requests fall back to the current reviewed contract, while legacy clients fall back to the
+oldest supported contract. The release golden records the current surface plus full legacy alias schema,
+annotations, and deprecation notice. Removing an alias requires a later reviewed contract version.
 
 `CapabilityPolicy` is the single application decision point for extension emission. Unsupported Apps
 fall back to bounded structured results with stable action IDs. Unsupported elicitation returns
@@ -309,7 +318,7 @@ way as today. The default `context_lines=0` is unchanged from the tool's prior b
 ## Verification and publication
 
 | Tool | Purpose |
-|---|---|
+|---|---|---|
 | `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. Pass `background=true` for a long profile to hold the workspace lock and run it as a durable, cancellable operation instead of blocking the call; poll with `operation_status`. On failure, a bounded per-workspace history detects an identical failure signature on an unchanged tree and adds `retry_guidance` (investigate instead of retrying), a missing-dependency hint for `NOT_FOUND` failures, and a quick/diagnostic suggestion when a full-profile run fails inside the fast-fail threshold (`server.fast_fail_threshold_seconds`, default 10s) — guidance only, never a refusal. |
 | `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, optional `intent` (`tdd_red`, `tdd_green`, `refactor`, `pre_commit`, `final`), and optional pass/fail expectation. It reports whether business tests actually ran and never treats collection, syntax, import, dependency, tool, timeout, or environment failures as valid TDD RED. |
 | `workspace_run_adhoc` | Run one exact command (bounded `argv`, no shell) against a repository the owner has explicitly enrolled with `execution_mode = "relaxed"` and an `adhoc_runners` allowlist. Evidence only: fully audited with fingerprint/changed-path evidence, but never populates `last_verification` and never satisfies `require_verification_before_commit`. Returns a structured `EXECUTION_MODE_STRICT` refusal in a strict-mode repository (the default). Supports `background=true` via the same durable-operation path as `workspace_run_profile`. |
@@ -348,8 +357,8 @@ Read-only diagnostics must preserve the exact workspace fingerprint. Artifact di
 only configured artifact patterns; every current changed path and any unexpected path is reported. Any
 fingerprint change invalidates a prior verification receipt. Missing tools, timeouts, parser failures,
 contract drift, dependency/environment failures, output truncation, stale fingerprints, and unexpected
-mutation are explicit. Diagnostics do not update golden files, grant commit eligibility, replace
-`workspace_verify`, or imply an operating-system network sandbox.
+mutation are explicit. Diagnostics do not update golden files, grant commit eligibility, replace the
+final verification-enabled `workspace_run_profile`, or imply an operating-system network sandbox.
 
 With `background=false` (the default), `workspace_run_profile` behavior and result shape are unchanged.
 With `background=true`, RepoForge validates inputs and acquires the workspace lock eagerly (failing fast

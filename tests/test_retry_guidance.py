@@ -245,6 +245,7 @@ def test_success_path_is_unaffected_by_retry_guidance(forge_env: ForgeEnvironmen
     result = forge_env.service.workspace_run_profile(workspace_id, "full")
     assert set(result) == {
         "workspace_id",
+        "repo_id",
         "profile",
         "description",
         "verification",
@@ -252,6 +253,7 @@ def test_success_path_is_unaffected_by_retry_guidance(forge_env: ForgeEnvironmen
         "commands",
         "change_metrics",
         "satisfies_commit_gate",
+        "used_default",
         "head_sha",
         "working_directory",
     }

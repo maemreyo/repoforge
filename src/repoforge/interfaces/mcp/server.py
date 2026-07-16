@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import Tool as McpTool
 from mcp.types import ToolAnnotations
 
 from ...application.runtime.hot_reload import AtomicServiceRouter
@@ -23,6 +24,69 @@ from ...config import load_config
 from ...domain.errors import operation_error_from_exception
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
+from ...domain.tool_contract import ToolContractRegistry, default_tool_contract_registry
+from .capabilities import client_capabilities_from_context
+
+
+class ContractAwareFastMCP(FastMCP[None]):
+    """Expose one request-scoped reviewed tool contract without mutating registration."""
+
+    def __init__(
+        self,
+        *args: Any,
+        contract_registry: ToolContractRegistry,
+        contract_version: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._contract_registry = contract_registry
+        self._contract_version = contract_version
+        if contract_version is not None:
+            self._contract_registry.tool_names(contract_version, frozenset())
+
+    def _selected_contract_version(self) -> int:
+        if self._contract_version is not None:
+            return self._contract_version
+        try:
+            capabilities = client_capabilities_from_context(self.get_context())
+        except (LookupError, ValueError, AttributeError):
+            return self._contract_registry.current_version
+        return self._contract_registry.resolve(capabilities).version
+
+    async def list_tools(self) -> list[McpTool]:
+        tools = await super().list_tools()
+        version = self._selected_contract_version()
+        allowed = self._contract_registry.tool_names(
+            version,
+            frozenset(tool.name for tool in tools),
+        )
+        aliases = {
+            alias.alias: alias
+            for alias in self._contract_registry.aliases
+            if alias.active_in(version)
+        }
+        visible: list[McpTool] = []
+        for tool in tools:
+            if tool.name not in allowed:
+                continue
+            alias = aliases.get(tool.name)
+            if alias is None:
+                visible.append(tool)
+                continue
+            description = f"{alias.notice} {tool.description or ''}".strip()
+            visible.append(tool.model_copy(update={"description": description}))
+        return visible
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        all_tools = await super().list_tools()
+        registered = frozenset(tool.name for tool in all_tools)
+        version = self._selected_contract_version()
+        allowed = self._contract_registry.tool_names(version, registered)
+        if name in registered and name not in allowed:
+            raise ValueError(
+                f"Tool {name!r} is not available in RepoForge tool contract v{version}"
+            )
+        return await super().call_tool(name, arguments)
 
 
 class _StructuredMcpToolError(RuntimeError):
@@ -90,7 +154,7 @@ class _ServiceErrorBoundary:
             ) from exc
 
 
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile, workspace_run_diagnostic, or (only where the repository owner has enabled it)\nworkspace_run_adhoc; they are cheap and meant for the edit-test loop and never satisfy the commit\ngate. Reserve the full (or repository-default) verification profile for one run via workspace_verify\nimmediately before commit; never claim verification succeeded unless the tool returned success.\nCommit, push, and create only draft pull requests. Never merge, force-push, modify protected branches,\nrequest secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely undo\nselected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.".strip()
+SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull verification profile for one workspace_run_profile call immediately before commit; omit\nprofile_name to use the repository default. Never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.".strip()
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
@@ -183,7 +247,7 @@ def _canonical_ast_value(value: object) -> object:
     return value
 
 
-def tool_surface_hash() -> str:
+def tool_surface_hash(contract_version: int | None = None) -> str:
     module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     create = next(
         n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "create_server"
@@ -219,11 +283,16 @@ def tool_surface_hash() -> str:
                 "structured_output": keywords.get("structured_output"),
             }
         )
+    registry = default_tool_contract_registry()
+    version = contract_version or registry.current_version
+    allowed = registry.tool_names(version, frozenset(str(tool["name"]) for tool in tools))
+    versioned_tools = [tool for tool in tools if str(tool["name"]) in allowed]
     return hashlib.sha256(
         json.dumps(
             {
                 "schema_version": 2,
-                "tools": sorted(tools, key=lambda item: item["name"]),
+                "contract_version": version,
+                "tools": sorted(versioned_tools, key=lambda item: item["name"]),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -236,6 +305,7 @@ def create_server(
     *,
     service: CodingService | None = None,
     router: AtomicServiceRouter | None = None,
+    contract_version: int | None = None,
 ) -> FastMCP:
     if service is not None and router is not None:
         raise ValueError("create_server accepts either service or router, not both")
@@ -243,7 +313,13 @@ def create_server(
         None if router is not None else CodingService(load_config(config_path))
     )
     bounded_service = _ServiceErrorBoundary(raw_service, router=router)
-    mcp = FastMCP("RepoForge", instructions=SERVER_INSTRUCTIONS, log_level="WARNING")
+    mcp = ContractAwareFastMCP(
+        "RepoForge",
+        instructions=SERVER_INSTRUCTIONS,
+        log_level="WARNING",
+        contract_registry=default_tool_contract_registry(),
+        contract_version=contract_version,
+    )
 
     @mcp.tool(title="Read durable operation status", annotations=READ_ONLY, structured_output=True)
     def operation_status(operation_id: str) -> dict[str, Any]:
@@ -705,9 +781,11 @@ def create_server(
         structured_output=True,
     )
     def workspace_run_profile(
-        workspace_id: str, profile_name: str, background: bool = False
+        workspace_id: str,
+        profile_name: str | None = None,
+        background: bool = False,
     ) -> dict[str, Any]:
-        """Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
+        """Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
         return bounded_service.call("workspace_run_profile", workspace_id, profile_name, background)
 
     @mcp.tool(
@@ -754,9 +832,13 @@ def create_server(
             "workspace_run_adhoc", workspace_id, argv, working_directory, background
         )
 
-    @mcp.tool(title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True)
+    @mcp.tool(
+        title="Verify workspace (deprecated alias)",
+        annotations=LOCAL_MUTATE,
+        structured_output=True,
+    )
     def workspace_verify(workspace_id: str, profile_name: str | None = None) -> dict[str, Any]:
-        """Use this before commit to run the repository-default or explicitly named verification gate."""
+        """Use this compatibility alias only while migrating to workspace_run_profile."""
         return bounded_service.call("workspace_verify", workspace_id, profile_name)
 
     @mcp.tool(

@@ -181,7 +181,7 @@ commands = [[{_toml(sys.executable)}, "-c", "from pathlib import Path; assert Pa
                 )
             ],
         )
-        verification = service.workspace_verify(workspace_id)
+        verification = service.workspace_run_profile(workspace_id)
         assert verification["satisfies_commit_gate"] is True
         committed = service.workspace_commit(workspace_id, "Verify installed wheel lifecycle")
         pushed = service.workspace_push(
