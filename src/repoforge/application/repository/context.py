@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -9,7 +10,8 @@ from ...domain.diagnostic_packs import detect_ecosystems, ecosystem_diagnostic_p
 from ...domain.diagnostics import DiagnosticProfileConfig, DiagnosticSelectorConfig
 from ...domain.errors import SecurityError
 from ...domain.policy import assert_path_allowed
-from ..context import ApplicationContext
+from ..context import ApplicationContext, repository_policy_snapshot
+from ..profile_drift import ProfileDriftAssessor
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +34,7 @@ class RepositoryContextResult:
     default_verification_profile: str | None
     diagnostics: list[dict[str, Any]]
     diagnostic_pack_suggestions: list[dict[str, Any]]
+    profile_drift: dict[str, Any]
 
 
 def _selector_schema(selector: DiagnosticSelectorConfig) -> dict[str, Any]:
@@ -159,6 +162,17 @@ class RepositoryContextReader:
             _diagnostic_schema(diagnostic) for _, diagnostic in sorted(repo.diagnostics.items())
         ]
         pack_suggestions = [] if diagnostics else _pack_suggestion_payload(root_files)
+        config_identity = hashlib.sha256(self.ctx.config.source_path.read_bytes()).hexdigest()
+        policy_hash = repository_policy_snapshot(repo).get("sha256")
+        if not isinstance(policy_hash, str):
+            raise RuntimeError("repository policy hash is unavailable")
+        profile_drift = ProfileDriftAssessor().assess(
+            repo,
+            head_sha=self.ctx.git.head_sha(repo.path).lower(),
+            config_identity=config_identity,
+            policy_hash=policy_hash,
+            source_dirty=bool(self.ctx.git.status_porcelain(repo.path)),
+        )
         return RepositoryContextResult(
             c.repo_id,
             repo.display_name or c.repo_id,
@@ -173,4 +187,5 @@ class RepositoryContextReader:
             repo.default_verification_profile,
             diagnostics,
             pack_suggestions,
+            profile_drift.as_dict(),
         )

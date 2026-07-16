@@ -72,6 +72,25 @@ def test_bundle_matches_standalone_tools_field_for_field(forge_env: ForgeEnviron
 # ---------------------------------------------------------------------------
 
 
+def test_repository_context_surfaces_snapshot_bound_profile_drift(
+    forge_env: ForgeEnvironment,
+) -> None:
+    (forge_env.source / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    (forge_env.source / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    git("add", "pyproject.toml", "uv.lock", cwd=forge_env.source)
+    git("commit", "-m", "add python toolchain markers", cwd=forge_env.source)
+
+    context = forge_env.service.repo_context("demo")
+
+    drift = context["profile_drift"]
+    assert drift["stale"] is False
+    assert drift["head_sha"] == git("rev-parse", "HEAD", cwd=forge_env.source).strip()
+    candidates = {item["profile_id"]: item for item in drift["detected_unenrolled_profiles"]}
+    assert candidates["python-test"]["capability_delta"] == "expansion"
+    assert candidates["python-test"]["proposal_ready"] is True
+    assert candidates["python-test"]["repo_policy_apply"]["dry_run"] is True
+
+
 def test_bundle_omits_absent_sections_as_explicit_null(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
 
