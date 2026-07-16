@@ -329,6 +329,18 @@ network_policy = "local_only"
 mutability = "read_only"
 parser = "pytest"
 output_limit = 2000
+
+[repositories.demo.formatters.test-format]
+summary = "Format changed text fixtures"
+check_argv = ["python3", "-c", "import sys; from pathlib import Path; bad=[p for p in sys.argv[1:] if 'needs-format' in Path(p).read_text()]; [print('Would reformat: ' + p) for p in bad]; raise SystemExit(1 if bad else 0)"]
+fix_argv = ["python3", "-c", "import sys; from pathlib import Path; [(lambda p: p.write_text(p.read_text().replace('needs-format', 'formatted')))(Path(x)) for x in sys.argv[1:]]"]
+include_globs = ["*.txt", "**/*.txt"]
+timeout_seconds = 30
+output_limit = 2000
+max_paths = 20
+baseline_cache_ttl_seconds = 3600
+network_policy = "local_only"
+parser = "ruff_format"
 ''',
         encoding="utf-8",
     )

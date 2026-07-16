@@ -312,6 +312,8 @@ way as today. The default `context_lines=0` is unchanged from the tool's prior b
 |---|---|
 | `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. Pass `background=true` for a long profile to hold the workspace lock and run it as a durable, cancellable operation instead of blocking the call; poll with `operation_status`. |
 | `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, optional `intent` (`tdd_red`, `tdd_green`, `refactor`, `pre_commit`, `final`), and optional pass/fail expectation. It reports whether business tests actually ran and never treats collection, syntax, import, dependency, tool, timeout, or environment failures as valid TDD RED. |
+| `workspace_hygiene_status` | Compare formatter findings from an immutable exact-base archive with the current workspace. Findings are classified as pre-existing, introduced, resolved, and introduced-on-changed-path; the source clone is never used as the baseline. |
+| `workspace_format_changed` | Run one reviewed formatter only over policy-allowed paths derived from the current Git change set. The caller supplies an exact workspace fingerprint, never argv, an executable, a working directory, environment values, or paths. |
 | `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. Run this once per workspace, right before commit — not on every edit. |
 | `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. |
 | `workspace_push` | Push the workspace branch without force and record the pushed commit SHA. |
@@ -333,6 +335,23 @@ expected failure class; only a collected business test failing as `test_failure`
 passed to `workspace_verify`) only once on the exact final tree immediately before `workspace_commit`.
 `workspace_commit` still requires the exact tree that the most recent successful `workspace_verify`
 receipt covers.
+
+The intended TDD loop is: write or update the narrow business test, run a diagnostic with
+`intent=tdd_red` and `expectation=fail`, implement the change, inspect `workspace_hygiene_status`, run
+`workspace_format_changed` only when changed paths have formatter findings, then rerun the narrow
+diagnostic with `intent=tdd_green` and `expectation=pass`. Formatting is not verification: any actual
+formatter mutation changes the workspace fingerprint, invalidates an existing verification receipt, and
+requires the GREEN diagnostic again. A no-op formatter run preserves the fingerprint and receipt.
+
+A formatter policy is reviewed repository configuration. It fixes separate check and fix argv, path
+include globs, timeout, output bound, path-count bound, cache TTL, local-only network declaration, and
+parser. Baseline findings come from a bounded disposable `git archive` of the exact workspace base SHA;
+the mutable source clone is never read as baseline evidence. Cache entries bind repository ID, exact base
+SHA, active configuration identity, execution-environment identity, formatter contract hash, and TTL.
+Archive traversal, links, devices, unsupported entries, corrupt cache frames, stale fingerprints, and
+formatter mutation outside the server-derived changed-path scope fail closed. Callers cannot request a
+whole-repository format or supply path lists, shell fragments, argv, executables, working directories, or
+environment values.
 
 A diagnostic profile is part of the reviewed repository configuration. It fixes the executable and argv
 template, selector kind, working directory, timeout, local-only network declaration, mutability, parser,

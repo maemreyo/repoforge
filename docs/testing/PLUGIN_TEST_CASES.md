@@ -34,6 +34,14 @@ arguments, confirmation prompts, results and unexpected tool calls.
     `issue_number: 460` and `workspace_id`; no separate `repo_context`, `repo_issue_spec`, or
     `workspace_status` calls for the same warm-start.
 
+11. **TDD hygiene loop** — “The RED test now fails for the expected reason. Implement the fix, format only
+     files changed in this workspace, then rerun the narrow GREEN test.” Expected: RED diagnostic evidence,
+     implementation edits, `workspace_hygiene_status`, `workspace_format_changed` with the exact returned
+     fingerprint, then GREEN diagnostic; no `full` verification until the final tree.
+12. **Baseline debt remains visible** — “Tell me whether formatter failures in this workspace were already
+     present on its exact base.” Expected: `workspace_hygiene_status`; response distinguishes pre-existing,
+     introduced, resolved, and changed-path findings without reading or modifying the source clone.
+
 ## Indirect
 
 1. “Can you safely implement the next open issue in my local Work Frontier clone and let me review

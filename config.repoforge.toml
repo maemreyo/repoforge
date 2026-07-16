@@ -119,6 +119,18 @@ mutability = "read_only"
 parser = "release_contract"
 output_limit = 8000
 
+[repositories.repoforge.formatters.ruff-format]
+summary = "Check or format policy-allowed changed Python files with Ruff"
+check_argv = ["uv", "run", "--extra", "dev", "ruff", "format", "--check", "--"]
+fix_argv = ["uv", "run", "--extra", "dev", "ruff", "format", "--"]
+include_globs = ["src/**/*.py", "tests/**/*.py", "scripts/**/*.py"]
+timeout_seconds = 300
+output_limit = 12000
+max_paths = 1000
+baseline_cache_ttl_seconds = 3600
+network_policy = "local_only"
+parser = "ruff_format"
+
 [repositories.repoforge.profiles.setup]
 description = "Synchronize the locked RepoForge development environment"
 verification = false

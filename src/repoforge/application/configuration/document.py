@@ -187,7 +187,9 @@ def render_resolved(
                 continue
             lines.extend(["", f"[repositories.{repo_id}]"])
             for key in sorted(
-                k for k in raw if k not in {"profiles", "diagnostics", "resource_budget"}
+                k
+                for k in raw
+                if k not in {"profiles", "diagnostics", "formatters", "resource_budget"}
             ):
                 value = raw[key]
                 if isinstance(value, (str, int, bool, list)):
@@ -242,6 +244,28 @@ def render_resolved(
                             lines.append(f"{key} = {_toml(diagnostic[key])}")
                     for key in ("argv", "selector_values", "artifact_paths"):
                         value = diagnostic.get(key)
+                        if isinstance(value, list):
+                            lines.append(f"{key} = {_toml(value)}")
+            formatters = raw.get("formatters", {})
+            if isinstance(formatters, dict):
+                for formatter_id in sorted(formatters):
+                    formatter = formatters[formatter_id]
+                    if not isinstance(formatter, dict):
+                        continue
+                    lines.extend(["", f"[repositories.{repo_id}.formatters.{formatter_id}]"])
+                    for key in (
+                        "summary",
+                        "timeout_seconds",
+                        "output_limit",
+                        "max_paths",
+                        "baseline_cache_ttl_seconds",
+                        "network_policy",
+                        "parser",
+                    ):
+                        if key in formatter and isinstance(formatter[key], (str, int, bool)):
+                            lines.append(f"{key} = {_toml(formatter[key])}")
+                    for key in ("check_argv", "fix_argv", "include_globs"):
+                        value = formatter.get(key)
                         if isinstance(value, list):
                             lines.append(f"{key} = {_toml(value)}")
     return "\n".join(lines).rstrip() + "\n"

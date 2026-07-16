@@ -82,6 +82,20 @@ class RepositoryLister:
                         }
                         for name, diagnostic in repo.diagnostics.items()
                     },
+                    "formatters": {
+                        name: {
+                            "summary": formatter.summary,
+                            "include_globs": list(formatter.include_globs),
+                            "timeout_seconds": formatter.timeout_seconds,
+                            "output_limit": formatter.output_limit,
+                            "max_paths": formatter.max_paths,
+                            "baseline_cache_ttl_seconds": formatter.baseline_cache_ttl_seconds,
+                            "network_policy": formatter.network_policy.value,
+                            "parser": formatter.parser.value,
+                            "contract_hash": formatter.contract_hash,
+                        }
+                        for name, formatter in repo.formatters.items()
+                    },
                 }
                 repositories.append(entry)
             details["repo_count"] = len(repositories)
