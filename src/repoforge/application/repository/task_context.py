@@ -203,9 +203,7 @@ class RepoTaskContextReader:
                 self._timed(
                     details,
                     "workspace",
-                    lambda: self._workspace_reader.compute(
-                        WorkspaceStatusCommand(workspace_id)
-                    ),
+                    lambda: self._workspace_reader.compute(WorkspaceStatusCommand(workspace_id)),
                 )
             )
             workspace_payload["truncated"] = False

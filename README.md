@@ -46,6 +46,7 @@ Today, RepoForge can:
 - create and update draft pull requests;
 - inspect pull-request and CI state;
 - validate a deterministic issue dependency graph and select the next Ready work;
+- dry-run and apply a deterministic ticket projection to GitHub Projects and native issue relationships;
 - attach explainable risk and ordered verification recommendations to one assessment snapshot;
 - reuse private atomic durable-state primitives across operational records;
 - manage local configuration generations and runtime lifecycle;
@@ -184,6 +185,16 @@ See [SECURITY.md](SECURITY.md) for the detailed threat model and limitations.
 - List configured repositories and policies.
 - Inspect Git status, remotes, branch state, manifests, scripts, and project instructions.
 - Read recent commits, GitHub issues, pull requests, reviews, and checks.
+
+### Ticket project synchronization
+
+- Compare the checked-in ticket graph with one existing GitHub Project V2.
+- Plan managed fields, project items, field values, views, sub-issues, and blocked-by relationships.
+- Default to a read-only dry-run with scope, project-access, rate-limit, conflict, and drift evidence.
+- Apply one stable idempotent change at a time, stop safely on partial failure, and preserve unmanaged state.
+
+See [GitHub ticket project synchronization](docs/operations/TICKET_PROJECT_SYNC.md) for permissions,
+recovery, managed fields and views, and the explicit manual fallback for Project view sorting.
 
 ### Isolated workspace lifecycle
 
@@ -330,6 +341,14 @@ rf repo remove repository-id
 ```
 
 Repository inspection and preview operations do not execute discovered commands. Capability expansion requires explicit approval of the current proposal.
+
+Synchronize the checked-in ticket graph with an existing GitHub Project and native issue relationships. The first command is read-only; the second performs the reviewed external writes:
+
+```bash
+rf tickets sync --repo-id repoforge --owner maemreyo --project-number 7
+rf tickets sync --repo-id repoforge --owner maemreyo --project-number 7 --apply \
+  --idempotency-key repoforge-ticket-sync-2026-07-16
+```
 
 ### Manage the runtime
 

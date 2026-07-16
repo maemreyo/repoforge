@@ -265,7 +265,12 @@ def test_oversized_fixture_is_truncated_and_never_exceeds_the_hard_cap(
     source = forge_env.source
 
     # Oversized instruction files: each near repo_context's own preview cap.
-    for relative in ("AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", ".github/copilot-instructions.md"):
+    for relative in (
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        ".github/copilot-instructions.md",
+    ):
         path = source / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x" * 20_000, encoding="utf-8")
@@ -443,7 +448,5 @@ async def test_mcp_repo_task_context_tool(forge_env: ForgeEnvironment) -> None:
         assert structured["workspace"] is None
         assert structured["repository"]["repo_id"] == "demo"
 
-        error_result = await session.call_tool(
-            "repo_task_context", {"repo_id": "missing-repo"}
-        )
+        error_result = await session.call_tool("repo_task_context", {"repo_id": "missing-repo"})
         assert error_result.isError is True

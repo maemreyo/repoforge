@@ -6,6 +6,7 @@ from typing import Any
 
 from ..bootstrap import AdapterOverrides, Application, build_application
 from ..config import AppConfig
+from ..domain.ticket_sync import TicketProjectOwnerType
 from ..ports import (
     AuditSink,
     CommandExecutor,
@@ -13,6 +14,7 @@ from ..ports import (
     LockManager,
     MetricsSink,
     OperationGate,
+    TicketProjectGateway,
     WorkspaceStore,
 )
 from .dto import to_data
@@ -48,6 +50,10 @@ from .repository.status import (
 )
 from .repository.task_context import RepoTaskContextCommand, RepoTaskContextReader
 from .repository.tree import RepositoryTreeCommand, RepositoryTreeReader
+from .tickets.project_sync import (
+    TicketProjectSyncCommand,
+    TicketProjectSyncer,
+)
 from .workspace.apply_patch import (
     WorkspaceApplyPatchCommand,
     WorkspacePatchApplier,
@@ -155,6 +161,7 @@ class CodingService:
         gate: OperationGate | None = None,
         metrics: MetricsSink | None = None,
         idempotency: IdempotencyStore | None = None,
+        ticket_projects: TicketProjectGateway | None = None,
         application: Application | None = None,
     ):
         self.application = application or build_application(
@@ -167,6 +174,7 @@ class CodingService:
                 gate=gate,
                 metrics=metrics,
                 idempotency=idempotency,
+                ticket_projects=ticket_projects,
             ),
         )
         self.config = self.application.context.config
@@ -198,6 +206,7 @@ class CodingService:
         self._issue_spec = RepositoryIssueSpecReader(ctx)
         self._repo_pr = PullRequestReader(ctx)
         self._task_context = RepoTaskContextReader(ctx)
+        self._ticket_project_sync = TicketProjectSyncer(ctx)
         self._create = WorkspaceCreator(ctx)
         self._list = WorkspaceLister(ctx)
         self._status = WorkspaceStatusReader(ctx)
@@ -421,8 +430,29 @@ class CodingService:
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
         return _result(
-            self._task_context.execute(
-                RepoTaskContextCommand(repo_id, issue_number, workspace_id)
+            self._task_context.execute(RepoTaskContextCommand(repo_id, issue_number, workspace_id))
+        )
+
+    def ticket_project_sync(
+        self,
+        *,
+        repo_id: str,
+        owner: str,
+        project_number: int,
+        owner_type: str = "organization",
+        apply: bool = False,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._ticket_project_sync.execute(
+                TicketProjectSyncCommand(
+                    repo_id=repo_id,
+                    owner=owner,
+                    project_number=project_number,
+                    owner_type=TicketProjectOwnerType(owner_type),
+                    apply=apply,
+                    idempotency_key=idempotency_key,
+                )
             )
         )
 

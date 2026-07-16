@@ -64,9 +64,7 @@ def test_read_audit_events_filters_by_min_duration(tmp_path: Path) -> None:
 def test_read_audit_events_filters_by_min_bytes(tmp_path: Path) -> None:
     clock = FixedClock("2026-07-15T00:00:00+00:00")
     sink = JsonlAuditSink(tmp_path, clock)
-    sink.record(
-        "workspace_diff", success=True, details={"duration_ms": 1.0, "result_bytes": 100}
-    )
+    sink.record("workspace_diff", success=True, details={"duration_ms": 1.0, "result_bytes": 100})
     sink.record(
         "workspace_status", success=True, details={"duration_ms": 1.0, "result_bytes": 50_000}
     )

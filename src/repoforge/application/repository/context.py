@@ -36,14 +36,18 @@ class RepositoryContextReader:
 
     def execute(self, c: RepositoryContextCommand) -> RepositoryContextResult:
         repo = self.ctx.repo(c.repo_id)
-        return self.ctx.audited("repo_context", {"repo_id": c.repo_id}, lambda: self._build(c, repo))
+        return self.ctx.audited(
+            "repo_context", {"repo_id": c.repo_id}, lambda: self._build(c, repo)
+        )
 
     def compute(self, c: RepositoryContextCommand) -> RepositoryContextResult:
         """Pure application logic with no audit event, for embedding in a larger audited bundle."""
         repo = self.ctx.repo(c.repo_id)
         return self._build(c, repo)
 
-    def _build(self, c: RepositoryContextCommand, repo: RepositoryConfig) -> RepositoryContextResult:
+    def _build(
+        self, c: RepositoryContextCommand, repo: RepositoryConfig
+    ) -> RepositoryContextResult:
         package = None
         package_path = repo.path / "package.json"
         if (

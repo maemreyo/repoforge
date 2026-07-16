@@ -153,9 +153,7 @@ class WorkspaceProfileRunner:
             on_before_command: Callable[[], None] | None,
         ) -> WorkspaceRunProfileResult:
             fresh = self.ctx.store.load(c.workspace_id)
-            timeout = (
-                profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
-            )
+            timeout = profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
             environment_hash: str | None = None
             if self.ctx.execution_environment is not None:
                 request = EnvironmentIdentityRequest(
@@ -307,8 +305,7 @@ class WorkspaceProfileRunner:
                 holder = self._running_operation_id(c.workspace_id)
                 suffix = f" (currently running as operation {holder!r})" if holder else ""
                 raise RepoForgeError(
-                    f"Workspace {c.workspace_id!r} is locked by another running operation"
-                    f"{suffix}",
+                    f"Workspace {c.workspace_id!r} is locked by another running operation{suffix}",
                     code=ErrorCode.LOCK_TIMEOUT,
                     retryable=True,
                     safe_next_action=(

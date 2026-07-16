@@ -169,9 +169,7 @@ class JsonGitHubReadCache:
                     ordered = sorted(
                         entries.items(),
                         key=lambda item: (
-                            item[1].get("stored_at", 0.0)
-                            if isinstance(item[1], dict)
-                            else 0.0
+                            item[1].get("stored_at", 0.0) if isinstance(item[1], dict) else 0.0
                         ),
                     )
                     overflow = len(entries) - self._max_entries

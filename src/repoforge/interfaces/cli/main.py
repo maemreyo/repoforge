@@ -1455,6 +1455,17 @@ def build_parser() -> argparse.ArgumentParser:
     operation_cancel = operation_sub.add_parser("cancel")
     operation_cancel.add_argument("operation_id")
     operation_cancel.add_argument("--expected-updated-at")
+    tickets = commands.add_parser("tickets")
+    tickets_sub = tickets.add_subparsers(dest="tickets_command", required=True)
+    ticket_sync = tickets_sub.add_parser("sync")
+    ticket_sync.add_argument("--repo-id", required=True)
+    ticket_sync.add_argument("--owner", required=True)
+    ticket_sync.add_argument("--project-number", required=True, type=int)
+    ticket_sync.add_argument(
+        "--owner-type", choices=("organization", "user"), default="organization"
+    )
+    ticket_sync.add_argument("--apply", action="store_true")
+    ticket_sync.add_argument("--idempotency-key")
     diagnostics = commands.add_parser("diagnostics")
     diagnostics_sub = diagnostics.add_subparsers(dest="diagnostics_command", required=True)
     bundle = diagnostics_sub.add_parser("bundle")
@@ -1611,6 +1622,18 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError("No accepted configuration generation")
         config = load_config(store.resolved_path(active_for_cli.generation))
         service = CodingService(config)
+        if args.command == "tickets" and args.tickets_command == "sync":
+            _json(
+                service.ticket_project_sync(
+                    repo_id=args.repo_id,
+                    owner=args.owner,
+                    project_number=args.project_number,
+                    owner_type=args.owner_type,
+                    apply=args.apply,
+                    idempotency_key=args.idempotency_key,
+                )
+            )
+            return 0
         if args.command == "operation":
             if args.operation_command == "status":
                 _json(service.operation_status(args.operation_id))

@@ -52,6 +52,7 @@ from .runtime_control import (
 )
 from .sleeper import Sleeper
 from .state_repository import StateRepository
+from .ticket_project import TicketProjectGateway
 from .tunnel import TunnelClient, TunnelProfileStore
 from .workflow_recording_store import (
     WorkflowRecordingPage,
@@ -116,6 +117,7 @@ __all__ = [
     "RuntimeStore",
     "Sleeper",
     "StateRepository",
+    "TicketProjectGateway",
     "TunnelClient",
     "TunnelProfileStore",
     "WorkflowRecordingPage",

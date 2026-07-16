@@ -33,6 +33,7 @@ from ..ports import (
     OperationStore,
     ProviderRegistry,
     PullRequestGateway,
+    TicketProjectGateway,
     WorkspaceStore,
 )
 from .dto import to_data
@@ -152,6 +153,8 @@ def orphaned_repository_config(record: WorkspaceRecord) -> RepositoryConfig:
 
 
 _MUTATING_ACTIONS = {
+    "ticket_project_sync_apply",
+    "ticket_project_sync_change",
     "workspace_create",
     "workspace_write_file",
     "workspace_replace_text",
@@ -169,12 +172,14 @@ _MUTATING_ACTIONS = {
 }
 
 _PUBLISH_ACTIONS = {
+    "ticket_project_sync_apply",
     "workspace_push",
     "workspace_create_draft_pr",
     "workspace_update_draft_pr",
 }
 
 _POLICY_WRITE_ACTIONS = {
+    "ticket_project_sync_apply",
     "workspace_write_file",
     "workspace_replace_text",
     "workspace_apply_patch",
@@ -212,6 +217,7 @@ class ApplicationContext:
     provider_registry: ProviderRegistry | None = None
     github_read_cache: GitHubReadCache | None = None
     nudge_tracker: AdoptionNudgeTracker | None = None
+    ticket_projects: TicketProjectGateway | None = None
 
     def now_epoch(self) -> float:
         try:

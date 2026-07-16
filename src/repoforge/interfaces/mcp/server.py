@@ -358,9 +358,7 @@ def create_server(
         return bounded_service.call("repo_recent_commits", repo_id, limit)
 
     @mcp.tool(title="Read GitHub issue", annotations=EXTERNAL_READ, structured_output=True)
-    def repo_issue_read(
-        repo_id: str, issue_number: int, fresh: bool = False
-    ) -> dict[str, Any]:
+    def repo_issue_read(repo_id: str, issue_number: int, fresh: bool = False) -> dict[str, Any]:
         """Use this when implementation requirements are defined by a GitHub issue. A recent
         read of the same issue in this session may be served from a short-lived local cache
         (marked `cache_hit: true`); pass `fresh=true` to force a live read, e.g. before acting
@@ -413,9 +411,7 @@ def create_server(
         annotations=EXTERNAL_READ,
         structured_output=True,
     )
-    def repo_issue_spec(
-        repo_id: str, issue_number: int, fresh: bool = False
-    ) -> dict[str, Any]:
+    def repo_issue_spec(repo_id: str, issue_number: int, fresh: bool = False) -> dict[str, Any]:
         """Use this before implementing one ticket to get its manifest metadata, the live GitHub issue, drift against the manifest, and comment references without reconstructing prior chat. The live issue portion may be served from a short-lived local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read."""
         return bounded_service.call("repo_issue_spec", repo_id, issue_number, fresh)
 
@@ -677,9 +673,7 @@ def create_server(
         workspace_id: str, profile_name: str, background: bool = False
     ) -> dict[str, Any]:
         """Use this for an explicitly named allowlisted setup, fix, build, or verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full (or repository-default) profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
-        return bounded_service.call(
-            "workspace_run_profile", workspace_id, profile_name, background
-        )
+        return bounded_service.call("workspace_run_profile", workspace_id, profile_name, background)
 
     @mcp.tool(
         title="Run reviewed workspace diagnostic",

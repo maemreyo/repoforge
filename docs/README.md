@@ -25,6 +25,10 @@ Documentation is grouped by purpose so the `docs/` root remains a stable entry p
 
 - [Starter prompts](guides/STARTER_PROMPTS.md)
 
+## Operations
+
+- [GitHub ticket project synchronization](operations/TICKET_PROJECT_SYNC.md)
+
 ## Architecture and contracts
 
 - [Architecture records](architecture/)

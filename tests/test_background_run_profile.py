@@ -126,7 +126,10 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
 
     # The workspace lock is held for the whole background run.
     locks = service.application.context.locks
-    with pytest.raises(RepoForgeError) as timeout_exc, locks.lock(workspace_id, timeout_seconds=0.1):
+    with (
+        pytest.raises(RepoForgeError) as timeout_exc,
+        locks.lock(workspace_id, timeout_seconds=0.1),
+    ):
         pass
     assert timeout_exc.value.code is ErrorCode.LOCK_TIMEOUT
 
@@ -180,13 +183,17 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
     assert len(bg_events) == 1
     sync_details, bg_details = sync_events[0]["details"], bg_events[0]["details"]
     # Same bounded audit shape; only workspace-identifying and timing/size values differ.
-    assert set(sync_details) == set(bg_details) == {
-        "workspace_id",
-        "profile",
-        "correlation_id",
-        "duration_ms",
-        "result_bytes",
-    }
+    assert (
+        set(sync_details)
+        == set(bg_details)
+        == {
+            "workspace_id",
+            "profile",
+            "correlation_id",
+            "duration_ms",
+            "result_bytes",
+        }
+    )
     assert sync_details["profile"] == bg_details["profile"] == "slow"
     assert isinstance(sync_details["result_bytes"], int) and sync_details["result_bytes"] > 0
     assert isinstance(bg_details["result_bytes"], int) and bg_details["result_bytes"] > 0
