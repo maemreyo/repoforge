@@ -477,9 +477,7 @@ async def test_workspace_edit_batch_edits_through_mcp_protocol(
             assert result.structuredContent is not None
             return result.structuredContent
 
-        created = await call(
-            "workspace_create", {"repo_id": "demo", "task_slug": "batch edit"}
-        )
+        created = await call("workspace_create", {"repo_id": "demo", "task_slug": "batch edit"})
         workspace_id = str(created["workspace_id"])
         hello = await call(
             "workspace_read_file",

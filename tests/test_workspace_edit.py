@@ -189,7 +189,9 @@ def test_rejects_more_than_max_edits_per_file(forge_env: ForgeEnvironment) -> No
     assert len(too_many_edits) == 21
 
     with pytest.raises(ValueError, match=r"at most 20 entries, got 21"):
-        service.workspace_edit(workspace_id, [FileEdit("hello.txt", hello["sha256"], too_many_edits)])
+        service.workspace_edit(
+            workspace_id, [FileEdit("hello.txt", hello["sha256"], too_many_edits)]
+        )
 
     assert path.read_bytes() == before_bytes
 

@@ -82,7 +82,9 @@ class WorkspaceEditor:
         if not files:
             raise ValueError("files must contain at least one entry")
         if len(files) > MAX_FILES_PER_CALL:
-            raise ValueError(f"files must contain at most {MAX_FILES_PER_CALL} entries, got {len(files)}")
+            raise ValueError(
+                f"files must contain at most {MAX_FILES_PER_CALL} entries, got {len(files)}"
+            )
         seen_paths: set[str] = set()
         for index, entry in enumerate(files):
             if not _SHA.fullmatch(entry.expected_sha256):
@@ -103,7 +105,9 @@ class WorkspaceEditor:
                 )
             for edit_index, edit in enumerate(edits):
                 if not edit.old_text:
-                    raise ValueError(f"files[{index}].edits[{edit_index}]: old_text must be non-empty")
+                    raise ValueError(
+                        f"files[{index}].edits[{edit_index}]: old_text must be non-empty"
+                    )
                 if "\x00" in edit.old_text or "\x00" in edit.new_text:
                     raise SecurityError(
                         f"files[{index}].edits[{edit_index}]: NUL bytes are not allowed in text replacements"
@@ -202,5 +206,7 @@ class WorkspaceEditor:
         except Exception:
             for item in written:
                 with contextlib.suppress(Exception):
-                    self.ctx.filesystem.write_bytes_atomic(item.path, item.original, preserve_mode=True)
+                    self.ctx.filesystem.write_bytes_atomic(
+                        item.path, item.original, preserve_mode=True
+                    )
             raise

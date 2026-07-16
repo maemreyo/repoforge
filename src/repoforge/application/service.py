@@ -533,9 +533,7 @@ class CodingService:
         )
 
     def workspace_edit(self, workspace_id: str, files: list[FileEdit]) -> dict[str, Any]:
-        return _result(
-            self._edit.execute(WorkspaceEditCommand(workspace_id, tuple(files)))
-        )
+        return _result(self._edit.execute(WorkspaceEditCommand(workspace_id, tuple(files))))
 
     def workspace_apply_patch(
         self,
