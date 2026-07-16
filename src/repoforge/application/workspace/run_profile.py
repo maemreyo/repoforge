@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import EnvironmentIdentityRequest
 from ...domain.operation_task import OperationRetryability, OperationState
@@ -21,7 +22,7 @@ from ...domain.retry_guidance import (
     clear as clear_retry_guidance,
 )
 from ...domain.verification import get_profile
-from ...domain.workspace import VerificationReceipt
+from ...domain.workspace import VerificationReceipt, is_commit_sha
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
@@ -70,7 +71,17 @@ class WorkspaceRunProfileResult:
     change_metrics: dict[str, object]
     satisfies_commit_gate: bool
     head_sha: str
+    command_source_dirty: bool
+    command_source_dirty_paths: list[str]
+    command_source_warning: str | None
     working_directory: str | None = None
+
+
+_COMMAND_SOURCE_WARNING_TEMPLATE = (
+    "This run is not representative of the enrolled command chain: {paths} "
+    "differ from the workspace base. Consider workspace_run_diagnostic or the "
+    "audited ad-hoc runner (where enabled) for a targeted check instead."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +192,28 @@ class WorkspaceProfileRunner:
                 self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, path
             )
             before_fingerprint = before.fingerprint
+
+            # Command-source integrity stamp (issue #170): a zero-cost guard when the
+            # profile has no declared/derived command-source paths; otherwise one cheap,
+            # path-restricted diff against the recorded workspace base plus the already
+            # -needed working-tree changed-paths read. Evidence only -- never blocks.
+            command_source_dirty_paths: tuple[str, ...] = ()
+            if profile.command_source_paths:
+                changed_since_base: set[str] = set(self.ctx.git.changed_paths(path, repo))
+                base_sha = fresh.metadata.get("workspace_base_sha")
+                if isinstance(base_sha, str) and is_commit_sha(base_sha):
+                    head_sha = self.ctx.git.head_sha(path)
+                    if base_sha != head_sha:
+                        changed_since_base.update(
+                            self.ctx.git.changed_paths_between(path, repo, base_sha, head_sha)
+                        )
+                command_source_dirty_paths = dirty_command_source_paths(
+                    frozenset(changed_since_base), profile.command_source_paths
+                )
+            command_source_dirty = bool(command_source_dirty_paths)
+            audit_details["command_source_dirty"] = command_source_dirty
+            if command_source_dirty_paths:
+                audit_details["command_source_dirty_paths"] = list(command_source_dirty_paths)
 
             def record_command_failure(
                 exc: CommandError, command: tuple[str, ...], steps_completed: int
@@ -296,6 +329,11 @@ class WorkspaceProfileRunner:
             )
             fp = fingerprint.fingerprint
             cleared_retry_history = clear_retry_guidance(fresh.metadata, target=target)
+            command_source_warning = (
+                _COMMAND_SOURCE_WARNING_TEMPLATE.format(paths=", ".join(command_source_dirty_paths))
+                if command_source_dirty_paths
+                else None
+            )
             if profile.verification:
                 fresh.last_verification = VerificationReceipt(
                     profile.name,
@@ -303,6 +341,8 @@ class WorkspaceProfileRunner:
                     self.ctx.clock.now_iso(),
                     [self.receipt(r) for r in results],
                     environment_hash,
+                    command_source_dirty,
+                    list(command_source_dirty_paths),
                 )
                 self.ctx.store.save(fresh)
             elif cleared_retry_history:
@@ -317,6 +357,9 @@ class WorkspaceProfileRunner:
                 metrics,
                 profile.verification,
                 self.ctx.git.head_sha(path),
+                command_source_dirty,
+                list(command_source_dirty_paths),
+                command_source_warning,
                 profile.working_directory,
             )
 

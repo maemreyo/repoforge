@@ -55,6 +55,8 @@ class VerificationReceipt:
     completed_at: str
     commands: list[dict[str, Any]]
     environment_identity_hash: str | None = None
+    command_source_dirty: bool = False
+    command_source_dirty_paths: list[str] = field(default_factory=list)
 
 
 @dataclass

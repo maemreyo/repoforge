@@ -12,6 +12,10 @@ from typing import Any, TypeVar
 import tomli as tomllib
 
 from .domain.adhoc import ExecutionMode, validate_adhoc_runners
+from .domain.command_source import (
+    derive_command_source_paths,
+    validate_command_source_paths,
+)
 from .domain.diagnostics import (
     DiagnosticMutability,
     DiagnosticNetworkPolicy,
@@ -123,6 +127,7 @@ class ProfileConfig:
     verification: bool = False
     timeout_seconds: int | None = None
     working_directory: str | None = None
+    command_source_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -345,6 +350,14 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
                     f"profile {repo_id}.{name}.commands[{index}] must be a non-empty string array"
                 )
             commands.append(tuple(command))
+        command_source_context = f"repositories.{repo_id}.profiles.{name}.command_source_paths"
+        declared_source_paths = _tuple_of_strings(
+            profile.get("command_source_paths"), command_source_context
+        )
+        command_source_paths = validate_command_source_paths(
+            declared_source_paths or derive_command_source_paths(tuple(commands)),
+            command_source_context,
+        )
         profiles[name] = ProfileConfig(
             name=name,
             description=description,
@@ -352,6 +365,7 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
             verification=verification,
             timeout_seconds=timeout_seconds,
             working_directory=working_directory,
+            command_source_paths=command_source_paths,
         )
     return profiles
 
