@@ -37,6 +37,53 @@ class DiagnosticParserKind(str, Enum):
     TEXT = "text"
 
 
+class DiagnosticExpectation(str, Enum):
+    NONE = "none"
+    PASS = "pass"
+    FAIL = "fail"
+
+    @classmethod
+    def parse(cls, value: DiagnosticExpectation | str | None) -> DiagnosticExpectation:
+        if value is None:
+            return cls.NONE
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Unknown diagnostic expectation {value!r}. Available: {[item.value for item in cls]}"
+            ) from exc
+
+
+class DiagnosticFailureClass(str, Enum):
+    TEST_FAILURE = "test_failure"
+    COLLECTION_ERROR = "collection_error"
+    SYNTAX_ERROR = "syntax_error"
+    IMPORT_ERROR = "import_error"
+    DEPENDENCY_MISSING = "dependency_missing"
+    TOOL_MISSING = "tool_missing"
+    TIMEOUT = "timeout"
+    ENVIRONMENT_MISMATCH = "environment_mismatch"
+    CONTRACT_DRIFT = "contract_drift"
+    DIAGNOSTIC_FAILURE = "diagnostic_failure"
+
+    @classmethod
+    def parse_optional(
+        cls, value: DiagnosticFailureClass | str | None
+    ) -> DiagnosticFailureClass | None:
+        if value is None:
+            return None
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Unknown diagnostic failure class {value!r}. Available: {[item.value for item in cls]}"
+            ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class DiagnosticSelectorConfig:
     kind: DiagnosticSelectorKind
@@ -56,6 +103,17 @@ class DiagnosticProfileConfig:
     parser: DiagnosticParserKind
     output_limit: int
     artifact_paths: tuple[str, ...] = ()
+
+
+def validate_diagnostic_expectation(
+    expectation: DiagnosticExpectation | str | None,
+    expected_failure_class: DiagnosticFailureClass | str | None,
+) -> tuple[DiagnosticExpectation, DiagnosticFailureClass | None]:
+    normalized_expectation = DiagnosticExpectation.parse(expectation)
+    normalized_failure = DiagnosticFailureClass.parse_optional(expected_failure_class)
+    if normalized_failure is not None and normalized_expectation is not DiagnosticExpectation.FAIL:
+        raise ConfigError("expected_failure_class requires expectation='fail'")
+    return normalized_expectation, normalized_failure
 
 
 def _safe_relative(value: str, field: str, *, allow_glob: bool = False) -> str:
@@ -173,11 +231,14 @@ def validate_diagnostic_profile(profile: DiagnosticProfileConfig) -> DiagnosticP
 
 
 __all__ = [
+    "DiagnosticExpectation",
+    "DiagnosticFailureClass",
     "DiagnosticMutability",
     "DiagnosticNetworkPolicy",
     "DiagnosticParserKind",
     "DiagnosticProfileConfig",
     "DiagnosticSelectorConfig",
     "DiagnosticSelectorKind",
+    "validate_diagnostic_expectation",
     "validate_diagnostic_profile",
 ]

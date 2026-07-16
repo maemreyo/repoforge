@@ -139,6 +139,29 @@ def test_missing_evidence_never_reduces_risk_or_verification() -> None:
     assert any("evidence" in action.lower() for action in recommendation.next_safe_actions)
 
 
+def test_tdd_intent_keeps_narrow_diagnostics_for_critical_changes() -> None:
+    assessment = _assessment(
+        ["src/repoforge/security.py", "src/repoforge/interfaces/mcp/server.py"]
+    )
+    policy = default_risk_policy(final_profile="full")
+    risk = assess_workspace_risk(assessment, policy)
+    assert risk.level is RiskLevel.CRITICAL
+
+    for intent in ("tdd_red", "tdd_green"):
+        recommendation = recommend_verification(
+            assessment,
+            risk,
+            policy,
+            available_profiles={"quick", "test", "full"},
+            available_diagnostics={"pytest-target"},
+            intent=intent,
+        )
+        assert recommendation.recommended_diagnostics == ("pytest-target",)
+        assert recommendation.ordered_stages[0].diagnostic == "pytest-target"
+        assert recommendation.required_profiles[-1] == "full"
+        assert recommendation.manual_review_required is True
+
+
 def test_risk_and_recommendation_become_stale_with_snapshot_change() -> None:
     assessment = _assessment(["docs/guide.md"])
     policy = default_risk_policy(final_profile="full")

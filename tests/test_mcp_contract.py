@@ -160,6 +160,9 @@ async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment
             "diagnostic_id",
             "selector",
             "expected_fingerprint",
+            "intent",
+            "expectation",
+            "expected_failure_class",
         }
         for name in ("workspace_base_status", "workspace_refresh_preview"):
             annotations = tools[name].annotations
@@ -329,10 +332,16 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
                 "diagnostic_id": "pytest-target",
                 "selector": "hello.txt::test_example",
                 "expected_fingerprint": diagnostic_status["workspace_fingerprint"],
+                "intent": "tdd_green",
+                "expectation": "pass",
             },
         )
         assert diagnostic_result["outcome"] == "passed"
         assert diagnostic_result["resolved_selector"] == "hello.txt::test_example"
+        assert diagnostic_result["intent"] == "tdd_green"
+        assert diagnostic_result["expectation_met"] is True
+        assert diagnostic_result["business_tests_ran"] is True
+        assert diagnostic_result["valid_tdd_red_evidence"] is False
         await call("workspace_tree", {"workspace_id": workspace_id, "max_entries": 50})
         hello = await call(
             "workspace_read_file",

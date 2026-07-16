@@ -640,6 +640,9 @@ class CodingService:
         diagnostic_id: str,
         selector: str | None = None,
         expected_fingerprint: str | None = None,
+        intent: str | None = None,
+        expectation: str | None = None,
+        expected_failure_class: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._diagnostic.execute(
@@ -648,6 +651,9 @@ class CodingService:
                     diagnostic_id,
                     selector,
                     expected_fingerprint,
+                    intent,
+                    expectation,
+                    expected_failure_class,
                 )
             )
         )

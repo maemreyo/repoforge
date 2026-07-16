@@ -78,7 +78,7 @@
   "contract_version": 1,
   "mcp": {
     "server_instructions_sha256": "f0724bcb7eca9ba8a6f86da1eaab6007214743ce601bd113c29814b510dc0d37",
-    "tool_surface_hash": "c017e366116a702ddd1d0947fd8cab59537091deb2a44539c23f77d922f95699",
+    "tool_surface_hash": "d455f0c6f785965585e261baaf16ae4acacbde08404f91f4ec95d3a9f00c5228",
     "tools": [
       {
         "annotations": {
@@ -1851,12 +1851,36 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed.",
+        "description": "Use this to run one typed repository-reviewed diagnostic for RED, GREEN, or other bounded evidence without supplying argv or shell input; non-test failures never count as valid TDD RED.",
         "inputSchema": {
           "properties": {
             "diagnostic_id": {
               "title": "Diagnostic Id",
               "type": "string"
+            },
+            "expectation": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expectation"
+            },
+            "expected_failure_class": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expected Failure Class"
             },
             "expected_fingerprint": {
               "anyOf": [
@@ -1869,6 +1893,18 @@
               ],
               "default": null,
               "title": "Expected Fingerprint"
+            },
+            "intent": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Intent"
             },
             "selector": {
               "anyOf": [

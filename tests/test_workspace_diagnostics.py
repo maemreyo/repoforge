@@ -409,7 +409,14 @@ def test_parses_pytest_and_release_contract_output() -> None:
     parsed = parse_diagnostic(_profile(), pytest_result)
     assert parsed.outcome == "failed"
     assert parsed.failure_class == "test_failure"
-    assert parsed.fields == {"passed": 2, "failed": 1, "errors": 0, "skipped": 3}
+    assert parsed.fields == {
+        "passed": 2,
+        "failed": 1,
+        "errors": 0,
+        "skipped": 3,
+        "collected": 6,
+    }
+    assert parsed.business_tests_ran is True
     assert "FAILED hello.txt::test_bad" in parsed.excerpt
 
     release_profile = _profile(
@@ -445,6 +452,59 @@ def test_parser_reports_dependency_failure_and_truncation() -> None:
     assert parsed.output_truncated is True
 
 
+@pytest.mark.parametrize(
+    ("output", "expected_failure_class"),
+    [
+        (
+            "ERROR collecting tests/test_demo.py\n1 error in 0.02s",
+            "collection_error",
+        ),
+        (
+            "SyntaxError: invalid syntax\nERROR collecting tests/test_demo.py",
+            "syntax_error",
+        ),
+        (
+            "ImportError: cannot import name 'missing' from 'demo'\nERROR collecting",
+            "import_error",
+        ),
+        (
+            "ModuleNotFoundError: No module named 'demo'\nERROR collecting",
+            "dependency_missing",
+        ),
+        ("Permission denied while importing test module", "environment_mismatch"),
+    ],
+)
+def test_pytest_parser_classifies_non_business_failures(
+    output: str,
+    expected_failure_class: str,
+) -> None:
+    parsed = parse_diagnostic(
+        _profile(),
+        CommandResult(("pytest", "tests/test_demo.py", "-q"), "/workspace", 2, output, ""),
+    )
+
+    assert parsed.failure_class == expected_failure_class
+    assert parsed.business_tests_ran is False
+    assert parsed.fields["collected"] == 0
+
+
+def test_pytest_parser_rejects_zero_collected_tests_as_business_evidence() -> None:
+    parsed = parse_diagnostic(
+        _profile(),
+        CommandResult(
+            ("pytest", "tests/test_demo.py", "-q"),
+            "/workspace",
+            5,
+            "no tests ran in 0.01s",
+            "",
+        ),
+    )
+
+    assert parsed.failure_class == "collection_error"
+    assert parsed.business_tests_ran is False
+    assert parsed.fields["collected"] == 0
+
+
 def _runtime_profile(
     diagnostic_id: str,
     argv: tuple[str, ...],
@@ -468,6 +528,84 @@ def _runtime_profile(
         output_limit=output_limit,
         artifact_paths=artifact_paths,
     )
+
+
+def test_workspace_diagnostic_evaluates_tdd_expectations(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create("demo", "diagnostic expectations")
+    workspace_id = created["workspace_id"]
+    failing = _runtime_profile(
+        "expected-test-failure",
+        (
+            "python3",
+            "-c",
+            "import sys; print('1 failed in 0.01s\\nFAILED demo.py::test_bad'); sys.exit(1)",
+        ),
+        parser=DiagnosticParserKind.PYTEST,
+    )
+    service.config.repositories["demo"].diagnostics[failing.diagnostic_id] = failing
+
+    red = service.workspace_run_diagnostic(
+        workspace_id,
+        failing.diagnostic_id,
+        intent="tdd_red",
+        expectation="fail",
+        expected_failure_class="test_failure",
+    )
+    assert red["intent"] == "tdd_red"
+    assert red["expectation"] == "fail"
+    assert red["expectation_met"] is True
+    assert red["business_tests_ran"] is True
+    assert red["valid_tdd_red_evidence"] is True
+
+    mismatch = service.workspace_run_diagnostic(
+        workspace_id,
+        failing.diagnostic_id,
+        intent="tdd_red",
+        expectation="fail",
+        expected_failure_class="collection_error",
+    )
+    assert mismatch["expectation_met"] is False
+    assert mismatch["valid_tdd_red_evidence"] is False
+
+    status = service.workspace_status(workspace_id)
+    green = service.workspace_run_diagnostic(
+        workspace_id,
+        "pytest-target",
+        selector="hello.txt::test_example",
+        expected_fingerprint=status["workspace_fingerprint"],
+        intent="tdd_green",
+        expectation="pass",
+    )
+    assert green["expectation_met"] is True
+    assert green["business_tests_ran"] is True
+    assert green["valid_tdd_red_evidence"] is False
+
+
+def test_workspace_diagnostic_rejects_invalid_expectation_inputs(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create("demo", "invalid diagnostic expectation")
+    workspace_id = created["workspace_id"]
+
+    with pytest.raises(ConfigError, match="expected_failure_class"):
+        service.workspace_run_diagnostic(
+            workspace_id,
+            "pytest-target",
+            selector="hello.txt::test_example",
+            expectation="pass",
+            expected_failure_class="test_failure",
+        )
+    with pytest.raises(ConfigError, match="verification intent"):
+        service.workspace_run_diagnostic(
+            workspace_id,
+            "pytest-target",
+            selector="hello.txt::test_example",
+            intent="unknown",
+        )
 
 
 def test_workspace_diagnostic_read_only_success_and_stale_guard(

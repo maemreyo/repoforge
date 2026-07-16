@@ -311,7 +311,7 @@ way as today. The default `context_lines=0` is unchanged from the tool's prior b
 | Tool | Purpose |
 |---|---|
 | `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. Pass `background=true` for a long profile to hold the workspace lock and run it as a durable, cancellable operation instead of blocking the call; poll with `operation_status`. |
-| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, and explicit mutation reporting. Cheaper than a full profile run for iterating on a single failing path during development. |
+| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, optional `intent` (`tdd_red`, `tdd_green`, `refactor`, `pre_commit`, `final`), and optional pass/fail expectation. It reports whether business tests actually ran and never treats collection, syntax, import, dependency, tool, timeout, or environment failures as valid TDD RED. |
 | `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. Run this once per workspace, right before commit — not on every edit. |
 | `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. |
 | `workspace_push` | Push the workspace branch without force and record the pushed commit SHA. |
@@ -324,21 +324,24 @@ way as today. The default `context_lines=0` is unchanged from the tool's prior b
 | `workspace_pr_failure_evidence` | Return a redacted, bounded failure excerpt, class, hash, retryability, source coverage, uncertainty, and truncation metadata for one selected Check Run. |
 
 Repository `risk.ordered_profiles` typically ranges from a fast `quick` profile through an intermediate
-`test` profile up to a slower `full` profile, plus optional single-target diagnostics. Use the cheapest
-option that answers the question during the edit-test loop — `quick` or `workspace_run_diagnostic` — and
-run `full` (or the repository default passed to `workspace_verify`) only once, right before
-`workspace_commit`. Repeating the full profile on every edit wastes its entire timeout budget on runs
-that were always going to fail early; a `quick` or diagnostic failure surfaces the same problem sooner
-and cheaper. `workspace_commit` still requires the exact tree that the most recent successful
-`workspace_verify` receipt covers.
+`test` profile up to a slower `full` profile, plus optional single-target diagnostics. Verification
+intent and change risk are independent: `tdd_red`, `tdd_green`, and `refactor` select the cheapest
+reviewed diagnostic even for high or critical changes, while risk still preserves every required
+pre-commit/final profile and manual-review rule. Use `expectation=fail` for RED and optionally bind the
+expected failure class; only a collected business test failing as `test_failure` can set
+`valid_tdd_red_evidence=true`. Use `expectation=pass` for GREEN. Run `full` (or the repository default
+passed to `workspace_verify`) only once on the exact final tree immediately before `workspace_commit`.
+`workspace_commit` still requires the exact tree that the most recent successful `workspace_verify`
+receipt covers.
 
 A diagnostic profile is part of the reviewed repository configuration. It fixes the executable and argv
 template, selector kind, working directory, timeout, local-only network declaration, mutability, parser,
 output limit, and optional artifact paths. Callers provide only `diagnostic_id`, an optional typed selector,
-and an optional reviewed workspace fingerprint. Supported selector kinds are `none`, `tracked_path`,
-`pytest_node`, `package_name`, `enum`, and `check_id`; path selectors must be policy-allowed tracked
-regular files and always occupy one complete argv token. RepoForge never accepts shell fragments,
-free-form argv, environment values, executables, or working directories through this tool.
+an optional reviewed workspace fingerprint, verification intent, expectation, and expected failure class.
+Supported selector kinds are `none`, `tracked_path`, `pytest_node`, `package_name`, `enum`, and `check_id`;
+path selectors must be policy-allowed tracked regular files and always occupy one complete argv token.
+RepoForge never accepts shell fragments, free-form argv, environment values, executables, or working
+directories through this tool.
 
 Read-only diagnostics must preserve the exact workspace fingerprint. Artifact diagnostics may change
 only configured artifact patterns; every current changed path and any unexpected path is reported. Any

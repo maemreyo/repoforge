@@ -14,6 +14,7 @@ from ...domain.risk import (
     VerificationStage,
     WorkspaceRiskAssessment,
 )
+from ...domain.verification import VerificationIntent
 
 
 def _paths(assessment: WorkspaceAssessment) -> tuple[str, ...]:
@@ -241,16 +242,22 @@ def recommend_verification(
     *,
     available_profiles: Collection[str],
     available_diagnostics: Collection[str],
+    intent: VerificationIntent | str | None = None,
 ) -> VerificationRecommendation:
     if risk.assessment_snapshot_id != assessment.snapshot.snapshot_id:
         raise ValueError("risk belongs to a different assessment snapshot")
 
+    normalized_intent = VerificationIntent.parse(intent)
     profiles: list[str] = []
     stages: list[VerificationStage] = []
     diagnostics = tuple(
         item
         for item in policy.narrow_diagnostics
-        if item in available_diagnostics and risk.level in {RiskLevel.LOW, RiskLevel.MEDIUM}
+        if item in available_diagnostics
+        and (
+            normalized_intent.prefers_narrow_diagnostics
+            or risk.level in {RiskLevel.LOW, RiskLevel.MEDIUM}
+        )
     )
     for diagnostic in diagnostics:
         stages.append(

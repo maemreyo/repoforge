@@ -737,14 +737,20 @@ def create_server(
         diagnostic_id: str,
         selector: str | None = None,
         expected_fingerprint: str | None = None,
+        intent: str | None = None,
+        expectation: str | None = None,
+        expected_failure_class: str | None = None,
     ) -> dict[str, Any]:
-        """Use this to run one typed repository-reviewed diagnostic without supplying argv or shell input; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed."""
+        """Use this to run one typed repository-reviewed diagnostic for RED, GREEN, or other bounded evidence without supplying argv or shell input; non-test failures never count as valid TDD RED."""
         return bounded_service.call(
             "workspace_run_diagnostic",
             workspace_id,
             diagnostic_id,
             selector,
             expected_fingerprint,
+            intent,
+            expectation,
+            expected_failure_class,
         )
 
     @mcp.tool(title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True)

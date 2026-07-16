@@ -8,13 +8,20 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ...domain.diagnostics import DiagnosticMutability, DiagnosticProfileConfig
+from ...domain.diagnostics import (
+    DiagnosticExpectation,
+    DiagnosticFailureClass,
+    DiagnosticMutability,
+    DiagnosticProfileConfig,
+    validate_diagnostic_expectation,
+)
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.policy import normalize_relative_path
+from ...domain.verification import VerificationIntent
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
-from .diagnostic_parser import parse_diagnostic
+from .diagnostic_parser import evaluate_diagnostic_expectation, parse_diagnostic
 from .diagnostic_selector import resolve_diagnostic_selector
 
 
@@ -24,6 +31,9 @@ class WorkspaceRunDiagnosticCommand:
     diagnostic_id: str
     selector: str | None = None
     expected_fingerprint: str | None = None
+    intent: VerificationIntent | str | None = None
+    expectation: DiagnosticExpectation | str | None = None
+    expected_failure_class: DiagnosticFailureClass | str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,9 +48,15 @@ class WorkspaceRunDiagnosticResult:
     network_policy: str
     mutability: str
     parser: str
+    intent: str
+    expectation: str
+    expected_failure_class: str | None
     returncode: int
     outcome: str
     failure_class: str | None
+    expectation_met: bool | None
+    business_tests_ran: bool
+    valid_tdd_red_evidence: bool
     parsed: dict[str, int | str]
     excerpt: str
     output_truncated: bool
@@ -151,6 +167,11 @@ class WorkspaceDiagnosticRunner:
     def execute(self, command: WorkspaceRunDiagnosticCommand) -> WorkspaceRunDiagnosticResult:
         _, repo, _ = self.ctx.workspace(command.workspace_id)
         profile = _profile(repo, command.diagnostic_id)
+        intent = VerificationIntent.parse(command.intent)
+        expectation, expected_failure_class = validate_diagnostic_expectation(
+            command.expectation,
+            command.expected_failure_class,
+        )
 
         audit_details: dict[str, object] = {
             "workspace_id": command.workspace_id,
@@ -158,6 +179,11 @@ class WorkspaceDiagnosticRunner:
             "selector_kind": profile.selector.kind.value,
             "mutability": profile.mutability.value,
             "parser": profile.parser.value,
+            "intent": intent.value,
+            "expectation": expectation.value,
+            "expected_failure_class": (
+                expected_failure_class.value if expected_failure_class is not None else None
+            ),
         }
 
         def operation() -> WorkspaceRunDiagnosticResult:
@@ -286,6 +312,12 @@ class WorkspaceDiagnosticRunner:
                     )
                 assert result is not None
                 parsed = parse_diagnostic(locked_profile, result)
+                evaluation = evaluate_diagnostic_expectation(
+                    parsed,
+                    intent=intent,
+                    expectation=expectation,
+                    expected_failure_class=expected_failure_class,
+                )
                 metrics = self.ctx.git.change_metrics(locked_workspace, locked_repo)
                 next_actions: list[dict[str, object]] = []
                 if fingerprint_changed:
@@ -296,13 +328,29 @@ class WorkspaceDiagnosticRunner:
                             "required": True,
                         }
                     )
-                if parsed.outcome != "passed":
+                if evaluation.valid_tdd_red_evidence:
+                    next_actions.append(
+                        {
+                            "action": "implement_business_logic",
+                            "reason": "The selected business test produced valid expected RED evidence.",
+                            "required": True,
+                        }
+                    )
+                elif evaluation.expectation_met is False or parsed.outcome != "passed":
                     next_actions.append(
                         {
                             "action": "review_diagnostic_failure",
                             "reason": parsed.failure_class
-                            or "The diagnostic returned a non-zero result.",
+                            or "The diagnostic result did not meet the reviewed expectation.",
                             "required": True,
+                        }
+                    )
+                elif intent is VerificationIntent.TDD_GREEN:
+                    next_actions.append(
+                        {
+                            "action": "continue_refactor_or_hygiene",
+                            "reason": "The selected business test is GREEN on the current fingerprint.",
+                            "required": False,
                         }
                     )
                 return WorkspaceRunDiagnosticResult(
@@ -316,9 +364,17 @@ class WorkspaceDiagnosticRunner:
                     network_policy=locked_profile.network_policy.value,
                     mutability=locked_profile.mutability.value,
                     parser=locked_profile.parser.value,
+                    intent=intent.value,
+                    expectation=expectation.value,
+                    expected_failure_class=(
+                        expected_failure_class.value if expected_failure_class is not None else None
+                    ),
                     returncode=result.returncode,
                     outcome=parsed.outcome,
                     failure_class=parsed.failure_class,
+                    expectation_met=evaluation.expectation_met,
+                    business_tests_ran=parsed.business_tests_ran,
+                    valid_tdd_red_evidence=evaluation.valid_tdd_red_evidence,
                     parsed=parsed.fields,
                     excerpt=parsed.excerpt,
                     output_truncated=parsed.output_truncated,

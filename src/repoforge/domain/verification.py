@@ -1,9 +1,38 @@
-"""Pure verification-profile selection decisions."""
+"""Pure verification-profile selection and iteration-intent decisions."""
 
 from __future__ import annotations
 
+from enum import Enum
+
 from ..config import ProfileConfig, RepositoryConfig
 from .errors import ConfigError
+
+
+class VerificationIntent(str, Enum):
+    """Why verification evidence is being requested at this point in the workflow."""
+
+    TDD_RED = "tdd_red"
+    TDD_GREEN = "tdd_green"
+    REFACTOR = "refactor"
+    PRE_COMMIT = "pre_commit"
+    FINAL = "final"
+
+    @classmethod
+    def parse(cls, value: VerificationIntent | str | None) -> VerificationIntent:
+        if value is None:
+            return cls.FINAL
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Unknown verification intent {value!r}. Available: {[item.value for item in cls]}"
+            ) from exc
+
+    @property
+    def prefers_narrow_diagnostics(self) -> bool:
+        return self in {self.TDD_RED, self.TDD_GREEN, self.REFACTOR}
 
 
 def get_profile(repo: RepositoryConfig, profile_name: str) -> ProfileConfig:
