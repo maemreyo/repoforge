@@ -84,7 +84,16 @@ step "Push"
 git push origin main --tags
 info "Pushed ${TAG} to origin"
 
+# --- GitHub release -----------------------------------------------------------
+step "GitHub Release"
+# Grab changelog entries for this version
+NOTES=$(awk "/^## ${VERSION} — /{found=1; next} /^## [0-9]+\.[0-9]+\.[0-9]+ — /{if(found) exit} found{print}" CHANGELOG.md)
+uv build --out-dir dist >/dev/null 2>&1
+gh release create "$TAG" \
+  --title "v${VERSION}" \
+  --notes "$(echo "## What's New\n${NOTES}\n\nSee [CHANGELOG](CHANGELOG.md) for full details.")" \
+  dist/repoforge_mcp-${VERSION}.tar.gz \
+  dist/repoforge_mcp-${VERSION}-py3-none-any.whl 2>&1
+info "Created GitHub Release: $TAG"
+
 step "Done! Released ${TAG}"
-echo ""
-echo "Next steps:"
-echo "  gh release view ${TAG}"
