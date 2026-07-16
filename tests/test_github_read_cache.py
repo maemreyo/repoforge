@@ -286,7 +286,9 @@ def test_cache_miss_when_repository_path_differs(tmp_path: Path) -> None:
     new_repo = tmp_path / "new-repo"
     old_repo.mkdir()
     new_repo.mkdir()
-    cache.put("demo", old_repo, "issue", 1, {"number": 1, "title": "old repo issue"}, now_epoch=1_000.0)
+    cache.put(
+        "demo", old_repo, "issue", 1, {"number": 1, "title": "old repo issue"}, now_epoch=1_000.0
+    )
 
     assert cache.get("demo", old_repo, "issue", 1, ttl_seconds=120, now_epoch=1_001.0) is not None
     assert cache.get("demo", new_repo, "issue", 1, ttl_seconds=120, now_epoch=1_001.0) is None
@@ -354,9 +356,7 @@ def test_cache_malformed_entry_shape_falls_back_to_miss(tmp_path: Path) -> None:
 
 def test_cache_put_skips_oversized_entry_without_raising(tmp_path: Path) -> None:
     cache = JsonGitHubReadCache(tmp_path, InMemoryLockManager(), max_entry_bytes=100)
-    cache.put(
-        "demo", tmp_path, "issue", 1, {"number": 1, "body": "x" * 1_000}, now_epoch=1_000.0
-    )
+    cache.put("demo", tmp_path, "issue", 1, {"number": 1, "body": "x" * 1_000}, now_epoch=1_000.0)
     assert cache.get("demo", tmp_path, "issue", 1, ttl_seconds=120, now_epoch=1_000.0) is None
 
 
