@@ -113,6 +113,10 @@ from .workspace.restore_paths import (
     WorkspacePathsRestorer,
     WorkspaceRestorePathsCommand,
 )
+from .workspace.run_adhoc import (
+    WorkspaceAdhocRunner,
+    WorkspaceRunAdhocCommand,
+)
 from .workspace.run_diagnostic import (
     WorkspaceDiagnosticRunner,
     WorkspaceRunDiagnosticCommand,
@@ -229,6 +233,11 @@ class CodingService:
             background_tasks=self.application.background_tasks,
         )
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
+        self._adhoc = WorkspaceAdhocRunner(
+            ctx,
+            operations=self.operations,
+            background_tasks=self.application.background_tasks,
+        )
         self._verify = WorkspaceVerifier(ctx)
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
@@ -635,6 +644,24 @@ class CodingService:
                     expectation,
                     expected_failure_class,
                     selector2,
+                )
+            )
+        )
+
+    def workspace_run_adhoc(
+        self,
+        workspace_id: str,
+        argv: list[str],
+        working_directory: str | None = None,
+        background: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._adhoc.execute(
+                WorkspaceRunAdhocCommand(
+                    workspace_id,
+                    tuple(argv) if isinstance(argv, list) else argv,
+                    working_directory,
+                    background,
                 )
             )
         )

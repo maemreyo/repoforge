@@ -100,6 +100,9 @@ class ErrorCode(str, Enum):
     DIAGNOSTIC_PARSER_FAILED = "DIAGNOSTIC_PARSER_FAILED"
     DIAGNOSTIC_UNEXPECTED_MUTATION = "DIAGNOSTIC_UNEXPECTED_MUTATION"
     DIAGNOSTIC_OUTPUT_INVALID = "DIAGNOSTIC_OUTPUT_INVALID"
+    EXECUTION_MODE_STRICT = "EXECUTION_MODE_STRICT"
+    ADHOC_RUNNER_NOT_ALLOWED = "ADHOC_RUNNER_NOT_ALLOWED"
+    ADHOC_ARGV_INVALID = "ADHOC_ARGV_INVALID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +307,9 @@ def operation_error_from_exception(
         ErrorCode.DIAGNOSTIC_PARSER_FAILED: "The configured parser could not interpret the bounded diagnostic output safely.",
         ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION: "The diagnostic changed workspace paths outside its reviewed mutability contract.",
         ErrorCode.DIAGNOSTIC_OUTPUT_INVALID: "The diagnostic returned malformed or unsupported bounded output.",
+        ErrorCode.EXECUTION_MODE_STRICT: "This repository is enrolled strict; the ad-hoc runner is disabled by configuration.",
+        ErrorCode.ADHOC_RUNNER_NOT_ALLOWED: "The requested argv[0] is not an allowlisted ad-hoc runner for this repository.",
+        ErrorCode.ADHOC_ARGV_INVALID: "The ad-hoc argv violates the bounded list/element shape RepoForge accepts.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

@@ -11,6 +11,7 @@ from typing import Any, TypeVar
 
 import tomli as tomllib
 
+from .domain.adhoc import ExecutionMode, validate_adhoc_runners
 from .domain.diagnostics import (
     DiagnosticMutability,
     DiagnosticNetworkPolicy,
@@ -153,6 +154,9 @@ class RepositoryConfig:
         default_factory=lambda: default_risk_policy(final_profile="full")
     )
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
+    execution_mode: ExecutionMode = ExecutionMode.STRICT
+    adhoc_runners: tuple[str, ...] = ()
+    adhoc_timeout_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -773,6 +777,28 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             defaults=server.resource_budget,
             ceiling=server.resource_budget,
         )
+        execution_mode = _enum_value(
+            ExecutionMode,
+            repo_raw.get("execution_mode", "strict"),
+            f"repositories.{repo_id}.execution_mode",
+        )
+        adhoc_runners = validate_adhoc_runners(
+            _tuple_of_strings(
+                repo_raw.get("adhoc_runners"), f"repositories.{repo_id}.adhoc_runners"
+            ),
+            repo_id,
+        )
+        if execution_mode is ExecutionMode.RELAXED and not adhoc_runners:
+            raise ConfigError(
+                f"repositories.{repo_id}.execution_mode='relaxed' requires a non-empty adhoc_runners allowlist"
+            )
+        adhoc_timeout_seconds = _bounded_int(
+            repo_raw.get("adhoc_timeout_seconds"),
+            300,
+            1,
+            3_600,
+            f"repositories.{repo_id}.adhoc_timeout_seconds",
+        )
         repositories[repo_id] = RepositoryConfig(
             repo_id=repo_id,
             path=_expand_path(str(repo_raw["path"]), base_dir=base_dir),
@@ -838,6 +864,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             diagnostics=diagnostics,
             risk_policy=risk_policy,
             resource_budget=resource_budget,
+            execution_mode=execution_mode,
+            adhoc_runners=adhoc_runners,
+            adhoc_timeout_seconds=adhoc_timeout_seconds,
         )
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(
