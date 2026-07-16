@@ -90,7 +90,7 @@ class _ServiceErrorBoundary:
             ) from exc
 
 
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull (or repository-default) verification profile for one run via workspace_verify immediately before\ncommit; never claim verification succeeded unless the tool returned success. Commit, push, and create\nonly draft pull requests. Never merge, force-push, modify protected branches, request secrets, or\nbypass path/change-budget policies. Use workspace_restore_paths to safely undo selected uncommitted\nmistakes after refreshing status. Use workspace_list to review workspace age, dirty state, and\nissue_ids before removing or reusing a workspace.".strip()
+SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile, workspace_run_diagnostic, or (only where the repository owner has enabled it)\nworkspace_run_adhoc; they are cheap and meant for the edit-test loop and never satisfy the commit\ngate. Reserve the full (or repository-default) verification profile for one run via workspace_verify\nimmediately before commit; never claim verification succeeded unless the tool returned success.\nCommit, push, and create only draft pull requests. Never merge, force-push, modify protected branches,\nrequest secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely undo\nselected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.".strip()
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
@@ -736,6 +736,22 @@ def create_server(
             expectation,
             expected_failure_class,
             selector2,
+        )
+
+    @mcp.tool(
+        title="Run audited ad-hoc command",
+        annotations=LOCAL_MUTATE,
+        structured_output=True,
+    )
+    def workspace_run_adhoc(
+        workspace_id: str,
+        argv: list[str],
+        working_directory: str | None = None,
+        background: bool = False,
+    ) -> dict[str, Any]:
+        """Use this only in a repository the owner has explicitly configured with execution_mode="relaxed", when no enrolled workspace_run_diagnostic template fits. argv is a bounded list (no shell, no shell metacharacters expanded) whose first element must be one of the repository's configured adhoc_runners. The result is evidence only: it is fully audited but never satisfies require_verification_before_commit -- run an enrolled verification profile on the exact tree immediately before workspace_commit. In a strict-mode repository this call returns a structured EXECUTION_MODE_STRICT error naming the enrolled-diagnostic and configuration alternatives instead of running anything. Set background=true for a long-running command; poll with operation_status."""
+        return bounded_service.call(
+            "workspace_run_adhoc", workspace_id, argv, working_directory, background
         )
 
     @mcp.tool(title="Verify workspace", annotations=LOCAL_MUTATE, structured_output=True)
