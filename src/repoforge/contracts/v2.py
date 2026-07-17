@@ -904,38 +904,74 @@ class WorkspaceVerifyOutput(ToolResponse):
     workspace_fingerprint: Sha256
 
 
+class ShippingChangeLimits(StrictModel):
+    max_changed_files: int = Field(ge=1)
+    max_diff_lines: int = Field(ge=1)
+    max_total_changed_bytes: int = Field(ge=1)
+
+
+class ShippingChangeMetrics(StrictModel):
+    changed_files: int = Field(ge=0)
+    added_lines: int = Field(ge=0)
+    deleted_lines: int = Field(ge=0)
+    diff_lines: int = Field(ge=0)
+    binary_files: int = Field(ge=0)
+    total_current_bytes: int = Field(ge=0)
+    limits: ShippingChangeLimits
+    within_limits: bool
+
+
 class WorkspaceCommitInput(StrictModel):
     workspace_id: Identifier
     message: str = Field(min_length=1, max_length=1000)
+    expected_head_sha: GitObjectId | None = None
+    expected_fingerprint: Sha256 | None = None
 
 
 class WorkspaceCommitOutput(ToolResponse):
     workspace_id: Identifier
+    branch: str = Field(min_length=1, max_length=512)
+    commit: str = Field(min_length=1, max_length=20_000)
     previous_head_sha: GitObjectId
     head_sha: GitObjectId
     committed: bool
+    verified_profile: Identifier | None = None
     verification_fingerprint: Sha256
+    change_metrics: ShippingChangeMetrics
+    command_source_paths_committed: tuple[RelativePath, ...] = Field(default=(), max_length=100)
 
 
 class WorkspacePushInput(StrictModel):
     workspace_id: Identifier
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=256)
+    expected_remote_head: GitObjectId | None = None
 
 
 class WorkspacePushOutput(ToolResponse):
     workspace_id: Identifier
+    branch: str = Field(min_length=1, max_length=512)
     head_sha: GitObjectId
     remote: str = Field(min_length=1, max_length=160)
     remote_head_before: GitObjectId | None = None
     remote_head_after: GitObjectId
     pushed: bool
     retryable_rejection: bool = False
+    output: str = Field(default="", max_length=12_000)
 
 
 class WorkspacePrAction(str, Enum):
     CREATE_DRAFT = "create_draft"
     UPDATE = "update"
+    COMMENT = "comment"
     WATCH = "watch"
+
+
+class PrCommentEvidence(StrictModel):
+    result: Literal["created", "reconciled"]
+    url: str | None = Field(default=None, max_length=2_000)
+    marker: str = Field(min_length=1, max_length=200)
+    idempotent_replay: bool
+    review_comment_id: int | None = Field(default=None, ge=1)
 
 
 class WorkspacePrInput(StrictModel):
@@ -943,16 +979,61 @@ class WorkspacePrInput(StrictModel):
     action: WorkspacePrAction
     title: str | None = Field(default=None, max_length=1000)
     body: str | None = Field(default=None, max_length=60_000)
+    evidence_ref: str | None = Field(default=None, min_length=1, max_length=1_000)
+    review_comment_id: int | None = Field(default=None, ge=1)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=256)
-    until: Literal["all_completed", "required_completed", "first_failure"] = "all_completed"
-    timeout_seconds: int = Field(default=900, ge=1, le=3600)
+    expected_remote_version: str | None = Field(default=None, min_length=1, max_length=256)
+    until: Literal["all_completed", "first_failure"] = "all_completed"
+    timeout_seconds: int = Field(default=900, ge=5, le=7200)
     event_cursor: Cursor | None = None
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> WorkspacePrInput:
+        write_actions = {
+            WorkspacePrAction.CREATE_DRAFT,
+            WorkspacePrAction.UPDATE,
+            WorkspacePrAction.COMMENT,
+        }
+        if self.action in write_actions and self.idempotency_key is None:
+            raise ValueError(f"workspace_pr {self.action.value} requires idempotency_key")
+        if self.action is WorkspacePrAction.CREATE_DRAFT and (
+            self.title is None or self.body is None
+        ):
+            raise ValueError("workspace_pr create_draft requires title and body")
+        if self.action is WorkspacePrAction.UPDATE and self.title is None and self.body is None:
+            raise ValueError("workspace_pr update requires title or body")
+        if self.action in {WorkspacePrAction.UPDATE, WorkspacePrAction.COMMENT} and (
+            self.expected_remote_version is None
+        ):
+            raise ValueError(f"workspace_pr {self.action.value} requires expected_remote_version")
+        if self.action is WorkspacePrAction.COMMENT and (
+            self.body is None or self.evidence_ref is None
+        ):
+            raise ValueError("workspace_pr comment requires body and evidence_ref")
+        if self.action is not WorkspacePrAction.COMMENT and (
+            self.evidence_ref is not None or self.review_comment_id is not None
+        ):
+            raise ValueError("comment fields are only valid for workspace_pr comment")
+        if self.action is WorkspacePrAction.WATCH and any(
+            value is not None
+            for value in (
+                self.title,
+                self.body,
+                self.idempotency_key,
+                self.expected_remote_version,
+            )
+        ):
+            raise ValueError("workspace_pr watch does not accept write fields")
+        if self.action is not WorkspacePrAction.WATCH and self.event_cursor is not None:
+            raise ValueError("event_cursor is only valid for workspace_pr watch")
+        return self
 
 
 class WorkspacePrOutput(ToolResponse):
     workspace_id: Identifier
     action: WorkspacePrAction
     pull_request: PullRequestEvidence | None = None
+    comment: PrCommentEvidence | None = None
     operation: OperationEvidence | None = None
     remote_version: str | None = Field(default=None, max_length=256)
     event_cursor: Cursor | None = None
@@ -979,6 +1060,17 @@ class WorkspacePrEvidenceInput(StrictModel):
     check_selector: str | None = Field(default=None, max_length=2048)
     since: Cursor | None = None
     max_excerpt_lines: int = Field(default=80, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def validate_detail_fields(self) -> WorkspacePrEvidenceInput:
+        if self.detail in {PrEvidenceDetail.CHECK, PrEvidenceDetail.FAILURE}:
+            if self.check_selector is None:
+                raise ValueError(
+                    f"workspace_pr_evidence {self.detail.value} requires check_selector"
+                )
+        elif self.check_selector is not None:
+            raise ValueError("check_selector is only valid for check or failure detail")
+        return self
 
 
 class WorkspacePrEvidenceOutput(ToolResponse):

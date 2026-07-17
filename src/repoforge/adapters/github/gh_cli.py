@@ -485,6 +485,50 @@ class GhCliGateway:
             "gh pr view",
         )
 
+    def pr_comments(
+        self, cwd: Path, pr_number: int, *, max_comments: int
+    ) -> tuple[tuple[RemoteComment, ...], bool]:
+        issue_comments, issue_truncated = self.issue_comments(
+            cwd, pr_number, max_comments=max_comments
+        )
+        remaining = max(0, max_comments - len(issue_comments))
+        if remaining == 0:
+            return issue_comments, True
+        slug = self._slug(cwd)
+        page_size = self._page_size(remaining, "pull request review comments")
+        payload = self._api_list(
+            cwd,
+            f"repos/{slug}/pulls/{pr_number}/comments?per_page={page_size}",
+            context="GitHub pull request review comments",
+        )
+        review_comments = tuple(
+            self._remote_comment(item, "GitHub pull request review comments")
+            for item in payload[:remaining]
+        )
+        combined = tuple(
+            sorted((*issue_comments, *review_comments), key=lambda item: item.comment_id)
+        )
+        return combined, issue_truncated or len(payload) > remaining or len(payload) >= page_size
+
+    def pr_comment(self, cwd: Path, pr_number: int, body: str) -> RemoteComment:
+        return self.issue_comment(cwd, pr_number, body)
+
+    def pr_review_reply(self, cwd: Path, review_comment_id: int, body: str) -> RemoteComment:
+        if review_comment_id <= 0 or not body or len(body) > 20_000:
+            raise ValueError("review reply requires a positive comment id and bounded body")
+        slug = self._slug(cwd)
+        payload = self._object(
+            self._api_result(
+                cwd,
+                f"repos/{slug}/pulls/comments/{review_comment_id}/replies",
+                method="POST",
+                fields=(("body", body),),
+                output_limit=200_000,
+            ),
+            "GitHub pull request review reply",
+        )
+        return self._remote_comment(payload, "GitHub pull request review reply")
+
     def status(self, cwd: Path, branch: str) -> dict[str, Any]:
         result = self.executor.run(
             [

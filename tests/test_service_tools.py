@@ -1012,6 +1012,41 @@ def test_commit_failure_reports_stage_and_invalidates_mutated_verified_tree(
     assert context.store.load(workspace_id).last_verification is None
 
 
+def test_push_rejection_is_non_retrying_and_preserves_remote_head_evidence(
+    forge_env: ForgeEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "push rejection evidence")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id, "hello.txt", "changed before rejected push\n", current["sha256"]
+    )
+    service.workspace_run_profile(workspace_id)
+    service.workspace_commit(workspace_id, "Prepare rejected push")
+    context = service.application.context
+
+    def rejected_push(path: Path, remote: str, branch: str, timeout: int):
+        del path, remote, branch, timeout
+        raise CommandError(
+            "push rejected",
+            details={
+                "stderr_excerpt": "! [rejected] HEAD -> branch (non-fast-forward)",
+                "exit_code": 1,
+            },
+        )
+
+    monkeypatch.setattr(context.git, "push", rejected_push)
+    with pytest.raises(CommandError) as excinfo:
+        service.workspace_push(workspace_id, idempotency_key="push-rejection-0001")
+
+    error = excinfo.value
+    assert error.retryable is False
+    assert error.details["remote_head_before"] is None
+    assert error.details["remote_head_after"] is None
+    assert error.details["retryable_rejection"] is False
+    assert "Refresh the workspace" in (error.safe_next_action or "")
+
+
 def test_change_budget_blocks_verification_and_commit(tmp_path: Path) -> None:
     env = create_forge_environment(tmp_path, max_changed_files=1, require_verification=False)
     service = env.service

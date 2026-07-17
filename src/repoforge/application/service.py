@@ -132,6 +132,7 @@ from .workspace.mutate_enhanced import (
     WorkspaceMutation,
     WorkspaceMutator,
 )
+from .workspace.pr import WorkspacePrCommand, WorkspacePrCoordinator
 from .workspace.pr_check_details import (
     WorkspacePrCheckDetailsCommand,
     WorkspacePrCheckDetailsReader,
@@ -139,6 +140,10 @@ from .workspace.pr_check_details import (
 from .workspace.pr_checks import (
     WorkspacePrChecksCommand,
     WorkspacePrChecksReader,
+)
+from .workspace.pr_evidence import (
+    WorkspacePrEvidenceCommand,
+    WorkspacePrEvidenceReader,
 )
 from .workspace.pr_failure_evidence import (
     WorkspacePrFailureEvidenceCommand,
@@ -332,6 +337,19 @@ class CodingService:
         self._check_details = WorkspacePrCheckDetailsReader(ctx)
         self._failure_evidence = WorkspacePrFailureEvidenceReader(ctx)
         self._pr_watch = self.application.pr_check_watches
+        self._pr = WorkspacePrCoordinator(
+            ctx,
+            creator=self._create_pr,
+            updater=self._update_pr,
+            watch=self._pr_watch,
+        )
+        self._pr_evidence = WorkspacePrEvidenceReader(
+            ctx,
+            status=self._pr_status,
+            checks=self._checks,
+            details=self._check_details,
+            failure=self._failure_evidence,
+        )
         self._remove = WorkspaceRemover(ctx)
         self._remove_v2 = WorkspaceRemoverV2(ctx)
         self._doctor = Doctor(ctx)
@@ -1222,13 +1240,87 @@ class CodingService:
             )
         )
 
-    def workspace_commit(self, workspace_id: str, message: str) -> dict[str, Any]:
-        return _result(self._commit.execute(WorkspaceCommitCommand(workspace_id, message)))
+    def workspace_commit(
+        self,
+        workspace_id: str,
+        message: str,
+        expected_head_sha: str | None = None,
+        expected_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._commit.execute(
+                WorkspaceCommitCommand(
+                    workspace_id,
+                    message,
+                    expected_head_sha,
+                    expected_fingerprint,
+                )
+            )
+        )
 
     def workspace_push(
-        self, workspace_id: str, idempotency_key: str | None = None
+        self,
+        workspace_id: str,
+        idempotency_key: str | None = None,
+        expected_remote_head: str | None = None,
     ) -> dict[str, Any]:
-        return _result(self._push.execute(WorkspacePushCommand(workspace_id, idempotency_key)))
+        return _result(
+            self._push.execute(
+                WorkspacePushCommand(workspace_id, idempotency_key, expected_remote_head)
+            )
+        )
+
+    def workspace_pr(
+        self,
+        workspace_id: str,
+        action: str,
+        title: str | None = None,
+        body: str | None = None,
+        evidence_ref: str | None = None,
+        review_comment_id: int | None = None,
+        idempotency_key: str | None = None,
+        expected_remote_version: str | None = None,
+        until: str = "all_completed",
+        timeout_seconds: int = 900,
+        event_cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._pr.execute(
+                WorkspacePrCommand(
+                    workspace_id=workspace_id,
+                    action=action,
+                    title=title,
+                    body=body,
+                    evidence_ref=evidence_ref,
+                    review_comment_id=review_comment_id,
+                    idempotency_key=idempotency_key,
+                    expected_remote_version=expected_remote_version,
+                    until=until,
+                    timeout_seconds=timeout_seconds,
+                    event_cursor=event_cursor,
+                )
+            )
+        )
+
+    def workspace_pr_evidence(
+        self,
+        workspace_id: str,
+        detail: str = "overview",
+        check_selector: str | None = None,
+        since: str | None = None,
+        max_excerpt_lines: int = 80,
+    ) -> dict[str, Any]:
+        return _result(
+            self._pr_evidence.execute(
+                WorkspacePrEvidenceCommand(
+                    workspace_id,
+                    detail,
+                    check_selector,
+                    since,
+                    max_excerpt_lines,
+                )
+            )
+        )
 
     def workspace_create_draft_pr(
         self,

@@ -1756,6 +1756,30 @@ class GitCliRepository:
             timeout=timeout,
         )
 
+    def remote_branch_sha(self, path: Path, remote: str, branch: str, timeout: int) -> str | None:
+        result = self._executor.run(
+            ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+            cwd=path,
+            timeout=timeout,
+            output_limit=512,
+        )
+        rendered = result.stdout.strip()
+        if not rendered:
+            return None
+        lines = rendered.splitlines()
+        if len(lines) != 1:
+            raise CommandError("Git returned ambiguous remote branch evidence")
+        fields = lines[0].split()
+        expected_ref = f"refs/heads/{branch}"
+        if (
+            len(fields) != 2
+            or len(fields[0]) != 40
+            or any(character not in "0123456789abcdefABCDEF" for character in fields[0])
+            or fields[1] != expected_ref
+        ):
+            raise CommandError("Git returned invalid remote branch evidence")
+        return fields[0].lower()
+
     def upstream_name(self, path: Path) -> str | None:
         r = self._executor.run(
             ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
