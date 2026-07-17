@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment
 
-from repoforge.adapters.filesystem.transaction import JournaledFileTransaction
+import repoforge.application.workspace.mutate as mutate_module
 from repoforge.application.workspace.mutate import (
     ApplyPatchMutation,
     CreateMutation,
@@ -387,12 +387,14 @@ Path(sys.argv[1]).write_text(json.dumps(result, sort_keys=True), encoding='utf-8
 
 def test_keyed_mutate_crash_after_commit_marker_replays_committed_receipt(
     forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "v2 keyed crash after commit")["workspace_id"]
     before = service.workspace_status(workspace_id)
+    original = mutate_module.JournaledFileTransaction
 
-    class CrashOnceTransaction(JournaledFileTransaction):
+    class CrashOnceTransaction(original):
         crashed = False
 
         def _checkpoint(self, point: str) -> None:
@@ -401,7 +403,7 @@ def test_keyed_mutate_crash_after_commit_marker_replays_committed_receipt(
                 raise SimulatedTransactionCrash(point)
             super()._checkpoint(point)
 
-    object.__setattr__(service.application.context, "file_transactions", CrashOnceTransaction)
+    monkeypatch.setattr(mutate_module, "JournaledFileTransaction", CrashOnceTransaction)
     operation = CreateMutation(path="committed-once.txt", content="one physical mutation\n")
     with pytest.raises(SimulatedTransactionCrash):
         service.workspace_mutate(
@@ -426,12 +428,14 @@ def test_keyed_mutate_crash_after_commit_marker_replays_committed_receipt(
 
 def test_keyed_mutate_crash_before_commit_rolls_back_then_retries_safely(
     forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "v2 keyed crash before commit")["workspace_id"]
     before = service.workspace_status(workspace_id)
+    original = mutate_module.JournaledFileTransaction
 
-    class CrashOnceTransaction(JournaledFileTransaction):
+    class CrashOnceTransaction(original):
         crashed = False
 
         def _checkpoint(self, point: str) -> None:
@@ -440,7 +444,7 @@ def test_keyed_mutate_crash_before_commit_rolls_back_then_retries_safely(
                 raise SimulatedTransactionCrash(point)
             super()._checkpoint(point)
 
-    object.__setattr__(service.application.context, "file_transactions", CrashOnceTransaction)
+    monkeypatch.setattr(mutate_module, "JournaledFileTransaction", CrashOnceTransaction)
     operations = [
         CreateMutation(path="first.txt", content="first\n"),
         CreateMutation(path="second.txt", content="second\n"),
