@@ -519,6 +519,32 @@ def _parse_envelope(text: str, read_file: ReadFile) -> tuple[str, set[str]]:
     return "".join(rendered), repairs
 
 
+def materialize_normalized_patch(
+    normalized_patch: str,
+    read_file: ReadFile,
+) -> dict[str, str | None]:
+    """Materialize one canonical patch into exact final file contents without I/O."""
+
+    changes: dict[str, str | None] = {}
+    for item in _parse_unified(normalized_patch):
+        identity = item.old_path or item.new_path
+        assert identity is not None
+        old = "" if item.old_path is None else read_file(item.old_path)
+        if old is None:
+            raise _error(
+                f"Patch target does not exist: {item.old_path}",
+                code=ErrorCode.PATCH_CONTEXT_NOT_FOUND,
+                safe_next_action="Read the exact current file and regenerate the patch.",
+                details={"target_path": item.old_path or ""},
+            )
+        new, _ = _apply_hunks(identity, old, item.hunks)
+        if item.old_path is not None and item.old_path != item.new_path:
+            changes[item.old_path] = None
+        if item.new_path is not None:
+            changes[item.new_path] = new
+    return changes
+
+
 def normalize_patch(text: str, read_file: ReadFile) -> PatchNormalizationResult:
     inspection = inspect_patch(text)
     if inspection.input_format == "openai_apply_patch":

@@ -31,6 +31,7 @@ from .domain.hygiene import (
     HygieneNetworkPolicy,
     HygieneParserKind,
 )
+from .domain.mutation_policy import MUTATION_OPS, validate_allowed_mutation_ops
 from .domain.provider_config import load_provider_manifests
 from .domain.provider_manifest import ProviderManifest
 from .domain.resource_budget import (
@@ -180,6 +181,7 @@ class RepositoryConfig:
     max_total_changed_bytes: int = 25 * 1024 * 1024
     allowed_paths: tuple[str, ...] = ()
     denied_paths: tuple[str, ...] = DEFAULT_DENIED_PATHS
+    allowed_mutation_ops: tuple[str, ...] = MUTATION_OPS
     pr_labels: tuple[str, ...] = ()
     pr_reviewers: tuple[str, ...] = ()
     no_maintainer_edit: bool = False
@@ -1075,6 +1077,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             defaults=server.resource_budget,
             ceiling=server.resource_budget,
         )
+        allowed_mutation_ops = validate_allowed_mutation_ops(
+            _tuple_of_strings(
+                repo_raw.get("allowed_mutation_ops", list(MUTATION_OPS)),
+                f"repositories.{repo_id}.allowed_mutation_ops",
+            ),
+            repo_id,
+        )
         execution_mode = _enum_value(
             ExecutionMode,
             repo_raw.get("execution_mode", "strict"),
@@ -1147,6 +1156,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 repo_raw.get("denied_paths", list(DEFAULT_DENIED_PATHS)),
                 f"repositories.{repo_id}.denied_paths",
             ),
+            allowed_mutation_ops=allowed_mutation_ops,
             pr_labels=_tuple_of_strings(
                 repo_raw.get("pr_labels", []), f"repositories.{repo_id}.pr_labels"
             ),

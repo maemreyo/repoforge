@@ -62,7 +62,12 @@ class JournaledFileTransaction:
             if path.is_dir() and (path / "manifest.json").is_file()
         )
 
-    def commit(self, plan: TransactionPlan) -> TransactionReceipt:
+    def commit(
+        self,
+        plan: TransactionPlan,
+        *,
+        precommit_validator: Callable[[], None] | None = None,
+    ) -> TransactionReceipt:
         """Validate, stage, durably apply, mark committed, then purge rollback data."""
 
         actions = self._validate_plan(plan)
@@ -77,6 +82,8 @@ class JournaledFileTransaction:
                 self._checkpoint(f"before_apply:{index}")
                 self._apply_action(tx_dir, index, action)
                 self._checkpoint(f"after_apply:{index}")
+            if precommit_validator is not None:
+                precommit_validator()
             self._checkpoint("before_commit_marker")
             manifest["phase"] = "committed"
             self._write_manifest(tx_dir, manifest)

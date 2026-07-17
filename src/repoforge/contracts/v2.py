@@ -511,13 +511,17 @@ class WorkspaceDiffOutput(ToolResponse):
     next_cursor: Cursor | None = None
 
 
+class TextReplacementOperation(StrictModel):
+    old_text: LongText
+    new_text: str = Field(max_length=120_000)
+    expected_occurrences: int = Field(default=1, ge=1, le=1000)
+
+
 class ReplaceTextOperation(StrictModel):
     op: Literal["replace_text"]
     path: RelativePath
     expected_sha256: Sha256
-    old_text: LongText
-    new_text: str = Field(max_length=120_000)
-    expected_occurrences: int = Field(default=1, ge=1, le=1000)
+    edits: tuple[TextReplacementOperation, ...] = Field(min_length=1, max_length=20)
 
 
 class WriteOperation(StrictModel):
@@ -531,19 +535,20 @@ class CreateOperation(StrictModel):
     op: Literal["create"]
     path: RelativePath
     content: str = Field(max_length=2_000_000)
+    mode: int = Field(default=0o644, ge=0, le=0o777)
 
 
 class DeleteOperation(StrictModel):
     op: Literal["delete"]
     path: RelativePath
-    expected_sha256: Sha256 | None = None
+    expected_sha256: Sha256
 
 
 class MoveOperation(StrictModel):
     op: Literal["move"]
     source: RelativePath
     destination: RelativePath
-    expected_sha256: Sha256 | None = None
+    expected_source_sha256: Sha256
 
 
 class ApplyPatchOperation(StrictModel):
@@ -579,23 +584,30 @@ class WorkspaceMutateInput(StrictModel):
 class MutationDiagnostic(StrictModel):
     index: int = Field(ge=0, le=99)
     op: Literal["replace_text", "write", "create", "delete", "move", "apply_patch", "restore"]
-    path: RelativePath | None = None
+    path: str | None = Field(default=None, max_length=8192)
+    status: Literal["ready", "no_op", "failed"]
     candidate_context: str | None = Field(default=None, max_length=4000)
     before_sha256: Sha256 | None = None
     after_sha256: Sha256 | None = None
     changed: bool
     failure_reason: str | None = Field(default=None, max_length=1000)
+    repair_actions: tuple[str, ...] = Field(default=(), max_length=20)
 
 
 class WorkspaceMutateOutput(ToolResponse):
     workspace_id: Identifier
     dry_run: bool
+    ready: bool
     changed: bool
-    diagnostics: tuple[MutationDiagnostic, ...] = Field(default=(), max_length=100)
+    would_change: bool
+    operation_count: int = Field(ge=1, le=100)
+    operations: tuple[MutationDiagnostic, ...] = Field(default=(), max_length=100)
     changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
-    diff_files: tuple[FileChange, ...] = Field(default=(), max_length=1000)
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
+    diff_stat: str = Field(default="", max_length=20_000)
+    change_metrics: ChangeMetrics
+    transaction_id: Identifier | None = None
 
 
 class VerifyMode(str, Enum):

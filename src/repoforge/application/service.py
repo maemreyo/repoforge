@@ -94,6 +94,11 @@ from .workspace.hygiene_status import (
     WorkspaceHygieneStatusReader,
 )
 from .workspace.list import WorkspaceListCommand, WorkspaceLister
+from .workspace.mutate import (
+    WorkspaceMutateCommand,
+    WorkspaceMutation,
+    WorkspaceMutator,
+)
 from .workspace.pr_check_details import (
     WorkspacePrCheckDetailsCommand,
     WorkspacePrCheckDetailsReader,
@@ -232,6 +237,7 @@ class CodingService:
         self._search = WorkspaceSearcher(ctx)
         self._write = WorkspaceFileWriter(ctx)
         self._edit = WorkspaceEditor(ctx)
+        self._mutate = WorkspaceMutator(ctx)
         self._patch = WorkspacePatchApplier(ctx)
         self._restore = WorkspacePathsRestorer(ctx)
         self._refresh_preview = WorkspaceRefreshPreviewer(ctx)
@@ -576,6 +582,24 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._edit.execute(WorkspaceEditCommand(workspace_id, tuple(files), idempotency_key))
+        )
+
+    def workspace_mutate(
+        self,
+        workspace_id: str,
+        operations: list[WorkspaceMutation],
+        expected_workspace_fingerprint: str,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._mutate.execute(
+                WorkspaceMutateCommand(
+                    workspace_id,
+                    tuple(operations),
+                    expected_workspace_fingerprint,
+                    dry_run,
+                )
+            )
         )
 
     def workspace_apply_patch(
