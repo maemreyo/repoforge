@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a typed durable-state lifecycle platform with contiguous forward/reverse schema migrations, backup-before-write journals and restart rollback, reference-aware explicit retention with count/byte quotas and resumable private trash, payload-free integrity findings, checksum-framed portable backup, and conflict-bound restore with destination backup and recovery; no MCP tool or resource was added.
 - Restored deterministic developer, runtime, verification, and release commands: the default Make goal is read-only help; configured verification targets exist again; background/watch startup preserves one-shell state; release preflight is portable, requires an explicit bump type, rejects dirty or untracked trees and existing tags, builds once into a clean output directory, and emits SHA-256 checksums.
 - Preserved GitHub-native ticket-graph configuration through source, proposal, and resolved generations; graph reads now report root and relationship coverage explicitly, and Ready-ticket selection fails closed whenever traversal is missing, unavailable, truncated, or incomplete.
 - Added normalized runtime health covering package/executable origin, accepted and active generation, process identity, server/current tool-surface hashes, negotiated client capabilities, and deterministic activation/restart/rediscovery guidance without persisting raw initialize payloads.

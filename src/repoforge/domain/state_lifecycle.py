@@ -462,3 +462,77 @@ def _validate_reason(value: str, field: str) -> str:
     ):
         raise _retention_error(f"{field} is invalid")
     return value
+
+
+class IntegritySeverity(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class StateIntegrityFinding:
+    severity: IntegritySeverity
+    code: str
+    record_id: str | None
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class StateIntegrityReport:
+    collection: str
+    scanned_records: int
+    total_bytes: int
+    findings: tuple[StateIntegrityFinding, ...]
+    findings_truncated: bool
+    healthy: bool
+
+
+@dataclass(frozen=True, slots=True)
+class StateBackupRecord:
+    record_id: str
+    checksum: str
+    size_bytes: int
+    schema_version: SchemaVersion
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class StateBackupPreview:
+    backup_id: str
+    manifest_checksum: str
+    collection: str
+    destination_id: str
+    records: tuple[StateBackupRecord, ...]
+    total_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class StateBackupReport:
+    backup_id: str
+    copied_records: int
+    total_bytes: int
+    destination_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class StateRestorePreview:
+    restore_id: str
+    plan_digest: str
+    backup_id: str
+    manifest_checksum: str
+    collection: str
+    destination_id: str
+    records: tuple[StateBackupRecord, ...]
+    conflicts: tuple[tuple[str, str], ...]
+    total_bytes: int
+    overwrite: bool
+
+
+@dataclass(frozen=True, slots=True)
+class StateRestoreReport:
+    restore_id: str
+    restored_records: int
+    replaced_records: int
+    total_bytes: int
+    backup_id: str

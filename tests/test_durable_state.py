@@ -10,11 +10,13 @@ from typing import cast
 import pytest
 
 from repoforge.adapters.persistence.json_state_lifecycle import JsonStateLifecycleManager
+from repoforge.adapters.persistence.json_state_recovery import JsonStateRecoveryManager
 from repoforge.adapters.persistence.json_state_repository import JsonStateRepository
 from repoforge.domain.durable_state import Revision, SchemaVersion, StateEnvelope
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.state_lifecycle import (
     CleanupDisposition,
+    IntegritySeverity,
     MigrationDirection,
     StateMigrationRegistry,
     StateMigrationStep,
@@ -826,3 +828,210 @@ def test_cleanup_apply_resumes_after_process_crash(tmp_path: Path) -> None:
     report = restarted.apply_cleanup(preview)
     assert report.deleted == 2
     assert not list((tmp_path / "demo_records").glob("*.json"))
+
+
+def test_integrity_scan_reports_schema_reference_corruption_and_quota_without_payloads(
+    tmp_path: Path,
+) -> None:
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=3,
+        revision=1,
+        payload={"display_name": "safe", "enabled": True},
+    )
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-2",
+        version=99,
+        revision=1,
+        payload={"secret": "must-not-appear"},
+    )
+    (tmp_path / "demo_records" / "demo-3.json").write_text("{bad", encoding="utf-8")
+    manager = JsonStateRecoveryManager(tmp_path, InMemoryLockManager())
+    report = manager.inspect_integrity(
+        collection="demo_records",
+        supported_versions=(SchemaVersion(3),),
+        references=(StateRecordReference("demo-1", "missing-record", "receipt"),),
+        max_records=10,
+        max_total_bytes=100,
+        max_findings=10,
+    )
+    assert report.healthy is False
+    assert {item.code for item in report.findings} >= {
+        "BYTE_QUOTA_EXCEEDED",
+        "CORRUPT_RECORD",
+        "MISSING_REFERENCE",
+        "UNSUPPORTED_SCHEMA",
+    }
+    assert any(item.severity is IntegritySeverity.ERROR for item in report.findings)
+    rendered = repr(report)
+    assert "must-not-appear" not in rendered
+    assert "{bad" not in rendered
+
+
+def test_backup_preview_apply_is_deterministic_private_and_idempotent(tmp_path: Path) -> None:
+    for index in range(1, 3):
+        _write_raw_state(
+            tmp_path,
+            collection="demo_records",
+            record_id=f"demo-{index}",
+            version=3,
+            revision=index,
+            payload={"display_name": f"demo-{index}", "enabled": True},
+        )
+    manager = JsonStateRecoveryManager(tmp_path, InMemoryLockManager())
+    preview = manager.preview_backup(
+        collection="demo_records",
+        destination_id="backup-destination",
+        max_records=10,
+        max_total_bytes=10_000,
+    )
+    assert len(preview.records) == 2
+    assert len(preview.manifest_checksum) == 64
+    assert (
+        manager.preview_backup(
+            collection="demo_records",
+            destination_id="backup-destination",
+            max_records=10,
+            max_total_bytes=10_000,
+        )
+        == preview
+    )
+
+    destination = tmp_path.parent / "backup-destination"
+    report = manager.apply_backup(preview, destination_root=destination)
+    assert report.copied_records == 2
+    assert report.total_bytes == preview.total_bytes
+    assert (destination / "manifest.json").stat().st_mode & 0o777 == 0o600
+    assert manager.apply_backup(preview, destination_root=destination) == report
+
+    with pytest.raises(RepoForgeError) as invalid_destination:
+        manager.preview_backup(
+            collection="demo_records",
+            destination_id="../unsafe",
+            max_records=10,
+            max_total_bytes=10_000,
+        )
+    assert invalid_destination.value.code is ErrorCode.STATE_BACKUP_INVALID
+
+
+def test_restore_preview_detects_conflicts_and_overwrite_restores_with_backup(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write_raw_state(
+        source,
+        collection="demo_records",
+        record_id="demo-1",
+        version=3,
+        revision=2,
+        payload={"display_name": "from-backup", "enabled": True},
+    )
+    source_manager = JsonStateRecoveryManager(source, InMemoryLockManager())
+    backup_preview = source_manager.preview_backup(
+        collection="demo_records",
+        destination_id="portable-backup",
+    )
+    backup_root = tmp_path / "portable-backup"
+    source_manager.apply_backup(backup_preview, destination_root=backup_root)
+
+    original_destination = _write_raw_state(
+        destination,
+        collection="demo_records",
+        record_id="demo-1",
+        version=3,
+        revision=1,
+        payload={"display_name": "local", "enabled": True},
+    )
+    destination_manager = JsonStateRecoveryManager(destination, InMemoryLockManager())
+    conflict = destination_manager.preview_restore(
+        backup_root=backup_root,
+        destination_id="destination-state",
+        overwrite=False,
+        max_records=10,
+        max_total_bytes=10_000,
+    )
+    assert conflict.conflicts == (("demo-1", "different_existing_record"),)
+    with pytest.raises(RepoForgeError) as blocked:
+        destination_manager.apply_restore(conflict, backup_root=backup_root)
+    assert blocked.value.code is ErrorCode.STATE_RESTORE_CONFLICT
+
+    preview = destination_manager.preview_restore(
+        backup_root=backup_root,
+        destination_id="destination-state",
+        overwrite=True,
+        max_records=10,
+        max_total_bytes=10_000,
+    )
+    report = destination_manager.apply_restore(preview, backup_root=backup_root)
+    assert report.restored_records == 1
+    assert report.replaced_records == 1
+    assert _read_raw_state(destination, "demo_records", "demo-1")["payload"] == {
+        "display_name": "from-backup",
+        "enabled": True,
+    }
+    destination_backup = (
+        destination
+        / ".state-lifecycle"
+        / "backups"
+        / preview.restore_id
+        / "destination"
+        / "demo-1.json"
+    )
+    assert destination_backup.read_bytes() == original_destination
+    assert destination_manager.apply_restore(preview, backup_root=backup_root) == report
+
+
+def test_restore_rejects_corrupt_backup_and_rolls_back_failure(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    for index in range(1, 3):
+        _write_raw_state(
+            source,
+            collection="demo_records",
+            record_id=f"demo-{index}",
+            version=3,
+            revision=1,
+            payload={"display_name": f"source-{index}", "enabled": True},
+        )
+    source_manager = JsonStateRecoveryManager(source, InMemoryLockManager())
+    backup = source_manager.preview_backup(
+        collection="demo_records",
+        destination_id="portable-backup",
+    )
+    backup_root = tmp_path / "portable-backup"
+    source_manager.apply_backup(backup, destination_root=backup_root)
+    (backup_root / "records" / "demo-2.json").write_text("tampered", encoding="utf-8")
+    destination_manager = JsonStateRecoveryManager(destination, InMemoryLockManager())
+    with pytest.raises(RepoForgeError) as corrupt:
+        destination_manager.preview_restore(
+            backup_root=backup_root,
+            destination_id="destination-state",
+            overwrite=False,
+        )
+    assert corrupt.value.code is ErrorCode.STATE_BACKUP_INVALID
+
+    source_manager.apply_backup(backup, destination_root=backup_root, repair=True)
+
+    def fail_second_restore(phase: str, record_id: str, index: int) -> None:
+        if phase == "before_restore_write" and index == 1:
+            raise OSError("injected restore failure")
+
+    failing_manager = JsonStateRecoveryManager(
+        destination,
+        InMemoryLockManager(),
+        fault_injector=fail_second_restore,
+    )
+    preview = failing_manager.preview_restore(
+        backup_root=backup_root,
+        destination_id="destination-state",
+        overwrite=False,
+    )
+    with pytest.raises(RepoForgeError) as failed:
+        failing_manager.apply_restore(preview, backup_root=backup_root)
+    assert failed.value.code is ErrorCode.STATE_INTEGRITY_FAILED
+    assert not list((destination / "demo_records").glob("*.json"))
