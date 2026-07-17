@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -29,6 +30,7 @@ from ...domain.retry_guidance import (
     reusable_failure,
 )
 from ...domain.verification import VerificationIntent
+from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
 from ..dto import to_data
@@ -65,6 +67,8 @@ class WorkspaceRunDiagnosticCommand:
     expected_failure_class: DiagnosticFailureClass | str | None = None
     selector2: SelectorInput = None
     force_rerun: bool = False
+    cancellation_token: CancellationToken | None = None
+    before_command: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,12 +336,15 @@ class WorkspaceDiagnosticRunner:
                 result: CommandResult | None = None
                 command_error: CommandError | None = None
                 try:
+                    if command.before_command is not None:
+                        command.before_command()
                     result = self.ctx.commands.run(
                         resolved.argv,
                         cwd=command_cwd,
                         timeout=locked_profile.timeout_seconds,
                         check=False,
                         output_limit=locked_profile.output_limit,
+                        cancel_token=command.cancellation_token,
                     )
                 except CommandError as exc:
                     command_error = exc

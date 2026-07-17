@@ -34,6 +34,7 @@ from .adapters.persistence import (
     JsonApprovalStore,
     JsonExecutionPlanAcceptanceStore,
     JsonExecutionPlanStore,
+    JsonExecutionReceiptStore,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -132,6 +133,7 @@ from .ports import (
     ExecutionEnvironmentPort,
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
+    ExecutionReceiptStore,
     FileSystem,
     FileTransactionFactory,
     GitHubReadCache,
@@ -200,6 +202,7 @@ class AdapterOverrides:
     code_intelligence: CodeIntelligenceProvider | None = None
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
+    execution_receipts: ExecutionReceiptStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +469,9 @@ def build_application(
     execution_plan_acceptances = o.execution_plan_acceptances or JsonExecutionPlanAcceptanceStore(
         config.server.state_root, locks
     )
+    execution_receipts = o.execution_receipts or JsonExecutionReceiptStore(
+        config.server.state_root, locks
+    )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
@@ -515,6 +521,7 @@ def build_application(
         ticket_projects=ticket_projects,
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
+        execution_receipts=execution_receipts,
     )
     operations = OperationManager(context)
     recover_operations(

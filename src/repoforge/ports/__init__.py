@@ -15,6 +15,7 @@ from .execution_environment import (
     ExecutionReceipt,
 )
 from .execution_plan_store import ExecutionPlanAcceptanceStore, ExecutionPlanStore
+from .execution_receipt_store import ExecutionReceiptStore
 from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
 from .git import (
@@ -99,6 +100,7 @@ __all__ = [
     "ExecutionPlanAcceptanceStore",
     "ExecutionPlanStore",
     "ExecutionReceipt",
+    "ExecutionReceiptStore",
     "FileSystem",
     "FileTransaction",
     "FileTransactionFactory",

@@ -842,6 +842,19 @@ def create_server(
         return bounded_service.call("workspace_diff", workspace_id, staged)
 
     @mcp.tool(
+        title="Execute accepted workspace plan",
+        annotations=LOCAL_MUTATE,
+        structured_output=True,
+    )
+    def workspace_execute_plan(
+        workspace_id: str,
+        plan_id: str,
+        through: Literal["iteration", "full"] = "iteration",
+    ) -> dict[str, Any]:
+        """Use this to execute an exact accepted immutable plan through iteration stages or the final full verification boundary; poll the returned durable operation with operation_status."""
+        return bounded_service.call("workspace_execute_plan", workspace_id, plan_id, through)
+
+    @mcp.tool(
         title="Run configured command profile",
         annotations=LOCAL_MUTATE,
         structured_output=True,

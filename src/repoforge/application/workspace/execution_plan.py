@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict, dataclass
 
 from ...domain.assessment import WorkspaceAssessment
-from ...domain.diagnostics import DiagnosticMutability
+from ...domain.diagnostics import DiagnosticMutability, DiagnosticSelectorKind
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.execution_plan import (
     ExecutionPlan,
@@ -94,7 +94,7 @@ class ExecutionPlanService:
             )
         _, repo, _ = self.ctx.workspace(assessment.snapshot.workspace_id)
         stages: list[PlanStage] = []
-        for index, recommended in enumerate(recommendation.ordered_stages, start=1):
+        for recommended in recommendation.ordered_stages:
             dependencies = (stages[-1].stage_id,) if stages else ()
             if recommended.kind == "diagnostic" and recommended.diagnostic is not None:
                 diagnostic = repo.diagnostics.get(recommended.diagnostic)
@@ -103,9 +103,14 @@ class ExecutionPlanService:
                         f"Recommended diagnostic no longer exists: {recommended.diagnostic}",
                         code=ErrorCode.STATE_INVALID,
                     )
+                if (
+                    diagnostic.selector.kind is not DiagnosticSelectorKind.NONE
+                    and recommended.selector is None
+                ):
+                    continue
                 stages.append(
                     PlanStage(
-                        stage_id=_stage_id(index, PlanStageKind.DIAGNOSTIC),
+                        stage_id=_stage_id(len(stages) + 1, PlanStageKind.DIAGNOSTIC),
                         kind=PlanStageKind.DIAGNOSTIC,
                         target=diagnostic.diagnostic_id,
                         selector=recommended.selector,
@@ -138,7 +143,7 @@ class ExecutionPlanService:
             final = profile.name == recommendation.final_profile
             stages.append(
                 PlanStage(
-                    stage_id=_stage_id(index, PlanStageKind.PROFILE),
+                    stage_id=_stage_id(len(stages) + 1, PlanStageKind.PROFILE),
                     kind=PlanStageKind.PROFILE,
                     target=profile.name,
                     selector=None,

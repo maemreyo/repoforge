@@ -97,6 +97,8 @@ class WorkspaceRunProfileCommand:
     profile_name: str | None = None
     background: bool = False
     force_rerun: bool = False
+    cancellation_token: CancellationToken | None = None
+    before_command: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -757,7 +759,7 @@ class WorkspaceProfileRunner:
 
             def op() -> WorkspaceRunProfileResult:
                 with self.ctx.locks.lock(c.workspace_id):
-                    return run_body(None, None)
+                    return run_body(c.cancellation_token, c.before_command)
 
             return self.ctx.audited(
                 "workspace_run_profile",

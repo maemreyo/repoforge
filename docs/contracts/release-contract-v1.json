@@ -137,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "56595883aef58b15fa79082b2dcc03f7d78eae9c5f4060bc2a42b7dec2a13327",
+    "tool_surface_hash": "bb52944cf512743bdfe359369d0d5863cead42f1831ab6449d346fd12c39f634",
     "tools": [
       {
         "annotations": {
@@ -1760,6 +1760,49 @@
           "type": "object"
         },
         "title": "Edit files"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Use this to execute an exact accepted immutable plan through iteration stages or the final full verification boundary; poll the returned durable operation with operation_status.",
+        "inputSchema": {
+          "properties": {
+            "plan_id": {
+              "title": "Plan Id",
+              "type": "string"
+            },
+            "through": {
+              "default": "iteration",
+              "enum": [
+                "iteration",
+                "full"
+              ],
+              "title": "Through",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "plan_id"
+          ],
+          "title": "workspace_execute_planArguments",
+          "type": "object"
+        },
+        "name": "workspace_execute_plan",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_execute_planDictOutput",
+          "type": "object"
+        },
+        "title": "Execute accepted workspace plan"
       },
       {
         "annotations": {

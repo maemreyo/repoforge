@@ -82,6 +82,10 @@ from .workspace.edit import (
     WorkspaceEditCommand,
     WorkspaceEditor,
 )
+from .workspace.execute_plan import (
+    WorkspaceExecutePlanCommand,
+    WorkspacePlanExecutor,
+)
 from .workspace.execution_plan import (
     AcceptExecutionPlanCommand,
     CreateExecutionPlanCommand,
@@ -275,6 +279,13 @@ class CodingService:
             background_tasks=self.application.background_tasks,
         )
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
+        self._plan_executor = WorkspacePlanExecutor(
+            ctx,
+            operations=self.operations,
+            background_tasks=self.application.background_tasks,
+            profile_runner=self._profile,
+            diagnostic_runner=self._diagnostic,
+        )
         self._hygiene_status = WorkspaceHygieneStatusReader(ctx)
         self._format_changed = WorkspaceChangedFormatter(ctx)
         self._adhoc = WorkspaceAdhocRunner(
@@ -318,6 +329,8 @@ class CodingService:
         )
         if result.cancellation_requested and result.operation.kind == "workspace_run_profile":
             self._profile.request_live_cancel(operation_id)
+        if result.cancellation_requested and result.operation.kind == "workspace_execute_plan":
+            self._plan_executor.request_live_cancel(operation_id)
         return _result(result)
 
     def repo_list(self) -> dict[str, Any]:
@@ -619,6 +632,19 @@ class CodingService:
         return _result(
             self._execution_plans.accept(AcceptExecutionPlanCommand(workspace_id, plan_id, task_id))
         )
+
+    def workspace_execute_plan(
+        self,
+        workspace_id: str,
+        plan_id: str,
+        through: str = "iteration",
+    ) -> dict[str, Any]:
+        return _result(
+            self._plan_executor.execute(WorkspaceExecutePlanCommand(workspace_id, plan_id, through))
+        )
+
+    def workspace_execution_receipts(self, plan_id: str) -> dict[str, Any]:
+        return _result(self._plan_executor.receipts(plan_id))
 
     def workspace_base_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._base_status.execute(WorkspaceBaseStatusCommand(workspace_id)))

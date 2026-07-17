@@ -132,6 +132,7 @@ async def test_mcp_protocol_contract_and_annotations(
             "workspace_apply_patch",
             "workspace_restore_paths",
             "workspace_diff",
+            "workspace_execute_plan",
             "workspace_run_profile",
             "workspace_run_diagnostic",
             "workspace_hygiene_status",
@@ -204,6 +205,20 @@ async def test_mcp_protocol_contract_and_annotations(
             fresh_schema = tools[graph_name].inputSchema["properties"]["fresh"]
             assert fresh_schema["type"] == "boolean"
             assert fresh_schema["default"] is False
+
+        execute_plan = tools["workspace_execute_plan"]
+        assert execute_plan.annotations.readOnlyHint is False
+        assert execute_plan.annotations.destructiveHint is False
+        assert execute_plan.annotations.openWorldHint is False
+        assert set(execute_plan.inputSchema["properties"]) == {
+            "workspace_id",
+            "plan_id",
+            "through",
+        }
+        assert execute_plan.inputSchema["properties"]["through"]["enum"] == [
+            "iteration",
+            "full",
+        ]
 
         run_profile = tools["workspace_run_profile"]
         assert "profile_name" not in run_profile.inputSchema.get("required", [])

@@ -25,6 +25,7 @@ from ..ports import (
     ExecutionEnvironmentPort,
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
+    ExecutionReceiptStore,
     FileSystem,
     FileTransactionFactory,
     GitHubReadCache,
@@ -172,6 +173,7 @@ _MUTATING_ACTIONS = {
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
+    "workspace_execute_plan",
     "workspace_format_changed",
     "workspace_run_adhoc",
     "workspace_verify",
@@ -200,6 +202,7 @@ _POLICY_WRITE_ACTIONS = {
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
+    "workspace_execute_plan",
     "workspace_format_changed",
     "workspace_run_adhoc",
     "workspace_verify",
@@ -241,6 +244,7 @@ class ApplicationContext:
     file_transactions: FileTransactionFactory | None = None
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
+    execution_receipts: ExecutionReceiptStore | None = None
 
     def now_epoch(self) -> float:
         try:
