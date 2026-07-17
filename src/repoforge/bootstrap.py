@@ -18,6 +18,7 @@ from .adapters.audit.query import (
 from .adapters.audit.query import summarize_operation_metrics as summarize_operation_metrics
 from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
+from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import LocalFileSystem
@@ -119,6 +120,7 @@ from .ports import (
     AuditSink,
     BackgroundTaskRunner,
     Clock,
+    CodeIntelligenceProvider,
     CommandExecutor,
     ConfigurationStore,
     ExecutableLocator,
@@ -186,6 +188,7 @@ class AdapterOverrides:
     sleeper: Sleeper | None = None
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
+    code_intelligence: CodeIntelligenceProvider | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +447,7 @@ def build_application(
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
+    code_intelligence = o.code_intelligence or SyntaxCodeIntelligenceProvider()
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
@@ -482,6 +486,7 @@ def build_application(
         executables=executables,
         execution_environment=execution_environment,
         provider_registry=provider_registry,
+        code_intelligence=code_intelligence,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,

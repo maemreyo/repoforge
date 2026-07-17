@@ -19,9 +19,13 @@ from ...domain.assessment import (
     new_assessment_snapshot,
     validate_workspace_assessment,
 )
+from ...domain.code_intelligence import CodeIntelligenceStatus
 from ...domain.errors import ErrorCode, RepoForgeError
+from ...domain.evidence import evidence_payload
 from ...domain.policy import assert_path_allowed
+from ..code_intelligence import CodeIntelligenceAnalyzer, CodeIntelligenceCommand
 from ..context import ApplicationContext, repository_policy_snapshot
+from ..dto import to_data
 from .base_status import WorkspaceBaseStatusCommand, WorkspaceBaseStatusReader
 from .diff import WorkspaceDiffCommand, WorkspaceDiffReader
 from .pr_checks import WorkspacePrChecksCommand, WorkspacePrChecksReader
@@ -41,6 +45,7 @@ class WorkspaceAssessmentReader:
     def __init__(self, ctx: ApplicationContext):
         self.ctx = ctx
         self._status = WorkspaceStatusReader(ctx)
+        self._intelligence = CodeIntelligenceAnalyzer(ctx)
         self._diff = WorkspaceDiffReader(ctx)
         self._base = WorkspaceBaseStatusReader(ctx)
         self._pr = WorkspacePrStatusReader(ctx)
@@ -247,6 +252,71 @@ class WorkspaceAssessmentReader:
                 receipt_freshness = status_failure
             self._assert_current(snapshot, repo, path)
 
+            try:
+                analysis = self._intelligence.analyze_current(
+                    CodeIntelligenceCommand(
+                        command.workspace_id,
+                        expected_head_sha=snapshot.head_sha,
+                        expected_fingerprint=snapshot.workspace_fingerprint,
+                    )
+                )
+                intelligence_payload = to_data(analysis.result)
+                if analysis.evidence is not None:
+                    intelligence_payload["evidence"] = evidence_payload(analysis.evidence)
+                if analysis.result.status is CodeIntelligenceStatus.CURRENT:
+                    code_intelligence = evidence(
+                        snapshot,
+                        status=AssessmentEvidenceStatus.CURRENT,
+                        coverage=AssessmentCoverage.COMPLETE,
+                        value=intelligence_payload,
+                    )
+                elif analysis.result.status is CodeIntelligenceStatus.PARTIAL:
+                    code_intelligence = evidence(
+                        snapshot,
+                        status=AssessmentEvidenceStatus.PARTIAL,
+                        coverage=AssessmentCoverage.PARTIAL,
+                        value=intelligence_payload,
+                        error_code=ErrorCode.CODE_INTELLIGENCE_PARTIAL.value,
+                        safe_fallback=(
+                            "Use affected-test candidates as hints only and retain the final "
+                            "verification profile."
+                        ),
+                    )
+                else:
+                    code_intelligence = evidence(
+                        snapshot,
+                        status=AssessmentEvidenceStatus.UNAVAILABLE,
+                        coverage=AssessmentCoverage.NONE,
+                        error_code=ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE.value,
+                        safe_fallback=(
+                            "No code-intelligence evidence is trusted; use changed paths and "
+                            "the configured verification profiles."
+                        ),
+                    )
+            except RepoForgeError as exc:
+                if exc.code is ErrorCode.CODE_INTELLIGENCE_STALE:
+                    raise RepoForgeError(
+                        "Workspace changed during code-intelligence assessment",
+                        code=ErrorCode.STALE_ASSESSMENT_SNAPSHOT,
+                        retryable=True,
+                    ) from exc
+                code_intelligence = evidence(
+                    snapshot,
+                    status=AssessmentEvidenceStatus.UNAVAILABLE,
+                    coverage=AssessmentCoverage.NONE,
+                    error_code=self._error_code(exc),
+                    safe_fallback="No code-intelligence evidence is trusted.",
+                )
+            except Exception:
+                code_intelligence = evidence(
+                    snapshot,
+                    status=AssessmentEvidenceStatus.UNAVAILABLE,
+                    coverage=AssessmentCoverage.NONE,
+                    error_code=ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE.value,
+                    safe_fallback="No code-intelligence evidence is trusted.",
+                )
+            self._assert_current(snapshot, repo, path)
+
             diff_summary = self._collect(
                 snapshot,
                 repo,
@@ -315,6 +385,7 @@ class WorkspaceAssessmentReader:
                 "diff_summary": diff_summary,
                 "change_budget": change_budget,
                 "path_policy": path_policy,
+                "code_intelligence": code_intelligence,
                 "base_freshness": base_freshness,
                 "pr_state": pr_state,
                 "ci_summary": ci_summary,
@@ -337,6 +408,7 @@ class WorkspaceAssessmentReader:
                     diff_summary=diff_summary,
                     change_budget=change_budget,
                     path_policy=path_policy,
+                    code_intelligence=code_intelligence,
                     base_freshness=base_freshness,
                     pr_state=pr_state,
                     ci_summary=ci_summary,

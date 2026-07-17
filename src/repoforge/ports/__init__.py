@@ -5,6 +5,7 @@ from .audit import AuditSink
 from .background_tasks import BackgroundTaskRunner
 from .capabilities import ExecutableLocator
 from .clock import Clock
+from .code_intelligence import CodeIntelligenceProvider
 from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
 from .execution_environment import (
@@ -85,6 +86,7 @@ __all__ = [
     "AuditSink",
     "BackgroundTaskRunner",
     "Clock",
+    "CodeIntelligenceProvider",
     "CommandExecutor",
     "CommandResult",
     "ConfigurationStore",

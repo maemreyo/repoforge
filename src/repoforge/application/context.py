@@ -19,6 +19,7 @@ from ..domain.workspace import WorkspaceRecord
 from ..ports import (
     AuditSink,
     Clock,
+    CodeIntelligenceProvider,
     CommandExecutor,
     ExecutableLocator,
     ExecutionEnvironmentPort,
@@ -225,6 +226,7 @@ class ApplicationContext:
     fingerprint_cache: FingerprintCache | None = None
     execution_environment: ExecutionEnvironmentPort | None = None
     provider_registry: ProviderRegistry | None = None
+    code_intelligence: CodeIntelligenceProvider | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
     hygiene_cache: HygieneBaselineCache | None = None

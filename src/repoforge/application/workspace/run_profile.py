@@ -37,6 +37,7 @@ from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ...ports.execution_environment import ApprovedExecution, ExecutionReceipt
+from ..code_intelligence import CodeIntelligenceAnalyzer, CodeIntelligenceCommand
 from ..context import ApplicationContext
 from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
@@ -315,6 +316,41 @@ class WorkspaceProfileRunner:
                         if exc.safe_next_action
                         else targeted_hint
                     )
+                affected_candidates: list[dict[str, object]] = []
+                if verification_step.kind in _REUSABLE_PROFILE_STEP_KINDS:
+                    with contextlib.suppress(Exception):
+                        analysis = CodeIntelligenceAnalyzer(self.ctx).analyze_current(
+                            CodeIntelligenceCommand(
+                                c.workspace_id,
+                                expected_head_sha=self.ctx.git.head_sha(path).lower(),
+                                expected_fingerprint=before_fingerprint,
+                            )
+                        )
+                        for candidate in analysis.result.affected_tests[:8]:
+                            if (
+                                candidate.diagnostic_id is None
+                                or candidate.diagnostic_id not in repo.diagnostics
+                            ):
+                                continue
+                            payload = to_data(candidate)
+                            if isinstance(payload, dict):
+                                affected_candidates.append(payload)
+                if affected_candidates:
+                    exc.details["affected_test_candidates"] = affected_candidates
+                    audit_details["affected_test_candidates"] = affected_candidates
+                    first = affected_candidates[0]
+                    diagnostic = first.get("diagnostic_id")
+                    selector = first.get("selector")
+                    candidate_hint = (
+                        "Run workspace_run_diagnostic with "
+                        f"diagnostic_id={diagnostic!r} and selector={selector!r} before "
+                        "rerunning the broader profile."
+                    )
+                    exc.safe_next_action = (
+                        f"{exc.safe_next_action} {candidate_hint}"
+                        if exc.safe_next_action
+                        else candidate_hint
+                    )
                 error_code = exc.code.value
                 raw_exit_code = exc.details.get("exit_code")
                 exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
@@ -365,6 +401,11 @@ class WorkspaceProfileRunner:
                             "not_run_steps": not_run_steps,
                             "business_tests_ran": business_tests_ran,
                             "valid_tdd_red_evidence": False,
+                            **(
+                                {"affected_test_candidates": affected_candidates}
+                                if affected_candidates
+                                else {}
+                            ),
                         },
                     )
                     if recorded:
@@ -420,14 +461,24 @@ class WorkspaceProfileRunner:
                         "retry_repeat": repeat,
                     }
                 )
+                cached_action = (
+                    "Investigate the cached failed-step evidence. Use force_rerun=true only "
+                    "when an external condition changed without changing the bound snapshot."
+                )
+                raw_candidates = details.get("affected_test_candidates")
+                if isinstance(raw_candidates, list) and raw_candidates:
+                    first = raw_candidates[0]
+                    if isinstance(first, dict):
+                        cached_action += (
+                            " Run workspace_run_diagnostic with "
+                            f"diagnostic_id={first.get('diagnostic_id')!r} and "
+                            f"selector={first.get('selector')!r}."
+                        )
                 error = CommandError(
                     "Reused an exact-bound deterministic failure without rerunning the command.",
                     code=code,
                     retryable=False,
-                    safe_next_action=(
-                        "Investigate the cached failed-step evidence. Use force_rerun=true only "
-                        "when an external condition changed without changing the bound snapshot."
-                    ),
+                    safe_next_action=cached_action,
                     details=details,
                 )
                 _apply_retry_guidance(

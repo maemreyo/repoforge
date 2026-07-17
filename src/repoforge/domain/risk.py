@@ -62,6 +62,7 @@ class VerificationStage:
     reason: str
     profile: str | None = None
     diagnostic: str | None = None
+    selector: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

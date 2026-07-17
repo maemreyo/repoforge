@@ -80,6 +80,10 @@ class ErrorCode(str, Enum):
     STALE_ASSESSMENT_SNAPSHOT = "STALE_ASSESSMENT_SNAPSHOT"
     ASSESSMENT_COMPONENT_UNAVAILABLE = "ASSESSMENT_COMPONENT_UNAVAILABLE"
     ASSESSMENT_INVALID = "ASSESSMENT_INVALID"
+    CODE_INTELLIGENCE_INVALID = "CODE_INTELLIGENCE_INVALID"
+    CODE_INTELLIGENCE_UNAVAILABLE = "CODE_INTELLIGENCE_UNAVAILABLE"
+    CODE_INTELLIGENCE_PARTIAL = "CODE_INTELLIGENCE_PARTIAL"
+    CODE_INTELLIGENCE_STALE = "CODE_INTELLIGENCE_STALE"
     PR_CHECK_WATCH_INVALID = "PR_CHECK_WATCH_INVALID"
     PR_CHECK_WATCH_STALE = "PR_CHECK_WATCH_STALE"
     PR_CHECK_WATCH_TIMEOUT = "PR_CHECK_WATCH_TIMEOUT"
@@ -289,6 +293,10 @@ def operation_error_from_exception(
         ErrorCode.STALE_ASSESSMENT_SNAPSHOT: "The workspace, configuration, or policy identity changed while evidence was being collected.",
         ErrorCode.ASSESSMENT_COMPONENT_UNAVAILABLE: "A bounded assessment provider could not return trustworthy evidence for the captured snapshot.",
         ErrorCode.ASSESSMENT_INVALID: "The assessment model violates snapshot identity, coverage, ordering, or bound invariants.",
+        ErrorCode.CODE_INTELLIGENCE_INVALID: "The provider-neutral code-intelligence result violates a typed identity, path, fact, or bound invariant.",
+        ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE: "No trustworthy bounded code-intelligence result is available for the captured workspace snapshot.",
+        ErrorCode.CODE_INTELLIGENCE_PARTIAL: "Code intelligence covered only part of the captured workspace and reports explicit limitations.",
+        ErrorCode.CODE_INTELLIGENCE_STALE: "The workspace identity changed while code-intelligence evidence was being collected.",
         ErrorCode.PR_CHECK_WATCH_INVALID: "The check-watch request violates a typed bound or completion-mode invariant.",
         ErrorCode.PR_CHECK_WATCH_STALE: "The workspace, pushed commit, pull request, or Check Run no longer matches the captured watch identity.",
         ErrorCode.PR_CHECK_WATCH_TIMEOUT: "The requested check condition was not reached before the bounded deadline.",
