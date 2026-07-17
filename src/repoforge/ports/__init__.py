@@ -17,7 +17,6 @@ from .execution_environment import (
 from .external_mutation_ledger import ExternalMutationLedger
 from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
-from .filesystem_transaction import CommitReceiptFactory, FaultInjector
 from .git import (
     GitBaseReferences,
     GitMergePreview,
@@ -93,7 +92,6 @@ __all__ = [
     "CodeIntelligenceProvider",
     "CommandExecutor",
     "CommandResult",
-    "CommitReceiptFactory",
     "ConfigurationStore",
     "DiscoveryRequest",
     "EnvironmentPreflight",
@@ -101,7 +99,6 @@ __all__ = [
     "ExecutionEnvironmentPort",
     "ExecutionReceipt",
     "ExternalMutationLedger",
-    "FaultInjector",
     "FileSystem",
     "FileTransaction",
     "FileTransactionFactory",

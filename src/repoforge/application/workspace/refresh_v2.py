@@ -29,6 +29,7 @@ from ...domain.workspace import (
     invalidate_workspace_refresh_receipts,
 )
 from ..context import ApplicationContext
+from ..file_transactions import open_file_transaction
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from .base_status import collect_workspace_base_status
 
@@ -214,7 +215,7 @@ class _RefreshJournal:
             # A nested resolution transaction may have crashed while the merge was active.
             # Roll it back against that merge state before resetting HEAD, otherwise its
             # backups could later overwrite the restored reviewed tree.
-            self.ctx.file_transaction(self.workspace).recover_pending()
+            open_file_transaction(self.ctx, self.workspace).recover_pending()
             self.ctx.git.reset_hard(self.workspace, old_head)
             self.ctx.store.save(record)
             prime_fingerprint(
@@ -354,7 +355,8 @@ class WorkspaceRefreshV2:
                         raise self._stale("merge conflict evidence changed during apply")
                     resolution_paths = tuple(sorted(resolutions))
                     if resolution_paths:
-                        file_engine = self.ctx.file_transaction(
+                        file_engine = open_file_transaction(
+                            self.ctx,
                             workspace,
                             fault_injector=self._file_fault_injector,
                         )

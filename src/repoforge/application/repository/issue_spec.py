@@ -112,27 +112,7 @@ class RepositoryIssueSpecReader:
                     dict(item, heading=_first_heading(body) if isinstance(body, str) else None)
                 )
 
-        live_state = ticket_live_state_from_issue(
-            live_payload,
-            expected_number=c.issue_number,
-        )
         drift: list[dict[str, Any]] = []
-        if not live_state.delivery.specification_complete:
-            drift.append(
-                {
-                    "code": "LIVE_SPEC_INCOMPLETE",
-                    "message": (
-                        "live issue is missing objective, acceptance, or verification evidence"
-                    ),
-                }
-            )
-        if live_state.delivery.unresolved_design_gate:
-            drift.append(
-                {
-                    "code": "LIVE_DESIGN_GATE_OPEN",
-                    "message": "live issue still carries an unresolved design gate",
-                }
-            )
         if node is not None and snapshot is not None:
             live_metadata = TicketLiveMetadata(
                 c.issue_number,
@@ -150,6 +130,13 @@ class RepositoryIssueSpecReader:
                 for item in compare_live_ticket_metadata(single_node_graph, (live_metadata,))
             ]
 
+        evolution = ticket_delivery_payload(
+            ticket_live_state_from_issue(
+                live_payload,
+                expected_number=c.issue_number,
+            ).delivery
+        )
+
         return RepositoryIssueSpecResult(
             c.repo_id,
             c.issue_number,
@@ -159,7 +146,7 @@ class RepositoryIssueSpecReader:
             live_payload,
             drift,
             comments,
-            ticket_delivery_payload(live_state.delivery),
+            evolution,
             cache_hit,
             graph_cache_hit,
             snapshot.observed_at if snapshot is not None else None,

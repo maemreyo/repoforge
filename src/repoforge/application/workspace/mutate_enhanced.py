@@ -26,6 +26,7 @@ from ...domain.redaction import sanitize_persisted_data
 from ...ports.filesystem_transaction import FileTransaction
 from ..context import ApplicationContext
 from ..dto import to_data
+from ..file_transactions import open_file_transaction
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from . import mutate as baseline_mutate
 
@@ -510,7 +511,7 @@ class WorkspaceMutator:
 
         def run() -> WorkspaceMutateResult:
             with self.ctx.locks.lock(command.workspace_id):
-                engine = self.ctx.file_transaction(workspace)
+                engine = open_file_transaction(self.ctx, workspace)
                 recovery = engine.recover_pending()
                 audit_details["recovered_rolled_back"] = recovery.rolled_back
                 audit_details["recovered_finalized"] = recovery.finalized

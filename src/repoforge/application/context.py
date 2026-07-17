@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 from ..config import AppConfig, RepositoryConfig
 from ..domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
@@ -26,7 +26,6 @@ from ..ports import (
     ExecutableLocator,
     ExecutionEnvironmentPort,
     ExternalMutationLedger,
-    FaultInjector,
     FileSystem,
     FileTransactionFactory,
     GitHubReadCache,
@@ -47,7 +46,9 @@ from ..ports import (
     TicketProjectGateway,
     WorkspaceStore,
 )
-from ..ports.filesystem_transaction import FileTransaction as ReceiptFileTransaction
+from ..ports.filesystem_transaction import (
+    FileTransactionFactory as ReceiptFileTransactionFactory,
+)
 from .dto import to_data
 from .fingerprint_cache import FingerprintCache
 from .idempotency import IdempotencyEffectBoundary, execute_idempotent
@@ -247,30 +248,12 @@ class ApplicationContext:
     external_mutations: ExternalMutationLedger | None = None
     approvals: ApprovalStore | None = None
     approval_payloads: ApprovalPayloadStore | None = None
+    receipt_file_transactions: ReceiptFileTransactionFactory | None = None
 
     def approval_stores(self) -> tuple[ApprovalStore, ApprovalPayloadStore]:
         if self.approvals is None or self.approval_payloads is None:
             raise ConfigError("Shared approval stores are unavailable")
         return self.approvals, self.approval_payloads
-
-    def file_transaction(
-        self,
-        workspace_root: Path,
-        *,
-        fault_injector: FaultInjector | None = None,
-    ) -> ReceiptFileTransaction:
-        factory = self.file_transactions
-        if factory is None:
-            raise ConfigError("Journaled file transaction factory is unavailable")
-        creator = getattr(factory, "create", None)
-        if fault_injector is None and callable(creator):
-            return cast(ReceiptFileTransaction, creator(workspace_root))
-        if not callable(factory):
-            raise ConfigError("Journaled file transaction factory cannot inject faults")
-        return cast(
-            ReceiptFileTransaction,
-            factory(workspace_root, fault_injector=fault_injector),
-        )
 
     def external_mutation_ledger(self) -> ExternalMutationLedger:
         ledger = self.external_mutations

@@ -21,7 +21,11 @@ from .adapters.capabilities import SystemExecutableLocator
 from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
-from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
+from .adapters.filesystem import (
+    JournaledFileTransactionFactory,
+    LocalFileSystem,
+    ReceiptJournaledFileTransactionFactory,
+)
 from .adapters.git import GitCliRepository
 from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
 from .adapters.github.ticket_project import GhTicketProjectGateway
@@ -165,6 +169,9 @@ from .ports import (
     WorkflowRecordingStore,
     WorkspaceStore,
 )
+from .ports.filesystem_transaction import (
+    FileTransactionFactory as ReceiptFileTransactionFactory,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +208,7 @@ class AdapterOverrides:
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
+    receipt_file_transactions: ReceiptFileTransactionFactory | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +461,9 @@ def build_application(
     )
     filesystem = o.filesystem or LocalFileSystem()
     file_transactions = o.file_transactions or JournaledFileTransactionFactory()
+    receipt_file_transactions = (
+        o.receipt_file_transactions or ReceiptJournaledFileTransactionFactory()
+    )
     git = o.git or GitCliRepository(command, config.server)
     default_github = GhCliGateway(command, config.server)
     github = o.github or default_github
@@ -506,6 +517,7 @@ def build_application(
         approval_payloads=approval_payloads,
         filesystem=filesystem,
         file_transactions=file_transactions,
+        receipt_file_transactions=receipt_file_transactions,
         store=store,
         locks=locks,
         gate=gate,
