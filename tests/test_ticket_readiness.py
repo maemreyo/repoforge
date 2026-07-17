@@ -465,6 +465,7 @@ def test_live_issue_metadata_parses_relations_and_partial_completion_sections() 
                         "Remaining scope:\n- Public adapter remains\n"
                         "New child issues: #92, #93\n"
                         "Unverified work:\n- Remote provider\n"
+                        "Rejected scope:\n- Dynamic Project V2 mutation\n"
                         "Handoff notes:\n- Reuse typed ports"
                     )
                 }
@@ -482,6 +483,7 @@ def test_live_issue_metadata_parses_relations_and_partial_completion_sections() 
     assert state.delivery.partial_completion is not None
     assert state.delivery.partial_completion.remaining_scope == ("Public adapter remains",)
     assert state.delivery.partial_completion.new_child_issues == (92, 93)
+    assert state.delivery.partial_completion.rejected_scope == ("Dynamic Project V2 mutation",)
 
 
 def test_concurrent_derivation_is_deterministic() -> None:

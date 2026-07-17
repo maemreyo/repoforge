@@ -41,7 +41,7 @@ _RELATION_PATTERNS: tuple[tuple[RequirementRelationType, re.Pattern[str]], ...] 
 )
 _PARTIAL_HEADING = re.compile(
     r"(?i)^\s*(?:[-*]\s*)?(?:\*\*)?"
-    r"(verified deliverables|remaining scope|new child issues|unverified work|handoff notes)"
+    r"(verified deliverables|remaining scope|new child issues|unverified work|rejected scope|handoff notes)"
     r"(?:\*\*)?\s*:\s*(.*)$"
 )
 _WAVE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?delivery wave(?:\*\*)?\s*:\s*(\d+)\b")
@@ -105,6 +105,7 @@ def _partial_completion(text: str) -> PartialCompletion | None:
         "verified deliverables": [],
         "remaining scope": [],
         "unverified work": [],
+        "rejected scope": [],
         "handoff notes": [],
     }
     child_issues: set[int] = set()
@@ -143,6 +144,7 @@ def _partial_completion(text: str) -> PartialCompletion | None:
         new_child_issues=tuple(sorted(child_issues))[:64],
         unverified_work=tuple(text_fields["unverified work"][:64]),
         handoff_notes=tuple(text_fields["handoff notes"][:64]),
+        rejected_scope=tuple(text_fields["rejected scope"][:64]),
     )
 
 
@@ -175,6 +177,7 @@ def ticket_delivery_payload(delivery: TicketDeliveryMetadata) -> dict[str, objec
                 "remaining_scope": list(partial.remaining_scope),
                 "new_child_issues": list(partial.new_child_issues),
                 "unverified_work": list(partial.unverified_work),
+                "rejected_scope": list(partial.rejected_scope),
                 "handoff_notes": list(partial.handoff_notes),
                 "has_remaining_scope": partial.has_remaining_scope,
             }

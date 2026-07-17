@@ -237,6 +237,17 @@ def test_operational_graph_is_not_checked_in_and_issue_forms_are_complete() -> N
         "Final verification",
         "Migration / compatibility",
         "Expected PR shape",
+        "Supersedes",
+        "Superseded by",
+        "Split into",
+        "Merged into",
+        "Invalidates",
+        "Verified deliverables",
+        "Remaining scope",
+        "New child issues",
+        "Unverified work",
+        "Rejected scope",
+        "Handoff notes",
     }
     for name in ("initiative.yml", "implementation-ticket.yml"):
         text = (root / ".github/ISSUE_TEMPLATE" / name).read_text(encoding="utf-8")

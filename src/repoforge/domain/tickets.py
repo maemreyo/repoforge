@@ -63,6 +63,7 @@ class PartialCompletion:
     new_child_issues: tuple[int, ...]
     unverified_work: tuple[str, ...]
     handoff_notes: tuple[str, ...]
+    rejected_scope: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name, values in (
@@ -70,6 +71,7 @@ class PartialCompletion:
             ("remaining_scope", self.remaining_scope),
             ("unverified_work", self.unverified_work),
             ("handoff_notes", self.handoff_notes),
+            ("rejected_scope", self.rejected_scope),
         ):
             if not isinstance(values, tuple) or len(values) > 64:
                 raise TicketGraphError(f"{field_name} must be a bounded tuple")
