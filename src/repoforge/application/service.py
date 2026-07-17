@@ -622,6 +622,7 @@ class CodingService:
         operations: list[WorkspaceMutation],
         expected_workspace_fingerprint: str,
         dry_run: bool = False,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._mutate.execute(
@@ -630,6 +631,7 @@ class CodingService:
                     tuple(operations),
                     expected_workspace_fingerprint,
                     dry_run,
+                    idempotency_key,
                 )
             )
         )

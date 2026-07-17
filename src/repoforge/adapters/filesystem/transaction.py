@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import uuid
@@ -27,8 +28,11 @@ from ...domain.filesystem_transaction import (
 )
 
 FaultInjector = Callable[[str], None]
+CommitReceiptFactory = Callable[[str, tuple[str, ...]], tuple[str, bytes]]
 _MANIFEST_SCHEMA_VERSION = 1
 _MAX_ACTIONS = 100
+_MAX_RECEIPT_BYTES = 1_000_000
+_SAFE_RECEIPT_NAME = re.compile(r"^[a-z][a-z0-9_.-]{7,199}$")
 
 
 class JournaledFileTransaction:
@@ -47,6 +51,7 @@ class JournaledFileTransaction:
         self._fault_injector = fault_injector
         root_key = hashlib.sha256(os.fsencode(str(root))).hexdigest()[:24]
         self._journal_root = root.parent / ".repoforge-transactions" / root_key
+        self._receipt_root = root.parent / ".repoforge-transaction-receipts" / root_key
         self.last_stage_device: int | None = None
 
     def _checkpoint(self, point: str) -> None:
@@ -62,17 +67,33 @@ class JournaledFileTransaction:
             if path.is_dir() and (path / "manifest.json").is_file()
         )
 
+    def load_commit_receipt(self, name: str) -> bytes | None:
+        """Read one private transaction-bound receipt without exposing its host path."""
+        path = self._receipt_path(name)
+        if not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file():
+            raise TransactionRecoveryError("Transaction receipt is not a regular file")
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise TransactionRecoveryError(
+                f"Cannot read transaction receipt {name}: {exc}"
+            ) from exc
+
     def commit(
         self,
         plan: TransactionPlan,
         *,
         precommit_validator: Callable[[], None] | None = None,
+        commit_receipt_factory: CommitReceiptFactory | None = None,
     ) -> TransactionReceipt:
         """Validate, stage, durably apply, mark committed, then purge rollback data."""
 
-        actions = self._validate_plan(plan)
+        actions = self._validate_plan(plan, allow_empty=commit_receipt_factory is not None)
         self.recover_pending()
         transaction_id = uuid.uuid4().hex
+        changed = tuple(sorted({path for action in actions for path in self._action_paths(action)}))
         tx_dir = self._journal_root / transaction_id
         manifest: dict[str, object] | None = None
         try:
@@ -84,6 +105,12 @@ class JournaledFileTransaction:
                 self._checkpoint(f"after_apply:{index}")
             if precommit_validator is not None:
                 precommit_validator()
+            if commit_receipt_factory is not None:
+                name, payload = commit_receipt_factory(transaction_id, changed)
+                self._prepare_commit_receipt(tx_dir, manifest, name, payload)
+                self._checkpoint("after_receipt_manifest")
+                self._apply_commit_receipt(tx_dir, manifest)
+                self._checkpoint("after_receipt_apply")
             self._checkpoint("before_commit_marker")
             manifest["phase"] = "committed"
             self._write_manifest(tx_dir, manifest)
@@ -103,8 +130,7 @@ class JournaledFileTransaction:
                 ) from primary
             raise
 
-        changed = sorted({path for action in actions for path in self._action_paths(action)})
-        return TransactionReceipt(transaction_id, tuple(changed))
+        return TransactionReceipt(transaction_id, changed)
 
     def recover_pending(self) -> RecoveryReport:
         """Rollback prepared journals and finalize committed journals idempotently."""
@@ -138,9 +164,14 @@ class JournaledFileTransaction:
                 )
         return RecoveryReport(rolled_back=rolled_back, finalized=finalized)
 
-    def _validate_plan(self, plan: TransactionPlan) -> tuple[TransactionAction, ...]:
+    def _validate_plan(
+        self,
+        plan: TransactionPlan,
+        *,
+        allow_empty: bool = False,
+    ) -> tuple[TransactionAction, ...]:
         actions = tuple(plan.actions)
-        if not actions:
+        if not actions and not allow_empty:
             raise TransactionValidationError("Transaction plan must contain at least one action")
         if len(actions) > _MAX_ACTIONS:
             raise TransactionValidationError(
@@ -227,6 +258,11 @@ class JournaledFileTransaction:
 
     def _absolute(self, relative: str) -> Path:
         return self.root / Path(*PurePosixPath(relative).parts)
+
+    def _receipt_path(self, name: str) -> Path:
+        if not _SAFE_RECEIPT_NAME.fullmatch(name):
+            raise TransactionValidationError("Unsafe transaction receipt name")
+        return self._receipt_root / name
 
     def _virtual_exists(self, relative: str, state: dict[str, bool]) -> bool:
         if relative not in state:
@@ -327,6 +363,59 @@ class JournaledFileTransaction:
             candidate = candidate.parent
         return list(reversed(missing))
 
+    def _prepare_commit_receipt(
+        self,
+        tx_dir: Path,
+        manifest: dict[str, object],
+        name: str,
+        payload: bytes,
+    ) -> None:
+        target = self._receipt_path(name)
+        if target.exists() or target.is_symlink():
+            raise TransactionValidationError("Transaction receipt already exists")
+        if not payload or len(payload) > _MAX_RECEIPT_BYTES:
+            raise TransactionValidationError(
+                f"Transaction receipt must contain between 1 and {_MAX_RECEIPT_BYTES} bytes"
+            )
+        stage = tx_dir / "commit-receipt"
+        self._write_staged(stage, payload, 0o600)
+        manifest["commit_receipt"] = {"name": name, "stage": "commit-receipt"}
+        self._write_manifest(tx_dir, manifest)
+
+    def _apply_commit_receipt(
+        self,
+        tx_dir: Path,
+        manifest: dict[str, object],
+    ) -> None:
+        raw = manifest.get("commit_receipt")
+        if not isinstance(raw, dict):
+            raise TransactionRecoveryError("Transaction commit receipt metadata is invalid")
+        name = self._required_string(raw, "name")
+        stage_name = self._required_string(raw, "stage")
+        target = self._receipt_path(name)
+        stage = tx_dir / stage_name
+        if target.exists() or target.is_symlink():
+            raise TransactionValidationError("Transaction receipt already exists")
+        self._receipt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self._receipt_root, 0o700)
+        os.replace(stage, target)
+        os.chmod(target, 0o600)
+        self._fsync_dirs((target.parent, tx_dir))
+
+    def _rollback_commit_receipt(self, manifest: dict[str, object]) -> None:
+        raw = manifest.get("commit_receipt")
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            raise TransactionRecoveryError("Transaction commit receipt metadata is invalid")
+        target = self._receipt_path(self._required_string(raw, "name"))
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise TransactionRecoveryError("Transaction receipt rollback target is unsafe")
+        existed = target.exists()
+        target.unlink(missing_ok=True)
+        if existed:
+            self._fsync_dir(target.parent)
+
     def _write_staged(self, path: Path, data: bytes, mode: int) -> None:
         with path.open("xb") as handle:
             handle.write(data)
@@ -364,6 +453,13 @@ class JournaledFileTransaction:
         actions = payload.get("actions")
         if not isinstance(actions, list):
             raise TransactionRecoveryError("Transaction manifest actions must be an array")
+        commit_receipt = payload.get("commit_receipt")
+        if commit_receipt is not None:
+            if not isinstance(commit_receipt, dict):
+                raise TransactionRecoveryError("Transaction commit receipt metadata is invalid")
+            self._receipt_path(self._required_string(commit_receipt, "name"))
+            if self._required_string(commit_receipt, "stage") != "commit-receipt":
+                raise TransactionRecoveryError("Transaction commit receipt stage is invalid")
         return payload
 
     def _apply_action(
@@ -406,6 +502,7 @@ class JournaledFileTransaction:
         self._fsync_dirs((source.parent, destination.parent))
 
     def _rollback(self, tx_dir: Path, manifest: dict[str, object]) -> None:
+        self._rollback_commit_receipt(manifest)
         raw_actions = manifest.get("actions")
         if not isinstance(raw_actions, list):
             raise TransactionRecoveryError("Transaction manifest actions are invalid")

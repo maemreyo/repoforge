@@ -579,6 +579,7 @@ class WorkspaceMutateInput(StrictModel):
     expected_head_sha: GitObjectId
     expected_workspace_fingerprint: Sha256
     dry_run: bool = False
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
 
 
 class MutationDiagnostic(StrictModel):

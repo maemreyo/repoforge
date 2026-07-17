@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment
 
+import repoforge.application.workspace.mutate as mutate_module
 from repoforge.application.workspace.mutate import (
     ApplyPatchMutation,
     CreateMutation,
@@ -16,7 +21,8 @@ from repoforge.application.workspace.mutate import (
     TextReplacement,
     WriteMutation,
 )
-from repoforge.domain.errors import SecurityError, WorkspaceError
+from repoforge.domain.errors import ConfigError, ErrorCode, SecurityError, WorkspaceError
+from repoforge.domain.filesystem_transaction import SimulatedTransactionCrash
 
 
 def _sha(path: Path) -> str:
@@ -281,3 +287,216 @@ def test_denied_paths_and_binary_text_replacements_fail_closed(
             ],
             expected_workspace_fingerprint=binary_status["workspace_fingerprint"],
         )
+
+
+def test_keyed_mutate_replays_same_transaction_and_rejects_conflicting_request(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 keyed mutate")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    operation = CreateMutation(path="keyed.txt", content="created once\n")
+
+    first = service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key="workspace-mutate-key-0001",
+    )
+    replay = service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key="workspace-mutate-key-0001",
+    )
+
+    assert replay == first
+    assert first["transaction_id"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    assert (root / "keyed.txt").read_text(encoding="utf-8") == "created once\n"
+    receipt = next((root.parent / ".repoforge-transaction-receipts").rglob("*.json"))
+    assert "created once" not in receipt.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError) as conflict:
+        service.workspace_mutate(
+            workspace_id,
+            [CreateMutation(path="other.txt", content="different\n")],
+            expected_workspace_fingerprint=before["workspace_fingerprint"],
+            idempotency_key="workspace-mutate-key-0001",
+        )
+    assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+    assert not (root / "other.txt").exists()
+
+
+def test_cross_process_keyed_mutate_executes_transaction_once(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 concurrent keyed mutate")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    start = tmp_path / "start"
+    worker = tmp_path / "mutate_worker.py"
+    first_result = tmp_path / "first.json"
+    second_result = tmp_path / "second.json"
+    worker.write_text(
+        f"""import json
+import sys
+import time
+from pathlib import Path
+from repoforge.application.service import CodingService
+from repoforge.application.workspace.mutate import CreateMutation
+from repoforge.config import load_config
+
+start = Path({str(start)!r})
+while not start.exists():
+    time.sleep(0.01)
+service = CodingService(load_config(Path({str(forge_env.config_path)!r})))
+result = service.workspace_mutate(
+    {workspace_id!r},
+    [CreateMutation(path='concurrent-mutate.txt', content='effect once\\n')],
+    expected_workspace_fingerprint={before["workspace_fingerprint"]!r},
+    idempotency_key='workspace-mutate-concurrent-key-0001',
+)
+Path(sys.argv[1]).write_text(json.dumps(result, sort_keys=True), encoding='utf-8')
+""",
+        encoding="utf-8",
+    )
+
+    first = subprocess.Popen([sys.executable, str(worker), str(first_result)])
+    second = subprocess.Popen([sys.executable, str(worker), str(second_result)])
+    try:
+        time.sleep(0.1)
+        start.write_text("go\n", encoding="utf-8")
+        assert first.wait(timeout=20) == 0
+        assert second.wait(timeout=20) == 0
+    finally:
+        if first.poll() is None:
+            first.kill()
+        if second.poll() is None:
+            second.kill()
+
+    assert json.loads(first_result.read_text(encoding="utf-8")) == json.loads(
+        second_result.read_text(encoding="utf-8")
+    )
+    root = Path(service.workspace_status(workspace_id)["path"])
+    assert (root / "concurrent-mutate.txt").read_text(encoding="utf-8") == "effect once\n"
+    receipts = list((root.parent / ".repoforge-transaction-receipts").rglob("*.json"))
+    assert len(receipts) == 1
+
+
+def test_keyed_mutate_crash_after_commit_marker_replays_committed_receipt(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 keyed crash after commit")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    original = mutate_module.JournaledFileTransaction
+
+    class CrashOnceTransaction(original):
+        crashed = False
+
+        def _checkpoint(self, point: str) -> None:
+            if point == "after_commit_marker" and not type(self).crashed:
+                type(self).crashed = True
+                raise SimulatedTransactionCrash(point)
+            super()._checkpoint(point)
+
+    monkeypatch.setattr(mutate_module, "JournaledFileTransaction", CrashOnceTransaction)
+    operation = CreateMutation(path="committed-once.txt", content="one physical mutation\n")
+    with pytest.raises(SimulatedTransactionCrash):
+        service.workspace_mutate(
+            workspace_id,
+            [operation],
+            expected_workspace_fingerprint=before["workspace_fingerprint"],
+            idempotency_key="workspace-mutate-crash-key-0001",
+        )
+
+    replay = service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key="workspace-mutate-crash-key-0001",
+    )
+
+    root = Path(service.workspace_status(workspace_id)["path"])
+    assert (root / "committed-once.txt").read_text(encoding="utf-8") == ("one physical mutation\n")
+    assert replay["changed"] is True
+    assert replay["transaction_id"]
+
+
+def test_keyed_mutate_crash_before_commit_rolls_back_then_retries_safely(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 keyed crash before commit")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    original = mutate_module.JournaledFileTransaction
+
+    class CrashOnceTransaction(original):
+        crashed = False
+
+        def _checkpoint(self, point: str) -> None:
+            if point == "after_receipt_apply" and not type(self).crashed:
+                type(self).crashed = True
+                raise SimulatedTransactionCrash(point)
+            super()._checkpoint(point)
+
+    monkeypatch.setattr(mutate_module, "JournaledFileTransaction", CrashOnceTransaction)
+    operations = [
+        CreateMutation(path="first.txt", content="first\n"),
+        CreateMutation(path="second.txt", content="second\n"),
+    ]
+    with pytest.raises(SimulatedTransactionCrash):
+        service.workspace_mutate(
+            workspace_id,
+            operations,
+            expected_workspace_fingerprint=before["workspace_fingerprint"],
+            idempotency_key="workspace-mutate-crash-key-0002",
+        )
+
+    result = service.workspace_mutate(
+        workspace_id,
+        operations,
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key="workspace-mutate-crash-key-0002",
+    )
+
+    root = Path(service.workspace_status(workspace_id)["path"])
+    assert (root / "first.txt").read_text(encoding="utf-8") == "first\n"
+    assert (root / "second.txt").read_text(encoding="utf-8") == "second\n"
+    assert result["changed_paths"] == ["first.txt", "second.txt"]
+
+
+def test_corrupt_keyed_mutate_receipt_fails_closed(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 corrupt mutate receipt")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    operation = CreateMutation(path="corrupt-receipt.txt", content="stable\n")
+    service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key="workspace-mutate-corrupt-key-0001",
+    )
+
+    root = Path(service.workspace_status(workspace_id)["path"])
+    receipts = root.parent / ".repoforge-transaction-receipts"
+    receipt = next(receipts.rglob("workspace_mutate-*.json"))
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["result"]["changed"] = "not-a-boolean"
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ConfigError) as corrupt:
+        service.workspace_mutate(
+            workspace_id,
+            [operation],
+            expected_workspace_fingerprint=before["workspace_fingerprint"],
+            idempotency_key="workspace-mutate-corrupt-key-0001",
+        )
+    assert corrupt.value.code is ErrorCode.STATE_PERSISTENCE_FAILED
+    assert (root / "corrupt-receipt.txt").read_text(encoding="utf-8") == "stable\n"
