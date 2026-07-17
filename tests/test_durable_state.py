@@ -5,12 +5,19 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from repoforge.adapters.persistence.json_state_lifecycle import JsonStateLifecycleManager
 from repoforge.adapters.persistence.json_state_repository import JsonStateRepository
 from repoforge.domain.durable_state import Revision, SchemaVersion, StateEnvelope
 from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.state_lifecycle import (
+    MigrationDirection,
+    StateMigrationRegistry,
+    StateMigrationStep,
+)
 from repoforge.testing.fakes import (
     FixedClock,
     InMemoryLockManager,
@@ -287,3 +294,369 @@ def test_json_state_repository_rejects_unsafe_collection_and_record_ids(
     store = _store(tmp_path)
     with pytest.raises(RepoForgeError):
         store.read("../escape")
+
+
+def _add_display_name(payload: dict[str, object]) -> dict[str, object]:
+    migrated = dict(payload)
+    migrated["display_name"] = migrated.pop("name")
+    return migrated
+
+
+def _remove_display_name(payload: dict[str, object]) -> dict[str, object]:
+    migrated = dict(payload)
+    migrated["name"] = migrated.pop("display_name")
+    return migrated
+
+
+def _add_enabled(payload: dict[str, object]) -> dict[str, object]:
+    return {**payload, "enabled": True}
+
+
+def _remove_enabled(payload: dict[str, object]) -> dict[str, object]:
+    migrated = dict(payload)
+    migrated.pop("enabled")
+    return migrated
+
+
+def _migration_registry() -> StateMigrationRegistry:
+    return StateMigrationRegistry(
+        (
+            StateMigrationStep(
+                collection="demo_records",
+                from_version=SchemaVersion(1),
+                to_version=SchemaVersion(2),
+                forward=_add_display_name,
+                reverse=_remove_display_name,
+            ),
+            StateMigrationStep(
+                collection="demo_records",
+                from_version=SchemaVersion(2),
+                to_version=SchemaVersion(3),
+                forward=_add_enabled,
+                reverse=_remove_enabled,
+            ),
+        )
+    )
+
+
+def test_migration_registry_plans_noop_and_ordered_multi_step_paths() -> None:
+    registry = _migration_registry()
+
+    noop = registry.plan("demo_records", SchemaVersion(2), SchemaVersion(2))
+    assert noop.direction is MigrationDirection.FORWARD
+    assert noop.steps == ()
+    assert len(noop.plan_digest) == 64
+
+    plan = registry.plan("demo_records", SchemaVersion(1), SchemaVersion(3))
+    assert plan.direction is MigrationDirection.FORWARD
+    assert tuple((step.from_version.value, step.to_version.value) for step in plan.steps) == (
+        (1, 2),
+        (2, 3),
+    )
+    assert registry.migrate_payload(plan, {"name": "alpha"}) == {
+        "display_name": "alpha",
+        "enabled": True,
+    }
+
+
+def test_migration_registry_requires_explicit_reverse_steps() -> None:
+    registry = _migration_registry()
+    plan = registry.plan("demo_records", SchemaVersion(3), SchemaVersion(1))
+    assert plan.direction is MigrationDirection.REVERSE
+    assert tuple((step.from_version.value, step.to_version.value) for step in plan.steps) == (
+        (2, 3),
+        (1, 2),
+    )
+    assert registry.migrate_payload(
+        plan,
+        {"display_name": "alpha", "enabled": True},
+    ) == {"name": "alpha"}
+
+    one_way = StateMigrationRegistry(
+        (
+            StateMigrationStep(
+                collection="one_way",
+                from_version=SchemaVersion(1),
+                to_version=SchemaVersion(2),
+                forward=lambda payload: {**payload, "version": 2},
+            ),
+        )
+    )
+    with pytest.raises(RepoForgeError) as missing_reverse:
+        one_way.plan("one_way", SchemaVersion(2), SchemaVersion(1))
+    assert missing_reverse.value.code is ErrorCode.STATE_MIGRATION_INVALID
+
+
+def test_migration_registry_rejects_duplicate_gapped_and_future_paths() -> None:
+    step = StateMigrationStep(
+        collection="demo_records",
+        from_version=SchemaVersion(1),
+        to_version=SchemaVersion(2),
+        forward=lambda payload: dict(payload),
+    )
+    with pytest.raises(RepoForgeError) as duplicate:
+        StateMigrationRegistry((step, step))
+    assert duplicate.value.code is ErrorCode.STATE_MIGRATION_INVALID
+
+    registry = StateMigrationRegistry((step,))
+    with pytest.raises(RepoForgeError) as gap:
+        registry.plan("demo_records", SchemaVersion(1), SchemaVersion(3))
+    assert gap.value.code is ErrorCode.STATE_MIGRATION_INVALID
+
+    with pytest.raises(RepoForgeError) as future:
+        registry.plan("demo_records", SchemaVersion(4), SchemaVersion(2))
+    assert future.value.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
+
+    with pytest.raises(RepoForgeError) as invalid_transform:
+        registry.migrate_payload(
+            registry.plan("demo_records", SchemaVersion(1), SchemaVersion(2)),
+            cast(dict[str, object], {"unsupported": object()}),
+        )
+    assert invalid_transform.value.code is ErrorCode.STATE_MIGRATION_INVALID
+
+
+def _write_raw_state(
+    root: Path,
+    *,
+    collection: str,
+    record_id: str,
+    version: int,
+    revision: int,
+    payload: dict[str, object],
+) -> bytes:
+    directory = root / collection
+    directory.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(
+            {
+                "payload": payload,
+                "record_id": record_id,
+                "revision": revision,
+                "schema_version": version,
+            },
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode()
+    (directory / f"{record_id}.json").write_bytes(encoded)
+    return encoded
+
+
+def _read_raw_state(root: Path, collection: str, record_id: str) -> dict[str, object]:
+    return json.loads((root / collection / f"{record_id}.json").read_bytes())
+
+
+def test_json_state_lifecycle_migrates_mixed_versions_with_backup_and_idempotency(
+    tmp_path: Path,
+) -> None:
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=1,
+        revision=1,
+        payload={"name": "alpha"},
+    )
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-2",
+        version=2,
+        revision=4,
+        payload={"display_name": "beta"},
+    )
+    backup_observed: list[bool] = []
+
+    def assert_backup_precedes_write(phase: str, record_id: str, index: int) -> None:
+        if phase == "before_migration_write":
+            backup_observed.append(
+                (
+                    tmp_path / ".state-lifecycle" / "backups" / preview.plan_id / "manifest.json"
+                ).is_file()
+            )
+
+    manager = JsonStateLifecycleManager(
+        tmp_path,
+        InMemoryLockManager(),
+        fault_injector=assert_backup_precedes_write,
+    )
+    preview = manager.preview_migration(
+        collection="demo_records",
+        registry=_migration_registry(),
+        target_version=SchemaVersion(3),
+        max_records=10,
+    )
+    assert preview.migrated_records == 2
+    assert preview.unchanged_records == 0
+    assert tuple(item.record_id for item in preview.records) == ("demo-1", "demo-2")
+    assert all(len(item.source_checksum) == 64 for item in preview.records)
+    assert all(len(item.target_checksum) == 64 for item in preview.records)
+
+    report = manager.apply_migration(preview, registry=_migration_registry())
+    assert report.processed == 2
+    assert report.migrated == 2
+    assert report.unchanged == 0
+    assert report.rolled_back is False
+    assert backup_observed == [True, True]
+    assert _read_raw_state(tmp_path, "demo_records", "demo-1") == {
+        "payload": {"display_name": "alpha", "enabled": True},
+        "record_id": "demo-1",
+        "revision": 2,
+        "schema_version": 3,
+    }
+    assert _read_raw_state(tmp_path, "demo_records", "demo-2") == {
+        "payload": {"display_name": "beta", "enabled": True},
+        "record_id": "demo-2",
+        "revision": 5,
+        "schema_version": 3,
+    }
+
+    repeated = manager.apply_migration(preview, registry=_migration_registry())
+    assert repeated == report
+
+
+def test_json_state_lifecycle_rejects_stale_and_corrupt_migration_previews(
+    tmp_path: Path,
+) -> None:
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=1,
+        revision=1,
+        payload={"name": "alpha"},
+    )
+    manager = JsonStateLifecycleManager(tmp_path, InMemoryLockManager())
+    preview = manager.preview_migration(
+        collection="demo_records",
+        registry=_migration_registry(),
+        target_version=SchemaVersion(3),
+    )
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=1,
+        revision=2,
+        payload={"name": "changed"},
+    )
+    with pytest.raises(RepoForgeError) as stale:
+        manager.apply_migration(preview, registry=_migration_registry())
+    assert stale.value.code is ErrorCode.STATE_MIGRATION_STALE
+
+    (tmp_path / "demo_records" / "demo-1.json").write_text("{bad", encoding="utf-8")
+    with pytest.raises(RepoForgeError) as corrupt:
+        manager.preview_migration(
+            collection="demo_records",
+            registry=_migration_registry(),
+            target_version=SchemaVersion(3),
+        )
+    assert corrupt.value.code is ErrorCode.STATE_CORRUPT
+
+
+def test_json_state_lifecycle_rolls_back_failed_migration_exactly(tmp_path: Path) -> None:
+    original_1 = _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=1,
+        revision=1,
+        payload={"name": "alpha"},
+    )
+    original_2 = _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-2",
+        version=1,
+        revision=1,
+        payload={"name": "beta"},
+    )
+
+    def fail_second_write(phase: str, record_id: str, index: int) -> None:
+        if phase == "before_migration_write" and index == 1:
+            raise OSError("injected migration write failure")
+
+    manager = JsonStateLifecycleManager(
+        tmp_path,
+        InMemoryLockManager(),
+        fault_injector=fail_second_write,
+    )
+    preview = manager.preview_migration(
+        collection="demo_records",
+        registry=_migration_registry(),
+        target_version=SchemaVersion(3),
+    )
+    with pytest.raises(RepoForgeError) as failed:
+        manager.apply_migration(preview, registry=_migration_registry())
+    assert failed.value.code is ErrorCode.STATE_MIGRATION_FAILED
+    assert (tmp_path / "demo_records" / "demo-1.json").read_bytes() == original_1
+    assert (tmp_path / "demo_records" / "demo-2.json").read_bytes() == original_2
+
+
+def test_json_state_lifecycle_recovers_interrupted_migration_after_restart(
+    tmp_path: Path,
+) -> None:
+    original_1 = _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=1,
+        revision=1,
+        payload={"name": "alpha"},
+    )
+    original_2 = _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-2",
+        version=1,
+        revision=1,
+        payload={"name": "beta"},
+    )
+
+    def crash_second_write(phase: str, record_id: str, index: int) -> None:
+        if phase == "before_migration_write" and index == 1:
+            raise SystemExit("simulated process crash")
+
+    manager = JsonStateLifecycleManager(
+        tmp_path,
+        InMemoryLockManager(),
+        fault_injector=crash_second_write,
+    )
+    preview = manager.preview_migration(
+        collection="demo_records",
+        registry=_migration_registry(),
+        target_version=SchemaVersion(3),
+    )
+    with pytest.raises(SystemExit):
+        manager.apply_migration(preview, registry=_migration_registry())
+    assert (tmp_path / "demo_records" / "demo-1.json").read_bytes() != original_1
+
+    restarted = JsonStateLifecycleManager(tmp_path, InMemoryLockManager())
+    assert restarted.recover_incomplete_migrations() == (preview.plan_id,)
+    assert (tmp_path / "demo_records" / "demo-1.json").read_bytes() == original_1
+    assert (tmp_path / "demo_records" / "demo-2.json").read_bytes() == original_2
+
+
+def test_json_state_lifecycle_noop_preview_does_not_create_backup(tmp_path: Path) -> None:
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=3,
+        revision=1,
+        payload={"display_name": "alpha", "enabled": True},
+    )
+    manager = JsonStateLifecycleManager(tmp_path, InMemoryLockManager())
+    preview = manager.preview_migration(
+        collection="demo_records",
+        registry=_migration_registry(),
+        target_version=SchemaVersion(3),
+    )
+    assert preview.migrated_records == 0
+    assert preview.unchanged_records == 1
+    report = manager.apply_migration(preview, registry=_migration_registry())
+    assert report.migrated == 0
+    assert report.unchanged == 1
+    assert not (tmp_path / ".state-lifecycle" / "backups" / preview.plan_id).exists()
