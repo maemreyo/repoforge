@@ -28,13 +28,13 @@ def _capabilities(*flags: str, legacy: bool = False) -> ClientCapabilities:
     )
 
 
-def test_default_registry_keeps_verify_alias_only_in_contract_v1() -> None:
+def test_default_registry_promotes_verify_to_canonical_in_contract_v2() -> None:
     registry = default_tool_contract_registry()
 
     assert registry.current_version == 2
     assert registry.supported_versions == (1, 2)
     assert registry.tool_names(1, _REGISTERED) == _REGISTERED
-    assert registry.tool_names(2, _REGISTERED) == frozenset({"repo_list", "workspace_run_profile"})
+    assert registry.tool_names(2, _REGISTERED) == _REGISTERED
 
 
 def test_normal_client_defaults_to_current_contract() -> None:
@@ -102,9 +102,11 @@ def test_alias_metadata_and_annotation_parity_are_explicit() -> None:
             "Deprecated compatibility alias; migrate to workspace_run_profile before "
             "tool contract v2."
         ),
+        "promoted_in": 2,
     }
     assert alias.active_in(1) is True
     assert alias.active_in(2) is False
+    assert alias.promoted_in == 2
     registry.validate_alias_annotations(
         1,
         {
@@ -134,6 +136,24 @@ def test_removal_without_a_reviewed_deprecation_window_is_rejected() -> None:
                     deprecated_in=2,
                     removed_in=2,
                     notice="Deprecated; migrate to new_tool.",
+                ),
+            ),
+        )
+
+
+def test_alias_promotion_before_removal_is_rejected() -> None:
+    with pytest.raises(ValueError, match="cannot be promoted"):
+        ToolContractRegistry(
+            current_version=2,
+            supported_versions=(1, 2),
+            aliases=(
+                ToolAlias(
+                    alias="old_tool",
+                    canonical="new_tool",
+                    deprecated_in=1,
+                    removed_in=2,
+                    notice="Deprecated; promoted later.",
+                    promoted_in=1,
                 ),
             ),
         )

@@ -18,21 +18,26 @@ def test_tool_surface_hash_is_deterministic() -> None:
 
 
 @pytest.mark.anyio
-async def test_release_contract_carries_current_and_legacy_alias_evidence() -> None:
+async def test_release_contract_carries_promoted_verify_and_legacy_alias_evidence() -> None:
     contract = await build_release_contract()
 
     assert contract["contract_version"] == 2
     tool_contract = contract["mcp"]["tool_contract"]
     assert tool_contract["current_version"] == 2
     assert tool_contract["supported_versions"] == [1, 2]
-    assert [tool["name"] for tool in contract["mcp"]["tools"]].count("workspace_verify") == 0
+    current_verify = [
+        tool for tool in contract["mcp"]["tools"] if tool["name"] == "workspace_verify"
+    ]
+    assert len(current_verify) == 1
+    assert "mode" in current_verify[0]["inputSchema"]["properties"]
     legacy_alias = tool_contract["legacy_alias_tools"][0]
-    canonical = next(
+    legacy_canonical = next(
         tool for tool in contract["mcp"]["tools"] if tool["name"] == "workspace_run_profile"
     )
     assert legacy_alias["name"] == "workspace_verify"
     assert legacy_alias["description"].startswith("Deprecated compatibility alias")
-    assert legacy_alias["annotations"] == canonical["annotations"]
+    assert legacy_alias["annotations"] == legacy_canonical["annotations"]
+    assert legacy_alias["inputSchema"] == legacy_canonical["inputSchema"]
 
 
 def test_tool_surface_hash_does_not_depend_on_ast_unparse(
@@ -132,6 +137,7 @@ async def test_mcp_protocol_contract_and_annotations(
             "workspace_apply_patch",
             "workspace_restore_paths",
             "workspace_diff",
+            "workspace_verify",
             "workspace_run_profile",
             "workspace_run_diagnostic",
             "workspace_hygiene_status",
@@ -213,6 +219,28 @@ async def test_mcp_protocol_contract_and_annotations(
             "background",
             "force_rerun",
         }
+        workspace_verify = tools["workspace_verify"]
+        assert workspace_verify.annotations.readOnlyHint is False
+        assert workspace_verify.annotations.destructiveHint is False
+        assert workspace_verify.annotations.openWorldHint is False
+        assert set(workspace_verify.inputSchema["properties"]) == {
+            "workspace_id",
+            "mode",
+            "diagnostic_id",
+            "selector",
+            "selector2",
+            "profile_name",
+            "argv",
+            "working_directory",
+            "expected_fingerprint",
+            "background",
+            "intent",
+            "expectation",
+            "expected_failure_class",
+            "force_rerun",
+            "impact_paths",
+            "artifact_output_path",
+        }
         assert tools["workspace_create"].description == (
             "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\n"
             "retries. Create one workspace per issue; pass issue_ids only when several dependent\n"
@@ -287,19 +315,28 @@ async def test_mcp_protocol_contract_and_annotations(
 
 
 @pytest.mark.anyio
-async def test_versioned_verify_alias_window_routes_to_canonical_profile(
+async def test_versioned_verify_promotion_preserves_v1_profile_alias(
     forge_env: ForgeEnvironment,
 ) -> None:
     current_server = create_server(forge_env.config_path, contract_version=2)
     async with create_connected_server_and_client_session(current_server) as session:
-        current_tools = {tool.name for tool in (await session.list_tools()).tools}
-        assert "workspace_verify" not in current_tools
-        rejected = await session.call_tool("workspace_verify", {"workspace_id": "missing"})
-        assert rejected.isError is True
-        rendered = "\n".join(
-            item.text for item in rejected.content if getattr(item, "type", None) == "text"
+        current_tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+        verify_tool = current_tools["workspace_verify"]
+        assert "mode" in verify_tool.inputSchema["properties"]
+        created = await session.call_tool(
+            "workspace_create",
+            {"repo_id": "demo", "task_slug": "canonical verify plan"},
         )
-        assert "tool contract v2" in rendered
+        assert created.isError is False
+        assert created.structuredContent is not None
+        planned = await session.call_tool(
+            "workspace_verify",
+            {"workspace_id": created.structuredContent["workspace_id"], "mode": "plan"},
+        )
+        assert planned.isError is False
+        assert planned.structuredContent is not None
+        assert planned.structuredContent["selected_mode"] == "plan"
+        assert planned.structuredContent["outcome"] == "planned"
 
     legacy_server = create_server(forge_env.config_path, contract_version=1)
     async with create_connected_server_and_client_session(legacy_server) as session:

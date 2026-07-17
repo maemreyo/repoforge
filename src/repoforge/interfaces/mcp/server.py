@@ -91,6 +91,7 @@ class ContractAwareFastMCP(FastMCP[None]):
             for alias in self._contract_registry.aliases
             if alias.active_in(version)
         }
+        tools_by_name = {tool.name: tool for tool in tools}
         visible: list[McpTool] = []
         for tool in tools:
             if tool.name not in allowed:
@@ -99,8 +100,23 @@ class ContractAwareFastMCP(FastMCP[None]):
             if alias is None:
                 visible.append(tool)
                 continue
-            description = f"{alias.notice} {tool.description or ''}".strip()
-            visible.append(tool.model_copy(update={"description": description}))
+            canonical = tools_by_name.get(alias.canonical)
+            if canonical is None:
+                raise ValueError(
+                    f"Compatibility alias {alias.alias!r} targets missing tool {alias.canonical!r}"
+                )
+            description = f"{alias.notice} {canonical.description or ''}".strip()
+            visible.append(
+                tool.model_copy(
+                    update={
+                        "title": f"{canonical.title or canonical.name} (deprecated alias)",
+                        "description": description,
+                        "inputSchema": canonical.inputSchema,
+                        "outputSchema": canonical.outputSchema,
+                        "annotations": canonical.annotations,
+                    }
+                )
+            )
         # Resolve $defs in every tool's input schema so clients see concrete types.
         resolved: list[McpTool] = []
         for tool in visible:
@@ -117,6 +133,14 @@ class ContractAwareFastMCP(FastMCP[None]):
             raise ValueError(
                 f"Tool {name!r} is not available in RepoForge tool contract v{version}"
             )
+        active_aliases = {
+            alias.alias: alias
+            for alias in self._contract_registry.aliases
+            if alias.active_in(version)
+        }
+        alias = active_aliases.get(name)
+        if alias is not None:
+            return await super().call_tool(alias.canonical, arguments)
         return await super().call_tool(name, arguments)
 
 
@@ -938,13 +962,48 @@ def create_server(
         )
 
     @mcp.tool(
-        title="Verify workspace (deprecated alias)",
+        title="Plan or run workspace verification",
         annotations=LOCAL_MUTATE,
         structured_output=True,
     )
-    def workspace_verify(workspace_id: str, profile_name: str | None = None) -> dict[str, Any]:
-        """Use this compatibility alias only while migrating to workspace_run_profile."""
-        return bounded_service.call("workspace_verify", workspace_id, profile_name)
+    def workspace_verify(
+        workspace_id: str,
+        mode: Literal["plan", "auto", "diagnostic", "profile", "adhoc"] = "auto",
+        diagnostic_id: str | None = None,
+        selector: str | list[str] | None = None,
+        selector2: str | list[str] | None = None,
+        profile_name: str | None = None,
+        argv: list[str] | None = None,
+        working_directory: str | None = None,
+        expected_fingerprint: str | None = None,
+        background: bool = False,
+        intent: Literal["tdd_red", "tdd_green", "refactor", "pre_commit", "final"] = "final",
+        expectation: Literal["none", "pass", "fail"] = "none",
+        expected_failure_class: str | None = None,
+        force_rerun: bool = False,
+        impact_paths: list[str] | None = None,
+        artifact_output_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this to plan or run unified verification; auto fails safe to the final profile."""
+        return bounded_service.call(
+            "workspace_verify",
+            workspace_id,
+            mode,
+            diagnostic_id,
+            selector,
+            selector2,
+            profile_name,
+            tuple(argv) if argv is not None else None,
+            working_directory,
+            expected_fingerprint,
+            background,
+            intent,
+            expectation,
+            expected_failure_class,
+            force_rerun,
+            tuple(impact_paths or ()),
+            artifact_output_path,
+        )
 
     @mcp.tool(
         title="Commit verified changes",

@@ -23,6 +23,7 @@ from ...domain.code_intelligence import CodeIntelligenceStatus
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.evidence import evidence_payload
 from ...domain.policy import assert_path_allowed
+from ...domain.verification import VerificationIntent
 from ..code_intelligence import CodeIntelligenceAnalyzer, CodeIntelligenceCommand
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
@@ -39,6 +40,8 @@ T = TypeVar("T")
 @dataclass(frozen=True, slots=True)
 class WorkspaceAssessmentCommand:
     workspace_id: str
+    impact_paths: tuple[str, ...] = ()
+    intent: VerificationIntent | str | None = None
 
 
 class WorkspaceAssessmentReader:
@@ -211,11 +214,19 @@ class WorkspaceAssessmentReader:
             status_result: Any | None = None
             try:
                 status_result = self._status.execute(WorkspaceStatusCommand(command.workspace_id))
+                selected_paths = (
+                    command.impact_paths
+                    if command.impact_paths
+                    else tuple(status_result.changed_paths)
+                )
+                allowed_paths = [
+                    assert_path_allowed(item, repo) for item in sorted(set(selected_paths))
+                ]
                 changed_paths = evidence(
                     snapshot,
                     status=AssessmentEvidenceStatus.CURRENT,
                     coverage=AssessmentCoverage.COMPLETE,
-                    value={"paths": sorted(status_result.changed_paths)},
+                    value={"paths": allowed_paths},
                 )
                 change_budget = evidence(
                     snapshot,
@@ -223,9 +234,6 @@ class WorkspaceAssessmentReader:
                     coverage=AssessmentCoverage.COMPLETE,
                     value=dict(status_result.change_metrics),
                 )
-                allowed_paths = [
-                    assert_path_allowed(item, repo) for item in sorted(status_result.changed_paths)
-                ]
                 path_policy = evidence(
                     snapshot,
                     status=AssessmentEvidenceStatus.CURRENT,
@@ -258,6 +266,7 @@ class WorkspaceAssessmentReader:
                         command.workspace_id,
                         expected_head_sha=snapshot.head_sha,
                         expected_fingerprint=snapshot.workspace_fingerprint,
+                        changed_paths_override=(command.impact_paths or None),
                     )
                 )
                 intelligence_payload = to_data(analysis.result)
@@ -425,6 +434,7 @@ class WorkspaceAssessmentReader:
                 repo.risk_policy,
                 available_profiles=set(repo.profiles),
                 available_diagnostics=set(repo.diagnostics),
+                intent=command.intent,
             )
             self._assert_current(snapshot, repo, path)
             return validate_workspace_assessment(

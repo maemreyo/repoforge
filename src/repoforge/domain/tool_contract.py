@@ -37,6 +37,7 @@ class ToolAlias:
     deprecated_in: int
     removed_in: int
     notice: str
+    promoted_in: int | None = None
 
     def active_in(self, version: int) -> bool:
         return self.deprecated_in <= version < self.removed_in
@@ -48,6 +49,7 @@ class ToolAlias:
             "deprecated_in": self.deprecated_in,
             "removed_in": self.removed_in,
             "notice": self.notice,
+            "promoted_in": self.promoted_in,
         }
 
 
@@ -87,6 +89,13 @@ class ToolContractRegistry:
                 )
             if not alias.notice.strip():
                 raise ValueError(f"Alias {alias.alias!r} requires a deprecation notice")
+            if alias.promoted_in is not None:
+                if alias.promoted_in not in self.supported_versions:
+                    raise ValueError(f"Alias {alias.alias!r} has an unsupported promotion version")
+                if alias.promoted_in < alias.removed_in:
+                    raise ValueError(
+                        f"Alias {alias.alias!r} cannot be promoted before alias removal"
+                    )
 
     def resolve(self, capabilities: ClientCapabilities) -> ContractResolution:
         """Resolve one supported contract without treating client claims as authority."""
@@ -131,7 +140,9 @@ class ToolContractRegistry:
             raise ValueError(f"Unsupported tool contract version: {version}")
         visible = set(registered_names)
         for alias in self.aliases:
-            if version >= alias.removed_in:
+            if version >= alias.removed_in and (
+                alias.promoted_in is None or version < alias.promoted_in
+            ):
                 visible.discard(alias.alias)
         return frozenset(visible)
 
@@ -176,6 +187,7 @@ def default_tool_contract_registry() -> ToolContractRegistry:
                     "Deprecated compatibility alias; migrate to workspace_run_profile before "
                     "tool contract v2."
                 ),
+                promoted_in=2,
             ),
         ),
     )

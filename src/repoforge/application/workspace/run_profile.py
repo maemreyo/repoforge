@@ -97,6 +97,7 @@ class WorkspaceRunProfileCommand:
     profile_name: str | None = None
     background: bool = False
     force_rerun: bool = False
+    expected_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +265,8 @@ class WorkspaceProfileRunner:
                 self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, path
             )
             before_fingerprint = before.fingerprint
+            if c.expected_fingerprint is not None and c.expected_fingerprint != before_fingerprint:
+                raise WorkspaceError("Workspace changed since the verification plan was reviewed")
             stage_telemetry: list[tuple[float, float]] = []
 
             # Command-source integrity stamp (issue #170): a zero-cost guard when the
@@ -751,6 +754,7 @@ class WorkspaceProfileRunner:
             "profile": profile.name,
             "used_default": used_default,
             "force_rerun": c.force_rerun,
+            "expected_fingerprint": c.expected_fingerprint,
         }
 
         if not c.background:

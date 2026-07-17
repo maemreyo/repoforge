@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,11 @@ from repoforge.application.workspace.assessment import (
     WorkspaceAssessmentReader,
 )
 from repoforge.application.workspace.edit import FileEdit, TextEdit
+from repoforge.application.workspace.run_diagnostic import WorkspaceRunDiagnosticResult
+from repoforge.application.workspace.run_profile import (
+    WorkspaceRunProfileBackgroundResult,
+    WorkspaceRunProfileResult,
+)
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.domain.assessment import (
@@ -31,7 +37,7 @@ from repoforge.domain.code_intelligence import (
     CodeIntelligenceStatus,
     new_code_intelligence_result,
 )
-from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 
 
 def test_code_intelligence_domain_is_snapshot_bound_and_normalized() -> None:
@@ -119,6 +125,391 @@ def _changed_workspace(env: ForgeEnvironment) -> str:
         [FileEdit("hello.txt", current["sha256"], (TextEdit("hello", "assessment change"),))],
     )
     return workspace_id
+
+
+def _diagnostic_result(
+    workspace_id: str, fingerprint: str, head_sha: str
+) -> WorkspaceRunDiagnosticResult:
+    return WorkspaceRunDiagnosticResult(
+        workspace_id=workspace_id,
+        diagnostic_id="pytest-target",
+        summary="Run one tracked pytest path",
+        selector_kind="pytest_node",
+        resolved_selector="tests/test_math_utils.py",
+        resolved_selectors={"selector": ["tests/test_math_utils.py"]},
+        argv=["pytest", "tests/test_math_utils.py"],
+        working_directory=".",
+        network_policy="local_only",
+        mutability="read_only",
+        parser="pytest",
+        intent="tdd_green",
+        expectation="pass",
+        expected_failure_class=None,
+        returncode=0,
+        outcome="passed",
+        failure_class=None,
+        expectation_met=True,
+        business_tests_ran=True,
+        valid_tdd_red_evidence=False,
+        parsed={"passed": 1},
+        excerpt="1 passed",
+        output_truncated=False,
+        fingerprint_before=fingerprint,
+        fingerprint_after=fingerprint,
+        fingerprint_changed=False,
+        head_sha=head_sha,
+        changed_paths=["src/math_utils.py"],
+        unexpected_paths=[],
+        change_metrics={},
+        verification_invalidated=False,
+        satisfies_commit_gate=False,
+        next_safe_actions=[],
+    )
+
+
+def _profile_result(
+    workspace_id: str, fingerprint: str, head_sha: str
+) -> WorkspaceRunProfileResult:
+    return WorkspaceRunProfileResult(
+        workspace_id=workspace_id,
+        repo_id="demo",
+        profile="full",
+        description="Full verification",
+        verification=True,
+        fingerprint=fingerprint,
+        commands=[
+            {
+                "argv": ["pytest", "-q"],
+                "returncode": 0,
+                "stdout": "1 passed",
+                "stderr": "",
+                "stage_index": 0,
+                "duration_ms": 12.5,
+                "cumulative_duration_ms": 12.5,
+            }
+        ],
+        change_metrics={},
+        satisfies_commit_gate=True,
+        used_default=True,
+        head_sha=head_sha,
+        command_source_dirty=False,
+        command_source_dirty_paths=[],
+        command_source_warning=None,
+        completed_steps=[{"id": "step-1", "kind": "business_tests"}],
+        failed_step=None,
+        failure_domain=None,
+        not_run_steps=[],
+        business_tests_ran=True,
+        valid_tdd_red_evidence=False,
+        hygiene_receipt=None,
+    )
+
+
+def test_workspace_verify_plan_is_read_only_and_returns_recommendations(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = _changed_workspace(forge_env)
+    verifier = forge_env.service._verify
+    monkeypatch.setattr(
+        verifier._profile,
+        "execute",
+        lambda _command: (_ for _ in ()).throw(AssertionError("profile must not run")),
+    )
+    monkeypatch.setattr(
+        verifier._diagnostic,
+        "execute",
+        lambda _command: (_ for _ in ()).throw(AssertionError("diagnostic must not run")),
+    )
+    monkeypatch.setattr(
+        verifier._adhoc,
+        "execute",
+        lambda _command: (_ for _ in ()).throw(AssertionError("adhoc must not run")),
+    )
+
+    result = forge_env.service.workspace_verify(workspace_id, mode="plan")
+
+    assert result["requested_mode"] == "plan"
+    assert result["selected_mode"] == "plan"
+    assert result["outcome"] == "planned"
+    assert result["assessment"]["current"] is True
+    assert result["recommendations"]
+    assert result["commands"] == []
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    V2_TOOL_SPECS["workspace_verify"].validate_output(result)
+
+
+def test_workspace_verify_auto_routes_high_confidence_exact_test_selector(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = forge_env.source / "src" / "math_utils.py"
+    test_file = forge_env.source / "tests" / "test_math_utils.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    test_file.write_text(
+        "from src.math_utils import add\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+        encoding="utf-8",
+    )
+    git("add", "src/math_utils.py", "tests/test_math_utils.py", cwd=forge_env.source)
+    git("commit", "-m", "add verify routing fixture", cwd=forge_env.source)
+    git("push", "origin", "main", cwd=forge_env.source)
+    workspace_id = forge_env.service.workspace_create("demo", "verify targeted")["workspace_id"]
+    current = forge_env.service.workspace_read_file(workspace_id, "src/math_utils.py")
+    forge_env.service.workspace_write_file(
+        workspace_id,
+        "src/math_utils.py",
+        "def add(a, b):\n    return a + b + 0\n",
+        current["sha256"],
+    )
+    status = forge_env.service.workspace_status(workspace_id)
+    captured: list[Any] = []
+
+    def run_diagnostic(command: Any) -> WorkspaceRunDiagnosticResult:
+        captured.append(command)
+        return _diagnostic_result(workspace_id, status["workspace_fingerprint"], status["head_sha"])
+
+    monkeypatch.setattr(forge_env.service._verify._diagnostic, "execute", run_diagnostic)
+    monkeypatch.setattr(
+        forge_env.service._verify._profile,
+        "execute",
+        lambda _command: (_ for _ in ()).throw(AssertionError("full profile must not run")),
+    )
+
+    result = forge_env.service.workspace_verify(
+        workspace_id,
+        mode="auto",
+        intent="tdd_green",
+        expectation="pass",
+    )
+
+    assert result["selected_mode"] == "diagnostic"
+    assert captured[0].diagnostic_id == "pytest-target"
+    assert captured[0].selector == ["tests/test_math_utils.py"]
+    assert captured[0].intent == "tdd_green"
+    assert result["outcome"] == "passed"
+    assert result["satisfies_commit_gate"] is False
+
+
+def test_workspace_verify_auto_falls_back_to_final_profile_when_intelligence_unavailable(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingProvider:
+        provider_id = "failing"
+        provider_version = "1"
+
+        def analyze(self, request: CodeIntelligenceRequest):
+            del request
+            raise RuntimeError("provider unavailable")
+
+    config = load_config(forge_env.config_path)
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(code_intelligence=FailingProvider()),
+    )
+    service = CodingService(config, application=application)
+    workspace_id = service.workspace_create("demo", "verify fallback")["workspace_id"]
+    status = service.workspace_status(workspace_id)
+    captured: list[Any] = []
+
+    def run_profile(command: Any) -> WorkspaceRunProfileResult:
+        captured.append(command)
+        return _profile_result(workspace_id, status["workspace_fingerprint"], status["head_sha"])
+
+    monkeypatch.setattr(service._verify._profile, "execute", run_profile)
+    monkeypatch.setattr(
+        service._verify._diagnostic,
+        "execute",
+        lambda _command: (_ for _ in ()).throw(AssertionError("diagnostic must not run")),
+    )
+
+    result = service.workspace_verify(workspace_id, mode="auto")
+
+    assert result["selected_mode"] == "profile"
+    assert result["outcome"] == "fallback_full"
+    assert captured[0].profile_name == "full"
+    assert "unavailable" in result["routing_reason"].lower()
+
+
+def test_workspace_verify_explicit_diagnostic_forwards_intent_and_reuse_controls(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = _changed_workspace(forge_env)
+    status = forge_env.service.workspace_status(workspace_id)
+    captured: list[Any] = []
+
+    def run_diagnostic(command: Any) -> WorkspaceRunDiagnosticResult:
+        captured.append(command)
+        return _diagnostic_result(workspace_id, status["workspace_fingerprint"], status["head_sha"])
+
+    monkeypatch.setattr(forge_env.service._verify._diagnostic, "execute", run_diagnostic)
+    result = forge_env.service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id="pytest-target",
+        selector=["tests/test_math_utils.py"],
+        intent="tdd_red",
+        expectation="fail",
+        expected_failure_class="test_failure",
+        force_rerun=True,
+    )
+
+    command = captured[0]
+    assert command.intent == "tdd_red"
+    assert command.expectation == "fail"
+    assert command.expected_failure_class == "test_failure"
+    assert command.force_rerun is True
+    assert result["selected_mode"] == "diagnostic"
+
+
+def test_workspace_verify_uses_refresh_impact_paths_instead_of_dirty_paths(
+    forge_env: ForgeEnvironment,
+) -> None:
+    files = {
+        "src/one.py": "def one():\n    return 1\n",
+        "tests/test_one.py": "from src.one import one\n\ndef test_one():\n    assert one() == 1\n",
+        "src/two.py": "def two():\n    return 2\n",
+        "tests/test_two.py": "from src.two import two\n\ndef test_two():\n    assert two() == 2\n",
+    }
+    for relative_path, content in files.items():
+        path = forge_env.source / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    git("add", *files, cwd=forge_env.source)
+    git("commit", "-m", "add refresh impact fixtures", cwd=forge_env.source)
+    git("push", "origin", "main", cwd=forge_env.source)
+    workspace_id = forge_env.service.workspace_create("demo", "verify impact selector")[
+        "workspace_id"
+    ]
+    current = forge_env.service.workspace_read_file(workspace_id, "src/one.py")
+    forge_env.service.workspace_write_file(
+        workspace_id,
+        "src/one.py",
+        "def one():\n    return 10\n",
+        current["sha256"],
+    )
+
+    result = forge_env.service.workspace_verify(
+        workspace_id,
+        mode="plan",
+        impact_paths=("src/two.py",),
+    )
+
+    assert result["assessment"]["changed_paths"] == ["src/two.py"]
+    assert any(item.get("selector") == "tests/test_two.py" for item in result["recommendations"])
+    assert all(item.get("selector") != "tests/test_one.py" for item in result["recommendations"])
+
+
+def test_workspace_verify_staleness_warning_does_not_block_execution(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = _changed_workspace(forge_env)
+    verifier = forge_env.service._verify
+    assessment = verifier._assessment.execute(WorkspaceAssessmentCommand(workspace_id))
+    stale_base = replace(
+        assessment.base_freshness,
+        value={**assessment.base_freshness.value, "refresh_required": True, "behind_base": 3},
+    )
+    stale_assessment = replace(assessment, base_freshness=stale_base)
+    monkeypatch.setattr(verifier._assessment, "execute", lambda _command: stale_assessment)
+    captured: list[Any] = []
+
+    def run_profile(command: Any) -> WorkspaceRunProfileResult:
+        captured.append(command)
+        return _profile_result(
+            workspace_id,
+            assessment.snapshot.workspace_fingerprint,
+            assessment.snapshot.head_sha,
+        )
+
+    monkeypatch.setattr(verifier._profile, "execute", run_profile)
+    result = forge_env.service.workspace_verify(workspace_id, mode="profile", profile_name="full")
+
+    assert captured
+    assert "3 commit(s) behind" in result["staleness_warning"]
+    assert result["outcome"] == "passed"
+    assert result["steps"][0]["status"] == "completed"
+    assert result["steps"][0]["duration_ms"] == 12.5
+
+
+def test_workspace_verify_journaled_artifact_invalidates_commit_gate(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = _changed_workspace(forge_env)
+    status = forge_env.service.workspace_status(workspace_id)
+    monkeypatch.setattr(
+        forge_env.service._verify._profile,
+        "execute",
+        lambda _command: _profile_result(
+            workspace_id,
+            status["workspace_fingerprint"],
+            status["head_sha"],
+        ),
+    )
+
+    result = forge_env.service.workspace_verify(
+        workspace_id,
+        mode="profile",
+        profile_name="full",
+        artifact_output_path="verify-result.json",
+    )
+
+    workspace_path = Path(forge_env.service.workspace_status(workspace_id)["path"])
+    decoded = json.loads((workspace_path / "verify-result.json").read_text(encoding="utf-8"))
+    assert decoded["selected_mode"] == "profile"
+    assert result["artifact_paths"] == ["verify-result.json"]
+    assert result["satisfies_commit_gate"] is False
+    assert result["workspace_fingerprint"] != status["workspace_fingerprint"]
+
+
+def test_workspace_verify_preserves_durable_profile_background_operation(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = _changed_workspace(forge_env)
+    monkeypatch.setattr(
+        forge_env.service._verify._profile,
+        "execute",
+        lambda _command: WorkspaceRunProfileBackgroundResult(
+            operation_id="op-verify-background-0001",
+            phase="running",
+            safe_next_action="Poll operation_status.",
+        ),
+    )
+
+    result = forge_env.service.workspace_verify(
+        workspace_id,
+        mode="profile",
+        profile_name="full",
+        background=True,
+    )
+
+    assert result["outcome"] == "running"
+    assert result["operation"]["operation_id"] == "op-verify-background-0001"
+    assert result["operation"]["kind"] == "workspace_run_profile"
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    V2_TOOL_SPECS["workspace_verify"].validate_output(result)
+
+
+def test_workspace_verify_rejects_background_artifact_output(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id = _changed_workspace(forge_env)
+
+    with pytest.raises(ConfigError, match="Background workspace_verify"):
+        forge_env.service.workspace_verify(
+            workspace_id,
+            mode="profile",
+            background=True,
+            artifact_output_path="verify-result.json",
+        )
 
 
 def test_assessment_includes_affected_test_candidates_and_targeted_stage(

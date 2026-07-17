@@ -798,14 +798,14 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
     assert removed["remote_branch_untouched"] is True
 
 
-def test_run_profile_default_and_verify_alias_share_canonical_contract(
+def test_run_profile_default_and_workspace_verify_profile_share_execution_contract(
     forge_env: ForgeEnvironment,
 ) -> None:
     service = forge_env.service
-    canonical_workspace = service.workspace_create("demo", "canonical verification")["workspace_id"]
-    alias_workspace = service.workspace_create("demo", "legacy verification alias")["workspace_id"]
+    profile_workspace = service.workspace_create("demo", "canonical verification")["workspace_id"]
+    verify_workspace = service.workspace_create("demo", "consolidated verification")["workspace_id"]
 
-    for workspace_id in (canonical_workspace, alias_workspace):
+    for workspace_id in (profile_workspace, verify_workspace):
         current = service.workspace_read_file(workspace_id, "hello.txt")
         service.workspace_write_file(
             workspace_id,
@@ -814,40 +814,26 @@ def test_run_profile_default_and_verify_alias_share_canonical_contract(
             current["sha256"],
         )
 
-    canonical = service.workspace_run_profile(canonical_workspace)
-    alias = service.workspace_verify(alias_workspace)
+    canonical = service.workspace_run_profile(profile_workspace)
+    consolidated = service.workspace_verify(verify_workspace, mode="profile")
 
     assert canonical["used_default"] is True
     assert canonical["repo_id"] == "demo"
-    for key in (
-        "profile",
-        "description",
-        "verification",
-        "satisfies_commit_gate",
-        "used_default",
-        "repo_id",
-        "working_directory",
+    assert consolidated["selected_mode"] == "profile"
+    assert consolidated["outcome"] == "passed"
+    assert consolidated["satisfies_commit_gate"] is True
+    assert consolidated["assessment"]["final_profile"] == canonical["profile"]
+    assert len(consolidated["commands"]) == len(canonical["commands"])
+    for verify_command, canonical_command in zip(
+        consolidated["commands"], canonical["commands"], strict=True
     ):
-        assert alias[key] == canonical[key]
-    assert len(alias["commands"]) == len(canonical["commands"])
-    for alias_command, canonical_command in zip(
-        alias["commands"], canonical["commands"], strict=True
-    ):
-        assert alias_command["duration_ms"] >= 0
+        assert verify_command["argv"] == canonical_command["argv"]
+        assert verify_command["returncode"] == canonical_command["returncode"]
+        assert verify_command["duration_ms"] >= 0
         assert canonical_command["duration_ms"] >= 0
-        assert alias_command["cumulative_duration_ms"] >= alias_command["duration_ms"]
-        assert canonical_command["cumulative_duration_ms"] >= canonical_command["duration_ms"]
-        assert {
-            key: value
-            for key, value in alias_command.items()
-            if key not in {"duration_ms", "cumulative_duration_ms"}
-        } == {
-            key: value
-            for key, value in canonical_command.items()
-            if key not in {"duration_ms", "cumulative_duration_ms"}
-        }
+    assert len(consolidated["steps"]) == len(canonical["completed_steps"])
     assert len(_audit_events(forge_env.root, "workspace_run_profile")) == 2
-    assert _audit_events(forge_env.root, "workspace_verify") == []
+    assert len(_audit_events(forge_env.root, "workspace_verify")) == 1
 
 
 @pytest.mark.parametrize(

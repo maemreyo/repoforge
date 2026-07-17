@@ -27,6 +27,7 @@ class CodeIntelligenceCommand:
     workspace_id: str
     expected_head_sha: str | None = None
     expected_fingerprint: str | None = None
+    changed_paths_override: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,12 +117,14 @@ class CodeIntelligenceAnalyzer:
                 allowed_paths.append(assert_path_allowed(relative_path, repo))
             except SecurityError:
                 denied_paths.append(relative_path.replace("\\", "/"))
+        raw_changed_paths = (
+            command.changed_paths_override
+            if command.changed_paths_override is not None
+            else tuple(self.ctx.git.changed_paths(workspace, repo))
+        )
         changed_paths = tuple(
             sorted(
-                {
-                    assert_path_allowed(relative_path, repo)
-                    for relative_path in self.ctx.git.changed_paths(workspace, repo)
-                }
+                {assert_path_allowed(relative_path, repo) for relative_path in raw_changed_paths}
             )
         )
         request = CodeIntelligenceRequest(

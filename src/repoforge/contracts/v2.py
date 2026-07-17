@@ -781,10 +781,67 @@ class WorkspaceMutateOutput(ToolResponse):
 
 
 class VerifyMode(str, Enum):
+    PLAN = "plan"
     AUTO = "auto"
     DIAGNOSTIC = "diagnostic"
     PROFILE = "profile"
     ADHOC = "adhoc"
+
+
+class VerifyIntent(str, Enum):
+    TDD_RED = "tdd_red"
+    TDD_GREEN = "tdd_green"
+    REFACTOR = "refactor"
+    PRE_COMMIT = "pre_commit"
+    FINAL = "final"
+
+
+class VerifyExpectation(str, Enum):
+    NONE = "none"
+    PASS = "pass"
+    FAIL = "fail"
+
+
+class VerifyRecommendationEvidence(StrictModel):
+    order: int = Field(ge=1, le=32)
+    kind: Literal["diagnostic", "profile"]
+    reason: str = Field(min_length=1, max_length=1000)
+    diagnostic_id: Identifier | None = None
+    profile_name: Identifier | None = None
+    selector: str | None = Field(default=None, max_length=4096)
+
+
+class VerifyStepEvidence(StrictModel):
+    id: Identifier
+    kind: Literal[
+        "unknown",
+        "hygiene",
+        "static_analysis",
+        "typecheck",
+        "business_tests",
+        "security",
+        "contract",
+        "build",
+    ]
+    status: Literal["completed", "failed", "not_run"]
+    duration_ms: float | None = Field(default=None, ge=0)
+    cumulative_duration_ms: float | None = Field(default=None, ge=0)
+    failure_domain: str | None = Field(default=None, max_length=160)
+
+
+class WorkspaceVerifyAssessment(StrictModel):
+    snapshot_id: Sha256
+    current: bool
+    changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    risk_score: int = Field(ge=0, le=100)
+    risk_level: Literal["low", "medium", "high", "critical"]
+    uncertainties: tuple[str, ...] = Field(default=(), max_length=64)
+    refresh_required: bool
+    behind_base: int = Field(ge=0)
+    provider: ProviderEvidence | None = None
+    final_profile: Identifier
+    manual_review_required: bool
+    evidence_coverage: tuple[KeyValue, ...] = Field(default=(), max_length=32)
 
 
 class WorkspaceVerifyInput(StrictModel):
@@ -798,6 +855,29 @@ class WorkspaceVerifyInput(StrictModel):
     working_directory: RelativePath | None = None
     expected_fingerprint: Sha256 | None = None
     background: bool = False
+    intent: VerifyIntent = VerifyIntent.FINAL
+    expectation: VerifyExpectation = VerifyExpectation.NONE
+    expected_failure_class: Identifier | None = None
+    force_rerun: bool = False
+    impact_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    artifact_output_path: RelativePath | None = None
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> WorkspaceVerifyInput:
+        if self.mode is VerifyMode.DIAGNOSTIC and self.diagnostic_id is None:
+            raise ValueError("diagnostic mode requires diagnostic_id")
+        if self.mode is VerifyMode.ADHOC and not self.argv:
+            raise ValueError("adhoc mode requires argv")
+        if self.mode is VerifyMode.PLAN and (self.background or self.artifact_output_path):
+            raise ValueError("plan mode is read-only")
+        if self.background and self.artifact_output_path is not None:
+            raise ValueError("background verification cannot write a synchronous artifact")
+        if (
+            self.expected_failure_class is not None
+            and self.expectation is not VerifyExpectation.FAIL
+        ):
+            raise ValueError("expected_failure_class requires expectation=fail")
+        return self
 
 
 class WorkspaceVerifyOutput(ToolResponse):
@@ -806,9 +886,19 @@ class WorkspaceVerifyOutput(ToolResponse):
     selected_mode: VerifyMode
     routing_reason: str = Field(min_length=1, max_length=1000)
     impact_evidence: ProviderEvidence | None = None
+    assessment: WorkspaceVerifyAssessment | None = None
+    recommendations: tuple[VerifyRecommendationEvidence, ...] = Field(default=(), max_length=32)
+    staleness_warning: str | None = Field(default=None, max_length=1000)
     operation: OperationEvidence | None = None
     commands: tuple[CommandEvidence, ...] = Field(default=(), max_length=100)
-    outcome: Literal["passed", "failed", "running", "fallback_full"]
+    steps: tuple[VerifyStepEvidence, ...] = Field(default=(), max_length=100)
+    failed_step: VerifyStepEvidence | None = None
+    failure_domain: str | None = Field(default=None, max_length=160)
+    business_tests_ran: bool = False
+    valid_tdd_red_evidence: bool = False
+    failure_reused: bool = False
+    artifact_paths: tuple[RelativePath, ...] = Field(default=(), max_length=100)
+    outcome: Literal["planned", "passed", "failed", "running", "fallback_full"]
     satisfies_commit_gate: bool
     head_sha: GitObjectId
     workspace_fingerprint: Sha256

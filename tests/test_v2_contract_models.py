@@ -115,7 +115,7 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
         },
         "repo_policy": {"preview", "apply"},
         "workspace_refresh": {"preview", "apply"},
-        "workspace_verify": {"auto", "diagnostic", "profile", "adhoc"},
+        "workspace_verify": {"plan", "auto", "diagnostic", "profile", "adhoc"},
         "workspace_pr": {"create_draft", "update", "watch"},
         "operation": {"get", "list", "cancel"},
     }
@@ -304,6 +304,43 @@ def test_repo_issue_contract_exposes_governed_write_modes() -> None:
     )
     assert output.mutation is not None
     assert output.mutation.external_writes == 1
+
+
+def test_workspace_verify_contract_exposes_planning_routing_and_evidence_fields() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_verify"]
+
+    validated = spec.validate_input(
+        {
+            "workspace_id": "demo-workspace",
+            "mode": "diagnostic",
+            "diagnostic_id": "pytest-target",
+            "selector": ["tests/test_one.py", "tests/test_two.py"],
+            "intent": "tdd_green",
+            "expectation": "pass",
+            "force_rerun": True,
+            "impact_paths": ["src/one.py"],
+            "artifact_output_path": "build/verify/result.json",
+        }
+    )
+
+    assert validated.mode.value == "diagnostic"
+    assert validated.intent.value == "tdd_green"
+    assert validated.force_rerun is True
+    assert validated.impact_paths == ("src/one.py",)
+    output_fields = set(spec.output_model.model_fields)
+    assert {
+        "assessment",
+        "recommendations",
+        "staleness_warning",
+        "steps",
+        "failed_step",
+        "failure_domain",
+        "business_tests_ran",
+        "valid_tdd_red_evidence",
+        "failure_reused",
+        "artifact_paths",
+    } <= output_fields
 
 
 def test_mutation_schema_exposes_all_ops_and_bounds() -> None:

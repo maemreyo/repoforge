@@ -191,6 +191,7 @@ from .workspace.update_draft_pr import (
     DraftPullRequestUpdater,
     WorkspaceUpdateDraftPrCommand,
 )
+from .workspace.verify import WorkspaceVerifier, WorkspaceVerifyCommand
 
 
 def _result(value: object) -> dict[str, Any]:
@@ -315,6 +316,13 @@ class CodingService:
             operations=self.operations,
             background_tasks=self.application.background_tasks,
         )
+        self._verify = WorkspaceVerifier(
+            ctx,
+            assessment=self._assessment,
+            profile=self._profile,
+            diagnostic=self._diagnostic,
+            adhoc=self._adhoc,
+        )
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
         self._create_pr = DraftPullRequestCreator(ctx)
@@ -350,8 +358,11 @@ class CodingService:
         result = self._operation_cancel.execute(
             OperationCancelCommand(operation_id, expected_updated_at)
         )
-        if result.cancellation_requested and result.operation.kind == "workspace_run_profile":
-            self._profile.request_live_cancel(operation_id)
+        if result.cancellation_requested:
+            if result.operation.kind == "workspace_run_profile":
+                self._profile.request_live_cancel(operation_id)
+            elif result.operation.kind == "workspace_run_adhoc":
+                self._adhoc.request_live_cancel(operation_id)
         return _result(result)
 
     def repo_list(self) -> dict[str, Any]:
@@ -1170,9 +1181,46 @@ class CodingService:
         )
 
     def workspace_verify(
-        self, workspace_id: str, profile_name: str | None = None
+        self,
+        workspace_id: str,
+        mode: str = "auto",
+        diagnostic_id: str | None = None,
+        selector: str | list[str] | None = None,
+        selector2: str | list[str] | None = None,
+        profile_name: str | None = None,
+        argv: tuple[str, ...] | None = None,
+        working_directory: str | None = None,
+        expected_fingerprint: str | None = None,
+        background: bool = False,
+        intent: str | None = None,
+        expectation: str | None = None,
+        expected_failure_class: str | None = None,
+        force_rerun: bool = False,
+        impact_paths: tuple[str, ...] = (),
+        artifact_output_path: str | None = None,
     ) -> dict[str, Any]:
-        return self.workspace_run_profile(workspace_id, profile_name)
+        return _result(
+            self._verify.execute(
+                WorkspaceVerifyCommand(
+                    workspace_id=workspace_id,
+                    mode=mode,  # type: ignore[arg-type]
+                    diagnostic_id=diagnostic_id,
+                    selector=selector,
+                    selector2=selector2,
+                    profile_name=profile_name,
+                    argv=argv,
+                    working_directory=working_directory,
+                    expected_fingerprint=expected_fingerprint,
+                    background=background,
+                    intent=intent,
+                    expectation=expectation,
+                    expected_failure_class=expected_failure_class,
+                    force_rerun=force_rerun,
+                    impact_paths=impact_paths,
+                    artifact_output_path=artifact_output_path,
+                )
+            )
+        )
 
     def workspace_commit(self, workspace_id: str, message: str) -> dict[str, Any]:
         return _result(self._commit.execute(WorkspaceCommitCommand(workspace_id, message)))
