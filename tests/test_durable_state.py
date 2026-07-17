@@ -14,9 +14,13 @@ from repoforge.adapters.persistence.json_state_repository import JsonStateReposi
 from repoforge.domain.durable_state import Revision, SchemaVersion, StateEnvelope
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.state_lifecycle import (
+    CleanupDisposition,
     MigrationDirection,
     StateMigrationRegistry,
     StateMigrationStep,
+    StateProtection,
+    StateRecordReference,
+    StateRetentionPolicy,
 )
 from repoforge.testing.fakes import (
     FixedClock,
@@ -660,3 +664,165 @@ def test_json_state_lifecycle_noop_preview_does_not_create_backup(tmp_path: Path
     assert report.migrated == 0
     assert report.unchanged == 1
     assert not (tmp_path / ".state-lifecycle" / "backups" / preview.plan_id).exists()
+
+
+def test_cleanup_preview_is_reference_aware_bounded_and_quota_driven(tmp_path: Path) -> None:
+    for record_id, _created_at, padding in (
+        ("demo-1", "2026-01-01T00:00:00+00:00", "x" * 60),
+        ("demo-2", "2026-02-01T00:00:00+00:00", "x" * 50),
+        ("demo-3", "2026-03-01T00:00:00+00:00", "x" * 40),
+        ("demo-4", "2026-04-01T00:00:00+00:00", "x" * 30),
+        ("demo-5", "2026-05-01T00:00:00+00:00", "x" * 20),
+    ):
+        _write_raw_state(
+            tmp_path,
+            collection="demo_records",
+            record_id=record_id,
+            version=3,
+            revision=1,
+            payload={"display_name": record_id, "enabled": True, "padding": padding},
+        )
+    manager = JsonStateLifecycleManager(tmp_path, InMemoryLockManager())
+    preview = manager.preview_cleanup(
+        collection="demo_records",
+        policy=StateRetentionPolicy(
+            now="2026-07-01T00:00:00+00:00",
+            retention_seconds=60 * 60 * 24 * 120,
+            max_records=3,
+            max_total_bytes=500,
+            batch_size=2,
+        ),
+        record_timestamps={
+            "demo-1": "2026-01-01T00:00:00+00:00",
+            "demo-2": "2026-02-01T00:00:00+00:00",
+            "demo-3": "2026-03-01T00:00:00+00:00",
+            "demo-4": "2026-04-01T00:00:00+00:00",
+            "demo-5": "2026-05-01T00:00:00+00:00",
+        },
+        protections=(StateProtection("demo-1", "active_task"),),
+        references=(
+            StateRecordReference("demo-5", "demo-2", "accepted_plan"),
+            StateRecordReference("demo-5", "missing-record", "receipt"),
+        ),
+    )
+    assert preview.protected_record_ids == ("demo-1", "demo-2")
+    assert preview.orphan_references == (("demo-5", "missing-record", "receipt"),)
+    assert tuple(item.record_id for item in preview.candidates) == ("demo-3", "demo-4")
+    assert preview.candidates[0].disposition is CleanupDisposition.EXPIRED
+    assert preview.next_cursor == "demo-4"
+    assert preview.remaining_candidate_count >= 1
+
+
+def test_cleanup_apply_is_stale_safe_idempotent_and_moves_to_private_trash(
+    tmp_path: Path,
+) -> None:
+    for index in range(1, 4):
+        _write_raw_state(
+            tmp_path,
+            collection="demo_records",
+            record_id=f"demo-{index}",
+            version=3,
+            revision=1,
+            payload={"display_name": f"demo-{index}", "enabled": True},
+        )
+    manager = JsonStateLifecycleManager(tmp_path, InMemoryLockManager())
+    preview = manager.preview_cleanup(
+        collection="demo_records",
+        policy=StateRetentionPolicy(
+            now="2026-07-01T00:00:00+00:00",
+            retention_seconds=1,
+            max_records=10,
+            max_total_bytes=10_000,
+            batch_size=10,
+        ),
+        record_timestamps={
+            "demo-1": "2026-01-01T00:00:00+00:00",
+            "demo-2": "2026-01-02T00:00:00+00:00",
+            "demo-3": "2026-01-03T00:00:00+00:00",
+        },
+        protections=(StateProtection("demo-3", "audit_required"),),
+    )
+    report = manager.apply_cleanup(preview)
+    assert report.processed == 2
+    assert report.deleted == 2
+    assert report.protected == 1
+    assert report.reclaimed_bytes > 0
+    assert not (tmp_path / "demo_records" / "demo-1.json").exists()
+    assert (tmp_path / ".state-lifecycle" / "trash" / preview.plan_id / "demo-1.json").is_file()
+    assert manager.apply_cleanup(preview) == report
+
+
+def test_cleanup_apply_rejects_concurrent_changes(tmp_path: Path) -> None:
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=3,
+        revision=1,
+        payload={"display_name": "alpha", "enabled": True},
+    )
+    manager = JsonStateLifecycleManager(tmp_path, InMemoryLockManager())
+    preview = manager.preview_cleanup(
+        collection="demo_records",
+        policy=StateRetentionPolicy(
+            now="2026-07-01T00:00:00+00:00",
+            retention_seconds=1,
+            max_records=10,
+            max_total_bytes=10_000,
+            batch_size=10,
+        ),
+        record_timestamps={"demo-1": "2026-01-01T00:00:00+00:00"},
+    )
+    _write_raw_state(
+        tmp_path,
+        collection="demo_records",
+        record_id="demo-1",
+        version=3,
+        revision=2,
+        payload={"display_name": "changed", "enabled": True},
+    )
+    with pytest.raises(RepoForgeError) as stale:
+        manager.apply_cleanup(preview)
+    assert stale.value.code is ErrorCode.STATE_RETENTION_STALE
+
+
+def test_cleanup_apply_resumes_after_process_crash(tmp_path: Path) -> None:
+    for index in range(1, 3):
+        _write_raw_state(
+            tmp_path,
+            collection="demo_records",
+            record_id=f"demo-{index}",
+            version=3,
+            revision=1,
+            payload={"display_name": f"demo-{index}", "enabled": True},
+        )
+
+    def crash_after_first_move(phase: str, record_id: str, index: int) -> None:
+        if phase == "before_cleanup_move" and index == 1:
+            raise SystemExit("simulated cleanup crash")
+
+    manager = JsonStateLifecycleManager(
+        tmp_path,
+        InMemoryLockManager(),
+        fault_injector=crash_after_first_move,
+    )
+    preview = manager.preview_cleanup(
+        collection="demo_records",
+        policy=StateRetentionPolicy(
+            now="2026-07-01T00:00:00+00:00",
+            retention_seconds=1,
+            max_records=10,
+            max_total_bytes=10_000,
+            batch_size=10,
+        ),
+        record_timestamps={
+            "demo-1": "2026-01-01T00:00:00+00:00",
+            "demo-2": "2026-01-02T00:00:00+00:00",
+        },
+    )
+    with pytest.raises(SystemExit):
+        manager.apply_cleanup(preview)
+    restarted = JsonStateLifecycleManager(tmp_path, InMemoryLockManager())
+    report = restarted.apply_cleanup(preview)
+    assert report.deleted == 2
+    assert not list((tmp_path / "demo_records").glob("*.json"))

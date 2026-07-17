@@ -10,16 +10,24 @@ import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from ...domain.durable_state import Revision, SchemaVersion
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.state_lifecycle import (
+    CleanupDisposition,
+    StateCleanupCandidate,
+    StateCleanupPreview,
+    StateCleanupReport,
     StateMigrationPreview,
     StateMigrationRecordPreview,
     StateMigrationRegistry,
     StateMigrationReport,
+    StateProtection,
+    StateRecordReference,
+    StateRetentionPolicy,
     validate_state_collection,
 )
 from ...ports.locking import LockManager
@@ -74,10 +82,17 @@ class JsonStateLifecycleManager:
         self.control_root = self.root / ".state-lifecycle"
         self.backups_root = self.control_root / "backups"
         self.journals_root = self.control_root / "journals"
+        self.trash_root = self.control_root / "trash"
         self._locks = locks
         self._max_record_bytes = max_record_bytes
         self._fault_injector = fault_injector
-        for directory in (self.root, self.control_root, self.backups_root, self.journals_root):
+        for directory in (
+            self.root,
+            self.control_root,
+            self.backups_root,
+            self.journals_root,
+            self.trash_root,
+        ):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(directory, 0o700)
 
@@ -728,3 +743,351 @@ class JsonStateLifecycleManager:
                 self._restore_backup(journal)
             recovered.append(plan_id)
         return tuple(recovered)
+
+    @staticmethod
+    def _retention_time(value: str, field: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise JsonStateLifecycleManager._error(
+                f"{field} must be an ISO-8601 timestamp",
+                ErrorCode.STATE_RETENTION_INVALID,
+            ) from exc
+        if parsed.tzinfo is None:
+            raise JsonStateLifecycleManager._error(
+                f"{field} must include a timezone offset",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+        return parsed
+
+    @staticmethod
+    def _cleanup_payload(
+        *,
+        collection: str,
+        candidates: tuple[StateCleanupCandidate, ...],
+        protected_record_ids: tuple[str, ...],
+        orphan_references: tuple[tuple[str, str, str], ...],
+        retained_records: int,
+        retained_bytes: int,
+        remaining_candidate_count: int,
+        next_cursor: str | None,
+    ) -> dict[str, object]:
+        return {
+            "collection": collection,
+            "candidates": [
+                {
+                    "record_id": item.record_id,
+                    "checksum": item.checksum,
+                    "size_bytes": item.size_bytes,
+                    "created_at": item.created_at,
+                    "disposition": item.disposition.value,
+                }
+                for item in candidates
+            ],
+            "protected_record_ids": list(protected_record_ids),
+            "orphan_references": [list(item) for item in orphan_references],
+            "retained_records": retained_records,
+            "retained_bytes": retained_bytes,
+            "remaining_candidate_count": remaining_candidate_count,
+            "next_cursor": next_cursor,
+        }
+
+    def preview_cleanup(
+        self,
+        *,
+        collection: str,
+        policy: StateRetentionPolicy,
+        record_timestamps: dict[str, str],
+        protections: tuple[StateProtection, ...] = (),
+        references: tuple[StateRecordReference, ...] = (),
+    ) -> StateCleanupPreview:
+        safe_collection = validate_state_collection(collection)
+        if not isinstance(policy, StateRetentionPolicy):
+            raise self._error(
+                "retention policy is invalid",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+        if not isinstance(record_timestamps, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in record_timestamps.items()
+        ):
+            raise self._error(
+                "record_timestamps must map record IDs to ISO-8601 timestamps",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+        if not isinstance(protections, tuple) or not all(
+            isinstance(item, StateProtection) for item in protections
+        ):
+            raise self._error(
+                "protections must be a StateProtection tuple",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+        if not isinstance(references, tuple) or not all(
+            isinstance(item, StateRecordReference) for item in references
+        ):
+            raise self._error(
+                "references must be a StateRecordReference tuple",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+
+        paths, truncated = self._record_paths(safe_collection, max_records=_MAX_RECORDS)
+        if truncated:
+            raise self._error(
+                "cleanup scan exceeds the reviewed record bound",
+                ErrorCode.STATE_QUOTA_EXCEEDED,
+            )
+        records = tuple(self._decode_record(path, expected_record_id=path.stem) for path in paths)
+        ids = {record.record_id for record in records}
+        if set(record_timestamps) != ids:
+            raise self._error(
+                "record_timestamps must cover exactly the current collection",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+        timestamps = {
+            record_id: self._retention_time(value, f"created_at for {record_id}")
+            for record_id, value in record_timestamps.items()
+        }
+        protected = {item.record_id for item in protections if item.record_id in ids}
+        orphan_references: list[tuple[str, str, str]] = []
+        for reference in references:
+            if reference.source_record_id not in ids:
+                continue
+            if reference.target_record_id in ids:
+                protected.add(reference.target_record_id)
+            else:
+                orphan_references.append(
+                    (
+                        reference.source_record_id,
+                        reference.target_record_id,
+                        reference.relation,
+                    )
+                )
+
+        ordered = sorted(
+            records,
+            key=lambda item: (timestamps[item.record_id], item.record_id),
+        )
+        dispositions: dict[str, CleanupDisposition] = {}
+        cutoff = self._retention_time(policy.now, "retention now") - timedelta(
+            seconds=policy.retention_seconds
+        )
+        for record in ordered:
+            if record.record_id not in protected and timestamps[record.record_id] < cutoff:
+                dispositions[record.record_id] = CleanupDisposition.EXPIRED
+
+        def remaining() -> list[_RawStateRecord]:
+            return [item for item in ordered if item.record_id not in dispositions]
+
+        while len(remaining()) > policy.max_records:
+            candidate = next(
+                (item for item in remaining() if item.record_id not in protected),
+                None,
+            )
+            if candidate is None:
+                break
+            dispositions[candidate.record_id] = CleanupDisposition.COUNT_QUOTA
+
+        while sum(item.encoded.__len__() for item in remaining()) > policy.max_total_bytes:
+            candidate = next(
+                (item for item in remaining() if item.record_id not in protected),
+                None,
+            )
+            if candidate is None:
+                break
+            dispositions[candidate.record_id] = CleanupDisposition.BYTE_QUOTA
+
+        all_candidates = tuple(
+            StateCleanupCandidate(
+                record_id=record.record_id,
+                checksum=record.checksum,
+                size_bytes=len(record.encoded),
+                created_at=record_timestamps[record.record_id],
+                disposition=dispositions[record.record_id],
+            )
+            for record in ordered
+            if record.record_id in dispositions
+        )
+        candidates = all_candidates[: policy.batch_size]
+        remaining_candidate_count = len(all_candidates) - len(candidates)
+        next_cursor = candidates[-1].record_id if remaining_candidate_count else None
+        retained = [item for item in ordered if item.record_id not in dispositions]
+        payload = self._cleanup_payload(
+            collection=safe_collection,
+            candidates=candidates,
+            protected_record_ids=tuple(sorted(protected)),
+            orphan_references=tuple(sorted(orphan_references)),
+            retained_records=len(retained),
+            retained_bytes=sum(len(item.encoded) for item in retained),
+            remaining_candidate_count=remaining_candidate_count,
+            next_cursor=next_cursor,
+        )
+        digest = self._sha256(self._canonical_bytes(payload))
+        return StateCleanupPreview(
+            plan_id=f"clean-{digest[:24]}",
+            plan_digest=digest,
+            collection=safe_collection,
+            candidates=candidates,
+            protected_record_ids=tuple(sorted(protected)),
+            orphan_references=tuple(sorted(orphan_references)),
+            retained_records=len(retained),
+            retained_bytes=sum(len(item.encoded) for item in retained),
+            remaining_candidate_count=remaining_candidate_count,
+            next_cursor=next_cursor,
+        )
+
+    def _validate_cleanup_preview(self, preview: StateCleanupPreview) -> None:
+        if not isinstance(preview, StateCleanupPreview):
+            raise self._error(
+                "cleanup preview is invalid",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+        payload = self._cleanup_payload(
+            collection=preview.collection,
+            candidates=preview.candidates,
+            protected_record_ids=preview.protected_record_ids,
+            orphan_references=preview.orphan_references,
+            retained_records=preview.retained_records,
+            retained_bytes=preview.retained_bytes,
+            remaining_candidate_count=preview.remaining_candidate_count,
+            next_cursor=preview.next_cursor,
+        )
+        digest = self._sha256(self._canonical_bytes(payload))
+        if preview.plan_digest != digest or preview.plan_id != f"clean-{digest[:24]}":
+            raise self._error(
+                "cleanup preview digest is invalid",
+                ErrorCode.STATE_RETENTION_INVALID,
+            )
+
+    def _cleanup_report(self, raw: dict[str, object]) -> StateCleanupReport | None:
+        if raw.get("phase") != "committed":
+            return None
+        report = raw.get("report")
+        if not isinstance(report, dict):
+            raise self._error("cleanup journal report is corrupt", ErrorCode.STATE_CORRUPT)
+        try:
+            return StateCleanupReport(
+                plan_id=str(report["plan_id"]),
+                processed=int(report["processed"]),
+                deleted=int(report["deleted"]),
+                protected=int(report["protected"]),
+                retained=int(report["retained"]),
+                reclaimed_bytes=int(report["reclaimed_bytes"]),
+                next_cursor=(
+                    str(report["next_cursor"]) if report["next_cursor"] is not None else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise self._error("cleanup journal report is corrupt", ErrorCode.STATE_CORRUPT) from exc
+
+    def _write_cleanup_journal(
+        self,
+        preview: StateCleanupPreview,
+        *,
+        phase: str,
+        report: StateCleanupReport | None = None,
+    ) -> None:
+        self._write_json(
+            self._journal_path(preview.plan_id),
+            {
+                "plan_id": preview.plan_id,
+                "plan_digest": preview.plan_digest,
+                "collection": preview.collection,
+                "phase": phase,
+                "report": (
+                    {
+                        "plan_id": report.plan_id,
+                        "processed": report.processed,
+                        "deleted": report.deleted,
+                        "protected": report.protected,
+                        "retained": report.retained,
+                        "reclaimed_bytes": report.reclaimed_bytes,
+                        "next_cursor": report.next_cursor,
+                    }
+                    if report is not None
+                    else None
+                ),
+            },
+        )
+
+    def apply_cleanup(self, preview: StateCleanupPreview) -> StateCleanupReport:
+        self._validate_cleanup_preview(preview)
+        journal_path = self._journal_path(preview.plan_id)
+        if journal_path.is_file():
+            journal = self._read_json(journal_path, code=ErrorCode.STATE_CORRUPT)
+            if journal.get("plan_digest") != preview.plan_digest:
+                raise self._error(
+                    "cleanup journal conflicts with the reviewed preview",
+                    ErrorCode.STATE_RETENTION_INVALID,
+                )
+            report = self._cleanup_report(journal)
+            if report is not None:
+                return report
+
+        with self._locks.lock(
+            f"state-cleanup-{preview.collection}",
+            timeout_seconds=10,
+            metadata={"operation": "cleanup", "plan_id": preview.plan_id},
+        ):
+            if journal_path.is_file():
+                existing = self._read_json(journal_path, code=ErrorCode.STATE_CORRUPT)
+                report = self._cleanup_report(existing)
+                if report is not None:
+                    return report
+            trash_dir = self.trash_root / self._record_id(preview.plan_id)
+            trash_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(trash_dir, 0o700)
+            self._write_cleanup_journal(preview, phase="applying")
+            moved: list[tuple[Path, Path]] = []
+            try:
+                for index, item in enumerate(preview.candidates):
+                    source = self._collection_root(preview.collection) / f"{item.record_id}.json"
+                    trash = trash_dir / f"{item.record_id}.json"
+                    if source.is_file():
+                        data = source.read_bytes()
+                        if not hmac.compare_digest(self._sha256(data), item.checksum):
+                            raise self._error(
+                                f"durable-state record {item.record_id} changed after cleanup preview",
+                                ErrorCode.STATE_RETENTION_STALE,
+                                retryable=True,
+                            )
+                        if self._fault_injector is not None:
+                            self._fault_injector("before_cleanup_move", item.record_id, index)
+                        os.replace(source, trash)
+                        self._fsync_dir(source.parent)
+                        self._fsync_dir(trash.parent)
+                        moved.append((source, trash))
+                    elif trash.is_file():
+                        if not hmac.compare_digest(self._sha256(trash.read_bytes()), item.checksum):
+                            raise self._error(
+                                f"cleanup trash for {item.record_id} is corrupt",
+                                ErrorCode.STATE_CORRUPT,
+                            )
+                    else:
+                        raise self._error(
+                            f"durable-state record {item.record_id} disappeared after cleanup preview",
+                            ErrorCode.STATE_RETENTION_STALE,
+                            retryable=True,
+                        )
+            except Exception as exc:
+                for source, trash in reversed(moved):
+                    if trash.is_file():
+                        os.replace(trash, source)
+                self._write_cleanup_journal(preview, phase="rolled_back")
+                if isinstance(exc, RepoForgeError):
+                    raise
+                raise self._error(
+                    "durable-state cleanup failed and was rolled back",
+                    ErrorCode.STATE_RETENTION_INVALID,
+                ) from exc
+
+            report = StateCleanupReport(
+                plan_id=preview.plan_id,
+                processed=len(preview.candidates),
+                deleted=len(preview.candidates),
+                protected=len(preview.protected_record_ids),
+                retained=preview.retained_records,
+                reclaimed_bytes=sum(item.size_bytes for item in preview.candidates),
+                next_cursor=preview.next_cursor,
+            )
+            self._write_cleanup_journal(preview, phase="committed", report=report)
+            return report

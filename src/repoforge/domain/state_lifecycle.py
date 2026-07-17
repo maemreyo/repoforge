@@ -329,3 +329,136 @@ class StateMigrationReport:
     unchanged: int
     rolled_back: bool
     backup_id: str | None
+
+
+class CleanupDisposition(str, Enum):
+    EXPIRED = "expired"
+    COUNT_QUOTA = "count_quota"
+    BYTE_QUOTA = "byte_quota"
+
+
+@dataclass(frozen=True, slots=True)
+class StateRetentionPolicy:
+    now: str
+    retention_seconds: int
+    max_records: int
+    max_total_bytes: int
+    batch_size: int = 100
+
+    def __post_init__(self) -> None:
+        _parse_timestamp(self.now, "retention now")
+        for field, value, minimum, maximum in (
+            ("retention_seconds", self.retention_seconds, 0, 10 * 365 * 24 * 60 * 60),
+            ("max_records", self.max_records, 1, 2_000_000),
+            ("max_total_bytes", self.max_total_bytes, 1, 1 << 50),
+            ("batch_size", self.batch_size, 1, 2_000),
+        ):
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not minimum <= value <= maximum
+            ):
+                raise _retention_error(f"{field} is outside its reviewed bound")
+
+
+@dataclass(frozen=True, slots=True)
+class StateProtection:
+    record_id: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        _validate_lifecycle_record_id(self.record_id)
+        _validate_reason(self.reason, "protection reason")
+
+
+@dataclass(frozen=True, slots=True)
+class StateRecordReference:
+    source_record_id: str
+    target_record_id: str
+    relation: str
+
+    def __post_init__(self) -> None:
+        _validate_lifecycle_record_id(self.source_record_id)
+        _validate_lifecycle_record_id(self.target_record_id)
+        _validate_reason(self.relation, "reference relation")
+
+
+@dataclass(frozen=True, slots=True)
+class StateCleanupCandidate:
+    record_id: str
+    checksum: str
+    size_bytes: int
+    created_at: str
+    disposition: CleanupDisposition
+
+
+@dataclass(frozen=True, slots=True)
+class StateCleanupPreview:
+    plan_id: str
+    plan_digest: str
+    collection: str
+    candidates: tuple[StateCleanupCandidate, ...]
+    protected_record_ids: tuple[str, ...]
+    orphan_references: tuple[tuple[str, str, str], ...]
+    retained_records: int
+    retained_bytes: int
+    remaining_candidate_count: int
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StateCleanupReport:
+    plan_id: str
+    processed: int
+    deleted: int
+    protected: int
+    retained: int
+    reclaimed_bytes: int
+    next_cursor: str | None
+
+
+def _retention_error(
+    message: str, code: ErrorCode = ErrorCode.STATE_RETENTION_INVALID
+) -> RepoForgeError:
+    return RepoForgeError(
+        message,
+        code=code,
+        safe_next_action=(
+            "Rebuild a bounded cleanup preview from current checksums, references, protections, "
+            "timestamps, and reviewed quotas."
+        ),
+    )
+
+
+def _parse_timestamp(value: str, field: str) -> object:
+    from datetime import datetime
+
+    if not isinstance(value, str) or len(value) > 64:
+        raise _retention_error(f"{field} must be a bounded ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise _retention_error(f"{field} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise _retention_error(f"{field} must include a timezone offset")
+    return parsed
+
+
+def _validate_lifecycle_record_id(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value) is None
+    ):
+        raise _retention_error("lifecycle record identifier is invalid")
+    return value
+
+
+def _validate_reason(value: str, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value) is None
+    ):
+        raise _retention_error(f"{field} is invalid")
+    return value
