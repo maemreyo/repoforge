@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..bootstrap import AdapterOverrides, Application, build_application
+from ..bootstrap import Application
 from ..config import AppConfig
 from ..domain.ticket_sync import TicketProjectOwnerType
+from ..extended_bootstrap import AdapterOverrides, build_application
 from ..ports import (
     AuditSink,
     CommandExecutor,

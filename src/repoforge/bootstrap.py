@@ -22,9 +22,6 @@ from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
-from .adapters.filesystem.receipt_transaction_factory import (
-    ReceiptJournaledFileTransactionFactory,
-)
 from .adapters.git import GitCliRepository
 from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
 from .adapters.github.ticket_project import GhTicketProjectGateway
@@ -35,7 +32,6 @@ from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
     JsonApprovalPayloadStore,
     JsonApprovalStore,
-    JsonExternalMutationLedger,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -99,7 +95,6 @@ from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
-from .application.extended_context import ExtendedApplicationContext
 from .application.fingerprint_cache import FingerprintCache
 from .application.nudges import AdoptionNudgeTracker
 from .application.onboarding.activation import ConfigurationActivator
@@ -167,19 +162,12 @@ from .ports import (
     WorkflowRecordingStore,
     WorkspaceStore,
 )
-from .ports.external_mutation_ledger import ExternalMutationLedger
-from .ports.filesystem_transaction import (
-    FileTransactionFactory as ReceiptFileTransactionFactory,
-)
-from .ports.issue_mutation import IssueMutationGateway
 
 
 @dataclass(frozen=True, slots=True)
 class AdapterOverrides:
     command: CommandExecutor | None = None
     execution_environment: ExecutionEnvironmentPort | None = None
-    approvals: ApprovalStore | None = None
-    approval_payloads: ApprovalPayloadStore | None = None
     store: WorkspaceStore | None = None
     locks: LockManager | None = None
     gate: OperationGate | None = None
@@ -190,8 +178,6 @@ class AdapterOverrides:
     file_transactions: FileTransactionFactory | None = None
     git: GitRepository | None = None
     github: PullRequestGateway | None = None
-    issue_mutations: IssueMutationGateway | None = None
-    external_mutations: ExternalMutationLedger | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     executables: ExecutableLocator | None = None
@@ -208,7 +194,6 @@ class AdapterOverrides:
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
-    receipt_file_transactions: ReceiptFileTransactionFactory | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,21 +447,7 @@ def build_application(
     filesystem = o.filesystem or LocalFileSystem()
     file_transactions = o.file_transactions or JournaledFileTransactionFactory()
     git = o.git or GitCliRepository(command, config.server)
-    default_github = GhCliGateway(command, config.server)
-    github = o.github or default_github
-    issue_mutations = o.issue_mutations or default_github
-    external_mutations = o.external_mutations or JsonExternalMutationLedger(
-        config.server.state_root,
-        locks,
-    )
-    approvals = o.approvals or JsonApprovalStore(config.server.state_root, locks)
-    approval_payloads = o.approval_payloads or JsonApprovalPayloadStore(
-        config.server.state_root,
-        locks,
-    )
-    receipt_file_transactions = (
-        o.receipt_file_transactions or ReceiptJournaledFileTransactionFactory()
-    )
+    github = o.github or GhCliGateway(command, config.server)
     ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
     ticket_projects = o.ticket_projects or GhTicketProjectGateway(command, config.server)
     ids = o.ids or UuidGenerator()
@@ -504,7 +475,7 @@ def build_application(
     )
     background_tasks = o.background_tasks or ThreadBackgroundTaskRunner()
     sleeper = o.sleeper or SystemSleeper()
-    context = ExtendedApplicationContext(
+    context = ApplicationContext(
         config=config,
         fingerprint_cache=FingerprintCache(),
         nudge_tracker=AdoptionNudgeTracker(),
@@ -532,11 +503,6 @@ def build_application(
         hygiene_cache=hygiene_cache,
         ticket_graphs=ticket_graphs,
         ticket_projects=ticket_projects,
-        issue_mutations=issue_mutations,
-        external_mutations=external_mutations,
-        approvals=approvals,
-        approval_payloads=approval_payloads,
-        receipt_file_transactions=receipt_file_transactions,
     )
     operations = OperationManager(context)
     recover_operations(
