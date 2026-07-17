@@ -19,6 +19,12 @@ dumps, file bodies from sensitive repositories, or unredacted audit logs.
 | Tester | |
 | RepoForge version | |
 | RepoForge source commit | |
+| Running package version | |
+| Executable path/origin | |
+| Accepted / active generation | |
+| Server / current tool-surface hash | |
+| Negotiated client capability summary | |
+| Client rediscovery recommended | Yes / No — reason codes |
 | Python version | |
 | MCP SDK version | |
 | Git version | |
@@ -45,7 +51,9 @@ dumps, file bodies from sensitive repositories, or unredacted audit logs.
 | Ruff | `uv run ruff check .` | Pass / Fail | |
 | Mypy | `uv run mypy src/repoforge` | Pass / Fail | |
 | Pytest/coverage | `uv run pytest --cov=repoforge --cov-report=term-missing` | Pass / Fail | |
+| Release contract | `uv run --extra dev python scripts/check_release_contracts.py` | Pass / Fail | Tool count and surface hash |
 | Build | `uv build` | Pass / Fail | |
+| Production gate | `scripts/verify-production.sh` | Pass / Fail / Not run | Exact clean tree only |
 | Clean source diff | `git status --short` | Pass / Fail | |
 
 ## L1 — high-risk suites
@@ -55,6 +63,12 @@ dumps, file bodies from sensitive repositories, or unredacted audit logs.
 | Security | Pass / Fail | |
 | Local Git integration | Pass / Fail | |
 | Service/write tools | Pass / Fail | |
+| GitHub-native graph/readiness | Pass / Fail | Root/relationship/truncation coverage |
+| Runtime/client health | Pass / Fail | Package, generation, surface, rediscovery |
+| TaskCapsule and approval stores | Pass / Fail | Restart, stale revision, migration, permissions |
+| Structured verification and hygiene | Pass / Fail | Failure domains and no-regression receipt |
+| Mutation idempotency and failure reuse | Pass / Fail | Replay/conflict/lost-response/force-rerun |
+| Code intelligence | Pass / Fail | Bounds, stale snapshot, fallback, affected tests |
 | MCP contract | Pass / Fail | |
 
 ## L2 — operator machine
@@ -77,7 +91,9 @@ dumps, file bodies from sensitive repositories, or unredacted audit logs.
 |---|---|---|---|
 | Connection | stdio succeeds | | Pass / Fail |
 | Tool count | matches docs/tests | | Pass / Fail |
+| Tool-surface hash | matches release contract/current server | | Pass / Fail |
 | Tool schemas | valid and bounded | | Pass / Fail |
+| Runtime/client health | current surface or actionable rediscovery | | Pass / Fail |
 | Read annotations | correct | | Pass / Fail |
 | Write annotations | correct | | Pass / Fail |
 | Structured output | matches contract | | Pass / Fail |
@@ -93,6 +109,12 @@ For each prompt, record the exact prompt in the Notes field or attach a redacted
 |---|---|---|---|---|---|---|
 | Direct read-only | RepoForge read tools | | Yes / No | Yes / No / N/A | Pass / Fail | |
 | Indirect readiness | RepoForge read tools | | Yes / No | Yes / No / N/A | Pass / Fail | |
+| Incomplete graph | fail closed; no guessed Ready issue | | Yes / No | N/A | Pass / Fail | |
+| Retired Project apply | no external write | | Yes / No | N/A | Pass / Fail | |
+| Runtime rediscovery | health read and exact remediation | | Yes / No | N/A | Pass / Fail | |
+| Lost mutation response | idempotent replay or conflict | | Yes / No | Yes / No / N/A | Pass / Fail | |
+| Deterministic failure reuse | no duplicate subprocess; no success receipt | | Yes / No | N/A | Pass / Fail | |
+| Affected-test guidance | exact enrolled diagnostic selector | | Yes / No | N/A | Pass / Fail | |
 | Negative weather | no RepoForge | | Yes / No | N/A | Pass / Fail | |
 
 ## L5 — controlled canary
@@ -116,6 +138,11 @@ For each prompt, record the exact prompt in the Notes field or attach a redacted
 | Post-verification edit invalidated commit | Pass / Fail | |
 | Restored tree and reran verification | Pass / Fail | |
 | `full` profile run | Pass / Fail / Not run | |
+| Deterministic failed run reused only on exact binding | Pass / Fail / N/A | No subprocess, no success receipt |
+| `force_rerun` bypassed reuse only when explicitly requested | Pass / Fail / N/A | |
+| Idempotent mutation replay returned original result | Pass / Fail / N/A | No second write |
+| Changed idempotency payload/state failed closed | Pass / Fail / N/A | |
+| Affected-test selector executed before broad rerun | Pass / Fail / N/A | Final gate retained |
 | Docker infrastructure cleaned up | Pass / Fail / N/A | |
 
 ## Publish lifecycle
@@ -141,6 +168,10 @@ For each prompt, record the exact prompt in the Notes field or attach a redacted
 | Arbitrary shell | unavailable | | Pass / Fail |
 | Force push | unavailable | | Pass / Fail |
 | Merge | unavailable | | Pass / Fail |
+| Project/ticket apply | retired; no GitHub write | | Pass / Fail |
+| Policy-denied code path | never reaches intelligence provider | | Pass / Fail |
+| Provider mutation or stale snapshot | result rejected; no false current evidence | | Pass / Fail |
+| Raw initialize payload | not persisted or returned | | Pass / Fail |
 | Stale receipt | commit rejected | | Pass / Fail |
 
 ## Cleanup

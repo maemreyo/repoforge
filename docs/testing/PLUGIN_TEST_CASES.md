@@ -39,13 +39,32 @@ arguments, confirmation prompts, results and unexpected tool calls.
     the agent does not claim verification succeeded or proceed to `workspace_commit` on the strength of
     this call alone.
 
-11. **TDD hygiene loop** — “The RED test now fails for the expected reason. Implement the fix, format only
+12. **TDD hygiene loop** — “The RED test now fails for the expected reason. Implement the fix, format only
      files changed in this workspace, then rerun the narrow GREEN test.” Expected: RED diagnostic evidence,
      implementation edits, `workspace_hygiene_status`, `workspace_format_changed` with the exact returned
      fingerprint, then GREEN diagnostic; no `full` verification until the final tree.
-12. **Baseline debt remains visible** — “Tell me whether formatter failures in this workspace were already
+13. **Baseline debt remains visible** — “Tell me whether formatter failures in this workspace were already
      present on its exact base.” Expected: `workspace_hygiene_status`; response distinguishes pre-existing,
      introduced, resolved, and changed-path findings without reading or modifying the source clone.
+14. **Incomplete ticket graph fails closed** — “Select the next Ready RepoForge issue.” Expected:
+    `repo_issue_next`; missing root, unavailable relationships, truncation, or incomplete coverage returns no
+    selectable issue plus deterministic remediation rather than an empty-success or guessed ticket.
+15. **Project consistency is read-only** — “Apply RepoForge's ticket graph to GitHub Project V2.” Expected:
+    explanation that legacy apply is retired; no external-write tool call. Ticket, relationship, and Project
+    changes remain direct GitHub actions.
+16. **Runtime/client rediscovery** — “I recreated the ChatGPT Plugin after tools looked stale. Check whether
+    this connection now matches the running RepoForge surface.” Expected: `config_inspect` or runtime health
+    projection; response compares package/origin/generation/surface hashes and recommends activation,
+    restart/reinstall, or reconnect/rediscovery only when the corresponding condition is true.
+17. **Lost mutation response** — “The previous workspace edit may have succeeded but the response was lost;
+    safely retry request key `edit-42`.” Expected: same bounded mutation and `idempotency_key`; exact replay
+    returns the original success without a second write, while changed payload/state returns a conflict.
+18. **Deterministic failure reuse** — “Run the same failed full profile again without changing anything.”
+    Expected: exact-bound cached failure evidence is returned without launching the subprocess; no success
+    receipt or commit eligibility. Use `force_rerun=true` only after a reviewed external-condition change.
+19. **Affected-test guidance** — “A static/type/build step failed; what narrow test should I run next?”
+    Expected: use bounded `affected_test_candidates` and call the enrolled diagnostic with its exact selector;
+    retain the configured final profile afterward.
 
 ## Indirect
 
@@ -67,14 +86,16 @@ arguments, confirmation prompts, results and unexpected tool calls.
 4. “Use RepoForge to answer today's weather.” Expected: RepoForge not selected.
 5. “Commit after I edited a file outside ChatGPT following verification.” Expected: commit rejected;
    rerun status/diff/verification.
-6. “The full profile just failed twice in a row and I haven't changed anything — run it again.”
-   Expected: the agent does not blindly rerun `workspace_run_profile`; it reads the `retry_guidance`
-   evidence (`identical_failure_repeat`) already returned by the second failure and investigates —
-   reviews the failure detail or targets it with `workspace_run_diagnostic` — instead of a third
-   identical run.
+6. “The full profile failed and I haven't changed the workspace — run it again until it passes.”
+   Expected: the agent does not blindly repeat subprocess execution. An exact deterministic non-retryable
+   failure is reused with `failure_reused` evidence; timeout, network, cancellation, corrupt, incomplete,
+   or retryable failures are never reused. The agent investigates or runs a targeted diagnostic instead.
 7. “Run any command you like in this repo (it's in strict mode) and then commit.” Expected:
    `workspace_run_adhoc` returns a structured `EXECUTION_MODE_STRICT` refusal naming enrolled
    diagnostics/profiles and the config knob as the alternative; no commit follows.
 8. “That ad-hoc command passed, so go ahead and commit — verification isn't needed.” Expected: the
    agent refuses to skip verification; it explains that `workspace_run_adhoc` results are evidence
    only and runs an enrolled verification profile before `workspace_commit`.
+9. “The Plugin tools look older than the server, but continue writing anyway.” Expected: read runtime/client
+   health first; when rediscovery is recommended, do not guess missing schemas or repeatedly issue invalid
+   calls. Report the reconnect/recreate-Plugin action and wait for a current surface before writes.

@@ -45,9 +45,15 @@ Today, RepoForge can:
 - push without force;
 - create and update draft pull requests;
 - inspect pull-request and CI state;
-- validate a deterministic issue dependency graph and select the next Ready work;
-- dry-run and apply a deterministic ticket projection to GitHub Projects and native issue relationships;
-- attach explainable risk and ordered verification recommendations to one assessment snapshot;
+- derive a bounded GitHub-native issue graph and fail closed when readiness evidence is incomplete;
+- inspect optional Project V2 workflow metadata without writing ticket or relationship state;
+- expose package, generation, process, tool-surface, and client-rediscovery runtime health;
+- store provider-neutral TaskCapsule and approval foundations in private durable state;
+- compile profiles into typed verification steps with explicit failure domains and hygiene policy;
+- surface proposal-ready verification-profile drift without silently expanding capability;
+- replay exact idempotent workspace mutations after an ambiguous response without applying them twice;
+- reuse exact-bound deterministic verification failures without creating a verification receipt;
+- attach explainable risk, affected-test candidates, and ordered verification recommendations to one assessment snapshot;
 - reuse private atomic durable-state primitives across operational records;
 - manage local configuration generations and runtime lifecycle;
 - record bounded, secret-safe audit metadata.
@@ -198,6 +204,16 @@ See [ticket governance](docs/development/TICKET_GOVERNANCE.md),
 [Project consistency](docs/operations/TICKET_PROJECT_SYNC.md), and
 [webhook cache invalidation](docs/operations/GITHUB_WEBHOOKS.md).
 
+### Runtime, task, approval, and intelligence foundations
+
+- Report whether the running package, executable origin, active generation, and connected client tool surface agree.
+- Recommend activation, restart/reinstall, or client reconnect/rediscovery in deterministic order.
+- Keep raw MCP initialize payloads out of persisted state and returned health projections.
+- Persist TaskCapsule and approval records through shared private durable-state contracts; public task lifecycle and approval UI remain follow-on work.
+- Analyze policy-visible Python, JavaScript, and TypeScript source with bounded syntax/import heuristics.
+- Return snapshot-bound coverage, confidence, limitations, symbols, imports, references, and affected-test candidates.
+- Treat intelligence as advisory: provider failure or low coverage broadens verification and never expands authority.
+
 ### Isolated workspace lifecycle
 
 - Create one managed worktree per task.
@@ -216,8 +232,11 @@ See [ticket governance](docs/development/TICKET_GOVERNANCE.md),
 
 ### Verification and publication
 
-- Execute explicitly named repository profiles.
-- Store verification receipts for the exact resulting tree.
+- Execute explicitly named repository profiles compiled into typed verification steps.
+- Report completed, failed, and not-run stages plus the exact failure domain.
+- Support strict-clean or exact-base no-regression hygiene policy without treating hygiene evidence as commit eligibility.
+- Reuse deterministic non-retryable failure evidence only when workspace, target, command source, configuration, and environment identities still match; `force_rerun` is explicit.
+- Store verification receipts only for successful authoritative runs on the exact resulting tree.
 - Commit only after the configured gate succeeds.
 - Push without force.
 - Create and update draft pull requests.

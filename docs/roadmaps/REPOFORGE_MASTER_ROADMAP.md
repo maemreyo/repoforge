@@ -3,7 +3,7 @@
 **Status:** Proposed  
 **Scope:** Product, architecture, agent experience, execution, evidence, safety, and scale  
 **Target horizon:** Post–RepoForge 2.0  
-**Last updated:** 2026-07-15
+**Last updated:** 2026-07-17
 
 ---
 
@@ -11,22 +11,19 @@
 
 RepoForge has evolved beyond a thin MCP wrapper around Git. Its current strengths include:
 
-- allowlisted local repositories;
-- isolated Git worktrees;
-- optimistic file and workspace locking;
-- protected branches and paths;
-- bounded changes and command profiles;
-- exact-tree verification receipts;
+- allowlisted local repositories and isolated Git worktrees;
+- optimistic file/workspace locking plus exact-state idempotent mutation replay;
+- protected branches and paths, bounded changes, and reviewed command profiles;
+- typed verification steps, explicit failure domains, no-regression hygiene evidence, deterministic failure reuse, and exact-tree success receipts;
 - non-force push and draft-only pull request creation;
-- immutable configuration generations;
-- atomic runtime hot reload;
-- managed tunnel lifecycle;
-- deterministic onboarding proposals;
-- interactive safe-default review;
+- immutable configuration generations, proposal-ready profile drift, and shared approval persistence;
+- package/generation/process/tool-surface runtime health with client rediscovery guidance;
+- managed tunnel lifecycle and bounded runtime diagnostics;
+- deterministic onboarding proposals and interactive safe-default review;
 - stable MCP and release contracts;
-- deterministic issue governance with a validated dependency graph and Ready-ticket selector;
-- snapshot-bound explainable risk and ordered verification recommendations;
-- reusable private atomic durable-state envelopes adopted by OperationTask;
+- GitHub-native issue governance with bounded sub-issue/dependency traversal, explicit coverage, fail-closed Ready selection, optional Project metadata, and no checked-in operational graph;
+- snapshot-bound assessment with explainable risk, ordered verification recommendations, and provider-neutral affected-test intelligence;
+- reusable private atomic durable-state envelopes adopted by OperationTask, TaskCapsule, approvals, evidence, and operational records;
 - local-first setup/serve with standard-install interactive onboarding and deterministic path provenance;
 - atomic dual-format patch normalization with bounded deterministic repair and actionable failures;
 - bounded committed-snapshot tree, file, batch-read, search, commit, and comparison evidence without checkout;
@@ -47,14 +44,14 @@ The roadmap is organized around six coordinated programs:
 
 The highest-priority outcomes are:
 
-- resumable task state;
-- one consistent workspace assessment;
-- durable progress and cancellation for long operations;
-- visual review and approval inside ChatGPT;
-- behavior-level agent evaluation;
-- CodeGraph-backed impact intelligence;
-- architecture drift prevention;
-- explainable risk and adaptive verification.
+- expose the existing TaskCapsule foundation through resumable public task workflows;
+- turn the existing snapshot-consistent assessment and affected-test baseline into a compact public workflow;
+- adopt durable progress and cancellation across additional long operations;
+- build visual review and approval inside ChatGPT on the shared approval plane;
+- add behavior-level agent evaluation;
+- add optional CodeGraph-backed semantic depth behind the provider-neutral intelligence port;
+- add architecture drift prevention;
+- execute immutable adaptive verification plans while retaining the final exact-tree gate.
 
 ### 1.1 Delivery tracking and authority
 
@@ -68,15 +65,29 @@ active, its specification is complete, and every blocker is closed. Executable t
 typed contracts, and current product behavior remain higher authority than both roadmap and issue
 metadata.
 
-### 1.2 Active onboarding and patch-reliability batch
+### 1.2 Control-plane foundation reconciliation — 2026-07-17
 
-Draft PR [#118](https://github.com/maemreyo/repoforge/pull/118) places #103, #104, #105, #106,
-#111, #112, #113, and #114 in review from one verified worktree. It delivers command/document drift
-prevention, local-first setup and serve, standard-install interactive onboarding, config/state path
-provenance, dual-format patch input, deterministic hunk repair, whitespace-check/apply parity, and
-structured actionable failures. Parent initiatives #101 and #102 remain open because #107–#110 and
-#115–#116 are separate follow-on work. The next P0 selectable ticket after this batch is #115; #116
-remains blocked by #115.
+The isolated branch `ai/control-plane-foundations-and-runtime-hardening-f19b20ede8` contains ten
+independently reviewable checkpoints:
+
+| Task | Commit | Delivered contract |
+| --- | --- | --- |
+| Deterministic tooling and release | `a22a53c` | Restored Make/runtime/release commands and portable fail-closed release preflight. |
+| GitHub graph authority | `9b1d331` | Preserved ticket-graph configuration and made graph/readiness discovery explicit and fail-closed. |
+| Runtime and client health | `5afecf7` | Added package/generation/process/tool-surface health and reconnect/rediscovery guidance; satisfies the implementation scope of #152. |
+| TaskCapsule foundation | `67d60f8` | Added the durable provider-neutral domain/store foundation requested by #18; public task tools remain follow-on work. |
+| Shared approval plane | `c0086c2` | Added the shared approval domain/store and pending-policy migration requested by #81; UI and broader approval consumers remain follow-on work. |
+| Structured verification | `501f185` | Added typed steps, failure-domain evidence, and hygiene policy for #165, building on the already-implemented #163/#164 behavior. |
+| Verification profile drift | `b40d27b` | Added proposal-ready, generation-bound drift evidence for #151. |
+| Idempotent mutations | `329da09` | Added exact-state replay/conflict/recovery behavior for #154. |
+| Deterministic failure reuse | `f332b6c` | Added exact-bound profile/diagnostic failure reuse with explicit `force_rerun`; evidence reuse never grants commit eligibility. |
+| Code-intelligence baseline | `01f00c9` | Added the first provider-neutral affected-test/import/symbol slice for #37; optional CodeGraph depth remains follow-on work. |
+
+Live GitHub metadata must be reconciled separately from code. Current-source evidence supports
+verify-and-close review for #77/#141, #134–#136, and #163/#164 rather than reimplementation. The old
+checked-in-graph reconciliation design in #161 is superseded by GitHub-native authority; #159 and
+#162 should be closed or rewritten around read-only metadata consistency and GitHub-native intake.
+Issue #76 remains separate protocol-conformance work and is not claimed by this branch.
 
 ---
 
@@ -175,15 +186,15 @@ RepoForge is already strong in the following areas:
 
 The main product gaps are:
 
-- task-capsule intent, decisions, and acceptance context are not yet a first-class durable entity;
-- durable operations exist, but approved consumers have not yet adopted them for resumable execution;
-- the agent must manually reconstruct broader task context after interruption;
-- workspace analysis requires multiple tool calls;
-- long-running work lacks a unified task/progress contract;
+- TaskCapsule, approval, and evidence foundations exist internally, but complete public task/approval workflows and UI adapters are not yet exposed;
+- durable operations exist, but additional indexing, onboarding, assessment, and verification consumers still need resumable adoption;
+- the agent still reconstructs some broader task context manually after interruption;
+- the snapshot-consistent assessment remains an internal application shell rather than one default public operation;
+- code intelligence currently uses bounded syntax/import heuristics; semantic CodeGraph depth, architecture policy, and broader language coverage remain optional follow-on work;
+- long-running work lacks one unified task/progress contract across all consumers;
 - tool-selection behavior is not evaluated end to end;
-- semantic impact, architecture drift, and risk are not yet unified;
+- immutable verification-plan storage and execution are not yet implemented;
 - execution is not fully reproducible across machines;
-- analyzer outputs lack one normalized evidence model;
 - team and multi-agent coordination are not first-class.
 
 ## 4.1 Cross-cutting foundation initiatives
@@ -273,12 +284,13 @@ Replace repeated manual status, diff, impact, architecture, risk, and verificati
 ### Current shell and future public operation
 
 The application layer now provides a snapshot-consistent internal assessment over status, diff,
-policy, base, PR, CI, failure-reference, verification-receipt, explainable risk, and ordered
-verification-recommendation evidence. It rechecks HEAD, workspace fingerprint, configuration
-generation, and policy hash after every provider boundary. Missing evidence raises rather than lowers
-risk, every recommendation retains the configured final exact-tree profile, and critical paths require
-manual review. Semantic impact, architecture analysis, immutable-plan execution, caching, and public
-MCP exposure remain separate follow-on work.
+policy, base, PR, CI, failure-reference, verification-receipt, provider-neutral code intelligence,
+explainable risk, and ordered verification-recommendation evidence. It rechecks HEAD, workspace
+fingerprint, configuration generation, and policy hash after every provider boundary. Missing or
+partial evidence raises rather than lowers risk, affected-test candidates become exact enrolled
+diagnostic stages when available, every recommendation retains the configured final exact-tree
+profile, and critical paths require manual review. Architecture policy, immutable-plan execution,
+assessment caching, semantic provider depth, and public MCP exposure remain separate follow-on work.
 
 ```text
 workspace_assess(workspace_id)
@@ -521,9 +533,14 @@ Next actions are recommendations, not execution authority.
 
 ## 14. Shared Evidence Model
 
-### Goal
+### Current baseline and goal
 
-Normalize evidence from Git, CodeGraph, analyzers, verification, CI, and configuration.
+RepoForge now has a provider-neutral typed evidence model with deterministic identity, provenance,
+scope, snapshot binding, coverage, confidence, current/partial/unavailable/conflicting/stale states,
+private content-addressed artifacts, bounded queries, quotas, retention, and corruption handling.
+Code-intelligence results normalize into this model without granting authority. The remaining goal is
+to adopt the same evidence contract consistently across every Git, analyzer, verification, CI, and
+configuration consumer.
 
 ```text
 evidence_id
@@ -538,8 +555,9 @@ coverage
 confidence
 paths
 symbols
+tests
 summary
-stale
+status
 created_at
 ```
 
@@ -547,9 +565,26 @@ Evidence cannot grant permissions. Stale evidence cannot satisfy a gate. Conflic
 
 ---
 
-## 15. CodeGraph Integration
+## 15. Code Intelligence and optional CodeGraph integration
 
-### Architecture
+### Current baseline
+
+```text
+Workspace assessment / failed-profile guidance
+    ↓
+CodeIntelligencePort
+    ↓
+Bounded local syntax/import adapter
+    ↓
+Python + JavaScript + TypeScript facts and affected-test candidates
+```
+
+The first adapter is read-only, snapshot-bound, policy-filtered, bounded by file/byte/fact limits,
+and explicit about malformed, unsupported, generated, denied, truncated, partial, or unavailable
+evidence. It maps Python affected tests directly to enrolled `pytest-target` selectors and degrades
+without disabling the existing exact-tree verification workflow.
+
+### Optional semantic depth
 
 ```text
 RepoForge application
@@ -561,15 +596,9 @@ RepoForge-owned structured sidecar
 CodeGraph library
 ```
 
-### Capabilities
-
-- symbol search;
-- callers and callees;
-- task context;
-- impact radius;
-- affected tests;
-- graph coverage;
-- repository and workspace snapshots.
+A future CodeGraph provider may add callers/callees, deeper task context, wider impact radius,
+affected-test recall, graph coverage, and immutable repository/workspace indexes without changing
+public authority or the normalized evidence contract.
 
 ### Safeguards
 
@@ -580,7 +609,8 @@ CodeGraph library
 - provider instructions never reach ChatGPT;
 - snippets pass local egress scanning;
 - provider release and integrity are locked;
-- semantic canaries gate upgrades.
+- semantic canaries gate upgrades;
+- provider failure, stale snapshots, or low coverage broaden verification rather than reducing it.
 
 ---
 
@@ -1250,13 +1280,17 @@ Do not:
 
 # 40. Top five recommended next initiatives
 
-1. **Issue-driven delivery governance and next-ready automation** — complete #61, then #68/#69 and #63/#64.
-2. **Unified Workspace Assessment** — complete base freshness and typed diagnostics, then #14–#16.
-3. **Durable State Platform and Task Control Plane** — complete #71, then Task Capsule and the remaining state lifecycle work.
-4. **Protocol Compatibility and Human Approval** — complete #29/#76/#77/#79 before client-specific UX, and #81–#84 before Elicitation approvals.
-5. **Provider Trust and Resource Control** — complete #86–#88 before semantic provider expansion and #90–#93 before heavy indexing, caches, multi-repository, or remote execution.
+1. **Public Task Control Plane** — expose the internal TaskCapsule foundation through bounded start/resume/status/cancel workflows and bind workspaces, decisions, evidence, and receipts without relying on chat history.
+2. **Immutable Assessment and Verification Plans** — publish the existing assessment shell, persist exact-state plans, and execute targeted stages before the unchanged final profile.
+3. **Protocol Conformance and Client UX** — complete #76 and remaining compatibility work before MCP Tasks/Apps/Elicitation adapters; consume runtime-health rediscovery evidence instead of adding client-specific heuristics.
+4. **Approval Consumers and UI** — extend the shared approval plane to plan acceptance, sensitive disclosure, and explicit external writes before building approval dashboards.
+5. **Provider Trust, Architecture, and Resource Control** — add provider lifecycle/canaries and resource budgets before optional CodeGraph depth, architecture enforcement, heavy indexes, caches, multi-repository, or remote execution.
 
-CodeGraph, Architecture Drift, MCP Apps, Adaptive Verification, analyzers, and isolated execution should consume these foundations rather than introduce parallel state, approval, provider, compatibility, or resource-control semantics.
+Before opening new implementation tickets, reconcile live GitHub metadata for the contracts already
+satisfied by merged or branch code, close superseded checked-in-graph work, and rewrite any remaining
+ticket-intake scope around GitHub-native authority. CodeGraph, Architecture Drift, MCP Apps, Adaptive
+Verification, analyzers, and isolated execution should consume the existing state, approval, evidence,
+compatibility, and resource-control foundations rather than introduce parallel semantics.
 
 ---
 
