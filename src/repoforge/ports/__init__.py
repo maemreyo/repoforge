@@ -15,13 +15,9 @@ from .execution_environment import (
     ExecutionReceipt,
 )
 from .external_mutation_ledger import ExternalMutationLedger
+from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
-from .filesystem_transaction import (
-    CommitReceiptFactory,
-    FaultInjector,
-    FileTransaction,
-    FileTransactionFactory,
-)
+from .filesystem_transaction import CommitReceiptFactory, FaultInjector
 from .git import (
     GitBaseReferences,
     GitMergePreview,

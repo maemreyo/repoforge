@@ -126,7 +126,7 @@ from .workspace.hygiene_status import (
     WorkspaceHygieneStatusReader,
 )
 from .workspace.list import WorkspaceListCommand, WorkspaceLister
-from .workspace.mutate import (
+from .workspace.mutate_enhanced import (
     WorkspaceMutateCommand,
     WorkspaceMutation,
     WorkspaceMutator,

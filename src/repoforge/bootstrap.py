@@ -21,8 +21,7 @@ from .adapters.capabilities import SystemExecutableLocator
 from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
-from .adapters.filesystem import LocalFileSystem
-from .adapters.filesystem.transaction import JournaledFileTransaction
+from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
 from .adapters.git import GitCliRepository
 from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
 from .adapters.github.ticket_project import GhTicketProjectGateway
@@ -453,7 +452,7 @@ def build_application(
         backup_count=config.server.audit_backup_count,
     )
     filesystem = o.filesystem or LocalFileSystem()
-    file_transactions: FileTransactionFactory = o.file_transactions or JournaledFileTransaction
+    file_transactions = o.file_transactions or JournaledFileTransactionFactory()
     git = o.git or GitCliRepository(command, config.server)
     default_github = GhCliGateway(command, config.server)
     github = o.github or default_github

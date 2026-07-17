@@ -29,6 +29,71 @@ class TicketStatus(str, Enum):
     SUPERSEDED = "Superseded"
 
 
+class RequirementRelationType(str, Enum):
+    SUPERSEDES = "supersedes"
+    SUPERSEDED_BY = "superseded_by"
+    SPLIT_INTO = "split_into"
+    MERGED_INTO = "merged_into"
+    INVALIDATES = "invalidates"
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class RequirementRelation:
+    relation_type: RequirementRelationType
+    target_issue: int
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.relation_type, RequirementRelationType):
+            raise TicketGraphError("relation_type must be a RequirementRelationType")
+        if (
+            not isinstance(self.target_issue, int)
+            or isinstance(self.target_issue, bool)
+            or self.target_issue <= 0
+        ):
+            raise TicketGraphError("relation target must be a positive issue number")
+        if not isinstance(self.reason, str) or not self.reason.strip() or len(self.reason) > 500:
+            raise TicketGraphError("relation reason must be a non-empty bounded string")
+
+
+@dataclass(frozen=True, slots=True)
+class PartialCompletion:
+    verified_deliverables: tuple[str, ...]
+    remaining_scope: tuple[str, ...]
+    new_child_issues: tuple[int, ...]
+    unverified_work: tuple[str, ...]
+    handoff_notes: tuple[str, ...]
+    rejected_scope: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for field_name, values in (
+            ("verified_deliverables", self.verified_deliverables),
+            ("remaining_scope", self.remaining_scope),
+            ("unverified_work", self.unverified_work),
+            ("handoff_notes", self.handoff_notes),
+            ("rejected_scope", self.rejected_scope),
+        ):
+            if not isinstance(values, tuple) or len(values) > 64:
+                raise TicketGraphError(f"{field_name} must be a bounded tuple")
+            if any(
+                not isinstance(item, str) or not item.strip() or len(item) > 500 for item in values
+            ):
+                raise TicketGraphError(f"{field_name} contains an invalid item")
+        if not isinstance(self.new_child_issues, tuple) or len(self.new_child_issues) > 64:
+            raise TicketGraphError("new_child_issues must be a bounded tuple")
+        if any(
+            not isinstance(item, int) or isinstance(item, bool) or item <= 0
+            for item in self.new_child_issues
+        ):
+            raise TicketGraphError("new_child_issues must contain positive issue numbers")
+        if tuple(sorted(set(self.new_child_issues))) != self.new_child_issues:
+            raise TicketGraphError("new_child_issues must be sorted and unique")
+
+    @property
+    def has_remaining_scope(self) -> bool:
+        return bool(self.remaining_scope or self.new_child_issues or self.unverified_work)
+
+
 @dataclass(frozen=True, slots=True)
 class TicketNode:
     number: int
@@ -63,6 +128,7 @@ class TicketLiveMetadata:
     title: str
     state: str
     body: str
+    comments: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +148,8 @@ class TicketDeliveryMetadata:
     specification_complete: bool
     unresolved_design_gate: bool = False
     superseded_by: int | None = None
+    relations: tuple[RequirementRelation, ...] = ()
+    partial_completion: PartialCompletion | None = None
     wave: int = 0
     sequence: int = 0
 
@@ -96,6 +164,20 @@ class TicketDeliveryMetadata:
             or self.superseded_by <= 0
         ):
             raise TicketGraphError("superseded_by must be a positive issue number")
+        if not isinstance(self.relations, tuple) or len(self.relations) > 128:
+            raise TicketGraphError("relations must be a bounded tuple")
+        if any(not isinstance(item, RequirementRelation) for item in self.relations):
+            raise TicketGraphError("relations must contain RequirementRelation values")
+        relation_order = {value: index for index, value in enumerate(RequirementRelationType)}
+        relation_keys = tuple(
+            (relation_order[item.relation_type], item.target_issue) for item in self.relations
+        )
+        if tuple(sorted(set(relation_keys))) != relation_keys:
+            raise TicketGraphError("relations must be sorted and unique by type and target")
+        if self.partial_completion is not None and not isinstance(
+            self.partial_completion, PartialCompletion
+        ):
+            raise TicketGraphError("partial_completion must be PartialCompletion or None")
         for field, value in (("wave", self.wave), ("sequence", self.sequence)):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise TicketGraphError(f"{field} must be a non-negative integer")

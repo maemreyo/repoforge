@@ -1,3 +1,4 @@
 from .local import LocalFileSystem
+from .transaction import JournaledFileTransactionFactory
 
-__all__ = ["LocalFileSystem"]
+__all__ = ["JournaledFileTransactionFactory", "LocalFileSystem"]

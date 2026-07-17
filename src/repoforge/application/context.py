@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from ..config import AppConfig, RepositoryConfig
 from ..domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
@@ -28,7 +28,6 @@ from ..ports import (
     ExternalMutationLedger,
     FaultInjector,
     FileSystem,
-    FileTransaction,
     FileTransactionFactory,
     GitHubReadCache,
     GitRepository,
@@ -48,6 +47,7 @@ from ..ports import (
     TicketProjectGateway,
     WorkspaceStore,
 )
+from ..ports.filesystem_transaction import FileTransaction as ReceiptFileTransaction
 from .dto import to_data
 from .fingerprint_cache import FingerprintCache
 from .idempotency import IdempotencyEffectBoundary, execute_idempotent
@@ -258,11 +258,19 @@ class ApplicationContext:
         workspace_root: Path,
         *,
         fault_injector: FaultInjector | None = None,
-    ) -> FileTransaction:
+    ) -> ReceiptFileTransaction:
         factory = self.file_transactions
         if factory is None:
             raise ConfigError("Journaled file transaction factory is unavailable")
-        return factory(workspace_root, fault_injector=fault_injector)
+        creator = getattr(factory, "create", None)
+        if fault_injector is None and callable(creator):
+            return cast(ReceiptFileTransaction, creator(workspace_root))
+        if not callable(factory):
+            raise ConfigError("Journaled file transaction factory cannot inject faults")
+        return cast(
+            ReceiptFileTransaction,
+            factory(workspace_root, fault_injector=fault_injector),
+        )
 
     def external_mutation_ledger(self) -> ExternalMutationLedger:
         ledger = self.external_mutations
