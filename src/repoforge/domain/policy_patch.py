@@ -1,7 +1,8 @@
 """Typed repository policy patches layered over template-derived proposals.
 
 A patch is the durable record of deliberate, reviewed customization (custom command
-profiles, diagnostics, formatters) that must survive ``rf repo refresh``. Profiles are
+profiles, diagnostics, formatters, and relaxed-execution policy) that must survive
+``rf repo refresh``. Profiles are
 fully typed here. Diagnostic and formatter tables are shape-validated against the exact
 key allowlist that :func:`repoforge.application.configuration.document.render_resolved`
 can render; their deep semantic validation stays single-sourced in
@@ -16,6 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .adhoc import validate_adhoc_runners
+from .errors import ConfigError
 from .verification_steps import (
     HygieneBaselinePolicy,
     VerificationStep,
@@ -30,6 +33,7 @@ MAX_ARGUMENTS_PER_COMMAND = 64
 MAX_ARGUMENT_LENGTH = 512
 MAX_DESCRIPTION_LENGTH = 500
 MAX_TIMEOUT_SECONDS = 7_200
+MAX_ADHOC_TIMEOUT_SECONDS = 3_600
 
 # Keys ``render_resolved`` can persist for a diagnostic; anything else would be
 # silently dropped between acceptance and load, so it is rejected here instead.
@@ -362,11 +366,30 @@ class RepositoryPolicyPatch:
     profiles: tuple[ProfilePatch, ...] = ()
     diagnostics: tuple[tuple[str, dict[str, Any]], ...] = ()
     formatters: tuple[tuple[str, dict[str, Any]], ...] = ()
+    execution_mode: str | None = None
+    adhoc_runners: tuple[str, ...] | None = None
+    adhoc_timeout_seconds: int | None = None
     remove_profiles: tuple[str, ...] = ()
     remove_diagnostics: tuple[str, ...] = ()
     remove_formatters: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.execution_mode not in {None, "strict", "relaxed"}:
+            raise PolicyPatchError("execution_mode must be 'strict' or 'relaxed'")
+        if self.adhoc_runners is not None:
+            try:
+                runners = validate_adhoc_runners(tuple(self.adhoc_runners), "policy_patch")
+            except ConfigError as exc:
+                raise PolicyPatchError(str(exc)) from exc
+            object.__setattr__(self, "adhoc_runners", runners)
+        if self.adhoc_timeout_seconds is not None and (
+            not isinstance(self.adhoc_timeout_seconds, int)
+            or isinstance(self.adhoc_timeout_seconds, bool)
+            or not 1 <= self.adhoc_timeout_seconds <= MAX_ADHOC_TIMEOUT_SECONDS
+        ):
+            raise PolicyPatchError(
+                f"adhoc_timeout_seconds must be an integer in 1..{MAX_ADHOC_TIMEOUT_SECONDS}"
+            )
         for label, entries in (
             ("profiles", self.profiles),
             ("diagnostics", self.diagnostics),
@@ -425,6 +448,9 @@ class RepositoryPolicyPatch:
             self.profiles
             or self.diagnostics
             or self.formatters
+            or self.execution_mode is not None
+            or self.adhoc_runners is not None
+            or self.adhoc_timeout_seconds is not None
             or self.remove_profiles
             or self.remove_diagnostics
             or self.remove_formatters
@@ -459,6 +485,17 @@ class RepositoryPolicyPatch:
             profiles=tuple(profiles.values()),
             diagnostics=tuple(diagnostics.items()),
             formatters=tuple(formatters.items()),
+            execution_mode=(
+                other.execution_mode if other.execution_mode is not None else self.execution_mode
+            ),
+            adhoc_runners=(
+                other.adhoc_runners if other.adhoc_runners is not None else self.adhoc_runners
+            ),
+            adhoc_timeout_seconds=(
+                other.adhoc_timeout_seconds
+                if other.adhoc_timeout_seconds is not None
+                else self.adhoc_timeout_seconds
+            ),
             remove_profiles=tuple(remove_profiles),
             remove_diagnostics=tuple(remove_diagnostics),
             remove_formatters=tuple(remove_formatters),
@@ -466,6 +503,12 @@ class RepositoryPolicyPatch:
 
     def as_table(self) -> dict[str, Any]:
         table: dict[str, Any] = {}
+        if self.execution_mode is not None:
+            table["execution_mode"] = self.execution_mode
+        if self.adhoc_runners is not None:
+            table["adhoc_runners"] = list(self.adhoc_runners)
+        if self.adhoc_timeout_seconds is not None:
+            table["adhoc_timeout_seconds"] = self.adhoc_timeout_seconds
         if self.remove_profiles:
             table["remove_profiles"] = list(self.remove_profiles)
         if self.remove_diagnostics:
@@ -492,6 +535,9 @@ class RepositoryPolicyPatch:
                 "profiles",
                 "diagnostics",
                 "formatters",
+                "execution_mode",
+                "adhoc_runners",
+                "adhoc_timeout_seconds",
                 "remove_profiles",
                 "remove_diagnostics",
                 "remove_formatters",
@@ -515,6 +561,13 @@ class RepositoryPolicyPatch:
             ),
             diagnostics=tuple(sorted(diagnostics_raw.items())),
             formatters=tuple(sorted(formatters_raw.items())),
+            execution_mode=raw.get("execution_mode"),
+            adhoc_runners=(
+                tuple(raw["adhoc_runners"])
+                if isinstance(raw.get("adhoc_runners"), (list, tuple))
+                else None
+            ),
+            adhoc_timeout_seconds=raw.get("adhoc_timeout_seconds"),
             remove_profiles=tuple(raw.get("remove_profiles", ())),
             remove_diagnostics=tuple(raw.get("remove_diagnostics", ())),
             remove_formatters=tuple(raw.get("remove_formatters", ())),

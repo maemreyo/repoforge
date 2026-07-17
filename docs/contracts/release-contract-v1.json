@@ -137,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "b167c3937c50db4570bbb5a2b8fdbdada831d73d2297767a8dc14c1e23a39b3c",
+    "tool_surface_hash": "326404a3e85fbadb4884c9120f15c38a6ceca566beaacff364ec3b56ec541777",
     "tools": [
       {
         "annotations": {
@@ -704,13 +704,58 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use this to change one repository's command profiles, diagnostics, formatters,\nor policy overrides through the reviewed immutable-generation pipeline. Pass\ndry_run=true first to preview the capability delta. Restrictions and metadata-only\nchanges are applied immediately and hot reloaded; any capability expansion is only\nstored as a pending change that the operator must approve in a terminal with\n`rf config approve <change_id>` -- report that instruction and never claim an\nexpansion is active until config_inspect shows the new generation.",
+        "description": "Use this to change one repository's command profiles, diagnostics, formatters,\nrelaxed-execution policy, or policy overrides through the reviewed immutable-generation\npipeline. Pass dry_run=true first to preview the capability delta. Restrictions and metadata-only\nchanges are applied immediately and hot reloaded; any capability expansion is only\nstored as a pending change that the operator must approve in a terminal with\n`rf config approve <change_id>` -- report that instruction and never claim an\nexpansion is active until config_inspect shows the new generation.",
         "inputSchema": {
           "properties": {
+            "adhoc_runners": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Adhoc Runners"
+            },
+            "adhoc_timeout_seconds": {
+              "anyOf": [
+                {
+                  "maximum": 3600,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Adhoc Timeout Seconds"
+            },
             "dry_run": {
               "default": false,
               "title": "Dry Run",
               "type": "boolean"
+            },
+            "execution_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "strict",
+                    "relaxed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Execution Mode"
             },
             "policy_overrides": {
               "anyOf": [

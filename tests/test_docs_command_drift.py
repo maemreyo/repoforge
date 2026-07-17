@@ -7,6 +7,7 @@ from pathlib import Path
 
 import tomli
 
+from repoforge.application.configuration.source import parse_source
 from repoforge.interfaces.cli.main import build_parser
 
 ROOT = Path(__file__).parents[1]
@@ -167,3 +168,21 @@ def test_release_script_verifies_and_builds_before_publishing() -> None:
     push_index = script.index("git push")
 
     assert verify_index < build_index < push_index < release_index
+
+
+def test_make_check_remains_the_stable_full_verification_contract() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "check:" in makefile
+    assert "scripts/verify-production.sh --allow-dirty" in makefile
+
+
+def test_repoforge_source_config_enables_reviewed_relaxed_execution() -> None:
+    source = parse_source((ROOT / "config.repoforge.toml").read_text(encoding="utf-8"))
+    repository = source.repositories[0]
+
+    assert dict(repository.decisions)["risky_commands"] == "exclude"
+    assert repository.policy_patch.execution_mode == "relaxed"
+    assert repository.policy_patch.adhoc_runners == ("uv", "python3", "make")
+    assert repository.policy_patch.adhoc_timeout_seconds == 600
+    assert "ticket-graph" in repository.policy_patch.remove_profiles

@@ -11,9 +11,10 @@ include .env
 export
 endif
 
-.PHONY: help setup lint typecheck test build check production-check tickets
-.PHONY: install install-hooks inspector clean clean-dist
-.PHONY: start dev-server restart status stop logs watch doctor smoke release
+.PHONY: default start dev-server restart status stop logs doctor
+.PHONY: setup lint typecheck test build check install release
+.PHONY: smoke clean
+.PHONY: help production-check tickets install-hooks inspector clean-dist watch
 
 # Keep this list explicit: config.repoforge.toml profiles and operator docs rely on
 # stable target names, and tests reject drift between reviewed profiles and Make.
@@ -52,7 +53,7 @@ typecheck:  # Type-check the full source tree
 test:  # Run the complete suite with the repository coverage policy
 	uv run --extra dev pytest --cov=repoforge --cov-report=term-missing
 
-check:  # Run the authoritative production gate while the worktree is dirty
+check:  # Authoritative full verification gate for dirty development workspaces
 	scripts/verify-production.sh --allow-dirty
 
 production-check:  # Run the authoritative production gate on a clean committed tree
