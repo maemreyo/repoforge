@@ -626,6 +626,9 @@ _REPO_RECOGNIZED = {
     "diagnostics",
     "formatters",
     "resource_budget",
+    "execution_mode",
+    "adhoc_runners",
+    "adhoc_timeout_seconds",
 }
 _SERVER_RECOGNIZED = {
     "workspace_root",
@@ -829,6 +832,38 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
                 removals=remove_direction,
                 reason=reason,
             )
+        left_mode = str(left.get("execution_mode", "strict"))
+        right_mode = str(right.get("execution_mode", "strict"))
+        if left_mode != right_mode:
+            changes.append(
+                CapabilityChange(
+                    prefix + ".execution_mode",
+                    left_mode,
+                    right_mode,
+                    (
+                        CapabilityDeltaKind.EXPANSION
+                        if right_mode == "relaxed"
+                        else CapabilityDeltaKind.RESTRICTION
+                    ),
+                    "ad-hoc execution availability changed",
+                )
+            )
+        _record_set_change(
+            changes,
+            prefix + ".adhoc_runners",
+            _set(left.get("adhoc_runners")),
+            _set(right.get("adhoc_runners")),
+            additions=CapabilityDeltaKind.EXPANSION,
+            removals=CapabilityDeltaKind.RESTRICTION,
+            reason="ad-hoc executable allowlist changed",
+        )
+        _record_number(
+            changes,
+            prefix + ".adhoc_timeout_seconds",
+            left.get("adhoc_timeout_seconds", 300),
+            right.get("adhoc_timeout_seconds", 300),
+            reason="ad-hoc process duration",
+        )
         _record_profile_changes(changes, prefix + ".profiles", left, right)
         _record_diagnostic_changes(changes, prefix + ".diagnostics", left, right)
         _record_formatter_changes(changes, prefix + ".formatters", left, right)

@@ -22,7 +22,11 @@ version = 2
 [[repo]]
 id = "repoforge"
 path = "/Users/trung.ngo/Documents/zaob-dev/repoforge"
-decisions = ["dependency_install=exclude", "existing_worktrees=use_new_isolated"]
+decisions = [
+  "dependency_install=exclude",
+  "existing_worktrees=use_new_isolated",
+  "risky_commands=exclude",
+]
 
 # GitHub is the operational ticket source. Project fields are an optional overlay;
 # native sub-issues rooted at #3 define membership even without a Project target.
@@ -59,7 +63,10 @@ docs_globs = ["*.md", "docs/**"]
 # template-derived proposal. The hand-tuned profiles below supersede the auto-detected
 # Makefile/pytest candidates, which are removed to keep one authoritative set.
 [repo.policy_patch]
-remove_profiles = ["make-check", "make-test", "python-test"]
+execution_mode = "relaxed"
+adhoc_runners = ["uv", "python3", "make"]
+adhoc_timeout_seconds = 600
+remove_profiles = ["make-check", "make-test", "python-test", "ticket-graph"]
 
 [repo.policy_patch.profiles.setup]
 description = "Synchronize the locked RepoForge development environment"
@@ -71,7 +78,11 @@ commands = [["make", "setup"]]
 description = "Run Ruff and strict Mypy without the full test/build gate"
 verification = true
 timeout_seconds = 600
-commands = [["make", "lint"], ["make", "typecheck"]]
+commands = [
+  ["uv", "run", "ruff", "format", "--check", "src", "tests", "scripts"],
+  ["uv", "run", "ruff", "check", "src", "tests", "scripts"],
+  ["uv", "run", "mypy", "--strict", "src/repoforge"],
+]
 
 [repo.policy_patch.profiles.test]
 description = "Run the RepoForge test suite with branch coverage enforcement"
@@ -85,17 +96,11 @@ verification = true
 timeout_seconds = 600
 commands = [["make", "build"]]
 
-[repo.policy_patch.profiles.ticket-graph]
-description = "Validate the checked-in roadmap graph and show the next Ready tickets"
-verification = true
-timeout_seconds = 120
-commands = [["make", "tickets"]]
-
 [repo.policy_patch.profiles.full]
-description = "Run ticket governance, lint, strict typing, tests with coverage, and package builds"
+description = "Run the authoritative RepoForge production gate on the current workspace tree"
 verification = true
 timeout_seconds = 1800
-commands = [["make", "check"]]
+commands = [["scripts/verify-production.sh", "--allow-dirty"]]
 
 [repo.policy_patch.diagnostics.pytest-target]
 summary = "Run one tracked pytest path or node without changing verification profiles"

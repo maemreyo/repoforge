@@ -100,11 +100,16 @@ class AdoptionNudgeTracker:
     # the command belongs in an enrolled workspace_run_diagnostic template instead.
     ADHOC_ARGV_WINDOW_SECONDS: Final[float] = 3_600.0
     ADHOC_ARGV_THRESHOLD: Final[int] = 3
+    # Issue #166: once shown, don't repeat the stale-workspace nudge on every
+    # workspace_create/workspace_list call within this window.
+    STALE_WORKSPACE_NUDGE_WINDOW_SECONDS: Final[float] = 3_600.0
 
     def __init__(self) -> None:
         self._pr_check_polls = _BoundedEventWindow(self.PR_CHECK_POLL_THRESHOLD)
         self._file_reads = _BoundedEventWindow(self.FILE_READ_THRESHOLD)
         self._adhoc_argv = _BoundedEventWindow(self.ADHOC_ARGV_THRESHOLD)
+        self._stale_workspace_last_shown: float | None = None
+        self._stale_workspace_lock = threading.Lock()
 
     def observe_pending_pr_check_poll(self, workspace_id: str, now_epoch: float) -> bool:
         """Record one pending poll; report whether the nudge threshold is met."""
@@ -133,3 +138,22 @@ class AdoptionNudgeTracker:
             f"{workspace_id}:{argv_shape_key}", now_epoch, self.ADHOC_ARGV_WINDOW_SECONDS
         )
         return count >= self.ADHOC_ARGV_THRESHOLD
+
+    def observe_stale_workspace_nudge(self, now_epoch: float) -> bool:
+        """Report whether the stale-workspace nudge may fire now, and if so, record it.
+
+        Returns ``True`` (and starts/refreshes the rate-limit clock) the first time
+        this is called, or once ``STALE_WORKSPACE_NUDGE_WINDOW_SECONDS`` has elapsed
+        since it last returned ``True``; returns ``False`` (a suppressed repeat)
+        otherwise.
+
+        Callers must only invoke this once they have already decided the nudge would
+        otherwise fire (e.g. the candidate count met the configured threshold), so a
+        call with nothing to show never starts the rate-limit clock.
+        """
+        with self._stale_workspace_lock:
+            last = self._stale_workspace_last_shown
+            if last is not None and now_epoch - last < self.STALE_WORKSPACE_NUDGE_WINDOW_SECONDS:
+                return False
+            self._stale_workspace_last_shown = now_epoch
+            return True

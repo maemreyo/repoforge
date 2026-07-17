@@ -81,6 +81,12 @@ def test_profile_patch_validates_names_commands_and_bounds() -> None:
 
 
 def test_policy_patch_rejects_unrenderable_keys_and_conflicts() -> None:
+    with pytest.raises(PolicyPatchError, match="execution_mode"):
+        RepositoryPolicyPatch(execution_mode="unrestricted")
+    with pytest.raises(PolicyPatchError, match="adhoc_runners"):
+        RepositoryPolicyPatch(adhoc_runners=("../shell",))
+    with pytest.raises(PolicyPatchError, match="adhoc_timeout_seconds"):
+        RepositoryPolicyPatch(adhoc_timeout_seconds=0)
     with pytest.raises(PolicyPatchError, match="unrenderable or unsupported"):
         RepositoryPolicyPatch(diagnostics=(("d", {"argv": ["x"], "shell": "sh"}),))
     with pytest.raises(PolicyPatchError, match="check_argv"):
@@ -110,6 +116,9 @@ def test_policy_patch_merge_layering() -> None:
 def test_policy_patch_table_round_trip() -> None:
     patch = RepositoryPolicyPatch(
         profiles=(_profile("debug", (("uv", "run", "pytest", "-x"),)),),
+        execution_mode="relaxed",
+        adhoc_runners=("uv", "python3"),
+        adhoc_timeout_seconds=600,
         diagnostics=(
             (
                 "dx",
@@ -481,7 +490,11 @@ def test_restriction_is_applied_immediately_with_hot_reload(tmp_path: Path) -> N
     assert reload_calls == [2]
     inspected = admin.config_inspect("demo")
     assert "quick" not in inspected["repositories"]["demo"]["profiles"]
-    assert inspected["repositories"]["demo"]["policy_patch"]["remove_profiles"] == ["quick"]
+    inspected_repo = inspected["repositories"]["demo"]
+    assert inspected_repo["policy_patch"]["remove_profiles"] == ["quick"]
+    assert inspected_repo["execution_mode"] == "strict"
+    assert inspected_repo["adhoc_runners"] == []
+    assert inspected_repo["adhoc_timeout_seconds"] == 300
     # The durable source now carries the patch, so a later refresh preserves it.
     persisted = parse_source(admin._store.read_source_text())
     assert persisted.repositories[0].policy_patch.remove_profiles == ("quick",)
@@ -519,6 +532,29 @@ def test_dry_run_previews_without_state_change(tmp_path: Path) -> None:
     )
     assert result["status"] == "preview"
     assert result["requires_operator_approval"] is True
+    assert admin.pending.summaries() == []
+    assert admin._store.current().generation == 1
+
+
+def test_relaxed_execution_policy_previews_as_capability_expansion(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+
+    result = admin.repo_policy_apply(
+        "demo",
+        execution_mode="relaxed",
+        adhoc_runners=["pnpm", "node"],
+        adhoc_timeout_seconds=600,
+        dry_run=True,
+    )
+
+    assert result["status"] == "preview"
+    assert result["capability_delta"] == "expansion"
+    assert result["requires_operator_approval"] is True
+    assert {change["path"] for change in result["changes"]} >= {
+        "repositories.demo.execution_mode",
+        "repositories.demo.adhoc_runners",
+        "repositories.demo.adhoc_timeout_seconds",
+    }
     assert admin.pending.summaries() == []
     assert admin._store.current().generation == 1
 
@@ -694,6 +730,19 @@ async def test_config_admin_tools_round_trip_through_protocol(tmp_path: Path) ->
         assert preview.structuredContent is not None
         assert preview.structuredContent["status"] == "preview"
         assert preview.structuredContent["capability_delta"] == "expansion"
+        execution_preview = await session.call_tool(
+            "repo_policy_apply",
+            {
+                "repo_id": "demo",
+                "execution_mode": "relaxed",
+                "adhoc_runners": ["pnpm", "node"],
+                "adhoc_timeout_seconds": 600,
+                "dry_run": True,
+            },
+        )
+        assert execution_preview.isError is False
+        assert execution_preview.structuredContent is not None
+        assert execution_preview.structuredContent["capability_delta"] == "expansion"
         applied = await session.call_tool(
             "repo_policy_apply",
             {"repo_id": "demo", "remove_profiles": ["quick"]},

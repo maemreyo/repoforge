@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from ...domain.redaction import redact_text
+from ...domain.workspace_removal import order_candidates
 from ..context import ApplicationContext
+from ..workspace.removal_safety import MAX_NUDGE_CANDIDATES, compute_removal_candidates
+
+#: Per-workspace file-count bound for the doctor disk-usage walk, so a
+#: pathologically large worktree cannot make `doctor` itself slow.
+_MAX_DISK_USAGE_FILES = 20_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +27,22 @@ class DoctorResult:
     summary: dict[str, int]
     checks: list[dict[str, Any]]
     audit_log: str
+    workspaces: dict[str, Any]
+
+
+def _directory_size(path: Path, *, max_files: int = _MAX_DISK_USAGE_FILES) -> tuple[int, bool]:
+    total = 0
+    count = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            count += 1
+            if count > max_files:
+                return total, True
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+    return total, False
 
 
 class Doctor:
@@ -214,6 +236,37 @@ class Doctor:
                 add(name, False, str(exc))
         errors = [x for x in checks if not x["ok"] and x["severity"] == "error"]
         warnings = [x for x in checks if not x["ok"] and x["severity"] == "warning"]
+
+        records = self.ctx.store.list()
+        disk_usage_bytes = 0
+        disk_usage_truncated = False
+        existing_on_disk = 0
+        for record in records:
+            path = Path(record.path)
+            if not path.is_dir():
+                continue
+            existing_on_disk += 1
+            size, truncated = _directory_size(path)
+            disk_usage_bytes += size
+            disk_usage_truncated = disk_usage_truncated or truncated
+        removable = order_candidates(tuple(compute_removal_candidates(self.ctx, records)))[
+            :MAX_NUDGE_CANDIDATES
+        ]
+        workspaces_section = {
+            "count": len(records),
+            "existing_on_disk": existing_on_disk,
+            "disk_usage_bytes": disk_usage_bytes,
+            "disk_usage_bytes_truncated": disk_usage_truncated,
+            "removable_candidates": [
+                {
+                    "workspace_id": item.workspace_id,
+                    "age_seconds": item.age_seconds,
+                    "pr_state": item.pr_state,
+                }
+                for item in removable
+            ],
+        }
+
         return DoctorResult(
             not errors,
             {
@@ -224,4 +277,5 @@ class Doctor:
             },
             checks,
             str(self.ctx.audit.path),
+            workspaces_section,
         )

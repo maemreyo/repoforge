@@ -157,6 +157,9 @@ class ConfigAdminService:
                 "require_verification_before_commit": entry.get(
                     "require_verification_before_commit", False
                 ),
+                "execution_mode": entry.get("execution_mode", "strict"),
+                "adhoc_runners": entry.get("adhoc_runners", []),
+                "adhoc_timeout_seconds": entry.get("adhoc_timeout_seconds", 300),
                 "profiles": entry.get("profiles", {}),
                 "diagnostics": sorted((entry.get("diagnostics") or {}).keys()),
                 "formatters": sorted((entry.get("formatters") or {}).keys()),
@@ -234,6 +237,9 @@ class ConfigAdminService:
         remove_diagnostics: list[str] | None = None,
         set_formatters: dict[str, Any] | None = None,
         remove_formatters: list[str] | None = None,
+        execution_mode: str | None = None,
+        adhoc_runners: list[str] | None = None,
+        adhoc_timeout_seconds: int | None = None,
         policy_overrides: dict[str, str] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
@@ -251,6 +257,9 @@ class ConfigAdminService:
             remove_diagnostics=remove_diagnostics or [],
             set_formatters=set_formatters or {},
             remove_formatters=remove_formatters or [],
+            execution_mode=execution_mode,
+            adhoc_runners=adhoc_runners,
+            adhoc_timeout_seconds=adhoc_timeout_seconds,
         )
         if delta_patch.is_empty() and not policy_overrides:
             raise ConfigError("repo_policy_apply requires at least one change")
@@ -422,6 +431,9 @@ class ConfigAdminService:
         remove_diagnostics: list[str],
         set_formatters: dict[str, Any],
         remove_formatters: list[str],
+        execution_mode: str | None,
+        adhoc_runners: list[str] | None,
+        adhoc_timeout_seconds: int | None,
     ) -> RepositoryPolicyPatch:
         try:
             profiles = []
@@ -434,6 +446,9 @@ class ConfigAdminService:
                 profiles=tuple(profiles),
                 diagnostics=tuple(sorted(set_diagnostics.items())),
                 formatters=tuple(sorted(set_formatters.items())),
+                execution_mode=execution_mode,
+                adhoc_runners=tuple(adhoc_runners) if adhoc_runners is not None else None,
+                adhoc_timeout_seconds=adhoc_timeout_seconds,
                 remove_profiles=tuple(remove_profiles),
                 remove_diagnostics=tuple(remove_diagnostics),
                 remove_formatters=tuple(remove_formatters),

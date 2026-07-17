@@ -93,6 +93,9 @@ install-hooks:  # Install the reviewed pre-push contract hook
 inspector:  # Launch the MCP Inspector workflow
 	./scripts/inspect-mcp.sh
 
+check:  # Authoritative full verification gate for dirty development workspaces
+	scripts/verify-production.sh --allow-dirty
+
 # =============================================================================
 # Runtime lifecycle
 # =============================================================================

@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..context import ApplicationContext
+from .removal_safety import build_stale_workspaces_nudge
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +14,7 @@ class WorkspaceListCommand:
 @dataclass(frozen=True, slots=True)
 class WorkspaceListResult:
     workspaces: list[dict[str, object]]
+    stale_workspaces: dict[str, Any] | None = None
 
 
 class WorkspaceLister:
@@ -57,6 +60,6 @@ class WorkspaceLister:
                     }
                 )
             details["workspace_count"] = len(values)
-            return WorkspaceListResult(values)
+            return WorkspaceListResult(values, build_stale_workspaces_nudge(self.ctx))
 
         return self.ctx.audited("workspace_list", details, op)

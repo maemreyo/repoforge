@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, replace
+from typing import Any, cast
 
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
@@ -9,6 +9,7 @@ from ...domain.policy import slugify, validate_branch
 from ...domain.workspace import WorkspaceRecord, normalize_issue_ids
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
+from .removal_safety import build_stale_workspaces_nudge
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,7 @@ class WorkspaceCreateResult:
         "Inspect files, make changes, run a verification profile, then review the diff."
     )
     issue_ids: tuple[str, ...] = ()
+    stale_workspaces: dict[str, Any] | None = None
 
 
 class WorkspaceCreator:
@@ -160,7 +162,7 @@ class WorkspaceCreator:
             "base": base,
             "issue_ids": list(issue_ids),
         }
-        return cast(
+        result = cast(
             WorkspaceCreateResult,
             self.ctx.idempotent(
                 "workspace_create",
@@ -178,3 +180,8 @@ class WorkspaceCreator:
                 deserialize=lambda value: WorkspaceCreateResult(**value),
             ),
         )
+        # Computed fresh on every call (even an idempotent cache hit) since workspace
+        # staleness across the whole repository changes over time independent of this
+        # specific create call's cached result.
+        nudge = build_stale_workspaces_nudge(self.ctx)
+        return replace(result, stale_workspaces=nudge) if nudge is not None else result
