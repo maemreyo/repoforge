@@ -19,11 +19,6 @@ from typing import Any
 
 from .adhoc import validate_adhoc_runners
 from .errors import ConfigError
-from .verification_steps import (
-    HygieneBaselinePolicy,
-    VerificationStep,
-    VerificationStepKind,
-)
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -130,8 +125,6 @@ class ProfilePatch:
     verification: bool = False
     timeout_seconds: int | None = None
     working_directory: str | None = None
-    steps: tuple[VerificationStep, ...] = ()
-    baseline_policy: HygieneBaselinePolicy = HygieneBaselinePolicy.STRICT_CLEAN
 
     def __post_init__(self) -> None:
         _safe_name(self.name, "profile name")
@@ -174,18 +167,6 @@ class ProfilePatch:
                     f"profile {self.name}.working_directory must be a safe relative path"
                 )
             object.__setattr__(self, "working_directory", workdir)
-        if self.steps:
-            step_ids = [step.step_id for step in self.steps]
-            if len(set(step_ids)) != len(step_ids):
-                raise PolicyPatchError(f"profile {self.name}.steps contains duplicate ids")
-            if tuple(step.command for step in self.steps) != self.commands:
-                raise PolicyPatchError(f"profile {self.name}.commands must match steps commands")
-        if self.baseline_policy is HygieneBaselinePolicy.NO_REGRESSION and not any(
-            step.kind is VerificationStepKind.HYGIENE for step in self.steps
-        ):
-            raise PolicyPatchError(
-                f"profile {self.name}.baseline_policy=no_regression requires a hygiene step"
-            )
 
     def as_table(self) -> dict[str, Any]:
         table: dict[str, Any] = {
@@ -197,17 +178,6 @@ class ProfilePatch:
             table["timeout_seconds"] = self.timeout_seconds
         if self.working_directory is not None:
             table["working_directory"] = self.working_directory
-        if self.steps:
-            table["steps"] = [
-                {
-                    "id": step.step_id,
-                    "kind": step.kind.value,
-                    "command": list(step.command),
-                }
-                for step in self.steps
-            ]
-        if self.baseline_policy is not HygieneBaselinePolicy.STRICT_CLEAN:
-            table["baseline_policy"] = self.baseline_policy.value
         return table
 
     @classmethod
@@ -216,15 +186,7 @@ class ProfilePatch:
             raise PolicyPatchError(f"profile {name} patch must be a table")
         unknown = sorted(
             set(raw)
-            - {
-                "description",
-                "verification",
-                "commands",
-                "timeout_seconds",
-                "working_directory",
-                "steps",
-                "baseline_policy",
-            }
+            - {"description", "verification", "commands", "timeout_seconds", "working_directory"}
         )
         if unknown:
             raise PolicyPatchError(f"profile {name} patch has unsupported keys: {unknown}")
@@ -234,46 +196,16 @@ class ProfilePatch:
         verification = raw.get("verification", False)
         if not isinstance(verification, bool):
             raise PolicyPatchError(f"profile {name}.verification must be a boolean")
-        commands = tuple(
-            _validate_command(command, f"profile {name}.commands[{index}]")
-            for index, command in enumerate(commands_raw)
-        )
-        raw_steps = raw.get("steps", [])
-        if not isinstance(raw_steps, (list, tuple)):
-            raise PolicyPatchError(f"profile {name}.steps must be an array of inline tables")
-        steps: list[VerificationStep] = []
-        for index, raw_step in enumerate(raw_steps):
-            if not isinstance(raw_step, dict) or set(raw_step) != {"id", "kind", "command"}:
-                raise PolicyPatchError(
-                    f"profile {name}.steps[{index}] must contain id, kind, and command"
-                )
-            try:
-                steps.append(
-                    VerificationStep(
-                        str(raw_step["id"]),
-                        VerificationStepKind(str(raw_step["kind"])),
-                        _validate_command(
-                            raw_step["command"], f"profile {name}.steps[{index}].command"
-                        ),
-                    )
-                )
-            except ValueError as exc:
-                raise PolicyPatchError(f"Invalid profile {name}.steps[{index}]: {exc}") from exc
-        try:
-            baseline_policy = HygieneBaselinePolicy(
-                str(raw.get("baseline_policy", HygieneBaselinePolicy.STRICT_CLEAN.value))
-            )
-        except ValueError as exc:
-            raise PolicyPatchError(f"profile {name}.baseline_policy is invalid") from exc
         return cls(
             name=name,
             description=str(raw.get("description", "")),
-            commands=commands,
+            commands=tuple(
+                _validate_command(command, f"profile {name}.commands[{index}]")
+                for index, command in enumerate(commands_raw)
+            ),
             verification=verification,
             timeout_seconds=raw.get("timeout_seconds"),
             working_directory=raw.get("working_directory"),
-            steps=tuple(steps),
-            baseline_policy=baseline_policy,
         )
 
 

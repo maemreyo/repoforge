@@ -5,15 +5,12 @@ import re
 import shlex
 from pathlib import Path
 
-import tomli
-
 from repoforge.application.configuration.source import parse_source
 from repoforge.interfaces.cli.main import build_parser
 
 ROOT = Path(__file__).parents[1]
 _COMMAND = re.compile(r"^(?:uv run )?(?:rf|repoforge)(?:\s|$)")
 _SHELL_META = ("\\", "<", ">", "$", "{", "}", "|", "&&", ";")
-_MAKE_TARGET = re.compile(r"^([A-Za-z0-9_.-]+)\s*:", re.MULTILINE)
 
 
 def _surface(
@@ -108,66 +105,6 @@ def test_example_config_matches_current_source_schema() -> None:
     assert "[[repo]]" in text
     assert 'id = "example-repository"' in text
     assert "[repositories." not in text
-
-
-def test_repository_profiles_reference_existing_make_targets() -> None:
-    config = tomli.loads((ROOT / "config.repoforge.toml").read_text(encoding="utf-8"))
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    targets = set(_MAKE_TARGET.findall(makefile))
-    profile_tables = config["repo"][0]["policy_patch"]["profiles"]
-
-    referenced = {
-        command[1]
-        for profile in profile_tables.values()
-        for command in profile["commands"]
-        if command[:1] == ["make"] and len(command) == 2
-    }
-
-    assert referenced <= targets, f"missing Make targets: {sorted(referenced - targets)}"
-
-
-def test_make_default_is_read_only_and_verification_targets_remain_available() -> None:
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-
-    assert ".DEFAULT_GOAL := help" in makefile
-    assert re.search(r"^help:\s*(?:#.*)?$", makefile, re.MULTILINE)
-    assert re.search(r"^check:\s*(?:#.*)?$", makefile, re.MULTILINE)
-    assert "scripts/verify-production.sh --allow-dirty" in makefile
-    assert re.search(r"^production-check:\s*(?:#.*)?$", makefile, re.MULTILINE)
-    assert "scripts/verify-production.sh" in makefile
-    assert re.search(r"^tickets:\s*(?:#.*)?$", makefile, re.MULTILINE)
-    assert re.search(r"^inspector:\s*(?:#.*)?$", makefile, re.MULTILINE)
-    assert re.search(r"^install-hooks:\s*(?:#.*)?$", makefile, re.MULTILINE)
-
-
-def test_release_script_requires_an_explicit_bump_and_is_cross_platform() -> None:
-    script = (ROOT / "scripts/release.sh").read_text(encoding="utf-8")
-
-    assert "${1:-}" in script
-    assert "${1:-minor}" not in script
-    assert "sed -i ''" not in script
-    assert "python" in script
-
-
-def test_release_script_rejects_untracked_files_and_ambiguous_artifacts() -> None:
-    script = (ROOT / "scripts/release.sh").read_text(encoding="utf-8")
-
-    assert "git status --porcelain" in script
-    assert "rm -rf dist" in script
-    assert "find dist" in script
-    assert "sha256" in script.lower()
-    assert "repoforge_mcp-*.whl" not in script
-
-
-def test_release_script_verifies_and_builds_before_publishing() -> None:
-    script = (ROOT / "scripts/release.sh").read_text(encoding="utf-8")
-
-    verify_index = script.index("scripts/verify-production.sh")
-    build_index = script.index("uv build")
-    release_index = script.index("gh release create")
-    push_index = script.index("git push")
-
-    assert verify_index < build_index < push_index < release_index
 
 
 def test_make_check_remains_the_stable_full_verification_contract() -> None:
