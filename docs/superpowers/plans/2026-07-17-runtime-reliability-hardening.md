@@ -8,6 +8,13 @@
 
 **Tech Stack:** Python 3.10+, standard library, existing Unix runtime control protocol, existing tunnel-client admin HTTP endpoint, pytest, Ruff, strict Mypy.
 
+## Completion Record
+
+- Reconciled onto the post-#196 runtime-health and typed-verification-step architecture under issue #197.
+- Preserved the frozen public contract at 52 MCP tools and runtime protocol v1; no new commit-readiness tool was added.
+- Full production verification passed on the reconciled implementation, including four deterministic pytest shards, branch coverage, package build, and isolated installed-wheel smoke testing.
+- Upstream tunnel-client freshness counters and Forge v2 tracing/retry work remain explicitly out of scope, as recorded in issue #197.
+
 ## Global Constraints
 
 - Use one RepoForge-managed worktree and one branch for the complete change.
