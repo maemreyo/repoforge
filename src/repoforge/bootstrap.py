@@ -32,6 +32,8 @@ from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
     JsonApprovalPayloadStore,
     JsonApprovalStore,
+    JsonExecutionPlanAcceptanceStore,
+    JsonExecutionPlanStore,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -128,6 +130,8 @@ from .ports import (
     ConfigurationStore,
     ExecutableLocator,
     ExecutionEnvironmentPort,
+    ExecutionPlanAcceptanceStore,
+    ExecutionPlanStore,
     FileSystem,
     FileTransactionFactory,
     GitHubReadCache,
@@ -194,6 +198,8 @@ class AdapterOverrides:
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
+    execution_plans: ExecutionPlanStore | None = None
+    execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +462,10 @@ def build_application(
     code_intelligence = o.code_intelligence or SyntaxCodeIntelligenceProvider()
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
+    execution_plans = o.execution_plans or JsonExecutionPlanStore(config.server.state_root, locks)
+    execution_plan_acceptances = o.execution_plan_acceptances or JsonExecutionPlanAcceptanceStore(
+        config.server.state_root, locks
+    )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
@@ -503,6 +513,8 @@ def build_application(
         hygiene_cache=hygiene_cache,
         ticket_graphs=ticket_graphs,
         ticket_projects=ticket_projects,
+        execution_plans=execution_plans,
+        execution_plan_acceptances=execution_plan_acceptances,
     )
     operations = OperationManager(context)
     recover_operations(

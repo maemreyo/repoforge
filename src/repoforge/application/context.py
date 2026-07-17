@@ -23,6 +23,8 @@ from ..ports import (
     CommandExecutor,
     ExecutableLocator,
     ExecutionEnvironmentPort,
+    ExecutionPlanAcceptanceStore,
+    ExecutionPlanStore,
     FileSystem,
     FileTransactionFactory,
     GitHubReadCache,
@@ -237,6 +239,8 @@ class ApplicationContext:
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     file_transactions: FileTransactionFactory | None = None
+    execution_plans: ExecutionPlanStore | None = None
+    execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
 
     def now_epoch(self) -> float:
         try:

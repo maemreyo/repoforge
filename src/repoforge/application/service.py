@@ -82,6 +82,11 @@ from .workspace.edit import (
     WorkspaceEditCommand,
     WorkspaceEditor,
 )
+from .workspace.execution_plan import (
+    AcceptExecutionPlanCommand,
+    CreateExecutionPlanCommand,
+    ExecutionPlanService,
+)
 from .workspace.file_read import (
     WorkspaceFileReadCommand,
     WorkspaceFileReader,
@@ -248,6 +253,7 @@ class CodingService:
         self._list = WorkspaceLister(ctx)
         self._status = WorkspaceStatusReader(ctx)
         self._assessment = WorkspaceAssessmentReader(ctx)
+        self._execution_plans = ExecutionPlanService(ctx)
         self._base_status = WorkspaceBaseStatusReader(ctx)
         self._tree = WorkspaceTreeReader(ctx)
         self._read = WorkspaceFileReader(ctx)
@@ -591,6 +597,28 @@ class CodingService:
 
     def workspace_assessment(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._assessment.execute(WorkspaceAssessmentCommand(workspace_id)))
+
+    def workspace_create_execution_plan(
+        self,
+        workspace_id: str,
+        task_id: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._execution_plans.create(
+                CreateExecutionPlanCommand(workspace_id, task_id, expires_at)
+            )
+        )
+
+    def workspace_accept_execution_plan(
+        self,
+        workspace_id: str,
+        plan_id: str,
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._execution_plans.accept(AcceptExecutionPlanCommand(workspace_id, plan_id, task_id))
+        )
 
     def workspace_base_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._base_status.execute(WorkspaceBaseStatusCommand(workspace_id)))

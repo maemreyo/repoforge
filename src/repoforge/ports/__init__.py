@@ -14,6 +14,7 @@ from .execution_environment import (
     ExecutionEnvironmentPort,
     ExecutionReceipt,
 )
+from .execution_plan_store import ExecutionPlanAcceptanceStore, ExecutionPlanStore
 from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
 from .git import (
@@ -95,6 +96,8 @@ __all__ = [
     "EnvironmentPreflight",
     "ExecutableLocator",
     "ExecutionEnvironmentPort",
+    "ExecutionPlanAcceptanceStore",
+    "ExecutionPlanStore",
     "ExecutionReceipt",
     "FileSystem",
     "FileTransaction",
