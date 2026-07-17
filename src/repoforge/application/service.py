@@ -46,6 +46,11 @@ from .repository.recent_commits import (
     RecentCommitsCommand,
     RecentCommitsReader,
 )
+from .repository.retrieval import (
+    RepositoryRetrieval,
+    RepositorySearchV2Command,
+    RepositoryTreeV2Command,
+)
 from .repository.search import RepositorySearchCommand, RepositorySearcher
 from .repository.status import (
     RepositoryStatusCommand,
@@ -53,6 +58,7 @@ from .repository.status import (
 )
 from .repository.task_context import RepoTaskContextCommand, RepoTaskContextReader
 from .repository.tree import RepositoryTreeCommand, RepositoryTreeReader
+from .retrieval import SearchMode
 from .tickets.project_sync import (
     TicketProjectSyncCommand,
     TicketProjectSyncer,
@@ -129,6 +135,12 @@ from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
 from .workspace.restore_paths import (
     WorkspacePathsRestorer,
     WorkspaceRestorePathsCommand,
+)
+from .workspace.retrieval import (
+    WorkspaceDiffV2Command,
+    WorkspaceRetrieval,
+    WorkspaceSearchV2Command,
+    WorkspaceTreeV2Command,
 )
 from .workspace.run_adhoc import (
     WorkspaceAdhocRunner,
@@ -221,6 +233,7 @@ class CodingService:
         self._repo_read = RepositoryFileReader(ctx)
         self._repo_reads = RepositoryFilesReader(ctx)
         self._repo_read_v2 = RepositoryReader(ctx)
+        self._repo_retrieval = RepositoryRetrieval(ctx)
         self._repo_search = RepositorySearcher(ctx)
         self._recent = RecentCommitsReader(ctx)
         self._issue = IssueReader(ctx)
@@ -239,6 +252,7 @@ class CodingService:
         self._read = WorkspaceFileReader(ctx)
         self._reads = WorkspaceFilesReader(ctx)
         self._read_v2 = WorkspaceReader(ctx)
+        self._workspace_retrieval = WorkspaceRetrieval(ctx)
         self._search = WorkspaceSearcher(ctx)
         self._write = WorkspaceFileWriter(ctx)
         self._edit = WorkspaceEditor(ctx)
@@ -405,6 +419,56 @@ class CodingService:
         return _result(
             self._repo_search.execute(
                 RepositorySearchCommand(repo_id, query, ref, path_glob, max_results, context_lines)
+            )
+        )
+
+    def repo_search_v2(
+        self,
+        repo_id: str,
+        query: str,
+        mode: SearchMode = SearchMode.LITERAL,
+        ref: str | None = None,
+        path_glob: str | None = None,
+        max_results: int = 100,
+        context_lines: int = 0,
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_retrieval.search(
+                RepositorySearchV2Command(
+                    repo_id,
+                    query,
+                    mode,
+                    ref,
+                    path_glob,
+                    max_results,
+                    context_lines,
+                    byte_budget,
+                    cursor,
+                )
+            )
+        )
+
+    def repo_tree_v2(
+        self,
+        repo_id: str,
+        ref: str | None = None,
+        subtree: str | None = None,
+        max_entries: int = 500,
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_retrieval.tree(
+                RepositoryTreeV2Command(
+                    repo_id,
+                    ref,
+                    subtree,
+                    max_entries,
+                    byte_budget,
+                    cursor,
+                )
             )
         )
 
@@ -583,6 +647,74 @@ class CodingService:
         return _result(
             self._search.execute(
                 WorkspaceSearchCommand(workspace_id, query, path_glob, max_results, context_lines)
+            )
+        )
+
+    def workspace_search_v2(
+        self,
+        workspace_id: str,
+        query: str,
+        mode: SearchMode = SearchMode.LITERAL,
+        path_glob: str | None = None,
+        max_results: int = 100,
+        context_lines: int = 0,
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._workspace_retrieval.search(
+                WorkspaceSearchV2Command(
+                    workspace_id,
+                    query,
+                    mode,
+                    path_glob,
+                    max_results,
+                    context_lines,
+                    byte_budget,
+                    cursor,
+                )
+            )
+        )
+
+    def workspace_tree_v2(
+        self,
+        workspace_id: str,
+        subtree: str | None = None,
+        max_entries: int = 500,
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._workspace_retrieval.tree(
+                WorkspaceTreeV2Command(
+                    workspace_id,
+                    subtree,
+                    max_entries,
+                    byte_budget,
+                    cursor,
+                )
+            )
+        )
+
+    def workspace_diff_v2(
+        self,
+        workspace_id: str,
+        staged: bool = False,
+        path_glob: str | None = None,
+        max_files: int = 100,
+        byte_budget: int = 120_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._workspace_retrieval.diff(
+                WorkspaceDiffV2Command(
+                    workspace_id,
+                    staged,
+                    path_glob,
+                    max_files,
+                    byte_budget,
+                    cursor,
+                )
             )
         )
 
