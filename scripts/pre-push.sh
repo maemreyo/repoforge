@@ -22,18 +22,40 @@ run_check() {
     return 1
 }
 
+workspace_fingerprint() {
+    {
+        git diff --binary --no-ext-diff -- src tests
+        git diff --cached --binary --no-ext-diff -- src tests
+        while IFS= read -r -d '' path; do
+            printf 'untracked:%s\0' "$path"
+            git hash-object -- "$path"
+        done < <(git ls-files --others --exclude-standard -z -- src tests)
+    } | git hash-object --stdin
+}
+
+before_format=$(workspace_fingerprint)
 format_failed=0
-run_check "ruff format --check" uv run ruff format --check src tests || format_failed=1
-run_check "ruff check" uv run ruff check src tests || format_failed=1
+run_check "ruff format" uv run ruff format src tests || format_failed=1
+run_check "ruff check --fix" uv run ruff check --fix src tests || format_failed=1
+after_format=$(workspace_fingerprint)
+
+if [ "$before_format" != "$after_format" ]; then
+    echo ""
+    echo -e "${RED}⛔ REJECTED: Auto-format changed the working tree.${NC}"
+    echo "Review and commit those changes before pushing again:"
+    echo "  git diff -- src tests"
+    echo "  git add <reviewed-files>"
+    echo "  git commit"
+    echo ""
+    exit 1
+fi
+
 run_check "mypy --strict" uv run mypy --strict src/repoforge || format_failed=1
 
 if [ "$format_failed" -ne 0 ]; then
     echo ""
     echo -e "${RED}⛔ REJECTED: format/lint/typecheck failed (see above).${NC}"
-    echo "Fix locally before pushing:"
-    echo "  uv run ruff format src tests"
-    echo "  uv run ruff check --fix src tests"
-    echo "  uv run mypy --strict src/repoforge"
+    echo "Fix the reported issues before pushing again."
     echo ""
     exit 1
 fi

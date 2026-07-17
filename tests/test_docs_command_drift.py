@@ -140,6 +140,20 @@ def test_make_default_is_read_only_and_verification_targets_remain_available() -
     assert re.search(r"^install-hooks:\s*(?:#.*)?$", makefile, re.MULTILINE)
 
 
+def test_pre_push_autoformats_but_requires_generated_changes_to_be_committed() -> None:
+    script = (ROOT / "scripts/pre-push.sh").read_text(encoding="utf-8")
+
+    format_index = script.index('run_check "ruff format" uv run ruff format src tests')
+    lint_index = script.index('run_check "ruff check --fix" uv run ruff check --fix src tests')
+    typecheck_index = script.index('run_check "mypy --strict" uv run mypy --strict src/repoforge')
+
+    assert "workspace_fingerprint" in script
+    assert "ruff format --check" not in script
+    assert format_index < lint_index < typecheck_index
+    assert "Auto-format changed the working tree" in script
+    assert "Review and commit those changes before pushing again" in script
+
+
 def test_release_script_requires_an_explicit_bump_and_is_cross_platform() -> None:
     script = (ROOT / "scripts/release.sh").read_text(encoding="utf-8")
 
