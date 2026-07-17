@@ -1,0 +1,214 @@
+"""Closed, reusable Pydantic primitives shared by every Forge v2 tool."""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..domain.errors import ErrorCode
+
+Identifier = Annotated[
+    str,
+    Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"),
+]
+RepoId = Annotated[
+    str,
+    Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+]
+RelativePath = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=4096,
+        pattern=r"^[A-Za-z0-9._ -][A-Za-z0-9._/ -]*$",
+    ),
+]
+GitRef = Annotated[str, Field(min_length=1, max_length=512)]
+Sha256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+GitObjectId = Annotated[str, Field(pattern=r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")]
+Cursor = Annotated[str, Field(min_length=1, max_length=2048)]
+ShortText = Annotated[str, Field(min_length=1, max_length=500)]
+LongText = Annotated[str, Field(min_length=1, max_length=120_000)]
+ByteBudget = Annotated[int, Field(ge=1, le=120_000)]
+
+
+class StrictModel(BaseModel):
+    """Base model that fails closed on undeclared fields."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
+
+
+class ToolErrorDetails(StrictModel):
+    """Bounded optional details for the unified public error union."""
+
+    field: str | None = Field(default=None, max_length=160)
+    path: RelativePath | None = None
+    operation_index: int | None = Field(default=None, ge=0, le=99)
+    expected: str | None = Field(default=None, max_length=1000)
+    actual: str | None = Field(default=None, max_length=1000)
+    correlation_id: str | None = Field(default=None, max_length=128)
+
+
+class ToolError(StrictModel):
+    """One typed error shape shared by all 28 public tools."""
+
+    code: ErrorCode
+    message: ShortText
+    why: ShortText
+    retryable: bool = False
+    safe_next_action: ShortText
+    details: ToolErrorDetails | None = None
+
+
+class ToolResponse(StrictModel):
+    """Stable response metadata inherited by every tool-specific output."""
+
+    status: Literal["ok", "failed"] = "ok"
+    summary: str = Field(min_length=1, max_length=500)
+    error: ToolError | None = None
+
+
+class Freshness(str, Enum):
+    LIVE = "live"
+    CACHE = "cache"
+    LOCAL = "local"
+    UNAVAILABLE = "unavailable"
+
+
+class ProviderEvidence(StrictModel):
+    provider: str = Field(min_length=1, max_length=80)
+    confidence: float = Field(ge=0.0, le=1.0)
+    coverage: tuple[str, ...] = Field(default=(), max_length=100)
+    limitations: tuple[str, ...] = Field(default=(), max_length=100)
+
+
+class ReadFileRequest(StrictModel):
+    path: RelativePath
+    start_line: int = Field(default=1, ge=1, le=10_000_000)
+    end_line: int = Field(default=500, ge=1, le=10_000_000)
+
+
+class ReadFileResult(StrictModel):
+    path: RelativePath
+    content: str = Field(max_length=120_000)
+    sha256: Sha256
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=0)
+    total_lines: int = Field(ge=0)
+    truncated: bool = False
+    omitted_line_range: tuple[int, int] | None = None
+    next_cursor: Cursor | None = None
+
+
+class SearchMode(str, Enum):
+    LITERAL = "literal"
+    REGEX = "regex"
+    FILE_NAME = "file_name"
+
+
+class SearchMatch(StrictModel):
+    path: RelativePath
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+    match: str = Field(min_length=1, max_length=4000)
+    context_before: tuple[str, ...] = Field(default=(), max_length=5)
+    context_after: tuple[str, ...] = Field(default=(), max_length=5)
+    score: float = Field(default=1.0, ge=0.0, le=1.0)
+    provider: str = Field(default="literal", min_length=1, max_length=80)
+
+
+class TreeEntryKind(str, Enum):
+    FILE = "file"
+    DIRECTORY = "directory"
+
+
+class TreeEntry(StrictModel):
+    path: RelativePath
+    kind: TreeEntryKind
+    size_bytes: int | None = Field(default=None, ge=0)
+
+
+class DiffLine(StrictModel):
+    kind: Literal["context", "add", "delete"]
+    old_line: int | None = Field(default=None, ge=1)
+    new_line: int | None = Field(default=None, ge=1)
+    text: str = Field(max_length=10_000)
+
+
+class DiffHunk(StrictModel):
+    header: str = Field(min_length=1, max_length=500)
+    lines: tuple[DiffLine, ...] = Field(default=(), max_length=5000)
+
+
+class DiffFile(StrictModel):
+    path: RelativePath
+    status: Literal["added", "modified", "deleted", "renamed"]
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+    hunks: tuple[DiffHunk, ...] = Field(default=(), max_length=500)
+
+
+class CommitSummary(StrictModel):
+    sha: GitObjectId
+    subject: str = Field(min_length=1, max_length=500)
+    author: str = Field(min_length=1, max_length=300)
+    committed_at: str = Field(min_length=1, max_length=80)
+
+
+class ChangeMetrics(StrictModel):
+    changed_files: int = Field(ge=0)
+    added_lines: int = Field(ge=0)
+    deleted_lines: int = Field(ge=0)
+    diff_lines: int = Field(ge=0)
+    total_current_bytes: int = Field(ge=0)
+    within_limits: bool
+
+
+class CommandEvidence(StrictModel):
+    argv: tuple[str, ...] = Field(min_length=1, max_length=100)
+    returncode: int
+    duration_ms: float = Field(ge=0)
+    output_excerpt: str = Field(default="", max_length=12_000)
+
+
+class RepositorySummary(StrictModel):
+    repo_id: RepoId
+    capabilities: tuple[str, ...] = Field(default=(), max_length=100)
+    default_ref: GitRef
+
+
+class WorkspaceSummary(StrictModel):
+    workspace_id: Identifier
+    repo_id: RepoId
+    branch: str = Field(min_length=1, max_length=512)
+    base: GitRef
+    exists: bool
+    dirty: bool | None = None
+    lifecycle: str = Field(min_length=1, max_length=80)
+    issue_ids: tuple[str, ...] = Field(default=(), max_length=100)
+
+
+class OperationState(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class OperationEvidence(StrictModel):
+    operation_id: Identifier
+    kind: str = Field(min_length=1, max_length=120)
+    state: OperationState
+    phase: str = Field(min_length=1, max_length=120)
+    progress_current: int | None = Field(default=None, ge=0)
+    progress_total: int | None = Field(default=None, ge=0)
+    cancellation_reason: str | None = Field(default=None, max_length=500)
+    poll_after_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
+
+
+class KeyValue(StrictModel):
+    key: str = Field(min_length=1, max_length=160)
+    value: str = Field(max_length=10_000)

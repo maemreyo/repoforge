@@ -10,6 +10,7 @@ import pytest
 from repoforge.application.service import CodingService
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
+from repoforge.domain.mutation_policy import MUTATION_OPS
 from repoforge.ports.clock import Clock
 
 
@@ -250,6 +251,7 @@ def create_forge_environment(
     clock: Clock | None = None,
     execution_mode: str = "strict",
     adhoc_runners: tuple[str, ...] = (),
+    allowed_mutation_ops: tuple[str, ...] = MUTATION_OPS,
 ) -> ForgeEnvironment:
     remote = tmp_path / "remote.git"
     git("init", "--bare", str(remote), cwd=tmp_path)
@@ -308,6 +310,7 @@ max_diff_lines = 1000
 max_total_changed_bytes = 1000000
 allowed_paths = []
 denied_paths = [".git", ".git/**", ".env", ".github/workflows/**", "**/*.pem"]
+allowed_mutation_ops = {json.dumps(list(allowed_mutation_ops))}
 pr_labels = ["agent"]
 pr_reviewers = ["reviewer"]
 no_maintainer_edit = true

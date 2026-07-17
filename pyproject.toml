@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
   "inquirerpy>=0.3.4,<1",
   "mcp==1.28.1",
+  "pydantic>=2.13,<3",
   "rich>=13,<15",
   "tomli>=2.2.1",
 ]

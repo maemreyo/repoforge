@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "corpus": "generated_changes",
+  "cases": [
+    {
+      "id": "gpt-replace-single",
+      "input": {
+        "operations": [
+          {
+            "op": "replace_text",
+            "path": "src/example.py",
+            "old_text": "return False",
+            "new_text": "return True",
+            "expected_occurrences": 1
+          }
+        ]
+      },
+      "expected": {
+        "changed_paths": ["src/example.py"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gpt",
+        "format": "typed"
+      }
+    },
+    {
+      "id": "claude-create-file",
+      "input": {
+        "operations": [
+          {
+            "op": "create",
+            "path": "src/new_module.py",
+            "content": "VALUE = 1\n"
+          }
+        ]
+      },
+      "expected": {
+        "changed_paths": ["src/new_module.py"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "claude",
+        "format": "typed"
+      }
+    },
+    {
+      "id": "gemini-write-existing",
+      "input": {
+        "operations": [
+          {
+            "op": "write",
+            "path": "README.md",
+            "content": "# Updated\n"
+          }
+        ]
+      },
+      "expected": {
+        "changed_paths": ["README.md"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gemini",
+        "format": "typed"
+      }
+    },
+    {
+      "id": "gpt-mixed-create-move-delete",
+      "input": {
+        "operations": [
+          {
+            "op": "create",
+            "path": "notes/a.txt",
+            "content": "a\n"
+          },
+          {
+            "op": "move",
+            "source": "notes/a.txt",
+            "destination": "notes/b.txt"
+          },
+          {
+            "op": "delete",
+            "path": "obsolete.txt"
+          }
+        ]
+      },
+      "expected": {
+        "changed_paths": ["notes/b.txt", "obsolete.txt"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gpt",
+        "format": "typed"
+      }
+    },
+    {
+      "id": "claude-no-op-write",
+      "input": {
+        "operations": [
+          {
+            "op": "write",
+            "path": "README.md",
+            "content": "# Existing\n"
+          }
+        ]
+      },
+      "expected": {
+        "changed": false,
+        "changed_paths": [],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "claude",
+        "format": "typed"
+      }
+    },
+    {
+      "id": "gemini-stale-precondition",
+      "input": {
+        "operations": [
+          {
+            "op": "replace_text",
+            "path": "src/example.py",
+            "old_text": "missing",
+            "new_text": "replacement",
+            "expected_occurrences": 1
+          }
+        ]
+      },
+      "expected": {
+        "status": "failed",
+        "unchanged": true,
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gemini",
+        "format": "typed",
+        "negative": true
+      }
+    },
+    {
+      "id": "gpt-denied-path",
+      "input": {
+        "operations": [
+          {
+            "op": "create",
+            "path": ".github/workflows/unsafe.yml",
+            "content": "name: unsafe\n"
+          }
+        ]
+      },
+      "expected": {
+        "status": "failed",
+        "unchanged": true,
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gpt",
+        "format": "typed",
+        "negative": true
+      }
+    },
+    {
+      "id": "claude-dry-run",
+      "input": {
+        "dry_run": true,
+        "operations": [
+          {
+            "op": "delete",
+            "path": "obsolete.txt"
+          }
+        ]
+      },
+      "expected": {
+        "changed": false,
+        "diagnostic_count": 1,
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "claude",
+        "format": "typed"
+      }
+    }
+  ]
+}

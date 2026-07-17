@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "corpus": "patches",
+  "cases": [
+    {
+      "id": "git-diff-add-line",
+      "input": {
+        "patch": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # Demo\n+Added.\n"
+      },
+      "expected": {
+        "changed_paths": ["README.md"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "git-diff",
+        "format": "unified"
+      }
+    },
+    {
+      "id": "gpt-multi-hunk",
+      "input": {
+        "patch": "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-A = 1\n+A = 2\n@@ -5 +5 @@\n-B = 1\n+B = 2\n"
+      },
+      "expected": {
+        "changed_paths": ["src/a.py"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gpt",
+        "format": "unified"
+      }
+    },
+    {
+      "id": "claude-new-file",
+      "input": {
+        "patch": "diff --git a/dev/null b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n"
+      },
+      "expected": {
+        "changed_paths": ["new.txt"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "claude",
+        "format": "unified"
+      }
+    },
+    {
+      "id": "gemini-delete-file",
+      "input": {
+        "patch": "diff --git a/old.txt b/old.txt\ndeleted file mode 100644\n--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+      },
+      "expected": {
+        "changed_paths": ["old.txt"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gemini",
+        "format": "unified"
+      }
+    },
+    {
+      "id": "gpt-openai-envelope",
+      "input": {
+        "patch": "*** Begin Patch\n*** Update File: README.md\n@@\n-# Demo\n+# Updated Demo\n*** End Patch\n"
+      },
+      "expected": {
+        "changed_paths": ["README.md"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gpt",
+        "format": "openai-envelope"
+      }
+    },
+    {
+      "id": "machine-rename",
+      "input": {
+        "patch": "diff --git a/old_name.py b/new_name.py\nsimilarity index 100%\nrename from old_name.py\nrename to new_name.py\n"
+      },
+      "expected": {
+        "changed_paths": ["old_name.py", "new_name.py"],
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "git-diff",
+        "format": "unified"
+      }
+    },
+    {
+      "id": "ambiguous-context-fails-closed",
+      "input": {
+        "patch": "*** Begin Patch\n*** Update File: repeated.txt\n@@\n-same\n+changed\n*** End Patch\n"
+      },
+      "expected": {
+        "status": "failed",
+        "unchanged": true,
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "gpt",
+        "format": "openai-envelope",
+        "negative": true
+      }
+    },
+    {
+      "id": "path-traversal-fails-closed",
+      "input": {
+        "patch": "diff --git a/../outside.txt b/../outside.txt\n--- a/../outside.txt\n+++ b/../outside.txt\n@@ -1 +1 @@\n-old\n+new\n"
+      },
+      "expected": {
+        "status": "failed",
+        "unchanged": true,
+        "wrong_target": false
+      },
+      "metadata": {
+        "producer": "adversarial",
+        "format": "unified",
+        "negative": true
+      }
+    }
+  ]
+}
