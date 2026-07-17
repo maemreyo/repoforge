@@ -16,6 +16,7 @@ from repoforge.adapters.persistence.json_hygiene_cache import JsonHygieneBaselin
 from repoforge.adapters.subprocess import SubprocessCommandExecutor
 from repoforge.application.configuration.document import render_resolved
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.hygiene_common import select_policy_paths
 from repoforge.config import ServerConfig, load_config
 from repoforge.domain.config_generation import CapabilityDeltaKind, classify_capability_delta
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError
@@ -162,6 +163,21 @@ def test_formatter_policy_contract_hash_excludes_summary_but_binds_authority() -
 
     assert policy.contract_hash == renamed.contract_hash
     assert policy.contract_hash != widened.contract_hash
+
+
+def test_formatter_double_star_glob_matches_root_and_nested_paths(tmp_path: Path) -> None:
+    loaded = load_config(_write_config(tmp_path, _formatter_table()))
+    repo = loaded.repositories["demo"]
+    formatter = replace(
+        repo.formatters["ruff-format"],
+        include_globs=("tests/**/*.py",),
+    )
+
+    assert select_policy_paths(
+        ["tests/test_root.py", "tests/unit/test_nested.py", "src/demo.py"],
+        repo=repo,
+        policy=formatter,
+    ) == ("tests/test_root.py", "tests/unit/test_nested.py")
 
 
 def test_loads_typed_formatter_policy_and_defaults_to_none(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ import pytest
 from repoforge.application.configuration.source import SourceConfiguration, SourceRepository
 from repoforge.domain.config_generation import CapabilityDeltaKind, ConfigGeneration
 from repoforge.domain.errors import ConfigError
-from repoforge.domain.runtime import RuntimePhase, RuntimeRecord
+from repoforge.domain.runtime import ControlResponse, RuntimePhase, RuntimeRecord
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
 
@@ -439,6 +439,19 @@ def test_runtime_status_and_activation_noop_paths(
     )
     monkeypatch.setattr(
         cli, "build_runtime_store", lambda path: SimpleNamespace(read=lambda: healthy)
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_runtime_control_client",
+        lambda path: SimpleNamespace(
+            request=lambda request, timeout_seconds=2.0: ControlResponse(
+                1,
+                True,
+                request.correlation_id,
+                "healthy",
+                (("health", [["mcp", True, "ok"]]),),
+            )
+        ),
     )
     status = cli._runtime_status(store)
     assert status["state"] == "healthy" and status["safe_next_action"] == "Runtime is healthy."

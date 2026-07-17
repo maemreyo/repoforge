@@ -254,18 +254,46 @@ def managed_start_claim(path: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def runtime_log_files(path: Path) -> tuple[Path, ...]:
+    """Return numeric rotations followed by the active log in chronological order."""
+    prefix = path.name + "."
+    rotations: list[tuple[int, Path]] = []
+    if path.parent.is_dir():
+        for candidate in path.parent.glob(prefix + "*"):
+            suffix = candidate.name[len(prefix) :]
+            if suffix.isdigit() and candidate.is_file():
+                rotations.append((int(suffix), candidate))
+    ordered = [candidate for _, candidate in sorted(rotations, reverse=True)]
+    if path.is_file():
+        ordered.append(path)
+    return tuple(ordered)
+
+
 def read_runtime_log(path: Path, tail: int) -> list[str]:
-    """Read a bounded redacted tail from a supervisor-owned local log file."""
+    """Read one global bounded redacted tail across active and rotated runtime logs."""
     if tail <= 0 or tail > 1_000:
         raise ConfigError("Runtime log tail must be between 1 and 1000 lines")
-    if not path.is_file():
+    files = runtime_log_files(path)
+    if not files:
         return []
+    remaining = _LOG_READ_LIMIT
+    chunks: list[str] = []
     try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - _LOG_READ_LIMIT))
-            text = handle.read().decode("utf-8", errors="replace")
+        for candidate in reversed(files):
+            if remaining <= 0:
+                break
+            with candidate.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                start = max(0, size - remaining)
+                handle.seek(start)
+                data = handle.read(remaining)
+            text = data.decode("utf-8", errors="replace")
+            if start > 0 and "\n" in text:
+                text = text.split("\n", 1)[1]
+            chunks.insert(0, text)
+            remaining -= len(data)
     except OSError as exc:
-        raise ConfigError(f"Cannot read runtime log {path}: {exc}") from exc
+        raise ConfigError(f"Cannot read runtime log {path.name}: {exc}") from exc
+    text = "".join(chunks)
     return [redact_text(line) for line in text.splitlines()[-tail:]]

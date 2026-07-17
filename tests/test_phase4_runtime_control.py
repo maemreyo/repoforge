@@ -617,3 +617,109 @@ def test_incompatible_generation_uses_supervisor_restart_without_hot_reload() ->
     assert ControlCommand.RELOAD not in control.commands
     assert control.commands[:2] == [ControlCommand.DRAIN, ControlCommand.SHUTDOWN]
     assert launcher.started == [2]
+
+
+def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path) -> None:
+    from contextlib import nullcontext
+
+    from repoforge.application.runtime.supervisor import RuntimeSupervisor
+    from repoforge.domain.runtime import ChildProcess, HealthCheck, TunnelProfile
+
+    class Locks:
+        def lock(self, name: str, *, timeout_seconds=None, metadata=None):
+            del name, timeout_seconds, metadata
+            return nullcontext()
+
+    class Server:
+        def start(self, handler):
+            self.handler = handler
+
+        def close(self):
+            pass
+
+    class Processes:
+        def identity(self, pid: int) -> str | None:
+            return "f" * 64 if pid > 0 else None
+
+    class Mcp:
+        def request(self, request, *, timeout_seconds=10.0):
+            del timeout_seconds
+            if tunnel.starts == 2:
+                supervisor._stop.set()
+            return ControlResponse(1, True, request.correlation_id, "healthy")
+
+    class Tunnel:
+        def __init__(self) -> None:
+            self.starts = 0
+            self.health_calls = 0
+            self.terminated = 0
+
+        def initialize(self, profile, *, env):
+            del profile, env
+
+        def doctor(self, profile, *, env):
+            del profile, env
+            return True, "ok"
+
+        def start(self, profile, *, env, log_path):
+            del profile, env, log_path
+            self.starts += 1
+            self.health_calls = 0
+            return ChildProcess(200 + self.starts, "f" * 64, "now")
+
+        def is_alive(self, child):
+            del child
+            return True
+
+        def health(self, child, *, timeout_seconds):
+            del child, timeout_seconds
+            self.health_calls += 1
+            if self.starts == 1 and self.health_calls >= 2:
+                return (HealthCheck("control_plane_response", False, "502 response path"),)
+            return (HealthCheck("control_plane_response", True, "ok"),)
+
+        def terminate(self, child, *, grace_seconds):
+            del child, grace_seconds
+            self.terminated += 1
+
+    configs = FakeConfigStore(_generation(1, CapabilityDeltaKind.EXPANSION))
+    configs.target_item = _generation(2, CapabilityDeltaKind.EXPANSION)
+    configs.current_item = configs.target_item
+    runtime = FakeRuntimeStore()
+    tunnel = Tunnel()
+    runtime_path = tmp_path / "runtime.json"
+    runtime_path.write_text(
+        '{"pid":999,"process_identity":"' + "f" * 64 + '","active_generation":2}',
+        encoding="utf-8",
+    )
+    supervisor = RuntimeSupervisor(
+        store=runtime,
+        configs=configs,
+        locks=Locks(),
+        control=Server(),
+        mcp_control=Mcp(),
+        tunnel=tunnel,
+        profile_store=MemoryTunnelProfileStore(),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        ids=SequenceIdGenerator(tuple(f"id-{index}" for index in range(20))),
+        processes=Processes(),
+        mcp_runtime_path=runtime_path,
+        log_path=tmp_path / "runtime.log",
+        health_timeout_seconds=0.1,
+        watchdog_interval_seconds=0.001,
+        health_failure_threshold=2,
+        max_restarts=1,
+    )
+    profile = TunnelProfile("a" * 64, "repoforge", "tunnel-client", "1.0", ("rf", "serve"))
+
+    assert (
+        supervisor.run(
+            generation=2,
+            profile=profile,
+            tool_surface_hash="b" * 64,
+            environment={},
+        )
+        == 0
+    )
+    assert tunnel.starts == 2
+    assert tunnel.terminated >= 2

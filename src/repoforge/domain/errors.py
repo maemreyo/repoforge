@@ -15,6 +15,10 @@ class ErrorCode(str, Enum):
     COMMAND_FAILED = "COMMAND_FAILED"
     COMMAND_TIMEOUT = "COMMAND_TIMEOUT"
     WORKSPACE_INVALID = "WORKSPACE_INVALID"
+    WORKSPACE_PATH_MISSING = "WORKSPACE_PATH_MISSING"
+    WORKTREE_REGISTRATION_STALE = "WORKTREE_REGISTRATION_STALE"
+    WORKSPACE_BRANCH_MISMATCH = "WORKSPACE_BRANCH_MISMATCH"
+    WORKSPACE_OUTSIDE_ROOT = "WORKSPACE_OUTSIDE_ROOT"
     PATCH_FORMAT_UNSUPPORTED = "PATCH_FORMAT_UNSUPPORTED"
     PATCH_PARSE_FAILED = "PATCH_PARSE_FAILED"
     PATCH_CONTEXT_NOT_FOUND = "PATCH_CONTEXT_NOT_FOUND"
@@ -262,6 +266,10 @@ def operation_error_from_exception(
         ErrorCode.STATE_CORRUPT: "The durable state record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.STATE_SCHEMA_UNSUPPORTED: "The durable state record uses a schema version this build cannot safely interpret.",
         ErrorCode.STATE_TOO_LARGE: "The encoded durable state record exceeds its reviewed storage bound.",
+        ErrorCode.WORKSPACE_PATH_MISSING: "The registered workspace directory no longer exists on disk.",
+        ErrorCode.WORKTREE_REGISTRATION_STALE: "The registered path is no longer a valid Git worktree.",
+        ErrorCode.WORKSPACE_BRANCH_MISMATCH: "The worktree branch no longer matches the immutable workspace registry binding.",
+        ErrorCode.WORKSPACE_OUTSIDE_ROOT: "The registered path escapes the configured RepoForge workspace root.",
         ErrorCode.PATCH_FORMAT_UNSUPPORTED: "The supplied patch is not one of RepoForge's reviewed patch formats.",
         ErrorCode.PATCH_PARSE_FAILED: "The patch structure is malformed or violates a bounded parser contract.",
         ErrorCode.PATCH_CONTEXT_NOT_FOUND: "The requested hunk context does not exist in the exact current workspace file.",

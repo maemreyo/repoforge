@@ -83,6 +83,33 @@ logs while the process is running. The current log and each retained backup rema
 `runtime_log_max_bytes`. A pathological no-newline stream is bounded so it cannot grow memory or
 bypass the retention policy.
 
+## Runtime truth and bounded recovery
+
+The managed runtime no longer equates process liveness with service health. The domain record retains
+both its persisted phase and timestamped component observations. The supervisor composes tunnel-child
+identity, loopback admin readiness, MCP generation, repository self-check, and control-plane response
+signals behind the existing `TunnelClient` and runtime-control ports. Startup and steady-state monitoring
+use the same observation path.
+
+One transient failure records evidence only. Consecutive failures transition `healthy` to `degraded`; a
+reviewed threshold terminates the child and reuses the existing bounded restart path. A sustained healthy
+window resets restart pressure. Exhausting the restart budget writes a terminal failed record, preventing
+an unbounded crash loop. The CLI actively probes the supervisor and reports `stale` when a persisted
+healthy record cannot be confirmed.
+
+The existing runtime log reader merges retained numeric rotations and the active file under one global
+byte and line budget. Agent-facing results expose only relative labels, while the local files remain
+private and redacted.
+
+## Commit and verification failure evidence
+
+The existing profile runner timestamps each reviewed command and returns stage and cumulative durations
+on success or the first failing stage on error. The existing commit path annotates Git add, staged-diff,
+commit-hook, and summary failures with bounded redacted subprocess evidence. If a failed hook changes the
+workspace fingerprint, the prior verification receipt is invalidated before the failure is returned.
+No readiness or incident MCP tool is introduced; the enhanced evidence travels through the existing
+`workspace_run_profile`, `workspace_commit`, runtime status, and runtime-log surfaces.
+
 ## Diagnostics bundle
 
 `rf diagnostics bundle` writes a private metadata-only JSON document containing:

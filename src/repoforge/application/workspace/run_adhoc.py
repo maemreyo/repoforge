@@ -150,9 +150,18 @@ def _argv_shape_key(argv: tuple[str, ...]) -> str:
 
 
 def _safe_error_message(text: str, *, limit: int = 2_000) -> str:
-    cleaned = "".join(ch for ch in text if ch in "\n\t\r" or ord(ch) >= 32)
-    cleaned = cleaned[:limit].strip()
-    return cleaned or "Background workspace_run_adhoc failed"
+    cleaned = "".join(ch for ch in text if ch in "\n\t\r" or ord(ch) >= 32).strip()
+    if not cleaned:
+        return "Background workspace_run_adhoc failed"
+    if len(cleaned) <= limit:
+        return cleaned
+    marker = "\n... durable error excerpt omitted ...\n"
+    if limit <= len(marker):
+        return cleaned[:limit]
+    available = limit - len(marker)
+    head_size = available // 2
+    tail_size = available - head_size
+    return cleaned[:head_size] + marker + cleaned[-tail_size:]
 
 
 class WorkspaceAdhocRunner:

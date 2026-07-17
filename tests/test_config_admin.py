@@ -629,6 +629,8 @@ def test_runtime_logs_read_bounds_sources_and_filters(tmp_path: Path) -> None:
     assert [item["action"] for item in failed["events"]] == ["workspace_run_profile"]
     runtime = admin.runtime_logs_read("runtime", limit=1)
     assert runtime["lines"] == ["two"]
+    assert runtime["path"] == "managed-runtime.log"
+    assert runtime["files"] == ["managed-runtime.log"]
     with pytest.raises(ConfigError, match="source"):
         admin.runtime_logs_read("secrets")
     with pytest.raises(ConfigError, match="limit"):

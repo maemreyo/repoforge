@@ -1580,16 +1580,33 @@ class GitCliRepository:
         return delete_branch
 
     def commit(self, path: Path, message: str) -> tuple[str, str]:
-        self._executor.run(["git", "add", "--all", "--"], cwd=path)
-        if not self._executor.run(
-            ["git", "diff", "--cached", "--name-only", "--"], cwd=path
-        ).stdout.strip():
+        try:
+            self._executor.run(["git", "add", "--all", "--"], cwd=path)
+        except CommandError as exc:
+            exc.details.setdefault("commit_stage", "git_add")
+            raise
+        try:
+            staged = self._executor.run(
+                ["git", "diff", "--cached", "--name-only", "--"], cwd=path
+            ).stdout.strip()
+        except CommandError as exc:
+            exc.details.setdefault("commit_stage", "staged_diff")
+            raise
+        if not staged:
             raise WorkspaceError("No staged changes remain after git add")
-        self._executor.run(["git", "commit", "-m", message], cwd=path)
+        try:
+            self._executor.run(["git", "commit", "-m", message], cwd=path)
+        except CommandError as exc:
+            exc.details.setdefault("commit_stage", "git_commit")
+            raise
         head = self.head_sha(path)
-        show = self._executor.run(
-            ["git", "show", "-1", "--stat", "--oneline", "--decorate"], cwd=path
-        ).stdout
+        try:
+            show = self._executor.run(
+                ["git", "show", "-1", "--stat", "--oneline", "--decorate"], cwd=path
+            ).stdout
+        except CommandError as exc:
+            exc.details.setdefault("commit_stage", "commit_summary")
+            raise
         return (head, show)
 
     def commit_summary(self, path: Path) -> str:

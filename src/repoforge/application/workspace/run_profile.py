@@ -140,10 +140,19 @@ class WorkspaceRunProfileBackgroundResult:
 
 
 def _safe_error_message(text: str, *, limit: int = 2_000) -> str:
-    """Bound and sanitize a raw exception message for a durable operation record."""
-    cleaned = "".join(ch for ch in text if ch in "\n\t\r" or ord(ch) >= 32)
-    cleaned = cleaned[:limit].strip()
-    return cleaned or "Background workspace_run_profile failed"
+    """Bound and sanitize a raw exception while preserving diagnostic head and tail."""
+    cleaned = "".join(ch for ch in text if ch in "\n\t\r" or ord(ch) >= 32).strip()
+    if not cleaned:
+        return "Background workspace_run_profile failed"
+    if len(cleaned) <= limit:
+        return cleaned
+    marker = "\n... durable error excerpt omitted ...\n"
+    if limit <= len(marker):
+        return cleaned[:limit]
+    available = limit - len(marker)
+    head_size = available // 2
+    tail_size = available - head_size
+    return cleaned[:head_size] + marker + cleaned[-tail_size:]
 
 
 class WorkspaceProfileRunner:
@@ -161,12 +170,21 @@ class WorkspaceProfileRunner:
         self._cancel_tokens_lock = threading.Lock()
 
     @staticmethod
-    def public(r: CommandResult) -> dict[str, object]:
+    def public(
+        r: CommandResult,
+        *,
+        stage_index: int,
+        duration_ms: float,
+        cumulative_duration_ms: float,
+    ) -> dict[str, object]:
         return {
             "argv": list(r.argv),
             "returncode": r.returncode,
             "stdout": r.stdout,
             "stderr": r.stderr,
+            "stage_index": stage_index,
+            "duration_ms": round(duration_ms, 3),
+            "cumulative_duration_ms": round(cumulative_duration_ms, 3),
         }
 
     @staticmethod
@@ -246,6 +264,7 @@ class WorkspaceProfileRunner:
                 self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, path
             )
             before_fingerprint = before.fingerprint
+            stage_telemetry: list[tuple[float, float]] = []
 
             # Command-source integrity stamp (issue #170): a zero-cost guard when the
             # profile has no declared/derived command-source paths; otherwise one cheap,
@@ -272,19 +291,33 @@ class WorkspaceProfileRunner:
             reuse_binding = None
 
             def record_command_failure(
-                exc: CommandError, verification_step: VerificationStep, step_index: int
+                exc: CommandError,
+                verification_step: VerificationStep,
+                step_index: int,
+                stage_duration_ms: float,
             ) -> None:
                 command = verification_step.command
                 fallback = command[0] if command else None
-                completed_steps = [item.public() for item in steps[:step_index]]
+                completed_steps = [
+                    {
+                        **item.public(),
+                        "duration_ms": round(stage_telemetry[index][0], 3),
+                        "cumulative_duration_ms": round(stage_telemetry[index][1], 3),
+                    }
+                    for index, item in enumerate(steps[:step_index])
+                ]
                 failed_step = verification_step.public()
                 not_run_steps = [item.public() for item in steps[step_index + 1 :]]
                 business_tests_ran = any(
                     item.kind is VerificationStepKind.BUSINESS_TESTS
                     for item in steps[: step_index + 1]
                 )
+                cumulative_duration_ms = (time.monotonic() - run_started) * 1_000
+                failed_step["duration_ms"] = round(stage_duration_ms, 3)
+                failed_step["cumulative_duration_ms"] = round(cumulative_duration_ms, 3)
                 exc.details.update(
                     {
+                        "steps_completed": step_index,
                         "completed_steps": completed_steps,
                         "failed_step": failed_step,
                         "failure_domain": verification_step.kind.value,
@@ -299,6 +332,8 @@ class WorkspaceProfileRunner:
                 audit_details["failed_step"] = failed_step
                 audit_details["failure_domain"] = verification_step.kind.value
                 audit_details["business_tests_ran"] = business_tests_ran
+                audit_details["duration_ms"] = round(stage_duration_ms, 3)
+                audit_details["cumulative_duration_ms"] = round(cumulative_duration_ms, 3)
                 if exc.details.get("cancelled"):
                     audit_details["cancelled"] = True
                 if exc.details.get("cancelled"):
@@ -569,9 +604,11 @@ class WorkspaceProfileRunner:
                             receipts.append(
                                 ExecutionReceipt(command, identity.identity_hash, accepted)
                             )
+                            stage_telemetry.append((0.0, (time.monotonic() - run_started) * 1_000))
                             continue
                         if on_before_command is not None:
                             on_before_command()
+                        stage_started = time.monotonic()
                         try:
                             receipts.append(
                                 execution_environment.execute(
@@ -585,8 +622,19 @@ class WorkspaceProfileRunner:
                                 )
                             )
                         except CommandError as exc:
-                            record_command_failure(exc, verification_step, step_index)
+                            record_command_failure(
+                                exc,
+                                verification_step,
+                                step_index,
+                                (time.monotonic() - stage_started) * 1_000,
+                            )
                             raise
+                        stage_telemetry.append(
+                            (
+                                (time.monotonic() - stage_started) * 1_000,
+                                (time.monotonic() - run_started) * 1_000,
+                            )
+                        )
                     results = [receipt.result for receipt in receipts]
                 else:
                     for step_index, verification_step in enumerate(steps):
@@ -594,9 +642,11 @@ class WorkspaceProfileRunner:
                         accepted = accepted_no_regression_step(verification_step)
                         if accepted is not None:
                             results.append(accepted)
+                            stage_telemetry.append((0.0, (time.monotonic() - run_started) * 1_000))
                             continue
                         if on_before_command is not None:
                             on_before_command()
+                        stage_started = time.monotonic()
                         try:
                             if cancel_token is None:
                                 results.append(
@@ -612,8 +662,19 @@ class WorkspaceProfileRunner:
                                     )
                                 )
                         except CommandError as exc:
-                            record_command_failure(exc, verification_step, step_index)
+                            record_command_failure(
+                                exc,
+                                verification_step,
+                                step_index,
+                                (time.monotonic() - stage_started) * 1_000,
+                            )
                             raise
+                        stage_telemetry.append(
+                            (
+                                (time.monotonic() - stage_started) * 1_000,
+                                (time.monotonic() - run_started) * 1_000,
+                            )
+                        )
             finally:
                 if (
                     execution_environment is not None
@@ -657,7 +718,15 @@ class WorkspaceProfileRunner:
                 description=profile.description,
                 verification=profile.verification,
                 fingerprint=fp,
-                commands=[self.public(r) for r in results],
+                commands=[
+                    self.public(
+                        result,
+                        stage_index=index,
+                        duration_ms=stage_telemetry[index][0],
+                        cumulative_duration_ms=stage_telemetry[index][1],
+                    )
+                    for index, result in enumerate(results)
+                ],
                 change_metrics=metrics,
                 satisfies_commit_gate=profile.verification,
                 used_default=used_default,

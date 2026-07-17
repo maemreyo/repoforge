@@ -43,10 +43,29 @@ def select_formatter(
     )
 
 
+def _globstar_variants(pattern: str) -> tuple[str, ...]:
+    """Expand ``**/`` as zero-or-more directories, including the zero-depth case."""
+    variants = {pattern}
+    pending = [pattern]
+    while pending:
+        current = pending.pop()
+        marker = "**/"
+        index = current.find(marker)
+        if index < 0:
+            continue
+        collapsed = current[:index] + current[index + len(marker) :]
+        if collapsed not in variants:
+            variants.add(collapsed)
+            pending.append(collapsed)
+    return tuple(sorted(variants))
+
+
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
     candidate = PurePosixPath(path)
     return any(
-        fnmatch.fnmatchcase(path, pattern) or candidate.match(pattern) for pattern in patterns
+        fnmatch.fnmatchcase(path, variant) or candidate.match(variant)
+        for pattern in patterns
+        for variant in _globstar_variants(pattern)
     )
 
 

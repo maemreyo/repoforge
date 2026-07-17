@@ -35,7 +35,9 @@ async def test_release_contract_carries_current_and_legacy_alias_evidence() -> N
     assert legacy_alias["annotations"] == canonical["annotations"]
 
 
-def test_tool_surface_hash_does_not_depend_on_ast_unparse(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tool_surface_hash_does_not_depend_on_ast_unparse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import ast
 
     def fail_unparse(_node: ast.AST) -> str:
@@ -88,7 +90,9 @@ def test_multiline_tool_descriptions_are_explicit_and_stable() -> None:
 
 
 @pytest.mark.anyio
-async def test_mcp_protocol_contract_and_annotations(forge_env: ForgeEnvironment) -> None:
+async def test_mcp_protocol_contract_and_annotations(
+    forge_env: ForgeEnvironment,
+) -> None:
     server = create_server(forge_env.config_path)
     async with create_connected_server_and_client_session(server) as session:
         result = await session.list_tools()
@@ -351,13 +355,31 @@ async def test_versioned_verify_alias_window_routes_to_canonical_profile(
             "profile",
             "description",
             "verification",
-            "commands",
             "satisfies_commit_gate",
             "used_default",
             "repo_id",
             "working_directory",
         ):
             assert alias.structuredContent[key] == canonical.structuredContent[key]
+        alias_commands = alias.structuredContent["commands"]
+        canonical_commands = canonical.structuredContent["commands"]
+        assert len(alias_commands) == len(canonical_commands)
+        for alias_command, canonical_command in zip(
+            alias_commands, canonical_commands, strict=True
+        ):
+            assert alias_command["duration_ms"] >= 0
+            assert canonical_command["duration_ms"] >= 0
+            assert alias_command["cumulative_duration_ms"] >= alias_command["duration_ms"]
+            assert canonical_command["cumulative_duration_ms"] >= canonical_command["duration_ms"]
+            assert {
+                key: value
+                for key, value in alias_command.items()
+                if key not in {"duration_ms", "cumulative_duration_ms"}
+            } == {
+                key: value
+                for key, value in canonical_command.items()
+                if key not in {"duration_ms", "cumulative_duration_ms"}
+            }
 
 
 @pytest.mark.anyio
@@ -470,7 +492,11 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
 
         created = await call(
             "workspace_create",
-            {"repo_id": "demo", "task_slug": "MCP contract", "issue_ids": ["42", "#43"]},
+            {
+                "repo_id": "demo",
+                "task_slug": "MCP contract",
+                "issue_ids": ["42", "#43"],
+            },
         )
         assert created["issue_ids"] == ["42", "#43"]
         workspace_id = str(created["workspace_id"])
@@ -629,7 +655,11 @@ async def test_all_tools_through_mcp_protocol(forge_env: ForgeEnvironment) -> No
         await call("workspace_push", {"workspace_id": workspace_id})
         await call(
             "workspace_create_draft_pr",
-            {"workspace_id": workspace_id, "title": "MCP contract", "body": "Test body"},
+            {
+                "workspace_id": workspace_id,
+                "title": "MCP contract",
+                "body": "Test body",
+            },
         )
         await call(
             "workspace_update_draft_pr",
@@ -722,8 +752,14 @@ async def test_workspace_edit_batch_edits_through_mcp_protocol(
                         "path": "hello.txt",
                         "expected_sha256": batch_result["files"][0]["sha256"],
                         "edits": [
-                            {"old_text": "hi there, batched", "new_text": "changed once more"},
-                            {"old_text": "text that does not exist", "new_text": "unreachable"},
+                            {
+                                "old_text": "hi there, batched",
+                                "new_text": "changed once more",
+                            },
+                            {
+                                "old_text": "text that does not exist",
+                                "new_text": "unreachable",
+                            },
                         ],
                     }
                 ],

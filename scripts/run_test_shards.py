@@ -21,6 +21,11 @@ class ShardResult:
     stderr: str
 
 
+def order_shard_results(results: tuple[ShardResult, ...]) -> tuple[ShardResult, ...]:
+    """Report failed shards first so bounded callers retain the actionable tail."""
+    return tuple(sorted(results, key=lambda result: (result.returncode == 0, result.index)))
+
+
 def partition_test_files(
     test_files: list[Path] | tuple[Path, ...], shard_count: int
 ) -> tuple[tuple[Path, ...], ...]:
@@ -132,7 +137,7 @@ def run(root: Path, coverage_dir: Path, shard_count: int) -> int:
             executor.submit(_run_shard, root, coverage_dir, index, files)
             for index, files in enumerate(shards, start=1)
         ]
-        results = sorted((future.result() for future in futures), key=lambda item: item.index)
+        results = order_shard_results(tuple(future.result() for future in futures))
 
     failed = False
     for result in results:

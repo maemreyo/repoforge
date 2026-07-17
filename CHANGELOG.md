@@ -9,6 +9,10 @@
 - Added typed verification steps, explicit failure-domain evidence, exact-base no-regression hygiene receipts, and proposal-ready verification-profile drift surfaced through repository context.
 - Added exact-state idempotency to workspace write/edit/patch mutations and exact-bound reuse of deterministic non-retryable profile or diagnostic failures; replay never applies a mutation twice, and failure reuse never creates a verification receipt or commit eligibility.
 - Added a provider-neutral code-intelligence baseline with bounded Python/JavaScript/TypeScript syntax and import facts, explicit coverage/confidence/limitations, affected-test candidates mapped to enrolled diagnostics, snapshot invalidation, and provider-failure fallback.
+- Hardened the existing managed runtime without adding tools: `rf runtime status` now reconciles persisted state with an active supervisor/MCP/tunnel probe and reports stale or unhealthy states truthfully; the supervisor continuously watches MCP generation, repository self-check, loopback tunnel admin readiness, and unresolved control-plane response failures, transitioning through degraded state and applying bounded restart recovery instead of trusting a live PID.
+- Enhanced existing runtime-log reads to merge retained numeric rotations and the active log under one global bound, with chronological output, relative file labels, rotation coverage, and no absolute host path in `runtime_logs_read` results.
+- Enhanced `workspace_commit` failures with Git-stage and bounded redacted subprocess evidence. A failed hook that changes the tree now reports resulting paths and invalidates the previous exact-tree verification receipt before returning.
+- Added per-step timing to the existing `workspace_run_profile` success and failure contracts, richer typed selector details to existing diagnostic failures, and specific workspace invariant error codes for missing paths, stale Git worktree registration, branch mismatch, and paths outside the reviewed workspace root.
 
 ## 2.1.0 — 2026-07-16
 

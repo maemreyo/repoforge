@@ -333,3 +333,58 @@ def test_serve_health_failure_and_missing_generation(
     monkeypatch.setattr(cli, "_ensure_generation", lambda path: EmptyStore())
     with pytest.raises(ConfigError, match="No accepted configuration generation"):
         cli._serve(tmp_path / "config.toml")
+
+
+def test_tunnel_health_uses_advertised_admin_endpoint_and_response_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("repoforge.adapters.runtime.tunnel_cli")
+    client = TunnelCliClient("tunnel-client")
+    child = module.ChildProcess(321, "a" * 64, "now")
+    monkeypatch.setattr(client, "is_alive", lambda value: value == child)
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self, limit: int) -> bytes:
+            assert limit <= 65_537
+            return b'{"status":"ok"}'
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    client._observe_log_line(
+        child.pid,
+        '{"level":"INFO","msg":"WEB UI","health_url":"http://127.0.0.1:8080"}',
+    )
+    healthy = client.health(child, timeout_seconds=0.1)
+    assert all(check.ok for check in healthy)
+    assert {check.name for check in healthy} == {
+        "tunnel_child",
+        "tunnel_admin",
+        "control_plane_response",
+    }
+
+    client._observe_log_line(
+        child.pid,
+        '{"level":"ERROR","msg":"failed to post error response to control plane"}',
+    )
+    client._observe_log_line(
+        child.pid,
+        '{"level":"ERROR","msg":"failed to process polled command","status":502}',
+    )
+    degraded = client.health(child, timeout_seconds=0.1)
+    response_check = next(check for check in degraded if check.name == "control_plane_response")
+    assert response_check.ok is False
+    assert "502" in response_check.detail
+
+    client._observe_log_line(
+        child.pid,
+        '{"level":"INFO","msg":"dispatcher acknowledged notification with control plane"}',
+    )
+    recovered = client.health(child, timeout_seconds=0.1)
+    assert next(check for check in recovered if check.name == "control_plane_response").ok

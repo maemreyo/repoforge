@@ -9,17 +9,20 @@ from typing import Any
 import pytest
 
 
-def _load_partition_function() -> Callable[[list[Path] | tuple[Path, ...], int], Any]:
+def _load_runner_module() -> Any:
     script = Path(__file__).parents[1] / "scripts/run_test_shards.py"
     spec = importlib.util.spec_from_file_location("repoforge_run_test_shards", script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module.partition_test_files
+    return module
 
 
-partition_test_files = _load_partition_function()
+runner_module = _load_runner_module()
+partition_test_files: Callable[[list[Path] | tuple[Path, ...], int], Any] = (
+    runner_module.partition_test_files
+)
 
 
 def _sized_file(root: Path, name: str, size: int) -> Path:
@@ -50,3 +53,13 @@ def test_partition_test_files_rejects_invalid_shard_count(tmp_path: Path) -> Non
     test_file = _sized_file(tmp_path, "test_one.py", 1)
     with pytest.raises(ValueError, match="shard_count"):
         partition_test_files([test_file], 0)
+
+
+def test_failed_shard_results_are_reported_before_successes() -> None:
+    passed_first = runner_module.ShardResult(1, (), 0, "passed one", "")
+    failed = runner_module.ShardResult(2, (), 1, "failed two", "")
+    passed_last = runner_module.ShardResult(3, (), 0, "passed three", "")
+
+    ordered = runner_module.order_shard_results((passed_last, failed, passed_first))
+
+    assert [result.index for result in ordered] == [2, 1, 3]

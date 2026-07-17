@@ -376,6 +376,10 @@ def test_two_consecutive_failures_without_edits_carry_retry_guidance(
     with pytest.raises(RepoForgeError) as first:
         service.workspace_run_profile(workspace_id, "always_fail")
     assert "retry_guidance" not in first.value.details
+    assert first.value.details["steps_completed"] == 0
+    failed_step = first.value.details["failed_step"]
+    assert failed_step["duration_ms"] >= 0
+    assert failed_step["cumulative_duration_ms"] >= failed_step["duration_ms"]
 
     with pytest.raises(RepoForgeError) as second:
         service.workspace_run_profile(workspace_id, "always_fail")
@@ -436,6 +440,10 @@ def test_success_path_is_unaffected_by_retry_guidance(forge_env: ForgeEnvironmen
     workspace_id = created["workspace_id"]
     Path(created["path"], "hello.txt").write_text("changed\n", encoding="utf-8")
     result = forge_env.service.workspace_run_profile(workspace_id, "full")
+    assert result["commands"]
+    assert all(command["stage_index"] >= 0 for command in result["commands"])
+    assert all(command["duration_ms"] >= 0 for command in result["commands"])
+    assert result["commands"][-1]["cumulative_duration_ms"] >= result["commands"][-1]["duration_ms"]
     assert set(result) == {
         "workspace_id",
         "repo_id",

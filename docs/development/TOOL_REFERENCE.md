@@ -102,28 +102,28 @@ and quota exhaustion fail closed with stable error codes.
 
 ## Local runtime commands
 
-`rf runtime status` is a local operator command, not an MCP tool. It compares the reviewed lock
-generation on disk with the generation loaded by the live MCP process. Repository mutations include
-the same `config_generation`, `active_generation`, and `restart_required` fields. When restart is
-required, RepoForge continues to fail closed on stale resolved locks and reports the exact next
-action. `rf runtime start` creates a new tunnel-client session leader, records its PID and generation
-in a private local state file, and refuses a duplicate managed start. `rf runtime stop` validates the
-recorded process identity and process group before sending termination signals; it cannot execute
-arbitrary commands or target an unrecorded process. `rf runtime restart` performs that controlled
-stop then starts the reviewed runtime again. This stage does not yet provide request draining,
-health-check rollback, or in-process hot reload.
+`rf runtime status` is a local operator command, not an MCP tool. It preserves the persisted supervisor
+phase as `persisted_state`, then performs a bounded active probe through the existing supervisor control
+socket and reports the reconciled `observed_state`, component `health`, probe result, observation time,
+and consecutive-failure count. A persisted `healthy` record whose control path no longer answers is
+reported as `stale`, not healthy, and the command exits non-zero for stale, degraded, unhealthy, or failed
+runtime states. Repository mutations continue to expose the reviewed configuration generation and
+restart requirements independently of this live observation.
 
-`rf runtime logs --tail N` returns at most 1,000 lines from the supervisor-owned tunnel log. The
-reader bounds file access to one megabyte and redacts credential-shaped `token`, `secret`, password,
-authorization, and control-plane-key values before printing; log bodies never enter the audit log.
+The supervisor continuously checks the identity-bound tunnel child, the MCP generation and repository
+self-check, the tunnel-client loopback admin endpoint when advertised, and unresolved control-plane
+response-path failures observed in the redacted tunnel stream. A transient failure is retained as
+evidence without restarting. Consecutive failures move the runtime to `degraded`; after the reviewed
+threshold the child is terminated and restarted under the existing bounded restart budget. A stable
+healthy interval resets that budget, while exhausting it leaves a durable failed record instead of a
+restart loop. `rf runtime stop`, `restart`, and `reload` still target only the recorded process identity
+and process group.
 
-`rf runtime status` includes two bounded local checks: whether the identity-validated managed tunnel
-process is live and whether its MCP child has published an active generation. It performs no network
-health request and therefore cannot disclose tunnel credentials.
-
-`rf runtime reload` is currently the supervisor-managed restart strategy. It validates and stops only
-the recorded managed process group before starting the latest reviewed configuration; it does not
-mutate a live MCP container in place.
+`rf runtime logs --tail N` returns at most 1,000 lines from one global, one-megabyte bounded tail across
+numeric rotations (`.3`, `.2`, `.1`) and the active supervisor-owned tunnel log in chronological order.
+The response lists only relative log labels and the number of included rotations. Credential-shaped
+`token`, `secret`, password, authorization, and control-plane-key values are redacted before output; log
+bodies never enter the audit log.
 
 ## Diagnostics command
 
@@ -187,7 +187,7 @@ Snapshot retention is bounded to the newest ten complete generations.
 | Tool | Purpose |
 |---|---|
 | `config_inspect` | Read the accepted and active generations, restart status, one repository's effective policy (profiles with exact commands, diagnostic and formatter names, execution mode, ad-hoc runner allowlist and timeout, budgets, allowed and denied paths, stored decisions, overrides, and policy patch), plus pending policy changes. Read-only. |
-| `runtime_logs_read` | Read bounded, redacted operational evidence: the local JSONL audit trail (`source="audit"`, filterable by action, failures only, or minimum duration) or the managed runtime log tail (`source="runtime"`). At most 200 entries per call. Read-only. |
+| `runtime_logs_read` | Read bounded, redacted operational evidence: the local JSONL audit trail (`source="audit"`, filterable by action, failures only, or minimum duration) or one chronological global tail across retained managed-runtime log rotations (`source="runtime"`). Runtime results expose relative file labels and rotation coverage, never absolute host paths. At most 200 entries per call. Read-only. |
 | `repo_policy_apply` | Request one repository's policy change (set/remove command profiles, diagnostics, formatters, relaxed execution mode, ad-hoc runners and timeout, or known policy overrides) through the reviewed immutable-generation pipeline. Supports `dry_run` previews. |
 
 `repo_policy_apply` is gated by the capability delta of the rendered candidate, enforced
@@ -354,13 +354,13 @@ way as today. The default `context_lines=0` is unchanged from the tool's prior b
 
 | Tool | Purpose |
 |---|---|---|
-| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. Pass `background=true` for a long profile to hold the workspace lock and run it as a durable, cancellable operation instead of blocking the call; poll with `operation_status`. On failure, a bounded per-workspace history detects an identical failure signature on an unchanged tree and adds `retry_guidance` (investigate instead of retrying), a missing-dependency hint for `NOT_FOUND` failures, and a quick/diagnostic suggestion when a full-profile run fails inside the fast-fail threshold (`server.fast_fail_threshold_seconds`, default 10s) — guidance only, never a refusal. The result also carries `command_source_dirty`/`command_source_dirty_paths`: whether any tracked file defining the profile's command chain (a `Makefile` a step invokes, or a script path named verbatim in argv) differs from the workspace base — evidence only, never blocking, and never affecting `last_verification`'s exact-tree semantics. |
-| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, optional `intent` (`tdd_red`, `tdd_green`, `refactor`, `pre_commit`, `final`), and optional pass/fail expectation. It reports whether business tests actually ran and never treats collection, syntax, import, dependency, tool, timeout, or environment failures as valid TDD RED. |
+| `workspace_run_profile` | Run one explicitly named allowlisted command profile; the profile may be non-verifying. Prefer the `quick` profile during the edit-test loop; run `full` (or the repository default) once, immediately before `workspace_commit`. Pass `background=true` for a long profile to hold the workspace lock and run it as a durable, cancellable operation instead of blocking the call; poll with `operation_status`. Every successful command entry includes `stage_index`, `duration_ms`, and `cumulative_duration_ms`; a failure carries the first failing stage and the same bounded timing evidence. Existing repeat, missing-dependency, fast-fail, targeted-diagnostic, and command-source guidance remains advisory and exact-tree verification semantics are unchanged. |
+| `workspace_run_diagnostic` | Run one repository-reviewed diagnostic with a typed selector, bounded parser, exact fingerprint check, optional `intent` (`tdd_red`, `tdd_green`, `refactor`, `pre_commit`, `final`), and optional pass/fail expectation. Selector failures include the reviewed selector name, kind, maximum value count, expansion mode, and received count so callers can correct the existing call without guessing. It reports whether business tests actually ran and never treats collection, syntax, import, dependency, tool, timeout, or environment failures as valid TDD RED. |
 | `workspace_hygiene_status` | Compare formatter findings from an immutable exact-base archive with the current workspace. Findings are classified as pre-existing, introduced, resolved, and introduced-on-changed-path; the source clone is never used as the baseline. |
 | `workspace_format_changed` | Run one reviewed formatter only over policy-allowed paths derived from the current Git change set. The caller supplies an exact workspace fingerprint, never argv, an executable, a working directory, environment values, or paths. |
 | `workspace_run_adhoc` | Run one exact command (bounded `argv`, no shell) against a repository the owner has explicitly enrolled with `execution_mode = "relaxed"` and an `adhoc_runners` allowlist. Evidence only: fully audited with fingerprint/changed-path evidence, but never populates `last_verification` and never satisfies `require_verification_before_commit`. Returns a structured `EXECUTION_MODE_STRICT` refusal in a strict-mode repository (the default). Supports `background=true` via the same durable-operation path as `workspace_run_profile`. |
 | `workspace_verify` | Run the default or named verification profile and store a receipt for the exact resulting tree. Run this once per workspace, right before commit — not on every edit. |
-| `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. If the committed diff touches any enrolled profile's command-source paths (e.g. a `Makefile`), the result's `command_source_paths_committed` names them — a non-blocking callout, not a refusal, so a legitimate Makefile change sails through with an explicit acknowledgment and a forgotten revert becomes visible while it can still be fixed. |
+| `workspace_commit` | Commit the exact verified tree after enforcing path policy and the configured change budget. Failures identify the Git stage and include bounded redacted command output. If a commit hook mutates the tree before failing, RepoForge reports the resulting changed paths and automatically invalidates the prior verification receipt, requiring review and exact-tree verification before retrying. Successful commits still report enrolled command-source paths as a non-blocking acknowledgment. |
 | `workspace_push` | Push the workspace branch without force and record the pushed commit SHA. |
 | `workspace_create_draft_pr` | Create a draft pull request with configured labels, reviewers, and maintainer-edit policy. |
 | `workspace_update_draft_pr` | Update the title or body of the existing draft pull request without changing draft state. |

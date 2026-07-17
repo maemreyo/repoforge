@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import json
 import os
 import shlex
 import signal
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
-from ...domain.runtime import ChildProcess, TunnelProfile
+from ...domain.runtime import ChildProcess, HealthCheck, TunnelProfile
 from .state_store import process_identity
 
 _STREAM_BUFFER_LIMIT = 64 * 1024
 _LOG_PUMP_FINALIZE_TIMEOUT_SECONDS = 30.0
+_HEALTH_RESPONSE_LIMIT = 64 * 1024
+_RESPONSE_FAILURE_THRESHOLD = 2
 
 
 class TunnelCliClient:
@@ -37,6 +42,10 @@ class TunnelCliClient:
         self._children: dict[int, subprocess.Popen[bytes]] = {}
         self._log_threads: dict[int, threading.Thread] = {}
         self._log_lock = threading.Lock()
+        self._health_lock = threading.Lock()
+        self._health_urls: dict[int, str] = {}
+        self._response_failures: dict[int, tuple[int, float, str]] = {}
+        self._response_success_at: dict[int, float] = {}
 
     @staticmethod
     def _fsync_dir(path: Path) -> None:
@@ -85,6 +94,46 @@ class TunnelCliClient:
             if not existed:
                 self._fsync_dir(log_path.parent)
 
+    def _observe_log_line(self, pid: int, line: str) -> None:
+        """Track secret-free health signals already emitted by tunnel-client."""
+        message = line
+        health_url: str | None = None
+        status: object = None
+        try:
+            payload = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            raw_message = payload.get("msg")
+            if isinstance(raw_message, str):
+                message = raw_message
+            raw_url = payload.get("health_url")
+            if isinstance(raw_url, str) and raw_url.startswith("http://127.0.0.1:"):
+                health_url = raw_url
+            status = payload.get("status")
+        lowered = message.lower()
+        now = time.monotonic()
+        with self._health_lock:
+            if health_url is not None:
+                self._health_urls[pid] = health_url
+            if "dispatcher acknowledged notification with control plane" in lowered:
+                self._response_success_at[pid] = now
+                self._response_failures.pop(pid, None)
+                return
+            failure = (
+                "failed to post" in lowered
+                or "failed to process polled command" in lowered
+                or "context canceled" in lowered
+                or status in {502, 503, 504}
+                or any(f" {code} " in f" {lowered} " for code in ("502", "503", "504"))
+            )
+            if failure:
+                count, _, _ = self._response_failures.get(pid, (0, now, ""))
+                detail = redact_text(message, limit=500)
+                if status in {502, 503, 504} and str(status) not in detail:
+                    detail = f"HTTP {status}: {detail}"
+                self._response_failures[pid] = (count + 1, now, detail)
+
     def _pump_output(
         self,
         process: subprocess.Popen[bytes],
@@ -120,6 +169,7 @@ class TunnelCliClient:
                             secrets=secrets,
                         )
                     else:
+                        self._observe_log_line(process.pid, line)
                         self._append_log(log_path, line + "\n", secrets=secrets)
                 if len(pending) > _STREAM_BUFFER_LIMIT:
                     self._append_log(
@@ -147,6 +197,10 @@ class TunnelCliClient:
                 return
         self._log_threads.pop(pid, None)
         self._children.pop(pid, None)
+        with self._health_lock:
+            self._health_urls.pop(pid, None)
+            self._response_failures.pop(pid, None)
+            self._response_success_at.pop(pid, None)
 
     @staticmethod
     def _run(argv: list[str], *, env: dict[str, str], timeout: int) -> tuple[int, str]:
@@ -272,6 +326,66 @@ class TunnelCliClient:
             self._finalize_child(child.pid)
             return child.pid in self._children
         return process_identity(child.pid) == child.process_identity
+
+    def health(self, child: ChildProcess, *, timeout_seconds: float) -> tuple[HealthCheck, ...]:
+        child_alive = self.is_alive(child)
+        child_check = HealthCheck(
+            "tunnel_child",
+            child_alive,
+            "managed child process is alive" if child_alive else "managed child process exited",
+        )
+        if not child_alive:
+            return (
+                child_check,
+                HealthCheck("tunnel_admin", False, "admin health endpoint is unavailable"),
+                HealthCheck("control_plane_response", False, "tunnel process is not running"),
+            )
+
+        with self._health_lock:
+            health_url = self._health_urls.get(child.pid)
+            failure = self._response_failures.get(child.pid)
+            success_at = self._response_success_at.get(child.pid, 0.0)
+        if health_url is None:
+            admin_check = HealthCheck(
+                "tunnel_admin",
+                True,
+                "tunnel-client has not advertised an admin health endpoint yet",
+            )
+        else:
+            try:
+                request = urllib.request.Request(health_url, method="GET")
+                with urllib.request.urlopen(
+                    request, timeout=max(0.01, timeout_seconds)
+                ) as response:
+                    body = response.read(_HEALTH_RESPONSE_LIMIT + 1)
+                    status_code = int(getattr(response, "status", 200))
+                admin_ok = 200 <= status_code < 400 and len(body) <= _HEALTH_RESPONSE_LIMIT
+                admin_detail = (
+                    f"admin endpoint returned HTTP {status_code}"
+                    if len(body) <= _HEALTH_RESPONSE_LIMIT
+                    else "admin endpoint response exceeded the bounded health payload"
+                )
+            except (OSError, ValueError, urllib.error.URLError) as exc:
+                admin_ok = False
+                admin_detail = redact_text(
+                    f"admin health probe failed: {type(exc).__name__}: {exc}"
+                )
+            admin_check = HealthCheck("tunnel_admin", admin_ok, admin_detail)
+
+        response_ok = True
+        response_detail = "no unresolved control-plane response failures"
+        if failure is not None:
+            count, failed_at, detail = failure
+            if count >= _RESPONSE_FAILURE_THRESHOLD and failed_at >= success_at:
+                response_ok = False
+                response_detail = f"{count} consecutive response-path failures; latest: {detail}"
+            else:
+                response_detail = f"transient response-path failure observed: {detail}"
+        return (
+            child_check,
+            admin_check,
+            HealthCheck("control_plane_response", response_ok, response_detail),
+        )
 
     def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None:
         process = self._children.get(child.pid)

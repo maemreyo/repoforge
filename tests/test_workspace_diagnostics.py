@@ -540,6 +540,13 @@ def test_multi_value_selector_rejects_values_beyond_max_values(
             git=git,
         )
     assert exc.value.code is ErrorCode.DIAGNOSTIC_SELECTOR_INVALID
+    assert exc.value.details == {
+        "selector_name": "selector",
+        "selector_kind": "tracked_path",
+        "max_values": 1,
+        "received_values": 2,
+        "expansion": "repeat",
+    }
 
 
 def test_multi_value_join_expansion_uses_declared_separator(

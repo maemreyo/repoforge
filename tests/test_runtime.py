@@ -168,3 +168,13 @@ def test_managed_start_claim_rejects_concurrent_claim(tmp_path: Path) -> None:
     # Then: a later start can acquire the released claim.
     with managed_start_claim(claim_path):
         pass
+
+
+def test_runtime_log_merges_rotations_in_chronological_order(tmp_path: Path) -> None:
+    log_path = tmp_path / "managed-runtime.log"
+    log_path.with_suffix(".log.3").write_text("oldest\n", encoding="utf-8")
+    log_path.with_suffix(".log.2").write_text("older\n", encoding="utf-8")
+    log_path.with_suffix(".log.1").write_text("previous\n", encoding="utf-8")
+    log_path.write_text("current-1\ncurrent-2\n", encoding="utf-8")
+
+    assert read_runtime_log(log_path, 4) == ["older", "previous", "current-1", "current-2"]
