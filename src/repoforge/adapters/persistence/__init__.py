@@ -4,6 +4,7 @@ from .json_execution_receipt_store import JsonExecutionReceiptStore
 from .json_github_read_cache import JsonGitHubReadCache
 from .json_hygiene_cache import JsonHygieneBaselineCache
 from .json_idempotency_store import JsonIdempotencyStore
+from .json_iteration_cache import JsonIterationCache
 from .json_onboarding_store import JsonOnboardingStore
 from .json_operation_result_store import JsonOperationResultStore
 from .json_operation_store import JsonOperationStore
@@ -21,6 +22,7 @@ __all__ = [
     "JsonGitHubReadCache",
     "JsonHygieneBaselineCache",
     "JsonIdempotencyStore",
+    "JsonIterationCache",
     "JsonOnboardingStore",
     "JsonOperationResultStore",
     "JsonOperationStore",

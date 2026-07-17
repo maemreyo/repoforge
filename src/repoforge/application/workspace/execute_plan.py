@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
+import platform
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,9 +30,19 @@ from ...domain.execution_receipt import (
     receipt_payload,
 )
 from ...domain.operation_task import OperationRetryability
+from ...domain.verification_dag import (
+    CacheMissReason,
+    CachePolicy,
+    IterationCacheKey,
+    VerificationDagStage,
+    build_iteration_cache_key,
+    compile_plan_dag,
+    create_iteration_cache_entry,
+)
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
 from ...ports.execution_receipt_store import ExecutionReceiptStore
+from ...ports.iteration_cache import IterationCache
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
 from ..operations.manager import OperationManager
@@ -80,6 +93,29 @@ def _safe_error_message(exc: Exception) -> str:
     return text[:2_000]
 
 
+def _stable_digest(payload: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _workspace_files_digest(root: Path, names: tuple[str, ...]) -> str:
+    payload: list[dict[str, str]] = []
+    for name in names:
+        path = root / name
+        if not path.is_file() or path.is_symlink():
+            payload.append({"path": name, "sha256": "missing"})
+            continue
+        payload.append({"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    return _stable_digest(payload)
+
+
 class WorkspacePlanExecutor:
     def __init__(
         self,
@@ -106,6 +142,9 @@ class WorkspacePlanExecutor:
                 code=ErrorCode.CONFIG_INVALID,
             )
         return self.ctx.execution_receipts
+
+    def _cache_store(self) -> IterationCache | None:
+        return self.ctx.iteration_cache
 
     @staticmethod
     def _boundary(value: ExecutionBoundary | str) -> ExecutionBoundary:
@@ -165,6 +204,66 @@ class WorkspacePlanExecutor:
             if (digest := self._artifact_digest(path, relative)) is not None
         ]
         return tuple(sorted(artifacts, key=lambda item: item.path))
+
+    def _target_payload(self, plan: ExecutionPlan, stage: PlanStage) -> object:
+        _, repo, _ = self.ctx.workspace(plan.workspace_id)
+        if stage.kind is PlanStageKind.PROFILE:
+            return to_data(repo.profiles[stage.target])
+        return to_data(repo.diagnostics[stage.target])
+
+    def _environment_identity(self, plan: ExecutionPlan, stage: PlanStage) -> str:
+        adapter = self.ctx.execution_environment
+        return _stable_digest(
+            {
+                "adapter": type(adapter).__qualname__ if adapter is not None else "none",
+                "machine": platform.machine(),
+                "platform": platform.platform(),
+                "python": sys.version,
+                "target": self._target_payload(plan, stage),
+            }
+        )
+
+    def _cache_key(
+        self,
+        plan: ExecutionPlan,
+        stage: PlanStage,
+        dag_stage: VerificationDagStage,
+        identity: WorkspaceIdentity,
+        receipts_by_stage: dict[str, StageReceipt],
+    ) -> IterationCacheKey:
+        _, _, workspace = self.ctx.workspace(plan.workspace_id)
+        target_payload = self._target_payload(plan, stage)
+        dependency_hashes = tuple(
+            _stable_digest(receipt_payload(receipts_by_stage[dependency]))
+            for dependency in dag_stage.dependencies
+        )
+        toolchain_hash = _stable_digest(
+            {
+                "machine": platform.machine(),
+                "platform": platform.platform(),
+                "python": sys.version,
+                "target": target_payload,
+            }
+        )
+        provider_hash = _stable_digest(to_data(self.ctx.config.providers))
+        return build_iteration_cache_key(
+            workspace_identity=identity.workspace_fingerprint,
+            declared_input_hash=identity.workspace_fingerprint,
+            stage_definition_hash=dag_stage.definition_hash,
+            target_identity=_stable_digest(target_payload),
+            working_directory=dag_stage.working_directory,
+            environment_identity=self._environment_identity(plan, stage),
+            toolchain_hash=toolchain_hash,
+            lockfile_hash=_workspace_files_digest(
+                workspace,
+                ("uv.lock", "poetry.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"),
+            ),
+            config_generation=identity.config_generation,
+            policy_hash=identity.policy_hash,
+            provider_hash=provider_hash,
+            network_policy=dag_stage.network_policy,
+            dependency_receipt_hashes=dependency_hashes,
+        )
 
     def _register_token(self, operation_id: str, token: CancellationToken) -> None:
         with self._tokens_lock:
@@ -262,10 +361,14 @@ class WorkspacePlanExecutor:
         pre_identity: WorkspaceIdentity,
         status: StageReceiptStatus,
         failure_class: str | None,
+        cache_status: StageCacheStatus = StageCacheStatus.NOT_CACHEABLE,
+        result_reference: str | None = None,
+        environment_identity: str | None = None,
+        artifact_digests: tuple[ArtifactDigest, ...] | None = None,
     ) -> StageReceipt:
         post_identity = self._identity(plan.workspace_id)
         source_changed = pre_identity.workspace_fingerprint != post_identity.workspace_fingerprint
-        result_reference = f"stage-result-{operation_id.removeprefix('op-')}-{ordinal}"
+        reference = result_reference or f"stage-result-{operation_id.removeprefix('op-')}-{ordinal}"
         receipt = create_stage_receipt(
             operation_id=operation_id,
             ordinal=ordinal,
@@ -281,12 +384,16 @@ class WorkspacePlanExecutor:
             pre_identity=pre_identity,
             post_identity=post_identity,
             target_identity=stage.definition_hash,
-            environment_identity=None,
+            environment_identity=environment_identity,
             status=status,
             failure_class=failure_class,
-            result_reference=result_reference,
-            artifact_digests=self._artifact_digests(plan.workspace_id, stage),
-            cache_status=StageCacheStatus.NOT_CACHEABLE,
+            result_reference=reference,
+            artifact_digests=(
+                artifact_digests
+                if artifact_digests is not None
+                else self._artifact_digests(plan.workspace_id, stage)
+            ),
+            cache_status=cache_status,
             source_changed=source_changed,
         )
         return self._receipt_store().create(receipt).value
@@ -298,9 +405,14 @@ class WorkspacePlanExecutor:
         through: ExecutionBoundary,
         token: CancellationToken,
     ) -> WorkspaceExecutePlanResult:
+        dag = compile_plan_dag(plan)
+        dag_by_id = {stage.stage_id: stage for stage in dag.stages}
         selected = self._selected_stages(plan, through)
         receipts: list[StageReceipt] = []
+        receipts_by_stage: dict[str, StageReceipt] = {}
         total = len(selected)
+        _, _, workspace_root = self.ctx.workspace(plan.workspace_id)
+        cache = self._cache_store()
         for ordinal, stage in enumerate(selected):
             self._check_cancelled(operation_id, token)
             self.plan_service.require_current(plan)
@@ -314,6 +426,57 @@ class WorkspacePlanExecutor:
             )
             started_at = self.ctx.clock.now_iso()
             pre_identity = self._identity(plan.workspace_id)
+            dag_stage = dag_by_id[stage.stage_id]
+            cacheable = dag_stage.cache_policy is CachePolicy.READ_ONLY and cache is not None
+            cache_key: IterationCacheKey | None = None
+            miss_reason: CacheMissReason | None = None
+            environment_identity = self._environment_identity(plan, stage)
+            if cacheable and cache is not None:
+                cache_key = self._cache_key(
+                    plan,
+                    stage,
+                    dag_stage,
+                    pre_identity,
+                    receipts_by_stage,
+                )
+                lookup = cache.lookup(cache_key, workspace_root=workspace_root)
+                if lookup.hit and lookup.entry is not None:
+                    receipt = self._persist_receipt(
+                        operation_id=operation_id,
+                        ordinal=ordinal,
+                        plan=plan,
+                        stage=stage,
+                        started_at=started_at,
+                        pre_identity=pre_identity,
+                        status=StageReceiptStatus.SUCCEEDED,
+                        failure_class=None,
+                        cache_status=StageCacheStatus.HIT,
+                        result_reference=(
+                            f"cache-hit:{lookup.entry.entry_id}:{cache_key.cache_key[:16]}"
+                        ),
+                        environment_identity=environment_identity,
+                        artifact_digests=lookup.entry.artifact_digests,
+                    )
+                    receipts.append(receipt)
+                    receipts_by_stage[stage.stage_id] = receipt
+                    self.operations.progress(
+                        operation_id,
+                        phase=f"stage-{ordinal + 1}",
+                        current=ordinal + 1,
+                        total=total,
+                        unit="stages",
+                        message=f"Reused compatible stage {ordinal + 1} of {total}: {stage.stage_id}",
+                    )
+                    continue
+                miss_reason = lookup.reason or CacheMissReason.NOT_FOUND
+
+            cache_status = StageCacheStatus.MISS if cacheable else StageCacheStatus.NOT_CACHEABLE
+            reference = (
+                f"stage-result-{operation_id.removeprefix('op-')}-{ordinal};"
+                f"cache-miss:{miss_reason.value}"
+                if miss_reason is not None
+                else None
+            )
             try:
                 self._execute_stage(operation_id, plan, stage, token)
                 receipt = self._persist_receipt(
@@ -325,35 +488,51 @@ class WorkspacePlanExecutor:
                     pre_identity=pre_identity,
                     status=StageReceiptStatus.SUCCEEDED,
                     failure_class=None,
+                    cache_status=cache_status,
+                    result_reference=reference,
+                    environment_identity=environment_identity,
                 )
                 receipts.append(receipt)
+                receipts_by_stage[stage.stage_id] = receipt
                 if receipt.source_changed:
                     raise RepoForgeError(
                         "Plan stage changed the accepted workspace snapshot",
                         code=ErrorCode.STATE_STALE,
                         details={"stage_id": stage.stage_id, "receipt_id": receipt.receipt_id},
                     )
+                if cacheable and cache is not None and cache_key is not None:
+                    cache.put(
+                        create_iteration_cache_entry(
+                            key=cache_key,
+                            source_receipt_id=receipt.receipt_id,
+                            artifact_digests=receipt.artifact_digests,
+                            created_at=receipt.finished_at,
+                        )
+                    )
             except Exception as exc:
                 if not receipts or receipts[-1].stage_id != stage.stage_id:
                     code = getattr(getattr(exc, "code", None), "value", None)
                     failure_class = str(code or type(exc).__name__)[:128]
                     with contextlib.suppress(Exception):
-                        receipts.append(
-                            self._persist_receipt(
-                                operation_id=operation_id,
-                                ordinal=ordinal,
-                                plan=plan,
-                                stage=stage,
-                                started_at=started_at,
-                                pre_identity=pre_identity,
-                                status=(
-                                    StageReceiptStatus.CANCELLED
-                                    if token.is_cancelled()
-                                    else StageReceiptStatus.FAILED
-                                ),
-                                failure_class=failure_class,
-                            )
+                        failed_receipt = self._persist_receipt(
+                            operation_id=operation_id,
+                            ordinal=ordinal,
+                            plan=plan,
+                            stage=stage,
+                            started_at=started_at,
+                            pre_identity=pre_identity,
+                            status=(
+                                StageReceiptStatus.CANCELLED
+                                if token.is_cancelled()
+                                else StageReceiptStatus.FAILED
+                            ),
+                            failure_class=failure_class,
+                            cache_status=cache_status,
+                            result_reference=reference,
+                            environment_identity=environment_identity,
                         )
+                        receipts.append(failed_receipt)
+                        receipts_by_stage[stage.stage_id] = failed_receipt
                 if stage.failure_policy is StageFailurePolicy.OPTIONAL and not token.is_cancelled():
                     continue
                 raise

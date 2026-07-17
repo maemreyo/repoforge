@@ -34,6 +34,7 @@ from ..ports import (
     HygieneGateway,
     IdempotencyStore,
     IdGenerator,
+    IterationCache,
     LockManager,
     MetricsSink,
     OperationGate,
@@ -245,6 +246,7 @@ class ApplicationContext:
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
     execution_receipts: ExecutionReceiptStore | None = None
+    iteration_cache: IterationCache | None = None
 
     def now_epoch(self) -> float:
         try:

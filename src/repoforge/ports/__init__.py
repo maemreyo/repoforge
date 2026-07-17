@@ -44,6 +44,7 @@ from .hygiene import (
 )
 from .idempotency import IdempotencyStore
 from .ids import IdGenerator
+from .iteration_cache import IterationCache
 from .locking import LockManager
 from .metrics import MetricsSink
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
@@ -123,6 +124,7 @@ __all__ = [
     "HygieneInspection",
     "IdGenerator",
     "IdempotencyStore",
+    "IterationCache",
     "LockManager",
     "MetricsSink",
     "OnboardingEnvironment",

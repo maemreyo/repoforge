@@ -38,6 +38,7 @@ from .adapters.persistence import (
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
+    JsonIterationCache,
     JsonOnboardingStore,
     JsonOperationResultStore,
     JsonOperationStore,
@@ -142,6 +143,7 @@ from .ports import (
     HygieneGateway,
     IdempotencyStore,
     IdGenerator,
+    IterationCache,
     LockManager,
     MetricsSink,
     OnboardingEnvironment,
@@ -203,6 +205,7 @@ class AdapterOverrides:
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
     execution_receipts: ExecutionReceiptStore | None = None
+    iteration_cache: IterationCache | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,6 +475,7 @@ def build_application(
     execution_receipts = o.execution_receipts or JsonExecutionReceiptStore(
         config.server.state_root, locks
     )
+    iteration_cache = o.iteration_cache or JsonIterationCache(config.server.state_root, locks)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
@@ -522,6 +526,7 @@ def build_application(
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
         execution_receipts=execution_receipts,
+        iteration_cache=iteration_cache,
     )
     operations = OperationManager(context)
     recover_operations(
