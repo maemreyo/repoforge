@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "corpus": "read_golden",
+  "cases": [
+    {
+      "id": "single-complete-file",
+      "input": {
+        "files": [{"path": "small.txt", "start_line": 1, "end_line": 20}],
+        "byte_budget": 60000
+      },
+      "expected": {
+        "truncated": false,
+        "content": "all requested lines"
+      },
+      "metadata": {
+        "kind": "complete"
+      }
+    },
+    {
+      "id": "independent-ranges",
+      "input": {
+        "files": [
+          {"path": "a.txt", "start_line": 2, "end_line": 4},
+          {"path": "b.txt", "start_line": 10, "end_line": 12}
+        ],
+        "byte_budget": 60000
+      },
+      "expected": {
+        "truncated": false,
+        "per_file_ranges": true
+      },
+      "metadata": {
+        "kind": "batch"
+      }
+    },
+    {
+      "id": "budget-truncation-resumes",
+      "input": {
+        "files": [{"path": "large.txt", "start_line": 1, "end_line": 10000}],
+        "byte_budget": 200
+      },
+      "expected": {
+        "truncated": true,
+        "next_cursor": true,
+        "omitted_line_range": true
+      },
+      "metadata": {
+        "kind": "truncated"
+      }
+    },
+    {
+      "id": "resume-cursor-no-duplication",
+      "input": {
+        "cursor_from": "budget-truncation-resumes"
+      },
+      "expected": {
+        "truncated": false,
+        "duplicates": 0,
+        "omissions": 0
+      },
+      "metadata": {
+        "kind": "resume"
+      }
+    },
+    {
+      "id": "denied-path-does-not-leak",
+      "input": {
+        "files": [{"path": ".env", "start_line": 1, "end_line": 5}],
+        "byte_budget": 60000
+      },
+      "expected": {
+        "status": "failed",
+        "content_leaked": false,
+        "absolute_path_leaked": false
+      },
+      "metadata": {
+        "kind": "negative"
+      }
+    },
+    {
+      "id": "binary-file-fails-closed",
+      "input": {
+        "files": [{"path": "binary.dat", "start_line": 1, "end_line": 5}],
+        "byte_budget": 60000
+      },
+      "expected": {
+        "status": "failed",
+        "content_leaked": false
+      },
+      "metadata": {
+        "kind": "negative"
+      }
+    }
+  ]
+}

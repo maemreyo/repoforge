@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "corpus": "seeded_bugs",
+  "cases": [
+    {
+      "id": "python-unit-regression",
+      "input": {
+        "changed_paths": ["src/package/calculator.py"],
+        "seed": "wrong arithmetic result"
+      },
+      "expected": {
+        "candidate_tests": ["tests/test_calculator.py"],
+        "caught_or_full_fallback": true
+      },
+      "metadata": {
+        "language": "python",
+        "mapping": "import-graph"
+      }
+    },
+    {
+      "id": "python-package-init-regression",
+      "input": {
+        "changed_paths": ["src/package/__init__.py"],
+        "seed": "broken public import"
+      },
+      "expected": {
+        "candidate_tests": ["tests/test_package.py"],
+        "caught_or_full_fallback": true
+      },
+      "metadata": {
+        "language": "python",
+        "mapping": "convention"
+      }
+    },
+    {
+      "id": "typescript-component-regression",
+      "input": {
+        "changed_paths": ["src/components/button.ts"],
+        "seed": "wrong disabled behavior"
+      },
+      "expected": {
+        "candidate_tests": ["src/components/button.test.ts"],
+        "caught_or_full_fallback": true
+      },
+      "metadata": {
+        "language": "typescript",
+        "mapping": "sibling-test"
+      }
+    },
+    {
+      "id": "low-confidence-cross-cutting-change",
+      "input": {
+        "changed_paths": ["pyproject.toml"],
+        "seed": "dependency contract regression"
+      },
+      "expected": {
+        "selected_mode": "profile",
+        "full_fallback": true,
+        "caught_or_full_fallback": true
+      },
+      "metadata": {
+        "language": "mixed",
+        "mapping": "low-confidence"
+      }
+    },
+    {
+      "id": "deleted-module-regression",
+      "input": {
+        "changed_paths": ["src/package/removed.py"],
+        "seed": "dependent import deleted"
+      },
+      "expected": {
+        "caught_or_full_fallback": true
+      },
+      "metadata": {
+        "language": "python",
+        "mapping": "reverse-import"
+      }
+    }
+  ]
+}
