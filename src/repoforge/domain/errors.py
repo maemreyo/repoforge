@@ -41,15 +41,6 @@ class ErrorCode(str, Enum):
     STATE_CORRUPT = "STATE_CORRUPT"
     STATE_SCHEMA_UNSUPPORTED = "STATE_SCHEMA_UNSUPPORTED"
     STATE_TOO_LARGE = "STATE_TOO_LARGE"
-    STATE_MIGRATION_INVALID = "STATE_MIGRATION_INVALID"
-    STATE_MIGRATION_STALE = "STATE_MIGRATION_STALE"
-    STATE_MIGRATION_FAILED = "STATE_MIGRATION_FAILED"
-    STATE_RETENTION_INVALID = "STATE_RETENTION_INVALID"
-    STATE_RETENTION_STALE = "STATE_RETENTION_STALE"
-    STATE_QUOTA_EXCEEDED = "STATE_QUOTA_EXCEEDED"
-    STATE_INTEGRITY_FAILED = "STATE_INTEGRITY_FAILED"
-    STATE_BACKUP_INVALID = "STATE_BACKUP_INVALID"
-    STATE_RESTORE_CONFLICT = "STATE_RESTORE_CONFLICT"
     NOT_FOUND = "NOT_FOUND"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     DISCOVERY_ROOT_NOT_FOUND = "DISCOVERY_ROOT_NOT_FOUND"
@@ -275,15 +266,6 @@ def operation_error_from_exception(
         ErrorCode.STATE_CORRUPT: "The durable state record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.STATE_SCHEMA_UNSUPPORTED: "The durable state record uses a schema version this build cannot safely interpret.",
         ErrorCode.STATE_TOO_LARGE: "The encoded durable state record exceeds its reviewed storage bound.",
-        ErrorCode.STATE_MIGRATION_INVALID: "The requested durable-state migration graph or transform is incomplete, ambiguous, or non-deterministic.",
-        ErrorCode.STATE_MIGRATION_STALE: "A durable-state record changed after the migration preview was reviewed.",
-        ErrorCode.STATE_MIGRATION_FAILED: "The durable-state migration could not commit safely and required rollback or recovery.",
-        ErrorCode.STATE_RETENTION_INVALID: "The durable-state retention policy, protection set, cursor, or cleanup plan is invalid.",
-        ErrorCode.STATE_RETENTION_STALE: "A durable-state record changed after the cleanup preview was reviewed.",
-        ErrorCode.STATE_QUOTA_EXCEEDED: "The durable-state collection or requested restore exceeds its reviewed record or byte quota.",
-        ErrorCode.STATE_INTEGRITY_FAILED: "Durable-state schema, checksum, reference, or quota integrity could not be established.",
-        ErrorCode.STATE_BACKUP_INVALID: "The durable-state backup destination, manifest, checksum, or bounded content is invalid.",
-        ErrorCode.STATE_RESTORE_CONFLICT: "The durable-state restore conflicts with current destination state or overwrite policy.",
         ErrorCode.WORKSPACE_PATH_MISSING: "The registered workspace directory no longer exists on disk.",
         ErrorCode.WORKTREE_REGISTRATION_STALE: "The registered path is no longer a valid Git worktree.",
         ErrorCode.WORKSPACE_BRANCH_MISMATCH: "The worktree branch no longer matches the immutable workspace registry binding.",

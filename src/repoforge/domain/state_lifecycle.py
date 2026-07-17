@@ -19,7 +19,7 @@ _SAFE_COLLECTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _MAX_MIGRATION_PAYLOAD_BYTES = 1_000_000
 
 
-def _error(message: str, code: ErrorCode = ErrorCode.STATE_MIGRATION_INVALID) -> RepoForgeError:
+def _error(message: str, code: ErrorCode = ErrorCode.STATE_INVALID) -> RepoForgeError:
     return RepoForgeError(
         message,
         code=code,
@@ -417,9 +417,7 @@ class StateCleanupReport:
     next_cursor: str | None
 
 
-def _retention_error(
-    message: str, code: ErrorCode = ErrorCode.STATE_RETENTION_INVALID
-) -> RepoForgeError:
+def _retention_error(message: str, code: ErrorCode = ErrorCode.STATE_INVALID) -> RepoForgeError:
     return RepoForgeError(
         message,
         code=code,

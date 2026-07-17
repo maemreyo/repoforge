@@ -155,7 +155,7 @@ class JsonStateLifecycleManager:
         except (TypeError, ValueError) as exc:
             raise JsonStateLifecycleManager._error(
                 "durable-state record is not JSON serializable",
-                ErrorCode.STATE_MIGRATION_INVALID,
+                ErrorCode.STATE_INVALID,
             ) from exc
 
     @staticmethod
@@ -325,12 +325,12 @@ class JsonStateLifecycleManager:
         if not isinstance(registry, StateMigrationRegistry):
             raise self._error(
                 "migration registry is invalid",
-                ErrorCode.STATE_MIGRATION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         if not isinstance(target_version, SchemaVersion):
             raise self._error(
                 "target_version must be a SchemaVersion",
-                ErrorCode.STATE_MIGRATION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         paths, scan_truncated = self._record_paths(
             safe_collection,
@@ -401,7 +401,7 @@ class JsonStateLifecycleManager:
         if not isinstance(preview, StateMigrationPreview):
             raise self._error(
                 "migration preview is invalid",
-                ErrorCode.STATE_MIGRATION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         digest = self._sha256(
             self._canonical_bytes(
@@ -416,12 +416,12 @@ class JsonStateLifecycleManager:
         if preview.plan_digest != digest or preview.plan_id != f"mig-{digest[:24]}":
             raise self._error(
                 "migration preview digest is invalid",
-                ErrorCode.STATE_MIGRATION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         if preview.scan_truncated:
             raise self._error(
                 "migration preview is truncated and cannot be applied",
-                ErrorCode.STATE_MIGRATION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
 
     def _materialize(
@@ -439,7 +439,7 @@ class JsonStateLifecycleManager:
             if not hmac.compare_digest(source.checksum, item.source_checksum):
                 raise self._error(
                     f"durable-state record {item.record_id} changed after migration preview",
-                    ErrorCode.STATE_MIGRATION_STALE,
+                    ErrorCode.STATE_STALE,
                     retryable=True,
                 )
             plan = registry.plan(
@@ -461,7 +461,7 @@ class JsonStateLifecycleManager:
             if not hmac.compare_digest(self._sha256(target_bytes), item.target_checksum):
                 raise self._error(
                     f"migration output for {item.record_id} changed since preview",
-                    ErrorCode.STATE_MIGRATION_INVALID,
+                    ErrorCode.STATE_INVALID,
                 )
             materialized.append(_MaterializedMigration(item, source, target_bytes))
         return tuple(materialized)
@@ -500,7 +500,7 @@ class JsonStateLifecycleManager:
         if raw.get("plan_digest") != preview.plan_digest:
             raise self._error(
                 "migration journal identity conflicts with the reviewed preview",
-                ErrorCode.STATE_MIGRATION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         return self._journal_report(raw)
 
@@ -662,7 +662,7 @@ class JsonStateLifecycleManager:
                 details: dict[str, object] = {"rollback_failed": rollback_error is not None}
                 raise RepoForgeError(
                     "durable-state migration failed and was rolled back",
-                    code=ErrorCode.STATE_MIGRATION_FAILED,
+                    code=ErrorCode.STATE_PERSISTENCE_FAILED,
                     safe_next_action=(
                         "Inspect the private migration backup and journal, recover incomplete "
                         "migrations, then recreate the preview."
@@ -751,12 +751,12 @@ class JsonStateLifecycleManager:
         except (AttributeError, ValueError) as exc:
             raise JsonStateLifecycleManager._error(
                 f"{field} must be an ISO-8601 timestamp",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             ) from exc
         if parsed.tzinfo is None:
             raise JsonStateLifecycleManager._error(
                 f"{field} must include a timezone offset",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         return parsed
 
@@ -805,7 +805,7 @@ class JsonStateLifecycleManager:
         if not isinstance(policy, StateRetentionPolicy):
             raise self._error(
                 "retention policy is invalid",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         if not isinstance(record_timestamps, dict) or not all(
             isinstance(key, str) and isinstance(value, str)
@@ -813,35 +813,35 @@ class JsonStateLifecycleManager:
         ):
             raise self._error(
                 "record_timestamps must map record IDs to ISO-8601 timestamps",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         if not isinstance(protections, tuple) or not all(
             isinstance(item, StateProtection) for item in protections
         ):
             raise self._error(
                 "protections must be a StateProtection tuple",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         if not isinstance(references, tuple) or not all(
             isinstance(item, StateRecordReference) for item in references
         ):
             raise self._error(
                 "references must be a StateRecordReference tuple",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
 
         paths, truncated = self._record_paths(safe_collection, max_records=_MAX_RECORDS)
         if truncated:
             raise self._error(
                 "cleanup scan exceeds the reviewed record bound",
-                ErrorCode.STATE_QUOTA_EXCEEDED,
+                ErrorCode.STATE_TOO_LARGE,
             )
         records = tuple(self._decode_record(path, expected_record_id=path.stem) for path in paths)
         ids = {record.record_id for record in records}
         if set(record_timestamps) != ids:
             raise self._error(
                 "record_timestamps must cover exactly the current collection",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         timestamps = {
             record_id: self._retention_time(value, f"created_at for {record_id}")
@@ -939,7 +939,7 @@ class JsonStateLifecycleManager:
         if not isinstance(preview, StateCleanupPreview):
             raise self._error(
                 "cleanup preview is invalid",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         payload = self._cleanup_payload(
             collection=preview.collection,
@@ -955,7 +955,7 @@ class JsonStateLifecycleManager:
         if preview.plan_digest != digest or preview.plan_id != f"clean-{digest[:24]}":
             raise self._error(
                 "cleanup preview digest is invalid",
-                ErrorCode.STATE_RETENTION_INVALID,
+                ErrorCode.STATE_INVALID,
             )
 
     def _cleanup_report(self, raw: dict[str, object]) -> StateCleanupReport | None:
@@ -1017,7 +1017,7 @@ class JsonStateLifecycleManager:
             if journal.get("plan_digest") != preview.plan_digest:
                 raise self._error(
                     "cleanup journal conflicts with the reviewed preview",
-                    ErrorCode.STATE_RETENTION_INVALID,
+                    ErrorCode.STATE_INVALID,
                 )
             report = self._cleanup_report(journal)
             if report is not None:
@@ -1047,7 +1047,7 @@ class JsonStateLifecycleManager:
                         if not hmac.compare_digest(self._sha256(data), item.checksum):
                             raise self._error(
                                 f"durable-state record {item.record_id} changed after cleanup preview",
-                                ErrorCode.STATE_RETENTION_STALE,
+                                ErrorCode.STATE_STALE,
                                 retryable=True,
                             )
                         if self._fault_injector is not None:
@@ -1065,7 +1065,7 @@ class JsonStateLifecycleManager:
                     else:
                         raise self._error(
                             f"durable-state record {item.record_id} disappeared after cleanup preview",
-                            ErrorCode.STATE_RETENTION_STALE,
+                            ErrorCode.STATE_STALE,
                             retryable=True,
                         )
             except Exception as exc:
@@ -1077,7 +1077,7 @@ class JsonStateLifecycleManager:
                     raise
                 raise self._error(
                     "durable-state cleanup failed and was rolled back",
-                    ErrorCode.STATE_RETENTION_INVALID,
+                    ErrorCode.STATE_INVALID,
                 ) from exc
 
             report = StateCleanupReport(

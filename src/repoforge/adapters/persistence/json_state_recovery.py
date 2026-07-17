@@ -110,19 +110,19 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             max_records,
             field="max_records",
             maximum=_MAX_RECORDS,
-            code=ErrorCode.STATE_INTEGRITY_FAILED,
+            code=ErrorCode.STATE_INVALID,
         )
         quota_bytes = self._bounded_positive_int(
             max_total_bytes,
             field="max_total_bytes",
             maximum=1 << 50,
-            code=ErrorCode.STATE_INTEGRITY_FAILED,
+            code=ErrorCode.STATE_INVALID,
         )
         findings_limit = self._bounded_positive_int(
             max_findings,
             field="max_findings",
             maximum=_MAX_FINDINGS,
-            code=ErrorCode.STATE_INTEGRITY_FAILED,
+            code=ErrorCode.STATE_INVALID,
         )
         if (
             not isinstance(supported_versions, tuple)
@@ -131,14 +131,14 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         ):
             raise self._recovery_error(
                 "supported_versions must be a non-empty SchemaVersion tuple",
-                ErrorCode.STATE_INTEGRITY_FAILED,
+                ErrorCode.STATE_INVALID,
             )
         if not isinstance(references, tuple) or not all(
             isinstance(item, StateRecordReference) for item in references
         ):
             raise self._recovery_error(
                 "references must be a StateRecordReference tuple",
-                ErrorCode.STATE_INTEGRITY_FAILED,
+                ErrorCode.STATE_INVALID,
             )
 
         paths, scan_truncated = self._record_paths(
@@ -265,25 +265,25 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         safe_collection = validate_state_collection(collection)
         safe_destination = self._identity(
             destination_id,
-            code=ErrorCode.STATE_BACKUP_INVALID,
+            code=ErrorCode.STATE_INVALID,
         )
         records_limit = self._bounded_positive_int(
             max_records,
             field="max_records",
             maximum=_MAX_RECORDS,
-            code=ErrorCode.STATE_BACKUP_INVALID,
+            code=ErrorCode.STATE_INVALID,
         )
         bytes_limit = self._bounded_positive_int(
             max_total_bytes,
             field="max_total_bytes",
             maximum=1 << 50,
-            code=ErrorCode.STATE_BACKUP_INVALID,
+            code=ErrorCode.STATE_INVALID,
         )
         paths, truncated = self._record_paths(safe_collection, max_records=_MAX_RECORDS)
         if truncated or len(paths) > records_limit:
             raise self._recovery_error(
                 "backup exceeds its reviewed record quota",
-                ErrorCode.STATE_QUOTA_EXCEEDED,
+                ErrorCode.STATE_TOO_LARGE,
             )
         records: list[StateBackupRecord] = []
         total_bytes = 0
@@ -293,7 +293,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             except RepoForgeError as exc:
                 raise self._recovery_error(
                     f"backup source record {path.stem} is corrupt",
-                    ErrorCode.STATE_BACKUP_INVALID,
+                    ErrorCode.STATE_INVALID,
                 ) from exc
             total_bytes += len(record.encoded)
             records.append(
@@ -308,7 +308,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         if total_bytes > bytes_limit:
             raise self._recovery_error(
                 "backup exceeds its reviewed byte quota",
-                ErrorCode.STATE_QUOTA_EXCEEDED,
+                ErrorCode.STATE_TOO_LARGE,
             )
         ordered = tuple(sorted(records, key=lambda item: item.record_id))
         seed_payload = self._backup_manifest_payload(
@@ -339,7 +339,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
 
     def _validate_backup_preview(self, preview: StateBackupPreview) -> None:
         if not isinstance(preview, StateBackupPreview):
-            raise self._recovery_error("backup preview is invalid", ErrorCode.STATE_BACKUP_INVALID)
+            raise self._recovery_error("backup preview is invalid", ErrorCode.STATE_INVALID)
         payload = self._backup_manifest_payload(
             backup_id=preview.backup_id,
             collection=preview.collection,
@@ -350,7 +350,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         checksum = self._sha256(self._canonical_bytes(payload))
         if not hmac.compare_digest(checksum, preview.manifest_checksum):
             raise self._recovery_error(
-                "backup preview checksum is invalid", ErrorCode.STATE_BACKUP_INVALID
+                "backup preview checksum is invalid", ErrorCode.STATE_INVALID
             )
 
     @staticmethod
@@ -373,10 +373,10 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         ):
             raise self._recovery_error(
                 "backup destination path does not match its bound identity or is inside source state",
-                ErrorCode.STATE_BACKUP_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         if not isinstance(repair, bool):
-            raise self._recovery_error("repair must be a boolean", ErrorCode.STATE_BACKUP_INVALID)
+            raise self._recovery_error("repair must be a boolean", ErrorCode.STATE_INVALID)
         manifest_path = destination / "manifest.json"
         if manifest_path.is_file() and not repair:
             existing = self._read_backup(destination)
@@ -389,7 +389,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                 )
             raise self._recovery_error(
                 "backup destination contains a different manifest",
-                ErrorCode.STATE_BACKUP_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(destination, 0o700)
@@ -408,12 +408,12 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                 except OSError as exc:
                     raise self._recovery_error(
                         f"backup source record {item.record_id} is unavailable",
-                        ErrorCode.STATE_BACKUP_INVALID,
+                        ErrorCode.STATE_INVALID,
                     ) from exc
                 if not hmac.compare_digest(self._sha256(data), item.checksum):
                     raise self._recovery_error(
                         f"backup source record {item.record_id} changed after preview",
-                        ErrorCode.STATE_BACKUP_INVALID,
+                        ErrorCode.STATE_INVALID,
                         retryable=True,
                     )
                 self._atomic_write(records_root / f"{item.record_id}.json", data)
@@ -445,36 +445,34 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise self._recovery_error(
                 "backup manifest is unavailable or corrupt",
-                ErrorCode.STATE_BACKUP_INVALID,
+                ErrorCode.STATE_INVALID,
             ) from exc
         if not isinstance(raw, dict):
-            raise self._recovery_error(
-                "backup manifest must be an object", ErrorCode.STATE_BACKUP_INVALID
-            )
+            raise self._recovery_error("backup manifest must be an object", ErrorCode.STATE_INVALID)
         try:
             backup_id = str(raw["backup_id"])
             collection = validate_state_collection(str(raw["collection"]))
             destination_id = self._identity(
-                str(raw["destination_id"]), code=ErrorCode.STATE_BACKUP_INVALID
+                str(raw["destination_id"]), code=ErrorCode.STATE_INVALID
             )
             total_bytes = int(raw["total_bytes"])
             manifest_checksum = str(raw["manifest_checksum"])
             records_raw = raw["records"]
         except (KeyError, TypeError, ValueError, RepoForgeError) as exc:
             raise self._recovery_error(
-                "backup manifest fields are invalid", ErrorCode.STATE_BACKUP_INVALID
+                "backup manifest fields are invalid", ErrorCode.STATE_INVALID
             ) from exc
         if root.name != destination_id or not isinstance(records_raw, list):
             raise self._recovery_error(
                 "backup destination identity or record list is invalid",
-                ErrorCode.STATE_BACKUP_INVALID,
+                ErrorCode.STATE_INVALID,
             )
         records: list[StateBackupRecord] = []
         for item in records_raw:
             if not isinstance(item, dict):
                 raise self._recovery_error(
                     "backup record manifest entry is invalid",
-                    ErrorCode.STATE_BACKUP_INVALID,
+                    ErrorCode.STATE_INVALID,
                 )
             try:
                 record = StateBackupRecord(
@@ -487,21 +485,21 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             except (KeyError, TypeError, ValueError, RepoForgeError) as exc:
                 raise self._recovery_error(
                     "backup record manifest entry is invalid",
-                    ErrorCode.STATE_BACKUP_INVALID,
+                    ErrorCode.STATE_INVALID,
                 ) from exc
             try:
                 data = (root / "records" / f"{record.record_id}.json").read_bytes()
             except OSError as exc:
                 raise self._recovery_error(
                     f"backup record {record.record_id} is missing",
-                    ErrorCode.STATE_BACKUP_INVALID,
+                    ErrorCode.STATE_INVALID,
                 ) from exc
             if len(data) != record.size_bytes or not hmac.compare_digest(
                 self._sha256(data), record.checksum
             ):
                 raise self._recovery_error(
                     f"backup record {record.record_id} checksum is invalid",
-                    ErrorCode.STATE_BACKUP_INVALID,
+                    ErrorCode.STATE_INVALID,
                 )
             records.append(record)
         ordered = tuple(sorted(records, key=lambda item: item.record_id))
@@ -514,11 +512,11 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         )
         if not hmac.compare_digest(self._sha256(self._canonical_bytes(payload)), manifest_checksum):
             raise self._recovery_error(
-                "backup manifest checksum is invalid", ErrorCode.STATE_BACKUP_INVALID
+                "backup manifest checksum is invalid", ErrorCode.STATE_INVALID
             )
         if sum(item.size_bytes for item in ordered) != total_bytes:
             raise self._recovery_error(
-                "backup manifest byte total is invalid", ErrorCode.STATE_BACKUP_INVALID
+                "backup manifest byte total is invalid", ErrorCode.STATE_INVALID
             )
         return StateBackupPreview(
             backup_id,
@@ -566,27 +564,25 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         max_records: int = _MAX_RECORDS,
         max_total_bytes: int = 1 << 40,
     ) -> StateRestorePreview:
-        safe_destination = self._identity(destination_id, code=ErrorCode.STATE_BACKUP_INVALID)
+        safe_destination = self._identity(destination_id, code=ErrorCode.STATE_INVALID)
         if not isinstance(overwrite, bool):
-            raise self._recovery_error(
-                "overwrite must be a boolean", ErrorCode.STATE_BACKUP_INVALID
-            )
+            raise self._recovery_error("overwrite must be a boolean", ErrorCode.STATE_INVALID)
         records_limit = self._bounded_positive_int(
             max_records,
             field="max_records",
             maximum=_MAX_RECORDS,
-            code=ErrorCode.STATE_BACKUP_INVALID,
+            code=ErrorCode.STATE_INVALID,
         )
         bytes_limit = self._bounded_positive_int(
             max_total_bytes,
             field="max_total_bytes",
             maximum=1 << 50,
-            code=ErrorCode.STATE_BACKUP_INVALID,
+            code=ErrorCode.STATE_INVALID,
         )
         backup = self._read_backup(backup_root)
         if len(backup.records) > records_limit or backup.total_bytes > bytes_limit:
             raise self._recovery_error(
-                "restore exceeds its reviewed quota", ErrorCode.STATE_QUOTA_EXCEEDED
+                "restore exceeds its reviewed quota", ErrorCode.STATE_TOO_LARGE
             )
         conflicts: list[tuple[str, str]] = []
         collection_root = self._collection_root(backup.collection)
@@ -621,7 +617,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         self, preview: StateRestorePreview, backup: StateBackupPreview
     ) -> None:
         if not isinstance(preview, StateRestorePreview):
-            raise self._recovery_error("restore preview is invalid", ErrorCode.STATE_BACKUP_INVALID)
+            raise self._recovery_error("restore preview is invalid", ErrorCode.STATE_INVALID)
         if (
             preview.backup_id != backup.backup_id
             or preview.manifest_checksum != backup.manifest_checksum
@@ -630,7 +626,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             or preview.total_bytes != backup.total_bytes
         ):
             raise self._recovery_error(
-                "backup changed after restore preview", ErrorCode.STATE_BACKUP_INVALID
+                "backup changed after restore preview", ErrorCode.STATE_INVALID
             )
         payload = self._restore_payload(
             backup=backup,
@@ -640,9 +636,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         )
         digest = self._sha256(self._canonical_bytes(payload))
         if preview.plan_digest != digest or preview.restore_id != f"restore-{digest[:24]}":
-            raise self._recovery_error(
-                "restore preview digest is invalid", ErrorCode.STATE_BACKUP_INVALID
-            )
+            raise self._recovery_error("restore preview digest is invalid", ErrorCode.STATE_INVALID)
 
     def _restore_report(self, raw: dict[str, object]) -> StateRestoreReport | None:
         if raw.get("phase") != "committed":
@@ -731,7 +725,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         if preview.conflicts and not preview.overwrite:
             raise self._recovery_error(
                 "restore has unresolved destination conflicts",
-                ErrorCode.STATE_RESTORE_CONFLICT,
+                ErrorCode.ALREADY_EXISTS,
             )
         journal_path = self._journal_path(preview.restore_id)
         if journal_path.is_file():
@@ -739,7 +733,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             if journal.get("plan_digest") != preview.plan_digest:
                 raise self._recovery_error(
                     "restore journal conflicts with the reviewed preview",
-                    ErrorCode.STATE_RESTORE_CONFLICT,
+                    ErrorCode.ALREADY_EXISTS,
                 )
             report = self._restore_report(journal)
             if report is not None:
@@ -774,7 +768,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                 if not preview.overwrite:
                     raise self._recovery_error(
                         f"restore destination record {item.record_id} conflicts",
-                        ErrorCode.STATE_RESTORE_CONFLICT,
+                        ErrorCode.ALREADY_EXISTS,
                     )
                 self._atomic_write(destination_backup / f"{item.record_id}.json", current)
                 replaced.append(item.record_id)
@@ -817,7 +811,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                 )
                 raise self._recovery_error(
                     "durable-state restore failed and was rolled back",
-                    ErrorCode.STATE_INTEGRITY_FAILED,
+                    ErrorCode.STATE_PERSISTENCE_FAILED,
                 ) from exc
             report = StateRestoreReport(
                 restore_id=preview.restore_id,

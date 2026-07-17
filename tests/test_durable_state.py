@@ -390,7 +390,7 @@ def test_migration_registry_requires_explicit_reverse_steps() -> None:
     )
     with pytest.raises(RepoForgeError) as missing_reverse:
         one_way.plan("one_way", SchemaVersion(2), SchemaVersion(1))
-    assert missing_reverse.value.code is ErrorCode.STATE_MIGRATION_INVALID
+    assert missing_reverse.value.code is ErrorCode.STATE_INVALID
 
 
 def test_migration_registry_rejects_duplicate_gapped_and_future_paths() -> None:
@@ -402,12 +402,12 @@ def test_migration_registry_rejects_duplicate_gapped_and_future_paths() -> None:
     )
     with pytest.raises(RepoForgeError) as duplicate:
         StateMigrationRegistry((step, step))
-    assert duplicate.value.code is ErrorCode.STATE_MIGRATION_INVALID
+    assert duplicate.value.code is ErrorCode.STATE_INVALID
 
     registry = StateMigrationRegistry((step,))
     with pytest.raises(RepoForgeError) as gap:
         registry.plan("demo_records", SchemaVersion(1), SchemaVersion(3))
-    assert gap.value.code is ErrorCode.STATE_MIGRATION_INVALID
+    assert gap.value.code is ErrorCode.STATE_INVALID
 
     with pytest.raises(RepoForgeError) as future:
         registry.plan("demo_records", SchemaVersion(4), SchemaVersion(2))
@@ -418,7 +418,7 @@ def test_migration_registry_rejects_duplicate_gapped_and_future_paths() -> None:
             registry.plan("demo_records", SchemaVersion(1), SchemaVersion(2)),
             cast(dict[str, object], {"unsupported": object()}),
         )
-    assert invalid_transform.value.code is ErrorCode.STATE_MIGRATION_INVALID
+    assert invalid_transform.value.code is ErrorCode.STATE_INVALID
 
 
 def _write_raw_state(
@@ -550,7 +550,7 @@ def test_json_state_lifecycle_rejects_stale_and_corrupt_migration_previews(
     )
     with pytest.raises(RepoForgeError) as stale:
         manager.apply_migration(preview, registry=_migration_registry())
-    assert stale.value.code is ErrorCode.STATE_MIGRATION_STALE
+    assert stale.value.code is ErrorCode.STATE_STALE
 
     (tmp_path / "demo_records" / "demo-1.json").write_text("{bad", encoding="utf-8")
     with pytest.raises(RepoForgeError) as corrupt:
@@ -596,7 +596,7 @@ def test_json_state_lifecycle_rolls_back_failed_migration_exactly(tmp_path: Path
     )
     with pytest.raises(RepoForgeError) as failed:
         manager.apply_migration(preview, registry=_migration_registry())
-    assert failed.value.code is ErrorCode.STATE_MIGRATION_FAILED
+    assert failed.value.code is ErrorCode.STATE_PERSISTENCE_FAILED
     assert (tmp_path / "demo_records" / "demo-1.json").read_bytes() == original_1
     assert (tmp_path / "demo_records" / "demo-2.json").read_bytes() == original_2
 
@@ -785,7 +785,7 @@ def test_cleanup_apply_rejects_concurrent_changes(tmp_path: Path) -> None:
     )
     with pytest.raises(RepoForgeError) as stale:
         manager.apply_cleanup(preview)
-    assert stale.value.code is ErrorCode.STATE_RETENTION_STALE
+    assert stale.value.code is ErrorCode.STATE_STALE
 
 
 def test_cleanup_apply_resumes_after_process_crash(tmp_path: Path) -> None:
@@ -915,7 +915,7 @@ def test_backup_preview_apply_is_deterministic_private_and_idempotent(tmp_path: 
             max_records=10,
             max_total_bytes=10_000,
         )
-    assert invalid_destination.value.code is ErrorCode.STATE_BACKUP_INVALID
+    assert invalid_destination.value.code is ErrorCode.STATE_INVALID
 
 
 def test_restore_preview_detects_conflicts_and_overwrite_restores_with_backup(
@@ -958,7 +958,7 @@ def test_restore_preview_detects_conflicts_and_overwrite_restores_with_backup(
     assert conflict.conflicts == (("demo-1", "different_existing_record"),)
     with pytest.raises(RepoForgeError) as blocked:
         destination_manager.apply_restore(conflict, backup_root=backup_root)
-    assert blocked.value.code is ErrorCode.STATE_RESTORE_CONFLICT
+    assert blocked.value.code is ErrorCode.ALREADY_EXISTS
 
     preview = destination_manager.preview_restore(
         backup_root=backup_root,
@@ -1013,7 +1013,7 @@ def test_restore_rejects_corrupt_backup_and_rolls_back_failure(tmp_path: Path) -
             destination_id="destination-state",
             overwrite=False,
         )
-    assert corrupt.value.code is ErrorCode.STATE_BACKUP_INVALID
+    assert corrupt.value.code is ErrorCode.STATE_INVALID
 
     source_manager.apply_backup(backup, destination_root=backup_root, repair=True)
 
@@ -1033,5 +1033,5 @@ def test_restore_rejects_corrupt_backup_and_rolls_back_failure(tmp_path: Path) -
     )
     with pytest.raises(RepoForgeError) as failed:
         failing_manager.apply_restore(preview, backup_root=backup_root)
-    assert failed.value.code is ErrorCode.STATE_INTEGRITY_FAILED
+    assert failed.value.code is ErrorCode.STATE_PERSISTENCE_FAILED
     assert not list((destination / "demo_records").glob("*.json"))
