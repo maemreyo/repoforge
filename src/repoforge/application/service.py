@@ -6,6 +6,7 @@ from typing import Any
 
 from ..bootstrap import AdapterOverrides, Application, build_application
 from ..config import AppConfig
+from ..domain.egress import EgressDestination, sanitize_egress_data
 from ..domain.ticket_sync import TicketProjectOwnerType
 from ..ports import (
     AuditSink,
@@ -165,18 +166,18 @@ from .workspace.update_draft_pr import (
 
 def _result(value: object) -> dict[str, Any]:
     data = to_data(value)
-    if isinstance(data, dict) and set(data) == {"payload"} and isinstance(data["payload"], dict):
-        return data["payload"]
-    if (
-        isinstance(data, dict)
-        and data.get("payload") is not None
-        and isinstance(data["payload"], dict)
-    ):
-        return data["payload"]
     if not isinstance(data, dict):
         raise TypeError("Application result must serialize to an object")
-    data.pop("payload", None)
-    return data
+    payload_value = data.get("payload")
+    if isinstance(payload_value, dict):
+        payload = payload_value
+    else:
+        data.pop("payload", None)
+        payload = data
+    sanitized = sanitize_egress_data(payload, destination=EgressDestination.MODEL)
+    if not isinstance(sanitized, dict):
+        raise TypeError("Sanitized application result must remain an object")
+    return sanitized
 
 
 class CodingService:

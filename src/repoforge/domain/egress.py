@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -169,6 +170,9 @@ _UUID = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
 )
 _INTEGRITY = re.compile(r"sha(?:256|384|512)-[A-Za-z0-9+/=]{20,}")
+_PUBLIC_URL_BODY = re.compile(
+    r"[A-Za-z0-9.-]+\.(?:com|org|net|io|dev|test|local|ai|app)(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?"
+)
 _SAFE_SELECTOR = re.compile(
     r"(?:check-run|operation|task|workspace|restore|backup)-[A-Za-z0-9:._-]{1,128}"
 )
@@ -248,15 +252,23 @@ def _looks_high_entropy(value: str) -> bool:
             any(not character.isalnum() for character in value),
         )
     )
-    return classes >= 3 or (classes >= 2 and len(value) >= 40)
+    if classes < 2:
+        return False
+    counts = {character: value.count(character) for character in set(value)}
+    entropy = -sum(
+        (count / len(value)) * math.log2(count / len(value)) for count in counts.values()
+    )
+    return entropy >= 4.5 and len(counts) / len(value) >= 0.3
 
 
 def _safe_candidate(value: str, allow_values: frozenset[str]) -> bool:
+    url_body = value[2:] if value.startswith("//") else value
     return (
         value in allow_values
         or _SHA_HEX.fullmatch(value) is not None
         or _UUID.fullmatch(value) is not None
         or _INTEGRITY.fullmatch(value) is not None
+        or _PUBLIC_URL_BODY.fullmatch(url_body) is not None
         or _SAFE_SELECTOR.fullmatch(value) is not None
     )
 
@@ -586,6 +598,7 @@ def _safe_identity_field(key: str, value: str) -> bool:
         _SHA_HEX.fullmatch(value) is not None
         or _UUID.fullmatch(value) is not None
         or _INTEGRITY.fullmatch(value) is not None
+        or _PUBLIC_URL_BODY.fullmatch(value) is not None
         or _SAFE_SELECTOR.fullmatch(value) is not None
     )
 
@@ -652,7 +665,11 @@ def sanitize_egress_data(
                 policy=active_policy,
             )
         )
-        return evaluation.content or f"<{evaluation.decision.value}:{evaluation.reason}>"
+        return (
+            evaluation.content
+            if evaluation.content is not None
+            else f"<{evaluation.decision.value}:{evaluation.reason}>"
+        )
     if isinstance(value, str):
         if _safe_identity_field(_key, value):
             return value
@@ -666,7 +683,11 @@ def sanitize_egress_data(
                 policy=active_policy,
             )
         )
-        return evaluation.content or f"<{evaluation.decision.value}:{evaluation.reason}>"
+        return (
+            evaluation.content
+            if evaluation.content is not None
+            else f"<{evaluation.decision.value}:{evaluation.reason}>"
+        )
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return sanitize_egress_data(
