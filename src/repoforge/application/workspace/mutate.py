@@ -9,8 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
-from ...adapters.filesystem.transaction import JournaledFileTransaction
-from ...domain.errors import ErrorCode, RepoForgeError, SecurityError, WorkspaceError
+from ...domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.filesystem_transaction import (
     CreateFile,
     DeleteFile,
@@ -472,6 +471,9 @@ class WorkspaceMutator:
             raise ValueError(f"operations must contain between 1 and {_MAX_OPERATIONS} entries")
         if _SHA256.fullmatch(command.expected_workspace_fingerprint) is None:
             raise ValueError("expected_workspace_fingerprint must be a lowercase SHA-256")
+        transaction_factory = self.ctx.file_transactions
+        if transaction_factory is None:
+            raise ConfigError("File transaction adapter is unavailable")
         record, repo, workspace = self.ctx.workspace(command.workspace_id)
         op_names = tuple(self._op_name(operation) for operation in operations)
         audit_details: dict[str, object] = {
@@ -483,7 +485,7 @@ class WorkspaceMutator:
 
         def run() -> WorkspaceMutateResult:
             with self.ctx.locks.lock(command.workspace_id):
-                engine = JournaledFileTransaction(workspace)
+                engine = transaction_factory.create(workspace)
                 recovery = engine.recover_pending()
                 audit_details["recovered_rolled_back"] = recovery.rolled_back
                 audit_details["recovered_finalized"] = recovery.finalized

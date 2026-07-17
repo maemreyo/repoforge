@@ -9,8 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from .durable_state import SchemaVersion
 from .errors import ErrorCode, RepoForgeError
+from .versioning import SchemaVersion
 
 JsonObject = dict[str, object]
 MigrationTransform = Callable[[JsonObject], JsonObject]
