@@ -233,3 +233,33 @@ def test_egress_rejects_oversized_input_and_recursively_sanitizes_payloads() -> 
     rendered = repr(sanitized)
     assert secret not in rendered
     assert "ordinary" in rendered
+
+
+def test_egress_sanitization_preserves_existing_policy_markers() -> None:
+    payload = {
+        "subject": "token=<redacted>",
+        "body": "<redacted:private-key>",
+        "snippet": "<withheld:denied-source-snippet>",
+    }
+
+    sanitized = sanitize_egress_data(payload, destination=EgressDestination.MODEL)
+
+    assert sanitized == payload
+
+
+def test_egress_preserves_structured_paths_without_allowing_known_tokens() -> None:
+    workspace_path = (
+        "/private/tmp/pytest-of-user/pytest-610/"
+        "test_workspace_format_changed_2/workspaces/format-stale-a1b2c3d4e5"
+    )
+    provider = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    payload = {
+        "path": workspace_path,
+        "unsafe_path": f"/tmp/{provider}/artifact.txt",
+    }
+
+    sanitized = sanitize_egress_data(payload, destination=EgressDestination.MODEL)
+
+    assert isinstance(sanitized, dict)
+    assert sanitized["path"] == workspace_path
+    assert provider not in str(sanitized["unsafe_path"])

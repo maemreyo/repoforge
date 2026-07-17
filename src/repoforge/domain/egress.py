@@ -176,6 +176,9 @@ _PUBLIC_URL_BODY = re.compile(
 _SAFE_SELECTOR = re.compile(
     r"(?:check-run|operation|task|workspace|restore|backup)-[A-Za-z0-9:._-]{1,128}"
 )
+_SANITIZED_MARKER = re.compile(
+    r"<(?:redacted(?::[A-Za-z0-9_+.-]+)?|withheld:[A-Za-z0-9_+.-]+|reject_result:[^<>\r\n]+)>"
+)
 _SENSITIVE_KEYS = {
     "authorization",
     "control_plane_api_key",
@@ -286,7 +289,8 @@ def _add_candidate(
 ) -> None:
     if start < 0 or end <= start or end > len(text):
         return
-    if text[start:end] in allow_values:
+    value = text[start:end]
+    if value in allow_values or _SANITIZED_MARKER.fullmatch(value) is not None:
         return
     candidates.append(_Candidate(start, end, category, confidence, reason))
 
@@ -603,6 +607,15 @@ def _safe_identity_field(key: str, value: str) -> bool:
     )
 
 
+def _structured_path_field(key: str, value: str) -> bool:
+    return (
+        (key == "path" or key.endswith(("_path", "_paths")))
+        and 0 < len(value) <= 4_096
+        and not any(ord(character) < 32 for character in value)
+        and "://" not in value
+    )
+
+
 def sanitize_egress_data(
     value: object,
     *,
@@ -683,6 +696,12 @@ def sanitize_egress_data(
                 policy=active_policy,
             )
         )
+        if (
+            _structured_path_field(_key, value)
+            and evaluation.findings
+            and all(item.category == "high_entropy" for item in evaluation.findings)
+        ):
+            return value
         return (
             evaluation.content
             if evaluation.content is not None
