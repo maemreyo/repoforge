@@ -93,6 +93,18 @@ from .workspace.edit import (
     WorkspaceEditCommand,
     WorkspaceEditor,
 )
+from .workspace.family_v2 import (
+    WorkspaceChangedFormatterV2,
+    WorkspaceCreateV2Command,
+    WorkspaceCreatorV2,
+    WorkspaceFormatChangedV2Command,
+    WorkspaceListerV2,
+    WorkspaceListV2Command,
+    WorkspaceRemoverV2,
+    WorkspaceRemoveV2Command,
+    WorkspaceStatusV2,
+    WorkspaceStatusV2Command,
+)
 from .workspace.file_read import (
     WorkspaceFileReadCommand,
     WorkspaceFileReader,
@@ -142,6 +154,11 @@ from .workspace.refresh import WorkspaceRefreshCommand, WorkspaceRefresher
 from .workspace.refresh_preview import (
     WorkspaceRefreshPreviewCommand,
     WorkspaceRefreshPreviewer,
+)
+from .workspace.refresh_v2 import (
+    RefreshResolution,
+    WorkspaceRefreshV2,
+    WorkspaceRefreshV2Command,
 )
 from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
 from .workspace.restore_paths import (
@@ -261,8 +278,11 @@ class CodingService:
         self._task_context = RepoTaskContextReader(ctx)
         self._ticket_project_sync = TicketProjectSyncer(ctx)
         self._create = WorkspaceCreator(ctx)
+        self._create_v2 = WorkspaceCreatorV2(ctx)
         self._list = WorkspaceLister(ctx)
+        self._list_v2 = WorkspaceListerV2(ctx)
         self._status = WorkspaceStatusReader(ctx)
+        self._status_v2 = WorkspaceStatusV2(ctx)
         self._assessment = WorkspaceAssessmentReader(ctx)
         self._base_status = WorkspaceBaseStatusReader(ctx)
         self._tree = WorkspaceTreeReader(ctx)
@@ -278,6 +298,7 @@ class CodingService:
         self._restore = WorkspacePathsRestorer(ctx)
         self._refresh_preview = WorkspaceRefreshPreviewer(ctx)
         self._refresh = WorkspaceRefresher(ctx)
+        self._refresh_v2 = WorkspaceRefreshV2(ctx)
         self._diff = WorkspaceDiffReader(ctx)
         self._profile = WorkspaceProfileRunner(
             ctx,
@@ -287,6 +308,7 @@ class CodingService:
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
         self._hygiene_status = WorkspaceHygieneStatusReader(ctx)
         self._format_changed = WorkspaceChangedFormatter(ctx)
+        self._format_changed_v2 = WorkspaceChangedFormatterV2(ctx)
         self._adhoc = WorkspaceAdhocRunner(
             ctx,
             operations=self.operations,
@@ -302,6 +324,7 @@ class CodingService:
         self._failure_evidence = WorkspacePrFailureEvidenceReader(ctx)
         self._pr_watch = self.application.pr_check_watches
         self._remove = WorkspaceRemover(ctx)
+        self._remove_v2 = WorkspaceRemoverV2(ctx)
         self._doctor = Doctor(ctx)
 
     def operation_status(self, operation_id: str) -> dict[str, Any]:
@@ -707,11 +730,47 @@ class CodingService:
             )
         )
 
+    def workspace_create_v2(
+        self,
+        repo_id: str,
+        task_slug: str,
+        base: str | None = None,
+        idempotency_key: str | None = None,
+        issue_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        return _result(
+            self._create_v2.execute(
+                WorkspaceCreateV2Command(repo_id, task_slug, base, idempotency_key, issue_ids)
+            )
+        )
+
     def workspace_list(self) -> dict[str, Any]:
         return _result(self._list.execute(WorkspaceListCommand()))
 
+    def workspace_list_v2(
+        self,
+        exists: bool | None = True,
+        lifecycle: str | None = None,
+        repo_id: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._list_v2.execute(WorkspaceListV2Command(exists, lifecycle, repo_id, limit, cursor))
+        )
+
     def workspace_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._status.execute(WorkspaceStatusCommand(workspace_id)))
+
+    def workspace_status_v2(
+        self,
+        workspace_id: str,
+        sections: tuple[str, ...] = ("local",),
+        byte_budget: int = 60_000,
+    ) -> dict[str, Any]:
+        return _result(
+            self._status_v2.execute(WorkspaceStatusV2Command(workspace_id, sections, byte_budget))
+        )
 
     def workspace_assessment(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._assessment.execute(WorkspaceAssessmentCommand(workspace_id)))
@@ -961,6 +1020,32 @@ class CodingService:
             )
         )
 
+    def workspace_refresh_v2(
+        self,
+        workspace_id: str,
+        *,
+        action: str,
+        expected_head_sha: str,
+        expected_fingerprint: str,
+        plan_token: str | None = None,
+        resolutions: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        normalized = tuple(
+            RefreshResolution(item["path"], item["content"]) for item in (resolutions or [])
+        )
+        return _result(
+            self._refresh_v2.execute(
+                WorkspaceRefreshV2Command(
+                    workspace_id,
+                    action,
+                    expected_head_sha,
+                    expected_fingerprint,
+                    plan_token,
+                    normalized,
+                )
+            )
+        )
+
     def workspace_diff(self, workspace_id: str, staged: bool = False) -> dict[str, Any]:
         return _result(self._diff.execute(WorkspaceDiffCommand(workspace_id, staged)))
 
@@ -1046,6 +1131,22 @@ class CodingService:
         return _result(
             self._format_changed.execute(
                 WorkspaceFormatChangedCommand(
+                    workspace_id,
+                    expected_fingerprint,
+                    formatter_id,
+                )
+            )
+        )
+
+    def workspace_format_changed_v2(
+        self,
+        workspace_id: str,
+        expected_fingerprint: str,
+        formatter_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._format_changed_v2.execute(
+                WorkspaceFormatChangedV2Command(
                     workspace_id,
                     expected_fingerprint,
                     formatter_id,
@@ -1148,6 +1249,13 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._remove.execute(WorkspaceRemoveCommand(workspace_id, delete_local_branch))
+        )
+
+    def workspace_remove_v2(
+        self, workspace_id: str, delete_local_branch: bool = False
+    ) -> dict[str, Any]:
+        return _result(
+            self._remove_v2.execute(WorkspaceRemoveV2Command(workspace_id, delete_local_branch))
         )
 
     def doctor(self) -> dict[str, Any]:

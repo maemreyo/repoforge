@@ -376,23 +376,55 @@ class RefreshAction(str, Enum):
     APPLY = "apply"
 
 
+class RefreshResolution(StrictModel):
+    path: RelativePath
+    content: str = Field(max_length=2_000_000)
+
+
+class RefreshConflictEvidence(StrictModel):
+    path: RelativePath
+    kind: Literal[
+        "content",
+        "add_add",
+        "delete_modify",
+        "rename_delete",
+        "binary",
+        "generated",
+    ]
+    base: str | None = Field(default=None, max_length=60_000)
+    ours: str | None = Field(default=None, max_length=60_000)
+    theirs: str | None = Field(default=None, max_length=60_000)
+    content_truncated: bool = False
+    next_action: ShortText
+    regeneration_command: tuple[str, ...] = Field(default=(), max_length=64)
+
+
 class WorkspaceRefreshInput(StrictModel):
     workspace_id: Identifier
     action: RefreshAction
     expected_head_sha: GitObjectId
     expected_fingerprint: Sha256
     plan_token: str | None = Field(default=None, max_length=2048)
+    resolutions: tuple[RefreshResolution, ...] = Field(default=(), max_length=100)
 
 
 class WorkspaceRefreshOutput(ToolResponse):
     workspace_id: Identifier
     action: RefreshAction
     result: Literal["current", "preview", "applied", "conflict"]
-    plan_hash: Sha256 | None = None
+    plan_hash: Sha256
     plan_token: str | None = Field(default=None, max_length=2048)
+    target_base_sha: GitObjectId
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
-    conflicts: tuple[RelativePath, ...] = Field(default=(), max_length=100)
+    prediction_scope: Literal["committed_head"] = "committed_head"
+    apply_blockers: tuple[str, ...] = Field(default=(), max_length=20)
+    conflicts: tuple[RefreshConflictEvidence, ...] = Field(default=(), max_length=100)
+    warnings: tuple[str, ...] = Field(default=(), max_length=100)
+    changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    invalidated_receipts: tuple[str, ...] = Field(default=(), max_length=100)
+    transaction_id: Identifier | None = None
 
 
 class WorkspaceStatusSection(str, Enum):

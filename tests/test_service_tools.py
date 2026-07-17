@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -189,6 +190,111 @@ def test_v2_repo_history_cursor_continues_exact_log_page(
     )
     assert [item["subject"] for item in second["commits"]] == ["history 0", "initial"]
     assert second["next_cursor"] is None
+
+
+def test_v2_workspace_lifecycle_is_path_safe_filtered_and_sectioned(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    first = service.workspace_create_v2(
+        "demo",
+        "v2 lifecycle first",
+        idempotency_key="workspace-create-v2-first-0001",
+        issue_ids=("188",),
+    )
+    second = service.workspace_create_v2(
+        "demo",
+        "v2 lifecycle second",
+        idempotency_key="workspace-create-v2-second-0001",
+    )
+
+    assert "path" not in first
+    assert first["workspace_fingerprint"]
+    assert first["issue_ids"] == ["188"]
+    assert str(forge_env.root) not in json.dumps(first)
+
+    page_one = service.workspace_list_v2(limit=1)
+    assert len(page_one["workspaces"]) == 1
+    assert page_one["next_cursor"] is not None
+    assert "path" not in page_one["workspaces"][0]
+    page_two = service.workspace_list_v2(limit=1, cursor=page_one["next_cursor"])
+    assert len(page_two["workspaces"]) == 1
+    assert {
+        page_one["workspaces"][0]["workspace_id"],
+        page_two["workspaces"][0]["workspace_id"],
+    } == {first["workspace_id"], second["workspace_id"]}
+    assert str(forge_env.root) not in json.dumps(page_one)
+
+    status = service.workspace_status_v2(
+        first["workspace_id"],
+        sections=("local", "base", "hygiene"),
+    )
+    assert [section["section"] for section in status["sections"]] == [
+        "local",
+        "base",
+        "hygiene",
+    ]
+    assert status["fingerprint_source"] in {"cache", "scan"}
+    assert status["workspace_fingerprint"] == first["workspace_fingerprint"]
+    assert str(forge_env.root) not in json.dumps(status)
+
+    bounded = service.workspace_status_v2(
+        first["workspace_id"],
+        sections=("local", "base", "hygiene"),
+        byte_budget=250,
+    )
+    assert bounded["truncated"] is True
+
+    removed = service.workspace_remove_v2(second["workspace_id"])
+    assert removed["removed"] is True
+    assert removed["remote_untouched"] is True
+    assert "Remote branches" in removed["tombstone"]
+
+
+def test_v2_workspace_list_surfaces_missing_worktree_cleanup_guidance(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create_v2("demo", "missing v2 worktree")
+    record = service.state.load(created["workspace_id"])
+    shutil.rmtree(record.path)
+
+    missing = service.workspace_list_v2(exists=False)
+
+    assert [item["workspace_id"] for item in missing["workspaces"]] == [created["workspace_id"]]
+    assert missing["cleanup_guidance"]
+    assert str(forge_env.root) not in json.dumps(missing)
+
+
+def test_v2_workspace_format_changed_reports_changed_and_noop_evidence(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create_v2("demo", "v2 format changed")
+    workspace_id = created["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "needs-format\n",
+        current["sha256"],
+    )
+    dirty = service.workspace_status(workspace_id)
+
+    changed = service.workspace_format_changed_v2(
+        workspace_id,
+        dirty["workspace_fingerprint"],
+    )
+
+    assert changed["changed"] is True
+    assert changed["formatters"][0]["outcome"] == "changed"
+    assert changed["formatters"][0]["changed_paths"] == ["hello.txt"]
+    noop = service.workspace_format_changed_v2(
+        workspace_id,
+        changed["workspace_fingerprint"],
+    )
+    assert noop["changed"] is False
+    assert noop["formatters"][0]["outcome"] == "no_op"
 
 
 def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:

@@ -22,6 +22,7 @@ from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import LocalFileSystem
+from .adapters.filesystem.transaction import JournaledFileTransaction
 from .adapters.git import GitCliRepository
 from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
 from .adapters.github.ticket_project import GhTicketProjectGateway
@@ -129,6 +130,7 @@ from .ports import (
     ExecutableLocator,
     ExecutionEnvironmentPort,
     FileSystem,
+    FileTransactionFactory,
     GitHubReadCache,
     GitRepository,
     HygieneBaselineCache,
@@ -174,6 +176,7 @@ class AdapterOverrides:
     clock: Clock | None = None
     ids: IdGenerator | None = None
     filesystem: FileSystem | None = None
+    file_transactions: FileTransactionFactory | None = None
     git: GitRepository | None = None
     github: PullRequestGateway | None = None
     ticket_graphs: TicketGraphGateway | None = None
@@ -443,6 +446,7 @@ def build_application(
         backup_count=config.server.audit_backup_count,
     )
     filesystem = o.filesystem or LocalFileSystem()
+    file_transactions: FileTransactionFactory = o.file_transactions or JournaledFileTransaction
     git = o.git or GitCliRepository(command, config.server)
     github = o.github or GhCliGateway(command, config.server)
     ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
@@ -480,6 +484,7 @@ def build_application(
         git=git,
         github=github,
         filesystem=filesystem,
+        file_transactions=file_transactions,
         store=store,
         locks=locks,
         gate=gate,

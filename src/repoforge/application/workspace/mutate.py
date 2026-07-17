@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
-from ...adapters.filesystem.transaction import JournaledFileTransaction
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.filesystem_transaction import (
     CreateFile,
@@ -24,6 +23,7 @@ from ...domain.operations import hash_idempotency_key, request_fingerprint
 from ...domain.patches import materialize_normalized_patch, normalize_patch
 from ...domain.policy import assert_path_allowed, resolve_workspace_path, validate_patch
 from ...domain.redaction import sanitize_persisted_data
+from ...ports import FileTransaction
 from ..context import ApplicationContext
 from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
@@ -509,7 +509,7 @@ class WorkspaceMutator:
 
         def run() -> WorkspaceMutateResult:
             with self.ctx.locks.lock(command.workspace_id):
-                engine = JournaledFileTransaction(workspace)
+                engine = self.ctx.file_transaction(workspace)
                 recovery = engine.recover_pending()
                 audit_details["recovered_rolled_back"] = recovery.rolled_back
                 audit_details["recovered_finalized"] = recovery.finalized
@@ -736,7 +736,7 @@ class WorkspaceMutator:
 
     def _persist_receipt_only(
         self,
-        engine: JournaledFileTransaction,
+        engine: FileTransaction,
         result: WorkspaceMutateResult,
         *,
         key_hash: str | None,

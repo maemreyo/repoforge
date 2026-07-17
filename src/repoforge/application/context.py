@@ -23,7 +23,10 @@ from ..ports import (
     CommandExecutor,
     ExecutableLocator,
     ExecutionEnvironmentPort,
+    FaultInjector,
     FileSystem,
+    FileTransaction,
+    FileTransactionFactory,
     GitHubReadCache,
     GitRepository,
     HygieneBaselineCache,
@@ -235,6 +238,18 @@ class ApplicationContext:
     nudge_tracker: AdoptionNudgeTracker | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
+    file_transactions: FileTransactionFactory | None = None
+
+    def file_transaction(
+        self,
+        workspace_root: Path,
+        *,
+        fault_injector: FaultInjector | None = None,
+    ) -> FileTransaction:
+        factory = self.file_transactions
+        if factory is None:
+            raise ConfigError("Journaled file transaction factory is unavailable")
+        return factory(workspace_root, fault_injector=fault_injector)
 
     def now_epoch(self) -> float:
         try:

@@ -428,16 +428,10 @@ class GitCliRepository:
         )
         if result.returncode == 0:
             return GitMergeResult("refreshed", self.head_sha(path), ())
-        raw = self._executor.run_bytes(
-            ["git", "diff", "--name-only", "--diff-filter=U", "-z", "--"],
-            cwd=path,
-            max_bytes=self.server.max_fingerprint_bytes,
-        ).decode("utf-8", errors="strict")
-        raw_paths = [item for item in raw.split("\x00") if item]
+        raw_paths = list(self.unmerged_paths(path, repo))
         merge_in_progress = self._commit_ref(path, "MERGE_HEAD", check=False) is not None
         if not merge_in_progress:
             raise CommandError(result.combined or "Workspace base merge failed")
-        conflicts = self._bounded_policy_paths(raw_paths, repo)
         aborted = self._executor.run(
             ["git", "merge", "--abort"],
             cwd=path,
@@ -449,9 +443,68 @@ class GitCliRepository:
                 "Workspace refresh conflict could not be aborted cleanly",
                 safe_next_action="Inspect the isolated workspace before any further mutation.",
             )
+        return GitMergeResult("conflict", self.head_sha(path), tuple(raw_paths))
+
+    def begin_merge_no_ff(
+        self, path: Path, repo: RepositoryConfig, target_sha: str
+    ) -> GitMergeResult:
+        head = self.head_sha(path)
+        if self._is_ancestor(path, target_sha, head):
+            return GitMergeResult("current", head, ())
+        result = self._executor.run(
+            ["git", "merge", "--no-ff", "--no-commit", "--no-edit", target_sha],
+            cwd=path,
+            check=False,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=self.server.max_tool_output_chars,
+        )
+        if result.returncode == 0:
+            return GitMergeResult("ready", head, ())
+        merge_in_progress = self._commit_ref(path, "MERGE_HEAD", check=False) is not None
+        if not merge_in_progress:
+            raise CommandError(result.combined or "Workspace base merge failed")
+        conflicts = self.unmerged_paths(path, repo)
+        if not conflicts:
+            raise CommandError(
+                result.combined or "Workspace merge failed without conflict evidence"
+            )
+        return GitMergeResult("conflict", head, conflicts)
+
+    def unmerged_paths(self, path: Path, repo: RepositoryConfig) -> tuple[str, ...]:
+        raw = self._executor.run_bytes(
+            ["git", "diff", "--name-only", "--diff-filter=U", "-z", "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        ).decode("utf-8", errors="strict")
+        raw_paths = [item for item in raw.split("\x00") if item]
+        conflicts = self._bounded_policy_paths(raw_paths, repo)
         if raw_paths and not conflicts:
             raise SecurityError("Workspace refresh conflicts touch only denied repository paths")
-        return GitMergeResult("conflict", self.head_sha(path), tuple(conflicts))
+        return tuple(conflicts)
+
+    def stage_paths(
+        self, path: Path, repo: RepositoryConfig, relative_paths: tuple[str, ...]
+    ) -> None:
+        normalized = tuple(assert_path_allowed(item, repo) for item in relative_paths)
+        if not normalized:
+            return
+        self._executor.run(
+            ["git", "add", "--", *normalized],
+            cwd=path,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=2048,
+        )
+
+    def commit_merge(self, path: Path) -> str:
+        if self._commit_ref(path, "MERGE_HEAD", check=False) is None:
+            raise WorkspaceError("No reviewed merge is in progress")
+        self._executor.run(
+            ["git", "commit", "--no-edit"],
+            cwd=path,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=self.server.max_tool_output_chars,
+        )
+        return self.head_sha(path)
 
     def reset_hard(self, path: Path, target_sha: str) -> None:
         self._executor.run(["git", "reset", "--hard", target_sha], cwd=path, output_limit=2048)

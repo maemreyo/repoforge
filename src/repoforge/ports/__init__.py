@@ -15,6 +15,12 @@ from .execution_environment import (
     ExecutionReceipt,
 )
 from .filesystem import FileSystem
+from .filesystem_transaction import (
+    CommitReceiptFactory,
+    FaultInjector,
+    FileTransaction,
+    FileTransactionFactory,
+)
 from .git import (
     GitBaseReferences,
     GitMergePreview,
@@ -89,13 +95,17 @@ __all__ = [
     "CodeIntelligenceProvider",
     "CommandExecutor",
     "CommandResult",
+    "CommitReceiptFactory",
     "ConfigurationStore",
     "DiscoveryRequest",
     "EnvironmentPreflight",
     "ExecutableLocator",
     "ExecutionEnvironmentPort",
     "ExecutionReceipt",
+    "FaultInjector",
     "FileSystem",
+    "FileTransaction",
+    "FileTransactionFactory",
     "GateState",
     "GitBaseReferences",
     "GitHubActionsJob",

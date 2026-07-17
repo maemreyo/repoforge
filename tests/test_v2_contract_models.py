@@ -183,6 +183,42 @@ def test_repo_policy_contract_carries_typed_generated_paths() -> None:
     assert generated["maxItems"] == 64
 
 
+def test_workspace_refresh_contract_has_typed_conflicts_and_resolutions() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_refresh"]
+
+    validated = spec.validate_input(
+        {
+            "workspace_id": "demo-workspace",
+            "action": "apply",
+            "expected_head_sha": "a" * 40,
+            "expected_fingerprint": "b" * 64,
+            "plan_token": "refresh-v2:" + "c" * 40 + ":" + "d" * 64 + ":" + "e" * 64,
+            "resolutions": [
+                {
+                    "path": "hello.txt",
+                    "content": "reviewed resolution\n",
+                }
+            ],
+        }
+    )
+
+    assert validated.resolutions[0].path == "hello.txt"
+    input_schema = spec.input_model.model_json_schema()
+    assert input_schema["properties"]["resolutions"]["maxItems"] == 100
+    output_fields = set(spec.output_model.model_fields)
+    assert {
+        "prediction_scope",
+        "apply_blockers",
+        "conflicts",
+        "warnings",
+        "changed_paths",
+        "verify_selector",
+        "invalidated_receipts",
+        "transaction_id",
+    } <= output_fields
+
+
 def test_mutation_schema_exposes_all_ops_and_bounds() -> None:
     _, registry = _contracts()
     schema = registry.V2_TOOL_SPECS["workspace_mutate"].input_model.model_json_schema()

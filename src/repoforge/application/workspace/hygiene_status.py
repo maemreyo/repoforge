@@ -73,6 +73,10 @@ class WorkspaceHygieneStatusReader:
 
         return self.ctx.audited("workspace_hygiene_status", details, operation)
 
+    def compute(self, command: WorkspaceHygieneStatusCommand) -> WorkspaceHygieneStatusResult:
+        """Read hygiene evidence without a nested audit event."""
+        return self._read(command)
+
     def _read(self, command: WorkspaceHygieneStatusCommand) -> WorkspaceHygieneStatusResult:
         record, repo, workspace = self.ctx.workspace(command.workspace_id)
         policy = select_formatter(repo, command.formatter_id, allow_unavailable=True)
