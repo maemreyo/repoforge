@@ -12,7 +12,7 @@
 
 - Reconciled onto the post-#196 runtime-health and typed-verification-step architecture under issue #197.
 - Preserved the frozen public contract at 52 MCP tools and runtime protocol v1; no new commit-readiness tool was added.
-- Full production verification passed on the reconciled implementation, including four deterministic pytest shards, branch coverage, package build, and isolated installed-wheel smoke testing.
+- Full production verification passed on the reconciled implementation, including four deterministic pytest shards, branch coverage, package build, and isolated installed-wheel smoke testing; a separate unsharded 908-test profile also passed on the pushed SHA after one CI Python 3.12 job failed without test-level evidence.
 - Upstream tunnel-client freshness counters and Forge v2 tracing/retry work remain explicitly out of scope, as recorded in issue #197.
 
 ## Global Constraints
