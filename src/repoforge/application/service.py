@@ -22,6 +22,7 @@ from .dto import to_data
 from .operations.cancel import OperationCancelCommand, OperationCancellationRequester
 from .operations.list import OperationListCommand, OperationLister
 from .operations.status import OperationStatusCommand, OperationStatusReader
+from .read_batch import FileReadRequest
 from .repository.commit_read import (
     RepositoryCommitReadCommand,
     RepositoryCommitReader,
@@ -40,6 +41,7 @@ from .repository.issue_read import IssueReadCommand, IssueReader
 from .repository.issue_spec import RepositoryIssueSpecCommand, RepositoryIssueSpecReader
 from .repository.list import RepositoryListCommand, RepositoryLister
 from .repository.pr_read import PullRequestReadCommand, PullRequestReader
+from .repository.read import RepositoryReadCommand, RepositoryReader
 from .repository.recent_commits import (
     RecentCommitsCommand,
     RecentCommitsReader,
@@ -117,6 +119,7 @@ from .workspace.pr_status import (
 )
 from .workspace.pr_watch import WorkspacePrWatchCommand
 from .workspace.push import WorkspacePushCommand, WorkspacePusher
+from .workspace.read import WorkspaceReadCommand, WorkspaceReader
 from .workspace.refresh import WorkspaceRefreshCommand, WorkspaceRefresher
 from .workspace.refresh_preview import (
     WorkspaceRefreshPreviewCommand,
@@ -217,6 +220,7 @@ class CodingService:
         self._repo_tree = RepositoryTreeReader(ctx)
         self._repo_read = RepositoryFileReader(ctx)
         self._repo_reads = RepositoryFilesReader(ctx)
+        self._repo_read_v2 = RepositoryReader(ctx)
         self._repo_search = RepositorySearcher(ctx)
         self._recent = RecentCommitsReader(ctx)
         self._issue = IssueReader(ctx)
@@ -234,6 +238,7 @@ class CodingService:
         self._tree = WorkspaceTreeReader(ctx)
         self._read = WorkspaceFileReader(ctx)
         self._reads = WorkspaceFilesReader(ctx)
+        self._read_v2 = WorkspaceReader(ctx)
         self._search = WorkspaceSearcher(ctx)
         self._write = WorkspaceFileWriter(ctx)
         self._edit = WorkspaceEditor(ctx)
@@ -371,6 +376,20 @@ class CodingService:
         return _result(
             self._repo_reads.execute(
                 RepositoryFilesReadCommand(repo_id, relative_paths, ref, start_line, end_line)
+            )
+        )
+
+    def repo_read(
+        self,
+        repo_id: str,
+        files: list[FileReadRequest],
+        ref: str | None = None,
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_read_v2.execute(
+                RepositoryReadCommand(repo_id, tuple(files), ref, byte_budget, cursor)
             )
         )
 
@@ -537,6 +556,19 @@ class CodingService:
         return _result(
             self._reads.execute(
                 WorkspaceFilesReadCommand(workspace_id, relative_paths, start_line, end_line)
+            )
+        )
+
+    def workspace_read(
+        self,
+        workspace_id: str,
+        files: list[FileReadRequest],
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._read_v2.execute(
+                WorkspaceReadCommand(workspace_id, tuple(files), byte_budget, cursor)
             )
         )
 
