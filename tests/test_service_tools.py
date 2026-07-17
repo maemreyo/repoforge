@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import json
+import runpy
 from pathlib import Path
 
 import pytest
@@ -548,3 +550,18 @@ def test_workspace_list_audits_failure_without_leaking_internal_error_state(
     assert "error_code" in event["details"]
     assert "workspace_count" not in event["details"]
     assert "/secret/state/path" not in json.dumps(event["details"])
+
+
+def test_v2_retrieval_untracked_suite_bridge(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(Path(__file__).with_name("test_v2_retrieval.py")))
+    forge_factory = __import__("conftest").create_forge_environment
+    for name, candidate in sorted(namespace.items()):
+        if not name.startswith("test_") or not callable(candidate):
+            continue
+        parameters = inspect.signature(candidate).parameters
+        case_root = tmp_path / name
+        case_root.mkdir()
+        if tuple(parameters) == ("forge_env",):
+            candidate(forge_factory(case_root))
+        else:
+            candidate()
