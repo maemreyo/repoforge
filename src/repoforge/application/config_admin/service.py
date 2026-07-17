@@ -19,6 +19,7 @@ Gating contract (enforced twice — here for UX, and independently by
 
 from __future__ import annotations
 
+import json
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -32,7 +33,8 @@ from ...domain.config_generation import (
     classify_capability_delta,
     sha256_text,
 )
-from ...domain.errors import ConfigError
+from ...domain.errors import ConfigError, RepoForgeError
+from ...domain.generated_paths import parse_generated_paths
 from ...domain.policy_patch import (
     PolicyPatchError,
     ProfilePatch,
@@ -44,6 +46,7 @@ from ...ports.configuration import ConfigurationStore
 from ...ports.ids import IdGenerator
 from ..approvals import PendingPolicyChangeStore
 from ..configuration.document import (
+    apply_generated_paths,
     apply_policy_patch,
     apply_proposal,
     apply_risk_policy,
@@ -168,6 +171,9 @@ class ConfigAdminService:
                 "decisions": dict(source_item.decisions) if source_item else {},
                 "policy_overrides": dict(source_item.policy_overrides) if source_item else {},
                 "policy_patch": source_item.policy_patch.as_table() if source_item else {},
+                "generated_paths": (
+                    [rule.as_table() for rule in source_item.generated_paths] if source_item else []
+                ),
                 "ticket_graph": {
                     "source": source_graph,
                     "accepted": accepted_graph,
@@ -240,6 +246,129 @@ class ConfigAdminService:
 
     # -- writes --------------------------------------------------------------
 
+    def repo_policy(
+        self,
+        repo_id: str,
+        *,
+        action: str,
+        mutations: list[dict[str, Any]] | None = None,
+        generated_paths: list[dict[str, Any]] | None = None,
+        preview_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview or apply one exact-state-bound v2 repository policy proposal."""
+
+        if action == "preview":
+            if preview_token is not None:
+                raise ConfigError("repo_policy preview does not accept preview_token")
+            normalized = self._normalize_policy_mutations(mutations or [])
+            try:
+                canonical_generated = (
+                    [
+                        rule.as_table()
+                        for rule in parse_generated_paths(
+                            generated_paths,
+                            context=f"repositories.{repo_id}.generated_paths",
+                        )
+                    ]
+                    if generated_paths is not None
+                    else None
+                )
+            except ValueError as exc:
+                raise ConfigError(f"Invalid generated_paths declaration: {exc}") from exc
+            arguments = self._policy_apply_arguments(normalized)
+            preview = self.repo_policy_apply(
+                repo_id,
+                **arguments,
+                generated_paths=canonical_generated,
+                dry_run=True,
+            )
+            current = self._store.current()
+            if current is None:
+                raise ConfigError("No accepted configuration generation")
+            token = f"apr-{self._ids.new_hex(24)}"
+            preview_payload: dict[str, object] = {
+                "kind": "repo_policy_preview_v2",
+                "repo_id": repo_id,
+                "mutations": normalized,
+                "generated_paths": canonical_generated,
+                "expected_generation": current.generation,
+                "expected_source_sha256": sha256_text(self._store.read_source_text()),
+            }
+            try:
+                self.pending.payloads.save(token, preview_payload)
+            except (RepoForgeError, ValueError, TypeError) as exc:
+                raise ConfigError(f"Cannot persist repo_policy preview_token: {exc}") from exc
+            return {
+                "status": "ok",
+                "summary": f"Previewed repository policy for {repo_id}",
+                "error": None,
+                "repo_id": repo_id,
+                "action": "preview",
+                "result": "preview",
+                "preview_token": token,
+                "generation": None,
+                "changes": normalized,
+                "generated_paths": canonical_generated or [],
+                "operator_instruction": preview.get("safe_next_action"),
+            }
+        if action != "apply":
+            raise ConfigError("repo_policy action must be 'preview' or 'apply'")
+        if preview_token is None:
+            raise ConfigError("repo_policy apply requires preview_token")
+        if mutations or generated_paths is not None:
+            raise ConfigError("repo_policy apply accepts only the exact preview_token")
+        try:
+            stored_payload = self.pending.payloads.read(preview_token)
+        except (RepoForgeError, ValueError) as exc:
+            raise ConfigError(f"Invalid preview_token: {exc}") from exc
+        if stored_payload is None or stored_payload.get("kind") != "repo_policy_preview_v2":
+            raise ConfigError(f"Unknown preview_token: {preview_token}")
+        if stored_payload.get("repo_id") != repo_id:
+            raise ConfigError("preview_token is bound to a different repository")
+        current = self._store.current()
+        if current is None:
+            raise ConfigError("No accepted configuration generation")
+        if stored_payload.get("expected_generation") != current.generation or stored_payload.get(
+            "expected_source_sha256"
+        ) != sha256_text(self._store.read_source_text()):
+            self.pending.payloads.delete(preview_token)
+            raise ConfigError("repo_policy preview_token is stale")
+        stored_mutations = stored_payload.get("mutations")
+        if not isinstance(stored_mutations, list):
+            raise ConfigError("repo_policy preview_token payload is corrupt")
+        normalized = self._normalize_policy_mutations(stored_mutations)
+        stored_generated = stored_payload.get("generated_paths")
+        if stored_generated is not None and not isinstance(stored_generated, list):
+            raise ConfigError("repo_policy preview_token generated_paths payload is corrupt")
+        result = self.repo_policy_apply(
+            repo_id,
+            **self._policy_apply_arguments(normalized),
+            generated_paths=stored_generated,
+            dry_run=False,
+        )
+        self.pending.payloads.delete(preview_token)
+        legacy_status = str(result.get("status"))
+        mapped = {
+            "applied": "applied",
+            "pending_approval": "pending_approval",
+            "unchanged": "no_change",
+        }.get(legacy_status)
+        if mapped is None:
+            raise ConfigError(f"repo_policy apply could not complete from preview: {legacy_status}")
+        return {
+            "status": "ok",
+            "summary": f"Applied repository policy request for {repo_id}",
+            "error": None,
+            "repo_id": repo_id,
+            "action": "apply",
+            "result": mapped,
+            "preview_token": None,
+            "generation": result.get("generation"),
+            "changes": normalized,
+            "generated_paths": stored_generated or [],
+            "operator_instruction": result.get("safe_next_action"),
+        }
+
     def repo_policy_apply(
         self,
         repo_id: str,
@@ -254,6 +383,8 @@ class ConfigAdminService:
         adhoc_runners: list[str] | None = None,
         adhoc_timeout_seconds: int | None = None,
         policy_overrides: dict[str, str] | None = None,
+        remove_policy_overrides: list[str] | None = None,
+        generated_paths: list[dict[str, Any]] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         current = self._store.current()
@@ -274,11 +405,29 @@ class ConfigAdminService:
             adhoc_runners=adhoc_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
         )
-        if delta_patch.is_empty() and not policy_overrides:
+        try:
+            resolved_generated_paths = (
+                parse_generated_paths(
+                    generated_paths,
+                    context=f"repositories.{repo_id}.generated_paths",
+                )
+                if generated_paths is not None
+                else source_item.generated_paths
+            )
+        except ValueError as exc:
+            raise ConfigError(f"Invalid generated_paths declaration: {exc}") from exc
+        if (
+            delta_patch.is_empty()
+            and not policy_overrides
+            and not remove_policy_overrides
+            and generated_paths is None
+        ):
             raise ConfigError("repo_policy_apply requires at least one change")
         merged_patch = source_item.policy_patch.merge(delta_patch)
         merged_overrides = dict(source_item.policy_overrides)
         merged_overrides.update(policy_overrides or {})
+        for name in remove_policy_overrides or []:
+            merged_overrides.pop(name, None)
         try:
             proposal = self._proposals.propose(
                 Path(source_item.path),
@@ -313,6 +462,7 @@ class ConfigAdminService:
                     merged_patch,
                     item.ticket_graph,
                     item.risk_policy,
+                    resolved_generated_paths,
                 )
                 if item.repo_id == repo_id
                 else item
@@ -324,6 +474,7 @@ class ConfigAdminService:
         document = apply_proposal(document, proposal)
         document = apply_ticket_graph(document, repo_id, source_item.ticket_graph)
         document = apply_risk_policy(document, repo_id, source_item.risk_policy)
+        document = apply_generated_paths(document, repo_id, resolved_generated_paths)
         try:
             document = apply_policy_patch(document, repo_id, merged_patch)
         except ValueError as exc:
@@ -427,6 +578,113 @@ class ConfigAdminService:
         }
 
     # -- internals -----------------------------------------------------------
+
+    @staticmethod
+    def _normalize_policy_mutations(
+        mutations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if len(mutations) > 100:
+            raise ConfigError("repo_policy mutations supports at most 100 entries")
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, raw in enumerate(mutations):
+            if not isinstance(raw, dict) or set(raw) != {
+                "section",
+                "name",
+                "operation",
+                "value",
+            }:
+                raise ConfigError(
+                    f"repo_policy mutations[{index}] must contain section, name, operation, and value"
+                )
+            section = raw.get("section")
+            name = raw.get("name")
+            operation = raw.get("operation")
+            value = raw.get("value")
+            if section not in {"profile", "diagnostic", "formatter", "override"}:
+                raise ConfigError(f"repo_policy mutations[{index}].section is invalid")
+            if (
+                not isinstance(name, str)
+                or not name
+                or len(name) > 160
+                or any(ord(character) < 32 for character in name)
+            ):
+                raise ConfigError(f"repo_policy mutations[{index}].name is invalid")
+            target = (section, name)
+            if target in seen:
+                raise ConfigError(f"repo_policy mutations contains duplicate target: {target}")
+            seen.add(target)
+            if operation not in {"set", "remove"}:
+                raise ConfigError(f"repo_policy mutations[{index}].operation is invalid")
+            normalized_value: str | None = None
+            if operation == "remove":
+                if value is not None:
+                    raise ConfigError(
+                        f"repo_policy mutations[{index}].value must be null for remove"
+                    )
+            elif section == "override":
+                if not isinstance(value, str) or len(value) > 20_000:
+                    raise ConfigError(
+                        f"repo_policy mutations[{index}].value must be a bounded string"
+                    )
+                normalized_value = value
+            else:
+                if not isinstance(value, str) or len(value) > 20_000:
+                    raise ConfigError(f"repo_policy mutations[{index}].value must be bounded JSON")
+                try:
+                    decoded = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise ConfigError(
+                        f"repo_policy mutations[{index}].value must be valid JSON"
+                    ) from exc
+                if not isinstance(decoded, dict):
+                    raise ConfigError(f"repo_policy mutations[{index}].value must encode an object")
+                normalized_value = json.dumps(
+                    decoded,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            normalized.append(
+                {
+                    "section": section,
+                    "name": name,
+                    "operation": operation,
+                    "value": normalized_value,
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _policy_apply_arguments(mutations: list[dict[str, Any]]) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "set_profiles": [],
+            "remove_profiles": [],
+            "set_diagnostics": {},
+            "remove_diagnostics": [],
+            "set_formatters": {},
+            "remove_formatters": [],
+            "policy_overrides": {},
+            "remove_policy_overrides": [],
+        }
+        for mutation in mutations:
+            section = str(mutation["section"])
+            name = str(mutation["name"])
+            operation = str(mutation["operation"])
+            value = mutation.get("value")
+            if operation == "remove":
+                key = "remove_policy_overrides" if section == "override" else f"remove_{section}s"
+                arguments[key].append(name)
+                continue
+            if section == "override":
+                arguments["policy_overrides"][name] = str(value)
+                continue
+            decoded = json.loads(str(value))
+            if section == "profile":
+                arguments["set_profiles"].append({"name": name, **decoded})
+            else:
+                arguments[f"set_{section}s"][name] = decoded
+        return arguments
 
     def _source(self) -> SourceConfiguration:
         try:

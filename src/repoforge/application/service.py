@@ -33,6 +33,18 @@ from .repository.context import (
     RepositoryContextReader,
 )
 from .repository.doctor import Doctor, DoctorCommand
+from .repository.family_v2 import (
+    RepositoryHistoryV2,
+    RepositoryHistoryV2Command,
+    RepositoryIssueV2,
+    RepositoryIssueV2Command,
+    RepositoryListV2,
+    RepositoryListV2Command,
+    RepositoryPrReadV2,
+    RepositoryPrReadV2Command,
+    RepositoryTaskContextV2,
+    RepositoryTaskContextV2Command,
+)
 from .repository.file_read import RepositoryFileReadCommand, RepositoryFileReader
 from .repository.files_read import RepositoryFilesReadCommand, RepositoryFilesReader
 from .repository.issue_graph import RepositoryIssueGraphCommand, RepositoryIssueGraphReader
@@ -229,6 +241,11 @@ class CodingService:
         self._repo_context = RepositoryContextReader(ctx)
         self._repo_commit = RepositoryCommitReader(ctx)
         self._repo_compare = RepositoryComparer(ctx)
+        self._repo_history_v2 = RepositoryHistoryV2(ctx)
+        self._repo_list_v2 = RepositoryListV2(ctx)
+        self._repo_issue_v2 = RepositoryIssueV2(ctx)
+        self._repo_pr_v2 = RepositoryPrReadV2(ctx)
+        self._task_context_v2 = RepositoryTaskContextV2(ctx)
         self._repo_tree = RepositoryTreeReader(ctx)
         self._repo_read = RepositoryFileReader(ctx)
         self._repo_reads = RepositoryFilesReader(ctx)
@@ -315,6 +332,14 @@ class CodingService:
 
     def repo_list(self) -> dict[str, Any]:
         return _result(self._repo_list.execute(RepositoryListCommand()))
+
+    def repo_list_v2(
+        self,
+        detail: bool = False,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return _result(self._repo_list_v2.execute(RepositoryListV2Command(detail, cursor, limit)))
 
     def repo_status(self, repo_id: str) -> dict[str, Any]:
         return _result(self._repo_status.execute(RepositoryStatusCommand(repo_id)))
@@ -475,6 +500,36 @@ class CodingService:
     def repo_recent_commits(self, repo_id: str, limit: int = 20) -> dict[str, Any]:
         return _result(self._recent.execute(RecentCommitsCommand(repo_id, limit)))
 
+    def repo_history_v2(
+        self,
+        repo_id: str,
+        mode: str,
+        ref: str | None = None,
+        base_ref: str | None = None,
+        head_ref: str | None = None,
+        path_glob: str | None = None,
+        limit: int = 20,
+        include_patch: bool = False,
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_history_v2.execute(
+                RepositoryHistoryV2Command(
+                    repo_id,
+                    mode,
+                    ref,
+                    base_ref,
+                    head_ref,
+                    path_glob,
+                    limit,
+                    include_patch,
+                    byte_budget,
+                    cursor,
+                )
+            )
+        )
+
     def repo_issue_read(
         self, repo_id: str, issue_number: int, fresh: bool = False
     ) -> dict[str, Any]:
@@ -532,8 +587,52 @@ class CodingService:
             self._issue_spec.execute(RepositoryIssueSpecCommand(repo_id, issue_number, fresh))
         )
 
+    def repo_issue_v2(
+        self,
+        repo_id: str,
+        mode: str,
+        issue_number: int | None = None,
+        root_issue: int | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        initiative: int | None = None,
+        limit: int = 10,
+        fresh: bool = False,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_issue_v2.execute(
+                RepositoryIssueV2Command(
+                    repo_id,
+                    mode,
+                    issue_number,
+                    root_issue,
+                    status,
+                    priority,
+                    initiative,
+                    limit,
+                    fresh,
+                    cursor,
+                )
+            )
+        )
+
     def repo_pr_read(self, repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
         return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number, fresh)))
+
+    def repo_pr_read_v2(
+        self,
+        repo_id: str,
+        pr_number: int,
+        fresh: bool = False,
+        detail: str = "overview",
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_pr_v2.execute(
+                RepositoryPrReadV2Command(repo_id, pr_number, fresh, detail, cursor)
+            )
+        )
 
     def repo_task_context(
         self,
@@ -543,6 +642,32 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._task_context.execute(RepoTaskContextCommand(repo_id, issue_number, workspace_id))
+        )
+
+    def repo_task_context_v2(
+        self,
+        repo_id: str,
+        issue_number: int | None = None,
+        workspace_id: str | None = None,
+        sections: list[str] | tuple[str, ...] = (
+            "repository",
+            "status",
+            "ticket",
+            "workspace",
+            "recent_commits",
+        ),
+        byte_budget: int = 96_000,
+    ) -> dict[str, Any]:
+        return _result(
+            self._task_context_v2.execute(
+                RepositoryTaskContextV2Command(
+                    repo_id,
+                    issue_number,
+                    workspace_id,
+                    tuple(sections),
+                    byte_budget,
+                )
+            )
         )
 
     def ticket_project_sync(

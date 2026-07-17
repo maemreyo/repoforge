@@ -33,6 +33,7 @@ from repoforge.bootstrap import (
     read_audit_events,
     read_runtime_log,
 )
+from repoforge.config import load_config
 from repoforge.domain.config_generation import sha256_text
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.policy_patch import (
@@ -171,6 +172,59 @@ def test_source_round_trips_policy_patch() -> None:
     )
     text = render_source(config)
     assert parse_source(text) == config
+
+
+def test_source_round_trips_generated_paths_metadata() -> None:
+    text = """version = 2
+[[repo]]
+id = "demo"
+path = "/tmp/demo"
+
+[repositories.demo]
+generated_paths = [
+  { glob = "docs/contracts/*.json", regeneration_command = ["uv", "run", "python", "scripts/render_contract.py"], description = "Generated MCP contracts" },
+]
+"""
+
+    parsed = parse_source(text)
+    generated = parsed.repositories[0].generated_paths
+
+    assert len(generated) == 1
+    assert generated[0].glob == "docs/contracts/*.json"
+    assert generated[0].regeneration_command == (
+        "uv",
+        "run",
+        "python",
+        "scripts/render_contract.py",
+    )
+    assert generated[0].description == "Generated MCP contracts"
+    assert parse_source(render_source(parsed)) == parsed
+
+
+def test_resolved_config_loads_generated_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'''[server]
+workspace_root = "{tmp_path / "workspaces"}"
+state_root = "{tmp_path / "state"}"
+
+[repositories.demo]
+path = "{repo}"
+default_base = "main"
+allowed_base_branches = ["main"]
+generated_paths = [
+  {{ glob = "docs/contracts/*.json", regeneration_command = ["python", "render.py"], description = "Generated contracts" }},
+]
+''',
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path).repositories["demo"].generated_paths
+
+    assert loaded[0].glob == "docs/contracts/*.json"
+    assert loaded[0].regeneration_command == ("python", "render.py")
 
 
 def test_source_round_trips_ticket_graph_metadata() -> None:
@@ -553,6 +607,94 @@ def test_expansion_requires_operator_approval_and_never_applies(tmp_path: Path) 
     # The unapproved patch is not persisted in the editable source.
     persisted = parse_source(admin._store.read_source_text())
     assert persisted.repositories[0].policy_patch.is_empty()
+
+
+def test_repo_policy_preview_token_binds_exact_apply_request(tmp_path: Path) -> None:
+    reload_calls: list[int] = []
+    admin = _admin(tmp_path, reload_calls=reload_calls)
+
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        mutations=[
+            {
+                "section": "profile",
+                "name": "quick",
+                "operation": "remove",
+                "value": None,
+            }
+        ],
+        generated_paths=[
+            {
+                "glob": "docs/contracts/*.json",
+                "regeneration_command": ["python", "scripts/render_contract.py"],
+                "description": "Generated contracts",
+            }
+        ],
+    )
+
+    assert preview["result"] == "preview"
+    assert preview["preview_token"].startswith("apr-")
+    assert preview["changes"]
+    assert admin._store.current().generation == 1
+
+    applied = admin.repo_policy(
+        "demo",
+        action="apply",
+        preview_token=preview["preview_token"],
+    )
+
+    assert applied["result"] in {"applied", "pending_approval"}
+    assert admin.pending.payloads.read(preview["preview_token"]) is None
+
+
+def test_repo_policy_preview_supports_override_removal(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        mutations=[
+            {
+                "section": "override",
+                "name": "dependency_install",
+                "operation": "remove",
+                "value": None,
+            }
+        ],
+    )
+
+    assert preview["result"] == "preview"
+    assert preview["changes"] == [
+        {
+            "section": "override",
+            "name": "dependency_install",
+            "operation": "remove",
+            "value": None,
+        }
+    ]
+
+
+def test_repo_policy_rejects_stale_or_mismatched_preview_token(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        mutations=[
+            {
+                "section": "profile",
+                "name": "quick",
+                "operation": "remove",
+                "value": None,
+            }
+        ],
+    )
+    admin.repo_policy_apply("demo", remove_profiles=["quick"])
+
+    with pytest.raises(ConfigError, match="stale"):
+        admin.repo_policy("demo", action="apply", preview_token=preview["preview_token"])
+    with pytest.raises(ConfigError, match="preview_token"):
+        admin.repo_policy("other", action="apply", preview_token=preview["preview_token"])
 
 
 def test_dry_run_previews_without_state_change(tmp_path: Path) -> None:

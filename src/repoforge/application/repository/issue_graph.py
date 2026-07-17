@@ -257,6 +257,18 @@ class RepositoryIssueGraphReader:
         self.ctx = ctx
 
     def execute(self, c: RepositoryIssueGraphCommand) -> RepositoryIssueGraphResult:
+        return self._execute(c, audited=True)
+
+    def compute(self, c: RepositoryIssueGraphCommand) -> RepositoryIssueGraphResult:
+        """Read graph state without creating a nested audit event."""
+        return self._execute(c, audited=False)
+
+    def _execute(
+        self,
+        c: RepositoryIssueGraphCommand,
+        *,
+        audited: bool,
+    ) -> RepositoryIssueGraphResult:
         repo = self.ctx.repo(c.repo_id)
         details: dict[str, object] = {
             "repo_id": c.repo_id,
@@ -353,4 +365,4 @@ class RepositoryIssueGraphReader:
                 ),
             )
 
-        return self.ctx.audited("repo_issue_graph", details, op)
+        return self.ctx.audited("repo_issue_graph", details, op) if audited else op()

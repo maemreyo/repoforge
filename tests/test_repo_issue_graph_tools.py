@@ -131,6 +131,20 @@ def _audit_events_with_prefix(root: Path, prefix: str) -> list[dict[str, object]
     return [event for event in events if str(event.get("action", "")).startswith(prefix)]
 
 
+def test_v2_repo_issue_reports_graph_unavailable_with_next_action(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path, configured=False)
+
+    result = service.repo_issue_v2("demo", mode="graph")
+
+    assert result["graph_status"] == "graph_unavailable"
+    assert result["nodes"] == []
+    assert result["selected"] == []
+    assert result["next_action"]
+    assert "configure" in result["next_action"].lower()
+    assert len(_audit_events(environment.root, "repo_issue")) == 1
+    assert _audit_events(environment.root, "repo_issue_graph") == []
+
+
 def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Path) -> None:
     service, _ = _service(tmp_path, configured=False)
 
@@ -327,12 +341,21 @@ def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -
     assert "heading" in result["comments"][0]
 
 
-def test_repo_issue_spec_works_without_a_manifest_node(tmp_path: Path) -> None:
-    service, _ = _service(tmp_path)
-    result = service.repo_issue_spec("demo", 999)
+def test_repo_issue_spec_reports_live_spec_drift_without_a_graph_node(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps({"issues": {"999": {"body": "Issue body", "comments": []}}}),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
     assert result["graph_member"] is False
     assert result["node"] is None
-    assert result["drift"] == []
+    assert result["drift"] == [
+        {
+            "code": "LIVE_SPEC_INCOMPLETE",
+            "message": "live issue is missing objective, acceptance, or verification evidence",
+        }
+    ]
     assert result["live"]["title"] == "Implement safer workflow"
 
 

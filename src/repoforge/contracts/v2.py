@@ -300,10 +300,17 @@ class PolicyMutation(StrictModel):
     value: str | None = Field(default=None, max_length=20_000)
 
 
+class GeneratedPathDeclaration(StrictModel):
+    glob: str = Field(min_length=1, max_length=512)
+    regeneration_command: tuple[str, ...] = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=500)
+
+
 class RepoPolicyInput(StrictModel):
     repo_id: RepoId
     action: PolicyAction
     mutations: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
+    generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
     preview_token: str | None = Field(default=None, max_length=2048)
 
 
@@ -314,6 +321,7 @@ class RepoPolicyOutput(ToolResponse):
     preview_token: str | None = Field(default=None, max_length=2048)
     generation: int | None = Field(default=None, ge=1)
     changes: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
+    generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
     operator_instruction: str | None = Field(default=None, max_length=1000)
 
 

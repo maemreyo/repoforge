@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import inspect
 import json
-import runpy
 from pathlib import Path
 
 import pytest
@@ -127,6 +125,70 @@ def test_workspace_apply_patch_replays_keyed_result_and_rejects_conflict(
             idempotency_key="workspace-patch-key-0001",
         )
     assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+
+def test_v2_repo_list_history_and_pr_facades_are_compact_and_path_safe(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+
+    listed = service.repo_list_v2(limit=10)
+    assert listed["repositories"] == [
+        {
+            "repo_id": "demo",
+            "capabilities": ["read", "write", "publish", "verify"],
+            "default_ref": "main",
+        }
+    ]
+    assert str(forge_env.source) not in json.dumps(listed)
+
+    log = service.repo_history_v2("demo", mode="log", limit=5)
+    assert log["mode"] == "log"
+    assert log["commits"][0]["subject"] == "initial"
+    assert log["commit"] is None
+    assert log["comparison"] is None
+
+    commit = service.repo_history_v2("demo", mode="commit", ref="main")
+    assert commit["commit"]["sha"] == log["commits"][0]["sha"]
+    assert commit["commits"] == []
+
+    comparison = service.repo_history_v2(
+        "demo",
+        mode="compare",
+        base_ref="main",
+        head_ref="main",
+    )
+    assert comparison["comparison"]["ahead"] == 0
+    assert comparison["comparison"]["behind"] == 0
+    assert comparison["comparison"]["files"] == []
+
+    pr = service.repo_pr_read_v2("demo", 8, detail="overview")
+    assert pr["pull_request"]["number"] == 8
+    assert pr["pull_request"]["freshness"] == "live"
+    assert str(forge_env.source) not in json.dumps(pr)
+
+
+def test_v2_repo_history_cursor_continues_exact_log_page(
+    forge_env: ForgeEnvironment,
+) -> None:
+    for index in range(3):
+        path = forge_env.source / f"history-{index}.txt"
+        path.write_text(f"{index}\n", encoding="utf-8")
+        git("add", path.name, cwd=forge_env.source)
+        git("commit", "-m", f"history {index}", cwd=forge_env.source)
+
+    first = forge_env.service.repo_history_v2("demo", mode="log", limit=2)
+    assert [item["subject"] for item in first["commits"]] == ["history 2", "history 1"]
+    assert first["next_cursor"] is not None
+
+    second = forge_env.service.repo_history_v2(
+        "demo",
+        mode="log",
+        limit=2,
+        cursor=first["next_cursor"],
+    )
+    assert [item["subject"] for item in second["commits"]] == ["history 0", "initial"]
+    assert second["next_cursor"] is None
 
 
 def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
@@ -550,18 +612,3 @@ def test_workspace_list_audits_failure_without_leaking_internal_error_state(
     assert "error_code" in event["details"]
     assert "workspace_count" not in event["details"]
     assert "/secret/state/path" not in json.dumps(event["details"])
-
-
-def test_v2_retrieval_untracked_suite_bridge(tmp_path: Path) -> None:
-    namespace = runpy.run_path(str(Path(__file__).with_name("test_v2_retrieval.py")))
-    forge_factory = __import__("conftest").create_forge_environment
-    for name, candidate in sorted(namespace.items()):
-        if not name.startswith("test_") or not callable(candidate):
-            continue
-        parameters = inspect.signature(candidate).parameters
-        case_root = tmp_path / name
-        case_root.mkdir()
-        if tuple(parameters) == ("forge_env",):
-            candidate(forge_factory(case_root))
-        else:
-            candidate()

@@ -8,6 +8,7 @@ from ...config import RepositoryConfig
 from ...domain.tickets import TicketGraph, TicketLiveMetadata
 from ..context import ApplicationContext
 from ..tickets.graph import compare_live_ticket_metadata
+from ..tickets.live import ticket_live_state_from_issue
 from .issue_graph import node_payload, read_github_ticket_snapshot
 
 _HEADING = re.compile(r"(?m)^#{2,3}\s+(.+)$")
@@ -110,7 +111,27 @@ class RepositoryIssueSpecReader:
                     dict(item, heading=_first_heading(body) if isinstance(body, str) else None)
                 )
 
+        live_state = ticket_live_state_from_issue(
+            live_payload,
+            expected_number=c.issue_number,
+        )
         drift: list[dict[str, Any]] = []
+        if not live_state.delivery.specification_complete:
+            drift.append(
+                {
+                    "code": "LIVE_SPEC_INCOMPLETE",
+                    "message": (
+                        "live issue is missing objective, acceptance, or verification evidence"
+                    ),
+                }
+            )
+        if live_state.delivery.unresolved_design_gate:
+            drift.append(
+                {
+                    "code": "LIVE_DESIGN_GATE_OPEN",
+                    "message": "live issue still carries an unresolved design gate",
+                }
+            )
         if node is not None and snapshot is not None:
             live_metadata = TicketLiveMetadata(
                 c.issue_number,

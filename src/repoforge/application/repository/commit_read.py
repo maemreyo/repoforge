@@ -83,71 +83,7 @@ class RepositoryCommitReader:
         )
 
     def execute(self, command: RepositoryCommitReadCommand) -> RepositoryCommitReadResult:
-        if not command.ref or any(ord(character) < 32 for character in command.ref):
-            raise RepoForgeError(
-                "ref must be a non-empty bounded committed ref",
-                code=ErrorCode.REPOSITORY_REF_DISALLOWED,
-            )
-        limit = validate_evidence_limit(command.max_files)
-        repo = self.ctx.repo(command.repo_id)
-
-        def operation() -> RepositoryCommitReadResult:
-            snapshot = self.ctx.git.resolve_snapshot_ref(repo.path, repo, command.ref)
-            evidence = self.ctx.git.read_commit_evidence(
-                repo.path,
-                repo,
-                snapshot,
-                limit,
-                command.include_patch,
-            )
-            author, author_truncated, author_redacted = self._sanitize_identity(
-                evidence.author,
-                repo,
-            )
-            committer, committer_truncated, committer_redacted = self._sanitize_identity(
-                evidence.committer,
-                repo,
-            )
-            subject = sanitize_ci_text(
-                evidence.subject,
-                repo,
-                max_chars=min(4_000, self.ctx.config.server.max_tool_output_chars),
-            )
-            body = sanitize_ci_text(
-                evidence.body,
-                repo,
-                max_chars=min(20_000, self.ctx.config.server.max_tool_output_chars),
-            )
-            return RepositoryCommitReadResult(
-                command.repo_id,
-                command.ref,
-                snapshot.resolved_ref,
-                snapshot.commit_sha,
-                evidence.tree_sha,
-                evidence.parent_shas,
-                evidence.comparison_parent_sha,
-                author,
-                committer,
-                author_truncated or committer_truncated,
-                author_redacted or committer_redacted,
-                subject.text,
-                body.text,
-                evidence.message_truncated or subject.truncated or body.truncated,
-                subject.redacted or body.redacted,
-                evidence.files,
-                evidence.total_files,
-                len(evidence.files),
-                evidence.files_truncated,
-                evidence.additions,
-                evidence.deletions,
-                evidence.binary_files,
-                evidence.omitted_paths,
-                command.include_patch,
-                evidence.patch,
-                evidence.patch_truncated,
-                evidence.binary_patch_omitted,
-            )
-
+        limit, repo = self._validate(command)
         return self.ctx.audited(
             "repo_commit_read",
             {
@@ -156,5 +92,83 @@ class RepositoryCommitReader:
                 "max_files": limit,
                 "include_patch": command.include_patch,
             },
-            operation,
+            lambda: self._read(command, repo, limit),
+        )
+
+    def compute(self, command: RepositoryCommitReadCommand) -> RepositoryCommitReadResult:
+        """Read one commit without creating a nested audit event."""
+        limit, repo = self._validate(command)
+        return self._read(command, repo, limit)
+
+    def _validate(
+        self,
+        command: RepositoryCommitReadCommand,
+    ) -> tuple[int, RepositoryConfig]:
+        if not command.ref or any(ord(character) < 32 for character in command.ref):
+            raise RepoForgeError(
+                "ref must be a non-empty bounded committed ref",
+                code=ErrorCode.REPOSITORY_REF_DISALLOWED,
+            )
+        return validate_evidence_limit(command.max_files), self.ctx.repo(command.repo_id)
+
+    def _read(
+        self,
+        command: RepositoryCommitReadCommand,
+        repo: RepositoryConfig,
+        limit: int,
+    ) -> RepositoryCommitReadResult:
+        snapshot = self.ctx.git.resolve_snapshot_ref(repo.path, repo, command.ref)
+        evidence = self.ctx.git.read_commit_evidence(
+            repo.path,
+            repo,
+            snapshot,
+            limit,
+            command.include_patch,
+        )
+        author, author_truncated, author_redacted = self._sanitize_identity(
+            evidence.author,
+            repo,
+        )
+        committer, committer_truncated, committer_redacted = self._sanitize_identity(
+            evidence.committer,
+            repo,
+        )
+        subject = sanitize_ci_text(
+            evidence.subject,
+            repo,
+            max_chars=min(4_000, self.ctx.config.server.max_tool_output_chars),
+        )
+        body = sanitize_ci_text(
+            evidence.body,
+            repo,
+            max_chars=min(20_000, self.ctx.config.server.max_tool_output_chars),
+        )
+        return RepositoryCommitReadResult(
+            command.repo_id,
+            command.ref,
+            snapshot.resolved_ref,
+            snapshot.commit_sha,
+            evidence.tree_sha,
+            evidence.parent_shas,
+            evidence.comparison_parent_sha,
+            author,
+            committer,
+            author_truncated or committer_truncated,
+            author_redacted or committer_redacted,
+            subject.text,
+            body.text,
+            evidence.message_truncated or subject.truncated or body.truncated,
+            subject.redacted or body.redacted,
+            evidence.files,
+            evidence.total_files,
+            len(evidence.files),
+            evidence.files_truncated,
+            evidence.additions,
+            evidence.deletions,
+            evidence.binary_files,
+            evidence.omitted_paths,
+            command.include_patch,
+            evidence.patch,
+            evidence.patch_truncated,
+            evidence.binary_patch_omitted,
         )

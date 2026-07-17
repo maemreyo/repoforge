@@ -26,6 +26,7 @@ from .domain.diagnostics import (
     validate_diagnostic_profile,
 )
 from .domain.errors import ConfigError
+from .domain.generated_paths import GeneratedPathRule, parse_generated_paths
 from .domain.hygiene import (
     FormatterPolicy,
     HygieneNetworkPolicy,
@@ -196,6 +197,7 @@ class RepositoryConfig:
     adhoc_runners: tuple[str, ...] = ()
     adhoc_timeout_seconds: int = 300
     ticket_graph: GitHubTicketGraphConfig | None = None
+    generated_paths: tuple[GeneratedPathRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1043,6 +1045,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         diagnostics = _load_diagnostics(repo_raw.get("diagnostics"), repo_id)
         formatters = _load_formatters(repo_raw.get("formatters"), repo_id)
         ticket_graph = _load_github_ticket_graph(repo_raw.get("ticket_graph"), repo_id)
+        try:
+            generated_paths = parse_generated_paths(
+                repo_raw.get("generated_paths"),
+                context=f"repositories.{repo_id}.generated_paths",
+            )
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
         default_verification_raw = repo_raw.get("default_verification_profile")
         default_verification = (
             str(default_verification_raw) if default_verification_raw is not None else None
@@ -1177,6 +1186,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             adhoc_runners=adhoc_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
             ticket_graph=ticket_graph,
+            generated_paths=generated_paths,
         )
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(

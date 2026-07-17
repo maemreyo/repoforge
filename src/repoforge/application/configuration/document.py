@@ -8,6 +8,7 @@ from typing import Any
 
 import tomli as tomllib
 
+from ...domain.generated_paths import GeneratedPathRule
 from ...domain.policy_patch import RepositoryPolicyPatch
 from ...domain.repository_proposal import RepositoryProposal
 from ...domain.user_paths import DEFAULT_STATE_ROOT, DEFAULT_WORKSPACE_ROOT
@@ -64,6 +65,11 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
         if isinstance(existing, dict) and isinstance(existing.get("ticket_graph"), dict)
         else None
     )
+    existing_generated_paths = (
+        deepcopy(existing.get("generated_paths"))
+        if isinstance(existing, dict) and isinstance(existing.get("generated_paths"), list)
+        else None
+    )
     profile_map: dict[str, Any] = {}
     for profile in policy.profiles:
         profile_map[profile.name] = {
@@ -104,6 +110,8 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
         repo["default_verification_profile"] = default_profile
     if existing_ticket_graph is not None:
         repo["ticket_graph"] = existing_ticket_graph
+    if existing_generated_paths is not None:
+        repo["generated_paths"] = existing_generated_paths
     repositories[proposal.repo_id] = repo
     return result
 
@@ -187,6 +195,27 @@ def apply_ticket_graph(
         repo.pop("ticket_graph", None)
     else:
         repo["ticket_graph"] = ticket_graph.as_table()
+    return result
+
+
+def apply_generated_paths(
+    document: dict[str, Any],
+    repo_id: str,
+    generated_paths: tuple[GeneratedPathRule, ...],
+) -> dict[str, Any]:
+    """Layer human-owned generated-path declarations over a resolved repository entry."""
+
+    result = deepcopy(document)
+    repositories = result.get("repositories")
+    if not isinstance(repositories, dict) or repo_id not in repositories:
+        raise ValueError(f"Unknown repository id: {repo_id}")
+    repo = repositories[repo_id]
+    if not isinstance(repo, dict):
+        raise ValueError(f"repositories.{repo_id} must be a table")
+    if generated_paths:
+        repo["generated_paths"] = [rule.as_table() for rule in generated_paths]
+    else:
+        repo.pop("generated_paths", None)
     return result
 
 

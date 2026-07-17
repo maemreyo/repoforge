@@ -112,6 +112,18 @@ class RepositoryIssueNextReader:
         self.ctx = ctx
 
     def execute(self, c: RepositoryIssueNextCommand) -> RepositoryIssueNextResult:
+        return self._execute(c, audited=True)
+
+    def compute(self, c: RepositoryIssueNextCommand) -> RepositoryIssueNextResult:
+        """Derive readiness without creating a nested audit event."""
+        return self._execute(c, audited=False)
+
+    def _execute(
+        self,
+        c: RepositoryIssueNextCommand,
+        *,
+        audited: bool,
+    ) -> RepositoryIssueNextResult:
         details: dict[str, object] = {
             "repo_id": c.repo_id,
             "root_issue": c.root_issue,
@@ -292,4 +304,4 @@ class RepositoryIssueNextReader:
                 repairs=repairs,
             )
 
-        return self.ctx.audited("repo_issue_next", details, op)
+        return self.ctx.audited("repo_issue_next", details, op) if audited else op()

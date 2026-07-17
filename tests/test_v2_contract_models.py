@@ -158,6 +158,31 @@ def test_retrieval_contracts_publish_budget_and_truncation_metadata() -> None:
     assert schema["maximum"] == 1000
 
 
+def test_repo_policy_contract_carries_typed_generated_paths() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["repo_policy"]
+
+    validated = spec.validate_input(
+        {
+            "repo_id": "demo",
+            "action": "preview",
+            "mutations": [],
+            "generated_paths": [
+                {
+                    "glob": "docs/contracts/*.json",
+                    "regeneration_command": ["python", "render.py"],
+                    "description": "Generated contracts",
+                }
+            ],
+        }
+    )
+
+    assert validated.generated_paths[0].glob == "docs/contracts/*.json"
+    schema = spec.input_model.model_json_schema()
+    generated = schema["properties"]["generated_paths"]
+    assert generated["maxItems"] == 64
+
+
 def test_mutation_schema_exposes_all_ops_and_bounds() -> None:
     _, registry = _contracts()
     schema = registry.V2_TOOL_SPECS["workspace_mutate"].input_model.model_json_schema()
