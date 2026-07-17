@@ -12,7 +12,10 @@ from ..retrieval import (
     StructuredTreeEntry,
     paginate,
     search_files,
+    structured_regex_matches,
     tree_entries,
+    validate_path_glob,
+    validate_regex,
 )
 
 
@@ -74,9 +77,6 @@ class RepositoryRetrieval:
 
         def operation() -> RepositorySearchV2Result:
             snapshot = self.ctx.git.resolve_snapshot_ref(repo.path, repo, command.ref)
-            paths, source_truncated = self.ctx.git.list_snapshot_files(
-                repo.path, repo, snapshot.commit_sha, 10_000
-            )
             cache: dict[str, str | None] = {}
 
             def load_text(path: str) -> str | None:
@@ -96,14 +96,35 @@ class RepositoryRetrieval:
                 cache[path] = text
                 return text
 
-            matches = search_files(
-                paths,
-                load_text=load_text,
-                query=command.query,
-                mode=command.mode,
-                path_glob=command.path_glob,
-                context_lines=command.context_lines,
-            )
+            if command.mode is SearchMode.REGEX:
+                validate_path_glob(command.path_glob)
+                validate_regex(command.query)
+                locations, source_truncated = self.ctx.git.search_regex_locations(
+                    repo.path,
+                    repo,
+                    command.query,
+                    command.path_glob,
+                    10_000,
+                    commit_sha=snapshot.commit_sha,
+                    timeout_seconds=1,
+                )
+                matches = structured_regex_matches(
+                    locations,
+                    load_text=load_text,
+                    context_lines=command.context_lines,
+                )
+            else:
+                paths, source_truncated = self.ctx.git.list_snapshot_files(
+                    repo.path, repo, snapshot.commit_sha, 10_000
+                )
+                matches = search_files(
+                    paths,
+                    load_text=load_text,
+                    query=command.query,
+                    mode=command.mode,
+                    path_glob=command.path_glob,
+                    context_lines=command.context_lines,
+                )
             page = paginate(
                 matches,
                 kind="repo_search_v2",

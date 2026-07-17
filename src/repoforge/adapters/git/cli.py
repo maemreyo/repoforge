@@ -23,6 +23,7 @@ from ...ports.git import (
     GitComparisonEvidence,
     GitMergePreview,
     GitMergeResult,
+    GitSearchLocation,
     GitSnapshotBlob,
     ResolvedRepositoryRef,
 )
@@ -892,6 +893,87 @@ class GitCliRepository:
         ]
         truncated = executor_truncated or len(context_lines_out) > max_results
         return context_lines_out[:max_results], truncated
+
+    def search_regex_locations(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        query: str,
+        path_glob: str | None,
+        max_results: int,
+        *,
+        commit_sha: str | None = None,
+        timeout_seconds: int = 1,
+    ) -> tuple[list[GitSearchLocation], bool]:
+        if not query or len(query) > 500 or "\x00" in query:
+            raise ValueError("Regex query must contain between 1 and 500 non-NUL characters")
+        if not 1 <= max_results <= 10_000:
+            raise ValueError("max_results must be between 1 and 10000")
+        if not 1 <= timeout_seconds <= 10:
+            raise ValueError("timeout_seconds must be between 1 and 10")
+        argv = [
+            "git",
+            "grep",
+            "-z",
+            "-n",
+            "--column",
+            "-o",
+            "-I",
+            "-E",
+            "--full-name",
+        ]
+        if commit_sha is None:
+            argv.append("--untracked")
+        argv.extend(["-e", query])
+        if commit_sha is not None:
+            argv.append(commit_sha)
+        argv.append("--")
+        if path_glob is not None:
+            argv.append(f":(glob){path_glob}")
+        result = self._executor.run(
+            argv,
+            cwd=path,
+            check=False,
+            timeout=timeout_seconds,
+            output_limit=self.server.max_fingerprint_bytes,
+        )
+        if result.returncode == 1:
+            return [], False
+        if result.returncode != 0:
+            message = result.stderr.strip() or "Git regex search failed"
+            if "regular expression" in message.lower() or "regex" in message.lower():
+                raise ValueError(f"Invalid regex: {message}")
+            raise CommandError(message)
+
+        prefix = f"{commit_sha}:" if commit_sha is not None else ""
+        locations: list[GitSearchLocation] = []
+        for raw_line in result.stdout.splitlines():
+            fields = raw_line.split("\x00")
+            if len(fields) != 4:
+                if result.stdout_truncated:
+                    continue
+                raise CommandError("Git returned an invalid regex search record")
+            raw_path, line_text, column_text, matched = fields
+            if prefix:
+                if not raw_path.startswith(prefix):
+                    raise CommandError("Git returned a regex match outside the requested snapshot")
+                raw_path = raw_path[len(prefix) :]
+            try:
+                normalized = assert_path_allowed(raw_path, repo)
+                line_number = int(line_text)
+                column = int(column_text)
+            except (SecurityError, ValueError):
+                if result.stdout_truncated:
+                    continue
+                raise CommandError("Git returned an invalid regex search location") from None
+            if line_number < 1 or column < 1 or not matched:
+                raise CommandError("Git returned an invalid regex match")
+            locations.append(GitSearchLocation(normalized, line_number, column, matched[:4000]))
+        locations.sort(key=lambda item: (item.path, item.line, item.column, item.match))
+        return (
+            locations[:max_results],
+            result.stdout_truncated or len(locations) > max_results,
+        )
 
     @staticmethod
     def _raise_evidence_error(message: str, code: ErrorCode) -> NoReturn:

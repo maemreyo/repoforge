@@ -138,6 +138,26 @@ def test_registry_runtime_validation_rejects_unknown_fields() -> None:
         raise AssertionError("unknown input fields must be rejected")
 
 
+def test_retrieval_contracts_publish_budget_and_truncation_metadata() -> None:
+    _, registry = _contracts()
+    expected_output_fields = {
+        "repo_search": {"omitted_count", "source_truncated"},
+        "repo_tree": {"omitted_count", "source_truncated"},
+        "workspace_search": {"omitted_count", "source_truncated"},
+        "workspace_tree": {"omitted_count", "source_truncated"},
+        "workspace_diff": {"staged", "omitted_count", "source_truncated"},
+    }
+    for tool_name, fields in expected_output_fields.items():
+        model_fields = registry.V2_TOOL_SPECS[tool_name].output_model.model_fields
+        assert fields <= set(model_fields), (tool_name, set(model_fields))
+
+    diff_input = registry.V2_TOOL_SPECS["workspace_diff"].input_model
+    assert diff_input.model_fields["max_files"].default == 100
+    schema = diff_input.model_json_schema()["properties"]["max_files"]
+    assert schema["minimum"] == 1
+    assert schema["maximum"] == 1000
+
+
 def test_mutation_schema_exposes_all_ops_and_bounds() -> None:
     _, registry = _contracts()
     schema = registry.V2_TOOL_SPECS["workspace_mutate"].input_model.model_json_schema()

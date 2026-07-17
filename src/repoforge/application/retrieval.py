@@ -7,6 +7,7 @@ import difflib
 import hashlib
 import json
 import re
+import shlex
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
@@ -15,6 +16,7 @@ from pathlib import PurePosixPath
 from typing import Any, TypeVar, cast
 
 from ..domain.errors import SecurityError
+from ..ports.git import GitSearchLocation
 
 T = TypeVar("T")
 _MAX_CURSOR_CHARS = 4096
@@ -178,7 +180,7 @@ def paginate(
     )
 
 
-def _validate_glob(path_glob: str | None) -> None:
+def validate_path_glob(path_glob: str | None) -> None:
     if path_glob is None:
         return
     path = PurePosixPath(path_glob)
@@ -190,11 +192,11 @@ def _validate_glob(path_glob: str | None) -> None:
         raise SecurityError("Unsafe path_glob")
 
 
-def _compile_regex(query: str) -> re.Pattern[str]:
+def validate_regex(query: str) -> None:
     if len(query) > 500 or any(pattern.search(query) for pattern in _UNSAFE_REGEX):
         raise SecurityError("unsafe regex pattern rejected by the bounded search guard")
     try:
-        return re.compile(query)
+        re.compile(query)
     except re.error as exc:
         raise ValueError(f"Invalid regex: {exc}") from exc
 
@@ -213,8 +215,10 @@ def search_files(
         raise ValueError("query must be non-empty and cannot contain NUL")
     if not 0 <= context_lines <= 5:
         raise ValueError("context_lines must be between 0 and 5")
-    _validate_glob(path_glob)
-    matcher = _compile_regex(query) if mode is SearchMode.REGEX else None
+    validate_path_glob(path_glob)
+    if mode is SearchMode.REGEX:
+        validate_regex(query)
+    matcher = re.compile(query) if mode is SearchMode.REGEX else None
     deadline = time.monotonic() + deadline_ms / 1000
     matches: list[StructuredSearchMatch] = []
     for path in sorted(paths):
@@ -275,6 +279,45 @@ def search_files(
     return tuple(matches)
 
 
+def structured_regex_matches(
+    locations: Iterable[GitSearchLocation],
+    *,
+    load_text: Callable[[str], str | None],
+    context_lines: int,
+) -> tuple[StructuredSearchMatch, ...]:
+    if not 0 <= context_lines <= 5:
+        raise ValueError("context_lines must be between 0 and 5")
+    cache: dict[str, list[str] | None] = {}
+    matches: list[StructuredSearchMatch] = []
+    for location in locations:
+        if location.path not in cache:
+            text = load_text(location.path)
+            cache[location.path] = None if text is None else text.splitlines()
+        lines = cache[location.path]
+        before: tuple[str, ...] = ()
+        after: tuple[str, ...] = ()
+        if lines is not None and 1 <= location.line <= len(lines):
+            index = location.line - 1
+            before = tuple(line[:4000] for line in lines[max(0, index - context_lines) : index])
+            after = tuple(
+                line[:4000]
+                for line in lines[index + 1 : min(len(lines), index + 1 + context_lines)]
+            )
+        matches.append(
+            StructuredSearchMatch(
+                path=location.path,
+                line=location.line,
+                column=location.column,
+                match=location.match[:4000],
+                context_before=before,
+                context_after=after,
+                score=0.9,
+                provider="git_grep_regex",
+            )
+        )
+    return tuple(matches)
+
+
 def tree_entries(
     paths: Iterable[str],
     *,
@@ -286,12 +329,22 @@ def tree_entries(
         normalized_subtree = subtree.replace("\\", "/").strip("/")
         if not normalized_subtree or ".." in PurePosixPath(normalized_subtree).parts:
             raise SecurityError("Unsafe subtree")
-    entries = []
+    visible_files = []
+    directories: set[str] = set()
     for path in sorted(set(paths)):
         if normalized_subtree is not None and not path.startswith(f"{normalized_subtree}/"):
             continue
-        entries.append(StructuredTreeEntry(path, "file", size_of(path)))
-    return tuple(entries)
+        visible_files.append(path)
+        parts = PurePosixPath(path).parts
+        for index in range(1, len(parts)):
+            directory = PurePosixPath(*parts[:index]).as_posix()
+            if normalized_subtree is not None and directory == normalized_subtree:
+                continue
+            if normalized_subtree is None or directory.startswith(f"{normalized_subtree}/"):
+                directories.add(directory)
+    entries = [StructuredTreeEntry(path, "directory", None) for path in directories]
+    entries.extend(StructuredTreeEntry(path, "file", size_of(path)) for path in visible_files)
+    return tuple(sorted(entries, key=lambda item: (item.path, item.kind)))
 
 
 def build_diff_file(
@@ -309,8 +362,11 @@ def build_diff_file(
         status = "modified"
     if (before is not None and b"\x00" in before) or (after is not None and b"\x00" in after):
         return StructuredDiffFile(path, status, 0, 0, ())
-    before_text = "" if before is None else before.decode("utf-8")
-    after_text = "" if after is None else after.decode("utf-8")
+    try:
+        before_text = "" if before is None else before.decode("utf-8")
+        after_text = "" if after is None else after.decode("utf-8")
+    except UnicodeDecodeError:
+        return StructuredDiffFile(path, status, 0, 0, ())
     unified = list(
         difflib.unified_diff(
             before_text.splitlines(),
@@ -343,14 +399,14 @@ def build_diff_file(
         text = line[1:]
         if marker == "+":
             additions += 1
-            current_lines.append(StructuredDiffLine("add", None, new_line, text))
+            current_lines.append(StructuredDiffLine("add", None, new_line, text[:10_000]))
             new_line += 1
         elif marker == "-":
             deletions += 1
-            current_lines.append(StructuredDiffLine("delete", old_line, None, text))
+            current_lines.append(StructuredDiffLine("delete", old_line, None, text[:10_000]))
             old_line += 1
         elif marker == " ":
-            current_lines.append(StructuredDiffLine("context", old_line, new_line, text))
+            current_lines.append(StructuredDiffLine("context", old_line, new_line, text[:10_000]))
             old_line += 1
             new_line += 1
     if current_header is not None:
@@ -359,34 +415,92 @@ def build_diff_file(
 
 
 def parse_unified_diff(text: str) -> tuple[StructuredDiffFile, ...]:
-    """Parse bounded Git unified diff output for staged fallback evidence."""
+    """Parse bounded Git unified diff output without reconstructing or renumbering hunks."""
+
+    def clean_path(raw: str) -> str:
+        if raw in {"/dev/null", "dev/null"}:
+            return raw
+        return raw[2:] if raw.startswith(("a/", "b/")) else raw
 
     files: list[StructuredDiffFile] = []
     chunks = re.split(r"(?=^diff --git )", text, flags=re.MULTILINE)
     for chunk in chunks:
-        if not chunk.startswith("diff --git "):
+        lines = chunk.splitlines()
+        if not lines or not lines[0].startswith("diff --git "):
             continue
-        first = chunk.splitlines()[0].split()
-        if len(first) < 4:
-            continue
-        path = first[3][2:] if first[3].startswith("b/") else first[3]
-        before_lines: list[str] = []
-        after_lines: list[str] = []
-        for line in chunk.splitlines():
-            if line.startswith(("diff --git ", "index ", "--- ", "+++ ", "@@ ")):
+        try:
+            header_parts = shlex.split(lines[0])
+        except ValueError as exc:
+            raise ValueError(f"Invalid unified diff file header: {exc}") from exc
+        if len(header_parts) != 4:
+            raise ValueError("Invalid unified diff file header")
+        path = clean_path(header_parts[3])
+        status = "modified"
+        for line in lines[1:]:
+            if line.startswith("new file mode ") or line == "--- /dev/null":
+                status = "added"
+            elif line.startswith("deleted file mode ") or line == "+++ /dev/null":
+                status = "deleted"
+            elif line.startswith("rename to "):
+                status = "renamed"
+                try:
+                    renamed = shlex.split(line.removeprefix("rename to "))
+                except ValueError as exc:
+                    raise ValueError(f"Invalid unified diff rename path: {exc}") from exc
+                if len(renamed) != 1:
+                    raise ValueError("Invalid unified diff rename path")
+                path = clean_path(renamed[0])
+            elif line.startswith("+++ ") and line != "+++ /dev/null":
+                candidate = line.removeprefix("+++ ")
+                try:
+                    parsed = shlex.split(candidate)
+                except ValueError:
+                    parsed = []
+                if len(parsed) == 1:
+                    path = clean_path(parsed[0])
+
+        hunks: list[StructuredDiffHunk] = []
+        current_header: str | None = None
+        current_lines: list[StructuredDiffLine] = []
+        old_line = 0
+        new_line = 0
+        additions = 0
+        deletions = 0
+        for line in lines[1:]:
+            hunk_header = _HUNK_HEADER.match(line)
+            if hunk_header is not None:
+                if current_header is not None:
+                    hunks.append(StructuredDiffHunk(current_header, tuple(current_lines)))
+                current_header = line[:500]
+                current_lines = []
+                old_line = int(hunk_header.group("old"))
+                new_line = int(hunk_header.group("new"))
                 continue
-            if line.startswith("+"):
-                after_lines.append(line[1:])
-            elif line.startswith("-"):
-                before_lines.append(line[1:])
-            elif line.startswith(" "):
-                before_lines.append(line[1:])
-                after_lines.append(line[1:])
-        item = build_diff_file(
-            path,
-            "\n".join(before_lines).encode(),
-            "\n".join(after_lines).encode(),
+            if current_header is None or not line or line.startswith("\\ No newline"):
+                continue
+            marker = line[0]
+            content = line[1:][:10_000]
+            if marker == "+":
+                additions += 1
+                current_lines.append(StructuredDiffLine("add", None, new_line, content))
+                new_line += 1
+            elif marker == "-":
+                deletions += 1
+                current_lines.append(StructuredDiffLine("delete", old_line, None, content))
+                old_line += 1
+            elif marker == " ":
+                current_lines.append(StructuredDiffLine("context", old_line, new_line, content))
+                old_line += 1
+                new_line += 1
+        if current_header is not None:
+            hunks.append(StructuredDiffHunk(current_header, tuple(current_lines)))
+        files.append(
+            StructuredDiffFile(
+                path=path,
+                status=status,
+                additions=additions,
+                deletions=deletions,
+                hunks=tuple(hunks),
+            )
         )
-        if item is not None:
-            files.append(item)
     return tuple(files)

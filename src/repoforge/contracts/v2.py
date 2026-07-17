@@ -115,6 +115,8 @@ class RepoSearchOutput(ToolResponse):
     commit_sha: GitObjectId
     mode: SearchMode
     matches: tuple[SearchMatch, ...] = Field(default=(), max_length=200)
+    omitted_count: int = Field(default=0, ge=0)
+    source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
 
@@ -135,6 +137,7 @@ class RepoTreeOutput(ToolResponse):
     subtree: RelativePath | None = None
     entries: tuple[TreeEntry, ...] = Field(default=(), max_length=2000)
     omitted_count: int = Field(default=0, ge=0)
+    source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
 
@@ -470,6 +473,8 @@ class WorkspaceSearchOutput(ToolResponse):
     matches: tuple[SearchMatch, ...] = Field(default=(), max_length=200)
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
+    omitted_count: int = Field(default=0, ge=0)
+    source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
 
@@ -487,6 +492,7 @@ class WorkspaceTreeOutput(ToolResponse):
     subtree: RelativePath | None = None
     entries: tuple[TreeEntry, ...] = Field(default=(), max_length=2000)
     omitted_count: int = Field(default=0, ge=0)
+    source_truncated: bool = False
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
     truncated: bool = False
@@ -497,16 +503,20 @@ class WorkspaceDiffInput(StrictModel):
     workspace_id: Identifier
     staged: bool = False
     path_glob: str | None = Field(default=None, max_length=4096)
+    max_files: int = Field(default=100, ge=1, le=1000)
     byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
 class WorkspaceDiffOutput(ToolResponse):
     workspace_id: Identifier
+    staged: bool
     files: tuple[DiffFile, ...] = Field(default=(), max_length=1000)
     change_metrics: ChangeMetrics
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
+    omitted_count: int = Field(default=0, ge=0)
+    source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
 

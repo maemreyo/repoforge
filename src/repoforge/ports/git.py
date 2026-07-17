@@ -26,6 +26,14 @@ class GitSnapshotBlob:
 
 
 @dataclass(frozen=True, slots=True)
+class GitSearchLocation:
+    path: str
+    line: int
+    column: int
+    match: str
+
+
+@dataclass(frozen=True, slots=True)
 class GitActorIdentity:
     name: str
     email: str
@@ -205,6 +213,18 @@ class GitRepository(Protocol):
         max_results: int,
         context_lines: int = 0,
     ) -> tuple[list[str], bool]: ...
+
+    def search_regex_locations(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        query: str,
+        path_glob: str | None,
+        max_results: int,
+        *,
+        commit_sha: str | None = None,
+        timeout_seconds: int = 1,
+    ) -> tuple[list[GitSearchLocation], bool]: ...
 
     def read_commit_evidence(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -47,14 +48,22 @@ def test_regex_and_file_name_modes_are_guarded_and_typed(
     workspace_id = service.workspace_create("demo", "v2 regex search")["workspace_id"]
     root = Path(service.workspace_status(workspace_id)["path"])
     (root / "alpha_test.py").write_text("value_123\nvalue_456\n", encoding="utf-8")
+    (root / "space name.py").write_text("prefix value_789 suffix\n", encoding="utf-8")
 
     regex = service.workspace_search_v2(
         workspace_id,
         r"value_[0-9]+",
         mode=SearchMode.REGEX,
     )
-    assert [item["match"] for item in regex["matches"]] == ["value_123", "value_456"]
-    assert all(item["provider"] == "builtin_regex" for item in regex["matches"])
+    assert [item["match"] for item in regex["matches"]] == [
+        "value_123",
+        "value_456",
+        "value_789",
+    ]
+    assert all(item["provider"] == "git_grep_regex" for item in regex["matches"])
+    spaced = next(item for item in regex["matches"] if item["path"] == "space name.py")
+    assert spaced["line"] == 1
+    assert spaced["column"] == 8
 
     names = service.workspace_search_v2(
         workspace_id,
@@ -136,6 +145,18 @@ def test_tree_supports_subtree_cursor_and_explicit_omitted_count(
     assert all_paths == sorted(set(all_paths))
     assert all(path.startswith("pkg/") for path in all_paths)
 
+    nested = root / "pkg" / "nested" / "child.py"
+    nested.parent.mkdir()
+    nested.write_text("VALUE = 99\n", encoding="utf-8")
+    complete = service.workspace_tree_v2(
+        workspace_id,
+        subtree="pkg",
+        max_entries=20,
+        byte_budget=20_000,
+    )
+    directory = next(item for item in complete["entries"] if item["path"] == "pkg/nested")
+    assert directory == {"path": "pkg/nested", "kind": "directory", "size_bytes": None}
+
 
 def test_workspace_diff_returns_structured_files_hunks_and_lines(
     forge_env: ForgeEnvironment,
@@ -166,7 +187,43 @@ def test_workspace_diff_returns_structured_files_hunks_and_lines(
     new_diff = next(item for item in result["files"] if item["path"] == "new.txt")
     assert new_diff["status"] == "added"
     assert result["change_metrics"]["changed_files"] == 2
+    assert set(result["change_metrics"]) == {
+        "changed_files",
+        "added_lines",
+        "deleted_lines",
+        "diff_lines",
+        "total_current_bytes",
+        "within_limits",
+    }
     assert result["head_sha"] == service.workspace_status(workspace_id)["head_sha"]
+
+
+def test_staged_diff_preserves_multiple_hunk_coordinates(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 staged diff hunks")["workspace_id"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    original = "".join(f"line {index}\n" for index in range(1, 31))
+    target = root / "multi.txt"
+    target.write_text(original, encoding="utf-8")
+    subprocess.run(["git", "add", "multi.txt"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "add multi"], cwd=root, check=True)
+    lines = original.splitlines()
+    lines[1] = "changed near start"
+    lines[27] = "changed near end"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    subprocess.run(["git", "add", "multi.txt"], cwd=root, check=True)
+
+    result = service.workspace_diff_v2(workspace_id, staged=True)
+
+    diff = next(item for item in result["files"] if item["path"] == "multi.txt")
+    assert diff["status"] == "modified"
+    assert diff["additions"] == 2
+    assert diff["deletions"] == 2
+    assert len(diff["hunks"]) == 2
+    assert diff["hunks"][0]["lines"][0]["old_line"] == 1
+    assert diff["hunks"][1]["lines"][0]["old_line"] >= 24
 
 
 def test_retrieval_cursor_is_bound_to_query_and_scope(forge_env: ForgeEnvironment) -> None:
