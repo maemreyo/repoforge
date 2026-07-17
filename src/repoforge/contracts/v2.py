@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from enum import Enum
+from string import Formatter
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .common import (
     ByteBudget,
@@ -192,6 +193,17 @@ class IssueMode(str, Enum):
     SPEC = "spec"
     GRAPH = "graph"
     NEXT = "next"
+    COMMENT = "comment"
+    CLOSE = "close"
+    REOPEN = "reopen"
+    LINK = "link"
+    CREATE = "create"
+
+
+class IssueLinkType(str, Enum):
+    SUB_ISSUE = "sub_issue"
+    BLOCKED_BY = "blocked_by"
+    SUPERSEDE = "supersede"
 
 
 class IssueState(str, Enum):
@@ -234,6 +246,66 @@ class RepoIssueInput(StrictModel):
     limit: int = Field(default=10, ge=1, le=100)
     fresh: bool = False
     cursor: Cursor | None = None
+    body: str | None = Field(default=None, min_length=1, max_length=20_000)
+    title: str | None = Field(default=None, min_length=1, max_length=1_000)
+    evidence_ref: str | None = Field(default=None, min_length=1, max_length=1_000)
+    target_issue: int | None = Field(default=None, ge=1)
+    link_type: IssueLinkType | None = None
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
+    approval_request_id: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> RepoIssueInput:
+        write_modes = {
+            IssueMode.COMMENT,
+            IssueMode.CLOSE,
+            IssueMode.REOPEN,
+            IssueMode.LINK,
+            IssueMode.CREATE,
+        }
+        issue_modes = write_modes - {IssueMode.CREATE}
+        if self.mode in {IssueMode.READ, IssueMode.SPEC} and self.issue_number is None:
+            raise ValueError(f"repo_issue {self.mode.value} requires issue_number")
+        if self.mode in issue_modes and self.issue_number is None:
+            raise ValueError(f"repo_issue {self.mode.value} requires issue_number")
+        if self.mode in write_modes and self.idempotency_key is None:
+            raise ValueError(f"repo_issue {self.mode.value} requires idempotency_key")
+        if self.mode in write_modes and self.evidence_ref is None:
+            raise ValueError(f"repo_issue {self.mode.value} requires evidence_ref")
+        if self.mode is IssueMode.COMMENT and self.body is None:
+            raise ValueError("repo_issue comment requires body")
+        if self.mode is IssueMode.LINK and (self.target_issue is None or self.link_type is None):
+            raise ValueError("repo_issue link requires target_issue and link_type")
+        if self.mode is IssueMode.CREATE and (self.title is None or self.body is None):
+            raise ValueError("repo_issue create requires title and body")
+        if self.mode is not IssueMode.LINK and (
+            self.target_issue is not None or self.link_type is not None
+        ):
+            raise ValueError("target_issue and link_type are only valid for repo_issue link")
+        if self.mode is not IssueMode.CREATE and self.title is not None:
+            raise ValueError("title is only valid for repo_issue create")
+        if self.mode not in {IssueMode.COMMENT, IssueMode.CREATE} and self.body is not None:
+            raise ValueError("body is only valid for repo_issue comment or create")
+        if self.mode not in write_modes and (
+            self.evidence_ref is not None
+            or self.idempotency_key is not None
+            or self.approval_request_id is not None
+        ):
+            raise ValueError("write fields are only valid for repo_issue write modes")
+        return self
+
+
+class IssueMutationEvidence(StrictModel):
+    operation: Literal["comment", "close", "reopen", "link", "create"]
+    result: Literal["applied", "reconciled", "pending_approval"]
+    issue_number: int | None = Field(default=None, ge=1)
+    target_issue: int | None = Field(default=None, ge=1)
+    link_type: IssueLinkType | None = None
+    marker: str = Field(min_length=1, max_length=200)
+    external_writes: int = Field(default=0, ge=0, le=20)
+    idempotent_replay: bool = False
+    approval_request_id: str | None = Field(default=None, max_length=160)
+    url: str | None = Field(default=None, max_length=2_000)
 
 
 class RepoIssueOutput(ToolResponse):
@@ -244,6 +316,7 @@ class RepoIssueOutput(ToolResponse):
     nodes: tuple[IssueGraphNode, ...] = Field(default=(), max_length=500)
     selected: tuple[IssueGraphNode, ...] = Field(default=(), max_length=100)
     drift: tuple[IssueDrift, ...] = Field(default=(), max_length=100)
+    mutation: IssueMutationEvidence | None = None
     next_action: ShortText | None = None
     truncated: bool = False
     next_cursor: Cursor | None = None
@@ -306,11 +379,56 @@ class GeneratedPathDeclaration(StrictModel):
     description: str = Field(min_length=1, max_length=500)
 
 
+class IssueWritePolicyDeclaration(StrictModel):
+    enabled_ops: tuple[Literal["comment", "close", "reopen", "link", "create"], ...] = Field(
+        default=("comment",), max_length=5
+    )
+    approval_required_ops: tuple[Literal["comment", "close", "reopen", "link", "create"], ...] = (
+        Field(default=(), max_length=5)
+    )
+    max_writes_per_call: int = Field(default=2, ge=1, le=20)
+    max_writes_per_window: int = Field(default=20, ge=1, le=10_000)
+    window_seconds: int = Field(default=3_600, ge=60, le=604_800)
+    create_title_prefix: str = Field(default="[TASK]", min_length=1, max_length=80)
+    create_body_template: str = Field(
+        default="## Objective\n{body}\n\n## Evidence\n{evidence_ref}",
+        min_length=1,
+        max_length=10_000,
+    )
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> IssueWritePolicyDeclaration:
+        if len(set(self.enabled_ops)) != len(self.enabled_ops):
+            raise ValueError("issue_writes enabled_ops contains duplicates")
+        if len(set(self.approval_required_ops)) != len(self.approval_required_ops):
+            raise ValueError("issue_writes approval_required_ops contains duplicates")
+        if not set(self.approval_required_ops).issubset(self.enabled_ops):
+            raise ValueError("issue_writes approval_required_ops must be enabled")
+        if self.max_writes_per_call > self.max_writes_per_window:
+            raise ValueError("issue_writes per-call limit cannot exceed the window limit")
+        try:
+            template_fields = {
+                field_name
+                for _, field_name, _, _ in Formatter().parse(self.create_body_template)
+                if field_name is not None
+            }
+        except ValueError as exc:
+            raise ValueError(
+                "issue_writes create_body_template is not a valid format template"
+            ) from exc
+        if template_fields != {"body", "evidence_ref"}:
+            raise ValueError(
+                "issue_writes create_body_template must contain exactly body and evidence_ref"
+            )
+        return self
+
+
 class RepoPolicyInput(StrictModel):
     repo_id: RepoId
     action: PolicyAction
     mutations: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
     generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
+    issue_writes: IssueWritePolicyDeclaration | None = None
     preview_token: str | None = Field(default=None, max_length=2048)
 
 
@@ -322,6 +440,7 @@ class RepoPolicyOutput(ToolResponse):
     generation: int | None = Field(default=None, ge=1)
     changes: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
     generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
+    issue_writes: IssueWritePolicyDeclaration | None = None
     operator_instruction: str | None = Field(default=None, max_length=1000)
 
 

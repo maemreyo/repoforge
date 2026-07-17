@@ -35,6 +35,7 @@ from ...domain.config_generation import (
 )
 from ...domain.errors import ConfigError, RepoForgeError
 from ...domain.generated_paths import parse_generated_paths
+from ...domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from ...domain.policy_patch import (
     PolicyPatchError,
     ProfilePatch,
@@ -47,6 +48,7 @@ from ...ports.ids import IdGenerator
 from ..approvals import PendingPolicyChangeStore
 from ..configuration.document import (
     apply_generated_paths,
+    apply_issue_write_policy,
     apply_policy_patch,
     apply_proposal,
     apply_risk_policy,
@@ -253,6 +255,7 @@ class ConfigAdminService:
         action: str,
         mutations: list[dict[str, Any]] | None = None,
         generated_paths: list[dict[str, Any]] | None = None,
+        issue_writes: dict[str, Any] | None = None,
         preview_token: str | None = None,
     ) -> dict[str, Any]:
         """Preview or apply one exact-state-bound v2 repository policy proposal."""
@@ -275,11 +278,23 @@ class ConfigAdminService:
                 )
             except ValueError as exc:
                 raise ConfigError(f"Invalid generated_paths declaration: {exc}") from exc
+            try:
+                canonical_issue_writes = (
+                    IssueWritePolicy.from_table(
+                        issue_writes,
+                        context=f"repositories.{repo_id}.issue_writes",
+                    ).as_table()
+                    if issue_writes is not None
+                    else None
+                )
+            except IssueWritePolicyError as exc:
+                raise ConfigError(f"Invalid issue_writes declaration: {exc}") from exc
             arguments = self._policy_apply_arguments(normalized)
             preview = self.repo_policy_apply(
                 repo_id,
                 **arguments,
                 generated_paths=canonical_generated,
+                issue_writes=canonical_issue_writes,
                 dry_run=True,
             )
             current = self._store.current()
@@ -291,6 +306,7 @@ class ConfigAdminService:
                 "repo_id": repo_id,
                 "mutations": normalized,
                 "generated_paths": canonical_generated,
+                "issue_writes": canonical_issue_writes,
                 "expected_generation": current.generation,
                 "expected_source_sha256": sha256_text(self._store.read_source_text()),
             }
@@ -309,13 +325,14 @@ class ConfigAdminService:
                 "generation": None,
                 "changes": normalized,
                 "generated_paths": canonical_generated or [],
+                "issue_writes": canonical_issue_writes,
                 "operator_instruction": preview.get("safe_next_action"),
             }
         if action != "apply":
             raise ConfigError("repo_policy action must be 'preview' or 'apply'")
         if preview_token is None:
             raise ConfigError("repo_policy apply requires preview_token")
-        if mutations or generated_paths is not None:
+        if mutations or generated_paths is not None or issue_writes is not None:
             raise ConfigError("repo_policy apply accepts only the exact preview_token")
         try:
             stored_payload = self.pending.payloads.read(preview_token)
@@ -340,10 +357,14 @@ class ConfigAdminService:
         stored_generated = stored_payload.get("generated_paths")
         if stored_generated is not None and not isinstance(stored_generated, list):
             raise ConfigError("repo_policy preview_token generated_paths payload is corrupt")
+        stored_issue_writes = stored_payload.get("issue_writes")
+        if stored_issue_writes is not None and not isinstance(stored_issue_writes, dict):
+            raise ConfigError("repo_policy preview_token issue_writes payload is corrupt")
         result = self.repo_policy_apply(
             repo_id,
             **self._policy_apply_arguments(normalized),
             generated_paths=stored_generated,
+            issue_writes=stored_issue_writes,
             dry_run=False,
         )
         self.pending.payloads.delete(preview_token)
@@ -366,6 +387,7 @@ class ConfigAdminService:
             "generation": result.get("generation"),
             "changes": normalized,
             "generated_paths": stored_generated or [],
+            "issue_writes": stored_issue_writes,
             "operator_instruction": result.get("safe_next_action"),
         }
 
@@ -385,6 +407,7 @@ class ConfigAdminService:
         policy_overrides: dict[str, str] | None = None,
         remove_policy_overrides: list[str] | None = None,
         generated_paths: list[dict[str, Any]] | None = None,
+        issue_writes: dict[str, Any] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         current = self._store.current()
@@ -416,11 +439,23 @@ class ConfigAdminService:
             )
         except ValueError as exc:
             raise ConfigError(f"Invalid generated_paths declaration: {exc}") from exc
+        try:
+            resolved_issue_writes = (
+                IssueWritePolicy.from_table(
+                    issue_writes,
+                    context=f"repositories.{repo_id}.issue_writes",
+                )
+                if issue_writes is not None
+                else source_item.issue_writes
+            )
+        except IssueWritePolicyError as exc:
+            raise ConfigError(f"Invalid issue_writes declaration: {exc}") from exc
         if (
             delta_patch.is_empty()
             and not policy_overrides
             and not remove_policy_overrides
             and generated_paths is None
+            and issue_writes is None
         ):
             raise ConfigError("repo_policy_apply requires at least one change")
         merged_patch = source_item.policy_patch.merge(delta_patch)
@@ -463,6 +498,7 @@ class ConfigAdminService:
                     item.ticket_graph,
                     item.risk_policy,
                     resolved_generated_paths,
+                    resolved_issue_writes,
                 )
                 if item.repo_id == repo_id
                 else item
@@ -475,6 +511,7 @@ class ConfigAdminService:
         document = apply_ticket_graph(document, repo_id, source_item.ticket_graph)
         document = apply_risk_policy(document, repo_id, source_item.risk_policy)
         document = apply_generated_paths(document, repo_id, resolved_generated_paths)
+        document = apply_issue_write_policy(document, repo_id, resolved_issue_writes)
         try:
             document = apply_policy_patch(document, repo_id, merged_patch)
         except ValueError as exc:

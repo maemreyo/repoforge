@@ -32,6 +32,7 @@ from .domain.hygiene import (
     HygieneNetworkPolicy,
     HygieneParserKind,
 )
+from .domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from .domain.mutation_policy import MUTATION_OPS, validate_allowed_mutation_ops
 from .domain.provider_config import load_provider_manifests
 from .domain.provider_manifest import ProviderManifest
@@ -198,6 +199,7 @@ class RepositoryConfig:
     adhoc_timeout_seconds: int = 300
     ticket_graph: GitHubTicketGraphConfig | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
+    issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
 
 
 @dataclass(frozen=True)
@@ -1050,7 +1052,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 repo_raw.get("generated_paths"),
                 context=f"repositories.{repo_id}.generated_paths",
             )
-        except ValueError as exc:
+            issue_writes = IssueWritePolicy.from_table(
+                repo_raw.get("issue_writes"),
+                context=f"repositories.{repo_id}.issue_writes",
+            )
+        except (ValueError, IssueWritePolicyError) as exc:
             raise ConfigError(str(exc)) from exc
         default_verification_raw = repo_raw.get("default_verification_profile")
         default_verification = (
@@ -1187,6 +1193,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             adhoc_timeout_seconds=adhoc_timeout_seconds,
             ticket_graph=ticket_graph,
             generated_paths=generated_paths,
+            issue_writes=issue_writes,
         )
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(

@@ -33,6 +33,7 @@ from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
     JsonApprovalPayloadStore,
     JsonApprovalStore,
+    JsonExternalMutationLedger,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -129,6 +130,7 @@ from .ports import (
     ConfigurationStore,
     ExecutableLocator,
     ExecutionEnvironmentPort,
+    ExternalMutationLedger,
     FileSystem,
     FileTransactionFactory,
     GitHubReadCache,
@@ -137,6 +139,7 @@ from .ports import (
     HygieneGateway,
     IdempotencyStore,
     IdGenerator,
+    IssueMutationGateway,
     LockManager,
     MetricsSink,
     OnboardingEnvironment,
@@ -169,6 +172,8 @@ from .ports import (
 class AdapterOverrides:
     command: CommandExecutor | None = None
     execution_environment: ExecutionEnvironmentPort | None = None
+    approvals: ApprovalStore | None = None
+    approval_payloads: ApprovalPayloadStore | None = None
     store: WorkspaceStore | None = None
     locks: LockManager | None = None
     gate: OperationGate | None = None
@@ -179,6 +184,8 @@ class AdapterOverrides:
     file_transactions: FileTransactionFactory | None = None
     git: GitRepository | None = None
     github: PullRequestGateway | None = None
+    issue_mutations: IssueMutationGateway | None = None
+    external_mutations: ExternalMutationLedger | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     executables: ExecutableLocator | None = None
@@ -448,7 +455,18 @@ def build_application(
     filesystem = o.filesystem or LocalFileSystem()
     file_transactions: FileTransactionFactory = o.file_transactions or JournaledFileTransaction
     git = o.git or GitCliRepository(command, config.server)
-    github = o.github or GhCliGateway(command, config.server)
+    default_github = GhCliGateway(command, config.server)
+    github = o.github or default_github
+    issue_mutations = o.issue_mutations or default_github
+    external_mutations = o.external_mutations or JsonExternalMutationLedger(
+        config.server.state_root,
+        locks,
+    )
+    approvals = o.approvals or JsonApprovalStore(config.server.state_root, locks)
+    approval_payloads = o.approval_payloads or JsonApprovalPayloadStore(
+        config.server.state_root,
+        locks,
+    )
     ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
     ticket_projects = o.ticket_projects or GhTicketProjectGateway(command, config.server)
     ids = o.ids or UuidGenerator()
@@ -483,6 +501,10 @@ def build_application(
         commands=command,
         git=git,
         github=github,
+        issue_mutations=issue_mutations,
+        external_mutations=external_mutations,
+        approvals=approvals,
+        approval_payloads=approval_payloads,
         filesystem=filesystem,
         file_transactions=file_transactions,
         store=store,

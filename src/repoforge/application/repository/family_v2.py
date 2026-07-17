@@ -18,6 +18,10 @@ from .issue_graph import (
     RepositoryIssueGraphReader,
     node_payload,
 )
+from .issue_mutation_v2 import (
+    RepositoryIssueMutationCommand,
+    RepositoryIssueMutatorV2,
+)
 from .issue_next import RepositoryIssueNextCommand, RepositoryIssueNextReader
 from .issue_spec import RepositoryIssueSpecCommand, RepositoryIssueSpecReader
 from .pr_read import PullRequestReadCommand, PullRequestReader
@@ -181,6 +185,27 @@ class RepositoryIssueV2Command:
     limit: int = 10
     fresh: bool = False
     cursor: str | None = None
+    body: str | None = None
+    title: str | None = None
+    evidence_ref: str | None = None
+    target_issue: int | None = None
+    link_type: str | None = None
+    idempotency_key: str | None = None
+    approval_request_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IssueMutationEvidenceV2:
+    operation: str
+    result: str
+    issue_number: int | None
+    target_issue: int | None
+    link_type: str | None
+    marker: str
+    external_writes: int
+    idempotent_replay: bool
+    approval_request_id: str | None
+    url: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +223,7 @@ class RepositoryIssueV2Result:
     next_action: str | None
     truncated: bool
     next_cursor: str | None
+    mutation: IssueMutationEvidenceV2 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,17 +552,70 @@ class RepositoryPrReadV2:
 
 
 class RepositoryIssueV2:
-    _MODES = frozenset({"read", "spec", "graph", "next"})
+    _READ_MODES = frozenset({"read", "spec", "graph", "next"})
+    _WRITE_MODES = frozenset({"comment", "close", "reopen", "link", "create"})
+    _MODES = _READ_MODES | _WRITE_MODES
 
     def __init__(self, ctx: ApplicationContext) -> None:
         self.ctx = ctx
         self._spec = RepositoryIssueSpecReader(ctx)
         self._graph = RepositoryIssueGraphReader(ctx)
         self._next = RepositoryIssueNextReader(ctx)
+        self._mutator = RepositoryIssueMutatorV2(ctx)
 
     def execute(self, command: RepositoryIssueV2Command) -> RepositoryIssueV2Result:
         if command.mode not in self._MODES:
-            raise ValueError("mode must be one of: read, spec, graph, next")
+            raise ValueError(
+                "mode must be one of: read, spec, graph, next, comment, close, reopen, link, create"
+            )
+        if command.mode in self._WRITE_MODES:
+            mutation = self._mutator.execute(
+                RepositoryIssueMutationCommand(
+                    repo_id=command.repo_id,
+                    mode=command.mode,
+                    issue_number=command.issue_number,
+                    body=command.body,
+                    title=command.title,
+                    evidence_ref=command.evidence_ref,
+                    target_issue=command.target_issue,
+                    link_type=command.link_type,
+                    idempotency_key=command.idempotency_key,
+                    approval_request_id=command.approval_request_id,
+                )
+            )
+            evidence = IssueMutationEvidenceV2(
+                mutation.operation,
+                mutation.result,
+                mutation.issue_number,
+                mutation.target_issue,
+                mutation.link_type,
+                mutation.marker,
+                mutation.external_writes,
+                mutation.idempotent_replay,
+                mutation.approval_request_id,
+                mutation.url,
+            )
+            return RepositoryIssueV2Result(
+                "ok",
+                mutation.summary,
+                None,
+                command.repo_id,
+                command.mode,
+                "not_requested",
+                None,
+                (),
+                (),
+                (),
+                (
+                    "Obtain an operator decision for the bound approval request, then retry "
+                    "with the same idempotency key and approval_request_id."
+                    if mutation.result == "pending_approval"
+                    else None
+                ),
+                False,
+                None,
+                evidence,
+            )
         return self.ctx.audited(
             "repo_issue",
             {"repo_id": command.repo_id, "mode": command.mode},

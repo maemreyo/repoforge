@@ -25,6 +25,7 @@ T = TypeVar("T")
 _LOCAL_MUTATION_ACTIONS = frozenset(
     {"workspace_write_file", "workspace_edit", "workspace_apply_patch"}
 )
+_RECONCILE_MISS = object()
 
 
 @dataclass(slots=True)
@@ -48,6 +49,7 @@ def execute_idempotent(
     serialize: Callable[[T], Any] | None = None,
     deserialize: Callable[[Any], T] | None = None,
     effect_boundary: IdempotencyEffectBoundary | None = None,
+    reconcile_uncertain: Callable[[], T | None] | None = None,
 ) -> T:
     """Claim, execute, persist, and replay one reviewed keyed operation."""
     if key is None:
@@ -67,6 +69,45 @@ def execute_idempotent(
         "idempotency_key_hash": key_hash[:16],
     }
     unchanged = unchanged_state_for(action)
+
+    def materialize(result: T) -> tuple[Any, T]:
+        encoder = serialize or cast(Callable[[T], Any], lambda value: value)
+        persisted = sanitize_persisted_data(encoder(result))
+        json.dumps(persisted, sort_keys=True, allow_nan=False)
+        decoder = deserialize or cast(Callable[[Any], T], lambda value: value)
+        return persisted, decoder(persisted)
+
+    def reconcile(record: IdempotencyRecord) -> T | object:
+        if reconcile_uncertain is None:
+            return _RECONCILE_MISS
+        result = reconcile_uncertain()
+        if result is None:
+            store.delete(action, key_hash)
+            return _RECONCILE_MISS
+        persisted, safe_result = materialize(result)
+        store.save(
+            replace(
+                record,
+                state=IdempotencyState.COMPLETED,
+                updated_at=ctx.clock.now_iso(),
+                updated_at_epoch=ctx.now_epoch(),
+                result=persisted,
+            )
+        )
+        ctx.audit.record(
+            action,
+            success=True,
+            details={
+                **record_details,
+                "correlation_id": correlation,
+                "duration_ms": 0.0,
+                "idempotent_replay": True,
+                "idempotent_reconciled": True,
+            },
+        )
+        ctx.record_metric(action, success=True, duration_ms=0.0, error_code=None)
+        return safe_result
+
     try:
         with ctx.locks.lock(
             lock_name,
@@ -101,24 +142,41 @@ def execute_idempotent(
                 ctx.record_metric(action, success=True, duration_ms=0.0, error_code=None)
                 return replayed
             if existing is not None and existing.state is IdempotencyState.UNCERTAIN:
-                raise ConfigError(
-                    "IDEMPOTENCY_UNCERTAIN: the mutation may have completed before its result receipt was recorded",
-                    code=ErrorCode.IDEMPOTENCY_UNCERTAIN,
-                    retryable=False,
-                    safe_next_action=(
-                        "Inspect the current workspace status and target content, compare it with the "
-                        "requested result, and do not retry blindly with a new key."
-                    ),
-                    unchanged_state=(
-                        "The workspace mutation outcome is uncertain and must be inspected explicitly.",
-                    ),
-                    correlation_id=existing.correlation_id,
-                )
+                if reconcile_uncertain is not None:
+                    reconciled = reconcile(existing)
+                    if reconciled is not _RECONCILE_MISS:
+                        return cast(T, reconciled)
+                    existing = None
+                else:
+                    raise ConfigError(
+                        "IDEMPOTENCY_UNCERTAIN: the mutation may have completed before its result receipt was recorded",
+                        code=ErrorCode.IDEMPOTENCY_UNCERTAIN,
+                        retryable=False,
+                        safe_next_action=(
+                            "Inspect the current workspace status and target content, compare it with the "
+                            "requested result, and do not retry blindly with a new key."
+                        ),
+                        unchanged_state=(
+                            "The workspace mutation outcome is uncertain and must be inspected explicitly.",
+                        ),
+                        correlation_id=existing.correlation_id,
+                    )
             stale_existing = (
                 existing is not None
                 and now_epoch - existing.updated_at_epoch
                 > ctx.config.server.idempotency_stale_seconds
             )
+            if (
+                stale_existing
+                and existing is not None
+                and reconcile_uncertain is not None
+                and existing.state is IdempotencyState.IN_PROGRESS
+            ):
+                reconciled = reconcile(existing)
+                if reconciled is not _RECONCILE_MISS:
+                    return cast(T, reconciled)
+                existing = None
+                stale_existing = False
             if (
                 stale_existing
                 and action in _LOCAL_MUTATION_ACTIONS
@@ -170,11 +228,7 @@ def execute_idempotent(
             def execute_and_commit() -> T:
                 try:
                     result = operation()
-                    encoder = serialize or cast(Callable[[T], Any], lambda value: value)
-                    persisted = sanitize_persisted_data(encoder(result))
-                    json.dumps(persisted, sort_keys=True, allow_nan=False)
-                    decoder = deserialize or cast(Callable[[Any], T], lambda value: value)
-                    safe_result = decoder(persisted)
+                    persisted, safe_result = materialize(result)
                     current = store.load(action, key_hash)
                     if current is None or current.correlation_id != correlation:
                         raise ConfigError(

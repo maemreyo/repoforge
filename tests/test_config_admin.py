@@ -201,6 +201,25 @@ generated_paths = [
     assert parse_source(render_source(parsed)) == parsed
 
 
+def test_source_round_trips_issue_write_policy() -> None:
+    text = """version = 2
+[[repo]]
+id = "demo"
+path = "/tmp/demo"
+
+[repositories.demo]
+issue_writes = { enabled_ops = ["comment", "close", "create"], approval_required_ops = ["close"], max_writes_per_call = 3, max_writes_per_window = 12, window_seconds = 900, create_title_prefix = "[FOLLOWUP]", create_body_template = "## Objective\\n{body}\\n\\n## Evidence\\n{evidence_ref}" }
+"""
+
+    parsed = parse_source(text)
+    policy = parsed.repositories[0].issue_writes
+
+    assert policy.enabled_ops == ("comment", "close", "create")
+    assert policy.approval_required_ops == ("close",)
+    assert policy.max_writes_per_window == 12
+    assert parse_source(render_source(parsed)) == parsed
+
+
 def test_resolved_config_loads_generated_paths(tmp_path: Path) -> None:
     repo = tmp_path / "demo"
     repo.mkdir()
@@ -631,11 +650,21 @@ def test_repo_policy_preview_token_binds_exact_apply_request(tmp_path: Path) -> 
                 "description": "Generated contracts",
             }
         ],
+        issue_writes={
+            "enabled_ops": ["comment", "close"],
+            "approval_required_ops": ["close"],
+            "max_writes_per_call": 2,
+            "max_writes_per_window": 20,
+            "window_seconds": 3600,
+            "create_title_prefix": "[TASK]",
+            "create_body_template": "## Objective\n{body}\n\n## Evidence\n{evidence_ref}",
+        },
     )
 
     assert preview["result"] == "preview"
     assert preview["preview_token"].startswith("apr-")
     assert preview["changes"]
+    assert preview["issue_writes"]["enabled_ops"] == ["comment", "close"]
     assert admin._store.current().generation == 1
 
     applied = admin.repo_policy(
@@ -645,6 +674,7 @@ def test_repo_policy_preview_token_binds_exact_apply_request(tmp_path: Path) -> 
     )
 
     assert applied["result"] in {"applied", "pending_approval"}
+    assert applied["issue_writes"]["approval_required_ops"] == ["close"]
     assert admin.pending.payloads.read(preview["preview_token"]) is None
 
 

@@ -17,12 +17,15 @@ from ..domain.operations import automatic_retry_allowed, unchanged_state_for
 from ..domain.policy import validate_branch
 from ..domain.workspace import WorkspaceRecord
 from ..ports import (
+    ApprovalPayloadStore,
+    ApprovalStore,
     AuditSink,
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
     ExecutableLocator,
     ExecutionEnvironmentPort,
+    ExternalMutationLedger,
     FaultInjector,
     FileSystem,
     FileTransaction,
@@ -33,6 +36,7 @@ from ..ports import (
     HygieneGateway,
     IdempotencyStore,
     IdGenerator,
+    IssueMutationGateway,
     LockManager,
     MetricsSink,
     OperationGate,
@@ -239,6 +243,15 @@ class ApplicationContext:
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     file_transactions: FileTransactionFactory | None = None
+    issue_mutations: IssueMutationGateway | None = None
+    external_mutations: ExternalMutationLedger | None = None
+    approvals: ApprovalStore | None = None
+    approval_payloads: ApprovalPayloadStore | None = None
+
+    def approval_stores(self) -> tuple[ApprovalStore, ApprovalPayloadStore]:
+        if self.approvals is None or self.approval_payloads is None:
+            raise ConfigError("Shared approval stores are unavailable")
+        return self.approvals, self.approval_payloads
 
     def file_transaction(
         self,
@@ -250,6 +263,18 @@ class ApplicationContext:
         if factory is None:
             raise ConfigError("Journaled file transaction factory is unavailable")
         return factory(workspace_root, fault_injector=fault_injector)
+
+    def external_mutation_ledger(self) -> ExternalMutationLedger:
+        ledger = self.external_mutations
+        if ledger is None:
+            raise ConfigError("External mutation ledger is unavailable")
+        return ledger
+
+    def issue_mutation_gateway(self) -> IssueMutationGateway:
+        gateway = self.issue_mutations
+        if gateway is None:
+            raise ConfigError("GitHub issue mutation gateway is unavailable")
+        return gateway
 
     def now_epoch(self) -> float:
         try:
@@ -546,6 +571,7 @@ class ApplicationContext:
         serialize: Callable[[T], Any] | None = None,
         deserialize: Callable[[Any], T] | None = None,
         effect_boundary: IdempotencyEffectBoundary | None = None,
+        reconcile_uncertain: Callable[[], T | None] | None = None,
     ) -> T:
         return execute_idempotent(
             self,
@@ -557,4 +583,5 @@ class ApplicationContext:
             serialize=serialize,
             deserialize=deserialize,
             effect_boundary=effect_boundary,
+            reconcile_uncertain=reconcile_uncertain,
         )

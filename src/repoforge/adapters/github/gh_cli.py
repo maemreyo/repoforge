@@ -15,6 +15,7 @@ from ...ports.github import (
     GitHubCheckRun,
     GitHubJobLog,
 )
+from ...ports.issue_mutation import RemoteComment, RemoteIssue
 
 _ACTIONS_JOB_URL = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/"
@@ -72,13 +73,17 @@ class GhCliGateway:
         cwd: Path,
         endpoint: str,
         *,
+        method: str = "GET",
         fields: tuple[tuple[str, str], ...] = (),
+        typed_fields: tuple[tuple[str, int], ...] = (),
         output_limit: int,
         check: bool = True,
     ) -> CommandResult:
-        argv = ["gh", "api", "--method", "GET", endpoint]
-        for key, value in fields:
-            argv.extend(["-f", f"{key}={value}"])
+        argv = ["gh", "api", "--method", method, endpoint]
+        for key, field_value in fields:
+            argv.extend(["-f", f"{key}={field_value}"])
+        for key, typed_value in typed_fields:
+            argv.extend(["-F", f"{key}={typed_value}"])
         return self.executor.run(
             argv,
             cwd=cwd,
@@ -164,6 +169,208 @@ class GhCliGateway:
             ]
             payload["comments_truncated"] = len(comments) > 20
         return payload
+
+    @classmethod
+    def _remote_issue(cls, payload: dict[str, Any], context: str) -> RemoteIssue:
+        database_id = cls._integer(payload.get("id"))
+        issue_number = cls._integer(payload.get("number"))
+        if database_id is None or issue_number is None:
+            raise CommandError(f"{context} returned an invalid issue identity")
+        return RemoteIssue(
+            issue_number,
+            database_id,
+            cls._string(payload.get("title"))[:1_000],
+            cls._string(payload.get("state"))[:40],
+            cls._string(payload.get("body"))[:20_000],
+            cls._string(payload.get("html_url") or payload.get("url"))[:2_000],
+        )
+
+    @classmethod
+    def _remote_comment(cls, payload: dict[str, Any], context: str) -> RemoteComment:
+        comment_id = cls._integer(payload.get("id"))
+        if comment_id is None:
+            raise CommandError(f"{context} returned an invalid comment identity")
+        return RemoteComment(
+            comment_id,
+            cls._string(payload.get("body"))[:20_000],
+            cls._string(payload.get("html_url") or payload.get("url"))[:2_000],
+        )
+
+    @staticmethod
+    def _page_size(limit: int, context: str) -> int:
+        if not 1 <= limit <= 100:
+            raise ValueError(f"{context} limit must be between 1 and 100")
+        return min(100, limit + 1)
+
+    def issue_details(self, cwd: Path, issue_number: int) -> RemoteIssue:
+        slug = self._slug(cwd)
+        payload = self._api_object(
+            cwd,
+            f"repos/{slug}/issues/{issue_number}",
+            context="GitHub issue read",
+        )
+        return self._remote_issue(payload, "GitHub issue read")
+
+    def issue_comments(
+        self, cwd: Path, issue_number: int, *, max_comments: int
+    ) -> tuple[tuple[RemoteComment, ...], bool]:
+        slug = self._slug(cwd)
+        page_size = self._page_size(max_comments, "issue comments")
+        payload = self._api_list(
+            cwd,
+            f"repos/{slug}/issues/{issue_number}/comments?per_page={page_size}",
+            context="GitHub issue comments",
+        )
+        comments = tuple(
+            self._remote_comment(item, "GitHub issue comments") for item in payload[:max_comments]
+        )
+        return comments, len(payload) > max_comments or len(payload) >= page_size
+
+    def recent_issues(self, cwd: Path, *, max_issues: int) -> tuple[tuple[RemoteIssue, ...], bool]:
+        slug = self._slug(cwd)
+        page_size = self._page_size(max_issues, "recent issues")
+        payload = self._api_list(
+            cwd,
+            f"repos/{slug}/issues?state=all&sort=created&direction=desc&per_page={page_size}",
+            context="GitHub recent issues",
+        )
+        issue_payloads = [item for item in payload if "pull_request" not in item]
+        issues = tuple(
+            self._remote_issue(item, "GitHub recent issues") for item in issue_payloads[:max_issues]
+        )
+        return issues, len(issue_payloads) > max_issues or len(payload) >= page_size
+
+    def issue_comment(self, cwd: Path, issue_number: int, body: str) -> RemoteComment:
+        if not body or len(body) > 20_000:
+            raise ValueError("issue comment body must contain between 1 and 20000 characters")
+        slug = self._slug(cwd)
+        payload = self._object(
+            self._api_result(
+                cwd,
+                f"repos/{slug}/issues/{issue_number}/comments",
+                method="POST",
+                fields=(("body", body),),
+                output_limit=200_000,
+            ),
+            "GitHub issue comment",
+        )
+        return self._remote_comment(payload, "GitHub issue comment")
+
+    def set_issue_state(self, cwd: Path, issue_number: int, state: str) -> RemoteIssue:
+        if state not in {"open", "closed"}:
+            raise ValueError("issue state must be open or closed")
+        slug = self._slug(cwd)
+        payload = self._object(
+            self._api_result(
+                cwd,
+                f"repos/{slug}/issues/{issue_number}",
+                method="PATCH",
+                fields=(("state", state),),
+                output_limit=200_000,
+            ),
+            "GitHub issue state update",
+        )
+        return self._remote_issue(payload, "GitHub issue state update")
+
+    def create_issue(self, cwd: Path, title: str, body: str) -> RemoteIssue:
+        if not title or len(title) > 1_000 or not body or len(body) > 20_000:
+            raise ValueError("issue title or body exceeds the reviewed bounds")
+        slug = self._slug(cwd)
+        payload = self._object(
+            self._api_result(
+                cwd,
+                f"repos/{slug}/issues",
+                method="POST",
+                fields=(("title", title), ("body", body)),
+                output_limit=200_000,
+            ),
+            "GitHub issue creation",
+        )
+        return self._remote_issue(payload, "GitHub issue creation")
+
+    def _relationship_issues(
+        self,
+        cwd: Path,
+        issue_number: int,
+        suffix: str,
+        *,
+        max_issues: int,
+        context: str,
+    ) -> tuple[tuple[RemoteIssue, ...], bool]:
+        slug = self._slug(cwd)
+        page_size = self._page_size(max_issues, context)
+        payload = self._api_list(
+            cwd,
+            f"repos/{slug}/issues/{issue_number}/{suffix}?per_page={page_size}",
+            context=context,
+        )
+        issues = tuple(self._remote_issue(item, context) for item in payload[:max_issues])
+        return issues, len(payload) > max_issues or len(payload) >= page_size
+
+    def sub_issues(
+        self, cwd: Path, issue_number: int, *, max_issues: int
+    ) -> tuple[tuple[RemoteIssue, ...], bool]:
+        return self._relationship_issues(
+            cwd,
+            issue_number,
+            "sub_issues",
+            max_issues=max_issues,
+            context="GitHub sub-issues",
+        )
+
+    def blocked_by(
+        self, cwd: Path, issue_number: int, *, max_issues: int
+    ) -> tuple[tuple[RemoteIssue, ...], bool]:
+        return self._relationship_issues(
+            cwd,
+            issue_number,
+            "dependencies/blocked_by",
+            max_issues=max_issues,
+            context="GitHub blocked-by relationships",
+        )
+
+    def _add_relationship(
+        self,
+        cwd: Path,
+        issue_number: int,
+        suffix: str,
+        field_name: str,
+        related_issue_id: int,
+        *,
+        context: str,
+    ) -> RemoteIssue:
+        slug = self._slug(cwd)
+        payload = self._object(
+            self._api_result(
+                cwd,
+                f"repos/{slug}/issues/{issue_number}/{suffix}",
+                method="POST",
+                typed_fields=((field_name, related_issue_id),),
+                output_limit=200_000,
+            ),
+            context,
+        )
+        return self._remote_issue(payload, context)
+
+    def add_sub_issue(self, cwd: Path, issue_number: int, sub_issue_id: int) -> RemoteIssue:
+        return self._add_relationship(
+            cwd,
+            issue_number,
+            "sub_issues",
+            "sub_issue_id",
+            sub_issue_id,
+            context="GitHub add sub-issue",
+        )
+
+    def add_blocked_by(self, cwd: Path, issue_number: int, blocker_issue_id: int) -> RemoteIssue:
+        return self._add_relationship(
+            cwd,
+            issue_number,
+            "dependencies/blocked_by",
+            "issue_id",
+            blocker_issue_id,
+            context="GitHub add blocked-by relationship",
+        )
 
     def _trim_pr(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload["body"] = self._trim(payload.get("body"), 50_000)

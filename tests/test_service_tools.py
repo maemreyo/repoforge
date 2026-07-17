@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, git
 
 from repoforge.application.workspace.edit import FileEdit, TextEdit
+from repoforge.domain.approval import ApprovalStatus, decide_approval
 from repoforge.domain.errors import (
     CommandError,
     ConfigError,
@@ -15,6 +17,101 @@ from repoforge.domain.errors import (
     SecurityError,
     WorkspaceError,
 )
+from repoforge.domain.issue_writes import IssueWritePolicy
+from repoforge.ports.issue_mutation import RemoteComment, RemoteIssue
+
+
+class _FakeIssueMutationGateway:
+    def __init__(self) -> None:
+        self.issues: dict[int, RemoteIssue] = {
+            7: RemoteIssue(7, 7007, "Existing issue", "open", "", "https://example/7"),
+            8: RemoteIssue(8, 7008, "Target issue", "open", "", "https://example/8"),
+        }
+        self.comments: dict[int, list[RemoteComment]] = {}
+        self.sub_issue_links: dict[int, set[int]] = {}
+        self.blocked_by_links: dict[int, set[int]] = {}
+        self.fail_comment_after_effect_once = False
+        self.force_comment_scan_truncated = False
+        self._next_comment = 1
+        self._next_issue = 20
+
+    def issue_details(self, cwd: Path, issue_number: int) -> RemoteIssue:
+        del cwd
+        return self.issues[issue_number]
+
+    def issue_comments(
+        self, cwd: Path, issue_number: int, *, max_comments: int
+    ) -> tuple[tuple[RemoteComment, ...], bool]:
+        del cwd
+        values = self.comments.get(issue_number, [])
+        return (
+            tuple(values[:max_comments]),
+            self.force_comment_scan_truncated or len(values) > max_comments,
+        )
+
+    def recent_issues(self, cwd: Path, *, max_issues: int) -> tuple[tuple[RemoteIssue, ...], bool]:
+        del cwd
+        values = sorted(self.issues.values(), key=lambda item: item.issue_number, reverse=True)
+        return tuple(values[:max_issues]), len(values) > max_issues
+
+    def issue_comment(self, cwd: Path, issue_number: int, body: str) -> RemoteComment:
+        del cwd
+        comment = RemoteComment(
+            self._next_comment,
+            body,
+            f"https://example/{issue_number}#comment-{self._next_comment}",
+        )
+        self._next_comment += 1
+        self.comments.setdefault(issue_number, []).append(comment)
+        if self.fail_comment_after_effect_once:
+            self.fail_comment_after_effect_once = False
+            raise CommandError("simulated lost GitHub response")
+        return comment
+
+    def set_issue_state(self, cwd: Path, issue_number: int, state: str) -> RemoteIssue:
+        del cwd
+        current = self.issues[issue_number]
+        updated = replace(current, state=state)
+        self.issues[issue_number] = updated
+        return updated
+
+    def create_issue(self, cwd: Path, title: str, body: str) -> RemoteIssue:
+        del cwd
+        number = self._next_issue
+        self._next_issue += 1
+        issue = RemoteIssue(number, number + 7000, title, "open", body, f"https://example/{number}")
+        self.issues[number] = issue
+        return issue
+
+    def sub_issues(
+        self, cwd: Path, issue_number: int, *, max_issues: int
+    ) -> tuple[tuple[RemoteIssue, ...], bool]:
+        del cwd
+        values = [
+            self.issues[number] for number in sorted(self.sub_issue_links.get(issue_number, set()))
+        ]
+        return tuple(values[:max_issues]), len(values) > max_issues
+
+    def blocked_by(
+        self, cwd: Path, issue_number: int, *, max_issues: int
+    ) -> tuple[tuple[RemoteIssue, ...], bool]:
+        del cwd
+        values = [
+            self.issues[number] for number in sorted(self.blocked_by_links.get(issue_number, set()))
+        ]
+        return tuple(values[:max_issues]), len(values) > max_issues
+
+    def add_sub_issue(self, cwd: Path, issue_number: int, sub_issue_id: int) -> RemoteIssue:
+        del cwd
+        target = next(item for item in self.issues.values() if item.database_id == sub_issue_id)
+        self.sub_issue_links.setdefault(issue_number, set()).add(target.issue_number)
+        return target
+
+    def add_blocked_by(self, cwd: Path, issue_number: int, blocker_issue_id: int) -> RemoteIssue:
+        del cwd
+        target = next(item for item in self.issues.values() if item.database_id == blocker_issue_id)
+        self.blocked_by_links.setdefault(issue_number, set()).add(target.issue_number)
+        return target
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -190,6 +287,258 @@ def test_v2_repo_history_cursor_continues_exact_log_page(
     )
     assert [item["subject"] for item in second["commits"]] == ["history 0", "initial"]
     assert second["next_cursor"] is None
+
+
+def test_v2_repo_issue_comment_replays_and_reconciles_lost_response(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    object.__setattr__(service.application.context, "issue_mutations", gateway)
+
+    first = service.repo_issue_v2(
+        "demo",
+        mode="comment",
+        issue_number=7,
+        body="Verification passed. token=secret-value",
+        evidence_ref="commit:abc123",
+        idempotency_key="repo-issue-comment-0001",
+    )
+    replay = service.repo_issue_v2(
+        "demo",
+        mode="comment",
+        issue_number=7,
+        body="Verification passed. token=secret-value",
+        evidence_ref="commit:abc123",
+        idempotency_key="repo-issue-comment-0001",
+    )
+
+    assert replay == first
+    assert first["mutation"]["result"] == "applied"
+    assert first["mutation"]["external_writes"] == 1
+    assert len(gateway.comments[7]) == 1
+    assert "secret-value" not in gateway.comments[7][0].body
+    assert "<!-- repoforge-issue-write:" in gateway.comments[7][0].body
+
+    gateway.fail_comment_after_effect_once = True
+    with pytest.raises(ConfigError) as uncertain:
+        service.repo_issue_v2(
+            "demo",
+            mode="comment",
+            issue_number=7,
+            body="Second verified result.",
+            evidence_ref="verification:run-2",
+            idempotency_key="repo-issue-comment-0002",
+        )
+    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    reconciled = service.repo_issue_v2(
+        "demo",
+        mode="comment",
+        issue_number=7,
+        body="Second verified result.",
+        evidence_ref="verification:run-2",
+        idempotency_key="repo-issue-comment-0002",
+    )
+
+    assert reconciled["mutation"]["result"] == "reconciled"
+    assert reconciled["mutation"]["external_writes"] == 0
+    assert len(gateway.comments[7]) == 2
+
+
+def test_v2_repo_issue_policy_approval_create_and_rate_gates(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    ctx = service.application.context
+    object.__setattr__(ctx, "issue_mutations", gateway)
+    configured = service.config.repositories["demo"]
+    policy = IssueWritePolicy(
+        enabled_ops=("comment", "close", "create"),
+        approval_required_ops=("close",),
+        max_writes_per_call=2,
+        max_writes_per_window=2,
+        window_seconds=3600,
+        create_title_prefix="[FOLLOWUP]",
+    )
+    config = replace(
+        service.config,
+        repositories={
+            **service.config.repositories,
+            "demo": replace(configured, issue_writes=policy),
+        },
+    )
+    object.__setattr__(ctx, "config", config)
+    service.config = config
+
+    pending = service.repo_issue_v2(
+        "demo",
+        mode="close",
+        issue_number=7,
+        evidence_ref="verification:full-green",
+        idempotency_key="repo-issue-close-0001",
+    )
+    approval_id = pending["mutation"]["approval_request_id"]
+    assert pending["mutation"]["result"] == "pending_approval"
+    assert gateway.issues[7].state == "open"
+
+    approvals, _ = ctx.approval_stores()
+    envelope = approvals.read(approval_id)
+    assert envelope is not None
+    approved = decide_approval(
+        envelope.value,
+        ApprovalStatus.ACCEPTED,
+        actor="operator@example.com",
+        decided_at="2026-07-17T10:00:00+00:00",
+        reason="Reviewed exact issue mutation.",
+    )
+    approvals.save(approved, expected_revision=envelope.revision)
+    closed = service.repo_issue_v2(
+        "demo",
+        mode="close",
+        issue_number=7,
+        evidence_ref="verification:full-green",
+        idempotency_key="repo-issue-close-0001",
+        approval_request_id=approval_id,
+    )
+
+    assert closed["mutation"]["result"] == "applied"
+    assert closed["mutation"]["external_writes"] == 2
+    assert gateway.issues[7].state == "closed"
+
+    with pytest.raises(ConfigError, match="external mutation window limit"):
+        service.repo_issue_v2(
+            "demo",
+            mode="create",
+            title="Missing prefix is normalized",
+            body="Follow-up work.",
+            evidence_ref="issue:7",
+            idempotency_key="repo-issue-create-0001",
+        )
+
+
+def test_v2_repo_issue_create_reopen_and_native_links_are_explicit(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    ctx = service.application.context
+    object.__setattr__(ctx, "issue_mutations", gateway)
+    configured = service.config.repositories["demo"]
+    policy = IssueWritePolicy(
+        enabled_ops=("comment", "reopen", "link", "create"),
+        max_writes_per_call=2,
+        max_writes_per_window=20,
+        create_title_prefix="[FOLLOWUP]",
+    )
+    config = replace(
+        service.config,
+        repositories={
+            **service.config.repositories,
+            "demo": replace(configured, issue_writes=policy),
+        },
+    )
+    object.__setattr__(ctx, "config", config)
+    service.config = config
+    gateway.issues[7] = replace(gateway.issues[7], state="closed")
+
+    created = service.repo_issue_v2(
+        "demo",
+        mode="create",
+        title="Investigate regression",
+        body="Reproduce and fix the regression.",
+        evidence_ref="issue:7",
+        idempotency_key="repo-issue-create-0002",
+    )
+    created_issue = gateway.issues[created["mutation"]["issue_number"]]
+    assert created_issue.title == "[FOLLOWUP] Investigate regression"
+    assert "## Objective" in created_issue.body
+    assert "<!-- repoforge-issue-write:" in created_issue.body
+
+    reopened = service.repo_issue_v2(
+        "demo",
+        mode="reopen",
+        issue_number=7,
+        evidence_ref="verification:reopened",
+        idempotency_key="repo-issue-reopen-0001",
+    )
+    assert reopened["mutation"]["external_writes"] == 2
+    assert gateway.issues[7].state == "open"
+
+    sub_issue = service.repo_issue_v2(
+        "demo",
+        mode="link",
+        issue_number=7,
+        target_issue=8,
+        link_type="sub_issue",
+        evidence_ref="roadmap:7",
+        idempotency_key="repo-issue-link-sub-0001",
+    )
+    blocked_by = service.repo_issue_v2(
+        "demo",
+        mode="link",
+        issue_number=7,
+        target_issue=8,
+        link_type="blocked_by",
+        evidence_ref="dependency:8",
+        idempotency_key="repo-issue-link-block-0001",
+    )
+    superseded = service.repo_issue_v2(
+        "demo",
+        mode="link",
+        issue_number=7,
+        target_issue=8,
+        link_type="supersede",
+        evidence_ref="replacement:8",
+        idempotency_key="repo-issue-link-super-0001",
+    )
+
+    assert sub_issue["mutation"]["link_type"] == "sub_issue"
+    assert blocked_by["mutation"]["link_type"] == "blocked_by"
+    assert superseded["mutation"]["link_type"] == "supersede"
+    assert gateway.sub_issue_links[7] == {8}
+    assert gateway.blocked_by_links[7] == {8}
+    assert any(comment.body.startswith("Duplicate of #8") for comment in gateway.comments[7])
+    assert gateway.issues[7].state == "open"
+
+
+def test_v2_repo_issue_incomplete_reconciliation_fails_closed(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    gateway.force_comment_scan_truncated = True
+    object.__setattr__(service.application.context, "issue_mutations", gateway)
+
+    with pytest.raises(ConfigError, match="reconciliation is incomplete"):
+        service.repo_issue_v2(
+            "demo",
+            mode="comment",
+            issue_number=7,
+            body="Do not post blindly.",
+            evidence_ref="verification:bounded-scan",
+            idempotency_key="repo-issue-comment-incomplete",
+        )
+    assert gateway.comments == {}
+
+
+def test_v2_repo_issue_disabled_operation_fails_before_remote_write(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    object.__setattr__(service.application.context, "issue_mutations", gateway)
+
+    with pytest.raises(ConfigError, match="not enabled"):
+        service.repo_issue_v2(
+            "demo",
+            mode="close",
+            issue_number=7,
+            evidence_ref="verification:none",
+            idempotency_key="repo-issue-close-disabled",
+        )
+    assert gateway.comments == {}
+    assert gateway.issues[7].state == "open"
 
 
 def test_v2_workspace_lifecycle_is_path_safe_filtered_and_sectioned(

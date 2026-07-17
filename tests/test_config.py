@@ -38,6 +38,60 @@ commands = [["python", "-m", "pytest"]]
     assert repository.risk_policy.ordered_profiles[-1] == "test"
     assert loaded.server.workspace_root == (tmp_path / "workspaces").resolve()
     assert repository.denied_paths == DEFAULT_DENIED_PATHS
+    assert repository.issue_writes.enabled_ops == ("comment",)
+    assert repository.issue_writes.approval_required_ops == ()
+    assert repository.issue_writes.max_writes_per_call == 2
+
+
+def test_load_typed_issue_write_policy(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""[repositories.demo]
+path = "{repo}"
+
+[repositories.demo.issue_writes]
+enabled_ops = ["comment", "close", "create"]
+approval_required_ops = ["close"]
+max_writes_per_call = 3
+max_writes_per_window = 12
+window_seconds = 900
+create_title_prefix = "[FOLLOWUP]"
+create_body_template = "## Objective\\n{{body}}\\n\\n## Evidence\\n{{evidence_ref}}"
+""",
+        encoding="utf-8",
+    )
+
+    policy = load_config(config).repositories["demo"].issue_writes
+
+    assert policy.enabled_ops == ("comment", "close", "create")
+    assert policy.approval_required_ops == ("close",)
+    assert policy.max_writes_per_call == 3
+    assert policy.max_writes_per_window == 12
+    assert policy.window_seconds == 900
+    assert policy.create_title_prefix == "[FOLLOWUP]"
+
+
+def test_issue_write_approval_ops_must_be_enabled(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""[repositories.demo]
+path = "{repo}"
+
+[repositories.demo.issue_writes]
+enabled_ops = ["comment"]
+approval_required_ops = ["close"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="approval_required_ops"):
+        load_config(config)
 
 
 def test_load_structured_profile_steps_and_no_regression_policy(tmp_path: Path) -> None:

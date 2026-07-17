@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 
 def _contracts():
     from repoforge.contracts import common, registry
@@ -100,7 +102,17 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
     _, registry = _contracts()
     expectations = {
         "repo_history": {"commit", "log", "compare"},
-        "repo_issue": {"read", "spec", "graph", "next"},
+        "repo_issue": {
+            "read",
+            "spec",
+            "graph",
+            "next",
+            "comment",
+            "close",
+            "reopen",
+            "link",
+            "create",
+        },
         "repo_policy": {"preview", "apply"},
         "workspace_refresh": {"preview", "apply"},
         "workspace_verify": {"auto", "diagnostic", "profile", "adhoc"},
@@ -183,6 +195,22 @@ def test_repo_policy_contract_carries_typed_generated_paths() -> None:
     assert generated["maxItems"] == 64
 
 
+def test_repo_policy_contract_rejects_unknown_issue_template_fields() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["repo_policy"]
+
+    with pytest.raises(ValueError, match=r"exactly.*body.*evidence_ref"):
+        spec.validate_input(
+            {
+                "repo_id": "demo",
+                "action": "preview",
+                "issue_writes": {
+                    "create_body_template": "{body}\n{evidence_ref}\n{unknown}",
+                },
+            }
+        )
+
+
 def test_workspace_refresh_contract_has_typed_conflicts_and_resolutions() -> None:
     _, registry = _contracts()
     spec = registry.V2_TOOL_SPECS["workspace_refresh"]
@@ -217,6 +245,65 @@ def test_workspace_refresh_contract_has_typed_conflicts_and_resolutions() -> Non
         "invalidated_receipts",
         "transaction_id",
     } <= output_fields
+
+
+def test_repo_issue_contract_exposes_governed_write_modes() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["repo_issue"]
+    comment = spec.validate_input(
+        {
+            "repo_id": "demo",
+            "mode": "comment",
+            "issue_number": 7,
+            "body": "Verification evidence is attached.",
+            "evidence_ref": "commit:abc123",
+            "idempotency_key": "repo-issue-comment-0001",
+        }
+    )
+
+    assert comment.mode.value == "comment"
+    assert comment.evidence_ref == "commit:abc123"
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "repo_id": "demo",
+                "mode": "close",
+                "issue_number": 7,
+                "idempotency_key": "repo-issue-close-0001",
+            }
+        )
+    schema = spec.input_model.model_json_schema()
+    assert set(schema["$defs"]["IssueMode"]["enum"]) == {
+        "read",
+        "spec",
+        "graph",
+        "next",
+        "comment",
+        "close",
+        "reopen",
+        "link",
+        "create",
+    }
+    output = spec.validate_output(
+        {
+            "summary": "Applied repo_issue comment",
+            "repo_id": "demo",
+            "mode": "comment",
+            "graph_status": "not_requested",
+            "mutation": {
+                "operation": "comment",
+                "result": "applied",
+                "issue_number": 7,
+                "marker": "<!-- repoforge-issue-write:" + "a" * 64 + " -->",
+                "external_writes": 1,
+                "url": "https://github.com/acme/demo/issues/7#issuecomment-1",
+            },
+        }
+    )
+    assert output.mutation is not None
+    assert output.mutation.external_writes == 1
 
 
 def test_mutation_schema_exposes_all_ops_and_bounds() -> None:

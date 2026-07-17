@@ -11,6 +11,7 @@ from typing import Any
 import tomli as tomllib
 
 from ...domain.generated_paths import GeneratedPathRule, parse_generated_paths
+from ...domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from ...domain.policy_patch import PolicyPatchError, RepositoryPolicyPatch
 
 SOURCE_CONFIG_VERSION = 2
@@ -232,6 +233,7 @@ class SourceRepository:
     ticket_graph: SourceTicketGraph | None = None
     risk_policy: SourceRiskPolicy | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
+    issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,7 +295,7 @@ def parse_source(text: str) -> SourceConfiguration:
         if not isinstance(raw_metadata, dict):
             raise ValueError(f"repositories.{repo_id} must be a TOML table")
         unsupported_metadata = sorted(
-            set(raw_metadata) - {"ticket_graph", "risk", "generated_paths"}
+            set(raw_metadata) - {"ticket_graph", "risk", "generated_paths", "issue_writes"}
         )
         if unsupported_metadata:
             raise ValueError(
@@ -319,7 +321,11 @@ def parse_source(text: str) -> SourceConfiguration:
                 raw_metadata.get("generated_paths"),
                 context=f"repositories.{repo_id}.generated_paths",
             )
-        except ValueError as exc:
+            issue_writes = IssueWritePolicy.from_table(
+                raw_metadata.get("issue_writes"),
+                context=f"repositories.{repo_id}.issue_writes",
+            )
+        except (ValueError, IssueWritePolicyError) as exc:
             raise ValueError(str(exc)) from exc
         result.append(
             SourceRepository(
@@ -333,6 +339,7 @@ def parse_source(text: str) -> SourceConfiguration:
                 ticket_graph,
                 risk_policy,
                 generated_paths,
+                issue_writes,
             )
         )
     unknown_metadata = sorted(set(metadata) - repo_ids)
@@ -420,12 +427,15 @@ def render_source(config: SourceConfiguration) -> str:
         if not repo.policy_patch.is_empty():
             _render_patch_table("repo.policy_patch", repo.policy_patch.as_table(), lines)
     for repo in config.repositories:
-        if repo.generated_paths:
+        if repo.generated_paths or repo.issue_writes != IssueWritePolicy():
             lines.extend(["", f"[repositories.{_toml_key(repo.repo_id)}]"])
-            lines.append(
-                "generated_paths = "
-                + _toml_value([rule.as_table() for rule in repo.generated_paths])
-            )
+            if repo.generated_paths:
+                lines.append(
+                    "generated_paths = "
+                    + _toml_value([rule.as_table() for rule in repo.generated_paths])
+                )
+            if repo.issue_writes != IssueWritePolicy():
+                lines.append("issue_writes = " + _toml_value(repo.issue_writes.as_table()))
         if repo.ticket_graph is not None:
             lines.extend(["", f"[repositories.{_toml_key(repo.repo_id)}.ticket_graph]"])
             for key, value in repo.ticket_graph.as_table().items():

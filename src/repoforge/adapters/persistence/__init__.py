@@ -1,4 +1,5 @@
 from .json_approval_store import JsonApprovalPayloadStore, JsonApprovalStore
+from .json_external_mutation_ledger import JsonExternalMutationLedger
 from .json_github_read_cache import JsonGitHubReadCache
 from .json_hygiene_cache import JsonHygieneBaselineCache
 from .json_idempotency_store import JsonIdempotencyStore
@@ -13,6 +14,7 @@ from .json_workspace_store import JsonWorkspaceStore
 __all__ = [
     "JsonApprovalPayloadStore",
     "JsonApprovalStore",
+    "JsonExternalMutationLedger",
     "JsonGitHubReadCache",
     "JsonHygieneBaselineCache",
     "JsonIdempotencyStore",
