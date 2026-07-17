@@ -41,6 +41,26 @@ body:
     id: roadmap
     attributes: {label: Roadmap, placeholder: "master / section anchor"}
     validations: {required: true}
+  - type: input
+    id: supersedes
+    attributes: {label: Supersedes, placeholder: "None or #41, #42"}
+    validations: {required: true}
+  - type: input
+    id: superseded-by
+    attributes: {label: Superseded by, placeholder: "None or #50"}
+    validations: {required: true}
+  - type: input
+    id: split-into
+    attributes: {label: Split into, placeholder: "None or #51, #52"}
+    validations: {required: true}
+  - type: input
+    id: merged-into
+    attributes: {label: Merged into, placeholder: "None or #53"}
+    validations: {required: true}
+  - type: input
+    id: invalidates
+    attributes: {label: Invalidates, placeholder: "None or #54, #55"}
+    validations: {required: true}
   - type: textarea
     id: objective
     attributes: {label: Objective}
@@ -80,4 +100,38 @@ body:
   - type: textarea
     id: pr-shape
     attributes: {label: Expected PR shape}
+    validations: {required: true}
+  - type: textarea
+    id: verified-deliverables
+    attributes:
+      label: Verified deliverables
+      description: Use `None` until closing or handing off partial work; then list only evidence-backed deliverables.
+    validations: {required: true}
+  - type: textarea
+    id: remaining-scope
+    attributes:
+      label: Remaining scope
+      description: Use `None` for complete delivery; otherwise list every unfinished requirement.
+    validations: {required: true}
+  - type: input
+    id: new-child-issues
+    attributes: {label: New child issues, placeholder: "None or #56, #57"}
+    validations: {required: true}
+  - type: textarea
+    id: unverified-work
+    attributes:
+      label: Unverified work
+      description: Use `None` when all claimed work is verified; never represent unverified work as Done.
+    validations: {required: true}
+  - type: textarea
+    id: rejected-scope
+    attributes:
+      label: Rejected scope
+      description: Use `None` when no proposal or requirement was explicitly rejected; rejected work is not remaining scope.
+    validations: {required: true}
+  - type: textarea
+    id: handoff-notes
+    attributes:
+      label: Handoff notes
+      description: Use `None` for complete delivery; otherwise record bounded implementation and verification context.
     validations: {required: true}

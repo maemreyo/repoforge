@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 CI job
+    import tomli as tomllib
 
 from repoforge.contracts.registry import render_v2_schema_bundle
 

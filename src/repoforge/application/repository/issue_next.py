@@ -14,7 +14,7 @@ from ...domain.tickets import (
 )
 from ..context import ApplicationContext
 from ..tickets.graph import ticket_subtree_numbers, validate_ticket_graph
-from ..tickets.live import ticket_live_state_from_issue
+from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
 from ..tickets.readiness import derive_ticket_readiness
 from .issue_graph import (
     _incomplete_graph_diagnostic,
@@ -33,7 +33,10 @@ def _diagnostic_payload(item: TicketDiagnostic) -> dict[str, Any]:
     }
 
 
-def _assessment_payload(item: TicketReadinessAssessment) -> dict[str, Any]:
+def _assessment_payload(
+    item: TicketReadinessAssessment,
+    delivery: TicketDeliveryMetadata | None = None,
+) -> dict[str, Any]:
     return {
         "number": item.number,
         "declared_status": item.declared_status.value,
@@ -46,6 +49,9 @@ def _assessment_payload(item: TicketReadinessAssessment) -> dict[str, Any]:
         "metadata_repairs": list(item.metadata_repairs),
         "wave": item.wave,
         "sequence": item.sequence,
+        "evolution": ticket_delivery_payload(
+            delivery or TicketDeliveryMetadata(specification_complete=False)
+        ),
     }
 
 
@@ -65,7 +71,7 @@ def _live_states(snapshot: TicketGraphSnapshot) -> tuple[TicketLiveState, ...]:
                 "title": issue.title,
                 "state": issue.state,
                 "body": issue.body,
-                "comments": [],
+                "comments": [{"body": body} for body in issue.comments],
             },
             expected_number=issue.number,
         )
@@ -259,7 +265,9 @@ class RepositoryIssueNextReader:
                 p3_limit=c.p3_wip_limit,
                 initiative_limit=c.initiative_wip_limit,
             )
-            report = derive_ticket_readiness(graph, _live_states(snapshot), policy=policy)
+            live_states = _live_states(snapshot)
+            live_by_number = {item.number: item for item in live_states}
+            report = derive_ticket_readiness(graph, live_states, policy=policy)
             if report.diagnostics:
                 details["valid"] = False
                 details["diagnostic_count"] = len(report.diagnostics)
@@ -280,12 +288,17 @@ class RepositoryIssueNextReader:
             tickets = [
                 {
                     **node_payload(nodes[number]),
-                    "readiness": _assessment_payload(assessments[number]),
+                    "evolution": ticket_delivery_payload(live_by_number[number].delivery),
+                    "readiness": _assessment_payload(
+                        assessments[number], live_by_number[number].delivery
+                    ),
                 }
                 for number in recommended
             ]
             assessment_payloads = [
-                _assessment_payload(item) for item in report.assessments if item.number in scope
+                _assessment_payload(item, live_by_number[item.number].delivery)
+                for item in report.assessments
+                if item.number in scope
             ]
             repairs = [
                 {"issue_number": item.number, "repairs": list(item.metadata_repairs)}

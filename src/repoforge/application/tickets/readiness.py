@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from ...domain.tickets import (
+    RequirementRelationType,
+    TicketDiagnostic,
     TicketGraph,
     TicketGraphError,
     TicketLiveState,
@@ -33,6 +35,8 @@ _ADVISORY_GRAPH_DIAGNOSTICS = {"READY_WITH_OPEN_BLOCKER"}
 _REASON_MESSAGES = {
     "LIVE_METADATA_UNAVAILABLE": "Live issue state could not be read, so readiness fails closed.",
     "SUPERSEDED": "The ticket has an explicit superseding issue.",
+    "PARTIAL_COMPLETION_REMAINS": "The closed or handed-off result still has explicit remaining or unverified scope.",
+    "INVALIDATED_ASSUMPTION": "Another requirement explicitly invalidated an assumption used by this ticket.",
     "SPECIFICATION_INCOMPLETE": "The ticket specification is incomplete.",
     "DESIGN_GATE_UNRESOLVED": "A required design decision is still unresolved.",
     "PARENT_INACTIVE": "The parent program or initiative is not active.",
@@ -51,14 +55,109 @@ def _live_map(live_states: tuple[TicketLiveState, ...]) -> dict[int, TicketLiveS
     return result
 
 
+def _replacement_targets(state: TicketLiveState) -> tuple[int, ...]:
+    targets = {
+        item.target_issue
+        for item in state.delivery.relations
+        if item.relation_type
+        in {RequirementRelationType.SUPERSEDED_BY, RequirementRelationType.MERGED_INTO}
+    }
+    if state.delivery.superseded_by is not None:
+        targets.add(state.delivery.superseded_by)
+    return tuple(sorted(targets))
+
+
 def _base_status(node: TicketNode, live: TicketLiveState | None) -> TicketStatus:
     if live is None or live.is_open is None:
         return TicketStatus.BLOCKED
-    if live.delivery.superseded_by is not None or node.status is TicketStatus.SUPERSEDED:
+    if _replacement_targets(live) or node.status is TicketStatus.SUPERSEDED:
         return TicketStatus.SUPERSEDED
     if live.is_open is False:
+        if (
+            live.delivery.partial_completion is not None
+            and live.delivery.partial_completion.has_remaining_scope
+        ):
+            return TicketStatus.BLOCKED
         return TicketStatus.DONE
     return node.status
+
+
+def _evolution_diagnostics(
+    live_states: tuple[TicketLiveState, ...],
+) -> tuple[TicketDiagnostic, ...]:
+    diagnostics: list[TicketDiagnostic] = []
+    edges: dict[int, set[int]] = {}
+    for state in live_states:
+        replacements = set(_replacement_targets(state))
+        for relation in state.delivery.relations:
+            if relation.target_issue == state.number:
+                diagnostics.append(
+                    TicketDiagnostic(
+                        "SELF_REQUIREMENT_RELATION",
+                        state.number,
+                        "requirement evolution cannot target the same issue",
+                    )
+                )
+            if relation.relation_type is RequirementRelationType.SUPERSEDES:
+                edges.setdefault(relation.target_issue, set()).add(state.number)
+            elif relation.relation_type in {
+                RequirementRelationType.SUPERSEDED_BY,
+                RequirementRelationType.MERGED_INTO,
+                RequirementRelationType.SPLIT_INTO,
+            }:
+                edges.setdefault(state.number, set()).add(relation.target_issue)
+        if len(replacements) > 1:
+            diagnostics.append(
+                TicketDiagnostic(
+                    "AMBIGUOUS_SUPERSESSION",
+                    state.number,
+                    f"ticket declares multiple canonical replacements: {sorted(replacements)}",
+                )
+            )
+
+    visiting: set[int] = set()
+    visited: set[int] = set()
+    stack: list[int] = []
+    cycle_nodes: set[int] = set()
+
+    def visit(number: int) -> None:
+        if number in visited:
+            return
+        if number in visiting:
+            try:
+                start = stack.index(number)
+            except ValueError:
+                start = 0
+            cycle_nodes.update(stack[start:])
+            return
+        visiting.add(number)
+        stack.append(number)
+        for target in sorted(edges.get(number, ())):
+            visit(target)
+        stack.pop()
+        visiting.remove(number)
+        visited.add(number)
+
+    for number in sorted(edges):
+        visit(number)
+    diagnostics.extend(
+        TicketDiagnostic(
+            "SUPERSESSION_CYCLE",
+            number,
+            "ticket participates in a supersession, split, or merge cycle",
+        )
+        for number in sorted(cycle_nodes)
+    )
+    return tuple(sorted(set(diagnostics)))
+
+
+def _invalidated_targets(live_states: tuple[TicketLiveState, ...]) -> frozenset[int]:
+    return frozenset(
+        relation.target_issue
+        for state in live_states
+        for relation in state.delivery.relations
+        if relation.relation_type is RequirementRelationType.INVALIDATES
+    )
 
 
 def _initiative_number(node: TicketNode, nodes: dict[int, TicketNode]) -> int | None:
@@ -128,13 +227,14 @@ def derive_ticket_readiness(
         item
         for item in validate_ticket_graph(graph)
         if item.code not in _ADVISORY_GRAPH_DIAGNOSTICS
-    )
+    ) + _evolution_diagnostics(live_states)
     if diagnostics:
         return TicketReadinessReport((), (), diagnostics)
 
     nodes = {node.number: node for node in graph.nodes}
     live = _live_map(live_states)
     base_status = {number: _base_status(node, live.get(number)) for number, node in nodes.items()}
+    invalidated_targets = _invalidated_targets(live_states)
     initiative_by_ticket = {
         number: _initiative_number(node, nodes) for number, node in nodes.items()
     }
@@ -173,6 +273,31 @@ def derive_ticket_readiness(
                     node,
                     derived=TicketStatus.SUPERSEDED,
                     reason_codes=("SUPERSEDED",),
+                    wave=wave,
+                    sequence=sequence,
+                )
+            )
+            continue
+        if (
+            state.delivery.partial_completion is not None
+            and state.delivery.partial_completion.has_remaining_scope
+        ):
+            assessments.append(
+                _assessment(
+                    node,
+                    derived=TicketStatus.BLOCKED,
+                    reason_codes=("PARTIAL_COMPLETION_REMAINS",),
+                    wave=wave,
+                    sequence=sequence,
+                )
+            )
+            continue
+        if node.number in invalidated_targets:
+            assessments.append(
+                _assessment(
+                    node,
+                    derived=TicketStatus.BLOCKED,
+                    reason_codes=("INVALIDATED_ASSUMPTION",),
                     wave=wave,
                     sequence=sequence,
                 )

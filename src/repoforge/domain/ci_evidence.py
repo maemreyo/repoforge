@@ -6,16 +6,18 @@ import re
 from dataclasses import dataclass
 
 from ..config import RepositoryConfig
+from .egress import (
+    EgressContentClass,
+    EgressDestination,
+    EgressPolicy,
+    EgressRange,
+    EgressRequest,
+    evaluate_egress,
+)
 from .errors import ErrorCode, RepoForgeError, SecurityError
 from .policy import assert_path_allowed
-from .redaction import redact_text
 
 _SELECTOR = re.compile(r"check-run:([1-9][0-9]{0,19})")
-_PRIVATE_KEY = re.compile(
-    r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
-    re.DOTALL,
-)
-_TOKEN_CANDIDATE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9_./+=-]{32,})(?![A-Za-z0-9])")
 _PATH_CANDIDATE = re.compile(
     r"(?:^|[\s'\"(])"
     r"(\.env(?:\.[A-Za-z0-9_.-]+)?|"
@@ -57,34 +59,6 @@ def parse_check_selector(value: str) -> int:
     return check_run_id
 
 
-def _looks_high_entropy(value: str) -> bool:
-    if len(value) < 32 or len(set(value)) < 12:
-        return False
-    classes = sum(
-        (
-            any(character.islower() for character in value),
-            any(character.isupper() for character in value),
-            any(character.isdigit() for character in value),
-            any(not character.isalnum() for character in value),
-        )
-    )
-    return classes >= 3 or (classes >= 2 and len(value) >= 40)
-
-
-def _redact_entropy(value: str) -> tuple[str, bool]:
-    changed = False
-
-    def replace(match: re.Match[str]) -> str:
-        nonlocal changed
-        candidate = match.group(1)
-        if not _looks_high_entropy(candidate):
-            return candidate
-        changed = True
-        return "<redacted:high-entropy>"
-
-    return _TOKEN_CANDIDATE.sub(replace, value), changed
-
-
 def _line_exposes_denied_path(line: str, repo: RepositoryConfig) -> bool:
     for match in _PATH_CANDIDATE.finditer(line):
         candidate = match.group(1).rstrip(".,:;)]}")
@@ -95,6 +69,22 @@ def _line_exposes_denied_path(line: str, repo: RepositoryConfig) -> bool:
     return False
 
 
+def _render_egress_ranges(value: str, ranges: tuple[EgressRange, ...]) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for item in ranges:
+        parts.append(value[cursor : item.start])
+        if "private_key" in item.category:
+            parts.append("<redacted:private-key>")
+        elif "high_entropy" in item.category:
+            parts.append("<redacted:high-entropy>")
+        else:
+            parts.append("<redacted>")
+        cursor = item.end
+    parts.append(value[cursor:])
+    return "".join(parts)
+
+
 def sanitize_ci_text(
     value: str,
     repo: RepositoryConfig,
@@ -102,17 +92,36 @@ def sanitize_ci_text(
     max_chars: int,
     secrets: tuple[str, ...] = (),
 ) -> SanitizedCiText:
-    """Redact secrets, withhold denied paths, and bound model-visible CI text."""
-    private_redacted, private_count = _PRIVATE_KEY.subn("<redacted:private-key>", value)
-    credential_redacted = redact_text(
-        private_redacted,
-        secrets=secrets,
-        limit=max(len(private_redacted), max_chars),
+    """Apply central egress policy, denied-path withholding, and legacy CI rendering."""
+
+    if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars <= 0:
+        raise ValueError("max_chars must be a positive integer")
+    encoded_bytes = len(value.encode("utf-8", errors="replace"))
+    if encoded_bytes > 20_000_000:
+        return SanitizedCiText(
+            "<withheld:oversized-ci-evidence>",
+            True,
+            0,
+            True,
+        )
+    result = evaluate_egress(
+        EgressRequest(
+            value,
+            EgressContentClass.DIAGNOSTIC,
+            EgressDestination.MODEL,
+            explicit_secrets=secrets,
+            policy=EgressPolicy(
+                max_input_bytes=max(1, encoded_bytes),
+                max_output_chars=max(1, min(max(len(value), max_chars), 1_000_000)),
+                max_output_lines=20_000,
+                withhold_private_keys=False,
+            ),
+        )
     )
-    entropy_redacted, entropy_changed = _redact_entropy(credential_redacted)
+    egress_sanitized = _render_egress_ranges(value, result.redaction_ranges)
     withheld = 0
     lines: list[str] = []
-    for line in entropy_redacted.splitlines():
+    for line in egress_sanitized.splitlines():
         if _line_exposes_denied_path(line, repo):
             withheld += 1
             lines.append("<withheld:denied-source-snippet>")
@@ -125,7 +134,7 @@ def sanitize_ci_text(
         sanitized = f"{sanitized[:max_chars]}\n... <{omitted} characters omitted>"
     return SanitizedCiText(
         sanitized,
-        private_count > 0 or entropy_changed or sanitized != value,
+        bool(result.redaction_ranges) or withheld > 0 or sanitized != value,
         withheld,
         truncated,
     )

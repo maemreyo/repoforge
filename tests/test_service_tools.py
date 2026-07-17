@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, git
 
+from repoforge.application.service import _result
 from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.domain.approval import ApprovalStatus, decide_approval
 from repoforge.domain.errors import (
@@ -112,6 +113,36 @@ class _FakeIssueMutationGateway:
         target = next(item for item in self.issues.values() if item.database_id == blocker_issue_id)
         self.blocked_by_links.setdefault(issue_number, set()).add(target.issue_number)
         return target
+
+
+def test_service_result_enforces_secret_safe_egress_recursively() -> None:
+    secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    private_key = "-----BEGIN PRIVATE KEY-----\nPRIVATE-DATA\n-----END PRIVATE KEY-----"
+    digest = "a" * 64
+    payload = {
+        "payload": {
+            "message": f"failed with token={secret}",
+            "authorization": f"Bearer {secret}",
+            "nested": [
+                "ordinary source context",
+                f"https://user:{secret}@example.test/path",
+                private_key,
+            ],
+            "workspace_fingerprint": digest,
+            "selector": "check-run:12345",
+            "public_url": "https://example.test/actions/run/12345",
+        }
+    }
+
+    result = _result(payload)
+    rendered = json.dumps(result, sort_keys=True)
+
+    assert secret not in rendered
+    assert "PRIVATE-DATA" not in rendered
+    assert result["workspace_fingerprint"] == digest
+    assert result["selector"] == "check-run:12345"
+    assert result["public_url"] == "https://example.test/actions/run/12345"
+    assert "ordinary source context" in rendered
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
