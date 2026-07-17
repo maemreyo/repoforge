@@ -17,6 +17,7 @@ from repoforge.application.config_admin import ConfigAdminService
 from repoforge.application.configuration.document import (
     apply_policy_patch,
     apply_proposal,
+    apply_risk_policy,
     parse_resolved,
     render_resolved,
 )
@@ -199,6 +200,37 @@ type_field = "Ticket Type"
     assert graph.project_owner == "acme"
     assert graph.project_number == 7
     assert graph.status_field == "Delivery Status"
+    assert parse_source(render_source(parsed)) == parsed
+
+
+def test_source_round_trips_risk_metadata() -> None:
+    text = """version = 2
+[[repo]]
+id = "demo"
+path = "/tmp/demo"
+
+[repositories.demo.risk]
+low_max = 20
+medium_max = 45
+high_max = 70
+final_profile = "full"
+ordered_profiles = ["quick", "full"]
+narrow_diagnostics = ["pytest-target"]
+critical_globs = ["src/**/security*.py"]
+public_contract_globs = ["src/**/interfaces/**"]
+manifest_globs = ["pyproject.toml"]
+docs_globs = ["docs/**"]
+"""
+
+    parsed = parse_source(text)
+    risk = parsed.repositories[0].risk_policy
+
+    assert risk is not None
+    assert risk.low_max == 20
+    assert risk.ordered_profiles == ("quick", "full")
+    assert risk.critical_globs == ("src/**/security*.py",)
+    resolved = apply_risk_policy({"repositories": {"demo": {}}}, "demo", risk)
+    assert resolved["repositories"]["demo"]["risk"] == risk.as_table()
     assert parse_source(render_source(parsed)) == parsed
 
 

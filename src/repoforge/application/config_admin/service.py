@@ -46,6 +46,7 @@ from ..approvals import PendingPolicyChangeStore
 from ..configuration.document import (
     apply_policy_patch,
     apply_proposal,
+    apply_risk_policy,
     apply_ticket_graph,
     parse_resolved,
     render_resolved,
@@ -299,6 +300,7 @@ class ConfigAdminService:
                     tuple(sorted(merged_overrides.items())),
                     merged_patch,
                     item.ticket_graph,
+                    item.risk_policy,
                 )
                 if item.repo_id == repo_id
                 else item
@@ -309,6 +311,7 @@ class ConfigAdminService:
         document = parse_resolved(self._store.read_resolved_text(current.generation))
         document = apply_proposal(document, proposal)
         document = apply_ticket_graph(document, repo_id, source_item.ticket_graph)
+        document = apply_risk_policy(document, repo_id, source_item.risk_policy)
         try:
             document = apply_policy_patch(document, repo_id, merged_patch)
         except ValueError as exc:

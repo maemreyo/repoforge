@@ -23,6 +23,7 @@ from ...application.config_admin import ConfigAdminService, PendingPolicyChangeS
 from ...application.configuration.document import (
     apply_policy_patch,
     apply_proposal,
+    apply_risk_policy,
     apply_ticket_graph,
     parse_resolved,
     remove_repository,
@@ -32,6 +33,7 @@ from ...application.configuration.paths import resolve_repoforge_paths
 from ...application.configuration.source import (
     SourceConfiguration,
     SourceRepository,
+    SourceRiskPolicy,
     SourceTicketGraph,
     add_source_repository,
     parse_source,
@@ -228,6 +230,18 @@ def _source_for_display(store: ConfigurationStore) -> SourceConfiguration:
                         )
                         if repo.ticket_graph is not None
                         else None
+                    ),
+                    risk_policy=SourceRiskPolicy(
+                        low_max=repo.risk_policy.low_max,
+                        medium_max=repo.risk_policy.medium_max,
+                        high_max=repo.risk_policy.high_max,
+                        critical_globs=repo.risk_policy.critical_globs,
+                        public_contract_globs=repo.risk_policy.public_contract_globs,
+                        manifest_globs=repo.risk_policy.manifest_globs,
+                        docs_globs=repo.risk_policy.docs_globs,
+                        narrow_diagnostics=repo.risk_policy.narrow_diagnostics,
+                        ordered_profiles=repo.risk_policy.ordered_profiles,
+                        final_profile=repo.risk_policy.final_profile,
                     ),
                 )
                 for repo in sorted(config.repositories.values(), key=lambda item: item.repo_id)
@@ -795,6 +809,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
                 tuple(sorted(effective_inputs[item.repo_id][1].items())),
                 item.policy_patch,
                 item.ticket_graph,
+                item.risk_policy,
             )
             if item.repo_id in proposal_by_id
             else item
@@ -806,9 +821,11 @@ def _repo_refresh(args: argparse.Namespace) -> int:
     fingerprint_map = current.repository_fingerprint_map()
     patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
     graph_by_id = {item.repo_id: item.ticket_graph for item in source.repositories}
+    risk_by_id = {item.repo_id: item.risk_policy for item in source.repositories}
     for proposal in proposals:
         document = apply_proposal(document, proposal)
         document = apply_ticket_graph(document, proposal.repo_id, graph_by_id[proposal.repo_id])
+        document = apply_risk_policy(document, proposal.repo_id, risk_by_id[proposal.repo_id])
         document = apply_policy_patch(document, proposal.repo_id, patch_by_id[proposal.repo_id])
         fingerprint_map[proposal.repo_id] = proposal.facts_fingerprint
     fingerprints = tuple(sorted(fingerprint_map.items()))

@@ -149,6 +149,7 @@ def _common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "parse_resolved", lambda text: {"repositories": {}})
     monkeypatch.setattr(cli, "apply_proposal", lambda document, proposal: document)
     monkeypatch.setattr(cli, "apply_ticket_graph", lambda document, repo_id, graph: document)
+    monkeypatch.setattr(cli, "apply_risk_policy", lambda document, repo_id, policy: document)
     monkeypatch.setattr(cli, "_render_candidate", lambda *args, **kwargs: "resolved-new")
     monkeypatch.setattr(cli, "_smoke_resolved", lambda *args: {"ok": True})
     monkeypatch.setattr(cli, "_state_root", lambda: Path("/state"))

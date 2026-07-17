@@ -112,6 +112,114 @@ class SourceTicketGraph:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceRiskPolicy:
+    """Human-owned risk-policy fields preserved from source into resolved generations."""
+
+    low_max: int | None = None
+    medium_max: int | None = None
+    high_max: int | None = None
+    critical_globs: tuple[str, ...] | None = None
+    public_contract_globs: tuple[str, ...] | None = None
+    manifest_globs: tuple[str, ...] | None = None
+    docs_globs: tuple[str, ...] | None = None
+    narrow_diagnostics: tuple[str, ...] | None = None
+    ordered_profiles: tuple[str, ...] | None = None
+    final_profile: str | None = None
+
+    @classmethod
+    def from_table(cls, raw: object, *, context: str) -> SourceRiskPolicy:
+        if not isinstance(raw, dict):
+            raise ValueError(f"{context} must be a TOML table")
+        allowed = {
+            "low_max",
+            "medium_max",
+            "high_max",
+            "critical_globs",
+            "public_contract_globs",
+            "manifest_globs",
+            "docs_globs",
+            "narrow_diagnostics",
+            "ordered_profiles",
+            "final_profile",
+        }
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise ValueError(f"{context} contains unsupported fields: {unknown}")
+
+        def threshold(name: str) -> int | None:
+            value = raw.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
+                raise ValueError(f"{context}.{name} must be an integer in 0..100")
+            return value
+
+        def strings(name: str) -> tuple[str, ...] | None:
+            value = raw.get(name)
+            if value is None:
+                return None
+            if (
+                not isinstance(value, list)
+                or len(value) > 64
+                or not all(isinstance(item, str) and item and len(item) <= 512 for item in value)
+            ):
+                raise ValueError(
+                    f"{context}.{name} must be an array of at most 64 non-empty bounded strings"
+                )
+            return tuple(value)
+
+        final_profile = raw.get("final_profile")
+        if final_profile is not None and (
+            not isinstance(final_profile, str) or not final_profile or len(final_profile) > 64
+        ):
+            raise ValueError(f"{context}.final_profile must be a non-empty bounded string")
+        result = cls(
+            low_max=threshold("low_max"),
+            medium_max=threshold("medium_max"),
+            high_max=threshold("high_max"),
+            critical_globs=strings("critical_globs"),
+            public_contract_globs=strings("public_contract_globs"),
+            manifest_globs=strings("manifest_globs"),
+            docs_globs=strings("docs_globs"),
+            narrow_diagnostics=strings("narrow_diagnostics"),
+            ordered_profiles=strings("ordered_profiles"),
+            final_profile=final_profile,
+        )
+        if (
+            result.low_max is not None
+            and result.medium_max is not None
+            and result.high_max is not None
+            and not result.low_max < result.medium_max < result.high_max
+        ):
+            raise ValueError(f"{context} thresholds must be strictly increasing")
+        return result
+
+    def as_table(self) -> dict[str, int | str | list[str]]:
+        result: dict[str, int | str | list[str]] = {}
+        for name, value in (
+            ("low_max", self.low_max),
+            ("medium_max", self.medium_max),
+            ("high_max", self.high_max),
+        ):
+            if value is not None:
+                result[name] = value
+        if self.final_profile is not None:
+            result["final_profile"] = self.final_profile
+        for name in (
+            "critical_globs",
+            "public_contract_globs",
+            "manifest_globs",
+            "docs_globs",
+            "narrow_diagnostics",
+            "ordered_profiles",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                result[name] = list(value)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class SourceRepository:
     repo_id: str
     path: str
@@ -121,6 +229,7 @@ class SourceRepository:
     policy_overrides: tuple[tuple[str, str], ...] = ()
     policy_patch: RepositoryPolicyPatch = field(default_factory=RepositoryPolicyPatch)
     ticket_graph: SourceTicketGraph | None = None
+    risk_policy: SourceRiskPolicy | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +290,7 @@ def parse_source(text: str) -> SourceConfiguration:
         raw_metadata = metadata.get(repo_id, {})
         if not isinstance(raw_metadata, dict):
             raise ValueError(f"repositories.{repo_id} must be a TOML table")
-        unsupported_metadata = sorted(set(raw_metadata) - {"ticket_graph"})
+        unsupported_metadata = sorted(set(raw_metadata) - {"ticket_graph", "risk"})
         if unsupported_metadata:
             raise ValueError(
                 f"repositories.{repo_id} contains unsupported source metadata: "
@@ -194,6 +303,13 @@ def parse_source(text: str) -> SourceConfiguration:
             if "ticket_graph" in raw_metadata
             else None
         )
+        risk_policy = (
+            SourceRiskPolicy.from_table(
+                raw_metadata["risk"], context=f"repositories.{repo_id}.risk"
+            )
+            if "risk" in raw_metadata
+            else None
+        )
         result.append(
             SourceRepository(
                 repo_id,
@@ -204,6 +320,7 @@ def parse_source(text: str) -> SourceConfiguration:
                 overrides,
                 policy_patch,
                 ticket_graph,
+                risk_policy,
             )
         )
     unknown_metadata = sorted(set(metadata) - repo_ids)
@@ -291,11 +408,14 @@ def render_source(config: SourceConfiguration) -> str:
         if not repo.policy_patch.is_empty():
             _render_patch_table("repo.policy_patch", repo.policy_patch.as_table(), lines)
     for repo in config.repositories:
-        if repo.ticket_graph is None:
-            continue
-        lines.extend(["", f"[repositories.{_toml_key(repo.repo_id)}.ticket_graph]"])
-        for key, value in repo.ticket_graph.as_table().items():
-            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+        if repo.ticket_graph is not None:
+            lines.extend(["", f"[repositories.{_toml_key(repo.repo_id)}.ticket_graph]"])
+            for key, value in repo.ticket_graph.as_table().items():
+                lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+        if repo.risk_policy is not None:
+            lines.extend(["", f"[repositories.{_toml_key(repo.repo_id)}.risk]"])
+            for key, risk_value in repo.risk_policy.as_table().items():
+                lines.append(f"{_toml_key(key)} = {_toml_value(risk_value)}")
     return "\n".join(lines).rstrip() + "\n"
 
 
