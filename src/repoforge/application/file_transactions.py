@@ -8,6 +8,7 @@ from typing import cast
 from ..domain.errors import ConfigError
 from ..ports.filesystem_transaction import FaultInjector, FileTransaction
 from .context import ApplicationContext
+from .extended_context import receipt_file_transaction_factory
 
 
 def open_file_transaction(
@@ -31,9 +32,7 @@ def open_file_transaction(
     if callable(getattr(candidate, "load_commit_receipt", None)):
         return cast(FileTransaction, candidate)
 
-    receipt_factory = ctx.receipt_file_transactions
-    if receipt_factory is None:
-        raise ConfigError("Receipt-aware file transaction factory is unavailable")
+    receipt_factory = receipt_file_transaction_factory(ctx)
     checkpoint = fault_injector
     if checkpoint is None:
         candidate_checkpoint = getattr(candidate, "_checkpoint", None)

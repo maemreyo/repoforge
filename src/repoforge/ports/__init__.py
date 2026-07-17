@@ -14,7 +14,6 @@ from .execution_environment import (
     ExecutionEnvironmentPort,
     ExecutionReceipt,
 )
-from .external_mutation_ledger import ExternalMutationLedger
 from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
 from .git import (
@@ -43,7 +42,6 @@ from .hygiene import (
 )
 from .idempotency import IdempotencyStore
 from .ids import IdGenerator
-from .issue_mutation import IssueMutationGateway, RemoteComment, RemoteIssue
 from .locking import LockManager
 from .metrics import MetricsSink
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
@@ -98,7 +96,6 @@ __all__ = [
     "ExecutableLocator",
     "ExecutionEnvironmentPort",
     "ExecutionReceipt",
-    "ExternalMutationLedger",
     "FileSystem",
     "FileTransaction",
     "FileTransactionFactory",
@@ -121,7 +118,6 @@ __all__ = [
     "HygieneInspection",
     "IdGenerator",
     "IdempotencyStore",
-    "IssueMutationGateway",
     "LockManager",
     "MetricsSink",
     "OnboardingEnvironment",
@@ -136,8 +132,6 @@ __all__ = [
     "ProcessInspector",
     "ProviderRegistry",
     "PullRequestGateway",
-    "RemoteComment",
-    "RemoteIssue",
     "RepositoryDiscovery",
     "RepositoryProbe",
     "ResolvedRepositoryRef",

@@ -17,7 +17,12 @@ from ...domain.errors import ConfigError
 from ...domain.issue_writes import IssueLinkType
 from ...domain.redaction import redact_text
 from ..context import ApplicationContext
-from ..idempotency import IdempotencyEffectBoundary
+from ..extended_context import (
+    approval_stores,
+    external_mutation_ledger,
+    issue_mutation_gateway,
+)
+from ..idempotency import IdempotencyEffectBoundary, execute_idempotent
 
 _WRITE_MODES = frozenset({"comment", "close", "reopen", "link", "create"})
 _MAX_RECONCILIATION_ITEMS = 100
@@ -93,7 +98,7 @@ class RepositoryIssueMutatorV2:
         boundary = IdempotencyEffectBoundary()
 
         def reserve(effect: str) -> None:
-            self.ctx.external_mutation_ledger().reserve(
+            external_mutation_ledger(self.ctx).reserve(
                 repo.repo_id,
                 f"{marker}:{effect}",
                 count=1,
@@ -109,7 +114,7 @@ class RepositoryIssueMutatorV2:
             existing = reconcile()
             if existing is not None:
                 return existing
-            gateway = self.ctx.issue_mutation_gateway()
+            gateway = issue_mutation_gateway(self.ctx)
             issue_number = self._optional_int(normalized.get("issue_number"))
             evidence_ref = str(normalized["evidence_ref"])
             writes = 0
@@ -198,7 +203,8 @@ class RepositoryIssueMutatorV2:
                 url,
             )
 
-        return self.ctx.idempotent(
+        return execute_idempotent(
+            self.ctx,
             "repo_issue",
             command.idempotency_key,
             normalized,
@@ -231,7 +237,7 @@ class RepositoryIssueMutatorV2:
             if command.approval_request_id is not None:
                 raise ConfigError("approval_request_id is not valid for this repository policy")
             return None
-        approvals, payloads = self.ctx.approval_stores()
+        approvals, payloads = approval_stores(self.ctx)
         digest = payloads.digest(payload)
         envelope = None
         if command.approval_request_id is not None:
@@ -323,7 +329,7 @@ class RepositoryIssueMutatorV2:
         request: dict[str, object],
         marker: str,
     ) -> RepositoryIssueMutationResult | None:
-        gateway = self.ctx.issue_mutation_gateway()
+        gateway = issue_mutation_gateway(self.ctx)
         operation = str(request["mode"])
         issue_number = self._optional_int(request.get("issue_number"))
         target_issue = self._optional_int(request.get("target_issue"))
@@ -395,7 +401,7 @@ class RepositoryIssueMutatorV2:
         )
 
     def _find_marker_comment(self, repo_path: Any, issue_number: int, marker: str) -> Any | None:
-        comments, truncated = self.ctx.issue_mutation_gateway().issue_comments(
+        comments, truncated = issue_mutation_gateway(self.ctx).issue_comments(
             repo_path,
             issue_number,
             max_comments=_MAX_RECONCILIATION_ITEMS,
