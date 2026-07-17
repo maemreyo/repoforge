@@ -85,10 +85,13 @@ install: build  # Install the exact freshly built wheel as the system-wide rf to
 		uv tool install --reinstall "$$1" -q
 
 install-hooks:  # Install the reviewed pre-push contract hook
-	@echo "Installing pre-push hook..."
-	@cp scripts/pre-push.sh .git/hooks/pre-push
-	@chmod +x .git/hooks/pre-push
-	@echo "Installed .git/hooks/pre-push"
+	@set -eu; \
+		hooks_dir="$$(git rev-parse --git-common-dir)/hooks"; \
+		echo "Installing pre-push hook..."; \
+		mkdir -p "$$hooks_dir"; \
+		cp scripts/pre-push.sh "$$hooks_dir/pre-push"; \
+		chmod +x "$$hooks_dir/pre-push"; \
+		echo "Installed $$hooks_dir/pre-push"
 
 inspector:  # Launch the MCP Inspector workflow
 	./scripts/inspect-mcp.sh
