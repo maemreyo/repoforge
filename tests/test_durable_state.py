@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -950,8 +951,9 @@ def test_restore_preview_detects_conflicts_and_overwrite_restores_with_backup(
     destination_manager = JsonStateRecoveryManager(destination, InMemoryLockManager())
     conflict = destination_manager.preview_restore(
         backup_root=backup_root,
-        destination_id="destination-state",
+        destination_id="destination",
         overwrite=False,
+        supported_versions=(SchemaVersion(3),),
         max_records=10,
         max_total_bytes=10_000,
     )
@@ -962,8 +964,9 @@ def test_restore_preview_detects_conflicts_and_overwrite_restores_with_backup(
 
     preview = destination_manager.preview_restore(
         backup_root=backup_root,
-        destination_id="destination-state",
+        destination_id="destination",
         overwrite=True,
+        supported_versions=(SchemaVersion(3),),
         max_records=10,
         max_total_bytes=10_000,
     )
@@ -1010,8 +1013,9 @@ def test_restore_rejects_corrupt_backup_and_rolls_back_failure(tmp_path: Path) -
     with pytest.raises(RepoForgeError) as corrupt:
         destination_manager.preview_restore(
             backup_root=backup_root,
-            destination_id="destination-state",
+            destination_id="destination",
             overwrite=False,
+            supported_versions=(SchemaVersion(3),),
         )
     assert corrupt.value.code is ErrorCode.STATE_INVALID
 
@@ -1028,10 +1032,208 @@ def test_restore_rejects_corrupt_backup_and_rolls_back_failure(tmp_path: Path) -
     )
     preview = failing_manager.preview_restore(
         backup_root=backup_root,
-        destination_id="destination-state",
+        destination_id="destination",
         overwrite=False,
+        supported_versions=(SchemaVersion(3),),
     )
     with pytest.raises(RepoForgeError) as failed:
         failing_manager.apply_restore(preview, backup_root=backup_root)
     assert failed.value.code is ErrorCode.STATE_PERSISTENCE_FAILED
     assert not list((destination / "demo_records").glob("*.json"))
+
+
+def test_backup_manifest_rejects_future_format_unknown_fields_coercion_and_duplicates(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _write_raw_state(
+        source,
+        collection="demo_records",
+        record_id="demo-1",
+        version=3,
+        revision=1,
+        payload={"display_name": "safe", "enabled": True},
+    )
+    manager = JsonStateRecoveryManager(source, InMemoryLockManager())
+    preview = manager.preview_backup(
+        collection="demo_records",
+        destination_id="portable-backup",
+    )
+    backup_root = tmp_path / "portable-backup"
+    manager.apply_backup(preview, destination_root=backup_root)
+    manifest_path = backup_root / "manifest.json"
+    original = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    invalid_manifests: list[dict[str, object]] = []
+
+    future = dict(original)
+    future["format_version"] = 2
+    invalid_manifests.append(future)
+
+    unknown = dict(original)
+    unknown["content"] = "must-not-be-accepted"
+    invalid_manifests.append(unknown)
+
+    coerced = dict(original)
+    coerced["total_bytes"] = str(original["total_bytes"])
+    invalid_manifests.append(coerced)
+
+    duplicate = json.loads(json.dumps(original))
+    duplicate_records = duplicate["records"]
+    assert isinstance(duplicate_records, list)
+    duplicate_records.append(dict(duplicate_records[0]))
+    duplicate["total_bytes"] = int(duplicate["total_bytes"]) * 2
+    payload = {key: value for key, value in duplicate.items() if key != "manifest_checksum"}
+    duplicate["manifest_checksum"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    invalid_manifests.append(duplicate)
+
+    destination = tmp_path / "destination-state"
+    destination_manager = JsonStateRecoveryManager(destination, InMemoryLockManager())
+    for manifest in invalid_manifests:
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(RepoForgeError):
+            destination_manager.preview_restore(
+                backup_root=backup_root,
+                destination_id="destination-state",
+                overwrite=False,
+                supported_versions=(SchemaVersion(3),),
+            )
+
+
+def test_restore_preview_binds_destination_identity_schema_and_references(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_raw_state(
+        source,
+        collection="demo_records",
+        record_id="demo-1",
+        version=4,
+        revision=1,
+        payload={"display_name": "future", "enabled": True},
+    )
+    source_manager = JsonStateRecoveryManager(source, InMemoryLockManager())
+    backup = source_manager.preview_backup(
+        collection="demo_records",
+        destination_id="portable-backup",
+    )
+    backup_root = tmp_path / "portable-backup"
+    source_manager.apply_backup(backup, destination_root=backup_root)
+
+    destination = tmp_path / "destination-state"
+    manager = JsonStateRecoveryManager(destination, InMemoryLockManager())
+    with pytest.raises(RepoForgeError) as identity:
+        manager.preview_restore(
+            backup_root=backup_root,
+            destination_id="different-destination",
+            overwrite=False,
+            supported_versions=(SchemaVersion(4),),
+        )
+    assert identity.value.code is ErrorCode.STATE_INVALID
+
+    with pytest.raises(RepoForgeError) as schema:
+        manager.preview_restore(
+            backup_root=backup_root,
+            destination_id="destination-state",
+            overwrite=False,
+            supported_versions=(SchemaVersion(3),),
+        )
+    assert schema.value.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
+
+    with pytest.raises(RepoForgeError) as reference:
+        manager.preview_restore(
+            backup_root=backup_root,
+            destination_id="destination-state",
+            overwrite=False,
+            supported_versions=(SchemaVersion(4),),
+            references=(StateRecordReference("demo-1", "missing-record", "receipt"),),
+        )
+    assert reference.value.code is ErrorCode.STATE_INVALID
+
+
+def test_backup_apply_resumes_after_interruption(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    for index in range(1, 3):
+        _write_raw_state(
+            source,
+            collection="demo_records",
+            record_id=f"demo-{index}",
+            version=3,
+            revision=1,
+            payload={"display_name": f"source-{index}", "enabled": True},
+        )
+
+    def crash_second_copy(phase: str, record_id: str, index: int) -> None:
+        if phase == "before_backup_write" and index == 1:
+            raise SystemExit("simulated backup interruption")
+
+    manager = JsonStateRecoveryManager(
+        source,
+        InMemoryLockManager(),
+        fault_injector=crash_second_copy,
+    )
+    preview = manager.preview_backup(
+        collection="demo_records",
+        destination_id="portable-backup",
+    )
+    backup_root = tmp_path / "portable-backup"
+    with pytest.raises(SystemExit):
+        manager.apply_backup(preview, destination_root=backup_root)
+    assert not (backup_root / "manifest.json").exists()
+
+    restarted = JsonStateRecoveryManager(source, InMemoryLockManager())
+    report = restarted.apply_backup(preview, destination_root=backup_root)
+    assert report.copied_records == 2
+    assert restarted.apply_backup(preview, destination_root=backup_root) == report
+
+
+def test_restore_recovers_interrupted_apply_after_restart(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination-state"
+    for index in range(1, 3):
+        _write_raw_state(
+            source,
+            collection="demo_records",
+            record_id=f"demo-{index}",
+            version=3,
+            revision=1,
+            payload={"display_name": f"source-{index}", "enabled": True},
+        )
+    source_manager = JsonStateRecoveryManager(source, InMemoryLockManager())
+    backup = source_manager.preview_backup(
+        collection="demo_records",
+        destination_id="portable-backup",
+    )
+    backup_root = tmp_path / "portable-backup"
+    source_manager.apply_backup(backup, destination_root=backup_root)
+
+    def crash_second_restore(phase: str, record_id: str, index: int) -> None:
+        if phase == "before_restore_write" and index == 1:
+            raise SystemExit("simulated restore interruption")
+
+    manager = JsonStateRecoveryManager(
+        destination,
+        InMemoryLockManager(),
+        fault_injector=crash_second_restore,
+    )
+    preview = manager.preview_restore(
+        backup_root=backup_root,
+        destination_id="destination-state",
+        overwrite=False,
+        supported_versions=(SchemaVersion(3),),
+    )
+    with pytest.raises(SystemExit):
+        manager.apply_restore(preview, backup_root=backup_root)
+    assert (destination / "demo_records" / "demo-1.json").is_file()
+
+    restarted = JsonStateRecoveryManager(destination, InMemoryLockManager())
+    assert restarted.recover_incomplete_restores() == (preview.restore_id,)
+    assert not list((destination / "demo_records").glob("*.json"))
+    report = restarted.apply_restore(preview, backup_root=backup_root)
+    assert report.restored_records == 2
+    assert restarted.apply_restore(preview, backup_root=backup_root) == report

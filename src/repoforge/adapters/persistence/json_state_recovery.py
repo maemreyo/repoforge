@@ -28,8 +28,28 @@ from ...ports.locking import LockManager
 from .json_state_lifecycle import FaultInjector, JsonStateLifecycleManager
 
 _SAFE_IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_BACKUP_ID = re.compile(r"^backup-[a-f0-9]{24}$")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_BACKUP_FORMAT_VERSION = 1
+_BACKUP_MANIFEST_FIELDS = {
+    "format_version",
+    "backup_id",
+    "collection",
+    "destination_id",
+    "records",
+    "total_bytes",
+    "manifest_checksum",
+}
+_BACKUP_RECORD_FIELDS = {
+    "record_id",
+    "checksum",
+    "size_bytes",
+    "schema_version",
+    "revision",
+}
 _MAX_RECORDS = 2_000
 _MAX_FINDINGS = 2_000
+_MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 
 
 class JsonStateRecoveryManager(JsonStateLifecycleManager):
@@ -86,6 +106,60 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                 f"{field} must be between 1 and {maximum}", code
             )
         return value
+
+    @staticmethod
+    def _manifest_int(
+        value: object,
+        *,
+        field: str,
+        minimum: int = 0,
+        maximum: int = 1 << 50,
+    ) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+            raise JsonStateRecoveryManager._recovery_error(
+                f"backup manifest {field} is invalid",
+                ErrorCode.STATE_INVALID,
+            )
+        return value
+
+    @classmethod
+    def _supported_versions(
+        cls,
+        value: tuple[SchemaVersion, ...],
+    ) -> tuple[SchemaVersion, ...]:
+        if (
+            not isinstance(value, tuple)
+            or not value
+            or not all(isinstance(item, SchemaVersion) for item in value)
+        ):
+            raise cls._recovery_error(
+                "supported_versions must be a non-empty SchemaVersion tuple",
+                ErrorCode.STATE_INVALID,
+            )
+        return tuple(sorted(set(value), key=lambda item: item.value))
+
+    @classmethod
+    def _references(
+        cls,
+        value: tuple[StateRecordReference, ...],
+    ) -> tuple[StateRecordReference, ...]:
+        if not isinstance(value, tuple) or not all(
+            isinstance(item, StateRecordReference) for item in value
+        ):
+            raise cls._recovery_error(
+                "references must be a StateRecordReference tuple",
+                ErrorCode.STATE_INVALID,
+            )
+        return tuple(
+            sorted(
+                set(value),
+                key=lambda item: (
+                    item.source_record_id,
+                    item.target_record_id,
+                    item.relation,
+                ),
+            )
+        )
 
     @staticmethod
     def _severity_order(value: IntegritySeverity) -> int:
@@ -357,6 +431,51 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
     def _resolved_destination(path: Path) -> Path:
         return path.expanduser().resolve()
 
+    def _validate_partial_backup_destination(
+        self,
+        destination: Path,
+        preview: StateBackupPreview,
+        *,
+        repair: bool,
+    ) -> None:
+        if not destination.exists():
+            return
+        if not destination.is_dir():
+            raise self._recovery_error(
+                "backup destination must be a directory",
+                ErrorCode.STATE_INVALID,
+            )
+        for child in destination.iterdir():
+            if child.name not in {"manifest.json", "records"}:
+                raise self._recovery_error(
+                    "backup destination contains unrelated entries",
+                    ErrorCode.STATE_INVALID,
+                )
+        records_root = destination / "records"
+        if not records_root.exists():
+            return
+        if not records_root.is_dir():
+            raise self._recovery_error(
+                "backup records path must be a directory",
+                ErrorCode.STATE_INVALID,
+            )
+        expected = {item.record_id: item for item in preview.records}
+        for child in records_root.iterdir():
+            if not child.is_file() or child.suffix != ".json" or child.stem not in expected:
+                raise self._recovery_error(
+                    "backup destination contains an unrelated record",
+                    ErrorCode.STATE_INVALID,
+                )
+            data = child.read_bytes()
+            if (
+                not hmac.compare_digest(self._sha256(data), expected[child.stem].checksum)
+                and not repair
+            ):
+                raise self._recovery_error(
+                    f"partial backup record {child.stem} does not match the reviewed preview",
+                    ErrorCode.STATE_INVALID,
+                )
+
     def apply_backup(
         self,
         preview: StateBackupPreview,
@@ -391,6 +510,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                 "backup destination contains a different manifest",
                 ErrorCode.STATE_INVALID,
             )
+        self._validate_partial_backup_destination(destination, preview, repair=repair)
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(destination, 0o700)
         records_root = destination / "records"
@@ -401,7 +521,7 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             timeout_seconds=10,
             metadata={"operation": "backup", "backup_id": preview.backup_id},
         ):
-            for item in preview.records:
+            for index, item in enumerate(preview.records):
                 source = self._collection_root(preview.collection) / f"{item.record_id}.json"
                 try:
                     data = source.read_bytes()
@@ -416,7 +536,14 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                         ErrorCode.STATE_INVALID,
                         retryable=True,
                     )
-                self._atomic_write(records_root / f"{item.record_id}.json", data)
+                target = records_root / f"{item.record_id}.json"
+                if target.is_file() and hmac.compare_digest(
+                    self._sha256(target.read_bytes()), item.checksum
+                ):
+                    continue
+                if self._fault_injector is not None:
+                    self._fault_injector("before_backup_write", item.record_id, index)
+                self._atomic_write(target, data)
             manifest_payload = self._backup_manifest_payload(
                 backup_id=preview.backup_id,
                 collection=preview.collection,
@@ -441,68 +568,152 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
     def _read_backup(self, backup_root: Path) -> StateBackupPreview:
         root = self._resolved_destination(backup_root)
         try:
-            raw: Any = json.loads((root / "manifest.json").read_bytes())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            manifest_data = (root / "manifest.json").read_bytes()
+        except OSError as exc:
             raise self._recovery_error(
                 "backup manifest is unavailable or corrupt",
                 ErrorCode.STATE_INVALID,
             ) from exc
-        if not isinstance(raw, dict):
-            raise self._recovery_error("backup manifest must be an object", ErrorCode.STATE_INVALID)
-        try:
-            backup_id = str(raw["backup_id"])
-            collection = validate_state_collection(str(raw["collection"]))
-            destination_id = self._identity(
-                str(raw["destination_id"]), code=ErrorCode.STATE_INVALID
-            )
-            total_bytes = int(raw["total_bytes"])
-            manifest_checksum = str(raw["manifest_checksum"])
-            records_raw = raw["records"]
-        except (KeyError, TypeError, ValueError, RepoForgeError) as exc:
+        if len(manifest_data) > _MAX_MANIFEST_BYTES:
             raise self._recovery_error(
-                "backup manifest fields are invalid", ErrorCode.STATE_INVALID
-            ) from exc
-        if root.name != destination_id or not isinstance(records_raw, list):
-            raise self._recovery_error(
-                "backup destination identity or record list is invalid",
+                "backup manifest exceeds its reviewed size bound",
                 ErrorCode.STATE_INVALID,
             )
+        try:
+            raw: Any = json.loads(manifest_data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise self._recovery_error(
+                "backup manifest is unavailable or corrupt",
+                ErrorCode.STATE_INVALID,
+            ) from exc
+        if not isinstance(raw, dict) or set(raw) != _BACKUP_MANIFEST_FIELDS:
+            raise self._recovery_error(
+                "backup manifest fields do not match format version 1",
+                ErrorCode.STATE_INVALID,
+            )
+        format_version = raw.get("format_version")
+        if (
+            not isinstance(format_version, int)
+            or isinstance(format_version, bool)
+            or format_version != _BACKUP_FORMAT_VERSION
+        ):
+            raise self._recovery_error(
+                f"unsupported backup manifest format version: {format_version!r}",
+                ErrorCode.STATE_INVALID,
+            )
+        backup_id_raw = raw.get("backup_id")
+        collection_raw = raw.get("collection")
+        destination_raw = raw.get("destination_id")
+        checksum_raw = raw.get("manifest_checksum")
+        records_raw = raw.get("records")
+        if (
+            not isinstance(backup_id_raw, str)
+            or _BACKUP_ID.fullmatch(backup_id_raw) is None
+            or not isinstance(collection_raw, str)
+            or not isinstance(destination_raw, str)
+            or not isinstance(checksum_raw, str)
+            or _SHA256.fullmatch(checksum_raw) is None
+            or not isinstance(records_raw, list)
+            or len(records_raw) > _MAX_RECORDS
+        ):
+            raise self._recovery_error(
+                "backup manifest fields are invalid",
+                ErrorCode.STATE_INVALID,
+            )
+        backup_id = backup_id_raw
+        collection = validate_state_collection(collection_raw)
+        destination_id = self._identity(destination_raw, code=ErrorCode.STATE_INVALID)
+        manifest_checksum = checksum_raw
+        total_bytes = self._manifest_int(raw.get("total_bytes"), field="total_bytes")
+        if root.name != destination_id:
+            raise self._recovery_error(
+                "backup destination identity is invalid",
+                ErrorCode.STATE_INVALID,
+            )
+
         records: list[StateBackupRecord] = []
+        seen_ids: set[str] = set()
         for item in records_raw:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or set(item) != _BACKUP_RECORD_FIELDS:
                 raise self._recovery_error(
-                    "backup record manifest entry is invalid",
+                    "backup record manifest entry fields are invalid",
                     ErrorCode.STATE_INVALID,
                 )
-            try:
-                record = StateBackupRecord(
-                    record_id=self._record_id(str(item["record_id"])),
-                    checksum=str(item["checksum"]),
-                    size_bytes=int(item["size_bytes"]),
-                    schema_version=SchemaVersion(int(item["schema_version"])),
-                    revision=int(item["revision"]),
-                )
-            except (KeyError, TypeError, ValueError, RepoForgeError) as exc:
-                raise self._recovery_error(
-                    "backup record manifest entry is invalid",
-                    ErrorCode.STATE_INVALID,
-                ) from exc
-            try:
-                data = (root / "records" / f"{record.record_id}.json").read_bytes()
-            except OSError as exc:
-                raise self._recovery_error(
-                    f"backup record {record.record_id} is missing",
-                    ErrorCode.STATE_INVALID,
-                ) from exc
-            if len(data) != record.size_bytes or not hmac.compare_digest(
-                self._sha256(data), record.checksum
+            record_id_raw = item.get("record_id")
+            checksum = item.get("checksum")
+            schema_version_raw = item.get("schema_version")
+            if (
+                not isinstance(record_id_raw, str)
+                or not isinstance(checksum, str)
+                or _SHA256.fullmatch(checksum) is None
+                or not isinstance(schema_version_raw, int)
+                or isinstance(schema_version_raw, bool)
             ):
                 raise self._recovery_error(
-                    f"backup record {record.record_id} checksum is invalid",
+                    "backup record manifest entry is invalid",
+                    ErrorCode.STATE_INVALID,
+                )
+            record_id = self._record_id(record_id_raw)
+            if record_id in seen_ids:
+                raise self._recovery_error(
+                    f"backup manifest contains duplicate record {record_id}",
+                    ErrorCode.STATE_INVALID,
+                )
+            seen_ids.add(record_id)
+            size_bytes = self._manifest_int(item.get("size_bytes"), field="record size")
+            revision = self._manifest_int(
+                item.get("revision"),
+                field="record revision",
+                minimum=1,
+            )
+            try:
+                schema_version = SchemaVersion(schema_version_raw)
+            except ValueError as exc:
+                raise self._recovery_error(
+                    "backup record schema version is invalid",
+                    ErrorCode.STATE_INVALID,
+                ) from exc
+            record = StateBackupRecord(
+                record_id=record_id,
+                checksum=checksum,
+                size_bytes=size_bytes,
+                schema_version=schema_version,
+                revision=revision,
+            )
+            record_path = root / "records" / f"{record.record_id}.json"
+            try:
+                decoded = self._decode_record(record_path, expected_record_id=record.record_id)
+            except RepoForgeError as exc:
+                raise self._recovery_error(
+                    f"backup record {record.record_id} is missing or corrupt",
+                    ErrorCode.STATE_INVALID,
+                ) from exc
+            if (
+                len(decoded.encoded) != record.size_bytes
+                or not hmac.compare_digest(decoded.checksum, record.checksum)
+                or decoded.schema_version != record.schema_version
+                or decoded.revision.value != record.revision
+            ):
+                raise self._recovery_error(
+                    f"backup record {record.record_id} does not match its manifest metadata",
                     ErrorCode.STATE_INVALID,
                 )
             records.append(record)
+
         ordered = tuple(sorted(records, key=lambda item: item.record_id))
+        seed_payload = self._backup_manifest_payload(
+            backup_id=None,
+            collection=collection,
+            destination_id=destination_id,
+            records=ordered,
+            total_bytes=total_bytes,
+        )
+        expected_backup_id = f"backup-{self._sha256(self._canonical_bytes(seed_payload))[:24]}"
+        if backup_id != expected_backup_id:
+            raise self._recovery_error(
+                "backup identity does not match its manifest contents",
+                ErrorCode.STATE_INVALID,
+            )
         payload = self._backup_manifest_payload(
             backup_id=backup_id,
             collection=collection,
@@ -527,11 +738,34 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             total_bytes,
         )
 
+    def _validate_restore_references(
+        self,
+        backup: StateBackupPreview,
+        references: tuple[StateRecordReference, ...],
+    ) -> None:
+        backup_ids = {item.record_id for item in backup.records}
+        collection_root = self._collection_root(backup.collection)
+        for reference in references:
+            if reference.source_record_id not in backup_ids:
+                continue
+            if reference.target_record_id in backup_ids:
+                continue
+            target = collection_root / f"{reference.target_record_id}.json"
+            try:
+                self._decode_record(target, expected_record_id=reference.target_record_id)
+            except RepoForgeError as exc:
+                raise self._recovery_error(
+                    f"restore reference {reference.relation} targets a missing or corrupt record",
+                    ErrorCode.STATE_INVALID,
+                ) from exc
+
     @staticmethod
     def _restore_payload(
         *,
         backup: StateBackupPreview,
         destination_id: str,
+        supported_versions: tuple[SchemaVersion, ...],
+        references: tuple[StateRecordReference, ...],
         conflicts: tuple[tuple[str, str], ...],
         overwrite: bool,
     ) -> dict[str, object]:
@@ -550,6 +784,15 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
                 }
                 for item in backup.records
             ],
+            "supported_versions": [item.value for item in supported_versions],
+            "references": [
+                {
+                    "source_record_id": item.source_record_id,
+                    "target_record_id": item.target_record_id,
+                    "relation": item.relation,
+                }
+                for item in references
+            ],
             "conflicts": [list(item) for item in conflicts],
             "total_bytes": backup.total_bytes,
             "overwrite": overwrite,
@@ -561,10 +804,20 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         backup_root: Path,
         destination_id: str,
         overwrite: bool,
+        supported_versions: tuple[SchemaVersion, ...],
+        references: tuple[StateRecordReference, ...] = (),
         max_records: int = _MAX_RECORDS,
         max_total_bytes: int = 1 << 40,
     ) -> StateRestorePreview:
         safe_destination = self._identity(destination_id, code=ErrorCode.STATE_INVALID)
+        root_identity = self._identity(self.root.name, code=ErrorCode.STATE_INVALID)
+        if safe_destination != root_identity:
+            raise self._recovery_error(
+                "restore destination identity does not match the current state root",
+                ErrorCode.STATE_INVALID,
+            )
+        normalized_versions = self._supported_versions(supported_versions)
+        normalized_references = self._references(references)
         if not isinstance(overwrite, bool):
             raise self._recovery_error("overwrite must be a boolean", ErrorCode.STATE_INVALID)
         records_limit = self._bounded_positive_int(
@@ -584,6 +837,20 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             raise self._recovery_error(
                 "restore exceeds its reviewed quota", ErrorCode.STATE_TOO_LARGE
             )
+        supported = {item.value for item in normalized_versions}
+        unsupported = sorted(
+            {
+                item.schema_version.value
+                for item in backup.records
+                if item.schema_version.value not in supported
+            }
+        )
+        if unsupported:
+            raise self._recovery_error(
+                f"Unsupported state schema version: {unsupported[0]}",
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            )
+        self._validate_restore_references(backup, normalized_references)
         conflicts: list[tuple[str, str]] = []
         collection_root = self._collection_root(backup.collection)
         for item in backup.records:
@@ -596,6 +863,8 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
         payload = self._restore_payload(
             backup=backup,
             destination_id=safe_destination,
+            supported_versions=normalized_versions,
+            references=normalized_references,
             conflicts=ordered_conflicts,
             overwrite=overwrite,
         )
@@ -608,6 +877,8 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
             collection=backup.collection,
             destination_id=safe_destination,
             records=backup.records,
+            supported_versions=normalized_versions,
+            references=normalized_references,
             conflicts=ordered_conflicts,
             total_bytes=backup.total_bytes,
             overwrite=overwrite,
@@ -618,19 +889,38 @@ class JsonStateRecoveryManager(JsonStateLifecycleManager):
     ) -> None:
         if not isinstance(preview, StateRestorePreview):
             raise self._recovery_error("restore preview is invalid", ErrorCode.STATE_INVALID)
+        root_identity = self._identity(self.root.name, code=ErrorCode.STATE_INVALID)
+        normalized_versions = self._supported_versions(preview.supported_versions)
+        normalized_references = self._references(preview.references)
+        if preview.destination_id != root_identity:
+            raise self._recovery_error(
+                "restore destination identity does not match the current state root",
+                ErrorCode.STATE_INVALID,
+            )
         if (
             preview.backup_id != backup.backup_id
             or preview.manifest_checksum != backup.manifest_checksum
             or preview.collection != backup.collection
             or preview.records != backup.records
             or preview.total_bytes != backup.total_bytes
+            or preview.supported_versions != normalized_versions
+            or preview.references != normalized_references
         ):
             raise self._recovery_error(
                 "backup changed after restore preview", ErrorCode.STATE_INVALID
             )
+        supported = {item.value for item in normalized_versions}
+        if any(item.schema_version.value not in supported for item in backup.records):
+            raise self._recovery_error(
+                "restore preview contains an unsupported schema version",
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            )
+        self._validate_restore_references(backup, normalized_references)
         payload = self._restore_payload(
             backup=backup,
             destination_id=preview.destination_id,
+            supported_versions=normalized_versions,
+            references=normalized_references,
             conflicts=preview.conflicts,
             overwrite=preview.overwrite,
         )

@@ -522,6 +522,8 @@ class StateRestorePreview:
     collection: str
     destination_id: str
     records: tuple[StateBackupRecord, ...]
+    supported_versions: tuple[SchemaVersion, ...]
+    references: tuple[StateRecordReference, ...]
     conflicts: tuple[tuple[str, str], ...]
     total_bytes: int
     overwrite: bool

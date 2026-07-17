@@ -61,7 +61,7 @@ Findings are deterministically ordered and capped. Payload values are never incl
 
 `preview_backup` creates a deterministic manifest from record identity, schema version, revision, checksum, size, collection, destination identity, and total bytes. Corrupt sources or exceeded quotas fail closed.
 
-`apply_backup` requires a destination directory whose final name matches the reviewed destination identity. It copies checksum-verified private record bytes and writes a checksum-framed manifest. Reapplying an unchanged manifest is idempotent. `repair=True` is an explicit operator action that rewrites a damaged destination from the still-current source preview.
+`apply_backup` requires a destination directory whose final name matches the reviewed destination identity. It copies checksum-verified private record bytes and writes the manifest last, so an interrupted copy is never mistaken for a completed backup. A restart may resume only when every partial record already present matches the reviewed preview; unrelated entries or mismatched bytes fail closed. Reapplying an unchanged manifest is idempotent. `repair=True` is an explicit operator action that rewrites a damaged destination from the still-current source preview.
 
 A backup directory contains:
 
@@ -72,13 +72,13 @@ A backup directory contains:
     <record-id>.json
 ```
 
-The manifest contains no record payloads.
+The manifest contains no record payloads. Readers require the exact format-version-1 field set and native JSON types, reject unknown fields and duplicate record IDs, verify the deterministic backup identity and manifest checksum, and decode every record to confirm identity, schema version, revision, size, and checksum metadata.
 
 ## Restore
 
-`preview_restore` verifies the manifest checksum, every record checksum, record and byte quotas, and current destination conflicts. It binds the backup identity, destination identity, overwrite decision, conflicts, and record metadata into one restore digest.
+`preview_restore` verifies the manifest checksum, every record checksum, record and byte quotas, supported schema versions, caller-supplied references, and current destination conflicts. The reviewed destination identity must equal the final directory name of the current state root. The preview binds the backup identity, destination identity, supported-version set, references, overwrite decision, conflicts, and record metadata into one restore digest.
 
-Without `overwrite=True`, different existing records block apply. With overwrite enabled, destination bytes are copied into a private restore-specific backup before the first write. The restore journal records only created/replaced record IDs and safe operation metadata.
+Without `overwrite=True`, different existing records block apply. Unsupported record schemas and references from restored records to missing or corrupt targets block preview. With overwrite enabled, destination bytes are copied into a private restore-specific backup before the first write. The restore journal records only created/replaced record IDs and safe operation metadata.
 
 Ordinary failures restore replaced records and remove records created by the failed operation. If the process stops during apply, `recover_incomplete_restores` uses the private destination backup and journal metadata to roll the destination back after restart. Reapplying a committed restore returns the original structured report.
 
