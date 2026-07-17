@@ -78,10 +78,7 @@ def test_service_is_a_delegating_facade() -> None:
 
 
 def test_bootstrap_modules_are_composition_roots() -> None:
-    composition_roots = {
-        PACKAGE / "bootstrap.py",
-        PACKAGE / "extended_bootstrap.py",
-    }
+    composition_roots = {PACKAGE / "bootstrap.py"}
     for root in composition_roots:
         assert "adapters" in root.read_text(encoding="utf-8")
     for path in PACKAGE.rglob("*.py"):

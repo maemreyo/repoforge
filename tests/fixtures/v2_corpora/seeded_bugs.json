@@ -6,6 +6,10 @@
       "id": "python-unit-regression",
       "input": {
         "changed_paths": ["src/package/calculator.py"],
+        "files": {
+          "src/package/calculator.py": "def add(left, right):\n    return left + right\n",
+          "tests/test_calculator.py": "from src.package.calculator import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+        },
         "seed": "wrong arithmetic result"
       },
       "expected": {
@@ -14,13 +18,19 @@
       },
       "metadata": {
         "language": "python",
-        "mapping": "import-graph"
+        "mapping": "import-graph",
+        "provider_recall": true
       }
     },
     {
       "id": "python-package-init-regression",
       "input": {
         "changed_paths": ["src/package/__init__.py"],
+        "files": {
+          "src/package/__init__.py": "from .service import service\n",
+          "src/package/service.py": "def service():\n    return True\n",
+          "tests/test_package.py": "from src.package import service\n\ndef test_package():\n    assert service()\n"
+        },
         "seed": "broken public import"
       },
       "expected": {
@@ -29,13 +39,18 @@
       },
       "metadata": {
         "language": "python",
-        "mapping": "convention"
+        "mapping": "convention",
+        "provider_recall": true
       }
     },
     {
       "id": "typescript-component-regression",
       "input": {
         "changed_paths": ["src/components/button.ts"],
+        "files": {
+          "src/components/button.test.ts": "import { button } from './button';\ntest('button', () => button());\n",
+          "src/components/button.ts": "export function button() { return true; }\n"
+        },
         "seed": "wrong disabled behavior"
       },
       "expected": {
@@ -44,7 +59,51 @@
       },
       "metadata": {
         "language": "typescript",
-        "mapping": "sibling-test"
+        "mapping": "sibling-test",
+        "provider_recall": true
+      }
+    },
+    {
+      "id": "typescript-reexport-jsx-regression",
+      "input": {
+        "changed_paths": ["src/components/Button.tsx"],
+        "files": {
+          "src/app.test.tsx": "import { App } from './app';\ntest('app', () => App());\n",
+          "src/app.tsx": "import { Button } from './components';\nexport function App() { return <Button />; }\n",
+          "src/components/Button.tsx": "export function Button() { return <button>Go</button>; }\n",
+          "src/components/index.ts": "export { Button } from './Button';\n"
+        },
+        "seed": "re-exported component regression"
+      },
+      "expected": {
+        "candidate_tests": ["src/app.test.tsx"],
+        "caught_or_full_fallback": true
+      },
+      "metadata": {
+        "language": "typescript",
+        "mapping": "reexport-jsx",
+        "provider_recall": true
+      }
+    },
+    {
+      "id": "javascript-dynamic-import-regression",
+      "input": {
+        "changed_paths": ["src/feature.js"],
+        "files": {
+          "src/feature.js": "export function feature() { return true; }\n",
+          "src/loader.js": "export async function load() { return import('./feature'); }\n",
+          "tests/loader.test.js": "import { load } from '../src/loader';\ntest('load', () => load());\n"
+        },
+        "seed": "dynamically loaded feature regression"
+      },
+      "expected": {
+        "candidate_tests": ["tests/loader.test.js"],
+        "caught_or_full_fallback": true
+      },
+      "metadata": {
+        "language": "javascript",
+        "mapping": "dynamic-import",
+        "provider_recall": true
       }
     },
     {

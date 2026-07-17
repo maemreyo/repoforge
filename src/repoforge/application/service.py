@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..bootstrap import Application
+from ..bootstrap import AdapterOverrides, Application, build_application
 from ..config import AppConfig
 from ..domain.egress import EgressDestination, sanitize_egress_data
 from ..domain.ticket_sync import TicketProjectOwnerType
-from ..extended_bootstrap import AdapterOverrides, build_application
 from ..ports import (
     AuditSink,
     CommandExecutor,

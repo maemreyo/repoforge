@@ -154,6 +154,38 @@ def test_pre_push_autoformats_but_requires_generated_changes_to_be_committed() -
     assert "Review and commit those changes before pushing again" in script
 
 
+def test_tree_sitter_dependencies_are_exact_and_hash_locked() -> None:
+    project = tomli.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = set(project["project"]["dependencies"])
+    pins = {
+        "tree-sitter==0.25.2",
+        "tree-sitter-javascript==0.25.0",
+        "tree-sitter-python==0.25.0",
+        "tree-sitter-typescript==0.23.2",
+    }
+
+    assert pins <= dependencies
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    for requirement in pins:
+        name, version = requirement.split("==", 1)
+        package = re.search(
+            rf'\[\[package\]\]\nname = "{re.escape(name)}"\nversion = "{re.escape(version)}"(?P<body>.*?)(?=\n\[\[package\]\]|\Z)',
+            lock,
+            re.DOTALL,
+        )
+        assert package is not None, f"missing locked package {requirement}"
+        assert re.search(r'hash = "sha256:[0-9a-f]{64}"', package.group("body"))
+
+
+def test_v2_release_gate_measures_primary_and_fallback_provider_recall() -> None:
+    script = (ROOT / "scripts/run_v2_release_gates.py").read_text(encoding="utf-8")
+
+    assert "TreeSitterCodeIntelligenceProvider" in script
+    assert "SyntaxCodeIntelligenceProvider" in script
+    assert "measure_provider_recall" in script
+    assert "provider_recall_observations=" in script
+
+
 def test_release_script_requires_an_explicit_bump_and_is_cross_platform() -> None:
     script = (ROOT / "scripts/release.sh").read_text(encoding="utf-8")
 

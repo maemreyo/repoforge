@@ -22,6 +22,7 @@ from ...domain.code_intelligence import (
     CodeSymbolKind,
     new_code_intelligence_result,
 )
+from .calibration import calibrated_confidence
 
 _LANGUAGE_BY_SUFFIX = {
     ".py": CodeLanguage.PYTHON,
@@ -317,6 +318,7 @@ def _same_stem(source_path: str, test_path: str) -> bool:
 
 def _affected_tests(
     *,
+    provider_id: str,
     request: CodeIntelligenceRequest,
     analyzed_paths: tuple[str, ...],
     imports: tuple[CodeImportFact, ...],
@@ -330,10 +332,8 @@ def _affected_tests(
     candidates: dict[str, AffectedTestCandidate] = {}
     for test_path in tests:
         reason: str | None = None
-        confidence = 0
         if test_path in changed:
             reason = "The test file itself changed."
-            confidence = 100
         else:
             queue: deque[tuple[str, int]] = deque([(test_path, 0)])
             seen = {test_path}
@@ -348,7 +348,6 @@ def _affected_tests(
                             if depth == 0
                             else f"The test reaches a changed source through {depth + 1} import hops."
                         )
-                        confidence = max(70, 95 - depth * 5)
                         break
                     if dependency not in seen:
                         seen.add(dependency)
@@ -357,10 +356,15 @@ def _affected_tests(
             matched = next((path for path in sorted(changed) if _same_stem(path, test_path)), None)
             if matched is not None:
                 reason = f"The test name matches changed source {matched}."
-                confidence = 65
         if reason is None:
             continue
         language = _LANGUAGE_BY_SUFFIX.get(PurePosixPath(test_path).suffix.lower())
+        if language is None:
+            continue
+        confidence, _calibration_reason = calibrated_confidence(
+            provider_id,
+            frozenset({language}),
+        )
         diagnostic_id = (
             "pytest-target"
             if language is CodeLanguage.PYTHON and "pytest-target" in request.diagnostic_ids
@@ -455,6 +459,7 @@ class SyntaxCodeIntelligenceProvider:
             truncated = True
 
         affected = _affected_tests(
+            provider_id=self.provider_id,
             request=request,
             analyzed_paths=tuple(analyzed),
             imports=tuple(imports),
@@ -468,18 +473,16 @@ class SyntaxCodeIntelligenceProvider:
             status = CodeIntelligenceStatus.PARTIAL
         else:
             status = CodeIntelligenceStatus.CURRENT
-        confidence_value = 90
-        if any(
-            _LANGUAGE_BY_SUFFIX.get(PurePosixPath(path).suffix.lower())
-            in {CodeLanguage.JAVASCRIPT, CodeLanguage.TYPESCRIPT}
+        analyzed_languages = frozenset(
+            language
             for path in analyzed
-        ):
-            confidence_value -= 10
-        if malformed or truncated:
-            confidence_value -= 15
-        if request.denied_paths:
-            confidence_value -= 5
-        confidence_value = max(0, confidence_value if analyzed else 0)
+            if (language := _LANGUAGE_BY_SUFFIX.get(PurePosixPath(path).suffix.lower())) is not None
+        )
+        calibrated_value, calibration_reason = calibrated_confidence(
+            self.provider_id,
+            analyzed_languages,
+        )
+        confidence_value = round(calibrated_value * coverage_value / 100)
         limitations = [
             "Syntax-only analysis does not resolve runtime dispatch, reflection, aliases across package managers, or generated code."
         ]
@@ -507,10 +510,7 @@ class SyntaxCodeIntelligenceProvider:
                 coverage_value,
                 f"Analyzed {len(analyzed)} of {denominator} policy-visible paths in the bounded request.",
             ),
-            confidence=CodeIntelligenceMeasure(
-                confidence_value,
-                "Confidence reflects parser success, import resolution mode, and explicit exclusions.",
-            ),
+            confidence=CodeIntelligenceMeasure(confidence_value, calibration_reason),
             analyzed_paths=tuple(analyzed),
             symbols=tuple(symbols),
             imports=tuple(imports),

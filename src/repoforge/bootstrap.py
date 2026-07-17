@@ -18,10 +18,17 @@ from .adapters.audit.query import (
 from .adapters.audit.query import summarize_operation_metrics as summarize_operation_metrics
 from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
-from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
+from .adapters.code_intelligence import (
+    FallbackCodeIntelligenceProvider,
+    SyntaxCodeIntelligenceProvider,
+    TreeSitterCodeIntelligenceProvider,
+)
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
+from .adapters.filesystem.receipt_transaction_factory import (
+    ReceiptJournaledFileTransactionFactory,
+)
 from .adapters.git import GitCliRepository
 from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
 from .adapters.github.ticket_project import GhTicketProjectGateway
@@ -32,6 +39,7 @@ from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
     JsonApprovalPayloadStore,
     JsonApprovalStore,
+    JsonExternalMutationLedger,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -95,6 +103,7 @@ from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
+from .application.extended_context import ExtendedApplicationContext
 from .application.fingerprint_cache import FingerprintCache
 from .application.nudges import AdoptionNudgeTracker
 from .application.onboarding.activation import ConfigurationActivator
@@ -162,6 +171,11 @@ from .ports import (
     WorkflowRecordingStore,
     WorkspaceStore,
 )
+from .ports.external_mutation_ledger import ExternalMutationLedger
+from .ports.filesystem_transaction import (
+    FileTransactionFactory as ReceiptFileTransactionFactory,
+)
+from .ports.issue_mutation import IssueMutationGateway
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +208,11 @@ class AdapterOverrides:
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
+    approvals: ApprovalStore | None = None
+    approval_payloads: ApprovalPayloadStore | None = None
+    issue_mutations: IssueMutationGateway | None = None
+    external_mutations: ExternalMutationLedger | None = None
+    receipt_file_transactions: ReceiptFileTransactionFactory | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,13 +466,30 @@ def build_application(
     filesystem = o.filesystem or LocalFileSystem()
     file_transactions = o.file_transactions or JournaledFileTransactionFactory()
     git = o.git or GitCliRepository(command, config.server)
-    github = o.github or GhCliGateway(command, config.server)
+    default_github = GhCliGateway(command, config.server)
+    github = o.github or default_github
+    issue_mutations = o.issue_mutations or default_github
+    external_mutations = o.external_mutations or JsonExternalMutationLedger(
+        config.server.state_root,
+        locks,
+    )
+    approvals = o.approvals or JsonApprovalStore(config.server.state_root, locks)
+    approval_payloads = o.approval_payloads or JsonApprovalPayloadStore(
+        config.server.state_root,
+        locks,
+    )
+    receipt_file_transactions = (
+        o.receipt_file_transactions or ReceiptJournaledFileTransactionFactory()
+    )
     ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
     ticket_projects = o.ticket_projects or GhTicketProjectGateway(command, config.server)
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
-    code_intelligence = o.code_intelligence or SyntaxCodeIntelligenceProvider()
+    code_intelligence = o.code_intelligence or FallbackCodeIntelligenceProvider(
+        primary=TreeSitterCodeIntelligenceProvider(),
+        fallback=SyntaxCodeIntelligenceProvider(),
+    )
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
@@ -475,7 +511,7 @@ def build_application(
     )
     background_tasks = o.background_tasks or ThreadBackgroundTaskRunner()
     sleeper = o.sleeper or SystemSleeper()
-    context = ApplicationContext(
+    context = ExtendedApplicationContext(
         config=config,
         fingerprint_cache=FingerprintCache(),
         nudge_tracker=AdoptionNudgeTracker(),
@@ -503,6 +539,11 @@ def build_application(
         hygiene_cache=hygiene_cache,
         ticket_graphs=ticket_graphs,
         ticket_projects=ticket_projects,
+        issue_mutations=issue_mutations,
+        external_mutations=external_mutations,
+        approvals=approvals,
+        approval_payloads=approval_payloads,
+        receipt_file_transactions=receipt_file_transactions,
     )
     operations = OperationManager(context)
     recover_operations(

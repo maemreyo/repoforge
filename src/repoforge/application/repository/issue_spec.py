@@ -112,7 +112,20 @@ class RepositoryIssueSpecReader:
                     dict(item, heading=_first_heading(body) if isinstance(body, str) else None)
                 )
 
+        live_state = ticket_live_state_from_issue(
+            live_payload,
+            expected_number=c.issue_number,
+        )
         drift: list[dict[str, Any]] = []
+        if not live_state.delivery.specification_complete:
+            drift.append(
+                {
+                    "code": "LIVE_SPEC_INCOMPLETE",
+                    "message": (
+                        "live issue is missing objective, acceptance, or verification evidence"
+                    ),
+                }
+            )
         if node is not None and snapshot is not None:
             live_metadata = TicketLiveMetadata(
                 c.issue_number,
@@ -125,17 +138,12 @@ class RepositoryIssueSpecReader:
                 snapshot.graph.program_issue,
                 (node,),
             )
-            drift = [
+            drift.extend(
                 {"code": item.code, "message": item.message}
                 for item in compare_live_ticket_metadata(single_node_graph, (live_metadata,))
-            ]
+            )
 
-        evolution = ticket_delivery_payload(
-            ticket_live_state_from_issue(
-                live_payload,
-                expected_number=c.issue_number,
-            ).delivery
-        )
+        evolution = ticket_delivery_payload(live_state.delivery)
 
         return RepositoryIssueSpecResult(
             c.repo_id,

@@ -25,6 +25,9 @@ def open_file_transaction(
     creator = getattr(factory, "create", None)
     if callable(factory):
         candidate = factory(workspace_root, fault_injector=fault_injector)
+    elif fault_injector is not None:
+        receipt_factory = receipt_file_transaction_factory(ctx)
+        return receipt_factory(workspace_root, fault_injector=fault_injector)
     elif callable(creator):
         candidate = creator(workspace_root)
     else:

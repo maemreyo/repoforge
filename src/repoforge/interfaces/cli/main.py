@@ -52,6 +52,8 @@ from ...application.runtime.hot_reload import (
 from ...application.service import CodingService
 from ...application.verification_detection import VerificationProfileDetector
 from ...bootstrap import (
+    AdapterOverrides,
+    build_application,
     build_configuration_store,
     build_lock_manager,
     build_metrics_sink,
@@ -93,7 +95,6 @@ from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
-from ...extended_bootstrap import AdapterOverrides, build_application
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover

@@ -18,6 +18,12 @@ RELEASE_THRESHOLDS: dict[CorpusName, float] = {
     "read_golden": 1.0,
 }
 _CORPUS_ORDER: tuple[CorpusName, ...] = tuple(RELEASE_THRESHOLDS)
+PROVIDER_RECALL_THRESHOLDS: dict[str, float] = {
+    "syntax": 0.80,
+    "tree-sitter": 0.95,
+}
+_PRIMARY_PROVIDER_ID = "tree-sitter"
+_PRIMARY_PROVIDER_LANGUAGES = frozenset({"javascript", "python", "typescript"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +50,30 @@ class CaseObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderRecallObservation:
+    provider_id: str
+    language: str
+    case_id: str
+    expected_tests: tuple[str, ...]
+    routed_tests: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRecallMetric:
+    provider_id: str
+    language: str
+    case_count: int
+    expected_test_count: int
+    matched_test_count: int
+    recall: float
+    threshold: float
+
+    @property
+    def passed(self) -> bool:
+        return self.expected_test_count > 0 and self.recall >= self.threshold
+
+
+@dataclass(frozen=True, slots=True)
 class GateMetric:
     corpus: CorpusName
     threshold: float
@@ -64,6 +94,8 @@ class GateMetric:
 class ReleaseGateReport:
     schema_version: int
     metrics: tuple[GateMetric, ...]
+    provider_recall: tuple[ProviderRecallMetric, ...]
+    provider_recall_passed: bool
     passed: bool
 
     def metric(self, corpus: CorpusName) -> GateMetric:
@@ -77,6 +109,8 @@ class ReleaseGateReport:
             "schema_version": self.schema_version,
             "passed": self.passed,
             "metrics": [asdict(metric) for metric in self.metrics],
+            "provider_recall": [asdict(metric) for metric in self.provider_recall],
+            "provider_recall_passed": self.provider_recall_passed,
         }
 
 
@@ -142,6 +176,55 @@ def load_corpus(path: Path) -> tuple[CorpusCase, ...]:
     return tuple(cases)
 
 
+def evaluate_provider_recall(
+    observations: Iterable[ProviderRecallObservation],
+) -> tuple[ProviderRecallMetric, ...]:
+    """Measure routed-test recall independently for every provider/language pair."""
+
+    grouped: dict[tuple[str, str], list[ProviderRecallObservation]] = {}
+    seen: set[tuple[str, str, str]] = set()
+    for observation in observations:
+        provider_id = observation.provider_id.strip()
+        language = observation.language.strip()
+        case_id = observation.case_id.strip()
+        if not provider_id or not language or not case_id:
+            raise ValueError("provider recall identity fields must be non-empty")
+        identity = (provider_id, language, case_id)
+        if identity in seen:
+            raise ValueError(f"duplicate provider recall observation: {identity}")
+        seen.add(identity)
+        if not observation.expected_tests:
+            raise ValueError("provider recall observations require expected tests")
+        grouped.setdefault((provider_id, language), []).append(observation)
+
+    metrics: list[ProviderRecallMetric] = []
+    for (provider_id, language), items in sorted(grouped.items()):
+        try:
+            threshold = PROVIDER_RECALL_THRESHOLDS[provider_id]
+        except KeyError as exc:
+            raise ValueError(f"provider {provider_id!r} is missing a reviewed threshold") from exc
+        expected_count = 0
+        matched_count = 0
+        for item in items:
+            expected = set(item.expected_tests)
+            routed = set(item.routed_tests)
+            expected_count += len(expected)
+            matched_count += len(expected & routed)
+        recall = matched_count / expected_count if expected_count else 0.0
+        metrics.append(
+            ProviderRecallMetric(
+                provider_id=provider_id,
+                language=language,
+                case_count=len(items),
+                expected_test_count=expected_count,
+                matched_test_count=matched_count,
+                recall=recall,
+                threshold=threshold,
+            )
+        )
+    return tuple(metrics)
+
+
 def _case_passed(observation: CaseObservation) -> bool:
     if observation.corpus == "seeded_bugs":
         return observation.regression_caught or observation.fell_back_full
@@ -159,6 +242,8 @@ def _threshold_passed(corpus: CorpusName, success_rate: float) -> bool:
 
 def evaluate_release_gates(
     observations: Iterable[CaseObservation],
+    *,
+    provider_recall_observations: Iterable[ProviderRecallObservation] = (),
 ) -> ReleaseGateReport:
     """Evaluate all four blocking release gates without treating missing data as green."""
 
@@ -205,10 +290,23 @@ def evaluate_release_gates(
             )
         )
     frozen_metrics = tuple(metrics)
+    provider_recall = evaluate_provider_recall(provider_recall_observations)
+    if provider_recall:
+        primary_metrics = tuple(
+            metric for metric in provider_recall if metric.provider_id == _PRIMARY_PROVIDER_ID
+        )
+        primary_languages = frozenset(metric.language for metric in primary_metrics)
+        provider_recall_passed = primary_languages >= _PRIMARY_PROVIDER_LANGUAGES and all(
+            metric.passed for metric in primary_metrics
+        )
+    else:
+        provider_recall_passed = True
     return ReleaseGateReport(
         schema_version=1,
         metrics=frozen_metrics,
-        passed=all(metric.passed for metric in frozen_metrics),
+        provider_recall=provider_recall,
+        provider_recall_passed=provider_recall_passed,
+        passed=all(metric.passed for metric in frozen_metrics) and provider_recall_passed,
     )
 
 
@@ -216,6 +314,7 @@ def run_release_gates(
     executor: CaseExecutor,
     *,
     corpus_root: Path,
+    provider_recall_observations: Iterable[ProviderRecallObservation] = (),
 ) -> ReleaseGateReport:
     """Execute every committed corpus case exactly once and evaluate the result."""
 
@@ -230,7 +329,10 @@ def run_release_gates(
             if observation.corpus != case.corpus or observation.case_id != case.case_id:
                 raise ValueError("Executor returned an observation for the wrong corpus or case id")
             observations.append(observation)
-    return evaluate_release_gates(observations)
+    return evaluate_release_gates(
+        observations,
+        provider_recall_observations=provider_recall_observations,
+    )
 
 
 def _markdown(report: ReleaseGateReport) -> str:
@@ -251,6 +353,25 @@ def _markdown(report: ReleaseGateReport) -> str:
             f"{comparator} {metric.threshold:.1%} | {metric.wrong_target_count} | "
             f"{metric.missing_resume_metadata_count} | {metric.duration_ms:.3f} |"
         )
+    if report.provider_recall:
+        lines.extend(
+            [
+                "",
+                "## Provider routed-test recall",
+                "",
+                "| Provider | Language | Recall | Threshold | Blocking | Status |",
+                "| --- | --- | ---: | ---: | --- | --- |",
+            ]
+        )
+        for recall_metric in report.provider_recall:
+            blocking = recall_metric.provider_id == _PRIMARY_PROVIDER_ID
+            lines.append(
+                "| "
+                f"{recall_metric.provider_id} | {recall_metric.language} | "
+                f"{recall_metric.recall:.1%} | >= {recall_metric.threshold:.1%} | "
+                f"{'yes' if blocking else 'no'} | "
+                f"{'passed' if recall_metric.passed else 'failed'} |"
+            )
     return "\n".join(lines) + "\n"
 
 
