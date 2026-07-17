@@ -181,8 +181,16 @@ def test_runtime_status_logs_and_graceful_stop(
     assert json.loads(capsys.readouterr().out)["state"] == "healthy"
 
     monkeypatch.setattr(cli, "read_runtime_log", lambda path, tail: ["safe"])
+    monkeypatch.setattr(
+        cli,
+        "runtime_log_files",
+        lambda path: (path.with_name(path.name + ".1"), path),
+    )
     assert cli._runtime_command(_args(tmp_path / "config", "logs")) == 0
-    assert json.loads(capsys.readouterr().out)["lines"] == ["safe"]
+    logs = json.loads(capsys.readouterr().out)
+    assert logs["lines"] == ["safe"]
+    assert logs["path"] == "managed-runtime.log"
+    assert logs["files"] == ["managed-runtime.log.1", "managed-runtime.log"]
 
     runtime_store = RuntimeStore([_record(), None])
     monkeypatch.setattr(cli, "build_runtime_store", lambda path: runtime_store)
@@ -328,3 +336,53 @@ def test_runtime_reload_restart_and_unknown(
 
     with pytest.raises(ConfigError, match="Unknown runtime"):
         cli._runtime_command(_args(tmp_path / "config", "wat"))
+
+
+def test_runtime_status_reconciles_persisted_health_with_active_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Store(tmp_path)
+    persisted = _record(RuntimePhase.HEALTHY)
+    monkeypatch.setattr(cli, "build_runtime_store", lambda path: RuntimeStore([persisted]))
+    monkeypatch.setattr(
+        cli,
+        "build_runtime_control_client",
+        lambda path: SimpleNamespace(
+            request=lambda request, timeout_seconds=10.0: ControlResponse(
+                1,
+                False,
+                request.correlation_id,
+                "unhealthy",
+                (("health", [["mcp_control", False, "socket stalled"]]),),
+                "RUNTIME_UNHEALTHY",
+                "watchdog probe failed",
+            )
+        ),
+    )
+    payload = cli._runtime_status(store)
+    assert payload["persisted_state"] == "healthy"
+    assert payload["observed_state"] == "unhealthy"
+    assert payload["state"] == "unhealthy"
+    assert payload["probe"]["ok"] is False
+    assert payload["health"] == [["mcp_control", False, "socket stalled"]]
+
+
+def test_runtime_status_marks_persisted_healthy_stale_when_probe_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Store(tmp_path)
+    persisted = _record(RuntimePhase.HEALTHY)
+    monkeypatch.setattr(cli, "build_runtime_store", lambda path: RuntimeStore([persisted]))
+    monkeypatch.setattr(
+        cli,
+        "build_runtime_control_client",
+        lambda path: SimpleNamespace(
+            request=lambda *args, **kwargs: (_ for _ in ()).throw(ConfigError("socket down"))
+        ),
+    )
+    payload = cli._runtime_status(store)
+    assert payload["persisted_state"] == "healthy"
+    assert payload["observed_state"] == "stale"
+    assert payload["state"] == "stale"
+    assert payload["probe"]["ok"] is False
+    assert "socket down" in payload["probe"]["detail"]

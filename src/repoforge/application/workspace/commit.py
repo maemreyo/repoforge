@@ -1,9 +1,10 @@
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
 from ...config import RepositoryConfig
 from ...domain.command_source import dirty_command_source_paths
-from ...domain.errors import WorkspaceError
+from ...domain.errors import CommandError, WorkspaceError
 from ...domain.publishing import validate_commit_message
 from ..context import ApplicationContext
 
@@ -74,11 +75,51 @@ class WorkspaceCommitter:
                 completed = (
                     fresh.last_verification.completed_at if fresh.last_verification else None
                 )
-                if controlled_refresh and not dirty:
-                    head = current_head
-                    show = self.ctx.git.commit_summary(path)
-                else:
-                    head, show = self.ctx.git.commit(path, message)
+                before_commit_fingerprint = self.ctx.git.fingerprint(path)
+                try:
+                    if controlled_refresh and not dirty:
+                        head = current_head
+                        show = self.ctx.git.commit_summary(path)
+                    else:
+                        head, show = self.ctx.git.commit(path, message)
+                except CommandError as exc:
+                    after_paths: list[str] = []
+                    after_fingerprint: str | None = None
+                    with contextlib.suppress(Exception):
+                        after_paths = sorted(self.ctx.git.changed_paths(path, repo))
+                    with contextlib.suppress(Exception):
+                        after_fingerprint = self.ctx.git.fingerprint(path)
+                    tree_mutated = bool(
+                        after_fingerprint is not None
+                        and after_fingerprint != before_commit_fingerprint
+                    )
+                    verification_invalidated = False
+                    if tree_mutated and fresh.last_verification is not None:
+                        fresh.last_verification = None
+                        self.ctx.store.save(fresh)
+                        verification_invalidated = True
+                    exc.details.setdefault("commit_stage", "git_commit")
+                    exc.details.update(
+                        {
+                            "changed_paths_after_failure": after_paths,
+                            "tree_mutated_during_commit": tree_mutated,
+                            "verification_invalidated": verification_invalidated,
+                        }
+                    )
+                    exc.safe_next_action = (
+                        "Review workspace_diff and the reported hook output. If hooks changed files, "
+                        "review those changes, rerun the verification profile on the exact tree, "
+                        "then retry workspace_commit."
+                    )
+                    audit_details.update(
+                        {
+                            "commit_stage": exc.details.get("commit_stage"),
+                            "tree_mutated_during_commit": tree_mutated,
+                            "verification_invalidated": verification_invalidated,
+                            "changed_path_count_after_failure": len(after_paths),
+                        }
+                    )
+                    raise
                 if repo.require_verification_before_commit:
                     fresh.metadata.update(
                         {

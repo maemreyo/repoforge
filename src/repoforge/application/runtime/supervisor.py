@@ -22,6 +22,7 @@ from ...domain.runtime import (
     ControlCommand,
     ControlRequest,
     ControlResponse,
+    HealthCheck,
     RuntimePhase,
     RuntimeRecord,
     TunnelProfile,
@@ -69,6 +70,9 @@ class RuntimeSupervisor:
         log_path: Path,
         health_timeout_seconds: float = 30.0,
         max_restarts: int = 3,
+        watchdog_interval_seconds: float = 2.0,
+        health_failure_threshold: int = 3,
+        stable_health_reset_seconds: float = 60.0,
     ) -> None:
         self._store = store
         self._configs = configs
@@ -82,8 +86,19 @@ class RuntimeSupervisor:
         self._processes = processes
         self._mcp_runtime_path = mcp_runtime_path
         self._log_path = log_path
+        if (
+            health_timeout_seconds <= 0
+            or max_restarts < 0
+            or watchdog_interval_seconds <= 0
+            or health_failure_threshold <= 0
+            or stable_health_reset_seconds <= 0
+        ):
+            raise ValueError("Runtime health and restart bounds must be positive")
         self._health_timeout = health_timeout_seconds
         self._max_restarts = max_restarts
+        self._watchdog_interval = watchdog_interval_seconds
+        self._health_failure_threshold = health_failure_threshold
+        self._stable_health_reset = stable_health_reset_seconds
         self._stop = threading.Event()
         self._child: ChildProcess | None = None
 
@@ -139,6 +154,7 @@ class RuntimeSupervisor:
         error_code: str | None = None,
         error: str | None = None,
         health: tuple[tuple[str, bool, str], ...] = (),
+        consecutive_health_failures: int = 0,
     ) -> RuntimeRecord:
         pid = os.getpid()
         identity = self._processes.identity(pid)
@@ -167,16 +183,81 @@ class RuntimeSupervisor:
             package_version=__version__,
             executable=sys.executable,
             install_origin=_install_origin(),
+            health_observed_at=now if health else None,
+            consecutive_health_failures=consecutive_health_failures,
         )
+
+    def _tunnel_health(self, child: ChildProcess) -> tuple[HealthCheck, ...]:
+        probe = getattr(self._tunnel, "health", None)
+        if callable(probe):
+            try:
+                checks = tuple(probe(child, timeout_seconds=1.0))
+                if checks:
+                    return checks
+            except Exception as exc:
+                return (
+                    HealthCheck(
+                        "tunnel_probe",
+                        False,
+                        redact_text(f"tunnel health probe failed: {type(exc).__name__}: {exc}"),
+                    ),
+                )
+        alive = self._tunnel.is_alive(child)
+        return (
+            HealthCheck(
+                "tunnel_child",
+                alive,
+                "managed child process is alive" if alive else "managed child process exited",
+            ),
+        )
+
+    def _observe_health(
+        self, generation: int, child: ChildProcess
+    ) -> tuple[bool, tuple[tuple[str, bool, str], ...]]:
+        checks = list(self._tunnel_health(child))
+        mcp_generation = self._mcp_generation()
+        generation_ok = mcp_generation == generation
+        checks.append(
+            HealthCheck(
+                "mcp_generation",
+                generation_ok,
+                (
+                    f"MCP reported generation {generation}"
+                    if generation_ok
+                    else f"expected generation {generation}; observed {mcp_generation}"
+                ),
+            )
+        )
+        mcp_ok = False
+        mcp_detail = "MCP repository health did not pass"
+        if all(check.ok for check in checks) and generation_ok:
+            try:
+                response = self._mcp_control.request(
+                    ControlRequest(1, ControlCommand.HEALTH, self._ids.new_hex(24)),
+                    timeout_seconds=2.0,
+                )
+                mcp_ok = response.ok and response.status == "healthy"
+                mcp_detail = (
+                    "repo_list completed through MCP control"
+                    if mcp_ok
+                    else response.message or response.status
+                )
+            except Exception as exc:
+                mcp_detail = redact_text(f"MCP health probe failed: {type(exc).__name__}: {exc}")
+        checks.append(HealthCheck("repository_self_check", mcp_ok, mcp_detail))
+        legacy = tuple(check.legacy() for check in checks)
+        return all(check.ok for check in checks), legacy
 
     def _control_handler(self, request: ControlRequest) -> ControlResponse:
         record = self._store.read()
         child_alive = bool(self._child and self._tunnel.is_alive(self._child))
-        payload = {
+        payload: dict[str, object] = {
             "record": record.phase.value if record else "stopped",
             "active_generation": record.active_generation if record else None,
             "accepted_generation": record.accepted_generation if record else None,
             "child_alive": child_alive,
+            "health": list(record.health) if record else [],
+            "health_observed_at": record.health_observed_at if record else None,
         }
         if request.command is ControlCommand.PING:
             return ControlResponse(
@@ -192,12 +273,12 @@ class RuntimeSupervisor:
                 None if record is not None else "RUNTIME_NOT_STARTED",
             )
         if request.command is ControlCommand.HEALTH:
-            healthy = bool(
-                record
-                and record.phase is RuntimePhase.HEALTHY
-                and record.active_generation is not None
-                and child_alive
-            )
+            healthy = False
+            if record and self._child and record.active_generation is not None and child_alive:
+                healthy, observed = self._observe_health(record.active_generation, self._child)
+                payload["health"] = list(observed)
+                payload["health_observed_at"] = self._clock.now_iso()
+            healthy = bool(healthy and record and record.phase is RuntimePhase.HEALTHY)
             return ControlResponse(
                 1,
                 healthy,
@@ -223,39 +304,16 @@ class RuntimeSupervisor:
         self, generation: int, child: ChildProcess
     ) -> tuple[bool, tuple[tuple[str, bool, str], ...]]:
         deadline = time.monotonic() + self._health_timeout
+        latest: tuple[tuple[str, bool, str], ...] = ()
         while time.monotonic() < deadline:
-            child_ok = self._tunnel.is_alive(child)
-            mcp_generation = self._mcp_generation()
-            if child_ok and mcp_generation == generation:
-                try:
-                    response = self._mcp_control.request(
-                        ControlRequest(
-                            1,
-                            ControlCommand.HEALTH,
-                            self._ids.new_hex(24),
-                        ),
-                        timeout_seconds=2.0,
-                    )
-                    self_check = response.ok and response.status == "healthy"
-                except ConfigError:
-                    self_check = False
-                if self_check:
-                    return True, (
-                        ("tunnel_child", True, "managed child is alive"),
-                        ("mcp_generation", True, f"MCP reported generation {generation}"),
-                        ("repository_self_check", True, "repo_list completed through MCP control"),
-                    )
-            if not child_ok:
+            healthy, latest = self._observe_health(generation, child)
+            if healthy:
+                return True, latest
+            if not self._tunnel.is_alive(child):
                 break
             time.sleep(0.1)
-        return False, (
-            ("tunnel_child", self._tunnel.is_alive(child), "managed child process"),
-            (
-                "mcp_generation",
-                self._mcp_generation() == generation,
-                f"expected generation {generation}",
-            ),
-            ("repository_self_check", False, "MCP repository health did not pass"),
+        return False, latest or (
+            ("tunnel_child", False, "managed child process did not become healthy"),
         )
 
     def run(
@@ -415,8 +473,57 @@ class RuntimeSupervisor:
                         )
                     )
 
+                    consecutive_health_failures = 0
+                    stable_since = time.monotonic()
                     while not self._stop.is_set() and self._tunnel.is_alive(child):
-                        time.sleep(0.2)
+                        time.sleep(self._watchdog_interval)
+                        generation = self._adopt_committed_runtime_generation(generation)
+                        observed_ok, observed_health = self._observe_health(generation, child)
+                        current = self._store.read()
+                        if observed_ok:
+                            consecutive_health_failures = 0
+                            if time.monotonic() - stable_since >= self._stable_health_reset:
+                                restart_count = 0
+                            if current is not None and (
+                                current.phase is RuntimePhase.DEGRADED
+                                or current.health != observed_health
+                                or current.restart_count != restart_count
+                            ):
+                                self._store.write(
+                                    replace(
+                                        current,
+                                        phase=RuntimePhase.HEALTHY,
+                                        active_generation=generation,
+                                        accepted_generation=generation,
+                                        restart_count=restart_count,
+                                        health=observed_health,
+                                        health_observed_at=self._clock.now_iso(),
+                                        consecutive_health_failures=0,
+                                        last_error_code=None,
+                                        last_error=None,
+                                        updated_at=self._clock.now_iso(),
+                                    )
+                                )
+                            continue
+                        consecutive_health_failures += 1
+                        stable_since = time.monotonic()
+                        if current is not None:
+                            self._store.write(
+                                replace(
+                                    current,
+                                    phase=RuntimePhase.DEGRADED,
+                                    health=observed_health,
+                                    health_observed_at=self._clock.now_iso(),
+                                    consecutive_health_failures=consecutive_health_failures,
+                                    last_error_code="WATCHDOG_HEALTH_DEGRADED",
+                                    last_error="A live tunnel child failed active runtime health probes",
+                                    updated_at=self._clock.now_iso(),
+                                )
+                            )
+                        if consecutive_health_failures < self._health_failure_threshold:
+                            continue
+                        self._tunnel.terminate(child, grace_seconds=3)
+                        break
                     if self._stop.is_set():
                         break
                     self._child = None

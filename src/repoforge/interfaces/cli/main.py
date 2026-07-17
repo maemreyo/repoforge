@@ -70,6 +70,7 @@ from ...bootstrap import (
     prune_audit_log,
     read_audit_events,
     read_runtime_log,
+    runtime_log_files,
     summarize_command_source_stats,
     summarize_operation_metrics,
     system_clock,
@@ -1195,12 +1196,50 @@ def _current_runtime_identity() -> dict[str, str | None]:
 
 
 def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
-    runtime_path, _, _ = _runtime_paths(store)
+    runtime_path, supervisor_socket, _ = _runtime_paths(store)
     record = build_runtime_store(runtime_path).read()
     accepted = store.current()
     active = store.active()
     activation_target = store.activation_target()
-    phase = record.phase.value if record else "stopped"
+    persisted_state = record.phase.value if record else "stopped"
+    observed_state = persisted_state
+    observed_health: list[object] = list(record.health) if record else []
+    probe: dict[str, object] = {
+        "attempted": False,
+        "ok": record is None or record.phase is RuntimePhase.STOPPED,
+        "detail": "No active runtime requires probing."
+        if record is None
+        else "Runtime is stopped.",
+    }
+    if record is not None and record.phase is not RuntimePhase.STOPPED:
+        probe["attempted"] = True
+        try:
+            response = build_runtime_control_client(supervisor_socket).request(
+                ControlRequest(1, ControlCommand.HEALTH, id_generator().new_hex(24)),
+                timeout_seconds=2.0,
+            )
+            response_payload = dict(response.payload)
+            raw_health = response_payload.get("health")
+            if isinstance(raw_health, (list, tuple)):
+                observed_health = list(raw_health)
+            observed_state = (
+                "healthy" if response.ok and response.status == "healthy" else "unhealthy"
+            )
+            probe = {
+                "attempted": True,
+                "ok": response.ok,
+                "status": response.status,
+                "error_code": response.error_code,
+                "detail": response.message or response.status,
+            }
+        except ConfigError as exc:
+            observed_state = "stale" if persisted_state == "healthy" else persisted_state
+            probe = {
+                "attempted": True,
+                "ok": False,
+                "error_code": _error_code(exc),
+                "detail": redact_text(str(exc)),
+            }
     current_identity = _current_runtime_identity()
     snapshot = assess_runtime_health(
         running=RuntimeIdentity(
@@ -1217,18 +1256,33 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
         current_tool_surface_hash=_current_tool_surface_hash(),
         accepted_generation=accepted.generation if accepted else None,
         active_generation=record.active_generation if record else None,
-        phase=phase,
+        phase=persisted_state,
     )
     health = snapshot.as_dict()
+    safe_next_action = health["safe_next_action"]
+    if (
+        observed_state in {"unhealthy", "stale"}
+        and not snapshot.package_version_skew
+        and not snapshot.generation_activation_required
+        and not snapshot.client_rediscovery_recommended
+    ):
+        safe_next_action = (
+            "Run `rf runtime restart` or inspect logs; persisted state is not current health."
+        )
     return {
-        "state": phase,
+        "state": observed_state,
+        "persisted_state": persisted_state,
+        "observed_state": observed_state,
+        "probe": probe,
         "pid": record.pid if record else None,
         "child_pid": record.child_pid if record else None,
         "accepted_generation": accepted.generation if accepted else None,
         "disk_active_generation": active.generation if active else None,
         "activation_target_generation": activation_target.generation if activation_target else None,
         "active_generation": record.active_generation if record else None,
-        "health": list(record.health) if record else [],
+        "health": observed_health,
+        "health_observed_at": record.health_observed_at if record else None,
+        "consecutive_health_failures": record.consecutive_health_failures if record else 0,
         "tunnel_profile": record.tunnel_profile if record else None,
         "tunnel_profile_fingerprint": record.tunnel_profile_fingerprint if record else None,
         "tool_surface_hash": record.tool_surface_hash if record else None,
@@ -1239,6 +1293,7 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
         "last_error": record.last_error if record else None,
         "correlation_id": record.correlation_id if record else None,
         **health,
+        "safe_next_action": safe_next_action,
     }
 
 
@@ -1249,13 +1304,18 @@ def _runtime_command(args: argparse.Namespace) -> int:
     store = _ensure_generation(config_path)
     runtime_path, supervisor_socket, mcp_socket = _runtime_paths(store)
     if args.runtime_command == "status":
-        _json(_runtime_status(store))
-        return 0
+        status = _runtime_status(store)
+        _json(status)
+        return 0 if status.get("state") in {"healthy", "stopped"} else 1
     if args.runtime_command == "logs":
+        log_path = store.root / "managed-runtime.log"
+        files = runtime_log_files(log_path)
         _json(
             {
-                "path": str(store.root / "managed-runtime.log"),
-                "lines": read_runtime_log(store.root / "managed-runtime.log", args.tail),
+                "path": log_path.name,
+                "files": [candidate.name for candidate in files],
+                "rotations_included": max(0, len(files) - 1),
+                "lines": read_runtime_log(log_path, args.tail),
             }
         )
         return 0

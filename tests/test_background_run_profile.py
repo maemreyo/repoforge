@@ -14,6 +14,12 @@ import pytest
 from conftest import ForgeEnvironment
 
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.run_adhoc import (
+    _safe_error_message as _safe_adhoc_error_message,
+)
+from repoforge.application.workspace.run_profile import (
+    _safe_error_message as _safe_profile_error_message,
+)
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.domain.errors import ErrorCode, RepoForgeError
@@ -154,7 +160,24 @@ def _poll(predicate, *, timeout: float = 10.0, interval: float = 0.05):
 
 
 # ---------------------------------------------------------------------------
-# background=false is byte-for-byte unchanged
+# Durable background failure evidence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("render", [_safe_profile_error_message, _safe_adhoc_error_message])
+def test_background_error_excerpt_preserves_head_and_tail(render) -> None:
+    message = "COMMAND: make check\n" + ("x" * 4_000) + "\nFAILED: test_runtime_watchdog"
+
+    excerpt = render(message)
+
+    assert len(excerpt) <= 2_000
+    assert excerpt.startswith("COMMAND: make check")
+    assert excerpt.endswith("FAILED: test_runtime_watchdog")
+    assert "durable error excerpt omitted" in excerpt
+
+
+# ---------------------------------------------------------------------------
+# background=false preserves the synchronous contract and deterministic fields
 # ---------------------------------------------------------------------------
 
 
@@ -189,7 +212,25 @@ def test_background_false_keeps_synchronous_contract(forge_env: ForgeEnvironment
         "valid_tdd_red_evidence",
         "hygiene_receipt",
     }
-    assert implicit == explicit
+    for key in set(implicit) - {"commands"}:
+        assert implicit[key] == explicit[key]
+    assert len(implicit["commands"]) == len(explicit["commands"])
+    for implicit_command, explicit_command in zip(
+        implicit["commands"], explicit["commands"], strict=True
+    ):
+        assert implicit_command["duration_ms"] >= 0
+        assert explicit_command["duration_ms"] >= 0
+        assert implicit_command["cumulative_duration_ms"] >= implicit_command["duration_ms"]
+        assert explicit_command["cumulative_duration_ms"] >= explicit_command["duration_ms"]
+        assert {
+            key: value
+            for key, value in implicit_command.items()
+            if key not in {"duration_ms", "cumulative_duration_ms"}
+        } == {
+            key: value
+            for key, value in explicit_command.items()
+            if key not in {"duration_ms", "cumulative_duration_ms"}
+        }
     assert implicit["profile"] == "quick"
     assert implicit["verification"] is False
     assert implicit["completed_steps"] == [{"id": "step-1", "kind": "unknown"}]
@@ -226,11 +267,20 @@ def test_profile_failure_reports_step_domain_and_not_run_steps(
     with pytest.raises(RepoForgeError) as failure:
         service.workspace_run_profile(workspace_id, "structured-failure")
 
-    assert failure.value.details["completed_steps"] == [{"id": "lint", "kind": "static_analysis"}]
-    assert failure.value.details["failed_step"] == {
-        "id": "tests",
-        "kind": "business_tests",
-    }
+    completed_steps = failure.value.details["completed_steps"]
+    assert isinstance(completed_steps, list) and len(completed_steps) == 1
+    completed_step = completed_steps[0]
+    assert completed_step["id"] == "lint"
+    assert completed_step["kind"] == "static_analysis"
+    assert isinstance(completed_step["duration_ms"], float)
+    assert isinstance(completed_step["cumulative_duration_ms"], float)
+
+    failed_step = failure.value.details["failed_step"]
+    assert failed_step["id"] == "tests"
+    assert failed_step["kind"] == "business_tests"
+    assert isinstance(failed_step["duration_ms"], float)
+    assert isinstance(failed_step["cumulative_duration_ms"], float)
+
     assert failure.value.details["failure_domain"] == "business_tests"
     assert failure.value.details["not_run_steps"] == [{"id": "build", "kind": "build"}]
     assert failure.value.details["business_tests_ran"] is True

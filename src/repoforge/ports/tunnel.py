@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from ..domain.runtime import ChildProcess, TunnelProfile
+from ..domain.runtime import ChildProcess, HealthCheck, TunnelProfile
 
 
 class TunnelClient(Protocol):
@@ -17,6 +17,7 @@ class TunnelClient(Protocol):
     ) -> ChildProcess: ...
     def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None: ...
     def is_alive(self, child: ChildProcess) -> bool: ...
+    def health(self, child: ChildProcess, *, timeout_seconds: float) -> tuple[HealthCheck, ...]: ...
 
 
 class TunnelProfileStore(Protocol):

@@ -48,7 +48,12 @@ class ResolvedDiagnosticSelector:
     argv: tuple[str, ...]
 
 
-def _error(message: str, *, required: bool = False) -> RepoForgeError:
+def _error(
+    message: str,
+    *,
+    required: bool = False,
+    details: dict[str, object] | None = None,
+) -> RepoForgeError:
     return RepoForgeError(
         message,
         code=(
@@ -58,7 +63,22 @@ def _error(message: str, *, required: bool = False) -> RepoForgeError:
         ),
         unchanged_state=("The workspace and diagnostic configuration were not modified.",),
         safe_next_action="Use a selector that matches the diagnostic's reviewed selector schema.",
+        details=details,
     )
+
+
+def _selector_details(
+    selector: DiagnosticSelectorConfig, *, received_values: int | None = None
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "selector_name": selector.name,
+        "selector_kind": selector.kind.value,
+        "max_values": selector.max_values,
+        "expansion": selector.expansion,
+    }
+    if received_values is not None:
+        details["received_values"] = received_values
+    return details
 
 
 def _as_list(raw: SelectorInput) -> list[str] | None:
@@ -131,27 +151,31 @@ def _resolve_single(
     repo: RepositoryConfig,
     git: GitRepository,
 ) -> str:
-    value = _basic_value(raw_value, allow_leading_dash=selector.allow_leading_dash)
-    kind = selector.kind
-    if kind is DiagnosticSelectorKind.TRACKED_PATH:
-        return _tracked_path(value, workspace=workspace, repo=repo, git=git)
-    if kind is DiagnosticSelectorKind.PYTEST_NODE:
-        path, separator, node = value.partition("::")
-        normalized = _tracked_path(path, workspace=workspace, repo=repo, git=git)
-        if separator and (not node or ".." in node or any(ch in _SHELL_META for ch in node)):
-            raise _error("Pytest node selector is invalid")
-        return normalized + (f"::{node}" if separator else "")
-    if kind is DiagnosticSelectorKind.ENUM:
-        if value not in selector.values:
-            raise _error("Diagnostic selector is not in the reviewed enum allowlist")
-        return value
-    if kind in {DiagnosticSelectorKind.PACKAGE_NAME, DiagnosticSelectorKind.CHECK_ID}:
-        if _SAFE_IDENTIFIER.fullmatch(value) is None or ".." in value:
-            raise _error("Diagnostic identifier selector has an invalid format")
-        return value
-    if kind is DiagnosticSelectorKind.TOKEN:
-        return _token_value(value, selector)
-    raise _error(f"Unsupported diagnostic selector kind: {kind.value}")
+    try:
+        value = _basic_value(raw_value, allow_leading_dash=selector.allow_leading_dash)
+        kind = selector.kind
+        if kind is DiagnosticSelectorKind.TRACKED_PATH:
+            return _tracked_path(value, workspace=workspace, repo=repo, git=git)
+        if kind is DiagnosticSelectorKind.PYTEST_NODE:
+            path, separator, node = value.partition("::")
+            normalized = _tracked_path(path, workspace=workspace, repo=repo, git=git)
+            if separator and (not node or ".." in node or any(ch in _SHELL_META for ch in node)):
+                raise _error("Pytest node selector is invalid")
+            return normalized + (f"::{node}" if separator else "")
+        if kind is DiagnosticSelectorKind.ENUM:
+            if value not in selector.values:
+                raise _error("Diagnostic selector is not in the reviewed enum allowlist")
+            return value
+        if kind in {DiagnosticSelectorKind.PACKAGE_NAME, DiagnosticSelectorKind.CHECK_ID}:
+            if _SAFE_IDENTIFIER.fullmatch(value) is None or ".." in value:
+                raise _error("Diagnostic identifier selector has an invalid format")
+            return value
+        if kind is DiagnosticSelectorKind.TOKEN:
+            return _token_value(value, selector)
+        raise _error(f"Unsupported diagnostic selector kind: {kind.value}")
+    except RepoForgeError as exc:
+        exc.details.update(_selector_details(selector, received_values=1))
+        raise
 
 
 def _resolve_values(
@@ -169,12 +193,15 @@ def _resolve_values(
     values = _as_list(raw)
     if values is None or not values:
         raise _error(
-            f"Diagnostic selector '{selector.name}' requires at least one value", required=True
+            f"Diagnostic selector '{selector.name}' requires at least one value",
+            required=True,
+            details=_selector_details(selector, received_values=0),
         )
     if len(values) > selector.max_values:
         raise _error(
             f"Diagnostic selector '{selector.name}' accepts at most {selector.max_values} value(s), "
-            f"got {len(values)}"
+            f"got {len(values)}",
+            details=_selector_details(selector, received_values=len(values)),
         )
     return tuple(
         _resolve_single(selector, value, workspace=workspace, repo=repo, git=git)

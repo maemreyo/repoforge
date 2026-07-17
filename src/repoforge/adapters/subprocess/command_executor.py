@@ -12,6 +12,7 @@ from typing import Any
 
 from ...config import ServerConfig
 from ...domain.errors import CommandError, ErrorCode
+from ...domain.redaction import redact_text
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 
@@ -146,12 +147,19 @@ class SubprocessCommandExecutor:
                 if cancelled
                 else f"Command failed with exit code {result.returncode}: {' '.join(argv)}\n{result.combined or '<no output>'}"
             )
+            stdout_excerpt, stdout_excerpt_truncated = self._truncate(result.stdout, 2_000)
+            stderr_excerpt, stderr_excerpt_truncated = self._truncate(result.stderr, 2_000)
             raise CommandError(
                 message,
                 code=ErrorCode.COMMAND_FAILED,
                 details={
                     "command": argv[0],
+                    "argv": [redact_text(item, limit=256) for item in argv[:32]],
                     "exit_code": result.returncode,
+                    "stdout_excerpt": redact_text(stdout_excerpt, limit=2_000),
+                    "stderr_excerpt": redact_text(stderr_excerpt, limit=2_000),
+                    "stdout_truncated": result.stdout_truncated or stdout_excerpt_truncated,
+                    "stderr_truncated": result.stderr_truncated or stderr_excerpt_truncated,
                     **({"cancelled": True} if cancelled else {}),
                 },
             )

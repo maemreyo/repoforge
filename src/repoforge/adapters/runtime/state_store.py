@@ -99,6 +99,12 @@ class JsonRuntimeStore:
                 install_origin=(
                     str(raw["install_origin"]) if raw.get("install_origin") is not None else None
                 ),
+                health_observed_at=(
+                    str(raw["health_observed_at"])
+                    if raw.get("health_observed_at") is not None
+                    else None
+                ),
+                consecutive_health_failures=int(raw.get("consecutive_health_failures", 0)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"Invalid runtime state fields in {self.path}: {exc}") from exc

@@ -217,10 +217,22 @@ class ConfigAdminService:
             }
         if source == "runtime":
             lines = self._read_log(self._runtime_log_path, limit)
+            prefix = self._runtime_log_path.name + "."
+            rotations: list[tuple[int, str]] = []
+            if self._runtime_log_path.parent.is_dir():
+                for candidate in self._runtime_log_path.parent.glob(prefix + "*"):
+                    suffix = candidate.name[len(prefix) :]
+                    if suffix.isdigit() and candidate.is_file():
+                        rotations.append((int(suffix), candidate.name))
+            files = [name for _, name in sorted(rotations, reverse=True)]
+            if self._runtime_log_path.is_file():
+                files.append(self._runtime_log_path.name)
             return {
                 "status": "ok",
                 "source": "runtime",
-                "path": str(self._runtime_log_path),
+                "path": self._runtime_log_path.name,
+                "files": files,
+                "rotations_included": max(0, len(files) - 1),
                 "lines": lines,
                 "count": len(lines),
             }

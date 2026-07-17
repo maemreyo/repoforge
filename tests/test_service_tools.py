@@ -4,10 +4,16 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import ForgeEnvironment, create_forge_environment
+from conftest import ForgeEnvironment, create_forge_environment, git
 
 from repoforge.application.workspace.edit import FileEdit, TextEdit
-from repoforge.domain.errors import ConfigError, ErrorCode, SecurityError, WorkspaceError
+from repoforge.domain.errors import (
+    CommandError,
+    ConfigError,
+    ErrorCode,
+    SecurityError,
+    WorkspaceError,
+)
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -267,15 +273,65 @@ def test_run_profile_default_and_verify_alias_share_canonical_contract(
         "profile",
         "description",
         "verification",
-        "commands",
         "satisfies_commit_gate",
         "used_default",
         "repo_id",
         "working_directory",
     ):
         assert alias[key] == canonical[key]
+    assert len(alias["commands"]) == len(canonical["commands"])
+    for alias_command, canonical_command in zip(
+        alias["commands"], canonical["commands"], strict=True
+    ):
+        assert alias_command["duration_ms"] >= 0
+        assert canonical_command["duration_ms"] >= 0
+        assert alias_command["cumulative_duration_ms"] >= alias_command["duration_ms"]
+        assert canonical_command["cumulative_duration_ms"] >= canonical_command["duration_ms"]
+        assert {
+            key: value
+            for key, value in alias_command.items()
+            if key not in {"duration_ms", "cumulative_duration_ms"}
+        } == {
+            key: value
+            for key, value in canonical_command.items()
+            if key not in {"duration_ms", "cumulative_duration_ms"}
+        }
     assert len(_audit_events(forge_env.root, "workspace_run_profile")) == 2
     assert _audit_events(forge_env.root, "workspace_verify") == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("missing_path", ErrorCode.WORKSPACE_PATH_MISSING),
+        ("missing_git", ErrorCode.WORKTREE_REGISTRATION_STALE),
+        ("branch_mismatch", ErrorCode.WORKSPACE_BRANCH_MISMATCH),
+        ("outside_root", ErrorCode.WORKSPACE_OUTSIDE_ROOT),
+    ],
+)
+def test_workspace_invariant_failures_have_specific_error_codes(
+    forge_env: ForgeEnvironment, failure: str, expected_code: ErrorCode
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create("demo", f"workspace invariant {failure}")
+    workspace_id = created["workspace_id"]
+    workspace_path = Path(created["path"])
+    context = service.application.context
+
+    if failure == "missing_path":
+        workspace_path.rename(workspace_path.with_name(workspace_path.name + "-moved"))
+    elif failure == "missing_git":
+        workspace_path.joinpath(".git").unlink()
+    elif failure == "branch_mismatch":
+        git("checkout", "-b", "ai/unexpected-runtime-branch", cwd=workspace_path)
+    else:
+        record = context.store.load(workspace_id)
+        record.path = str(forge_env.root / "outside-workspace-root")
+        context.store.save(record)
+
+    with pytest.raises(WorkspaceError) as excinfo:
+        context.workspace(workspace_id)
+    assert excinfo.value.code is expected_code
 
 
 def test_batch_limit_and_denied_path(forge_env: ForgeEnvironment) -> None:
@@ -387,6 +443,37 @@ def test_stale_locks_and_verification_invalidation(forge_env: ForgeEnvironment) 
     service.workspace_write_file(workspace_id, "hello.txt", "changed again\n", current["sha256"])
     with pytest.raises(WorkspaceError, match="changed since"):
         service.workspace_restore_paths(workspace_id, ["hello.txt"], stale)
+
+
+def test_commit_failure_reports_stage_and_invalidates_mutated_verified_tree(
+    forge_env: ForgeEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "commit hook failure")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id, "hello.txt", "changed for hook failure\n", current["sha256"]
+    )
+    service.workspace_run_profile(workspace_id)
+    context = service.application.context
+
+    def failed_commit(path: Path, message: str) -> tuple[str, str]:
+        del message
+        (path / "hook-mutated.txt").write_text("formatted by hook\n", encoding="utf-8")
+        raise CommandError(
+            "pre-commit hook failed",
+            details={"commit_stage": "git_commit", "exit_code": 1},
+        )
+
+    monkeypatch.setattr(context.git, "commit", failed_commit)
+    with pytest.raises(CommandError) as excinfo:
+        service.workspace_commit(workspace_id, "Trigger hook failure")
+
+    error = excinfo.value
+    assert error.details["commit_stage"] == "git_commit"
+    assert error.details["verification_invalidated"] is True
+    assert "hook-mutated.txt" in error.details["changed_paths_after_failure"]
+    assert context.store.load(workspace_id).last_verification is None
 
 
 def test_change_budget_blocks_verification_and_commit(tmp_path: Path) -> None:

@@ -265,13 +265,45 @@ class ApplicationContext:
         try:
             path.relative_to(root)
         except ValueError as exc:
-            raise WorkspaceError(f"Workspace path is outside workspace_root: {path}") from exc
-        if not path.is_dir() or not (path / ".git").exists():
-            raise WorkspaceError(f"Workspace is missing or invalid: {path}")
+            raise WorkspaceError(
+                f"Workspace {workspace_id} is outside the configured workspace root",
+                code=ErrorCode.WORKSPACE_OUTSIDE_ROOT,
+                details={"workspace_id": workspace_id},
+            ) from exc
+        if not path.is_dir():
+            raise WorkspaceError(
+                f"Workspace directory is missing: {workspace_id}",
+                code=ErrorCode.WORKSPACE_PATH_MISSING,
+                details={"workspace_id": workspace_id},
+                safe_next_action=(
+                    "Use workspace_list to confirm the stale record, then remove it explicitly "
+                    "with workspace_remove after reviewing recovery needs."
+                ),
+            )
+        if not (path / ".git").exists():
+            raise WorkspaceError(
+                f"Workspace Git registration is missing or invalid: {workspace_id}",
+                code=ErrorCode.WORKTREE_REGISTRATION_STALE,
+                details={"workspace_id": workspace_id},
+                safe_next_action=(
+                    "Inspect the source repository's git worktree list and use workspace_list before "
+                    "performing explicit cleanup or recovery."
+                ),
+            )
         branch = self.git.current_branch(path)
         if branch != record.branch:
             raise WorkspaceError(
-                f"Workspace branch changed unexpectedly: registry={record.branch}, actual={branch}"
+                f"Workspace branch changed unexpectedly: registry={record.branch}, actual={branch}",
+                code=ErrorCode.WORKSPACE_BRANCH_MISMATCH,
+                details={
+                    "workspace_id": workspace_id,
+                    "expected_branch": record.branch,
+                    "actual_branch": branch,
+                },
+                safe_next_action=(
+                    "Restore the recorded workspace branch without rewriting history, or create a new "
+                    "isolated workspace for the other branch."
+                ),
             )
         validate_branch(branch, repo)
         return (record, repo, path)

@@ -122,6 +122,28 @@ class ChildProcess:
 
 
 @dataclass(frozen=True, slots=True)
+class HealthCheck:
+    """One bounded, explainable runtime health component observation."""
+
+    name: str
+    ok: bool
+    detail: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.name
+            or len(self.name) > 64
+            or not re.fullmatch(r"[a-z][a-z0-9_]*", self.name)
+            or not self.detail
+            or len(self.detail) > 1_000
+        ):
+            raise ValueError("Runtime health check is invalid")
+
+    def legacy(self) -> tuple[str, bool, str]:
+        return (self.name, self.ok, self.detail)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeRecord:
     protocol_version: int
     phase: RuntimePhase
@@ -144,6 +166,8 @@ class RuntimeRecord:
     package_version: str | None = None
     executable: str | None = None
     install_origin: str | None = None
+    health_observed_at: str | None = None
+    consecutive_health_failures: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -162,7 +186,12 @@ class RuntimeRecord:
                 raise ValueError("Runtime process identity is invalid")
         if self.active_generation is not None and self.active_generation <= 0:
             raise ValueError("Active generation must be positive")
-        if self.restart_count < 0 or not self.updated_at or not self.correlation_id:
+        if (
+            self.restart_count < 0
+            or self.consecutive_health_failures < 0
+            or not self.updated_at
+            or not self.correlation_id
+        ):
             raise ValueError("Runtime record metadata is invalid")
         for name, value in (
             ("package_version", self.package_version),
@@ -173,6 +202,10 @@ class RuntimeRecord:
                 not value or len(value) > 1024 or any(ord(c) < 32 for c in value)
             ):
                 raise ValueError(f"Runtime {name} is invalid")
+        for name, ok, detail in self.health:
+            HealthCheck(name, ok, detail)
+        if self.health and not self.health_observed_at:
+            object.__setattr__(self, "health_observed_at", self.updated_at)
         if self.phase is RuntimePhase.HEALTHY and (
             self.pid is None or self.child_pid is None or self.active_generation is None
         ):

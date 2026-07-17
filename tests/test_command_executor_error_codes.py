@@ -33,6 +33,10 @@ def test_run_nonzero_exit_is_command_failed_regardless_of_output_text(tmp_path: 
     assert err.code is ErrorCode.COMMAND_FAILED
     assert err.retryable is False
     assert err.details["exit_code"] == 1
+    assert err.details["argv"] == ["python3", str(script)]
+    assert "timeout: 60.0s" in err.details["stdout_excerpt"]
+    assert err.details["stderr_excerpt"] == ""
+    assert err.details["stdout_truncated"] is False
 
 
 def test_run_timeout_is_command_timeout(tmp_path: Path) -> None:
