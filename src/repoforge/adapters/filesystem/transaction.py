@@ -536,3 +536,10 @@ class JournaledFileTransaction:
                 continue
             seen.add(path)
             self._fsync_dir(path)
+
+
+class JournaledFileTransactionFactory:
+    """Create one journaled transaction engine for a reviewed workspace root."""
+
+    def create(self, workspace_root: Path) -> JournaledFileTransaction:
+        return JournaledFileTransaction(workspace_root)

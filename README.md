@@ -55,6 +55,7 @@ Today, RepoForge can:
 - reuse exact-bound deterministic verification failures without creating a verification receipt;
 - attach explainable risk, affected-test candidates, and ordered verification recommendations to one assessment snapshot;
 - reuse private atomic durable-state primitives across operational records;
+- preview and apply schema migrations, reference-aware retention, integrity checks, portable backup, and rollback-safe restore without expanding the public MCP surface;
 - manage local configuration generations and runtime lifecycle;
 - record bounded, secret-safe audit metadata.
 
@@ -210,6 +211,7 @@ See [ticket governance](docs/development/TICKET_GOVERNANCE.md),
 - Recommend activation, restart/reinstall, or client reconnect/rediscovery in deterministic order.
 - Keep raw MCP initialize payloads out of persisted state and returned health projections.
 - Persist TaskCapsule and approval records through shared private durable-state contracts; public task lifecycle and approval UI remain follow-on work.
+- Administer shared durable state through checksum-bound migration, retention, integrity, backup, and restore contracts; see [durable-state lifecycle operations](docs/development/DURABLE_STATE_LIFECYCLE.md).
 - Analyze policy-visible Python, JavaScript, and TypeScript source with bounded syntax/import heuristics.
 - Return snapshot-bound coverage, confidence, limitations, symbols, imports, references, and affected-test candidates.
 - Treat intelligence as advisory: provider failure or low coverage broadens verification and never expands authority.

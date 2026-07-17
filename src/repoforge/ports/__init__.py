@@ -14,6 +14,7 @@ from .execution_environment import (
     ExecutionEnvironmentPort,
     ExecutionReceipt,
 )
+from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
 from .git import (
     GitBaseReferences,
@@ -96,6 +97,8 @@ __all__ = [
     "ExecutionEnvironmentPort",
     "ExecutionReceipt",
     "FileSystem",
+    "FileTransaction",
+    "FileTransactionFactory",
     "GateState",
     "GitBaseReferences",
     "GitHubActionsJob",
