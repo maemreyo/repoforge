@@ -85,6 +85,11 @@ def _minimal_repository_stub(payload: dict[str, Any]) -> None:
     payload["scripts"] = {}
     payload["instruction_files"] = []
     payload["diagnostic_pack_suggestions"] = []
+    payload["profile_drift"] = {
+        "detected_unenrolled_profiles": [],
+        "stale": True,
+        "truncated": True,
+    }
 
 
 def _minimal_ticket_stub(payload: dict[str, Any]) -> None:

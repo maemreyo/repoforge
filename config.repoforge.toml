@@ -10,8 +10,8 @@
 #
 # The legacy resolved `[server]`/`[repositories.*]` format previously shown here is
 # still accepted for serve/doctor/runtime, but repository mutation and agent-driven
-# policy changes require this source format. Risk-scoring thresholds are not part of
-# the source format; generated configurations use the reviewed defaults.
+# policy changes require this source format. Optional repository risk metadata and
+# GitHub-native ticket metadata are preserved into reviewed resolved generations.
 version = 2
 
 # Omit [tunnel] for local-only stdio operation.

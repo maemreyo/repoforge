@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from ..domain.errors import ConfigError, ErrorCode, RepoForgeError
@@ -22,6 +22,20 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+_LOCAL_MUTATION_ACTIONS = frozenset(
+    {"workspace_write_file", "workspace_edit", "workspace_apply_patch"}
+)
+
+
+@dataclass(slots=True)
+class IdempotencyEffectBoundary:
+    """Marks the first point after which a failed operation may have changed durable state."""
+
+    started: bool = False
+
+    def begin(self) -> None:
+        self.started = True
+
 
 def execute_idempotent(
     ctx: ApplicationContext,
@@ -33,6 +47,7 @@ def execute_idempotent(
     details: dict[str, Any] | None = None,
     serialize: Callable[[T], Any] | None = None,
     deserialize: Callable[[Any], T] | None = None,
+    effect_boundary: IdempotencyEffectBoundary | None = None,
 ) -> T:
     """Claim, execute, persist, and replay one reviewed keyed operation."""
     if key is None:
@@ -85,11 +100,54 @@ def execute_idempotent(
                 )
                 ctx.record_metric(action, success=True, duration_ms=0.0, error_code=None)
                 return replayed
-            if (
+            if existing is not None and existing.state is IdempotencyState.UNCERTAIN:
+                raise ConfigError(
+                    "IDEMPOTENCY_UNCERTAIN: the mutation may have completed before its result receipt was recorded",
+                    code=ErrorCode.IDEMPOTENCY_UNCERTAIN,
+                    retryable=False,
+                    safe_next_action=(
+                        "Inspect the current workspace status and target content, compare it with the "
+                        "requested result, and do not retry blindly with a new key."
+                    ),
+                    unchanged_state=(
+                        "The workspace mutation outcome is uncertain and must be inspected explicitly.",
+                    ),
+                    correlation_id=existing.correlation_id,
+                )
+            stale_existing = (
                 existing is not None
                 and now_epoch - existing.updated_at_epoch
-                <= ctx.config.server.idempotency_stale_seconds
+                > ctx.config.server.idempotency_stale_seconds
+            )
+            if (
+                stale_existing
+                and action in _LOCAL_MUTATION_ACTIONS
+                and existing is not None
+                and existing.state is IdempotencyState.IN_PROGRESS
             ):
+                store.save(
+                    replace(
+                        existing,
+                        state=IdempotencyState.UNCERTAIN,
+                        updated_at=now_iso,
+                        updated_at_epoch=now_epoch,
+                        result=None,
+                    )
+                )
+                raise ConfigError(
+                    "IDEMPOTENCY_UNCERTAIN: a stale local mutation claim cannot be replayed safely",
+                    code=ErrorCode.IDEMPOTENCY_UNCERTAIN,
+                    retryable=False,
+                    safe_next_action=(
+                        "Inspect the target files and workspace fingerprint before deciding whether "
+                        "a new reviewed mutation is required."
+                    ),
+                    unchanged_state=(
+                        "The workspace mutation outcome is uncertain and must be inspected explicitly.",
+                    ),
+                    correlation_id=existing.correlation_id,
+                )
+            if existing is not None and not stale_existing:
                 raise ConfigError(
                     "IDEMPOTENCY_IN_PROGRESS: the same keyed operation is still running",
                     code=ErrorCode.IDEMPOTENCY_IN_PROGRESS,
@@ -136,10 +194,37 @@ def execute_idempotent(
                         )
                     )
                     return safe_result
-                except Exception:
+                except Exception as exc:
                     current = store.load(action, key_hash)
+                    effect_started = effect_boundary is not None and effect_boundary.started
                     if current is not None and current.correlation_id == correlation:
-                        store.delete(action, key_hash)
+                        if effect_started:
+                            store.save(
+                                replace(
+                                    current,
+                                    state=IdempotencyState.UNCERTAIN,
+                                    updated_at=ctx.clock.now_iso(),
+                                    updated_at_epoch=ctx.now_epoch(),
+                                    result=None,
+                                )
+                            )
+                        else:
+                            store.delete(action, key_hash)
+                    if effect_started:
+                        raise ConfigError(
+                            "IDEMPOTENCY_UNCERTAIN: the mutation crossed its effect boundary but its result receipt was not recorded",
+                            code=ErrorCode.IDEMPOTENCY_UNCERTAIN,
+                            retryable=False,
+                            safe_next_action=(
+                                "Inspect the current workspace status and target content before "
+                                "deciding whether a new reviewed mutation is required."
+                            ),
+                            unchanged_state=(
+                                "The workspace mutation outcome is uncertain and must be inspected explicitly.",
+                            ),
+                            correlation_id=correlation,
+                            details={"original_error_type": type(exc).__name__},
+                        ) from exc
                     raise
 
             return ctx.audited(

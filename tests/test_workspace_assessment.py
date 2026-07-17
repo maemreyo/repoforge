@@ -5,13 +5,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import ForgeEnvironment
+from conftest import ForgeEnvironment, git
 
+from repoforge.adapters.code_intelligence.syntax import SyntaxCodeIntelligenceProvider
+from repoforge.application.service import CodingService
 from repoforge.application.workspace.assessment import (
     WorkspaceAssessmentCommand,
     WorkspaceAssessmentReader,
 )
 from repoforge.application.workspace.edit import FileEdit, TextEdit
+from repoforge.bootstrap import AdapterOverrides, build_application
+from repoforge.config import load_config
 from repoforge.domain.assessment import (
     AssessmentCoverage,
     AssessmentEvidenceStatus,
@@ -20,7 +24,90 @@ from repoforge.domain.assessment import (
     new_assessment_snapshot,
     validate_workspace_assessment,
 )
+from repoforge.domain.code_intelligence import (
+    CodeIntelligenceMeasure,
+    CodeIntelligenceRequest,
+    CodeIntelligenceSnapshot,
+    CodeIntelligenceStatus,
+    new_code_intelligence_result,
+)
 from repoforge.domain.errors import ErrorCode, RepoForgeError
+
+
+def test_code_intelligence_domain_is_snapshot_bound_and_normalized() -> None:
+    snapshot = CodeIntelligenceSnapshot(
+        repo_id="demo",
+        workspace_id="workspace-1",
+        head_sha="a" * 40,
+        workspace_fingerprint="b" * 64,
+    )
+    result = new_code_intelligence_result(
+        provider_id="syntax",
+        provider_version="1",
+        snapshot=snapshot,
+        status=CodeIntelligenceStatus.CURRENT,
+        coverage=CodeIntelligenceMeasure(100, "All supported files were analyzed."),
+        confidence=CodeIntelligenceMeasure(90, "Imports were resolved syntactically."),
+        analyzed_paths=("src/z.py", "src/a.py", "src/a.py"),
+        limitations=("No runtime dispatch analysis.",),
+    )
+    assert result.analyzed_paths == ("src/a.py", "src/z.py")
+    assert result.snapshot.snapshot_id.startswith("ci-")
+
+    with pytest.raises(RepoForgeError) as unsafe:
+        new_code_intelligence_result(
+            provider_id="syntax",
+            provider_version="1",
+            snapshot=snapshot,
+            status=CodeIntelligenceStatus.CURRENT,
+            coverage=CodeIntelligenceMeasure(100, "Complete."),
+            confidence=CodeIntelligenceMeasure(80, "Bounded syntax evidence."),
+            analyzed_paths=("/tmp/escape.py",),
+        )
+    assert unsafe.value.code is ErrorCode.CODE_INTELLIGENCE_INVALID
+
+
+def test_syntax_code_intelligence_maps_python_and_typescript_tests(tmp_path: Path) -> None:
+    files = {
+        "src/math_utils.py": "def add(a, b):\n    return a + b\n",
+        "tests/test_math_utils.py": (
+            "from src.math_utils import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+        ),
+        "web/format.ts": ("export function formatName(name: string) { return name.trim(); }\n"),
+        "web/format.test.ts": ("import { formatName } from './format';\nformatName(' Ada ');\n"),
+    }
+    for relative_path, content in files.items():
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    request = CodeIntelligenceRequest(
+        workspace_root=tmp_path,
+        snapshot=CodeIntelligenceSnapshot(
+            repo_id="demo",
+            workspace_id="workspace-1",
+            head_sha="a" * 40,
+            workspace_fingerprint="b" * 64,
+        ),
+        paths=tuple(files),
+        changed_paths=("src/math_utils.py", "web/format.ts"),
+        diagnostic_ids=("pytest-target",),
+    )
+    result = SyntaxCodeIntelligenceProvider().analyze(request)
+
+    assert result.status is CodeIntelligenceStatus.CURRENT
+    assert {item.test_path for item in result.affected_tests} == {
+        "tests/test_math_utils.py",
+        "web/format.test.ts",
+    }
+    python_candidate = next(
+        item for item in result.affected_tests if item.test_path == "tests/test_math_utils.py"
+    )
+    assert python_candidate.diagnostic_id == "pytest-target"
+    assert python_candidate.selector == "tests/test_math_utils.py"
+    assert any(item.resolved_path == "src/math_utils.py" for item in result.imports)
+    assert any(item.resolved_path == "web/format.ts" for item in result.imports)
+    assert {item.language.value for item in result.symbols} == {"python", "typescript"}
 
 
 def _changed_workspace(env: ForgeEnvironment) -> str:
@@ -32,6 +119,125 @@ def _changed_workspace(env: ForgeEnvironment) -> str:
         [FileEdit("hello.txt", current["sha256"], (TextEdit("hello", "assessment change"),))],
     )
     return workspace_id
+
+
+def test_assessment_includes_affected_test_candidates_and_targeted_stage(
+    forge_env: ForgeEnvironment,
+) -> None:
+    source_file = forge_env.source / "src" / "math_utils.py"
+    test_file = forge_env.source / "tests" / "test_math_utils.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    test_file.write_text(
+        "from src.math_utils import add\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+        encoding="utf-8",
+    )
+    git("add", "src/math_utils.py", "tests/test_math_utils.py", cwd=forge_env.source)
+    git("commit", "-m", "add code intelligence fixture", cwd=forge_env.source)
+    git("push", "origin", "main", cwd=forge_env.source)
+
+    workspace_id = forge_env.service.workspace_create("demo", "assessment intelligence")[
+        "workspace_id"
+    ]
+    current = forge_env.service.workspace_read_file(workspace_id, "src/math_utils.py")
+    forge_env.service.workspace_write_file(
+        workspace_id,
+        "src/math_utils.py",
+        "def add(a, b):\n    return a + b + 0\n",
+        current["sha256"],
+    )
+
+    result = forge_env.service.workspace_assessment(workspace_id)
+    intelligence = result["code_intelligence"]
+    assert intelligence["status"] == "current"
+    candidates = intelligence["value"]["affected_tests"]
+    assert candidates[0]["test_path"] == "tests/test_math_utils.py"
+    assert candidates[0]["diagnostic_id"] == "pytest-target"
+    assert any(
+        stage.get("selector") == "tests/test_math_utils.py"
+        for stage in result["verification_recommendation"]["ordered_stages"]
+    )
+
+
+def test_assessment_degrades_code_intelligence_provider_failure(
+    forge_env: ForgeEnvironment,
+) -> None:
+    class FailingProvider:
+        provider_id = "failing"
+        provider_version = "1"
+
+        def analyze(self, request: CodeIntelligenceRequest):
+            del request
+            raise RuntimeError("provider unavailable")
+
+    config = load_config(forge_env.config_path)
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(code_intelligence=FailingProvider()),
+    )
+    service = CodingService(config, application=application)
+    workspace_id = service.workspace_create("demo", "assessment intelligence fallback")[
+        "workspace_id"
+    ]
+
+    result = service.workspace_assessment(workspace_id)
+    intelligence = result["code_intelligence"]
+    assert intelligence["status"] == "unavailable"
+    assert intelligence["coverage"] == "none"
+    assert intelligence["error_code"] == ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE.value
+    assert any(item.startswith("code_intelligence:") for item in result["uncertainties"])
+
+
+def test_failed_profile_surfaces_affected_test_selector(
+    forge_env: ForgeEnvironment,
+) -> None:
+    source_file = forge_env.source / "src" / "math_utils.py"
+    test_file = forge_env.source / "tests" / "test_math_utils.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    test_file.write_text(
+        "from src.math_utils import add\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+        encoding="utf-8",
+    )
+    git("add", "src/math_utils.py", "tests/test_math_utils.py", cwd=forge_env.source)
+    git("commit", "-m", "add profile intelligence fixture", cwd=forge_env.source)
+    git("push", "origin", "main", cwd=forge_env.source)
+    config_text = forge_env.config_path.read_text(encoding="utf-8")
+    forge_env.config_path.write_text(
+        config_text
+        + """
+
+[repositories.demo.profiles.static-failure]
+description = "Fail after static analysis"
+verification = true
+commands = [["python3", "-c", "import sys; sys.exit(3)"]]
+
+[[repositories.demo.profiles.static-failure.steps]]
+id = "static"
+kind = "static_analysis"
+command = ["python3", "-c", "import sys; sys.exit(3)"]
+""",
+        encoding="utf-8",
+    )
+    service = CodingService(load_config(forge_env.config_path))
+    workspace_id = service.workspace_create("demo", "profile intelligence")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "src/math_utils.py")
+    service.workspace_write_file(
+        workspace_id,
+        "src/math_utils.py",
+        "def add(a, b):\n    return a + b + 0\n",
+        current["sha256"],
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        service.workspace_run_profile(workspace_id, "static-failure")
+
+    candidates = failure.value.details["affected_test_candidates"]
+    assert candidates[0]["selector"] == "tests/test_math_utils.py"
+    assert "tests/test_math_utils.py" in (failure.value.safe_next_action or "")
+    assert "workspace_run_diagnostic" in (failure.value.safe_next_action or "")
 
 
 def test_assessment_domain_rejects_mixed_snapshot_components() -> None:
@@ -56,6 +262,7 @@ def test_assessment_domain_rejects_mixed_snapshot_components() -> None:
             "diff_summary",
             "change_budget",
             "path_policy",
+            "code_intelligence",
             "base_freshness",
             "pr_state",
             "ci_summary",

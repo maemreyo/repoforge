@@ -1,9 +1,11 @@
 """Protocols only; concrete implementations live under adapters/."""
 
+from .approval_store import ApprovalPayloadStore, ApprovalStore
 from .audit import AuditSink
 from .background_tasks import BackgroundTaskRunner
 from .capabilities import ExecutableLocator
 from .clock import Clock
+from .code_intelligence import CodeIntelligenceProvider
 from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
 from .execution_environment import (
@@ -60,6 +62,7 @@ from .runtime_control import (
 )
 from .sleeper import Sleeper
 from .state_repository import StateRepository
+from .task_store import TaskStore
 from .ticket_graph import TicketGraphGateway
 from .ticket_project import TicketProjectGateway
 from .tunnel import TunnelClient, TunnelProfileStore
@@ -76,11 +79,14 @@ from .workflow_replay import (
 from .workspace_store import WorkspaceStore
 
 __all__ = [
+    "ApprovalPayloadStore",
+    "ApprovalStore",
     "ApprovedExecution",
     "ArtifactResult",
     "AuditSink",
     "BackgroundTaskRunner",
     "Clock",
+    "CodeIntelligenceProvider",
     "CommandExecutor",
     "CommandResult",
     "ConfigurationStore",
@@ -132,6 +138,7 @@ __all__ = [
     "RuntimeStore",
     "Sleeper",
     "StateRepository",
+    "TaskStore",
     "TicketGraphGateway",
     "TicketProjectGateway",
     "TunnelClient",

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Restored deterministic developer, runtime, verification, and release commands: the default Make goal is read-only help; configured verification targets exist again; background/watch startup preserves one-shell state; release preflight is portable, requires an explicit bump type, rejects dirty or untracked trees and existing tags, builds once into a clean output directory, and emits SHA-256 checksums.
+- Preserved GitHub-native ticket-graph configuration through source, proposal, and resolved generations; graph reads now report root and relationship coverage explicitly, and Ready-ticket selection fails closed whenever traversal is missing, unavailable, truncated, or incomplete.
+- Added normalized runtime health covering package/executable origin, accepted and active generation, process identity, server/current tool-surface hashes, negotiated client capabilities, and deterministic activation/restart/rediscovery guidance without persisting raw initialize payloads.
+- Added private durable TaskCapsule and shared approval foundations, including migration of pending policy changes into one approval queue while retaining out-of-band approval for capability expansion.
+- Added typed verification steps, explicit failure-domain evidence, exact-base no-regression hygiene receipts, and proposal-ready verification-profile drift surfaced through repository context.
+- Added exact-state idempotency to workspace write/edit/patch mutations and exact-bound reuse of deterministic non-retryable profile or diagnostic failures; replay never applies a mutation twice, and failure reuse never creates a verification receipt or commit eligibility.
+- Added a provider-neutral code-intelligence baseline with bounded Python/JavaScript/TypeScript syntax and import facts, explicit coverage/confidence/limitations, affected-test candidates mapped to enrolled diagnostics, snapshot invalidation, and provider-failure fallback.
+
 ## 2.1.0 — 2026-07-16
 
 - Published concrete nested `workspace_edit` input items plus `context_lines` and `max_results` numeric bounds in the frozen MCP release contract, so clients can validate calls locally instead of discovering these constraints through failed tool calls.
@@ -60,7 +68,6 @@
 - Added bounded 30-day daily buckets alongside lifetime totals in `operation-metrics.json`, migrated compatibly from schema version 1, and extended `rf audit stats` with `--since`/`--until` window filters so a fix's before/after effect on a tool's failure rate or latency can be measured locally; default `rf audit stats` output is unchanged.
 - Added optional bounded `issue_ids` workspace metadata to `workspace_create`, surfaced in `workspace_list` and `workspace_status` alongside dirty/clean state, plus a documented one-issue-per-workspace default with a stacked-issue exception.
 - Added local `rf audit` and `rf audit stats` commands to read the existing private audit log and operation-metrics snapshot, with `--last`, `--action`, `--failed`, and `--slow` filters, so a failed or slow consumer call can be found and timed without new instrumentation.
-- Added AI-ready issue forms, a deterministic machine-readable ticket graph, offline validation, Ready-ticket selection, and bounded read-only GitHub drift checks.
 - Added snapshot-bound explainable workspace risk and policy-driven ordered verification recommendations while retaining the final exact-tree gate.
 - Added reusable typed durable-state envelopes and private atomic JSON storage, adopted by OperationTask without changing its serialized record contract.
 - Replaced the obsolete manual source hash manifest with a documented executable source and release integrity policy.

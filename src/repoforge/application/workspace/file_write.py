@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from typing import cast
 
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ..context import ApplicationContext
+from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint
+from ..idempotency import IdempotencyEffectBoundary
 
 _SHA = re.compile("^[a-f0-9]{64}$")
 
@@ -18,6 +21,7 @@ class WorkspaceFileWriteCommand:
     relative_path: str
     content: str
     expected_sha256: str
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +53,8 @@ class WorkspaceFileWriter:
         if self.ctx.filesystem.is_symlink(workspace / normalized):
             raise SecurityError("Writing through symlinks is not allowed")
 
+        effect = IdempotencyEffectBoundary()
+
         def op() -> WorkspaceFileWriteResult:
             with self.ctx.locks.lock(c.workspace_id):
                 if self.ctx.filesystem.exists(path):
@@ -67,6 +73,7 @@ class WorkspaceFileWriter:
                     raise WorkspaceError(
                         "File does not exist; use expected_sha256='<new>' to create it"
                     )
+                effect.begin()
                 self.ctx.filesystem.write_bytes_atomic(path, data, preserve_mode=True)
                 sha = hashlib.sha256(data).hexdigest()
                 stat = self.ctx.git.diff_stat(workspace)
@@ -81,12 +88,26 @@ class WorkspaceFileWriter:
                     c.workspace_id, normalized, sha, len(data), stat, fingerprint, head_sha
                 )
 
-        return self.ctx.audited(
-            "workspace_write_file",
-            {
-                "workspace_id": c.workspace_id,
-                "path": c.relative_path,
-                "size_bytes": len(data),
-            },
-            op,
+        return cast(
+            WorkspaceFileWriteResult,
+            self.ctx.idempotent(
+                "workspace_write_file",
+                c.idempotency_key,
+                {
+                    "workspace_id": c.workspace_id,
+                    "path": normalized,
+                    "expected_sha256": c.expected_sha256,
+                    "content_sha256": hashlib.sha256(data).hexdigest(),
+                    "size_bytes": len(data),
+                },
+                op,
+                details={
+                    "workspace_id": c.workspace_id,
+                    "path": normalized,
+                    "size_bytes": len(data),
+                },
+                serialize=to_data,
+                deserialize=lambda value: WorkspaceFileWriteResult(**value),
+                effect_boundary=effect,
+            ),
         )

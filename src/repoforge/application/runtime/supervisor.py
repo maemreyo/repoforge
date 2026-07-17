@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import os
 import signal
+import sys
 import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+
+from repoforge import __version__
 
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
@@ -30,6 +34,19 @@ from ...ports.locking import LockManager
 from ...ports.process import ProcessInspector
 from ...ports.runtime_control import RuntimeControlClient, RuntimeControlServer, RuntimeStore
 from ...ports.tunnel import TunnelClient, TunnelProfileStore
+
+
+def _install_origin() -> str | None:
+    spec = importlib.util.find_spec("repoforge")
+    origin = spec.origin if spec is not None else None
+    if not origin:
+        return None
+    normalized = origin.replace("\\", "/")
+    if "/site-packages/" in normalized:
+        return "wheel"
+    if "/src/repoforge/" in normalized:
+        return "source"
+    return "environment"
 
 
 class RuntimeSupervisor:
@@ -147,6 +164,9 @@ class RuntimeSupervisor:
             last_error_code=error_code,
             last_error=error,
             health=health,
+            package_version=__version__,
+            executable=sys.executable,
+            install_origin=_install_origin(),
         )
 
     def _control_handler(self, request: ControlRequest) -> ControlResponse:

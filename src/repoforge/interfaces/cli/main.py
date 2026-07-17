@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import asdict
@@ -21,6 +23,8 @@ from ...application.config_admin import ConfigAdminService, PendingPolicyChangeS
 from ...application.configuration.document import (
     apply_policy_patch,
     apply_proposal,
+    apply_risk_policy,
+    apply_ticket_graph,
     parse_resolved,
     remove_repository,
     render_resolved,
@@ -29,6 +33,8 @@ from ...application.configuration.paths import resolve_repoforge_paths
 from ...application.configuration.source import (
     SourceConfiguration,
     SourceRepository,
+    SourceRiskPolicy,
+    SourceTicketGraph,
     add_source_repository,
     parse_source,
     remove_source_repository,
@@ -52,6 +58,7 @@ from ...bootstrap import (
     build_lock_manager,
     build_metrics_sink,
     build_operation_gate,
+    build_pending_policy_change_store,
     build_repository_probe,
     build_runtime_control_client,
     build_runtime_control_server,
@@ -86,6 +93,7 @@ from ...domain.errors import (
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
+from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
@@ -205,7 +213,37 @@ def _source_for_display(store: ConfigurationStore) -> SourceConfiguration:
             os.environ.get("REPOFORGE_TUNNEL_ID", "legacy-unconfigured"),
             os.environ.get("REPOFORGE_TUNNEL_PROFILE", "repoforge"),
             tuple(
-                SourceRepository(repo.repo_id, str(repo.path))
+                SourceRepository(
+                    repo.repo_id,
+                    str(repo.path),
+                    ticket_graph=(
+                        SourceTicketGraph(
+                            root_issue=repo.ticket_graph.root_issue,
+                            repository=repo.ticket_graph.repository,
+                            project_owner=repo.ticket_graph.project_owner,
+                            project_number=repo.ticket_graph.project_number,
+                            project_owner_type=repo.ticket_graph.project_owner_type,
+                            status_field=repo.ticket_graph.status_field,
+                            priority_field=repo.ticket_graph.priority_field,
+                            initiative_field=repo.ticket_graph.initiative_field,
+                            type_field=repo.ticket_graph.type_field,
+                        )
+                        if repo.ticket_graph is not None
+                        else None
+                    ),
+                    risk_policy=SourceRiskPolicy(
+                        low_max=repo.risk_policy.low_max,
+                        medium_max=repo.risk_policy.medium_max,
+                        high_max=repo.risk_policy.high_max,
+                        critical_globs=repo.risk_policy.critical_globs,
+                        public_contract_globs=repo.risk_policy.public_contract_globs,
+                        manifest_globs=repo.risk_policy.manifest_globs,
+                        docs_globs=repo.risk_policy.docs_globs,
+                        narrow_diagnostics=repo.risk_policy.narrow_diagnostics,
+                        ordered_profiles=repo.risk_policy.ordered_profiles,
+                        final_profile=repo.risk_policy.final_profile,
+                    ),
+                )
                 for repo in sorted(config.repositories.values(), key=lambda item: item.repo_id)
             ),
         )
@@ -308,7 +346,7 @@ def _config_set(config_path: Path, args: argparse.Namespace) -> int:
 
 def _pending_store(config_path: Path) -> PendingPolicyChangeStore:
     store = _ensure_generation(config_path)
-    return PendingPolicyChangeStore(store.root / "pending-policy-changes")
+    return build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root))
 
 
 def _config_pending(config_path: Path) -> int:
@@ -331,7 +369,7 @@ def _config_pending(config_path: Path) -> int:
 
 def _config_approve(config_path: Path, args: argparse.Namespace) -> int:
     store = _ensure_generation(config_path)
-    pending = PendingPolicyChangeStore(store.root / "pending-policy-changes")
+    pending = build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root))
     record = pending.load(args.change_id)
     proposal_id = str(record["proposal_id"])
     now = system_clock().now_iso()
@@ -361,13 +399,21 @@ def _config_approve(config_path: Path, args: argparse.Namespace) -> int:
         )
     except ConfigError as exc:
         if str(exc).startswith(("STALE_CONFIG_GENERATION", "Configuration changed concurrently")):
-            pending.delete(args.change_id)
+            pending.invalidate(
+                args.change_id,
+                actor=os.environ.get("USER", "local-user"),
+                decided_at=now,
+            )
             raise ConfigError(
                 f"{exc}. The pending change was discarded as stale; ask the agent to "
                 "propose it again from the current configuration."
             ) from exc
         raise
-    pending.delete(args.change_id)
+    pending.approve(
+        args.change_id,
+        actor=os.environ.get("USER", "local-user"),
+        decided_at=now,
+    )
     activation = _activate(
         store,
         config_path,
@@ -393,7 +439,11 @@ def _config_approve(config_path: Path, args: argparse.Namespace) -> int:
 def _config_reject(config_path: Path, change_id: str) -> int:
     pending = _pending_store(config_path)
     record = pending.load(change_id)
-    pending.delete(change_id)
+    pending.reject(
+        change_id,
+        actor=os.environ.get("USER", "local-user"),
+        decided_at=system_clock().now_iso(),
+    )
     _json(
         {
             "status": "rejected",
@@ -758,6 +808,8 @@ def _repo_refresh(args: argparse.Namespace) -> int:
                 tuple(sorted(effective_inputs[item.repo_id][0].items())),
                 tuple(sorted(effective_inputs[item.repo_id][1].items())),
                 item.policy_patch,
+                item.ticket_graph,
+                item.risk_policy,
             )
             if item.repo_id in proposal_by_id
             else item
@@ -768,8 +820,12 @@ def _repo_refresh(args: argparse.Namespace) -> int:
     document = parse_resolved(store.read_resolved_text())
     fingerprint_map = current.repository_fingerprint_map()
     patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
+    graph_by_id = {item.repo_id: item.ticket_graph for item in source.repositories}
+    risk_by_id = {item.repo_id: item.risk_policy for item in source.repositories}
     for proposal in proposals:
         document = apply_proposal(document, proposal)
+        document = apply_ticket_graph(document, proposal.repo_id, graph_by_id[proposal.repo_id])
+        document = apply_risk_policy(document, proposal.repo_id, risk_by_id[proposal.repo_id])
         document = apply_policy_patch(document, proposal.repo_id, patch_by_id[proposal.repo_id])
         fingerprint_map[proposal.repo_id] = proposal.facts_fingerprint
     fingerprints = tuple(sorted(fingerprint_map.items()))
@@ -1109,20 +1165,32 @@ def _repo_remove(args: argparse.Namespace) -> int:
     return 0
 
 
-def _tool_surface_rediscovery(record_hash: str | None) -> dict[str, object]:
+def _current_tool_surface_hash() -> str | None:
     try:
         from ..mcp.server import tool_surface_hash
 
-        current_hash: str | None = tool_surface_hash()
+        return tool_surface_hash()
     except Exception:
-        current_hash = None
-    changed = bool(record_hash and current_hash and record_hash != current_hash)
+        return None
+
+
+def _current_runtime_identity() -> dict[str, str | None]:
+    spec = importlib.util.find_spec("repoforge")
+    origin = spec.origin if spec is not None else None
+    install_origin: str | None = None
+    if origin:
+        normalized = origin.replace("\\", "/")
+        install_origin = (
+            "wheel"
+            if "/site-packages/" in normalized
+            else "source"
+            if "/src/repoforge/" in normalized
+            else "environment"
+        )
     return {
-        "current_tool_surface_hash": current_hash,
-        "plugin_rediscovery_recommended": changed,
-        "plugin_rediscovery_reason": (
-            f"MCP tool surface changed from {record_hash} to {current_hash}" if changed else None
-        ),
+        "package_version": __version__,
+        "executable": sys.executable or None,
+        "install_origin": install_origin,
     }
 
 
@@ -1132,33 +1200,45 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
     accepted = store.current()
     active = store.active()
     activation_target = store.activation_target()
+    phase = record.phase.value if record else "stopped"
+    current_identity = _current_runtime_identity()
+    snapshot = assess_runtime_health(
+        running=RuntimeIdentity(
+            record.package_version if record else None,
+            record.executable if record else None,
+            record.install_origin if record else None,
+        ),
+        current=RuntimeIdentity(
+            current_identity.get("package_version"),
+            current_identity.get("executable"),
+            current_identity.get("install_origin"),
+        ),
+        running_tool_surface_hash=record.tool_surface_hash if record else None,
+        current_tool_surface_hash=_current_tool_surface_hash(),
+        accepted_generation=accepted.generation if accepted else None,
+        active_generation=record.active_generation if record else None,
+        phase=phase,
+    )
+    health = snapshot.as_dict()
     return {
-        "state": record.phase.value if record else "stopped",
+        "state": phase,
         "pid": record.pid if record else None,
         "child_pid": record.child_pid if record else None,
         "accepted_generation": accepted.generation if accepted else None,
         "disk_active_generation": active.generation if active else None,
         "activation_target_generation": activation_target.generation if activation_target else None,
         "active_generation": record.active_generation if record else None,
-        "restart_required": bool(
-            accepted and (not record or record.active_generation != accepted.generation)
-        ),
         "health": list(record.health) if record else [],
         "tunnel_profile": record.tunnel_profile if record else None,
         "tunnel_profile_fingerprint": record.tunnel_profile_fingerprint if record else None,
         "tool_surface_hash": record.tool_surface_hash if record else None,
-        **_tool_surface_rediscovery(record.tool_surface_hash if record else None),
+        "plugin_rediscovery_recommended": health["client_rediscovery_recommended"],
+        "plugin_rediscovery_reason": health["rediscovery_reason"],
         "restart_count": record.restart_count if record else 0,
         "last_error_code": record.last_error_code if record else None,
         "last_error": record.last_error if record else None,
         "correlation_id": record.correlation_id if record else None,
-        "safe_next_action": (
-            "Runtime is healthy."
-            if record and record.phase is RuntimePhase.HEALTHY
-            else "Run `rf runtime reload` after correcting the reported failure."
-            if record and record.phase in {RuntimePhase.FAILED, RuntimePhase.FAIL_CLOSED}
-            else "Run `rf runtime start` or inspect logs."
-        ),
+        **health,
     }
 
 
@@ -1422,11 +1502,13 @@ def _serve(config_path: Path) -> int:
         proposals=RepositoryProposalService(_probe()),
         clock=system_clock(),
         ids=id_generator(),
+        pending=build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root)),
         audit_log_path=audit_state_root / "audit.jsonl",
         runtime_log_path=store.root / "managed-runtime.log",
         reload_runtime=reload_in_process,
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_runtime_status=lambda: _runtime_status(store),
     )
     try:
         create_server(router=router, admin=admin).run(transport="stdio")

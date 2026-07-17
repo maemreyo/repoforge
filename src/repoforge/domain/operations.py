@@ -14,6 +14,7 @@ from .errors import ErrorCode
 class IdempotencyState(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    UNCERTAIN = "uncertain"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,9 @@ _KEYED_IDEMPOTENT_ACTIONS = frozenset(
         "workspace_push",
         "workspace_create_draft_pr",
         "workspace_update_draft_pr",
+        "workspace_write_file",
+        "workspace_edit",
+        "workspace_apply_patch",
     }
 )
 _TRANSIENT_RETRY_CODES = frozenset(
@@ -58,6 +62,15 @@ _UNCHANGED_STATE: dict[str, tuple[str, ...]] = {
     ),
     "workspace_update_draft_pr": (
         "Workspace files and local commit history remain unchanged; GitHub state follows the explicit error message.",
+    ),
+    "workspace_write_file": (
+        "The target file may have changed only when the error explicitly reports an uncertain mutation outcome.",
+    ),
+    "workspace_edit": (
+        "Workspace files may have changed only when the error explicitly reports an uncertain mutation outcome.",
+    ),
+    "workspace_apply_patch": (
+        "Workspace files may have changed only when the error explicitly reports an uncertain mutation outcome.",
     ),
 }
 _DEFAULT_UNCHANGED_STATE = (

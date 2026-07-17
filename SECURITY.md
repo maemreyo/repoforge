@@ -16,6 +16,11 @@ Its main controls are:
   are not implemented;
 - pull requests are always created as drafts;
 - optional verification gating binds a successful check to the exact working-tree fingerprint;
+- exact idempotency keys are bound to the normalized mutation payload and reviewed state, so a lost response can be replayed without applying the write twice;
+- deterministic verification-failure reuse is evidence only, never creates a success receipt, and is disabled for timeout, cancellation, network, corrupt, incomplete, or retryable outcomes;
+- GitHub issues, native sub-issues, and blocked-by relationships are authoritative; Project consistency is read-only and the legacy apply mode is retired;
+- code-intelligence providers receive only bounded policy-visible paths and their results are rejected when the workspace identity changes during collection;
+- runtime health returns normalized capability facts and hashes, not raw MCP initialize payloads;
 - tool and command activity is written to a local JSONL audit log;
 - model-requested configuration changes (`repo_policy_apply`) pass through the same immutable
   generation pipeline as the CLI and are gated by capability delta: restrictions and
@@ -32,6 +37,14 @@ confirmations enabled in ChatGPT.
 Do not add secrets to verification command arguments or to the MCP configuration. Subprocesses
 receive only a small allowlist of environment variables, but commands can still access files that
 the local OS account can access.
+
+The built-in syntax/import code-intelligence adapter is advisory and incomplete by design. It does
+not resolve runtime dispatch, reflection, package-manager aliases, generated code, or every language.
+Low coverage, malformed input, provider failure, and stale snapshots must remain explicit and must not
+reduce the configured final verification gate.
+
+TaskCapsule and approval persistence are foundations rather than a complete multi-user authorization
+system. Capability expansion still requires the existing out-of-band operator approval flow.
 
 ## Optional GitHub webhook ingress
 

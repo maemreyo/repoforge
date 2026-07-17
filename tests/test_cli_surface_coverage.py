@@ -429,7 +429,7 @@ def test_runtime_status_and_activation_noop_paths(
         1,
         "p",
         "e" * 64,
-        cli._tool_surface_rediscovery(None)["current_tool_surface_hash"] or "",
+        cli._current_tool_surface_hash() or "",
         "now",
         "now",
         "corr",

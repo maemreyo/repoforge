@@ -141,6 +141,9 @@ class RuntimeRecord:
     last_error_code: str | None = None
     last_error: str | None = None
     health: tuple[tuple[str, bool, str], ...] = ()
+    package_version: str | None = None
+    executable: str | None = None
+    install_origin: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -161,6 +164,15 @@ class RuntimeRecord:
             raise ValueError("Active generation must be positive")
         if self.restart_count < 0 or not self.updated_at or not self.correlation_id:
             raise ValueError("Runtime record metadata is invalid")
+        for name, value in (
+            ("package_version", self.package_version),
+            ("executable", self.executable),
+            ("install_origin", self.install_origin),
+        ):
+            if value is not None and (
+                not value or len(value) > 1024 or any(ord(c) < 32 for c in value)
+            ):
+                raise ValueError(f"Runtime {name} is invalid")
         if self.phase is RuntimePhase.HEALTHY and (
             self.pid is None or self.child_pid is None or self.active_generation is None
         ):

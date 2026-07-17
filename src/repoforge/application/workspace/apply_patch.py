@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from typing import Any, cast
 
 from ...domain.errors import WorkspaceError
 from ..context import ApplicationContext
+from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
+from ..idempotency import IdempotencyEffectBoundary
 from .patch_input import normalize_workspace_patch
 
 _OID = re.compile("^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
@@ -19,6 +22,7 @@ class WorkspaceApplyPatchCommand:
     patch: str
     expected_head_sha: str
     expected_workspace_fingerprint: str
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +35,19 @@ class WorkspaceApplyPatchResult:
     normalized_patch_sha256: str
     repair_actions: tuple[str, ...]
     head_sha: str
+
+
+def _deserialize_patch_result(value: Any) -> WorkspaceApplyPatchResult:
+    return WorkspaceApplyPatchResult(
+        workspace_id=str(value["workspace_id"]),
+        changed_paths=tuple(str(item) for item in value["changed_paths"]),
+        workspace_fingerprint=str(value["workspace_fingerprint"]),
+        diff_stat=str(value["diff_stat"]),
+        input_format=str(value["input_format"]),
+        normalized_patch_sha256=str(value["normalized_patch_sha256"]),
+        repair_actions=tuple(str(item) for item in value["repair_actions"]),
+        head_sha=str(value["head_sha"]),
+    )
 
 
 class WorkspacePatchApplier:
@@ -47,6 +64,8 @@ class WorkspacePatchApplier:
             "workspace_id": c.workspace_id,
             "input_patch_sha256": hashlib.sha256(c.patch.encode("utf-8")).hexdigest(),
         }
+
+        effect = IdempotencyEffectBoundary()
 
         def op() -> WorkspaceApplyPatchResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -83,6 +102,7 @@ class WorkspacePatchApplier:
                         "fingerprint_duration_ms": before_lookup.duration_ms,
                     }
                 )
+                effect.begin()
                 self.ctx.git.apply_patch(path, normalized.patch)
                 try:
                     actual_changed = tuple(self.ctx.git.changed_paths(path, repo))
@@ -120,8 +140,21 @@ class WorkspacePatchApplier:
                     self.ctx.git.head_sha(path),
                 )
 
-        return self.ctx.audited(
-            "workspace_apply_patch",
-            audit_details,
-            op,
+        return cast(
+            WorkspaceApplyPatchResult,
+            self.ctx.idempotent(
+                "workspace_apply_patch",
+                c.idempotency_key,
+                {
+                    "workspace_id": c.workspace_id,
+                    "input_patch_sha256": audit_details["input_patch_sha256"],
+                    "expected_head_sha": c.expected_head_sha,
+                    "expected_workspace_fingerprint": c.expected_workspace_fingerprint,
+                },
+                op,
+                details=audit_details,
+                serialize=to_data,
+                deserialize=_deserialize_patch_result,
+                effect_boundary=effect,
+            ),
         )

@@ -53,6 +53,7 @@ def _assessment(paths: list[str], *, missing_ci: bool = False) -> WorkspaceAsses
             }
         ),
         "path_policy": current({"allowed_paths": paths, "violations": []}),
+        "code_intelligence": current({"affected_tests": []}),
         "base_freshness": current({"behind_remote": 0, "remote_state": "current"}),
         "pr_state": current({"state": "OPEN"}),
         "ci_summary": (
@@ -160,6 +161,44 @@ def test_tdd_intent_keeps_narrow_diagnostics_for_critical_changes() -> None:
         assert recommendation.ordered_stages[0].diagnostic == "pytest-target"
         assert recommendation.required_profiles[-1] == "full"
         assert recommendation.manual_review_required is True
+
+
+def test_affected_test_candidate_precedes_generic_verification_stages() -> None:
+    assessment = _assessment(["src/service.py"])
+    candidate = evidence(
+        assessment.snapshot,
+        status=AssessmentEvidenceStatus.CURRENT,
+        coverage=AssessmentCoverage.COMPLETE,
+        value={
+            "affected_tests": [
+                {
+                    "test_path": "tests/test_service.py",
+                    "reason": "The test imports a changed source directly.",
+                    "confidence": 95,
+                    "diagnostic_id": "pytest-target",
+                    "selector": "tests/test_service.py",
+                }
+            ]
+        },
+    )
+    assessment = replace(
+        assessment,
+        code_intelligence=candidate,
+        evidence_coverage={**assessment.evidence_coverage, "code_intelligence": "complete"},
+    )
+    policy = default_risk_policy(final_profile="full")
+    risk = assess_workspace_risk(assessment, policy)
+    recommendation = recommend_verification(
+        assessment,
+        risk,
+        policy,
+        available_profiles={"quick", "full"},
+        available_diagnostics={"pytest-target"},
+    )
+    first = recommendation.ordered_stages[0]
+    assert first.diagnostic == "pytest-target"
+    assert first.selector == "tests/test_service.py"
+    assert recommendation.required_profiles[-1] == "full"
 
 
 def test_risk_and_recommendation_become_stale_with_snapshot_change() -> None:

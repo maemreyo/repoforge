@@ -14,25 +14,63 @@ from ...domain.retry_guidance import (
     NOT_FOUND_CODES,
     FailureSignature,
     RetryGuidance,
+    clear_reusable_failure,
     fast_fail_guidance,
     not_found_guidance,
     record_and_compare,
+    record_reusable_failure,
+    reusable_failure,
 )
 from ...domain.retry_guidance import (
     clear as clear_retry_guidance,
 )
 from ...domain.verification import get_profile, select_verification_profile
+from ...domain.verification_steps import (
+    HygieneBaselinePolicy,
+    VerificationStep,
+    VerificationStepKind,
+    compile_legacy_steps,
+    no_regression_receipt,
+)
 from ...domain.workspace import VerificationReceipt, is_commit_sha
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
-from ...ports.execution_environment import ApprovedExecution
+from ...ports.execution_environment import ApprovedExecution, ExecutionReceipt
+from ..code_intelligence import CodeIntelligenceAnalyzer, CodeIntelligenceCommand
 from ..context import ApplicationContext
 from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..operations.manager import OperationManager
+from ..verification_reuse import (
+    command_source_identity,
+    config_identity,
+    failure_reuse_binding,
+    profile_target_identity,
+)
+from .hygiene_status import WorkspaceHygieneStatusCommand, WorkspaceHygieneStatusReader
 
 _KIND = "workspace_run_profile"
+_REUSABLE_PROFILE_STEP_KINDS = frozenset(
+    {
+        VerificationStepKind.HYGIENE,
+        VerificationStepKind.STATIC_ANALYSIS,
+        VerificationStepKind.TYPECHECK,
+        VerificationStepKind.SECURITY,
+        VerificationStepKind.CONTRACT,
+        VerificationStepKind.BUILD,
+    }
+)
+_NON_REUSABLE_PROFILE_CODES = frozenset(
+    {
+        ErrorCode.COMMAND_TIMEOUT,
+        ErrorCode.LOCK_TIMEOUT,
+        ErrorCode.RUNTIME_UNAVAILABLE,
+        ErrorCode.RUNTIME_RELOADING,
+        ErrorCode.STATE_PERSISTENCE_FAILED,
+        ErrorCode.NOT_FOUND,
+    }
+)
 
 
 def _apply_retry_guidance(
@@ -58,6 +96,7 @@ class WorkspaceRunProfileCommand:
     workspace_id: str
     profile_name: str | None = None
     background: bool = False
+    force_rerun: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +115,13 @@ class WorkspaceRunProfileResult:
     command_source_dirty: bool
     command_source_dirty_paths: list[str]
     command_source_warning: str | None
+    completed_steps: list[dict[str, object]]
+    failed_step: dict[str, object] | None
+    failure_domain: str | None
+    not_run_steps: list[dict[str, object]]
+    business_tests_ran: bool
+    valid_tdd_red_evidence: bool
+    hygiene_receipt: dict[str, object] | None
     working_directory: str | None = None
 
 
@@ -170,6 +216,7 @@ class WorkspaceProfileRunner:
         else:
             profile = get_profile(repo, c.profile_name)
             used_default = False
+        steps = profile.steps or compile_legacy_steps(profile.commands)
         command_cwd = path
         if profile.working_directory:
             relative = normalize_relative_path(profile.working_directory)
@@ -187,6 +234,7 @@ class WorkspaceProfileRunner:
                 )
 
         target = f"profile:{profile.name}"
+        target_identity = profile_target_identity(profile, steps)
 
         def run_body(
             cancel_token: CancellationToken | None,
@@ -221,13 +269,36 @@ class WorkspaceProfileRunner:
             if command_source_dirty_paths:
                 audit_details["command_source_dirty_paths"] = list(command_source_dirty_paths)
 
+            reuse_binding = None
+
             def record_command_failure(
-                exc: CommandError, command: tuple[str, ...], steps_completed: int
+                exc: CommandError, verification_step: VerificationStep, step_index: int
             ) -> None:
+                command = verification_step.command
                 fallback = command[0] if command else None
+                completed_steps = [item.public() for item in steps[:step_index]]
+                failed_step = verification_step.public()
+                not_run_steps = [item.public() for item in steps[step_index + 1 :]]
+                business_tests_ran = any(
+                    item.kind is VerificationStepKind.BUSINESS_TESTS
+                    for item in steps[: step_index + 1]
+                )
+                exc.details.update(
+                    {
+                        "completed_steps": completed_steps,
+                        "failed_step": failed_step,
+                        "failure_domain": verification_step.kind.value,
+                        "not_run_steps": not_run_steps,
+                        "business_tests_ran": business_tests_ran,
+                        "valid_tdd_red_evidence": False,
+                    }
+                )
                 audit_details["failed_command"] = exc.details.get("command", fallback)
                 audit_details["exit_code"] = exc.details.get("exit_code")
-                audit_details["steps_completed"] = steps_completed
+                audit_details["steps_completed"] = step_index
+                audit_details["failed_step"] = failed_step
+                audit_details["failure_domain"] = verification_step.kind.value
+                audit_details["business_tests_ran"] = business_tests_ran
                 if exc.details.get("cancelled"):
                     audit_details["cancelled"] = True
                 if exc.details.get("cancelled"):
@@ -245,16 +316,101 @@ class WorkspaceProfileRunner:
                         if exc.safe_next_action
                         else targeted_hint
                     )
+                affected_candidates: list[dict[str, object]] = []
+                if verification_step.kind in _REUSABLE_PROFILE_STEP_KINDS:
+                    with contextlib.suppress(Exception):
+                        analysis = CodeIntelligenceAnalyzer(self.ctx).analyze_current(
+                            CodeIntelligenceCommand(
+                                c.workspace_id,
+                                expected_head_sha=self.ctx.git.head_sha(path).lower(),
+                                expected_fingerprint=before_fingerprint,
+                            )
+                        )
+                        for candidate in analysis.result.affected_tests[:8]:
+                            if (
+                                candidate.diagnostic_id is None
+                                or candidate.diagnostic_id not in repo.diagnostics
+                            ):
+                                continue
+                            payload = to_data(candidate)
+                            if isinstance(payload, dict):
+                                affected_candidates.append(payload)
+                if affected_candidates:
+                    exc.details["affected_test_candidates"] = affected_candidates
+                    audit_details["affected_test_candidates"] = affected_candidates
+                    first = affected_candidates[0]
+                    diagnostic = first.get("diagnostic_id")
+                    selector = first.get("selector")
+                    candidate_hint = (
+                        "Run workspace_run_diagnostic with "
+                        f"diagnostic_id={diagnostic!r} and selector={selector!r} before "
+                        "rerunning the broader profile."
+                    )
+                    exc.safe_next_action = (
+                        f"{exc.safe_next_action} {candidate_hint}"
+                        if exc.safe_next_action
+                        else candidate_hint
+                    )
                 error_code = exc.code.value
                 raw_exit_code = exc.details.get("exit_code")
                 exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
-                signature = FailureSignature(error_code, steps_completed, exit_code)
+                signature = FailureSignature(error_code, step_index, exit_code)
                 repeat, repeat_guidance = record_and_compare(
                     fresh.metadata,
                     target=target,
                     fingerprint=before_fingerprint,
                     signature=signature,
                 )
+                rendered_failure = str(exc).lower()
+                suspected_network_failure = any(
+                    marker in rendered_failure
+                    for marker in (
+                        "connection refused",
+                        "connection reset",
+                        "network is unreachable",
+                        "name or service not known",
+                        "temporary failure in name resolution",
+                        "dns",
+                        "http 429",
+                        "http 502",
+                        "http 503",
+                        "http 504",
+                    )
+                )
+                reusable = (
+                    reuse_binding is not None
+                    and not exc.retryable
+                    and exit_code is not None
+                    and verification_step.kind in _REUSABLE_PROFILE_STEP_KINDS
+                    and exc.code not in _NON_REUSABLE_PROFILE_CODES
+                    and not suspected_network_failure
+                )
+                if reusable and reuse_binding is not None:
+                    recorded = record_reusable_failure(
+                        fresh.metadata,
+                        target=target,
+                        binding=reuse_binding,
+                        evidence={
+                            "complete": True,
+                            "error_code": error_code,
+                            "exit_code": exit_code,
+                            "failed_step_index": step_index,
+                            "completed_steps": completed_steps,
+                            "failed_step": failed_step,
+                            "failure_domain": verification_step.kind.value,
+                            "not_run_steps": not_run_steps,
+                            "business_tests_ran": business_tests_ran,
+                            "valid_tdd_red_evidence": False,
+                            **(
+                                {"affected_test_candidates": affected_candidates}
+                                if affected_candidates
+                                else {}
+                            ),
+                        },
+                    )
+                    if recorded:
+                        audit_details["failure_reuse_recorded"] = True
+                        audit_details["reuse_binding"] = reuse_binding.digest
                 self.ctx.store.save(fresh)
                 audit_details["retry_repeat"] = repeat
                 guidances: list[RetryGuidance] = []
@@ -272,59 +428,199 @@ class WorkspaceProfileRunner:
                         guidances.append(fast_guidance)
                 _apply_retry_guidance(exc, guidances=guidances, repeat=repeat)
 
+            def raise_reused_failure(evidence: dict[str, object]) -> None:
+                if reuse_binding is None:
+                    return
+                raw_code = evidence.get("error_code")
+                try:
+                    code = ErrorCode(str(raw_code))
+                except ValueError:
+                    code = ErrorCode.COMMAND_FAILED
+                raw_step = evidence.get("failed_step_index")
+                failed_step_index = raw_step if isinstance(raw_step, int) else None
+                raw_exit = evidence.get("exit_code")
+                exit_code = raw_exit if isinstance(raw_exit, int) else None
+                repeat, guidance = record_and_compare(
+                    fresh.metadata,
+                    target=target,
+                    fingerprint=before_fingerprint,
+                    signature=FailureSignature(code.value, failed_step_index, exit_code),
+                )
+                self.ctx.store.save(fresh)
+                details = {str(key): value for key, value in evidence.items() if key != "complete"}
+                details.update(
+                    {
+                        "failure_reused": True,
+                        "reuse_binding": reuse_binding.digest,
+                    }
+                )
+                audit_details.update(
+                    {
+                        "failure_reused": True,
+                        "reuse_binding": reuse_binding.digest,
+                        "retry_repeat": repeat,
+                    }
+                )
+                cached_action = (
+                    "Investigate the cached failed-step evidence. Use force_rerun=true only "
+                    "when an external condition changed without changing the bound snapshot."
+                )
+                raw_candidates = details.get("affected_test_candidates")
+                if isinstance(raw_candidates, list) and raw_candidates:
+                    first = raw_candidates[0]
+                    if isinstance(first, dict):
+                        cached_action += (
+                            " Run workspace_run_diagnostic with "
+                            f"diagnostic_id={first.get('diagnostic_id')!r} and "
+                            f"selector={first.get('selector')!r}."
+                        )
+                error = CommandError(
+                    "Reused an exact-bound deterministic failure without rerunning the command.",
+                    code=code,
+                    retryable=False,
+                    safe_next_action=cached_action,
+                    details=details,
+                )
+                _apply_retry_guidance(
+                    error,
+                    guidances=[guidance] if guidance is not None else [],
+                    repeat=repeat,
+                )
+                raise error
+
             timeout = profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
             environment_hash: str | None = None
-            if self.ctx.execution_environment is not None:
-                request = EnvironmentIdentityRequest(
-                    workspace_root=path,
-                    command_cwd=command_cwd,
-                    commands=profile.commands,
-                    working_directory_policy=profile.working_directory or ".",
+            hygiene_receipt_data: dict[str, object] | None = None
+
+            def accepted_no_regression_step(
+                verification_step: VerificationStep,
+            ) -> CommandResult | None:
+                nonlocal hygiene_receipt_data
+                if (
+                    profile.baseline_policy is not HygieneBaselinePolicy.NO_REGRESSION
+                    or verification_step.kind is not VerificationStepKind.HYGIENE
+                ):
+                    return None
+                status = WorkspaceHygieneStatusReader(self.ctx)._read(
+                    WorkspaceHygieneStatusCommand(c.workspace_id)
                 )
-                self.ctx.execution_environment.prepare(request)
-                try:
-                    identity = self.ctx.execution_environment.identity(request)
-                    receipts = []
-                    for step, command in enumerate(profile.commands):
+                receipt = no_regression_receipt(
+                    base_sha=status.base_sha,
+                    workspace_fingerprint=status.workspace_fingerprint,
+                    formatter_contract_hash=status.formatter_contract_hash,
+                    environment_identity=status.environment_identity,
+                    preexisting_count=len(status.preexisting),
+                    introduced_count=len(status.introduced),
+                    changed_path_finding_count=len(status.changed_path_findings),
+                    output_truncated=status.output_truncated,
+                )
+                if receipt is None:
+                    return None
+                hygiene_receipt_data = receipt.as_dict()
+                audit_details["baseline_policy"] = profile.baseline_policy.value
+                audit_details["hygiene_receipt_hash"] = receipt.receipt_hash
+                audit_details["preexisting_hygiene_findings"] = receipt.preexisting_count
+                return CommandResult(
+                    verification_step.command,
+                    str(command_cwd),
+                    0,
+                    "Accepted by the reviewed no_regression hygiene policy.",
+                    "",
+                )
+
+            execution_environment = self.ctx.execution_environment
+            environment_request: EnvironmentIdentityRequest | None = None
+            prepared_environment = False
+            results: list[CommandResult] = []
+            try:
+                if execution_environment is not None:
+                    environment_request = EnvironmentIdentityRequest(
+                        workspace_root=path,
+                        command_cwd=command_cwd,
+                        commands=tuple(step.command for step in steps),
+                        working_directory_policy=profile.working_directory or ".",
+                    )
+                    execution_environment.prepare(environment_request)
+                    prepared_environment = True
+                    identity = execution_environment.identity(environment_request)
+                    environment_hash = identity.identity_hash
+                    reuse_binding = failure_reuse_binding(
+                        fingerprint=before_fingerprint,
+                        target_identity=target_identity,
+                        command_source_identity_value=command_source_identity(
+                            path, profile.command_source_paths
+                        ),
+                        config_identity_value=config_identity(self.ctx.config.source_path),
+                        environment_identity=environment_hash,
+                    )
+                    if not c.force_rerun and reuse_binding is not None:
+                        cached = reusable_failure(
+                            fresh.metadata,
+                            target=target,
+                            binding=reuse_binding,
+                        )
+                        if cached is not None:
+                            raise_reused_failure(cached)
+                    receipts: list[ExecutionReceipt] = []
+                    for step_index, verification_step in enumerate(steps):
+                        command = verification_step.command
+                        accepted = accepted_no_regression_step(verification_step)
+                        if accepted is not None:
+                            receipts.append(
+                                ExecutionReceipt(command, identity.identity_hash, accepted)
+                            )
+                            continue
                         if on_before_command is not None:
                             on_before_command()
                         try:
                             receipts.append(
-                                self.ctx.execution_environment.execute(
+                                execution_environment.execute(
                                     ApprovedExecution(
-                                        command, request, identity, timeout, cancel_token
+                                        command,
+                                        environment_request,
+                                        identity,
+                                        timeout,
+                                        cancel_token,
                                     )
                                 )
                             )
                         except CommandError as exc:
-                            record_command_failure(exc, command, step)
+                            record_command_failure(exc, verification_step, step_index)
                             raise
-                finally:
-                    self.ctx.execution_environment.cleanup(request)
-                results = [receipt.result for receipt in receipts]
-                environment_hash = identity.identity_hash
-            else:
-                results = []
-                for step, command in enumerate(profile.commands):
-                    if on_before_command is not None:
-                        on_before_command()
-                    try:
-                        if cancel_token is None:
-                            results.append(
-                                self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
-                            )
-                        else:
-                            results.append(
-                                self.ctx.commands.run(
-                                    command,
-                                    cwd=command_cwd,
-                                    timeout=timeout,
-                                    cancel_token=cancel_token,
+                    results = [receipt.result for receipt in receipts]
+                else:
+                    for step_index, verification_step in enumerate(steps):
+                        command = verification_step.command
+                        accepted = accepted_no_regression_step(verification_step)
+                        if accepted is not None:
+                            results.append(accepted)
+                            continue
+                        if on_before_command is not None:
+                            on_before_command()
+                        try:
+                            if cancel_token is None:
+                                results.append(
+                                    self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
                                 )
-                            )
-                    except CommandError as exc:
-                        record_command_failure(exc, command, step)
-                        raise
+                            else:
+                                results.append(
+                                    self.ctx.commands.run(
+                                        command,
+                                        cwd=command_cwd,
+                                        timeout=timeout,
+                                        cancel_token=cancel_token,
+                                    )
+                                )
+                        except CommandError as exc:
+                            record_command_failure(exc, verification_step, step_index)
+                            raise
+            finally:
+                if (
+                    execution_environment is not None
+                    and environment_request is not None
+                    and prepared_environment
+                ):
+                    execution_environment.cleanup(environment_request)
             _ = self.ctx.git.changed_paths(path, repo)
             metrics = self.ctx.git.enforce_change_budget(path, repo)
             fingerprint = prime_fingerprint(
@@ -335,6 +631,7 @@ class WorkspaceProfileRunner:
             )
             fp = fingerprint.fingerprint
             cleared_retry_history = clear_retry_guidance(fresh.metadata, target=target)
+            cleared_reuse_history = clear_reusable_failure(fresh.metadata, target=target)
             command_source_warning = (
                 _COMMAND_SOURCE_WARNING_TEMPLATE.format(paths=", ".join(command_source_dirty_paths))
                 if command_source_dirty_paths
@@ -351,7 +648,7 @@ class WorkspaceProfileRunner:
                     list(command_source_dirty_paths),
                 )
                 self.ctx.store.save(fresh)
-            elif cleared_retry_history:
+            elif cleared_retry_history or cleared_reuse_history:
                 self.ctx.store.save(fresh)
             return WorkspaceRunProfileResult(
                 workspace_id=c.workspace_id,
@@ -369,12 +666,22 @@ class WorkspaceProfileRunner:
                 command_source_dirty=command_source_dirty,
                 command_source_dirty_paths=list(command_source_dirty_paths),
                 command_source_warning=command_source_warning,
+                completed_steps=[step.public() for step in steps],
+                failed_step=None,
+                failure_domain=None,
+                not_run_steps=[],
+                business_tests_ran=any(
+                    step.kind is VerificationStepKind.BUSINESS_TESTS for step in steps
+                ),
+                valid_tdd_red_evidence=False,
+                hygiene_receipt=hygiene_receipt_data,
             )
 
         audit_details: dict[str, object] = {
             "workspace_id": c.workspace_id,
             "profile": profile.name,
             "used_default": used_default,
+            "force_rerun": c.force_rerun,
         }
 
         if not c.background:

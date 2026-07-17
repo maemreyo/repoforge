@@ -29,6 +29,7 @@ class ErrorCode(str, Enum):
     ALREADY_EXISTS = "ALREADY_EXISTS"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
+    IDEMPOTENCY_UNCERTAIN = "IDEMPOTENCY_UNCERTAIN"
     STATE_PERSISTENCE_FAILED = "STATE_PERSISTENCE_FAILED"
     STATE_INVALID = "STATE_INVALID"
     STATE_NOT_FOUND = "STATE_NOT_FOUND"
@@ -79,6 +80,10 @@ class ErrorCode(str, Enum):
     STALE_ASSESSMENT_SNAPSHOT = "STALE_ASSESSMENT_SNAPSHOT"
     ASSESSMENT_COMPONENT_UNAVAILABLE = "ASSESSMENT_COMPONENT_UNAVAILABLE"
     ASSESSMENT_INVALID = "ASSESSMENT_INVALID"
+    CODE_INTELLIGENCE_INVALID = "CODE_INTELLIGENCE_INVALID"
+    CODE_INTELLIGENCE_UNAVAILABLE = "CODE_INTELLIGENCE_UNAVAILABLE"
+    CODE_INTELLIGENCE_PARTIAL = "CODE_INTELLIGENCE_PARTIAL"
+    CODE_INTELLIGENCE_STALE = "CODE_INTELLIGENCE_STALE"
     PR_CHECK_WATCH_INVALID = "PR_CHECK_WATCH_INVALID"
     PR_CHECK_WATCH_STALE = "PR_CHECK_WATCH_STALE"
     PR_CHECK_WATCH_TIMEOUT = "PR_CHECK_WATCH_TIMEOUT"
@@ -149,6 +154,7 @@ _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
     ("INPUT_REQUIRED", ErrorCode.INPUT_REQUIRED, False),
     ("IDEMPOTENCY_CONFLICT", ErrorCode.IDEMPOTENCY_CONFLICT, False),
     ("IDEMPOTENCY_IN_PROGRESS", ErrorCode.IDEMPOTENCY_IN_PROGRESS, True),
+    ("IDEMPOTENCY_UNCERTAIN", ErrorCode.IDEMPOTENCY_UNCERTAIN, False),
     ("STATE_PERSISTENCE_FAILED", ErrorCode.STATE_PERSISTENCE_FAILED, True),
     ("COMMAND_TIMEOUT", ErrorCode.COMMAND_TIMEOUT, True),
 )
@@ -248,6 +254,7 @@ def operation_error_from_exception(
         ErrorCode.ALREADY_RUNNING: "An identity-validated runtime already owns the supervisor lock.",
         ErrorCode.IDEMPOTENCY_CONFLICT: "The same idempotency key was already bound to different reviewed input.",
         ErrorCode.IDEMPOTENCY_IN_PROGRESS: "Another process is still executing the same keyed operation.",
+        ErrorCode.IDEMPOTENCY_UNCERTAIN: "The local mutation may have completed but its durable result receipt was not recorded.",
         ErrorCode.STATE_PERSISTENCE_FAILED: "RepoForge could not durably record required local operational state.",
         ErrorCode.STATE_INVALID: "The state collection, identifier, payload, or bound violates the reusable durable-state contract.",
         ErrorCode.STATE_NOT_FOUND: "No durable state record exists for the supplied identifier.",
@@ -286,6 +293,10 @@ def operation_error_from_exception(
         ErrorCode.STALE_ASSESSMENT_SNAPSHOT: "The workspace, configuration, or policy identity changed while evidence was being collected.",
         ErrorCode.ASSESSMENT_COMPONENT_UNAVAILABLE: "A bounded assessment provider could not return trustworthy evidence for the captured snapshot.",
         ErrorCode.ASSESSMENT_INVALID: "The assessment model violates snapshot identity, coverage, ordering, or bound invariants.",
+        ErrorCode.CODE_INTELLIGENCE_INVALID: "The provider-neutral code-intelligence result violates a typed identity, path, fact, or bound invariant.",
+        ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE: "No trustworthy bounded code-intelligence result is available for the captured workspace snapshot.",
+        ErrorCode.CODE_INTELLIGENCE_PARTIAL: "Code intelligence covered only part of the captured workspace and reports explicit limitations.",
+        ErrorCode.CODE_INTELLIGENCE_STALE: "The workspace identity changed while code-intelligence evidence was being collected.",
         ErrorCode.PR_CHECK_WATCH_INVALID: "The check-watch request violates a typed bound or completion-mode invariant.",
         ErrorCode.PR_CHECK_WATCH_STALE: "The workspace, pushed commit, pull request, or Check Run no longer matches the captured watch identity.",
         ErrorCode.PR_CHECK_WATCH_TIMEOUT: "The requested check condition was not reached before the bounded deadline.",

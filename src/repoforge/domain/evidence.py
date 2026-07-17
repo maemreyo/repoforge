@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 
+from .code_intelligence import CodeIntelligenceResult, CodeIntelligenceStatus
 from .errors import ErrorCode, RepoForgeError
 from .redaction import redact_text
 
@@ -486,6 +487,53 @@ def new_evidence_item(
             evidence_id=f"ev-{digest[:24]}",
             content_digest=digest,
         )
+    )
+
+
+def new_code_intelligence_evidence(
+    result: CodeIntelligenceResult,
+    *,
+    created_at: str,
+) -> EvidenceItem | None:
+    """Normalize one available code-intelligence report into generic evidence."""
+
+    if result.status is CodeIntelligenceStatus.UNAVAILABLE or not result.analyzed_paths:
+        return None
+    status = (
+        EvidenceStatus.CURRENT
+        if result.status is CodeIntelligenceStatus.CURRENT
+        else EvidenceStatus.PARTIAL
+    )
+    return new_evidence_item(
+        source_kind=EvidenceSourceKind.CODE_INTELLIGENCE,
+        provider_id=result.provider_id,
+        provider_version=result.provider_version,
+        provenance=EvidenceProvenance(
+            source_reference=(
+                f"workspace:{result.snapshot.workspace_id}@{result.snapshot.head_sha}"
+            )
+        ),
+        scope=EvidenceScope(
+            paths=result.analyzed_paths,
+            symbols=tuple(item.qualified_name for item in result.symbols),
+            tests=tuple(item.test_path for item in result.affected_tests),
+        ),
+        snapshot=EvidenceSnapshot(
+            snapshot_id=result.snapshot.snapshot_id,
+            repo_id=result.snapshot.repo_id,
+            workspace_id=result.snapshot.workspace_id,
+            head_sha=result.snapshot.head_sha,
+            workspace_fingerprint=result.snapshot.workspace_fingerprint,
+        ),
+        summary=(
+            f"{result.provider_id} analyzed {len(result.analyzed_paths)} paths and identified "
+            f"{len(result.affected_tests)} affected-test candidates."
+        ),
+        coverage=EvidenceMeasure(result.coverage.value, result.coverage.reason),
+        confidence=EvidenceMeasure(result.confidence.value, result.confidence.reason),
+        status=status,
+        conflict_group=f"code-intelligence:{result.snapshot.workspace_id}",
+        created_at=created_at,
     )
 
 

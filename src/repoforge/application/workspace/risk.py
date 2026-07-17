@@ -213,6 +213,7 @@ def assess_workspace_risk(
         ("diff_summary", assessment.diff_summary),
         ("change_budget", assessment.change_budget),
         ("path_policy", assessment.path_policy),
+        ("code_intelligence", assessment.code_intelligence),
         ("base_freshness", assessment.base_freshness),
         ("ci_summary", assessment.ci_summary),
         ("receipt_freshness", assessment.receipt_freshness),
@@ -250,6 +251,47 @@ def recommend_verification(
     normalized_intent = VerificationIntent.parse(intent)
     profiles: list[str] = []
     stages: list[VerificationStage] = []
+    recommended_diagnostics: list[str] = []
+    raw_candidates = assessment.code_intelligence.value.get("affected_tests", ())
+    candidates = raw_candidates if isinstance(raw_candidates, list) else []
+    targeted: list[tuple[int, str, str, str]] = []
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+        diagnostic = raw.get("diagnostic_id")
+        selector = raw.get("selector")
+        reason = raw.get("reason")
+        confidence = raw.get("confidence")
+        if (
+            isinstance(diagnostic, str)
+            and diagnostic in available_diagnostics
+            and isinstance(selector, str)
+            and selector
+            and isinstance(reason, str)
+            and isinstance(confidence, int)
+        ):
+            targeted.append((confidence, diagnostic, selector, reason))
+    seen_targeted: set[tuple[str, str]] = set()
+    for confidence, diagnostic, selector, reason in sorted(
+        targeted,
+        key=lambda item: (-item[0], item[1], item[2]),
+    )[:8]:
+        identity = (diagnostic, selector)
+        if identity in seen_targeted:
+            continue
+        seen_targeted.add(identity)
+        if diagnostic not in recommended_diagnostics:
+            recommended_diagnostics.append(diagnostic)
+        stages.append(
+            VerificationStage(
+                order=len(stages) + 1,
+                kind="diagnostic",
+                diagnostic=diagnostic,
+                selector=selector,
+                reason=f"Affected-test candidate ({confidence}% confidence): {reason}",
+            )
+        )
+
     diagnostics = tuple(
         item
         for item in policy.narrow_diagnostics
@@ -260,6 +302,10 @@ def recommend_verification(
         )
     )
     for diagnostic in diagnostics:
+        if diagnostic not in recommended_diagnostics:
+            recommended_diagnostics.append(diagnostic)
+        if any(stage.diagnostic == diagnostic for stage in stages):
+            continue
         stages.append(
             VerificationStage(
                 order=len(stages) + 1,
@@ -323,7 +369,7 @@ def recommend_verification(
         assessment_snapshot_id=assessment.snapshot.snapshot_id,
         ordered_stages=tuple(stages),
         required_profiles=tuple(profiles),
-        recommended_diagnostics=diagnostics,
+        recommended_diagnostics=tuple(recommended_diagnostics),
         final_profile=final_profile,
         manual_review_required=risk.level is RiskLevel.CRITICAL,
         next_safe_actions=tuple(actions),

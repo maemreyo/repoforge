@@ -18,6 +18,7 @@ from .adapters.audit.query import (
 from .adapters.audit.query import summarize_operation_metrics as summarize_operation_metrics
 from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
+from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import LocalFileSystem
@@ -29,6 +30,8 @@ from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
+    JsonApprovalPayloadStore,
+    JsonApprovalStore,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -36,6 +39,7 @@ from .adapters.persistence import (
     JsonOperationResultStore,
     JsonOperationStore,
     JsonPrCheckWatchStore,
+    JsonTaskStore,
     JsonWorkflowRecordingStore,
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
@@ -85,6 +89,7 @@ from .adapters.runtime.local_runtime import (
 from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandExecutor
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
+from .application.approvals import PendingPolicyChangeStore
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
 from .application.fingerprint_cache import FingerprintCache
@@ -99,6 +104,7 @@ from .application.operations import OperationManager, recover_operations
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.supervisor import RuntimeSupervisor
+from .application.tasks import TaskCapsuleService
 from .application.workflow import (
     RecordedCategoryReplayAdapter,
     WorkflowRecorder,
@@ -109,9 +115,12 @@ from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
 from .ports import (
+    ApprovalPayloadStore,
+    ApprovalStore,
     AuditSink,
     BackgroundTaskRunner,
     Clock,
+    CodeIntelligenceProvider,
     CommandExecutor,
     ConfigurationStore,
     ExecutableLocator,
@@ -141,6 +150,7 @@ from .ports import (
     RuntimeLauncher,
     RuntimeStore,
     Sleeper,
+    TaskStore,
     TicketGraphGateway,
     TicketProjectGateway,
     TunnelClient,
@@ -178,6 +188,7 @@ class AdapterOverrides:
     sleeper: Sleeper | None = None
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
+    code_intelligence: CodeIntelligenceProvider | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +286,55 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
 
 def build_operation_gate() -> OperationGate:
     return InProcessOperationGate()
+
+
+def build_approval_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> ApprovalStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonApprovalStore(root, locks or build_lock_manager(root))
+
+
+def build_approval_payload_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> ApprovalPayloadStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonApprovalPayloadStore(root, locks or build_lock_manager(root))
+
+
+def build_pending_policy_change_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> PendingPolicyChangeStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    selected_locks = locks or build_lock_manager(root)
+    return PendingPolicyChangeStore(
+        approvals=build_approval_store(root, locks=selected_locks),
+        payloads=build_approval_payload_store(root, locks=selected_locks),
+        legacy_root=root / "pending-policy-changes",
+    )
+
+
+def build_task_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> TaskStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonTaskStore(root, locks or build_lock_manager(root))
+
+
+def build_task_service(
+    state_root: Path | None = None,
+    *,
+    locks: LockManager | None = None,
+    clock: Clock | None = None,
+    ids: IdGenerator | None = None,
+) -> TaskCapsuleService:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    selected_locks = locks or build_lock_manager(root)
+    return TaskCapsuleService(
+        store=build_task_store(root, locks=selected_locks),
+        clock=clock or system_clock(),
+        ids=ids or id_generator(),
+    )
 
 
 def build_runtime_store(path: Path) -> RuntimeStore:
@@ -387,6 +447,7 @@ def build_application(
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
+    code_intelligence = o.code_intelligence or SyntaxCodeIntelligenceProvider()
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
@@ -425,6 +486,7 @@ def build_application(
         executables=executables,
         execution_environment=execution_environment,
         provider_registry=provider_registry,
+        code_intelligence=code_intelligence,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,

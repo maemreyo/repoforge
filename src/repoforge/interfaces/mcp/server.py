@@ -732,11 +732,20 @@ def create_server(
         structured_output=True,
     )
     def workspace_write_file(
-        workspace_id: str, relative_path: str, content: str, expected_sha256: str
+        workspace_id: str,
+        relative_path: str,
+        content: str,
+        expected_sha256: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Use this to create or fully replace one UTF-8 file with optimistic locking; the response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between."""
+        """Use this to create or fully replace one UTF-8 file with optimistic locking; use an idempotency key for safe retries. The response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between."""
         return bounded_service.call(
-            "workspace_write_file", workspace_id, relative_path, content, expected_sha256
+            "workspace_write_file",
+            workspace_id,
+            relative_path,
+            content,
+            expected_sha256,
+            idempotency_key,
         )
 
     @mcp.tool(
@@ -744,9 +753,13 @@ def create_server(
         annotations=LOCAL_DESTRUCTIVE,
         structured_output=True,
     )
-    def workspace_edit(workspace_id: str, files: list[FileEdit]) -> dict[str, Any]:
-        """Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
-        return bounded_service.call("workspace_edit", workspace_id, files)
+    def workspace_edit(
+        workspace_id: str,
+        files: list[FileEdit],
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; use an idempotency key for safe retries. Pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
+        return bounded_service.call("workspace_edit", workspace_id, files, idempotency_key)
 
     @mcp.tool(
         title="Apply validated patch",
@@ -758,14 +771,16 @@ def create_server(
         patch: str,
         expected_head_sha: str,
         expected_workspace_fingerprint: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
+        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use an idempotency key for safe retries. Use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
         return bounded_service.call(
             "workspace_apply_patch",
             workspace_id,
             patch,
             expected_head_sha,
             expected_workspace_fingerprint,
+            idempotency_key,
         )
 
     @mcp.tool(
@@ -835,9 +850,12 @@ def create_server(
         workspace_id: str,
         profile_name: str | None = None,
         background: bool = False,
+        force_rerun: bool = False,
     ) -> dict[str, Any]:
-        """Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
-        return bounded_service.call("workspace_run_profile", workspace_id, profile_name, background)
+        """Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Deterministic failures may be reused only when every reviewed binding is unchanged; set force_rerun=true to bypass that evidence reuse and execute commands again. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
+        return bounded_service.call(
+            "workspace_run_profile", workspace_id, profile_name, background, force_rerun
+        )
 
     @mcp.tool(
         title="Run reviewed workspace diagnostic",
@@ -853,8 +871,9 @@ def create_server(
         expectation: str | None = None,
         expected_failure_class: str | None = None,
         selector2: str | list[str] | None = None,
+        force_rerun: bool = False,
     ) -> dict[str, Any]:
-        """Use this to run one typed repository-reviewed diagnostic; the response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed. Pass a single string or a bounded list of strings for a multi-value selector; use selector2 only when the diagnostic declares a second named placeholder. Call repo_task_context or repo_status first to see each enrolled diagnostic's selector schema (kind, character classes, max_values, expansion) before constructing a call."""
+        """Use this to run one typed repository-reviewed diagnostic; deterministic failures may be reused only when every reviewed binding is unchanged, and force_rerun=true bypasses that evidence reuse. The response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed. Pass a single string or a bounded list of strings for a multi-value selector; use selector2 only when the diagnostic declares a second named placeholder. Call repo_task_context or repo_status first to see each enrolled diagnostic's selector schema (kind, character classes, max_values, expansion) before constructing a call."""
         return bounded_service.call(
             "workspace_run_diagnostic",
             workspace_id,
@@ -865,6 +884,7 @@ def create_server(
             expectation,
             expected_failure_class,
             selector2,
+            force_rerun,
         )
 
     @mcp.tool(
@@ -1059,11 +1079,14 @@ def create_server(
         structured_output=True,
     )
     def config_inspect(repo_id: str | None = None) -> dict[str, Any]:
-        """Use this when helping with setup or debugging to read the accepted and active
-        configuration generations, one repository's effective policy (profiles with their
-        exact commands, diagnostics, formatters, budgets, allowed and denied paths), and
-        any policy changes still waiting for operator approval."""
-        return bounded_admin.call("config_inspect", repo_id)
+        """Use this when helping with setup or debugging to read accepted/effective policy,
+        runtime package/generation/tool-surface health, connection-scoped negotiated client
+        capabilities, and policy changes still waiting for operator approval."""
+        payload = bounded_admin.call("config_inspect", repo_id)
+        payload["client_capabilities"] = client_capabilities_from_context(
+            mcp.get_context()
+        ).as_dict()
+        return payload
 
     @mcp.tool(
         title="Read bounded operational logs",

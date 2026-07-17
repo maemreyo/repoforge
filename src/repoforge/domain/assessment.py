@@ -60,6 +60,7 @@ class WorkspaceAssessment:
     diff_summary: AssessmentEvidence
     change_budget: AssessmentEvidence
     path_policy: AssessmentEvidence
+    code_intelligence: AssessmentEvidence
     base_freshness: AssessmentEvidence
     pr_state: AssessmentEvidence
     ci_summary: AssessmentEvidence
@@ -177,6 +178,7 @@ def validate_workspace_assessment(assessment: WorkspaceAssessment) -> WorkspaceA
         "diff_summary": assessment.diff_summary,
         "change_budget": assessment.change_budget,
         "path_policy": assessment.path_policy,
+        "code_intelligence": assessment.code_intelligence,
         "base_freshness": assessment.base_freshness,
         "pr_state": assessment.pr_state,
         "ci_summary": assessment.ci_summary,

@@ -16,7 +16,11 @@ from ..context import ApplicationContext
 from ..tickets.graph import ticket_subtree_numbers, validate_ticket_graph
 from ..tickets.live import ticket_live_state_from_issue
 from ..tickets.readiness import derive_ticket_readiness
-from .issue_graph import node_payload, read_github_ticket_snapshot
+from .issue_graph import (
+    _incomplete_graph_diagnostic,
+    node_payload,
+    read_github_ticket_snapshot,
+)
 
 _MAX_LIVE_ISSUES = 200
 
@@ -181,6 +185,20 @@ class RepositoryIssueNextReader:
             details["source"] = "github"
             details["cache_hit"] = cache_hit
             details["evidence_complete"] = snapshot.evidence_complete
+            if not snapshot.evidence_complete:
+                incomplete_diagnostic = _incomplete_graph_diagnostic(snapshot)
+                details["valid"] = False
+                details["diagnostic_count"] = 1
+                details["ticket_count"] = 0
+                return result(
+                    snapshot,
+                    cache_hit,
+                    valid=False,
+                    diagnostics=[incomplete_diagnostic],
+                    tickets=[],
+                    assessments=[],
+                    repairs=[],
+                )
             diagnostics = validate_ticket_graph(graph)
             if diagnostics:
                 details["valid"] = False

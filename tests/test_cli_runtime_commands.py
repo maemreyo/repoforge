@@ -6,7 +6,7 @@ import importlib
 import json
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -103,6 +103,72 @@ def _args(config: Path, command: str, **kwargs: object) -> argparse.Namespace:
     }
     values.update(kwargs)
     return argparse.Namespace(**values)
+
+
+def test_runtime_status_classifies_package_generation_and_surface_skew(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Store(tmp_path)
+    store._active = _generation(1)
+    record = replace(
+        _record(RuntimePhase.HEALTHY),
+        active_generation=1,
+        accepted_generation=2,
+        tool_surface_hash="1" * 64,
+        package_version="2.0.0",
+        executable="/opt/repoforge-2.0/bin/rf",
+        install_origin="wheel",
+    )
+    monkeypatch.setattr(cli, "build_runtime_store", lambda path: RuntimeStore([record]))
+    monkeypatch.setattr(
+        cli,
+        "_current_runtime_identity",
+        lambda: {
+            "package_version": "2.1.0",
+            "executable": "/opt/repoforge-2.1/bin/rf",
+            "install_origin": "wheel",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "_current_tool_surface_hash", lambda: "2" * 64, raising=False)
+
+    payload = cli._runtime_status(store)
+
+    assert payload["running_package_version"] == "2.0.0"
+    assert payload["current_package_version"] == "2.1.0"
+    assert payload["package_version_skew"] is True
+    assert payload["generation_activation_required"] is True
+    assert payload["restart_required"] is True
+    assert payload["client_rediscovery_recommended"] is True
+    assert payload["rediscovery_reason"] == "tool_surface_changed"
+    assert payload["safe_next_action"].startswith("Reinstall RepoForge 2.1.0")
+
+
+def test_runtime_status_represents_unknown_identity_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Store(tmp_path)
+    monkeypatch.setattr(cli, "build_runtime_store", lambda path: RuntimeStore([None]))
+    monkeypatch.setattr(
+        cli,
+        "_current_runtime_identity",
+        lambda: {"package_version": "2.1.0", "executable": None, "install_origin": None},
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "_current_tool_surface_hash", lambda: None, raising=False)
+
+    payload = cli._runtime_status(store)
+
+    assert payload["package_version_skew"] is None
+    assert payload["unknown_fields"] == [
+        "current_executable",
+        "current_install_origin",
+        "running_executable",
+        "running_install_origin",
+        "running_package_version",
+        "running_tool_surface_hash",
+    ]
+    assert payload["safe_next_action"] == "Run `rf runtime start` or inspect logs."
 
 
 def test_runtime_status_logs_and_graceful_stop(

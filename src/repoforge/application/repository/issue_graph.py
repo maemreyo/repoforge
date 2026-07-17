@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ...config import GitHubTicketGraphConfig, RepositoryConfig
@@ -52,6 +52,36 @@ def _parse_priority(value: str | None) -> TicketPriority | None:
     except ValueError as exc:
         allowed = ", ".join(item.value for item in TicketPriority)
         raise TicketGraphError(f"priority must be one of: {allowed}") from exc
+
+
+def _coverage(
+    configured_root: int | None, snapshot: TicketGraphSnapshot | None = None
+) -> dict[str, Any]:
+    return {
+        "configured_root": configured_root,
+        "observed_root": snapshot.graph.program_issue if snapshot is not None else None,
+        "observed_nodes": len(snapshot.graph.nodes) if snapshot is not None else 0,
+        "unavailable": list(snapshot.unavailable) if snapshot is not None else [],
+        "truncated": snapshot.truncated if snapshot is not None else False,
+        "evidence_complete": snapshot.evidence_complete if snapshot is not None else False,
+    }
+
+
+def _incomplete_graph_diagnostic(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
+    reasons: list[str] = []
+    if snapshot.unavailable:
+        reasons.append(
+            "unavailable issues: " + ", ".join(str(item) for item in snapshot.unavailable)
+        )
+    if snapshot.truncated:
+        reasons.append("the bounded traversal was truncated")
+    if not reasons:
+        reasons.append("one or more GitHub relationships could not be verified")
+    return {
+        "code": "GRAPH_EVIDENCE_INCOMPLETE",
+        "issue_number": snapshot.graph.program_issue,
+        "message": "GitHub ticket graph evidence is incomplete; " + "; ".join(reasons),
+    }
 
 
 def _snapshot_payload(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
@@ -214,6 +244,10 @@ class RepositoryIssueGraphResult:
     nodes: list[dict[str, Any]]
     node_count: int
     truncated: bool
+    valid: bool = True
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    coverage: dict[str, Any] = field(default_factory=dict)
+    safe_next_action: str | None = None
 
 
 class RepositoryIssueGraphReader:
@@ -253,6 +287,21 @@ class RepositoryIssueGraphReader:
                     [],
                     0,
                     False,
+                    False,
+                    [
+                        {
+                            "code": "GRAPH_NOT_CONFIGURED",
+                            "issue_number": 0,
+                            "message": (
+                                f"Configure repositories.{c.repo_id}.ticket_graph.root_issue"
+                            ),
+                        }
+                    ],
+                    _coverage(None),
+                    (
+                        f"Run `rf repo refresh {c.repo_id} --accept` after adding the reviewed "
+                        "ticket_graph root to the source configuration."
+                    ),
                 )
             snapshot, cache_hit = read_github_ticket_snapshot(
                 self.ctx,
@@ -275,6 +324,9 @@ class RepositoryIssueGraphReader:
             details["node_count"] = len(nodes)
             details["truncated"] = truncated
             details["evidence_complete"] = snapshot.evidence_complete
+            diagnostics = (
+                [] if snapshot.evidence_complete else [_incomplete_graph_diagnostic(snapshot)]
+            )
             return RepositoryIssueGraphResult(
                 c.repo_id,
                 "github",
@@ -286,6 +338,19 @@ class RepositoryIssueGraphReader:
                 [node_payload(node) for node in nodes],
                 len(nodes),
                 truncated,
+                snapshot.evidence_complete,
+                diagnostics,
+                _coverage(
+                    repo.ticket_graph.root_issue if repo.ticket_graph else c.root_issue, snapshot
+                ),
+                (
+                    None
+                    if snapshot.evidence_complete
+                    else (
+                        "Retry with `fresh=true`; if evidence remains incomplete, verify GitHub "
+                        "sub-issue and dependency API access before selecting work."
+                    )
+                ),
             )
 
         return self.ctx.audited("repo_issue_graph", details, op)

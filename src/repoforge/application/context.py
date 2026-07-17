@@ -19,6 +19,7 @@ from ..domain.workspace import WorkspaceRecord
 from ..ports import (
     AuditSink,
     Clock,
+    CodeIntelligenceProvider,
     CommandExecutor,
     ExecutableLocator,
     ExecutionEnvironmentPort,
@@ -42,7 +43,7 @@ from ..ports import (
 )
 from .dto import to_data
 from .fingerprint_cache import FingerprintCache
-from .idempotency import execute_idempotent
+from .idempotency import IdempotencyEffectBoundary, execute_idempotent
 from .nudges import AdoptionNudgeTracker
 
 T = TypeVar("T")
@@ -225,6 +226,7 @@ class ApplicationContext:
     fingerprint_cache: FingerprintCache | None = None
     execution_environment: ExecutionEnvironmentPort | None = None
     provider_registry: ProviderRegistry | None = None
+    code_intelligence: CodeIntelligenceProvider | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
     hygiene_cache: HygieneBaselineCache | None = None
@@ -494,6 +496,7 @@ class ApplicationContext:
         details: dict[str, Any] | None = None,
         serialize: Callable[[T], Any] | None = None,
         deserialize: Callable[[Any], T] | None = None,
+        effect_boundary: IdempotencyEffectBoundary | None = None,
     ) -> T:
         return execute_idempotent(
             self,
@@ -504,4 +507,5 @@ class ApplicationContext:
             details=details,
             serialize=serialize,
             deserialize=deserialize,
+            effect_boundary=effect_boundary,
         )
