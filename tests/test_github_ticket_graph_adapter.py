@@ -78,12 +78,16 @@ def _responses() -> dict[str, object]:
             "Status: in progress\nPriority: P0\nType: program",
         ),
         f"{prefix}/1/sub_issues?per_page=100": [{"number": 2}, {"number": 3}],
+        f"{prefix}/1/comments?per_page=20": [],
         f"{prefix}/2": _issue(
             2,
             "First ticket",
             "Status: ready\nPriority: P1\nType: implementation ticket",
         ),
         f"{prefix}/2/sub_issues?per_page=100": [],
+        f"{prefix}/2/comments?per_page=20": [
+            {"body": "Superseded by: #3\nHandoff notes:\n- Continue in the canonical issue."}
+        ],
         f"{prefix}/3": _issue(
             3,
             "Second ticket",
@@ -91,6 +95,7 @@ def _responses() -> dict[str, object]:
             state="closed",
         ),
         f"{prefix}/3/sub_issues?per_page=100": [],
+        f"{prefix}/3/comments?per_page=20": [],
         f"{prefix}/1/dependencies/blocked_by?per_page=100": [],
         f"{prefix}/2/dependencies/blocked_by?per_page=100": [],
         f"{prefix}/3/dependencies/blocked_by?per_page=100": [{"number": 2}],
@@ -121,7 +126,11 @@ def test_reads_native_subissues_dependencies_and_metadata(tmp_path: Path) -> Non
     assert nodes[2].blocks == (3,)
     assert nodes[3].blockers == (2,)
     assert nodes[3].status is TicketStatus.DONE
-    assert {item.number for item in snapshot.live_issues} == {1, 2, 3}
+    live = {item.number: item for item in snapshot.live_issues}
+    assert set(live) == {1, 2, 3}
+    assert live[2].comments == (
+        "Superseded by: #3\nHandoff notes:\n- Continue in the canonical issue.",
+    )
     assert all(call[0] == "gh" for call in executor.calls)
 
 

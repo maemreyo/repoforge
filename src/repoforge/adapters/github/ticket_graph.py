@@ -27,6 +27,8 @@ _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _METADATA_LINE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?P<name>[A-Za-z ]+)\s*:\s*(?P<value>[^\n]+)")
 _API_VERSION = "2022-11-28"
 _MAX_BODY_CHARS = 200_000
+_MAX_COMMENTS = 20
+_MAX_COMMENT_CHARS = 20_000
 
 
 class CommandGitHubTicketGraphGateway:
@@ -264,6 +266,33 @@ class CommandGitHubTicketGraphGateway:
                     queue.append(child_number)
 
         wanted = set(issues)
+        comments_by_number: dict[int, tuple[str, ...]] = {}
+        for number in sorted(wanted):
+            try:
+                raw_comments = self._list(
+                    self._api(
+                        cwd, f"repos/{slug}/issues/{number}/comments?per_page={_MAX_COMMENTS}"
+                    ),
+                    f"GitHub comments for #{number}",
+                )
+            except CommandError:
+                unavailable.add(number)
+                comments_by_number[number] = ()
+                continue
+            if len(raw_comments) == _MAX_COMMENTS:
+                truncated = True
+            comments: list[str] = []
+            malformed = False
+            for raw_comment in raw_comments[:_MAX_COMMENTS]:
+                comment_body = raw_comment.get("body")
+                if not isinstance(comment_body, str) or len(comment_body) > _MAX_COMMENT_CHARS:
+                    malformed = True
+                    continue
+                comments.append(comment_body)
+            if malformed:
+                unavailable.add(number)
+            comments_by_number[number] = tuple(comments)
+
         blockers_by_number: dict[int, set[int]] = {number: set() for number in wanted}
         for number in sorted(wanted):
             try:
@@ -357,7 +386,15 @@ class CommandGitHubTicketGraphGateway:
                     roadmap=roadmap,
                 )
             )
-            live.append(TicketLiveMetadata(number, title, state, body))
+            live.append(
+                TicketLiveMetadata(
+                    number,
+                    title,
+                    state,
+                    body,
+                    comments_by_number.get(number, ()),
+                )
+            )
 
         if source.root_issue not in wanted:
             raise TicketGraphError(f"GitHub ticket graph root #{source.root_issue} is unavailable")
@@ -406,7 +443,7 @@ class GitHubTicketGraphReader:
                         "--repo",
                         repository,
                         "--json",
-                        "number,title,state,body",
+                        "number,title,state,body,comments",
                     ),
                     cwd=self._cwd,
                     timeout=30,
@@ -424,6 +461,15 @@ class GitHubTicketGraphReader:
             title = payload.get("title")
             state = payload.get("state")
             body = payload.get("body")
+            raw_comments = payload.get("comments")
+            comments: list[str] = []
+            if isinstance(raw_comments, list):
+                for raw_comment in raw_comments[:_MAX_COMMENTS]:
+                    comment_body = (
+                        raw_comment.get("body") if isinstance(raw_comment, dict) else None
+                    )
+                    if isinstance(comment_body, str) and len(comment_body) <= _MAX_COMMENT_CHARS:
+                        comments.append(comment_body)
             if (
                 live_number != issue_number
                 or not isinstance(title, str)
@@ -433,5 +479,7 @@ class GitHubTicketGraphReader:
                 or len(body) > _MAX_BODY_CHARS
             ):
                 continue
-            snapshots.append(TicketLiveMetadata(issue_number, title.strip(), state, body))
+            snapshots.append(
+                TicketLiveMetadata(issue_number, title.strip(), state, body, tuple(comments))
+            )
         return tuple(snapshots)

@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from repoforge.application.tickets.live import ticket_live_state_from_issue
 from repoforge.application.tickets.readiness import derive_ticket_readiness
 from repoforge.domain.tickets import (
+    PartialCompletion,
+    RequirementRelation,
+    RequirementRelationType,
     TicketDeliveryMetadata,
     TicketGraph,
+    TicketGraphError,
     TicketLiveState,
     TicketNode,
     TicketPriority,
@@ -48,6 +54,8 @@ def _live(
     complete: bool = True,
     design_gate: bool = False,
     superseded_by: int | None = None,
+    relations: tuple[RequirementRelation, ...] = (),
+    partial_completion: PartialCompletion | None = None,
     wave: int = 0,
     sequence: int = 0,
 ) -> TicketLiveState:
@@ -58,6 +66,8 @@ def _live(
             specification_complete=complete,
             unresolved_design_gate=design_gate,
             superseded_by=superseded_by,
+            relations=relations,
+            partial_completion=partial_completion,
             wave=wave,
             sequence=sequence,
         ),
@@ -306,6 +316,172 @@ def test_live_issue_metadata_normalizes_spec_gate_supersession_and_order() -> No
     assert state.delivery.superseded_by == 70
     assert state.delivery.wave == 2
     assert state.delivery.sequence == 7
+
+
+def test_requirement_evolution_contracts_are_bounded_and_deterministic() -> None:
+    relation = RequirementRelation(
+        RequirementRelationType.SUPERSEDED_BY,
+        70,
+        "The newer contract consolidates the completed scope.",
+    )
+    partial = PartialCompletion(
+        verified_deliverables=("The domain model is verified.",),
+        remaining_scope=("Expose the public adapter.",),
+        new_child_issues=(71,),
+        unverified_work=("Remote-provider behavior was not tested.",),
+        handoff_notes=("Reuse the shared durable-state port.",),
+    )
+
+    assert relation.target_issue == 70
+    assert partial.has_remaining_scope is True
+    with pytest.raises(TicketGraphError):
+        RequirementRelation(RequirementRelationType.SUPERSEDES, 0, "invalid")
+    with pytest.raises(TicketGraphError):
+        PartialCompletion(
+            verified_deliverables=(),
+            remaining_scope=(),
+            new_child_issues=(71, 71),
+            unverified_work=(),
+            handoff_notes=(),
+        )
+    with pytest.raises(TicketGraphError):
+        TicketDeliveryMetadata(
+            specification_complete=True,
+            relations=(relation, relation),
+        )
+
+
+def test_supersession_selection_cycles_partial_completion_and_invalidation() -> None:
+    old = _node(40, status=TicketStatus.READY)
+    replacement = _node(41, status=TicketStatus.READY)
+    partial = _node(50, status=TicketStatus.READY)
+    invalidator = _node(60, status=TicketStatus.DONE)
+    invalidated = _node(61, status=TicketStatus.READY)
+    graph = _graph(old, replacement, partial, invalidator, invalidated)
+
+    report = derive_ticket_readiness(
+        graph,
+        (
+            _live(3),
+            _live(
+                40,
+                relations=(
+                    RequirementRelation(
+                        RequirementRelationType.SUPERSEDED_BY,
+                        41,
+                        "Replacement owns the remaining scope.",
+                    ),
+                ),
+            ),
+            _live(
+                41,
+                relations=(
+                    RequirementRelation(
+                        RequirementRelationType.SUPERSEDES,
+                        40,
+                        "This issue is the canonical replacement.",
+                    ),
+                ),
+            ),
+            _live(
+                50,
+                is_open=False,
+                partial_completion=PartialCompletion(
+                    verified_deliverables=("The parser is verified.",),
+                    remaining_scope=("The adapter is still required.",),
+                    new_child_issues=(51,),
+                    unverified_work=(),
+                    handoff_notes=("Continue in #51.",),
+                ),
+            ),
+            _live(
+                60,
+                is_open=False,
+                relations=(
+                    RequirementRelation(
+                        RequirementRelationType.INVALIDATES,
+                        61,
+                        "The old storage assumption is no longer valid.",
+                    ),
+                ),
+            ),
+            _live(61),
+        ),
+        policy=TicketReadinessPolicy.unbounded(),
+    )
+    assessments = _by_number(report)
+
+    assert assessments[40].derived_status is TicketStatus.SUPERSEDED
+    assert assessments[40].selectable is False
+    assert assessments[41].derived_status is TicketStatus.READY
+    assert assessments[50].derived_status is TicketStatus.BLOCKED
+    assert assessments[50].reason_codes == ("PARTIAL_COMPLETION_REMAINS",)
+    assert assessments[61].derived_status is TicketStatus.BLOCKED
+    assert assessments[61].reason_codes == ("INVALIDATED_ASSUMPTION",)
+    assert report.recommended == (41,)
+
+    cycle = derive_ticket_readiness(
+        _graph(_node(70), _node(71)),
+        (
+            _live(3),
+            _live(
+                70,
+                relations=(
+                    RequirementRelation(
+                        RequirementRelationType.SUPERSEDED_BY,
+                        71,
+                        "Replacement A.",
+                    ),
+                ),
+            ),
+            _live(
+                71,
+                relations=(
+                    RequirementRelation(
+                        RequirementRelationType.MERGED_INTO,
+                        70,
+                        "Replacement B.",
+                    ),
+                ),
+            ),
+        ),
+    )
+    assert cycle.recommended == ()
+    assert {item.code for item in cycle.diagnostics} == {"SUPERSESSION_CYCLE"}
+
+
+def test_live_issue_metadata_parses_relations_and_partial_completion_sections() -> None:
+    state = ticket_live_state_from_issue(
+        {
+            "number": 80,
+            "state": "CLOSED",
+            "body": "Objective\nAcceptance criteria\nTests\nSupersedes: #70, #71",
+            "comments": [
+                {
+                    "body": (
+                        "Merged into: #90\n"
+                        "Invalidates: #91\n"
+                        "Verified deliverables:\n- Domain contract verified\n"
+                        "Remaining scope:\n- Public adapter remains\n"
+                        "New child issues: #92, #93\n"
+                        "Unverified work:\n- Remote provider\n"
+                        "Handoff notes:\n- Reuse typed ports"
+                    )
+                }
+            ],
+        },
+        expected_number=80,
+    )
+
+    assert tuple((item.relation_type, item.target_issue) for item in state.delivery.relations) == (
+        (RequirementRelationType.SUPERSEDES, 70),
+        (RequirementRelationType.SUPERSEDES, 71),
+        (RequirementRelationType.MERGED_INTO, 90),
+        (RequirementRelationType.INVALIDATES, 91),
+    )
+    assert state.delivery.partial_completion is not None
+    assert state.delivery.partial_completion.remaining_scope == ("Public adapter remains",)
+    assert state.delivery.partial_completion.new_child_issues == (92, 93)
 
 
 def test_concurrent_derivation_is_deterministic() -> None:

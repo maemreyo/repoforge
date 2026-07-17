@@ -255,10 +255,18 @@ def test_live_reader_is_bounded_read_only_and_normalizes_metadata(tmp_path: Path
         )
     )
     executor = RecordingExecutor(
-        {4: {"number": 4, "title": "Issue 4", "state": "OPEN", "body": body}}
+        {
+            4: {
+                "number": 4,
+                "title": "Issue 4",
+                "state": "OPEN",
+                "body": body,
+                "comments": [{"body": "Superseded by: #8"}],
+            }
+        }
     )
     snapshots = GitHubTicketGraphReader(executor, cwd=tmp_path).read("owner/repo", (4,))
-    assert snapshots == (TicketLiveMetadata(4, "Issue 4", "OPEN", body),)
+    assert snapshots == (TicketLiveMetadata(4, "Issue 4", "OPEN", body, ("Superseded by: #8",)),)
     assert executor.calls == [
         (
             "gh",
@@ -268,7 +276,7 @@ def test_live_reader_is_bounded_read_only_and_normalizes_metadata(tmp_path: Path
             "--repo",
             "owner/repo",
             "--json",
-            "number,title,state,body",
+            "number,title,state,body,comments",
         )
     ]
     assert not {"create", "edit", "close", "delete", "comment"}.intersection(executor.calls[0])

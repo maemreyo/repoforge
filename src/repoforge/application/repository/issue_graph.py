@@ -17,6 +17,7 @@ from ...domain.tickets import (
 )
 from ..context import ApplicationContext
 from ..tickets.graph import select_ticket_nodes
+from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
 
 
 def node_payload(node: TicketNode) -> dict[str, Any]:
@@ -84,6 +85,23 @@ def _incomplete_graph_diagnostic(snapshot: TicketGraphSnapshot) -> dict[str, Any
     }
 
 
+def _evolution_by_number(snapshot: TicketGraphSnapshot) -> dict[int, dict[str, object]]:
+    return {
+        issue.number: ticket_delivery_payload(
+            ticket_live_state_from_issue(
+                {
+                    "number": issue.number,
+                    "state": issue.state,
+                    "body": issue.body,
+                    "comments": [{"body": body} for body in issue.comments],
+                },
+                expected_number=issue.number,
+            ).delivery
+        )
+        for issue in snapshot.live_issues
+    }
+
+
 def _snapshot_payload(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
     return {
         "schema_version": snapshot.graph.schema_version,
@@ -99,6 +117,7 @@ def _snapshot_payload(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
                 "title": issue.title,
                 "state": issue.state,
                 "body": issue.body,
+                "comments": list(issue.comments),
             }
             for issue in snapshot.live_issues
         ],
@@ -144,6 +163,7 @@ def _snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
                 str(raw["title"]),
                 str(raw["state"]),
                 str(raw["body"]),
+                tuple(str(item) for item in raw.get("comments", [])),
             )
             for raw in raw_live
             if isinstance(raw, dict)
@@ -327,6 +347,7 @@ class RepositoryIssueGraphReader:
             diagnostics = (
                 [] if snapshot.evidence_complete else [_incomplete_graph_diagnostic(snapshot)]
             )
+            evolution = _evolution_by_number(snapshot)
             return RepositoryIssueGraphResult(
                 c.repo_id,
                 "github",
@@ -335,7 +356,7 @@ class RepositoryIssueGraphReader:
                 snapshot.observed_at,
                 snapshot.evidence_complete,
                 list(snapshot.unavailable),
-                [node_payload(node) for node in nodes],
+                [{**node_payload(node), "evolution": evolution.get(node.number)} for node in nodes],
                 len(nodes),
                 truncated,
                 snapshot.evidence_complete,

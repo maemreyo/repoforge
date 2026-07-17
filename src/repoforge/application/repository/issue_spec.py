@@ -8,6 +8,7 @@ from ...config import RepositoryConfig
 from ...domain.tickets import TicketGraph, TicketLiveMetadata
 from ..context import ApplicationContext
 from ..tickets.graph import compare_live_ticket_metadata
+from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
 from .issue_graph import node_payload, read_github_ticket_snapshot
 
 _HEADING = re.compile(r"(?m)^#{2,3}\s+(.+)$")
@@ -35,6 +36,7 @@ class RepositoryIssueSpecResult:
     live: dict[str, Any]
     drift: list[dict[str, Any]]
     comments: list[dict[str, Any]]
+    evolution: dict[str, object]
     cache_hit: bool
     graph_cache_hit: bool
     observed_at: str | None
@@ -128,6 +130,13 @@ class RepositoryIssueSpecReader:
                 for item in compare_live_ticket_metadata(single_node_graph, (live_metadata,))
             ]
 
+        evolution = ticket_delivery_payload(
+            ticket_live_state_from_issue(
+                live_payload,
+                expected_number=c.issue_number,
+            ).delivery
+        )
+
         return RepositoryIssueSpecResult(
             c.repo_id,
             c.issue_number,
@@ -137,6 +146,7 @@ class RepositoryIssueSpecReader:
             live_payload,
             drift,
             comments,
+            evolution,
             cache_hit,
             graph_cache_hit,
             snapshot.observed_at if snapshot is not None else None,

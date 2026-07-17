@@ -80,6 +80,11 @@ class FixtureTicketGraphGateway:
                     )
                 ),
                 "Objective\nAcceptance criteria\nTests",
+                tuple(
+                    str(item.get("body"))
+                    for item in issue_states.get(str(node.number), {}).get("comments", [])
+                    if isinstance(item, dict) and isinstance(item.get("body"), str)
+                ),
             )
             for node in graph.nodes
         )
@@ -312,6 +317,71 @@ def test_repo_issue_next_derives_closed_blockers_and_metadata_repairs(tmp_path: 
     ]
 
 
+def test_repo_issue_tools_render_evolution_and_exclude_superseded_work(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(
+        3,
+        ticket_type="program",
+        status="In progress",
+        parent=None,
+        children=[40, 41, 50],
+    )
+    old = _node(40, status="Ready")
+    replacement = _node(41, status="Ready")
+    partial = _node(50, status="Ready")
+    _write_manifest(environment.source, [program, old, replacement, partial])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "3": {"state": "OPEN"},
+                    "40": {
+                        "state": "OPEN",
+                        "comments": [{"body": "Superseded by: #41"}],
+                    },
+                    "41": {
+                        "state": "OPEN",
+                        "comments": [{"body": "Supersedes: #40"}],
+                    },
+                    "50": {
+                        "state": "CLOSED",
+                        "comments": [
+                            {
+                                "body": (
+                                    "Verified deliverables:\n- Parser verified\n"
+                                    "Remaining scope:\n- Public adapter remains\n"
+                                    "New child issues: #51"
+                                )
+                            }
+                        ],
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    graph = service.repo_issue_graph("demo")
+    graph_nodes = {item["number"]: item for item in graph["nodes"]}
+    assert graph_nodes[40]["evolution"]["relations"] == [
+        {
+            "type": "superseded_by",
+            "target_issue": 41,
+            "reason": "Declared superseded_by relation in live issue metadata.",
+        }
+    ]
+
+    next_result = service.repo_issue_next("demo", limit=10)
+    assert [item["number"] for item in next_result["tickets"]] == [41]
+    assessments = {item["number"]: item for item in next_result["assessments"]}
+    assert assessments[40]["derived_status"] == "Superseded"
+    assert assessments[40]["evolution"]["relations"][0]["target_issue"] == 41
+    assert assessments[50]["reason_codes"] == ["PARTIAL_COMPLETION_REMAINS"]
+    assert assessments[50]["evolution"]["partial_completion"]["remaining_scope"] == [
+        "Public adapter remains"
+    ]
+
+
 def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -> None:
     service, environment = _service(tmp_path)
     program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
@@ -325,6 +395,11 @@ def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -
     assert result["live"]["state"] == "OPEN"
     assert result["comments"][0]["body"].startswith("context")
     assert "heading" in result["comments"][0]
+    assert result["evolution"] == {
+        "relations": [],
+        "partial_completion": None,
+        "superseded_by": None,
+    }
 
 
 def test_repo_issue_spec_works_without_a_manifest_node(tmp_path: Path) -> None:
