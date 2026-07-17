@@ -1,6 +1,7 @@
 from .json_approval_store import JsonApprovalPayloadStore, JsonApprovalStore
 from .json_execution_plan_store import JsonExecutionPlanAcceptanceStore, JsonExecutionPlanStore
 from .json_execution_receipt_store import JsonExecutionReceiptStore
+from .json_failure_evidence_store import JsonFailureEvidenceStore
 from .json_github_read_cache import JsonGitHubReadCache
 from .json_hygiene_cache import JsonHygieneBaselineCache
 from .json_idempotency_store import JsonIdempotencyStore
@@ -19,6 +20,7 @@ __all__ = [
     "JsonExecutionPlanAcceptanceStore",
     "JsonExecutionPlanStore",
     "JsonExecutionReceiptStore",
+    "JsonFailureEvidenceStore",
     "JsonGitHubReadCache",
     "JsonHygieneBaselineCache",
     "JsonIdempotencyStore",

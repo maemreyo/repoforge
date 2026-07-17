@@ -47,6 +47,7 @@ from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
 from ..operations.manager import OperationManager
 from .execution_plan import ExecutionPlanService
+from .failure_intelligence import FailureIntelligenceService
 from .run_diagnostic import WorkspaceDiagnosticRunner, WorkspaceRunDiagnosticCommand
 from .run_profile import WorkspaceProfileRunner, WorkspaceRunProfileCommand
 
@@ -125,12 +126,14 @@ class WorkspacePlanExecutor:
         background_tasks: BackgroundTaskRunner,
         profile_runner: WorkspaceProfileRunner,
         diagnostic_runner: WorkspaceDiagnosticRunner,
+        failure_intelligence: FailureIntelligenceService,
     ) -> None:
         self.ctx = ctx
         self.operations = operations
         self.background_tasks = background_tasks
         self.profile_runner = profile_runner
         self.diagnostic_runner = diagnostic_runner
+        self.failure_intelligence = failure_intelligence
         self.plan_service = ExecutionPlanService(ctx)
         self._tokens: dict[str, CancellationToken] = {}
         self._tokens_lock = threading.Lock()
@@ -496,9 +499,17 @@ class WorkspacePlanExecutor:
                 receipts_by_stage[stage.stage_id] = receipt
                 if receipt.source_changed:
                     raise RepoForgeError(
-                        "Plan stage changed the accepted workspace snapshot",
-                        code=ErrorCode.STATE_STALE,
-                        details={"stage_id": stage.stage_id, "receipt_id": receipt.receipt_id},
+                        "Plan stage changed the accepted workspace snapshot unexpectedly",
+                        code=ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION,
+                        details={
+                            "stage_id": stage.stage_id,
+                            "receipt_id": receipt.receipt_id,
+                            "paths": list(
+                                self.ctx.git.changed_paths(
+                                    workspace_root, self.ctx.workspace(plan.workspace_id)[1]
+                                )
+                            ),
+                        },
                     )
                 if cacheable and cache is not None and cache_key is not None:
                     cache.put(
@@ -510,32 +521,61 @@ class WorkspacePlanExecutor:
                         )
                     )
             except Exception as exc:
-                if not receipts or receipts[-1].stage_id != stage.stage_id:
-                    code = getattr(getattr(exc, "code", None), "value", None)
-                    failure_class = str(code or type(exc).__name__)[:128]
-                    with contextlib.suppress(Exception):
-                        failed_receipt = self._persist_receipt(
-                            operation_id=operation_id,
-                            ordinal=ordinal,
-                            plan=plan,
-                            stage=stage,
-                            started_at=started_at,
-                            pre_identity=pre_identity,
-                            status=(
-                                StageReceiptStatus.CANCELLED
-                                if token.is_cancelled()
-                                else StageReceiptStatus.FAILED
-                            ),
-                            failure_class=failure_class,
-                            cache_status=cache_status,
-                            result_reference=reference,
-                            environment_identity=environment_identity,
-                        )
-                        receipts.append(failed_receipt)
-                        receipts_by_stage[stage.stage_id] = failed_receipt
+                _, locked_repo, _ = self.ctx.workspace(plan.workspace_id)
+                post_identity = self._identity(plan.workspace_id)
+                prior_page = self._receipt_store().list_for_plan(plan.plan_id)
+                prior_receipts = tuple(item.value for item in prior_page.records)
+                evidence = self.failure_intelligence.build(
+                    operation_id=operation_id,
+                    plan=plan,
+                    stage=stage,
+                    exc=exc,
+                    pre_identity=pre_identity,
+                    post_identity=post_identity,
+                    environment_identity=environment_identity,
+                    changed_paths=tuple(self.ctx.git.changed_paths(workspace_root, locked_repo)),
+                    prior_receipts=prior_receipts,
+                )
+                failed_receipt = self._persist_receipt(
+                    operation_id=operation_id,
+                    ordinal=ordinal,
+                    plan=plan,
+                    stage=stage,
+                    started_at=started_at,
+                    pre_identity=pre_identity,
+                    status=(
+                        StageReceiptStatus.CANCELLED
+                        if token.is_cancelled()
+                        else StageReceiptStatus.FAILED
+                    ),
+                    failure_class=evidence.failure_class.value,
+                    cache_status=cache_status,
+                    result_reference=f"failure:{evidence.failure_id}",
+                    environment_identity=environment_identity,
+                )
+                stored_evidence = self.failure_intelligence.persist_for_workspace(
+                    evidence,
+                    receipt_id=failed_receipt.receipt_id,
+                    workspace_id=plan.workspace_id,
+                )
+                receipts.append(failed_receipt)
+                receipts_by_stage[stage.stage_id] = failed_receipt
+                if isinstance(exc, RepoForgeError):
+                    exc.details["failure_id"] = stored_evidence.failure_id
+                    exc.details["failure_class"] = stored_evidence.failure_class.value
+                    failure_to_raise: Exception = exc
+                else:
+                    failure_to_raise = RepoForgeError(
+                        str(exc) or type(exc).__name__,
+                        code=ErrorCode.COMMAND_FAILED,
+                        details={
+                            "failure_id": stored_evidence.failure_id,
+                            "failure_class": stored_evidence.failure_class.value,
+                        },
+                    )
                 if stage.failure_policy is StageFailurePolicy.OPTIONAL and not token.is_cancelled():
                     continue
-                raise
+                raise failure_to_raise from exc
             self.operations.progress(
                 operation_id,
                 phase=f"stage-{ordinal + 1}",
@@ -650,6 +690,17 @@ class WorkspacePlanExecutor:
                 "Plan execution completed without a result",
                 code=ErrorCode.INTERNAL_ERROR,
             )
+            details = getattr(final_error, "details", None)
+            failure_id = details.get("failure_id") if isinstance(details, dict) else None
+            result_store = self.ctx.operation_result_store
+            if isinstance(failure_id, str) and result_store is not None:
+                result_store.save(
+                    operation_id,
+                    {
+                        "failure_id": failure_id,
+                        "failure_evidence_reference": f"failure:{failure_id}",
+                    },
+                )
             raw_code = getattr(getattr(final_error, "code", None), "value", None)
             error_code = str(raw_code or ErrorCode.INTERNAL_ERROR.value)
             self.operations.fail(

@@ -137,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "bb52944cf512743bdfe359369d0d5863cead42f1831ab6449d346fd12c39f634",
+    "tool_surface_hash": "54ba0537114663521da85054acaaffd61da969f5e00321c3973c3b2d2ee9fad5",
     "tools": [
       {
         "annotations": {
@@ -172,6 +172,35 @@
           "type": "object"
         },
         "title": "Inspect reviewed configuration"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this with an exact failure_id from operation_status or workspace_status to read one bounded redacted execution failure and its typed recovery choices.",
+        "inputSchema": {
+          "properties": {
+            "failure_id": {
+              "title": "Failure Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "failure_id"
+          ],
+          "title": "failure_evidence_readArguments",
+          "type": "object"
+        },
+        "name": "failure_evidence_read",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "failure_evidence_readDictOutput",
+          "type": "object"
+        },
+        "title": "Read execution failure evidence"
       },
       {
         "annotations": {

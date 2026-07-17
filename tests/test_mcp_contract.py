@@ -101,6 +101,7 @@ async def test_mcp_protocol_contract_and_annotations(
             "operation_status",
             "operation_list",
             "operation_cancel",
+            "failure_evidence_read",
             "repo_list",
             "repo_status",
             "repo_context",

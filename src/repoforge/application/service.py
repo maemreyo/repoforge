@@ -91,6 +91,10 @@ from .workspace.execution_plan import (
     CreateExecutionPlanCommand,
     ExecutionPlanService,
 )
+from .workspace.failure_intelligence import (
+    FailureEvidenceReadCommand,
+    FailureIntelligenceService,
+)
 from .workspace.file_read import (
     WorkspaceFileReadCommand,
     WorkspaceFileReader,
@@ -279,12 +283,14 @@ class CodingService:
             background_tasks=self.application.background_tasks,
         )
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
+        self._execution_failure_evidence = FailureIntelligenceService(ctx)
         self._plan_executor = WorkspacePlanExecutor(
             ctx,
             operations=self.operations,
             background_tasks=self.application.background_tasks,
             profile_runner=self._profile,
             diagnostic_runner=self._diagnostic,
+            failure_intelligence=self._execution_failure_evidence,
         )
         self._hygiene_status = WorkspaceHygieneStatusReader(ctx)
         self._format_changed = WorkspaceChangedFormatter(ctx)
@@ -332,6 +338,11 @@ class CodingService:
         if result.cancellation_requested and result.operation.kind == "workspace_execute_plan":
             self._plan_executor.request_live_cancel(operation_id)
         return _result(result)
+
+    def failure_evidence_read(self, failure_id: str) -> dict[str, Any]:
+        return _result(
+            self._execution_failure_evidence.read(FailureEvidenceReadCommand(failure_id))
+        )
 
     def repo_list(self) -> dict[str, Any]:
         return _result(self._repo_list.execute(RepositoryListCommand()))

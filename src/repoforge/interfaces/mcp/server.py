@@ -393,6 +393,15 @@ def create_server(
         return bounded_service.call("operation_cancel", operation_id, expected_updated_at)
 
     @mcp.tool(
+        title="Read execution failure evidence",
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    def failure_evidence_read(failure_id: str) -> dict[str, Any]:
+        """Use this with an exact failure_id from operation_status or workspace_status to read one bounded redacted execution failure and its typed recovery choices."""
+        return bounded_service.call("failure_evidence_read", failure_id)
+
+    @mcp.tool(
         title="List configured repositories",
         annotations=READ_ONLY,
         structured_output=True,

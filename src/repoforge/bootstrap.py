@@ -35,6 +35,7 @@ from .adapters.persistence import (
     JsonExecutionPlanAcceptanceStore,
     JsonExecutionPlanStore,
     JsonExecutionReceiptStore,
+    JsonFailureEvidenceStore,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
@@ -135,6 +136,7 @@ from .ports import (
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
     ExecutionReceiptStore,
+    FailureEvidenceStore,
     FileSystem,
     FileTransactionFactory,
     GitHubReadCache,
@@ -206,6 +208,7 @@ class AdapterOverrides:
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
     execution_receipts: ExecutionReceiptStore | None = None
     iteration_cache: IterationCache | None = None
+    failure_evidence: FailureEvidenceStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,6 +479,9 @@ def build_application(
         config.server.state_root, locks
     )
     iteration_cache = o.iteration_cache or JsonIterationCache(config.server.state_root, locks)
+    failure_evidence = o.failure_evidence or JsonFailureEvidenceStore(
+        config.server.state_root, locks
+    )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
@@ -527,6 +533,7 @@ def build_application(
         execution_plan_acceptances=execution_plan_acceptances,
         execution_receipts=execution_receipts,
         iteration_cache=iteration_cache,
+        failure_evidence=failure_evidence,
     )
     operations = OperationManager(context)
     recover_operations(
