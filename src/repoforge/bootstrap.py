@@ -23,7 +23,11 @@ from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
 from .adapters.git import GitCliRepository
-from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
+from .adapters.github import (
+    CommandGitHubCapabilityProbe,
+    CommandGitHubTicketGraphGateway,
+    GhCliGateway,
+)
 from .adapters.github.ticket_project import GhTicketProjectGateway
 from .adapters.hygiene import CommandHygieneGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
@@ -139,6 +143,7 @@ from .ports import (
     FailureEvidenceStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
     HygieneBaselineCache,
@@ -190,6 +195,7 @@ class AdapterOverrides:
     github: PullRequestGateway | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
+    github_capabilities: GitHubCapabilityProbe | None = None
     executables: ExecutableLocator | None = None
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
@@ -465,6 +471,9 @@ def build_application(
     github = o.github or GhCliGateway(command, config.server)
     ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
     ticket_projects = o.ticket_projects or GhTicketProjectGateway(command, config.server)
+    github_capabilities = o.github_capabilities or CommandGitHubCapabilityProbe(
+        command, config.server
+    )
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
@@ -529,6 +538,7 @@ def build_application(
         hygiene_cache=hygiene_cache,
         ticket_graphs=ticket_graphs,
         ticket_projects=ticket_projects,
+        github_capabilities=github_capabilities,
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
         execution_receipts=execution_receipts,

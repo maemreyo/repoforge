@@ -531,10 +531,12 @@ def test_repo_list_produces_exactly_one_bounded_audit_event(forge_env: ForgeEnvi
     event = events[0]
     assert event["success"] is True
     assert event["details"]["repo_count"] == 1
-    # Bounded: only a count plus the standard correlation/duration fields, never the
+    assert event["details"]["selection_outcome"] == "single_enrolled"
+    # Bounded: only a count/outcome plus the standard correlation/duration fields, never the
     # full repository listing (paths, profiles, diagnostics) that the result contains.
     assert set(event["details"]) == {
         "repo_count",
+        "selection_outcome",
         "correlation_id",
         "duration_ms",
         "result_bytes",

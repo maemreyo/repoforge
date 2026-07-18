@@ -35,6 +35,7 @@ from .github import (
     GitHubJobLog,
     PullRequestGateway,
 )
+from .github_capabilities import GitHubCapabilityProbe
 from .github_read_cache import GitHubReadCache
 from .hygiene import (
     HygieneBaselineCache,
@@ -112,6 +113,7 @@ __all__ = [
     "GitBaseReferences",
     "GitHubActionsJob",
     "GitHubActionsStep",
+    "GitHubCapabilityProbe",
     "GitHubCheckAnnotation",
     "GitHubCheckRun",
     "GitHubJobLog",

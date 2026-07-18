@@ -29,7 +29,7 @@ from ...domain.errors import ConfigError, operation_error_from_exception
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
 from ...domain.tool_contract import ToolContractRegistry, default_tool_contract_registry
-from .capabilities import client_capabilities_from_context
+from .capabilities import capability_policy_from_context, client_capabilities_from_context
 
 
 class ContractAwareFastMCP(FastMCP[None]):
@@ -185,7 +185,7 @@ class _ServiceErrorBoundary:
             ) from exc
 
 
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull verification profile for one workspace_run_profile call immediately before commit; omit\nprofile_name to use the repository default. Never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.\nWhen helping the operator set up or debug RepoForge itself, start with config_inspect for the\nreviewed policy and runtime_logs_read for bounded redacted evidence. Propose configuration changes\nonly through repo_policy_apply (dry_run first): restrictions apply immediately, while any capability\nexpansion returns pending_approval with an `rf config approve <change_id>` instruction the operator\nmust run in a terminal -- relay that instruction and never claim the change is active until\nconfig_inspect shows the new generation.".strip()
+SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nNever guess which repository to use. Read repo_list's selection.outcome: single_enrolled or\nexact_match means proceed with selection.repo_id; input_required means ask the user to choose from\nselection.candidates before any repository-scoped call -- never by recency, filesystem order, default\nbase branch, or your own preference; no_match means no repository is enrolled yet.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull verification profile for one workspace_run_profile call immediately before commit; omit\nprofile_name to use the repository default. Never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.\nWhen helping the operator set up or debug RepoForge itself, start with config_inspect for the\nreviewed policy and runtime_logs_read for bounded redacted evidence. Propose configuration changes\nonly through repo_policy_apply (dry_run first): restrictions apply immediately, while any capability\nexpansion returns pending_approval with an `rf config approve <change_id>` instruction the operator\nmust run in a terminal -- relay that instruction and never claim the change is active until\nconfig_inspect shows the new generation.".strip()
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
@@ -222,6 +222,16 @@ _WORKSPACE_LIST_DESCRIPTION = (
     "dirty state, and linked issue_ids to help decide what to reuse or remove."
 )
 _MULTILINE_TOOL_DESCRIPTIONS = {
+    "repo_list": (
+        "Use this first, before any repository-scoped call, to choose a repository and\n"
+        "discover its profiles and safety policy. Pass requested_repo as the exact repo_id,\n"
+        "display name, or remote name the user explicitly named in this request; leave it unset\n"
+        "if they did not name one -- never guess from unrelated wording. Read `selection.outcome`\n"
+        "in the result: `single_enrolled` or `exact_match` means proceed with `selection.repo_id`\n"
+        "without asking; `input_required` means ask the user to choose from `selection.candidates`\n"
+        "(never pick by recency, filesystem order, default base branch, or your own preference);\n"
+        "`no_match` means no repository is enrolled yet."
+    ),
     "repo_search": (
         "Use this to locate literal text in an immutable reviewed repository snapshot. Pass\n"
         "context_lines (0-5) to also return that many surrounding lines on each side of a match\n"
@@ -403,14 +413,24 @@ def create_server(
 
     @mcp.tool(
         title="List configured repositories",
+        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_list"],
         annotations=READ_ONLY,
         structured_output=True,
     )
-    def repo_list() -> dict[str, Any]:
-        """Use this when choosing a repository or discovering its profiles and safety policy."""
-        return bounded_service.call(
-            "repo_list",
-        )
+    def repo_list(requested_repo: str | None = None) -> dict[str, Any]:
+        """Use this first, before any repository-scoped call, to choose a repository and
+        discover its profiles and safety policy."""
+        result = bounded_service.call("repo_list", requested_repo)
+        selection = result.get("selection")
+        if isinstance(selection, dict) and selection.get("outcome") == "input_required":
+            policy = capability_policy_from_context(mcp.get_context())
+            candidates = cast("list[dict[str, Any]]", selection.get("candidates", []))
+            result["selection_prompt"] = policy.input_required(
+                decision_id="repo_selection",
+                prompt=cast(str, selection.get("guidance", "")),
+                allowed_options=tuple(candidate["repo_id"] for candidate in candidates),
+            )
+        return result
 
     @mcp.tool(
         title="Inspect repository status",

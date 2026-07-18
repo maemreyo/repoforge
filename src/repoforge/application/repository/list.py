@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ...domain.repository_selection import select_repository
 from ..context import ApplicationContext
 
 
 @dataclass(frozen=True, slots=True)
 class RepositoryListCommand:
-    pass
+    requested_repo: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RepositoryListResult:
     repositories: list[dict[str, object]]
+    selection: dict[str, object]
 
 
 class RepositoryLister:
@@ -23,8 +25,9 @@ class RepositoryLister:
         details: dict[str, object] = {}
 
         def op() -> RepositoryListResult:
+            repo_configs = tuple(self.ctx.config.repositories.values())
             repositories: list[dict[str, object]] = []
-            for repo in self.ctx.config.repositories.values():
+            for repo in repo_configs:
                 entry: dict[str, object] = {
                     "repo_id": repo.repo_id,
                     "display_name": repo.display_name or repo.repo_id,
@@ -98,7 +101,9 @@ class RepositoryLister:
                     },
                 }
                 repositories.append(entry)
+            selection = select_repository(repo_configs, requested_repo=command.requested_repo)
             details["repo_count"] = len(repositories)
-            return RepositoryListResult(repositories)
+            details["selection_outcome"] = selection.outcome.value
+            return RepositoryListResult(repositories, selection.as_dict())
 
         return self.ctx.audited("repo_list", details, op)

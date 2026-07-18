@@ -49,6 +49,16 @@ def test_tool_surface_hash_does_not_depend_on_ast_unparse(
 
 def test_multiline_tool_descriptions_are_explicit_and_stable() -> None:
     expected = {
+        "repo_list": (
+            "Use this first, before any repository-scoped call, to choose a repository and\n"
+            "discover its profiles and safety policy. Pass requested_repo as the exact repo_id,\n"
+            "display name, or remote name the user explicitly named in this request; leave it unset\n"
+            "if they did not name one -- never guess from unrelated wording. Read `selection.outcome`\n"
+            "in the result: `single_enrolled` or `exact_match` means proceed with `selection.repo_id`\n"
+            "without asking; `input_required` means ask the user to choose from `selection.candidates`\n"
+            "(never pick by recency, filesystem order, default base branch, or your own preference);\n"
+            "`no_match` means no repository is enrolled yet."
+        ),
         "repo_search": (
             "Use this to locate literal text in an immutable reviewed repository snapshot. Pass\n"
             "context_lines (0-5) to also return that many surrounding lines on each side of a match\n"

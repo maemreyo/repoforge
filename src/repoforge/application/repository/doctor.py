@@ -130,6 +130,28 @@ class Doctor:
             except Exception as exc:
                 add(f"repository_git:{repo_id}", False, str(exc))
                 continue
+            if paths.get("gh") and self.ctx.github_capabilities is not None:
+                try:
+                    report = self.ctx.github_capabilities.probe(repo.path, repo.ticket_graph)
+                except Exception as exc:
+                    add(f"github_capabilities:{repo_id}", False, str(exc), severity="warning")
+                else:
+                    for result in report.results:
+                        if result.state.value == "unavailable":
+                            add(
+                                f"github_capability:{repo_id}:{result.capability.value}",
+                                False,
+                                result.detail,
+                                severity="warning",
+                                remediation=result.remediation,
+                            )
+                        else:
+                            add(
+                                f"github_capability:{repo_id}:{result.capability.value}",
+                                True,
+                                result.detail,
+                                severity="info",
+                            )
             current = self.ctx.git.current_branch(repo.path)
             add(
                 f"repository_branch:{repo_id}",
