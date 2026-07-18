@@ -46,7 +46,7 @@ def test_seq_is_monotonic_and_survives_a_fresh_sink_instance(tmp_path: Path) -> 
     assert [event["seq"] for event in page.events] == [1, 2, 3]
 
 
-def test_since_cursor_returns_only_events_after_the_cursor(tmp_path: Path) -> None:
+def test_cursor_returns_only_events_after_the_cursor(tmp_path: Path) -> None:
     sink = _sink(tmp_path)
     for name in ("a", "b", "c"):
         sink.record(name, success=True, details={})
@@ -137,14 +137,14 @@ def test_negative_cursor_is_rejected(tmp_path: Path) -> None:
         read_audit_events_since(tmp_path / "audit.jsonl", cursor=-1)
 
 
-def test_cli_since_cursor_flag_returns_a_cursor_page(
+def test_cli_cursor_flag_returns_a_cursor_page(
     forge_env: ForgeEnvironment, capsys: pytest.CaptureFixture[str]
 ) -> None:
     forge_env.service.repo_list()
     forge_env.service.repo_list()
     capsys.readouterr()
 
-    assert cli.main(["--config", str(forge_env.config_path), "audit", "--since-cursor", "0"]) == 0
+    assert cli.main(["--config", str(forge_env.config_path), "audit", "--cursor", "0"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
     assert len(payload["events"]) == 2
@@ -156,7 +156,7 @@ def test_cli_since_cursor_flag_returns_a_cursor_page(
                 "--config",
                 str(forge_env.config_path),
                 "audit",
-                "--since-cursor",
+                "--cursor",
                 str(payload["next_cursor"]),
             ]
         )
@@ -165,3 +165,19 @@ def test_cli_since_cursor_flag_returns_a_cursor_page(
     second = json.loads(capsys.readouterr().out)
     assert second["events"] == []
     assert second["next_cursor"] == payload["next_cursor"]
+
+
+def test_cursor_flag_does_not_create_an_argparse_prefix_ambiguity_with_stats_since(
+    forge_env: ForgeEnvironment, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression: `--cursor` must never share a prefix with `audit stats --since` (a distinct,
+    # unrelated date-bound flag) -- argparse's abbreviation matching treats any option string
+    # that is a strict prefix of exactly one other option as ambiguous, and previously named
+    # `--since-cursor`/`--since-cursor-limit` collided with `--since` on Python's argparse in a
+    # way that only failed on 3.10/3.11 in CI, not locally on 3.13.
+    assert (
+        cli.main(
+            ["--config", str(forge_env.config_path), "audit", "stats", "--since", "2026-01-01"]
+        )
+        == 0
+    )

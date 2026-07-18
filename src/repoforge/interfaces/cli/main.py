@@ -1771,15 +1771,16 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--slow", type=float, default=None)
     audit.add_argument("--min-bytes", type=float, default=None)
     audit.add_argument(
-        "--since-cursor",
+        "--cursor",
         type=int,
         default=None,
         help=(
             "Foreman-loop mode (#210): return events with seq > CURSOR (oldest first) plus "
-            "the cursor to resume from, instead of the most-recent-first --last view."
+            "the cursor to resume from, instead of the most-recent-first --last view. Named "
+            "distinctly from `stats --since` (a date bound) to avoid argparse prefix ambiguity."
         ),
     )
-    audit.add_argument("--since-cursor-limit", type=int, default=500)
+    audit.add_argument("--cursor-limit", type=int, default=500)
     stats = audit_sub.add_parser("stats")
     stats.add_argument("--since")
     stats.add_argument("--until")
@@ -2042,11 +2043,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             parser.error(f"Unknown rules command: {args.rules_command}")
         if args.command == "audit":
-            if getattr(args, "since_cursor", None) is not None:
+            if getattr(args, "cursor", None) is not None:
                 page = read_audit_events_since(
                     service.audit.path,
-                    cursor=args.since_cursor,
-                    limit=args.since_cursor_limit,
+                    cursor=args.cursor,
+                    limit=args.cursor_limit,
                 )
                 _json(page.as_dict())
                 return 0
