@@ -1447,8 +1447,15 @@ def _runtime_command(args: argparse.Namespace) -> int:
     raise ConfigError(f"Unknown runtime command: {args.runtime_command}")
 
 
-def _serve(config_path: Path) -> int:
-    from ..mcp.server import create_server, tool_surface_hash
+def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
+    from ..mcp.grace import FORGE_V1_IDENTITY, create_grace_server
+    from ..mcp.server import FORGE_V2_IDENTITY, create_server, tool_surface_hash
+
+    if connector_identity == FORGE_V1_IDENTITY:
+        create_grace_server().run(transport="stdio")
+        return 0
+    if connector_identity != FORGE_V2_IDENTITY:
+        raise ConfigError(f"Unknown connector identity: {connector_identity}")
 
     store = _ensure_generation(config_path)
     initial_generation = store.activation_target() or store.active() or store.current()
@@ -1527,6 +1534,8 @@ def _serve(config_path: Path) -> int:
         router=router,
         reloader=reloader,
         on_activated=record_activation,
+        connector_identity=FORGE_V2_IDENTITY,
+        tool_surface_hash=tool_surface_hash(),
     )
     control = build_runtime_control_server(mcp_socket)
     control.start(host.handle)
@@ -1654,7 +1663,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"RepoForge {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("serve")
+    serve = commands.add_parser("serve")
+    serve.add_argument(
+        "--connector-identity",
+        choices=("forge_v2", "forge_v1"),
+        default="forge_v2",
+    )
     webhook = commands.add_parser("webhook", help="Optional GitHub webhook cache invalidation")
     webhook_sub = webhook.add_subparsers(dest="webhook_command", required=True)
     webhook_sub.add_parser("serve", help="Serve the signed loopback webhook endpoint")
@@ -1817,7 +1831,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config).expanduser().resolve()
     try:
         if args.command == "serve":
-            return _serve(config_path)
+            return _serve(config_path, args.connector_identity)
         if args.command == "webhook" and args.webhook_command == "serve":
             return _webhook_serve(config_path)
         if args.command == "start":

@@ -590,25 +590,25 @@ async def test_operation_tools_are_exposed_through_actual_mcp_protocol(
     server = create_server(service=forge_env.service)
     async with create_connected_server_and_client_session(server) as session:
         tools = {item.name: item for item in (await session.list_tools()).tools}
-        assert {"operation_status", "operation_list", "operation_cancel"}.issubset(tools)
-        assert tools["operation_status"].annotations.readOnlyHint is True
-        assert tools["operation_list"].annotations.readOnlyHint is True
-        assert tools["operation_cancel"].annotations.readOnlyHint is False
-        assert tools["operation_cancel"].annotations.destructiveHint is False
-        assert tools["operation_cancel"].annotations.idempotentHint is True
+        assert "operation" in tools
+        assert tools["operation"].annotations.readOnlyHint is False
+        assert tools["operation"].annotations.destructiveHint is False
+        assert tools["operation"].annotations.idempotentHint is True
 
-        status = await session.call_tool("operation_status", {"operation_id": task.operation_id})
+        status = await session.call_tool(
+            "operation", {"action": "get", "operation_id": task.operation_id}
+        )
         assert status.isError is False
-        assert status.structuredContent["state"] == "running"
+        assert status.structuredContent["operation"]["state"] == "running"
         listed = await session.call_tool(
-            "operation_list",
-            {"scope": "task:task-mcp", "state": "running", "limit": 20},
+            "operation",
+            {"action": "list", "scope": "task:task-mcp", "state": "running", "limit": 20},
         )
         assert listed.isError is False
         assert listed.structuredContent["operations"][0]["operation_id"] == task.operation_id
         cancelled = await session.call_tool(
-            "operation_cancel",
-            {"operation_id": task.operation_id},
+            "operation",
+            {"action": "cancel", "operation_id": task.operation_id},
         )
         assert cancelled.isError is False
         assert cancelled.structuredContent["cancellation_requested"] is True

@@ -572,10 +572,16 @@ def build_application(
     )
 
 
-def run_runtime_worker(config_path: Path) -> int:
-    """Construct and run the long-lived supervisor for one reviewed configuration."""
-    from .interfaces.mcp.server import tool_surface_hash
+def run_runtime_worker(
+    config_path: Path,
+    *,
+    connector_identity: str = "forge_v2",
+) -> int:
+    """Construct and run the long-lived supervisor for the Forge v2 identity."""
+    from .interfaces.mcp.server import FORGE_V2_IDENTITY, tool_surface_hash
 
+    if connector_identity != FORGE_V2_IDENTITY:
+        raise ConfigError("Managed runtime supports only the forge_v2 connector identity")
     config_path = config_path.expanduser().resolve()
     configs = build_configuration_store(config_path)
     target = configs.activation_target() or configs.active()
@@ -611,7 +617,16 @@ def run_runtime_worker(config_path: Path) -> int:
     if not tunnel_version:
         raise ConfigError("Cannot determine tunnel-client version")
     tunnel_id_fingerprint = hashlib.sha256(tunnel_id.encode()).hexdigest()
-    mcp_argv = (sys.executable, "-m", "repoforge", "--config", str(config_path), "serve")
+    mcp_argv = (
+        sys.executable,
+        "-m",
+        "repoforge",
+        "--config",
+        str(config_path),
+        "serve",
+        "--connector-identity",
+        connector_identity,
+    )
     profile = TunnelProfile(
         tunnel_id_fingerprint,
         profile_name,

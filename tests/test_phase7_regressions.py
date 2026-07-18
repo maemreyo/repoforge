@@ -19,7 +19,7 @@ from repoforge.interfaces.mcp.server import create_server
 
 
 class _MissingRepositoryService:
-    def repo_status(self, repo_id: str) -> dict[str, Any]:
+    def repo_read(self, repo_id: str, **_: object) -> dict[str, Any]:
         raise ConfigError(f"Unknown repository id: {repo_id}")
 
 
@@ -27,7 +27,9 @@ class _MissingRepositoryService:
 async def test_mcp_structured_failure_preserves_protocol_error_semantics() -> None:
     server = create_server(service=_MissingRepositoryService())  # type: ignore[arg-type]
     async with create_connected_server_and_client_session(server) as session:
-        result = await session.call_tool("repo_status", {"repo_id": "missing"})
+        result = await session.call_tool(
+            "repo_read", {"repo_id": "missing", "files": [{"path": "README.md"}]}
+        )
 
     assert result.isError is True
     rendered = "\n".join(

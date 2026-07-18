@@ -1,0 +1,170 @@
+{
+  "cli": {
+    "commands": {
+      "config": {
+        "actions": [
+          "path",
+          "history",
+          "rollback"
+        ],
+        "path_inspection_is_read_only": true
+      },
+      "onboard": {
+        "actions": [
+          "run",
+          "status",
+          "resume",
+          "cancel"
+        ],
+        "arguments": [
+          "ROOT"
+        ],
+        "options": [
+          "--activate",
+          "--approve",
+          "--decision",
+          "--defaults",
+          "--exclude",
+          "--include",
+          "--max-depth",
+          "--no-rollback-on-failure",
+          "--no-wait",
+          "--non-interactive",
+          "--plan-only",
+          "--policy-override",
+          "--profile",
+          "--repo-id",
+          "--resume",
+          "--rollback-on-failure",
+          "--template",
+          "--tunnel-id",
+          "--ui",
+          "--wait"
+        ]
+      },
+      "operation": {
+        "actions": [
+          "status",
+          "list",
+          "cancel"
+        ],
+        "cancellation_is_request_only": true,
+        "max_list_limit": 100,
+        "public_creation": false
+      },
+      "repo discover": {
+        "arguments": [
+          "ROOT"
+        ],
+        "options": [
+          "--exclude",
+          "--include",
+          "--max-depth"
+        ],
+        "read_only": true
+      }
+    },
+    "exit_codes": {
+      "0": "completed or read-only success",
+      "2": "stable validation or operation failure",
+      "3": "operator decision or exact approval required"
+    },
+    "session_schema_version": 1
+  },
+  "configuration": {
+    "resolved_format_version": 3,
+    "source_version": 2
+  },
+  "contract_version": 2,
+  "mcp": {
+    "grace": {
+      "identity": "forge_v1",
+      "tool_count": 1,
+      "tool_hashes": {
+        "migration_required": "be75f61aef816271099b25d87eb76b59a4b3618e4bf7864844f1eb33508d8417"
+      },
+      "tool_names": [
+        "migration_required"
+      ],
+      "tool_surface_hash": "a35cf906a086c19e7235b638266e65f7a45c94626984d12816b6a6215f9258b7"
+    },
+    "identity": "forge_v2",
+    "retired_identity": "forge_v1",
+    "server_instructions_sha256": "ca4fdc29b3be7103796b2e65d04e0e4f4d1d7361786ddda62d60193d2b82d76e",
+    "tool_contract": {
+      "aliases": [],
+      "current_version": 2,
+      "supported_versions": [
+        2
+      ]
+    },
+    "tool_count": 28,
+    "tool_hashes": {
+      "config_inspect": "3b3224b5450b44ccdd04e61c548a5f324f11105d14e7d62f637578076b6de1e9",
+      "operation": "458ec4373f784db02a64e0208fd1ca9090c7a59aeea17c2de7e0fdef70da6e26",
+      "repo_history": "885697f2a34c8c1703e7423596158522df881902fa3aad197cbd31278c356171",
+      "repo_issue": "81ab160de9ce06d5a458001144c3cac8ba10c4819d3da20f52a28ecdccf0417b",
+      "repo_list": "37c468d4724673c9a503e5425a86c136f62b35bef918846d6cae8b90ca3a2f46",
+      "repo_policy": "9a248060cfa7d6bc3316d4e5ca1eb5128488ba0d2adf8650732951f592cd6536",
+      "repo_pr_read": "712f1a29691cfb572ccd3ca9093e1960b91d8fbfb704977ee08363f9463cd612",
+      "repo_read": "0e5d55c98421038b974a96a9fa0851b20344a2a7c15be0d2f339ffc37df8552b",
+      "repo_search": "2adeaaed34bd878ab81d037c41bbc8b85646a4fde9b4bd6e6ec8be854024b79e",
+      "repo_task_context": "68e4e5a947c9cf6a38122bdce89ab76c99d95190dadbc383d154338c2eaf5a1d",
+      "repo_tree": "bb145de97d13b4719b89b8ad3d1f429151aababf2cfd31fcc6f9b0eb257b1485",
+      "runtime_logs_read": "9a0fd84388d1472343522b0d12f7240ee6a70b9d75fa7094e32a123b0ff67785",
+      "workspace_commit": "d3995978315c0446fb29bc2de4d05c729fbd9ff6563c7331b0b5c436846136b5",
+      "workspace_create": "c3d6a0d2bfe378ce40f6ea562f7d1161981d6d83a4b33731ff1333600fea844c",
+      "workspace_diff": "0198f9c4a1409fdc7b92e26605087184c9a1f66b8894ef74b8ddc9d09fd1492b",
+      "workspace_format_changed": "0f5d7d29dd0cfc7163fd1af4e8d8b1bfada94dd8c8acd2ce128cca3adc3fa973",
+      "workspace_list": "30a46b6e058bf6e1bc29b4fba9c14ddbb8e3059834afdd20e353f6446dd03819",
+      "workspace_mutate": "6461abf0c986e30d36a75acaacf3fbb8fa700f5f5459952c0d6b9ad2456e3fbe",
+      "workspace_pr": "e341f940bdfd8f91f8aa47ba085bf0d663e825b1d6dd324e0211c07a3943c9de",
+      "workspace_pr_evidence": "5518ab1a055111f0b60559b1879ba6782b3ee0d64f796912ada122135eee5754",
+      "workspace_push": "7b4bde4b13a80a1ff24a7939edf15fbfa7c74895364054c8a8b5c8db903b7f4e",
+      "workspace_read": "3e1818ef5d748193fec449375199f88adc1898ed12461994bbfa32df92f388d3",
+      "workspace_refresh": "4475af6ddfd07fd8d10a523c1dde1ddd2551fa8b071f87660ec68e282b2166ea",
+      "workspace_remove": "c69947fb69a5ebf3e7d48740a6feb018c231725c32dba57d69f6a1fd2dd17e5c",
+      "workspace_search": "7982cf1a77e97b6f952971520851ce1363bbdd375a573ad854e163c9ae0e4e7b",
+      "workspace_status": "2317503464a02da35abbeec3ac9ff7b572bc6c1d21d38862a871c40ead613fed",
+      "workspace_tree": "b7544b0049a8ce4320e17e7d8082b0d598e8a37b4864a3bdf5ebc5d4d355f57a",
+      "workspace_verify": "4cf04df065b94766b17643a04249d87922c65b5f1753659f6fcb5597c3197eab"
+    },
+    "tool_names": [
+      "repo_task_context",
+      "repo_read",
+      "repo_search",
+      "repo_tree",
+      "repo_history",
+      "repo_issue",
+      "repo_pr_read",
+      "repo_list",
+      "repo_policy",
+      "workspace_create",
+      "workspace_remove",
+      "workspace_list",
+      "workspace_refresh",
+      "workspace_status",
+      "workspace_format_changed",
+      "workspace_read",
+      "workspace_search",
+      "workspace_tree",
+      "workspace_diff",
+      "workspace_mutate",
+      "workspace_verify",
+      "workspace_commit",
+      "workspace_push",
+      "workspace_pr",
+      "workspace_pr_evidence",
+      "operation",
+      "config_inspect",
+      "runtime_logs_read"
+    ],
+    "tool_schema_bundle_sha256": "5507de1a1c75c7001435c4222aeca877ad36483c3208b3f85d1b07da7ce16584",
+    "tool_surface_hash": "a2bf16da439e5eff92ba0b09c29641fe88c471aaa3988a88fc12275f94fb4064"
+  },
+  "package_version": "2.1.0",
+  "runtime": {
+    "control_protocol_version": 1,
+    "diagnostics_schema_version": 1
+  }
+}

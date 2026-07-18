@@ -496,7 +496,7 @@ async def test_mcp_repo_task_context_tool(forge_env: ForgeEnvironment) -> None:
     async with create_connected_server_and_client_session(server) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
         tool = tools["repo_task_context"]
-        assert tool.description.startswith("Use this")
+        assert "bounded repository" in tool.description
         assert tool.annotations is not None
         assert tool.annotations.readOnlyHint is True
         assert tool.annotations.destructiveHint is False
@@ -505,9 +505,22 @@ async def test_mcp_repo_task_context_tool(forge_env: ForgeEnvironment) -> None:
         assert result.isError is False
         structured = result.structuredContent
         assert structured is not None
-        assert structured["ticket"] is None
-        assert structured["workspace"] is None
-        assert structured["repository"]["repo_id"] == "demo"
+        sections = {section["name"]: section for section in structured["sections"]}
+        assert sections["repository"]["complete"] is True
+        assert sections["ticket"] == {
+            "name": "ticket",
+            "freshness": "unavailable",
+            "complete": False,
+            "truncated": False,
+            "facts": [],
+        }
+        assert sections["workspace"] == {
+            "name": "workspace",
+            "freshness": "unavailable",
+            "complete": False,
+            "truncated": False,
+            "facts": [],
+        }
 
         error_result = await session.call_tool("repo_task_context", {"repo_id": "missing-repo"})
         assert error_result.isError is True

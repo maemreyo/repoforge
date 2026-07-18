@@ -28,11 +28,12 @@ for required in ("repo", "runtime", "config", "diagnostics", "start", "serve"):
     assert required in commands, required
 contract = asyncio.run(build_release_contract())
 assert contract["package_version"] == repoforge.__version__
-assert len(contract["mcp"]["tools"]) >= 25
+assert contract["mcp"]["identity"] == "forge_v2"
+assert len(contract["mcp"]["tool_names"]) == 28
 print(json.dumps({
     "status": "ok",
     "package_version": repoforge.__version__,
-    "tool_count": len(contract["mcp"]["tools"]),
+    "tool_count": len(contract["mcp"]["tool_names"]),
     "tool_surface_hash": contract["mcp"]["tool_surface_hash"],
 }, sort_keys=True))
 PY

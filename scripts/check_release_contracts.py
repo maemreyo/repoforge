@@ -20,7 +20,7 @@ from repoforge.contracts.registry import render_v2_schema_bundle  # noqa: E402
 from repoforge.interfaces.cli.contract import build_cli_release_contract  # noqa: E402
 from repoforge.interfaces.mcp.contract import build_release_contract  # noqa: E402
 
-CONTRACT_PATH = ROOT / "docs/contracts/release-contract-v1.json"
+CONTRACT_PATH = ROOT / "docs/contracts/release-contract-v2.json"
 TOOL_SCHEMA_PATH = ROOT / "docs/contracts/tool-schemas-v2.json"
 PLAN_PATH = ROOT / "docs/plans/repoforge-production-architecture-tunnel-plan.md"
 
@@ -49,7 +49,7 @@ def _emit_github_error(message: str) -> None:
     bounded = message[:12_000]
     escaped = bounded.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
     print(
-        "::error file=docs/contracts/release-contract-v1.json,"
+        "::error file=docs/contracts/release-contract-v2.json,"
         f"title=Public release contract drift::{escaped}"
     )
 
@@ -127,7 +127,7 @@ def main() -> int:
         "Status: Implemented — Phases 0" + "\N{EN DASH}" + "8 complete",
         "Phase 8 — Program completion and release gates",
         "scripts/verify-production.sh",
-        "release-contract-v1.json",
+        "release-contract-v2.json",
     )
     missing = [marker for marker in required_plan_markers if marker not in plan]
     if missing:
@@ -136,7 +136,7 @@ def main() -> int:
 
     print(
         "release contracts match: "
-        f"{len(actual['mcp']['tools'])} MCP tools, "
+        f"{len(actual['mcp']['tool_names'])} MCP tools, "
         f"surface={actual['mcp']['tool_surface_hash']}, "
         f"runtime-protocol={actual['runtime']['control_protocol_version']}"
     )

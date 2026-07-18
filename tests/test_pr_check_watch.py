@@ -345,17 +345,17 @@ async def test_workspace_pr_watch_is_exposed_through_actual_mcp(
     server = create_server(service=forge_env.service)
     async with create_connected_server_and_client_session(server) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-        tool = tools["workspace_pr_watch"]
+        tool = tools["workspace_pr"]
         assert tool.annotations.readOnlyHint is False
         assert tool.annotations.destructiveHint is False
         assert tool.annotations.openWorldHint is True
         result = await session.call_tool(
-            "workspace_pr_watch",
+            "workspace_pr",
             {
                 "workspace_id": workspace_id,
+                "action": "watch",
                 "until": "all_completed",
                 "timeout_seconds": 300,
-                "include_failure_evidence": True,
             },
         )
         assert result.isError is False

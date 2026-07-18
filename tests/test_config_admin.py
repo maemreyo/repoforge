@@ -1039,7 +1039,7 @@ async def test_config_admin_tools_are_registered_and_fail_closed_without_admin()
     server = create_server(service=_FakeCodingService())  # type: ignore[arg-type]
     async with create_connected_server_and_client_session(server) as session:
         tools = {tool.name for tool in (await session.list_tools()).tools}
-        assert {"config_inspect", "runtime_logs_read", "repo_policy_apply"} <= tools
+        assert {"config_inspect", "runtime_logs_read", "repo_policy"} <= tools
         result = await session.call_tool("config_inspect", {})
     assert result.isError is True
     rendered = "\n".join(
@@ -1056,39 +1056,32 @@ async def test_config_admin_tools_round_trip_through_protocol(tmp_path: Path) ->
         inspected = await session.call_tool("config_inspect", {"repo_id": "demo"})
         assert inspected.isError is False
         assert inspected.structuredContent is not None
-        assert "client_capabilities" in inspected.structuredContent
-        assert "features" in inspected.structuredContent["client_capabilities"]
+        assert inspected.structuredContent["accepted"]["generation"] == 1
+        assert inspected.structuredContent["repo_facts"]
+
+        mutation = {"section": "profile", "name": "quick", "operation": "remove"}
         preview = await session.call_tool(
-            "repo_policy_apply",
-            {
-                "repo_id": "demo",
-                "set_profiles": [{"name": "debug", "commands": [["pnpm", "run", "debug:server"]]}],
-                "dry_run": True,
-            },
+            "repo_policy",
+            {"repo_id": "demo", "action": "preview", "mutations": [mutation]},
         )
         assert preview.isError is False
         assert preview.structuredContent is not None
-        assert preview.structuredContent["status"] == "preview"
-        assert preview.structuredContent["capability_delta"] == "expansion"
-        execution_preview = await session.call_tool(
-            "repo_policy_apply",
+        assert preview.structuredContent["result"] == "preview"
+        preview_token = preview.structuredContent["preview_token"]
+        assert isinstance(preview_token, str)
+
+        applied = await session.call_tool(
+            "repo_policy",
             {
                 "repo_id": "demo",
-                "execution_mode": "relaxed",
-                "adhoc_runners": ["pnpm", "node"],
-                "adhoc_timeout_seconds": 600,
-                "dry_run": True,
+                "action": "apply",
+                "preview_token": preview_token,
             },
         )
-        assert execution_preview.isError is False
-        assert execution_preview.structuredContent is not None
-        assert execution_preview.structuredContent["capability_delta"] == "expansion"
-        applied = await session.call_tool(
-            "repo_policy_apply",
-            {"repo_id": "demo", "remove_profiles": ["quick"]},
-        )
-        assert applied.isError is False
+        applied_error = json.loads(applied.content[0].text) if applied.isError else None
+        assert applied.isError is False, applied_error["what_happened"]
         assert applied.structuredContent is not None
-        assert applied.structuredContent["status"] == "applied"
+        assert applied.structuredContent["result"] == "applied"
+
         logs = await session.call_tool("runtime_logs_read", {"source": "runtime", "limit": 5})
         assert logs.isError is False
