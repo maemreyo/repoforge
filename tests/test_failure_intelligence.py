@@ -142,6 +142,61 @@ def test_representative_failures_classify_deterministically(
     )
 
 
+def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -> None:
+    """Every recovery action's kind must be one of the 28 currently-callable
+    Forge v2 tools -- not a retired v1 tool name a client cannot execute.
+    workspace_verify actions must additionally carry enough of mode/
+    plan_action/diagnostic_id/profile_name/through to reconstruct the exact
+    call (#180 review: recovery actions still referenced workspace_execute_plan,
+    workspace_refresh_preview, workspace_restore_paths -- none of which exist
+    as standalone tools on the static 28-tool surface)."""
+    from repoforge.contracts.registry import V2_TOOL_NAMES
+
+    for overrides in (
+        {"error_code": ErrorCode.DIAGNOSTIC_TOOL_MISSING.value},
+        {"message": "ModuleNotFoundError: No module named httpx"},
+        {"message": "Python environment mismatch: expected 3.13"},
+        {"error_code": ErrorCode.CONFIG_INVALID.value},
+        {"error_code": ErrorCode.COMMAND_TIMEOUT.value},
+        {"details": {"cancelled": True}},
+        {"failure_domain": "static_analysis"},
+        {"failure_domain": "typecheck"},
+        {"failure_domain": "business_tests"},
+        {"failure_domain": "build"},
+        {"message": "DNS resolution failed with HTTP 503"},
+        {"message": "Permission denied while reading tool cache"},
+        {"error_code": ErrorCode.SECURITY_POLICY_VIOLATION.value},
+        {"error_code": ErrorCode.DIAGNOSTIC_STALE_WORKSPACE.value},
+        {"error_code": ErrorCode.STATE_STALE.value, "details": {"plan_id": "plan-x"}},
+        {"error_code": ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION.value},
+        {
+            "error_code": ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION.value,
+            "changed_paths": ("src/a.py",),
+        },
+        {"error_code": ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE.value},
+        {"message": "opaque executor failure 77"},
+    ):
+        classification = classify_failure(_observation(**overrides))
+        for action in classification.safe_actions:
+            assert action.kind.value in V2_TOOL_NAMES, (
+                classification.failure_class,
+                action.kind,
+            )
+            if action.kind is RecoveryActionKind.WORKSPACE_VERIFY:
+                assert action.mode in {"auto", "diagnostic", "profile", "plan"}
+                if action.mode == "diagnostic":
+                    assert action.diagnostic_id is not None
+                if action.mode == "profile":
+                    assert action.profile_name is not None
+                if action.mode == "plan":
+                    assert action.plan_action in {"create", "accept", "execute"}
+                    if action.plan_action == "execute":
+                        assert action.through in {"iteration", "full"}
+            else:
+                assert action.mode is None
+                assert action.plan_action is None
+
+
 def test_structured_classification_precedes_text_and_rejects_injected_actions() -> None:
     observation = _observation(
         details={

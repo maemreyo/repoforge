@@ -5,9 +5,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import RepositoryConfig
+from ...domain.errors import CommandError
 from ...domain.tickets import GraphEvidenceCapability, TicketGraph, TicketLiveMetadata
 from ..context import ApplicationContext
-from ..tickets.graph import compare_live_ticket_metadata
+from ..tickets.graph import (
+    compare_live_ticket_metadata,
+    declared_blocker_numbers,
+    declared_status_drift,
+)
 from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
 from .issue_graph import (
     capability_coverage_payload,
@@ -83,6 +88,45 @@ class RepositoryIssueSpecReader:
             loader=lambda: self.ctx.github.issue_read(repo.path, c.issue_number),
         )
 
+    def _closed_blocker_drift(
+        self, c: RepositoryIssueSpecCommand, repo: RepositoryConfig, body: str
+    ) -> list[dict[str, Any]]:
+        """Detect a declared blocker that is already closed on GitHub.
+
+        Independent of ticket-graph membership (#187 addendum 2, #195): a
+        stale ``Blocked by`` reference is detectable from live reads alone.
+        A blocker that cannot be read (deleted, inaccessible, transient
+        failure) is skipped rather than treated as evidence of anything --
+        absence of evidence is not evidence of staleness."""
+        drift: list[dict[str, Any]] = []
+        for blocker_number in declared_blocker_numbers(body):
+
+            def load_blocker(number: int = blocker_number) -> dict[str, Any]:
+                return self.ctx.github.issue_read(repo.path, number)
+
+            try:
+                blocker_payload, _ = self.ctx.github_read(
+                    "issue",
+                    c.repo_id,
+                    repo.path,
+                    blocker_number,
+                    fresh=c.fresh,
+                    loader=load_blocker,
+                )
+            except CommandError:
+                continue
+            state = str(blocker_payload.get("state") or "").strip().upper()
+            if state == "CLOSED":
+                drift.append(
+                    {
+                        "code": "STALE_BLOCKER_REFERENCE",
+                        "message": (
+                            f"declared blocker #{blocker_number} is already closed on GitHub"
+                        ),
+                    }
+                )
+        return drift
+
     def _load(
         self,
         c: RepositoryIssueSpecCommand,
@@ -132,6 +176,7 @@ class RepositoryIssueSpecReader:
                     ),
                 }
             )
+        drift.extend(self._closed_blocker_drift(c, repo, str(live_payload.get("body") or "")))
         if node is not None and snapshot is not None:
             if is_capability_complete_for_issue(
                 snapshot, GraphEvidenceCapability.ISSUE, c.issue_number
@@ -162,6 +207,19 @@ class RepositoryIssueSpecReader:
                         ),
                     }
                 )
+        else:
+            # No graph node to compare against (unconfigured ticket_graph, or an
+            # issue that simply is not enrolled in it): still check the issue's
+            # own self-declared Status against its live GitHub state, per #187
+            # addendum 2 -- drift checks must run for any issue, graph member
+            # or not, not only when a graph comparison target exists.
+            status_drift = declared_status_drift(
+                c.issue_number,
+                str(live_payload.get("body") or ""),
+                str(live_payload.get("state") or ""),
+            )
+            if status_drift is not None:
+                drift.append({"code": status_drift.code, "message": status_drift.message})
 
         evolution = ticket_delivery_payload(live_state.delivery)
 

@@ -66,6 +66,57 @@ def test_unified_diff_recounts_and_relocates_unique_hunk() -> None:
     assert "@@ -2,3 +2,3 @@" in result.patch
 
 
+def test_unified_diff_pure_rename_with_no_content_change_normalizes() -> None:
+    """A git diff for a pure rename (similarity index 100%) has no ---/+++
+    file headers and no @@ hunks at all -- it is fully described by
+    `rename from`/`rename to` alone. This must not be rejected as a
+    malformed unified diff (#225 review: the release-gate reference executor
+    skipped this exact case by never calling normalize_patch for unified-diff
+    format, hiding this bug -- production always calls it)."""
+    files = {"old_name.py": "print(1)\n"}
+    patch = (
+        "diff --git a/old_name.py b/new_name.py\n"
+        "similarity index 100%\n"
+        "rename from old_name.py\n"
+        "rename to new_name.py\n"
+    )
+    inspection = inspect_patch(patch)
+    assert inspection.input_format == "unified_diff"
+    assert set(inspection.paths) == {"old_name.py", "new_name.py"}
+
+    result = normalize_patch(patch, _reader(files))
+    assert set(result.paths) == {"old_name.py", "new_name.py"}
+    assert "rename from old_name.py" in result.patch
+    assert "rename to new_name.py" in result.patch
+    assert "---" not in result.patch
+    assert "+++" not in result.patch
+
+    # The canonical output must itself re-parse without error (round-trip).
+    reparsed = normalize_patch(result.patch, _reader(files))
+    assert reparsed.patch == result.patch
+
+
+def test_unified_diff_rename_with_content_change_still_requires_headers() -> None:
+    """A rename that also changes content still needs ---/+++ and a hunk;
+    only a pure, content-unchanged rename may omit them."""
+    files = {"old.py": "print(1)\n"}
+    patch = (
+        "diff --git a/old.py b/new.py\n"
+        "similarity index 50%\n"
+        "rename from old.py\n"
+        "rename to new.py\n"
+        "index abc123..def456 100644\n"
+        "--- a/old.py\n"
+        "+++ b/new.py\n"
+        "@@ -1 +1 @@\n"
+        "-print(1)\n"
+        "+print(2)\n"
+    )
+    result = normalize_patch(patch, _reader(files))
+    assert set(result.paths) == {"old.py", "new.py"}
+    assert "+print(2)" in result.patch
+
+
 def test_unified_diff_uses_unique_whitespace_normalized_context() -> None:
     files = {"demo.txt": "before\nvalue    one\nafter\n"}
     patch = """diff --git a/demo.txt b/demo.txt

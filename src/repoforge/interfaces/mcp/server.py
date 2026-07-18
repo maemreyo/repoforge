@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult, ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp.types import Tool as McpTool
 from pydantic import BaseModel
 
@@ -36,7 +36,7 @@ from ...application.workspace.mutate import (
     WriteMutation,
 )
 from ...config import load_config
-from ...contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS
+from ...contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS, ToolContractSpec
 from ...domain.errors import ConfigError, WorkspaceError, operation_error_from_exception
 from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
 from ...domain.operations import automatic_retry_allowed
@@ -222,7 +222,15 @@ def _tool_annotations(name: str) -> ToolAnnotations:
 
 
 class _StructuredMcpToolError(RuntimeError):
-    """Signal a stable structured failure while preserving MCP isError semantics."""
+    """Signal a stable structured failure while preserving MCP isError semantics.
+
+    `payload` carries the same typed error envelope as the message text so
+    `call_tool` can surface it as real `structuredContent` on the wire
+    instead of leaving callers to parse JSON out of the text block."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
 
 def _raise_structured_error(
@@ -253,7 +261,7 @@ def _raise_structured_error(
             has_idempotency_key=has_idempotency_key,
         ),
     }
-    raise _StructuredMcpToolError(json.dumps(payload, sort_keys=True, ensure_ascii=False)) from exc
+    raise _StructuredMcpToolError(payload) from exc
 
 
 class _ServiceErrorBoundary:
@@ -534,6 +542,21 @@ class ForgeV2FastMCP(FastMCP[None]):
         if name not in V2_TOOL_SPECS:
             raise ValueError(f"Unknown Forge v2 tool: {name}")
         spec = V2_TOOL_SPECS[name]
+        try:
+            return await self._call_tool(name, arguments, spec)
+        except _StructuredMcpToolError as exc:
+            # The typed error envelope belongs in structuredContent, not only
+            # serialized into the text block -- otherwise a client can only
+            # recover it by parsing JSON out of free text (#225 review).
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(exc))],
+                structuredContent=exc.payload,
+                isError=True,
+            )
+
+    async def _call_tool(
+        self, name: str, arguments: dict[str, Any], spec: ToolContractSpec
+    ) -> CallToolResult:
         try:
             validated_input = spec.validate_input(arguments)
         except Exception as exc:

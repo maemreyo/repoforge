@@ -19,6 +19,7 @@ _BASE_FILES: dict[str, str] = {
     "old.txt": "old\n",
     "src/a.py": "A = 1\n\n\n\nB = 1\n",
     "repeated.txt": "same\nsame\n",
+    "old_name.py": "def run():\n    return True\n",
 }
 
 
@@ -156,10 +157,14 @@ def _patches(case: CorpusCase, started: float) -> CaseObservation:
         paths = tuple(sorted(inspection.paths))
         if any(".." in path.split("/") for path in paths):
             raise SecurityError("path traversal")
-        if inspection.input_format == "openai_apply_patch":
-            patch_files = {**_BASE_FILES, "README.md": "# Demo\n"}
-            normalized = normalize_patch(patch, lambda path: patch_files.get(path))
-            paths = tuple(sorted(normalized.paths))
+        # Always normalize, matching production's unconditional
+        # normalize_workspace_patch() call for every input format -- a
+        # reference executor that only exercises normalize_patch for
+        # openai_apply_patch input hides bugs unified-diff-format patches
+        # would hit in production (#225 review).
+        patch_files = {**_BASE_FILES, "README.md": "# Demo\n"}
+        normalized = normalize_patch(patch, lambda path: patch_files.get(path))
+        paths = tuple(sorted(normalized.paths))
     except (SecurityError, ValueError, RuntimeError):
         failed = True
         paths = ()

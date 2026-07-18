@@ -236,24 +236,44 @@ def test_egress_rejects_oversized_input_and_recursively_sanitizes_payloads() -> 
 
 
 def test_egress_never_redacts_long_slug_and_hex_compound_identifiers() -> None:
-    """A workspace_id/plan_id/operation_id built as "<slug>-<hex-suffix>" can be
-    long and diverse enough to cross the high-entropy threshold; it must never
-    be redacted, since it identifies the workspace the caller must use next."""
-    long_slug_ids = {
-        "workspace_id": "background-parity-check-0f644e5464a1b2c3",
+    """A workspace_id/plan_id/operation_id/acceptance_id/failure_id/receipt_id
+    built as "<slug-or-word>-<hex-suffix>" can be long and diverse enough to
+    cross the high-entropy threshold; it must never be redacted, since it
+    identifies the resource the caller must use next. Real RepoForge suffix
+    lengths are exactly 10 (workspace_id) or 24 (everything else) hex chars."""
+    generated_ids = {
+        "workspace_id": "background-parity-check-0f644e5464",
         "plan_id": "plan-" + "a" * 24,
         "operation_id": "op-" + "1a2b3c4d5e6f" * 2,
         "acceptance_id": "accept-" + "9f8e7d6c5b4a" * 2,
+        "failure_id": "failure-" + "b" * 24,
+        "receipt_id": "receipt-" + "c" * 24,
     }
-    sanitized = sanitize_egress_data(long_slug_ids, destination=EgressDestination.MODEL)
-    assert sanitized == long_slug_ids
+    sanitized = sanitize_egress_data(generated_ids, destination=EgressDestination.MODEL)
+    assert sanitized == generated_ids
+
+
+def test_egress_still_redacts_lowercase_secret_shaped_values_under_id_keys() -> None:
+    """The compound-identifier exemption is gated on RepoForge's own generated-
+    ID field names AND the exact hex-suffix lengths those generators use --
+    not on "any *_id-suffixed field with a safe charset". A hypothetical
+    session_id/client_id carrying a real, lowercase-shaped bearer token (not
+    one of RepoForge's own field names) must still be caught, even though a
+    mixed-case check alone would miss this: the earlier fix's first version
+    exempted any lowercase-alnum-hyphen value under any *_id key, regardless
+    of field name, which would have let a lowercase secret through unredacted."""
+    lowercase_secret_shapes = {
+        "session_id": "x9k2m7q4z1v8n3j6w0r5t2y7u4i1o8p5a3s6d9f0g2h7",
+    }
+    sanitized = sanitize_egress_data(lowercase_secret_shapes, destination=EgressDestination.MODEL)
+    assert sanitized["session_id"] != lowercase_secret_shapes["session_id"]
 
     # A key ending in _id is not a blank check: disallowed characters (mixed
     # case, base64 padding, underscores) still fall through to the ordinary
     # high-entropy scan and can still be redacted.
-    secret_shaped = {"session_id": "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0" * 2}
+    secret_shaped = {"workspace_id": "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0" * 2}
     redacted = sanitize_egress_data(secret_shaped, destination=EgressDestination.MODEL)
-    assert redacted["session_id"] != secret_shaped["session_id"]
+    assert redacted["workspace_id"] != secret_shaped["workspace_id"]
 
 
 def test_egress_sanitization_preserves_existing_policy_markers() -> None:

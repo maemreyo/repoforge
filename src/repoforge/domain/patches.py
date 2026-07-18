@@ -193,8 +193,15 @@ def _canonical_diff(old_path: str | None, new_path: str | None, old: str, new: s
             n=1,
         )
     )
-    if not rendered and old_path == new_path:
-        return ""
+    if not rendered:
+        if old_path == new_path:
+            return ""
+        if old_path is not None and new_path is not None:
+            # A pure rename: content is unchanged, only the path moved.
+            lines.append("similarity index 100%")
+            lines.append(f"rename from {old_path}")
+            lines.append(f"rename to {new_path}")
+            return "\n".join(lines).rstrip() + "\n"
     lines.extend(rendered)
     return "\n".join(lines).rstrip() + "\n"
 
@@ -331,8 +338,28 @@ def _parse_unified(text: str) -> tuple[_UnifiedFile, ...]:
                 details={"header": lines[index]},
             )
         index += 1
-        while index < len(lines) and not lines[index].startswith("--- "):
+        rename_from: str | None = None
+        rename_to: str | None = None
+        while (
+            index < len(lines)
+            and not lines[index].startswith("--- ")
+            and not lines[index].startswith("diff --git ")
+        ):
+            if lines[index].startswith("rename from "):
+                rename_from = _normalize_path(lines[index][len("rename from ") :])
+            elif lines[index].startswith("rename to "):
+                rename_to = _normalize_path(lines[index][len("rename to ") :])
             index += 1
+        if (
+            (index >= len(lines) or lines[index].startswith("diff --git "))
+            and rename_from is not None
+            and rename_to is not None
+        ):
+            # A pure rename (git similarity index 100%, no content change) has
+            # no ---/+++ headers and no @@ hunks at all; it is fully described
+            # by rename from/rename to alone.
+            files.append(_UnifiedFile(rename_from, rename_to, ()))
+            continue
         if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
             raise _error(
                 "Unified diff is missing ---/+++ file headers",

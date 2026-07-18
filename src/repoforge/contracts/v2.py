@@ -1219,18 +1219,22 @@ class FailureEvidenceWorkspaceIdentity(StrictModel):
 
 
 class FailureRecoveryAction(StrictModel):
+    """`kind` is always one of the 28 currently-callable Forge v2 tool names.
+    `mode`/`plan_action` carry the sub-mode a client needs to reconstruct the
+    exact `workspace_verify` call for operations that were consolidated
+    behind that one tool's mode field (#180 static 28-tool surface)."""
+
     kind: Literal[
-        "operation_status",
+        "operation",
         "workspace_status",
-        "workspace_run_diagnostic",
-        "workspace_run_profile",
-        "workspace_create_execution_plan",
-        "workspace_execute_plan",
-        "workspace_refresh_preview",
-        "workspace_restore_paths",
+        "workspace_verify",
+        "workspace_refresh",
+        "workspace_mutate",
         "config_inspect",
     ]
     precondition: str = Field(min_length=1, max_length=500)
+    mode: Literal["auto", "diagnostic", "profile", "plan"] | None = None
+    plan_action: Literal["create", "accept", "execute"] | None = None
     diagnostic_id: Identifier | None = None
     profile_name: Identifier | None = None
     through: Literal["iteration", "full"] | None = None

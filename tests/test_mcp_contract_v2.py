@@ -52,6 +52,8 @@ async def test_protocol_rejects_undeclared_input_before_dispatch(
     assert result.isError is True
     rendered = "\n".join(getattr(item, "text", "") for item in result.content)
     assert "extra_forbidden" in rendered or "Extra inputs are not permitted" in rendered
+    assert result.structuredContent is not None
+    assert result.structuredContent["status"] == "failed"
 
 
 @pytest.mark.anyio
@@ -71,6 +73,8 @@ async def test_protocol_validates_output_against_authoritative_model() -> None:
     rendered = "\n".join(getattr(item, "text", "") for item in result.content)
     assert "unexpected" in rendered
     assert "extra_forbidden" in rendered or "Extra inputs are not permitted" in rendered
+    assert result.structuredContent is not None
+    assert result.structuredContent["status"] == "failed"
 
 
 @pytest.mark.anyio
@@ -97,6 +101,9 @@ async def test_protocol_error_is_one_redacted_typed_envelope(
         "retryable",
     }
     assert envelope["status"] == "failed"
+    # The typed error envelope must be real structuredContent, not only
+    # recoverable by parsing JSON out of the text block (#225 review).
+    assert result.structuredContent == envelope
 
 
 def test_surface_hash_is_v2_identity_bound_and_version_negotiation_is_gone() -> None:

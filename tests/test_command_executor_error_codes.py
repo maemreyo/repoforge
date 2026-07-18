@@ -1,3 +1,6 @@
+import contextlib
+import os
+import signal
 import threading
 import time
 from pathlib import Path
@@ -49,6 +52,44 @@ def test_run_timeout_is_command_timeout(tmp_path: Path) -> None:
     assert err.code is ErrorCode.COMMAND_TIMEOUT
     assert err.retryable is True
     assert err.details["timeout_seconds"] == 1
+
+
+def test_timeout_cleanup_does_not_hang_when_killpg_reports_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killpg PermissionError (the Darwin already-reaped race) is treated as
+    "process already gone", but that assumption can be wrong. Prove the final
+    output drain is bounded so a process that is in fact still alive and still
+    writing output cannot hang the caller forever (#225 review finding)."""
+    executor = _executor(tmp_path)
+    script = tmp_path / "ignore_term.py"
+    script.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    real_killpg = os.killpg
+    signaled_pids: list[int] = []
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        signaled_pids.append(pid)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", fake_killpg)
+    try:
+        started = time.monotonic()
+        with pytest.raises(CommandError) as excinfo:
+            executor.run(["python3", str(script)], cwd=tmp_path, timeout=1)
+        elapsed = time.monotonic() - started
+        assert excinfo.value.code is ErrorCode.COMMAND_TIMEOUT
+        # 1s run timeout + 2s SIGTERM wait + 2s final drain, well under a hang.
+        assert elapsed < 8
+    finally:
+        monkeypatch.undo()
+        for pid in signaled_pids:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                real_killpg(pid, signal.SIGKILL)
 
 
 def test_run_missing_executable_is_not_found_even_with_not_found_in_message(

@@ -523,6 +523,103 @@ def test_repo_issue_spec_reports_live_spec_drift_without_a_graph_node(tmp_path: 
     assert result["live"]["title"] == "Implement safer workflow"
 
 
+def test_repo_issue_spec_detects_stale_status_without_a_graph_node(tmp_path: Path) -> None:
+    """#187 addendum 2: drift checks must run for any issue, graph member or
+    not. An issue that is not enrolled in the ticket graph still declares its
+    own Status metadata in its body; that self-declared status must still be
+    checked against the issue's live open/closed state."""
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "999": {
+                        "body": (
+                            "Objective: ship it.\n"
+                            "Acceptance criteria: it works.\n"
+                            "Tests: run the gate.\n"
+                            "Status: Done."
+                        ),
+                        "state": "OPEN",
+                        "comments": [],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
+    assert result["graph_member"] is False
+    assert result["node"] is None
+    assert {
+        "code": "LIVE_STATE_DRIFT",
+        "message": "expected GitHub state CLOSED, got OPEN",
+    } in result["drift"]
+
+
+def test_repo_issue_spec_detects_a_closed_declared_blocker_without_a_graph_node(
+    tmp_path: Path,
+) -> None:
+    """#187 addendum 2 / #195: closed-blocker drift must be detectable
+    without ticket-graph membership. An issue that is not enrolled in the
+    graph still declares its blockers in its own body; a declared blocker
+    that is already closed on GitHub is a stale reference worth surfacing."""
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "999": {
+                        "body": (
+                            "Objective: ship it.\n"
+                            "Acceptance criteria: it works.\n"
+                            "Tests: run the gate.\n"
+                            "Blocked by: #106."
+                        ),
+                        "state": "OPEN",
+                        "comments": [],
+                    },
+                    "106": {"state": "CLOSED"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
+    assert result["graph_member"] is False
+    assert {
+        "code": "STALE_BLOCKER_REFERENCE",
+        "message": "declared blocker #106 is already closed on GitHub",
+    } in result["drift"]
+
+
+def test_repo_issue_spec_does_not_flag_a_blocker_that_is_still_open(tmp_path: Path) -> None:
+    """A declared blocker that is still open is not a stale reference."""
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "999": {
+                        "body": (
+                            "Objective: ship it.\n"
+                            "Acceptance criteria: it works.\n"
+                            "Tests: run the gate.\n"
+                            "Blocked by: #106."
+                        ),
+                        "state": "OPEN",
+                        "comments": [],
+                    },
+                    "106": {"state": "OPEN"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
+    assert not any(item["code"] == "STALE_BLOCKER_REFERENCE" for item in result["drift"])
+
+
 def test_repo_issue_graph_produces_exactly_one_bounded_audit_event(tmp_path: Path) -> None:
     service, environment = _service(tmp_path)
     program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])

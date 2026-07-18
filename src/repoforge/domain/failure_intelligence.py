@@ -63,14 +63,22 @@ class FailureReproducibility(str, Enum):
 
 
 class RecoveryActionKind(str, Enum):
-    OPERATION_STATUS = "operation_status"
+    """The exact Forge v2 tool a recovery action names.
+
+    RepoForge exposes exactly 28 static tools (#180); several v1-era
+    operations (`workspace_run_diagnostic`, `workspace_run_profile`,
+    `workspace_create_execution_plan`, `workspace_execute_plan`,
+    `workspace_refresh_preview`, `workspace_restore_paths`,
+    `operation_status`) no longer exist as standalone tools. `kind` here is
+    always a real, currently-callable tool name; `RecoveryAction.mode` and
+    `.plan_action` carry the sub-mode a client needs to reconstruct the exact
+    call for tools that were consolidated behind a mode/action field."""
+
+    OPERATION = "operation"
     WORKSPACE_STATUS = "workspace_status"
-    WORKSPACE_RUN_DIAGNOSTIC = "workspace_run_diagnostic"
-    WORKSPACE_RUN_PROFILE = "workspace_run_profile"
-    WORKSPACE_CREATE_EXECUTION_PLAN = "workspace_create_execution_plan"
-    WORKSPACE_EXECUTE_PLAN = "workspace_execute_plan"
-    WORKSPACE_REFRESH_PREVIEW = "workspace_refresh_preview"
-    WORKSPACE_RESTORE_PATHS = "workspace_restore_paths"
+    WORKSPACE_VERIFY = "workspace_verify"
+    WORKSPACE_REFRESH = "workspace_refresh"
+    WORKSPACE_MUTATE = "workspace_mutate"
     CONFIG_INSPECT = "config_inspect"
 
 
@@ -78,6 +86,8 @@ class RecoveryActionKind(str, Enum):
 class RecoveryAction:
     kind: RecoveryActionKind
     precondition: str
+    mode: str | None = None
+    plan_action: str | None = None
     diagnostic_id: str | None = None
     profile_name: str | None = None
     through: str | None = None
@@ -93,24 +103,48 @@ class RecoveryAction:
                 _invalid(f"Recovery action {field} is invalid")
         if self.through is not None and self.through not in {"iteration", "full"}:
             _invalid("Recovery action through boundary is invalid")
+        if self.mode is not None and self.mode not in {"auto", "diagnostic", "profile", "plan"}:
+            _invalid("Recovery action mode is invalid")
+        if self.plan_action is not None and self.plan_action not in {
+            "create",
+            "accept",
+            "execute",
+        }:
+            _invalid("Recovery action plan_action is invalid")
         object.__setattr__(
             self,
             "relative_paths",
             _safe_paths(self.relative_paths, "recovery action relative_paths"),
         )
-        if self.kind is RecoveryActionKind.WORKSPACE_RUN_DIAGNOSTIC and self.diagnostic_id is None:
-            _invalid("Diagnostic recovery action requires diagnostic_id")
-        if self.kind is RecoveryActionKind.WORKSPACE_RUN_PROFILE and self.profile_name is None:
-            _invalid("Profile recovery action requires profile_name")
-        if self.kind is RecoveryActionKind.WORKSPACE_EXECUTE_PLAN and self.through is None:
-            _invalid("Plan recovery action requires through")
-        if self.kind is RecoveryActionKind.WORKSPACE_RESTORE_PATHS and not self.relative_paths:
+        verify_only = (self.mode, self.plan_action, self.diagnostic_id, self.profile_name)
+        if self.kind is not RecoveryActionKind.WORKSPACE_VERIFY and (
+            any(value is not None for value in verify_only) or self.through is not None
+        ):
+            _invalid(
+                "mode, plan_action, diagnostic_id, profile_name, and through are only valid "
+                "for workspace_verify recovery actions"
+            )
+        if self.kind is RecoveryActionKind.WORKSPACE_VERIFY:
+            if self.mode is None:
+                _invalid("workspace_verify recovery action requires mode")
+            if self.mode == "diagnostic" and self.diagnostic_id is None:
+                _invalid("Diagnostic recovery action requires diagnostic_id")
+            if self.mode == "profile" and self.profile_name is None:
+                _invalid("Profile recovery action requires profile_name")
+            if self.mode == "plan":
+                if self.plan_action is None:
+                    _invalid("Plan recovery action requires plan_action")
+                if self.plan_action == "execute" and self.through is None:
+                    _invalid("Plan execute recovery action requires through")
+        if self.kind is RecoveryActionKind.WORKSPACE_MUTATE and not self.relative_paths:
             _invalid("Restore recovery action requires relative_paths")
 
     def payload(self) -> dict[str, object]:
         return {
             "diagnostic_id": self.diagnostic_id,
             "kind": self.kind.value,
+            "mode": self.mode,
+            "plan_action": self.plan_action,
             "precondition": self.precondition,
             "profile_name": self.profile_name,
             "relative_paths": list(self.relative_paths),
@@ -476,21 +510,26 @@ def _actions(
         "The workspace still exists and the caller needs a fresh HEAD and fingerprint.",
     )
     operation = _action(
-        RecoveryActionKind.OPERATION_STATUS,
+        RecoveryActionKind.OPERATION,
         "The durable operation ID remains available.",
     )
     profile = _action(
-        RecoveryActionKind.WORKSPACE_RUN_PROFILE,
+        RecoveryActionKind.WORKSPACE_VERIFY,
         "The named reviewed profile remains configured for this repository.",
+        mode="profile",
         profile_name=observation.target if observation.stage_kind == "profile" else "quick",
     )
     plan = _action(
-        RecoveryActionKind.WORKSPACE_CREATE_EXECUTION_PLAN,
+        RecoveryActionKind.WORKSPACE_VERIFY,
         "Workspace status, configuration, policy, and assessment evidence are current.",
+        mode="plan",
+        plan_action="create",
     )
     execute = _action(
-        RecoveryActionKind.WORKSPACE_EXECUTE_PLAN,
+        RecoveryActionKind.WORKSPACE_VERIFY,
         "A fresh exact plan has been accepted and its bindings are current.",
+        mode="plan",
+        plan_action="execute",
         through="full",
     )
     config = _action(
@@ -499,8 +538,9 @@ def _actions(
     )
     if failure_class in {FailureClass.TOOL_MISSING, FailureClass.DEPENDENCY_MISSING}:
         setup = _action(
-            RecoveryActionKind.WORKSPACE_RUN_PROFILE,
+            RecoveryActionKind.WORKSPACE_VERIFY,
             "The reviewed setup profile is configured and network policy permits dependency preparation.",
+            mode="profile",
             profile_name="setup",
         )
         return (setup, profile, status)
@@ -524,7 +564,7 @@ def _actions(
         return (config, status)
     if failure_class is FailureClass.STALE_WORKSPACE:
         refresh = _action(
-            RecoveryActionKind.WORKSPACE_REFRESH_PREVIEW,
+            RecoveryActionKind.WORKSPACE_REFRESH,
             "The workspace is clean enough to review a new exact remote-base preview.",
         )
         return (status, refresh, plan)
@@ -533,7 +573,7 @@ def _actions(
     if failure_class is FailureClass.UNEXPECTED_MUTATION:
         if observation.changed_paths:
             restore = _action(
-                RecoveryActionKind.WORKSPACE_RESTORE_PATHS,
+                RecoveryActionKind.WORKSPACE_MUTATE,
                 "The listed paths were reviewed and the operator intends to discard those exact changes.",
                 relative_paths=observation.changed_paths,
             )
@@ -764,6 +804,10 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
             RecoveryAction(
                 kind=RecoveryActionKind(str(raw.get("kind", ""))),
                 precondition=str(raw.get("precondition", "")),
+                mode=(str(raw["mode"]) if raw.get("mode") is not None else None),
+                plan_action=(
+                    str(raw["plan_action"]) if raw.get("plan_action") is not None else None
+                ),
                 diagnostic_id=(
                     str(raw["diagnostic_id"]) if raw.get("diagnostic_id") is not None else None
                 ),

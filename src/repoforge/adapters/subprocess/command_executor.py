@@ -92,7 +92,14 @@ class SubprocessCommandExecutor:
                 except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
                     with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=2)
+                # A PermissionError from killpg is treated as "already reaped", but
+                # that assumption can be wrong; bound this drain so a process that
+                # is in fact still alive and still writing output cannot hang the
+                # caller forever.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.communicate(timeout=2)
                 raise CommandError(
                     f"Command timed out after {timeout}s: {' '.join(argv)}",
                     code=ErrorCode.COMMAND_TIMEOUT,
