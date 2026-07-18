@@ -50,6 +50,7 @@ from ...application.runtime.hot_reload import (
     HotReloadCoordinator,
 )
 from ...application.service import CodingService
+from ...application.skills.scaffold import scaffold_repoforge_rules
 from ...application.verification_detection import VerificationProfileDetector
 from ...bootstrap import (
     AdapterOverrides,
@@ -70,6 +71,7 @@ from ...bootstrap import (
     prune_audit_log,
     read_audit_event_page,
     read_audit_events,
+    read_audit_events_since,
     read_runtime_log,
     runtime_log_files,
     summarize_command_source_stats,
@@ -1771,6 +1773,12 @@ def build_parser() -> argparse.ArgumentParser:
     show_config.add_argument("--origin", action="store_true")
     commands.add_parser("doctor")
     commands.add_parser("list-workspaces")
+    rules = commands.add_parser("rules")
+    rules_sub = rules.add_subparsers(dest="rules_command", required=True)
+    rules_init = rules_sub.add_parser(
+        "init", help="Idempotently scaffold .repoforge/rules and .repoforge/skills.yaml"
+    )
+    rules_init.add_argument("--repo-id", required=True)
     audit = commands.add_parser("audit")
     audit_sub = audit.add_subparsers(dest="audit_command")
     audit.add_argument("--last", type=int, default=20)
@@ -1778,6 +1786,17 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--failed", action="store_true")
     audit.add_argument("--slow", type=float, default=None)
     audit.add_argument("--min-bytes", type=float, default=None)
+    audit.add_argument(
+        "--cursor",
+        type=int,
+        default=None,
+        help=(
+            "Foreman-loop mode (#210): return events with seq > CURSOR (oldest first) plus "
+            "the cursor to resume from, instead of the most-recent-first --last view. Named "
+            "distinctly from `stats --since` (a date bound) to avoid argparse prefix ambiguity."
+        ),
+    )
+    audit.add_argument("--cursor-limit", type=int, default=500)
     stats = audit_sub.add_parser("stats")
     stats.add_argument("--since")
     stats.add_argument("--until")
@@ -2030,7 +2049,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "list-workspaces":
             _json(service.workspace_list())
             return 0
+        if args.command == "rules":
+            if args.rules_command == "init":
+                repo = service.config.repositories.get(args.repo_id)
+                if repo is None:
+                    raise ConfigError(f"Unknown repository id: {args.repo_id}")
+                created = scaffold_repoforge_rules(repo.path)
+                _json({"repo_id": args.repo_id, "created": list(created)})
+                return 0
+            parser.error(f"Unknown rules command: {args.rules_command}")
         if args.command == "audit":
+            if getattr(args, "cursor", None) is not None:
+                page = read_audit_events_since(
+                    service.audit.path,
+                    cursor=args.cursor,
+                    limit=args.cursor_limit,
+                )
+                _json(page.as_dict())
+                return 0
             if getattr(args, "audit_command", None) == "prune":
                 pruned = prune_audit_log(service.audit.path, before=args.before)
                 _json(

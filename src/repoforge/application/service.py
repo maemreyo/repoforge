@@ -95,6 +95,20 @@ from .workspace.edit import (
     WorkspaceEditCommand,
     WorkspaceEditor,
 )
+from .workspace.execute_plan import (
+    WorkspaceExecutePlanCommand,
+    WorkspacePlanExecutor,
+)
+from .workspace.execution_plan import (
+    AcceptExecutionPlanCommand,
+    CreateExecutionPlanCommand,
+    ExecutionPlanResult,
+    ExecutionPlanService,
+)
+from .workspace.failure_intelligence import (
+    FailureEvidenceReadCommand,
+    FailureIntelligenceService,
+)
 from .workspace.family_v2 import (
     WorkspaceChangedFormatterV2,
     WorkspaceCreateV2Command,
@@ -200,6 +214,58 @@ from .workspace.update_draft_pr import (
 from .workspace.verify import WorkspaceVerifier, WorkspaceVerifyCommand
 
 
+def _execution_plan_evidence(result: ExecutionPlanResult) -> dict[str, Any]:
+    return {
+        "plan_id": result.plan_id,
+        "plan_hash": result.plan_hash,
+        "task_id": result.task_id,
+        "ordered_stages": list(result.ordered_stages),
+        "final_profile": result.final_profile,
+        "stage_definition_hash": result.stage_definition_hash,
+        "created_at": result.created_at,
+        "expires_at": result.expires_at,
+        "accepted": result.accepted,
+        "acceptance_id": result.acceptance_id,
+    }
+
+
+def _workspace_verify_plan_envelope(
+    workspace_id: str,
+    *,
+    summary: str,
+    plan: dict[str, Any] | None,
+    operation: dict[str, Any] | None,
+    outcome: str,
+    head_sha: str,
+    workspace_fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        "summary": summary,
+        "workspace_id": workspace_id,
+        "requested_mode": "plan",
+        "selected_mode": "plan",
+        "routing_reason": "Explicit plan mode was requested.",
+        "impact_evidence": None,
+        "assessment": None,
+        "recommendations": [],
+        "staleness_warning": None,
+        "operation": operation,
+        "commands": [],
+        "steps": [],
+        "failed_step": None,
+        "failure_domain": None,
+        "business_tests_ran": False,
+        "valid_tdd_red_evidence": False,
+        "failure_reused": False,
+        "artifact_paths": [],
+        "outcome": outcome,
+        "satisfies_commit_gate": False,
+        "head_sha": head_sha,
+        "workspace_fingerprint": workspace_fingerprint,
+        "plan": plan,
+    }
+
+
 def _result(value: object) -> dict[str, Any]:
     data = to_data(value)
     if not isinstance(data, dict):
@@ -292,6 +358,7 @@ class CodingService:
         self._status = WorkspaceStatusReader(ctx)
         self._status_v2 = WorkspaceStatusV2(ctx)
         self._assessment = WorkspaceAssessmentReader(ctx)
+        self._execution_plans = ExecutionPlanService(ctx)
         self._base_status = WorkspaceBaseStatusReader(ctx)
         self._tree = WorkspaceTreeReader(ctx)
         self._read = WorkspaceFileReader(ctx)
@@ -314,6 +381,15 @@ class CodingService:
             background_tasks=self.application.background_tasks,
         )
         self._diagnostic = WorkspaceDiagnosticRunner(ctx)
+        self._execution_failure_evidence = FailureIntelligenceService(ctx)
+        self._plan_executor = WorkspacePlanExecutor(
+            ctx,
+            operations=self.operations,
+            background_tasks=self.application.background_tasks,
+            profile_runner=self._profile,
+            diagnostic_runner=self._diagnostic,
+            failure_intelligence=self._execution_failure_evidence,
+        )
         self._hygiene_status = WorkspaceHygieneStatusReader(ctx)
         self._format_changed = WorkspaceChangedFormatter(ctx)
         self._format_changed_v2 = WorkspaceChangedFormatterV2(ctx)
@@ -326,6 +402,7 @@ class CodingService:
             status=self._operation_status,
             lister=self._operation_list,
             cancel=self._operation_cancel,
+            failure_evidence=self._execution_failure_evidence,
             request_live_cancel=self._request_live_operation_cancel,
         )
         self._verify = WorkspaceVerifier(
@@ -366,6 +443,8 @@ class CodingService:
             return self._profile.request_live_cancel(operation_id)
         if kind == "workspace_run_adhoc":
             return self._adhoc.request_live_cancel(operation_id)
+        if kind == "workspace_execute_plan":
+            return self._plan_executor.request_live_cancel(operation_id)
         return False
 
     def operation(
@@ -377,6 +456,7 @@ class CodingService:
         expected_updated_at: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        failure_id: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._operation.execute(
@@ -388,6 +468,7 @@ class CodingService:
                     expected_updated_at=expected_updated_at,
                     limit=limit,
                     cursor=cursor,
+                    failure_id=failure_id,
                 )
             )
         )
@@ -418,16 +499,26 @@ class CodingService:
             self._request_live_operation_cancel(result.operation.kind, operation_id)
         return _result(result)
 
-    def repo_list(self) -> dict[str, Any]:
-        return _result(self._repo_list.execute(RepositoryListCommand()))
+    def failure_evidence_read(self, failure_id: str) -> dict[str, Any]:
+        return _result(
+            self._execution_failure_evidence.read(FailureEvidenceReadCommand(failure_id))
+        )
+
+    def repo_list(self, requested_repo: str | None = None) -> dict[str, Any]:
+        return _result(self._repo_list.execute(RepositoryListCommand(requested_repo)))
 
     def repo_list_v2(
         self,
         detail: bool = False,
         cursor: str | None = None,
         limit: int = 50,
+        requested_repo: str | None = None,
     ) -> dict[str, Any]:
-        return _result(self._repo_list_v2.execute(RepositoryListV2Command(detail, cursor, limit)))
+        return _result(
+            self._repo_list_v2.execute(
+                RepositoryListV2Command(detail, cursor, limit, requested_repo)
+            )
+        )
 
     def repo_status(self, repo_id: str) -> dict[str, Any]:
         return _result(self._repo_status.execute(RepositoryStatusCommand(repo_id)))
@@ -854,6 +945,41 @@ class CodingService:
     def workspace_assessment(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._assessment.execute(WorkspaceAssessmentCommand(workspace_id)))
 
+    def workspace_create_execution_plan(
+        self,
+        workspace_id: str,
+        task_id: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._execution_plans.create(
+                CreateExecutionPlanCommand(workspace_id, task_id, expires_at)
+            )
+        )
+
+    def workspace_accept_execution_plan(
+        self,
+        workspace_id: str,
+        plan_id: str,
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._execution_plans.accept(AcceptExecutionPlanCommand(workspace_id, plan_id, task_id))
+        )
+
+    def workspace_execute_plan(
+        self,
+        workspace_id: str,
+        plan_id: str,
+        through: str = "iteration",
+    ) -> dict[str, Any]:
+        return _result(
+            self._plan_executor.execute(WorkspaceExecutePlanCommand(workspace_id, plan_id, through))
+        )
+
+    def workspace_execution_receipts(self, plan_id: str) -> dict[str, Any]:
+        return _result(self._plan_executor.receipts(plan_id))
+
     def workspace_base_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._base_status.execute(WorkspaceBaseStatusCommand(workspace_id)))
 
@@ -1251,7 +1377,21 @@ class CodingService:
         force_rerun: bool = False,
         impact_paths: tuple[str, ...] = (),
         artifact_output_path: str | None = None,
+        plan_action: str = "preview",
+        plan_id: str | None = None,
+        plan_task_id: str | None = None,
+        plan_expires_at: str | None = None,
+        plan_through: str = "iteration",
     ) -> dict[str, Any]:
+        if mode == "plan" and plan_action != "preview":
+            return self._workspace_verify_plan_action(
+                workspace_id,
+                plan_action,
+                plan_id=plan_id,
+                plan_task_id=plan_task_id,
+                plan_expires_at=plan_expires_at,
+                plan_through=plan_through,
+            )
         return _result(
             self._verify.execute(
                 WorkspaceVerifyCommand(
@@ -1272,6 +1412,79 @@ class CodingService:
                     impact_paths=impact_paths,
                     artifact_output_path=artifact_output_path,
                 )
+            )
+        )
+
+    def _workspace_verify_plan_action(
+        self,
+        workspace_id: str,
+        plan_action: str,
+        *,
+        plan_id: str | None,
+        plan_task_id: str | None,
+        plan_expires_at: str | None,
+        plan_through: str,
+    ) -> dict[str, Any]:
+        if plan_action == "create":
+            result = self._execution_plans.create(
+                CreateExecutionPlanCommand(workspace_id, plan_task_id, plan_expires_at)
+            )
+            return _result(
+                _workspace_verify_plan_envelope(
+                    workspace_id,
+                    summary=f"Created execution plan {result.plan_id}",
+                    plan=_execution_plan_evidence(result),
+                    operation=None,
+                    outcome="planned",
+                    head_sha=str(result.binding["head_sha"]),
+                    workspace_fingerprint=str(result.binding["workspace_fingerprint"]),
+                )
+            )
+        if plan_action == "accept":
+            if plan_id is None:
+                raise ValueError("plan_action=accept requires plan_id")
+            result = self._execution_plans.accept(
+                AcceptExecutionPlanCommand(workspace_id, plan_id, plan_task_id)
+            )
+            return _result(
+                _workspace_verify_plan_envelope(
+                    workspace_id,
+                    summary=f"Accepted execution plan {result.plan_id}",
+                    plan=_execution_plan_evidence(result),
+                    operation=None,
+                    outcome="planned",
+                    head_sha=str(result.binding["head_sha"]),
+                    workspace_fingerprint=str(result.binding["workspace_fingerprint"]),
+                )
+            )
+        if plan_action != "execute":
+            raise ValueError(f"Unknown workspace_verify plan_action: {plan_action}")
+        if plan_id is None:
+            raise ValueError("plan_action=execute requires plan_id")
+        admission = self._plan_executor.execute(
+            WorkspaceExecutePlanCommand(workspace_id, plan_id, plan_through)
+        )
+        plan_store = self.application.context.execution_plans
+        envelope = plan_store.read(plan_id) if plan_store is not None else None
+        binding = envelope.value.binding if envelope is not None else None
+        return _result(
+            _workspace_verify_plan_envelope(
+                workspace_id,
+                summary=f"Executing execution plan {plan_id}",
+                plan=None,
+                operation={
+                    "operation_id": admission.operation_id,
+                    "kind": "workspace_execute_plan",
+                    "state": "running",
+                    "phase": admission.phase,
+                    "progress_current": None,
+                    "progress_total": None,
+                    "cancellation_reason": None,
+                    "poll_after_seconds": 1.0,
+                },
+                outcome="running",
+                head_sha=binding.head_sha if binding is not None else "",
+                workspace_fingerprint=binding.workspace_fingerprint if binding is not None else "",
             )
         )
 

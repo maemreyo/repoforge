@@ -192,7 +192,10 @@ class WorkspaceAssessmentReader:
         }
 
     @staticmethod
-    def _failure_refs(result: Any) -> dict[str, Any]:
+    def _failure_refs(
+        result: Any,
+        execution_failure_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
         selectors = sorted(
             {
                 str(item["selector"])
@@ -202,10 +205,18 @@ class WorkspaceAssessmentReader:
                 and str(item["selector"]).startswith("check-run:")
             }
         )[:20]
-        return {"selectors": selectors, "truncated": len(selectors) >= 20}
+        return {
+            "selectors": selectors,
+            "execution_failure_ids": list(execution_failure_ids[-20:]),
+            "truncated": len(selectors) >= 20 or len(execution_failure_ids) > 20,
+        }
 
     def execute(self, command: WorkspaceAssessmentCommand) -> WorkspaceAssessment:
         record, repo, path = self.ctx.workspace(command.workspace_id)
+        raw_failure_ids = record.metadata.get("failure_evidence_ids", ())
+        execution_failure_ids = tuple(
+            str(item) for item in raw_failure_ids if isinstance(item, str)
+        )[-20:]
 
         def operation() -> WorkspaceAssessment:
             snapshot = self._capture(command.workspace_id, repo, path)
@@ -370,7 +381,7 @@ class WorkspaceAssessmentReader:
                     snapshot,
                     status=AssessmentEvidenceStatus.CURRENT,
                     coverage=AssessmentCoverage.COMPLETE,
-                    value=self._failure_refs(ci_result),
+                    value=self._failure_refs(ci_result, execution_failure_ids),
                 )
             except RepoForgeError as exc:
                 ci_summary = evidence(
@@ -382,10 +393,31 @@ class WorkspaceAssessmentReader:
                 )
                 failure_evidence_refs = evidence(
                     snapshot,
-                    status=AssessmentEvidenceStatus.UNAVAILABLE,
-                    coverage=AssessmentCoverage.NONE,
+                    status=(
+                        AssessmentEvidenceStatus.PARTIAL
+                        if execution_failure_ids
+                        else AssessmentEvidenceStatus.UNAVAILABLE
+                    ),
+                    coverage=(
+                        AssessmentCoverage.PARTIAL
+                        if execution_failure_ids
+                        else AssessmentCoverage.NONE
+                    ),
+                    value=(
+                        {
+                            "selectors": [],
+                            "execution_failure_ids": list(execution_failure_ids),
+                            "truncated": False,
+                        }
+                        if execution_failure_ids
+                        else None
+                    ),
                     error_code=self._error_code(exc),
-                    safe_fallback="No failure-evidence references can be trusted.",
+                    safe_fallback=(
+                        "Local execution failure references remain current; CI failure references are unavailable."
+                        if execution_failure_ids
+                        else "No failure-evidence references can be trusted."
+                    ),
                 )
             self._assert_current(snapshot, repo, path)
 

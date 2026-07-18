@@ -5,11 +5,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import RepositoryConfig
-from ...domain.tickets import TicketGraph, TicketLiveMetadata
+from ...domain.tickets import GraphEvidenceCapability, TicketGraph, TicketLiveMetadata
 from ..context import ApplicationContext
 from ..tickets.graph import compare_live_ticket_metadata
 from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
-from .issue_graph import node_payload, read_github_ticket_snapshot
+from .issue_graph import (
+    capability_coverage_payload,
+    is_capability_complete_for_issue,
+    node_payload,
+    read_github_ticket_snapshot,
+)
 
 _HEADING = re.compile(r"(?m)^#{2,3}\s+(.+)$")
 
@@ -41,6 +46,7 @@ class RepositoryIssueSpecResult:
     graph_cache_hit: bool
     observed_at: str | None
     evidence_complete: bool
+    capability_coverage: list[dict[str, Any]]
 
 
 class RepositoryIssueSpecReader:
@@ -127,21 +133,35 @@ class RepositoryIssueSpecReader:
                 }
             )
         if node is not None and snapshot is not None:
-            live_metadata = TicketLiveMetadata(
-                c.issue_number,
-                str(live_payload.get("title") or ""),
-                str(live_payload.get("state") or ""),
-                str(live_payload.get("body") or ""),
-            )
-            single_node_graph = TicketGraph(
-                snapshot.graph.schema_version,
-                snapshot.graph.program_issue,
-                (node,),
-            )
-            drift.extend(
-                {"code": item.code, "message": item.message}
-                for item in compare_live_ticket_metadata(single_node_graph, (live_metadata,))
-            )
+            if is_capability_complete_for_issue(
+                snapshot, GraphEvidenceCapability.ISSUE, c.issue_number
+            ):
+                live_metadata = TicketLiveMetadata(
+                    c.issue_number,
+                    str(live_payload.get("title") or ""),
+                    str(live_payload.get("state") or ""),
+                    str(live_payload.get("body") or ""),
+                )
+                single_node_graph = TicketGraph(
+                    snapshot.graph.schema_version,
+                    snapshot.graph.program_issue,
+                    (node,),
+                )
+                drift.extend(
+                    {"code": item.code, "message": item.message}
+                    for item in compare_live_ticket_metadata(single_node_graph, (live_metadata,))
+                )
+            else:
+                drift.append(
+                    {
+                        "code": "GRAPH_EVIDENCE_INCOMPLETE_FOR_ISSUE",
+                        "message": (
+                            "graph metadata for this issue (status/priority/type) could not be "
+                            "fully resolved from GitHub; skipping metadata drift comparison to "
+                            "avoid comparing against a defaulted value"
+                        ),
+                    }
+                )
 
         evolution = ticket_delivery_payload(live_state.delivery)
 
@@ -159,4 +179,5 @@ class RepositoryIssueSpecReader:
             graph_cache_hit,
             snapshot.observed_at if snapshot is not None else None,
             snapshot.evidence_complete if snapshot is not None else False,
+            capability_coverage_payload(snapshot),
         )

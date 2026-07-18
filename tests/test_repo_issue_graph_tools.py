@@ -13,7 +13,13 @@ from repoforge.application.service import CodingService
 from repoforge.application.tickets.graph import load_ticket_graph
 from repoforge.config import GitHubTicketGraphConfig, load_config
 from repoforge.domain.errors import ConfigError
-from repoforge.domain.tickets import TicketGraphError, TicketGraphSnapshot, TicketLiveMetadata
+from repoforge.domain.tickets import (
+    CapabilityCoverage,
+    GraphEvidenceCapability,
+    TicketGraphError,
+    TicketGraphSnapshot,
+    TicketLiveMetadata,
+)
 
 
 def _write_manifest(
@@ -88,6 +94,15 @@ class FixtureTicketGraphGateway:
             )
             for node in graph.nodes
         )
+        capability_coverage = tuple(
+            CapabilityCoverage(
+                GraphEvidenceCapability(str(item["capability"])),
+                bool(item["complete"]),
+                tuple(int(number) for number in item.get("unavailable", [])),
+                bool(item.get("truncated", False)),
+            )
+            for item in state_payload.get("capability_coverage", [])
+        )
         return TicketGraphSnapshot(
             graph,
             "2026-07-16T00:00:00+00:00",
@@ -95,6 +110,7 @@ class FixtureTicketGraphGateway:
             tuple(int(item) for item in state_payload.get("unavailable", [])),
             bool(state_payload.get("truncated", False)),
             live,
+            capability_coverage,
         )
 
 
@@ -150,6 +166,38 @@ def test_v2_repo_issue_reports_graph_unavailable_with_next_action(tmp_path: Path
     assert _audit_events(environment.root, "repo_issue_graph") == []
 
 
+def test_v2_repo_issue_graph_exposes_capability_scoped_coverage(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ticket = _node(9)
+    _write_manifest(environment.source, [program, ticket])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {},
+                "capability_coverage": [
+                    {"capability": "issue", "complete": True, "unavailable": []},
+                    {"capability": "sub_issues", "complete": True, "unavailable": []},
+                    {"capability": "comments", "complete": False, "unavailable": [9]},
+                    {"capability": "dependencies", "complete": True, "unavailable": []},
+                    {"capability": "project_overlay", "complete": True, "unavailable": []},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_v2("demo", mode="graph", fresh=True)
+
+    coverage = {item["capability"]: item for item in result["capability_coverage"]}
+    assert coverage["comments"]["complete"] is False
+    assert coverage["comments"]["unavailable"] == [9]
+    assert coverage["issue"]["complete"] is True
+    assert coverage["sub_issues"]["complete"] is True
+    assert coverage["dependencies"]["complete"] is True
+    assert coverage["project_overlay"]["complete"] is True
+
+
 def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Path) -> None:
     service, _ = _service(tmp_path, configured=False)
 
@@ -171,6 +219,7 @@ def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Pat
         "unavailable": [],
         "truncated": False,
         "evidence_complete": False,
+        "capabilities": [],
     }
     assert "rf repo refresh demo" in result["safe_next_action"]
 
@@ -414,6 +463,46 @@ def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -
         "partial_completion": None,
         "superseded_by": None,
     }
+
+
+def test_repo_issue_spec_skips_metadata_drift_when_issue_capability_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ticket = _node(9, priority="P0", status="Done")
+    _write_manifest(environment.source, [program, ticket])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"9": {"state": "OPEN"}},
+                "capability_coverage": [
+                    {"capability": "issue", "complete": False, "unavailable": [9]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_spec("demo", 9, fresh=True)
+
+    assert result["graph_member"] is True
+    assert result["capability_coverage"] == [
+        {"capability": "issue", "complete": False, "unavailable": [9], "truncated": False}
+    ]
+    # Manifest expects DONE/CLOSED but the live fixture reports OPEN -- without the fix this
+    # would raise a LIVE_STATE_DRIFT diagnostic even though the graph's own evidence for this
+    # issue is known-incomplete and should not be trusted for comparison.
+    assert result["drift"] == [
+        {
+            "code": "GRAPH_EVIDENCE_INCOMPLETE_FOR_ISSUE",
+            "message": (
+                "graph metadata for this issue (status/priority/type) could not be fully "
+                "resolved from GitHub; skipping metadata drift comparison to avoid comparing "
+                "against a defaulted value"
+            ),
+        }
+    ]
 
 
 def test_repo_issue_spec_reports_live_spec_drift_without_a_graph_node(tmp_path: Path) -> None:

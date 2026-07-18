@@ -77,7 +77,7 @@
   },
   "contract_version": 2,
   "mcp": {
-    "server_instructions_sha256": "e347bee216f799f5913d5461bbfd49fff6d482661d8aa0451c3e6e5d3b4e29b0",
+    "server_instructions_sha256": "e6e489f8961adc266acbc8496f555559fa1f3de1ac9cd1099934d76402bc6948",
     "tool_contract": {
       "aliases": [
         {
@@ -85,7 +85,6 @@
           "canonical": "workspace_run_profile",
           "deprecated_in": 1,
           "notice": "Deprecated compatibility alias; migrate to workspace_run_profile before tool contract v2.",
-          "promoted_in": 2,
           "removed_in": 2
         }
       ],
@@ -98,19 +97,9 @@
             "openWorldHint": false,
             "readOnlyHint": false
           },
-          "description": "Deprecated compatibility alias; migrate to workspace_run_profile before tool contract v2. Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Deterministic failures may be reused only when every reviewed binding is unchanged; set force_rerun=true to bypass that evidence reuse and execute commands again. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes.",
+          "description": "Deprecated compatibility alias; migrate to workspace_run_profile before tool contract v2. Use this compatibility alias only while migrating to workspace_run_profile.",
           "inputSchema": {
             "properties": {
-              "background": {
-                "default": false,
-                "title": "Background",
-                "type": "boolean"
-              },
-              "force_rerun": {
-                "default": false,
-                "title": "Force Rerun",
-                "type": "boolean"
-              },
               "profile_name": {
                 "anyOf": [
                   {
@@ -131,16 +120,16 @@
             "required": [
               "workspace_id"
             ],
-            "title": "workspace_run_profileArguments",
+            "title": "workspace_verifyArguments",
             "type": "object"
           },
           "name": "workspace_verify",
           "outputSchema": {
             "additionalProperties": true,
-            "title": "workspace_run_profileDictOutput",
+            "title": "workspace_verifyDictOutput",
             "type": "object"
           },
-          "title": "Run configured command profile (deprecated alias)"
+          "title": "Verify workspace (deprecated alias)"
         }
       ],
       "supported_versions": [
@@ -148,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "62c3ec87bbcf2aa6ccdac5fbb7ed8630ab93a133435769750ed23af6e68373a1",
+    "tool_surface_hash": "4172240b5841a9e64709d8b894408c71f75859cd49479fcf2b592663a03a6427",
     "tools": [
       {
         "annotations": {
@@ -183,6 +172,35 @@
           "type": "object"
         },
         "title": "Inspect reviewed configuration"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Use this with an exact failure_id from operation_status or workspace_status to read one bounded redacted execution failure and its typed recovery choices.",
+        "inputSchema": {
+          "properties": {
+            "failure_id": {
+              "title": "Failure Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "failure_id"
+          ],
+          "title": "failure_evidence_readArguments",
+          "type": "object"
+        },
+        "name": "failure_evidence_read",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "failure_evidence_readDictOutput",
+          "type": "object"
+        },
+        "title": "Read execution failure evidence"
       },
       {
         "annotations": {
@@ -694,9 +712,22 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use this when choosing a repository or discovering its profiles and safety policy.",
+        "description": "Use this first, before any repository-scoped call, to choose a repository and\ndiscover its profiles and safety policy. Pass requested_repo as the exact repo_id,\ndisplay name, or remote name the user explicitly named in this request; leave it unset\nif they did not name one -- never guess from unrelated wording. Read `selection.outcome`\nin the result: `single_enrolled` or `exact_match` means proceed with `selection.repo_id`\nwithout asking; `input_required` means ask the user to choose from `selection.candidates`\n(never pick by recency, filesystem order, default base branch, or your own preference);\n`no_match` means no repository is enrolled yet.",
         "inputSchema": {
-          "properties": {},
+          "properties": {
+            "requested_repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Requested Repo"
+            }
+          },
           "title": "repo_listArguments",
           "type": "object"
         },
@@ -1779,6 +1810,49 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
+        "description": "Use this to execute an exact accepted immutable plan through iteration stages or the final full verification boundary; poll the returned durable operation with operation_status.",
+        "inputSchema": {
+          "properties": {
+            "plan_id": {
+              "title": "Plan Id",
+              "type": "string"
+            },
+            "through": {
+              "default": "iteration",
+              "enum": [
+                "iteration",
+                "full"
+              ],
+              "title": "Through",
+              "type": "string"
+            },
+            "workspace_id": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "plan_id"
+          ],
+          "title": "workspace_execute_planArguments",
+          "type": "object"
+        },
+        "name": "workspace_execute_plan",
+        "outputSchema": {
+          "additionalProperties": true,
+          "title": "workspace_execute_planDictOutput",
+          "type": "object"
+        },
+        "title": "Execute accepted workspace plan"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
         "description": "Use this after editing to run one reviewed formatter over server-derived policy-allowed changed paths only; callers cannot provide argv, executables, environment values, working directories, or path lists.",
         "inputSchema": {
           "properties": {
@@ -2766,217 +2840,6 @@
           "type": "object"
         },
         "title": "Update draft pull request"
-      },
-      {
-        "annotations": {
-          "destructiveHint": false,
-          "idempotentHint": false,
-          "openWorldHint": false,
-          "readOnlyHint": false
-        },
-        "description": "Use this to plan or run unified verification; auto fails safe to the final profile.",
-        "inputSchema": {
-          "properties": {
-            "argv": {
-              "anyOf": [
-                {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Argv"
-            },
-            "artifact_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Artifact Output Path"
-            },
-            "background": {
-              "default": false,
-              "title": "Background",
-              "type": "boolean"
-            },
-            "diagnostic_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Diagnostic Id"
-            },
-            "expectation": {
-              "default": "none",
-              "enum": [
-                "none",
-                "pass",
-                "fail"
-              ],
-              "title": "Expectation",
-              "type": "string"
-            },
-            "expected_failure_class": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Expected Failure Class"
-            },
-            "expected_fingerprint": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Expected Fingerprint"
-            },
-            "force_rerun": {
-              "default": false,
-              "title": "Force Rerun",
-              "type": "boolean"
-            },
-            "impact_paths": {
-              "anyOf": [
-                {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Impact Paths"
-            },
-            "intent": {
-              "default": "final",
-              "enum": [
-                "tdd_red",
-                "tdd_green",
-                "refactor",
-                "pre_commit",
-                "final"
-              ],
-              "title": "Intent",
-              "type": "string"
-            },
-            "mode": {
-              "default": "auto",
-              "enum": [
-                "plan",
-                "auto",
-                "diagnostic",
-                "profile",
-                "adhoc"
-              ],
-              "title": "Mode",
-              "type": "string"
-            },
-            "profile_name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Profile Name"
-            },
-            "selector": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Selector"
-            },
-            "selector2": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Selector2"
-            },
-            "working_directory": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Working Directory"
-            },
-            "workspace_id": {
-              "title": "Workspace Id",
-              "type": "string"
-            }
-          },
-          "required": [
-            "workspace_id"
-          ],
-          "title": "workspace_verifyArguments",
-          "type": "object"
-        },
-        "name": "workspace_verify",
-        "outputSchema": {
-          "additionalProperties": true,
-          "title": "workspace_verifyDictOutput",
-          "type": "object"
-        },
-        "title": "Plan or run workspace verification"
       },
       {
         "annotations": {

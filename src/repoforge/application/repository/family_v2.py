@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...domain.errors import ConfigError
+from ...domain.repository_selection import select_repository
 from ...domain.tickets import TicketNode
 from ..context import ApplicationContext
 from ..retrieval import paginate
@@ -95,6 +96,21 @@ class RepositoryListV2Command:
     detail: bool = False
     cursor: str | None = None
     limit: int = 50
+    requested_repo: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RepositorySelectionCandidateV2:
+    repo_id: str
+    display_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class RepositorySelectionV2:
+    outcome: str
+    repo_id: str | None
+    candidates: tuple[RepositorySelectionCandidateV2, ...]
+    guidance: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +121,7 @@ class RepositoryListV2Result:
     repositories: tuple[CompactRepository, ...]
     truncated: bool
     next_cursor: str | None
+    selection: RepositorySelectionV2
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +191,26 @@ class IssueDriftV2:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityCoverageV2:
+    capability: str
+    complete: bool
+    unavailable: tuple[int, ...]
+    truncated: bool
+
+
+def _capability_coverage(raw: list[dict[str, Any]]) -> tuple[CapabilityCoverageV2, ...]:
+    return tuple(
+        CapabilityCoverageV2(
+            capability=str(item["capability"]),
+            complete=bool(item["complete"]),
+            unavailable=tuple(int(number) for number in item.get("unavailable", ())),
+            truncated=bool(item["truncated"]),
+        )
+        for item in raw
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class RepositoryIssueV2Command:
     repo_id: str
     mode: str
@@ -224,6 +261,7 @@ class RepositoryIssueV2Result:
     truncated: bool
     next_cursor: str | None
     mutation: IssueMutationEvidenceV2 | None = None
+    capability_coverage: tuple[CapabilityCoverageV2, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,13 +489,16 @@ class RepositoryListV2:
         self.ctx = ctx
 
     def execute(self, command: RepositoryListV2Command) -> RepositoryListV2Result:
+        details: dict[str, object] = {"detail": command.detail}
+
         def operation() -> RepositoryListV2Result:
             if not 1 <= command.limit <= 100:
                 raise ValueError("limit must be between 1 and 100")
+            repo_configs = tuple(
+                sorted(self.ctx.config.repositories.values(), key=lambda item: item.repo_id)
+            )
             repositories: list[CompactRepository] = []
-            for repo in sorted(
-                self.ctx.config.repositories.values(), key=lambda item: item.repo_id
-            ):
+            for repo in repo_configs:
                 capabilities = ["read"]
                 if not repo.read_only:
                     capabilities.append("write")
@@ -477,6 +518,17 @@ class RepositoryListV2:
                 byte_budget=60_000,
                 cursor=command.cursor,
             )
+            resolved = select_repository(repo_configs, requested_repo=command.requested_repo)
+            details["selection_outcome"] = resolved.outcome.value
+            selection = RepositorySelectionV2(
+                outcome=resolved.outcome.value,
+                repo_id=resolved.repo_id,
+                candidates=tuple(
+                    RepositorySelectionCandidateV2(c.repo_id, c.display_name)
+                    for c in resolved.candidates
+                ),
+                guidance=resolved.guidance,
+            )
             return RepositoryListV2Result(
                 "ok",
                 f"Listed {len(page.items)} repository/repositories",
@@ -484,9 +536,10 @@ class RepositoryListV2:
                 tuple(page.items),  # type: ignore[arg-type]
                 page.truncated,
                 page.next_cursor,
+                selection,
             )
 
-        return self.ctx.audited("repo_list", {"detail": command.detail}, operation)
+        return self.ctx.audited("repo_list", details, operation)
 
 
 class RepositoryPrReadV2:
@@ -667,6 +720,7 @@ class RepositoryIssueV2:
                 None,
                 False,
                 None,
+                capability_coverage=_capability_coverage(raw.capability_coverage),
             )
         if command.mode == "graph":
             raw_graph = self._graph.compute(
@@ -740,6 +794,9 @@ class RepositoryIssueV2:
                 raw_graph.safe_next_action,
                 raw_graph.truncated or page.truncated,
                 page.next_cursor,
+                capability_coverage=_capability_coverage(
+                    raw_graph.coverage.get("capabilities", [])
+                ),
             )
         raw_next = self._next.compute(
             RepositoryIssueNextCommand(
@@ -788,6 +845,7 @@ class RepositoryIssueV2:
             None if raw_next.valid else "Refresh the GitHub graph and resolve reported drift.",
             False,
             None,
+            capability_coverage=_capability_coverage(raw_next.capability_coverage),
         )
 
 

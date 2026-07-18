@@ -100,6 +100,7 @@ def _minimal_workspace_stub(payload: dict[str, Any]) -> None:
     payload["changed_paths"] = []
     payload["change_metrics"] = {}
     payload["issue_ids"] = []
+    payload["failure_evidence_ids"] = []
     payload["last_verification"] = None
 
 

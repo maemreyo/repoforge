@@ -29,6 +29,7 @@ class WorkspaceStatusResult:
     clean: bool
     last_verification: dict[str, Any] | None
     issue_ids: list[str]
+    failure_evidence_ids: list[str]
 
 
 class WorkspaceStatusReader:
@@ -96,4 +97,9 @@ class WorkspaceStatusReader:
                 not bool(self.ctx.git.status_porcelain(path).strip()),
                 last,
                 list(record.metadata.get("issue_ids", ())),
+                [
+                    str(item)
+                    for item in record.metadata.get("failure_evidence_ids", ())
+                    if isinstance(item, str)
+                ][-20:],
             )

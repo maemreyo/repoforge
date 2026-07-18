@@ -153,7 +153,7 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
         "workspace_refresh": {"preview", "apply"},
         "workspace_verify": {"plan", "auto", "diagnostic", "profile", "adhoc"},
         "workspace_pr": {"create_draft", "update", "comment", "watch"},
-        "operation": {"get", "list", "cancel"},
+        "operation": {"get", "list", "cancel", "failure_evidence"},
     }
 
     for tool_name, expected in expectations.items():

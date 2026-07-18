@@ -101,10 +101,10 @@
     "tool_count": 28,
     "tool_hashes": {
       "config_inspect": "3b3224b5450b44ccdd04e61c548a5f324f11105d14e7d62f637578076b6de1e9",
-      "operation": "458ec4373f784db02a64e0208fd1ca9090c7a59aeea17c2de7e0fdef70da6e26",
+      "operation": "701da50b1fb15bf450f1d4af6a6c088ad190ec4064d5d782f725291989db224e",
       "repo_history": "885697f2a34c8c1703e7423596158522df881902fa3aad197cbd31278c356171",
-      "repo_issue": "81ab160de9ce06d5a458001144c3cac8ba10c4819d3da20f52a28ecdccf0417b",
-      "repo_list": "37c468d4724673c9a503e5425a86c136f62b35bef918846d6cae8b90ca3a2f46",
+      "repo_issue": "65af3f95af9c9e8bc5a9a75b50cb088d7b7434ce23bb3bec34e407a005f4cd04",
+      "repo_list": "950d407e1d471f67092fa604a82bee2f8a09beca6c3eb0db83bc83f10972b378",
       "repo_policy": "9a248060cfa7d6bc3316d4e5ca1eb5128488ba0d2adf8650732951f592cd6536",
       "repo_pr_read": "712f1a29691cfb572ccd3ca9093e1960b91d8fbfb704977ee08363f9463cd612",
       "repo_read": "0e5d55c98421038b974a96a9fa0851b20344a2a7c15be0d2f339ffc37df8552b",
@@ -127,7 +127,7 @@
       "workspace_search": "7982cf1a77e97b6f952971520851ce1363bbdd375a573ad854e163c9ae0e4e7b",
       "workspace_status": "2317503464a02da35abbeec3ac9ff7b572bc6c1d21d38862a871c40ead613fed",
       "workspace_tree": "b7544b0049a8ce4320e17e7d8082b0d598e8a37b4864a3bdf5ebc5d4d355f57a",
-      "workspace_verify": "4cf04df065b94766b17643a04249d87922c65b5f1753659f6fcb5597c3197eab"
+      "workspace_verify": "52a5971a18c099c7c2a022f939f9f32bca7de6608cbc5bb3ffaaad923078a4c0"
     },
     "tool_names": [
       "repo_task_context",
@@ -159,8 +159,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "5507de1a1c75c7001435c4222aeca877ad36483c3208b3f85d1b07da7ce16584",
-    "tool_surface_hash": "a2bf16da439e5eff92ba0b09c29641fe88c471aaa3988a88fc12275f94fb4064"
+    "tool_schema_bundle_sha256": "95266acd5aa0b788375deaeceb9c20834e5b62afc0475f9cb49affa8467c44f9",
+    "tool_surface_hash": "473456ca1ab9fe1f05750ae8f7aaaeb3616e3911f1574c8d76dfee0a2717faf6"
   },
   "package_version": "2.1.0",
   "runtime": {

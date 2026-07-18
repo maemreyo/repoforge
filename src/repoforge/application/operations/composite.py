@@ -7,19 +7,23 @@ from dataclasses import dataclass
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
+from ..workspace.failure_intelligence import FailureEvidenceReadCommand, FailureIntelligenceService
 from .cancel import OperationCancelCommand, OperationCancellationRequester
 from .dto import OperationStatusView, OperationSummary
 from .list import OperationListCommand, OperationLister
 from .status import OperationStatusCommand, OperationStatusReader
 
-_ACTIONS = frozenset({"get", "list", "cancel"})
+_ACTIONS = frozenset({"get", "list", "cancel", "failure_evidence"})
 
 
 def _invalid(message: str) -> RepoForgeError:
     return RepoForgeError(
         message,
         code=ErrorCode.OPERATION_INVALID,
-        safe_next_action="Use operation with action=get, list, or cancel and only the fields valid for that action.",
+        safe_next_action=(
+            "Use operation with action=get, list, cancel, or failure_evidence and only "
+            "the fields valid for that action."
+        ),
     )
 
 
@@ -32,6 +36,7 @@ class OperationCommand:
     expected_updated_at: str | None = None
     limit: int = 50
     cursor: str | None = None
+    failure_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +48,7 @@ class OperationResult:
     cancellation_requested: bool
     truncated: bool
     next_cursor: str | None
+    failure_evidence: dict[str, object] | None = None
 
 
 def _poll_after(view: OperationSummary | OperationStatusView) -> float | None:
@@ -108,16 +114,32 @@ class OperationCoordinator:
         status: OperationStatusReader,
         lister: OperationLister,
         cancel: OperationCancellationRequester,
+        failure_evidence: FailureIntelligenceService,
         request_live_cancel: Callable[[str, str], bool] | None = None,
     ) -> None:
         self.status = status
         self.lister = lister
         self.cancel = cancel
+        self.failure_evidence = failure_evidence
         self.request_live_cancel = request_live_cancel
 
     def execute(self, command: OperationCommand) -> OperationResult:
         if command.action not in _ACTIONS:
             raise _invalid(f"Unknown operation action {command.action!r}")
+        if command.action == "failure_evidence":
+            if command.failure_id is None:
+                raise _invalid("operation failure_evidence requires failure_id")
+            evidence = self.failure_evidence.read(FailureEvidenceReadCommand(command.failure_id))
+            return OperationResult(
+                summary=f"Read failure evidence {command.failure_id}",
+                action="failure_evidence",
+                operation=None,
+                operations=[],
+                cancellation_requested=False,
+                truncated=False,
+                next_cursor=None,
+                failure_evidence=evidence,
+            )
         if command.action == "get":
             if command.operation_id is None:
                 raise _invalid("operation get requires operation_id")

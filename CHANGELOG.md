@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Integrated the pre-cutover execution-plan and failure-intelligence machinery into the static 28-tool surface instead of dropping it: `workspace_verify.mode = "plan"` gained a `plan_action = "create" | "accept" | "execute"` lifecycle for the immutable multi-stage DAG, and `operation` gained a `failure_evidence` action for exact, content-addressed failure lookup by `failure_id`. No tool was added or renamed.
+- `repo_list` now performs deterministic repository selection (`requested_repo` hint, `exact_match` / `single_enrolled` / `input_required` / `no_match` outcomes) with a capability-independent `selection_prompt` fallback, instead of leaving ambiguous multi-repo selection to the caller.
+- GitHub ticket-graph evidence completeness is now reported per capability (`issue`, `sub_issues`, `comments`, `dependencies`, `project_overlay`) instead of one blanket `evidence_complete` flag, so callers can tell exactly which GitHub read is incomplete; `repo_issue_spec` skips metadata drift comparison for an issue whose own `issue` capability is incomplete rather than comparing against a possibly-defaulted status/priority.
 - Cut the public MCP surface over to connector identity `forge_v2`: exactly 28 statically registered Pydantic tools, closed input/output schemas, generated schema and release-contract goldens, one unified typed error envelope, and no client-negotiated Forge v1 aliases.
 - Made `structuredContent` authoritative with short text summaries, bounded response tracing, and a deployment-level legacy text-duplication compatibility switch; the retired `forge_v1` identity exposes only `migration_required`.
 - Added the journaled `workspace_mutate` transaction, consolidated read/search/lifecycle/verification/shipping/operation families, impact-routed verification with fail-safe full fallback, and deterministic mutation replay.

@@ -14,6 +14,9 @@ from .execution_environment import (
     ExecutionEnvironmentPort,
     ExecutionReceipt,
 )
+from .execution_plan_store import ExecutionPlanAcceptanceStore, ExecutionPlanStore
+from .execution_receipt_store import ExecutionReceiptStore
+from .failure_evidence_store import FailureEvidencePage, FailureEvidenceStore
 from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
 from .git import (
@@ -32,6 +35,7 @@ from .github import (
     GitHubJobLog,
     PullRequestGateway,
 )
+from .github_capabilities import GitHubCapabilityProbe
 from .github_read_cache import GitHubReadCache
 from .hygiene import (
     HygieneBaselineCache,
@@ -42,6 +46,7 @@ from .hygiene import (
 )
 from .idempotency import IdempotencyStore
 from .ids import IdGenerator
+from .iteration_cache import IterationCache
 from .locking import LockManager
 from .metrics import MetricsSink
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
@@ -95,7 +100,12 @@ __all__ = [
     "EnvironmentPreflight",
     "ExecutableLocator",
     "ExecutionEnvironmentPort",
+    "ExecutionPlanAcceptanceStore",
+    "ExecutionPlanStore",
     "ExecutionReceipt",
+    "ExecutionReceiptStore",
+    "FailureEvidencePage",
+    "FailureEvidenceStore",
     "FileSystem",
     "FileTransaction",
     "FileTransactionFactory",
@@ -103,6 +113,7 @@ __all__ = [
     "GitBaseReferences",
     "GitHubActionsJob",
     "GitHubActionsStep",
+    "GitHubCapabilityProbe",
     "GitHubCheckAnnotation",
     "GitHubCheckRun",
     "GitHubJobLog",
@@ -118,6 +129,7 @@ __all__ = [
     "HygieneInspection",
     "IdGenerator",
     "IdempotencyStore",
+    "IterationCache",
     "LockManager",
     "MetricsSink",
     "OnboardingEnvironment",

@@ -13,6 +13,7 @@ from .adapters.audit import JsonlAuditSink as JsonlAuditSink
 from .adapters.audit.query import prune_audit_log as prune_audit_log
 from .adapters.audit.query import read_audit_event_page as read_audit_event_page
 from .adapters.audit.query import read_audit_events as read_audit_events
+from .adapters.audit.query import read_audit_events_since as read_audit_events_since
 from .adapters.audit.query import (
     summarize_command_source_stats as summarize_command_source_stats,
 )
@@ -31,7 +32,11 @@ from .adapters.filesystem.receipt_transaction_factory import (
     ReceiptJournaledFileTransactionFactory,
 )
 from .adapters.git import GitCliRepository
-from .adapters.github import CommandGitHubTicketGraphGateway, GhCliGateway
+from .adapters.github import (
+    CommandGitHubCapabilityProbe,
+    CommandGitHubTicketGraphGateway,
+    GhCliGateway,
+)
 from .adapters.github.ticket_project import GhTicketProjectGateway
 from .adapters.hygiene import CommandHygieneGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
@@ -40,10 +45,15 @@ from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
     JsonApprovalPayloadStore,
     JsonApprovalStore,
+    JsonExecutionPlanAcceptanceStore,
+    JsonExecutionPlanStore,
+    JsonExecutionReceiptStore,
     JsonExternalMutationLedger,
+    JsonFailureEvidenceStore,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
+    JsonIterationCache,
     JsonOnboardingStore,
     JsonOperationResultStore,
     JsonOperationStore,
@@ -138,14 +148,20 @@ from .ports import (
     ConfigurationStore,
     ExecutableLocator,
     ExecutionEnvironmentPort,
+    ExecutionPlanAcceptanceStore,
+    ExecutionPlanStore,
+    ExecutionReceiptStore,
+    FailureEvidenceStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
     HygieneBaselineCache,
     HygieneGateway,
     IdempotencyStore,
     IdGenerator,
+    IterationCache,
     LockManager,
     MetricsSink,
     OnboardingEnvironment,
@@ -195,6 +211,7 @@ class AdapterOverrides:
     github: PullRequestGateway | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
+    github_capabilities: GitHubCapabilityProbe | None = None
     executables: ExecutableLocator | None = None
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
@@ -214,6 +231,11 @@ class AdapterOverrides:
     issue_mutations: IssueMutationGateway | None = None
     external_mutations: ExternalMutationLedger | None = None
     receipt_file_transactions: ReceiptFileTransactionFactory | None = None
+    execution_plans: ExecutionPlanStore | None = None
+    execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
+    execution_receipts: ExecutionReceiptStore | None = None
+    iteration_cache: IterationCache | None = None
+    failure_evidence: FailureEvidenceStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +506,9 @@ def build_application(
     )
     ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
     ticket_projects = o.ticket_projects or GhTicketProjectGateway(command, config.server)
+    github_capabilities = o.github_capabilities or CommandGitHubCapabilityProbe(
+        command, config.server
+    )
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
@@ -493,6 +518,17 @@ def build_application(
     )
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
+    execution_plans = o.execution_plans or JsonExecutionPlanStore(config.server.state_root, locks)
+    execution_plan_acceptances = o.execution_plan_acceptances or JsonExecutionPlanAcceptanceStore(
+        config.server.state_root, locks
+    )
+    execution_receipts = o.execution_receipts or JsonExecutionReceiptStore(
+        config.server.state_root, locks
+    )
+    iteration_cache = o.iteration_cache or JsonIterationCache(config.server.state_root, locks)
+    failure_evidence = o.failure_evidence or JsonFailureEvidenceStore(
+        config.server.state_root, locks
+    )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
@@ -545,6 +581,12 @@ def build_application(
         approvals=approvals,
         approval_payloads=approval_payloads,
         receipt_file_transactions=receipt_file_transactions,
+        github_capabilities=github_capabilities,
+        execution_plans=execution_plans,
+        execution_plan_acceptances=execution_plan_acceptances,
+        execution_receipts=execution_receipts,
+        iteration_cache=iteration_cache,
+        failure_evidence=failure_evidence,
     )
     operations = OperationManager(context)
     recover_operations(

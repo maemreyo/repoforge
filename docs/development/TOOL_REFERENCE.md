@@ -46,6 +46,8 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 
 `repo_history.mode` is one of `commit`, `log`, or `compare`. Compare mode requires base and head refs. All repository reads are snapshot-bound and policy-filtered.
 
+`repo_list`'s optional `requested_repo` hint resolves deterministically to `selection.outcome`: `exact_match` or `single_enrolled` proceed without asking; `input_required` returns bounded `candidates` plus a `selection_prompt` that is present and identical whether or not the client negotiated Elicitation; `no_match` means nothing enrolled matches. Never guess a `repo_id` when the outcome is `input_required`.
+
 ### GitHub-native issues and repository policy
 
 | Tool | Purpose |
@@ -54,6 +56,8 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 | `repo_policy` | Preview or apply one exact-state-bound repository policy proposal. |
 
 `repo_issue.mode` supports `read`, `spec`, `graph`, `next`, `comment`, `close`, `reopen`, `link`, and `create`. Mutating modes require the fields declared by the strict schema, including evidence and idempotency where applicable. GitHub-native sub-issues and blocked-by relationships are authoritative; a checked-in ticket graph is not required for live readiness.
+
+`graph`, `next`, `read`, and `spec` results include `capability_coverage`: per-capability completeness (`issue`, `sub_issues`, `comments`, `dependencies`, `project_overlay`) with any affected issue numbers and whether that capability's read was truncated, so a caller can tell exactly which GitHub read is missing instead of one blanket evidence flag.
 
 `repo_policy.action` is `preview` or `apply`. Preview returns a state-bound token and normalized changes. Apply accepts the token only; it recomputes and rejects stale or mismatched state. Restrictions may activate immediately. Capability expansions remain pending until an operator approves them in the terminal.
 
@@ -118,9 +122,11 @@ Only a successful verification-enabled profile on the exact current fingerprint 
 
 | Tool | Purpose |
 | --- | --- |
-| `operation` | `get`, `list`, or `cancel` one durable-operation surface. Cancellation is a request and terminal state remains explicit. |
+| `operation` | `get`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. |
 | `config_inspect` | Read accepted/active configuration generations, repository facts, pending changes, runtime identity, and health. |
 | `runtime_logs_read` | Read bounded redacted audit or runtime-log evidence with filters and cursors. |
+
+`workspace_verify.mode = "plan"` additionally supports a plan lifecycle for structured multi-stage work: `plan_action = "create"` compiles reviewed profiles/diagnostics into a deterministic typed DAG and returns an immutable plan for operator review; `"accept"` admits it after revalidating every binding; `"execute"` runs it through either iteration stages or the final full boundary, returning a durable operation reference immediately (poll with `operation`). Every completed stage writes a private, bounded, content-addressed receipt. A read-only iteration stage may reuse a private content-addressed cache entry only when workspace/input, stage definition, target identity, environment/toolchain, lockfiles, configuration, policy, and dependency receipts remain compatible; mutating and final-verification stages are always non-cacheable. Only the accepted plan's final verification-enabled stage can populate `last_verification`.
 
 Operational and configuration tools never grant authority based on a model or client declaration. Expansion approval tokens remain outside the conversation.
 

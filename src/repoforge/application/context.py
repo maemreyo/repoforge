@@ -23,14 +23,20 @@ from ..ports import (
     CommandExecutor,
     ExecutableLocator,
     ExecutionEnvironmentPort,
+    ExecutionPlanAcceptanceStore,
+    ExecutionPlanStore,
+    ExecutionReceiptStore,
+    FailureEvidenceStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
     HygieneBaselineCache,
     HygieneGateway,
     IdempotencyStore,
     IdGenerator,
+    IterationCache,
     LockManager,
     MetricsSink,
     OperationGate,
@@ -170,6 +176,7 @@ _MUTATING_ACTIONS = {
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
+    "workspace_execute_plan",
     "workspace_format_changed",
     "workspace_run_adhoc",
     "workspace_verify",
@@ -198,6 +205,7 @@ _POLICY_WRITE_ACTIONS = {
     "workspace_refresh",
     "workspace_run_profile",
     "workspace_run_diagnostic",
+    "workspace_execute_plan",
     "workspace_format_changed",
     "workspace_run_adhoc",
     "workspace_verify",
@@ -236,7 +244,13 @@ class ApplicationContext:
     nudge_tracker: AdoptionNudgeTracker | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
+    github_capabilities: GitHubCapabilityProbe | None = None
     file_transactions: FileTransactionFactory | None = None
+    execution_plans: ExecutionPlanStore | None = None
+    execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
+    execution_receipts: ExecutionReceiptStore | None = None
+    iteration_cache: IterationCache | None = None
+    failure_evidence: FailureEvidenceStore | None = None
 
     def now_epoch(self) -> float:
         try:

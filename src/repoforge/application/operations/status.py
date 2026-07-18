@@ -22,7 +22,7 @@ class OperationStatusReader:
             task = self.operations.status(command.operation_id)
             result = None
             result_store = self.operations.ctx.operation_result_store
-            if result_store is not None and task.result_reference is not None:
+            if result_store is not None:
                 result = result_store.read(command.operation_id)
             return operation_status_view(task, result)
 

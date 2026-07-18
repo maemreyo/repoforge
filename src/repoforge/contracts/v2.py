@@ -236,6 +236,25 @@ class IssueDrift(StrictModel):
     issue_number: int = Field(ge=1)
 
 
+class GraphEvidenceCapability(str, Enum):
+    ISSUE = "issue"
+    COMMENTS = "comments"
+    SUB_ISSUES = "sub_issues"
+    DEPENDENCIES = "dependencies"
+    PROJECT_OVERLAY = "project_overlay"
+
+
+class GraphEvidenceCapabilityCoverage(StrictModel):
+    """Completeness of one independently-observed GitHub read, scoped to the
+    issues it actually touched -- so a caller can tell exactly which
+    capability is missing instead of one blanket `evidence_complete` flag."""
+
+    capability: GraphEvidenceCapability
+    complete: bool
+    unavailable: tuple[int, ...] = Field(default=(), max_length=200)
+    truncated: bool = False
+
+
 class RepoIssueInput(StrictModel):
     repo_id: RepoId
     mode: IssueMode
@@ -321,6 +340,9 @@ class RepoIssueOutput(ToolResponse):
     next_action: ShortText | None = None
     truncated: bool = False
     next_cursor: Cursor | None = None
+    capability_coverage: tuple[GraphEvidenceCapabilityCoverage, ...] = Field(
+        default=(), max_length=5
+    )
 
 
 class PullRequestEvidence(StrictModel):
@@ -350,16 +372,49 @@ class RepoPrReadOutput(ToolResponse):
     next_cursor: Cursor | None = None
 
 
+class RepositorySelectionOutcome(str, Enum):
+    EXACT_MATCH = "exact_match"
+    SINGLE_ENROLLED = "single_enrolled"
+    INPUT_REQUIRED = "input_required"
+    NO_MATCH = "no_match"
+
+
+class RepositorySelectionCandidate(StrictModel):
+    repo_id: RepoId
+    display_name: ShortText
+
+
+class RepositorySelection(StrictModel):
+    outcome: RepositorySelectionOutcome
+    repo_id: RepoId | None = None
+    candidates: tuple[RepositorySelectionCandidate, ...] = Field(default=(), max_length=200)
+    guidance: ShortText
+
+
+class SelectionPrompt(StrictModel):
+    """Deterministic fallback text for an INPUT_REQUIRED decision, present regardless of
+    negotiated Elicitation support (bounded, never gated on client capability)."""
+
+    status: Literal["INPUT_REQUIRED"] = "INPUT_REQUIRED"
+    fallback_for: Literal["elicitation"] = "elicitation"
+    decision_id: Identifier
+    prompt: ShortText
+    allowed_options: tuple[ShortText, ...] = Field(min_length=1, max_length=32)
+
+
 class RepoListInput(StrictModel):
     detail: bool = False
     cursor: Cursor | None = None
     limit: int = Field(default=50, ge=1, le=100)
+    requested_repo: ShortText | None = None
 
 
 class RepoListOutput(ToolResponse):
     repositories: tuple[RepositorySummary, ...] = Field(default=(), max_length=100)
     truncated: bool = False
     next_cursor: Cursor | None = None
+    selection: RepositorySelection
+    selection_prompt: SelectionPrompt | None = None
 
 
 class PolicyAction(str, Enum):
@@ -789,6 +844,47 @@ class VerifyMode(str, Enum):
     ADHOC = "adhoc"
 
 
+class VerifyPlanAction(str, Enum):
+    """Sub-action within `workspace_verify.mode = "plan"`.
+
+    `PREVIEW` (the default) keeps today's read-only assessment-and-recommendations
+    behavior. `CREATE`/`ACCEPT`/`EXECUTE` drive the immutable multi-stage execution
+    plan lifecycle without adding a 29th tool to the static Forge v2 surface."""
+
+    PREVIEW = "preview"
+    CREATE = "create"
+    ACCEPT = "accept"
+    EXECUTE = "execute"
+
+
+class ExecutionPlanStageEvidence(StrictModel):
+    stage_id: Identifier
+    kind: Literal["diagnostic", "profile"]
+    target: str = Field(min_length=1, max_length=4096)
+    selector: str | None = Field(default=None, max_length=256)
+    dependencies: tuple[Identifier, ...] = Field(default=(), max_length=64)
+    boundary: Literal["iteration", "final"]
+    working_directory: RelativePath | None = None
+    timeout_seconds: int = Field(ge=1)
+    mutability: Literal["read_only", "workspace_write"]
+    network_policy: str = Field(min_length=1, max_length=80)
+    failure_policy: Literal["required", "optional"]
+    artifact_paths: tuple[RelativePath, ...] = Field(default=(), max_length=100)
+
+
+class ExecutionPlanEvidence(StrictModel):
+    plan_id: Identifier
+    plan_hash: Sha256
+    task_id: Identifier | None = None
+    ordered_stages: tuple[ExecutionPlanStageEvidence, ...] = Field(default=(), max_length=64)
+    final_profile: Identifier
+    stage_definition_hash: Sha256
+    created_at: str = Field(min_length=1, max_length=80)
+    expires_at: str | None = Field(default=None, max_length=80)
+    accepted: bool
+    acceptance_id: Identifier | None = None
+
+
 class VerifyIntent(str, Enum):
     TDD_RED = "tdd_red"
     TDD_GREEN = "tdd_green"
@@ -862,6 +958,11 @@ class WorkspaceVerifyInput(StrictModel):
     force_rerun: bool = False
     impact_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
     artifact_output_path: RelativePath | None = None
+    plan_action: VerifyPlanAction = VerifyPlanAction.PREVIEW
+    plan_id: Identifier | None = None
+    plan_task_id: Identifier | None = None
+    plan_expires_at: str | None = Field(default=None, max_length=80)
+    plan_through: Literal["iteration", "full"] = "iteration"
 
     @model_validator(mode="after")
     def validate_mode_fields(self) -> WorkspaceVerifyInput:
@@ -878,6 +979,24 @@ class WorkspaceVerifyInput(StrictModel):
             and self.expectation is not VerifyExpectation.FAIL
         ):
             raise ValueError("expected_failure_class requires expectation=fail")
+        if self.plan_action is not VerifyPlanAction.PREVIEW and self.mode is not VerifyMode.PLAN:
+            raise ValueError("plan_action requires mode=plan")
+        if (
+            self.plan_action in {VerifyPlanAction.ACCEPT, VerifyPlanAction.EXECUTE}
+            and self.plan_id is None
+        ):
+            raise ValueError(f"plan_action={self.plan_action.value} requires plan_id")
+        if self.plan_action is VerifyPlanAction.PREVIEW and self.plan_id is not None:
+            raise ValueError("plan_id is only valid for plan_action accept or execute")
+        if self.plan_task_id is not None and self.plan_action not in {
+            VerifyPlanAction.CREATE,
+            VerifyPlanAction.ACCEPT,
+        }:
+            raise ValueError("plan_task_id is only valid for plan_action create or accept")
+        if self.plan_expires_at is not None and self.plan_action is not VerifyPlanAction.CREATE:
+            raise ValueError("plan_expires_at is only valid for plan_action create")
+        if self.plan_through != "iteration" and self.plan_action is not VerifyPlanAction.EXECUTE:
+            raise ValueError("plan_through is only valid for plan_action execute")
         return self
 
 
@@ -903,6 +1022,7 @@ class WorkspaceVerifyOutput(ToolResponse):
     satisfies_commit_gate: bool
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
+    plan: ExecutionPlanEvidence | None = None
 
 
 class ShippingChangeLimits(StrictModel):
@@ -1088,6 +1208,93 @@ class OperationAction(str, Enum):
     GET = "get"
     LIST = "list"
     CANCEL = "cancel"
+    FAILURE_EVIDENCE = "failure_evidence"
+
+
+class FailureEvidenceWorkspaceIdentity(StrictModel):
+    head_sha: GitObjectId
+    workspace_fingerprint: Sha256
+    config_generation: Sha256
+    policy_hash: Sha256
+
+
+class FailureRecoveryAction(StrictModel):
+    kind: Literal[
+        "operation_status",
+        "workspace_status",
+        "workspace_run_diagnostic",
+        "workspace_run_profile",
+        "workspace_create_execution_plan",
+        "workspace_execute_plan",
+        "workspace_refresh_preview",
+        "workspace_restore_paths",
+        "config_inspect",
+    ]
+    precondition: str = Field(min_length=1, max_length=500)
+    diagnostic_id: Identifier | None = None
+    profile_name: Identifier | None = None
+    through: Literal["iteration", "full"] | None = None
+    relative_paths: tuple[RelativePath, ...] = Field(default=(), max_length=200)
+
+
+class FailureAffectedScope(StrictModel):
+    paths: tuple[RelativePath, ...] = Field(default=(), max_length=100)
+    tests: tuple[str, ...] = Field(default=(), max_length=100)
+    symbols: tuple[str, ...] = Field(default=(), max_length=100)
+
+
+class FailureEvidenceDetail(StrictModel):
+    """One exact, private, content-addressed failure -- bounded, secret-redacted,
+    restart-safe -- with normalized failure class, stable error code, exact
+    pre/post identities, affected scope, and ordered typed recovery actions that
+    never contain arbitrary command text."""
+
+    failure_id: Identifier
+    operation_id: Identifier
+    plan_id: Identifier
+    plan_hash: Sha256
+    stage_id: Identifier
+    receipt_id: Identifier | None = None
+    pre_identity: FailureEvidenceWorkspaceIdentity
+    post_identity: FailureEvidenceWorkspaceIdentity
+    environment_identity: Sha256 | None = None
+    compatibility_binding: Sha256
+    failure_class: Literal[
+        "tool_missing",
+        "dependency_missing",
+        "environment_mismatch",
+        "configuration_invalid",
+        "timeout",
+        "cancelled",
+        "lint_failure",
+        "type_failure",
+        "test_failure",
+        "build_failure",
+        "network_failure",
+        "permission_failure",
+        "policy_failure",
+        "stale_workspace",
+        "stale_plan",
+        "unexpected_mutation",
+        "provider_failure",
+        "flaky_suspected",
+        "unknown",
+    ]
+    stable_error_code: Identifier
+    first_diagnostic: str = Field(min_length=1, max_length=500)
+    excerpt: str = Field(min_length=1, max_length=4_000)
+    excerpt_sha256: Sha256
+    excerpt_reference: str = Field(min_length=1, max_length=500)
+    affected_scope: FailureAffectedScope
+    reproducibility: Literal["reproducible", "intermittent", "unknown"]
+    files_changed: bool
+    retryable: bool
+    confidence: int = Field(ge=0, le=100)
+    uncertainty: tuple[str, ...] = Field(default=(), max_length=100)
+    safe_actions: tuple[FailureRecoveryAction, ...] = Field(min_length=1, max_length=20)
+    source_digest: Sha256
+    created_at: str = Field(min_length=1, max_length=80)
+    schema_version: int = Field(ge=1)
 
 
 class OperationInput(StrictModel):
@@ -1098,6 +1305,7 @@ class OperationInput(StrictModel):
     expected_updated_at: str | None = Field(default=None, max_length=80)
     limit: int = Field(default=50, ge=1, le=200)
     cursor: Cursor | None = None
+    failure_id: Identifier | None = None
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> OperationInput:
@@ -1112,6 +1320,10 @@ class OperationInput(StrictModel):
             raise ValueError("scope, state, and cursor are only valid for operation list")
         if self.action is not OperationAction.CANCEL and self.expected_updated_at is not None:
             raise ValueError("expected_updated_at is only valid for operation cancel")
+        if self.action is OperationAction.FAILURE_EVIDENCE and self.failure_id is None:
+            raise ValueError("operation failure_evidence requires failure_id")
+        if self.action is not OperationAction.FAILURE_EVIDENCE and self.failure_id is not None:
+            raise ValueError("failure_id is only valid for operation failure_evidence")
         return self
 
 
@@ -1122,6 +1334,7 @@ class OperationOutput(ToolResponse):
     cancellation_requested: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
+    failure_evidence: FailureEvidenceDetail | None = None
 
 
 class ConfigInspectInput(StrictModel):

@@ -27,6 +27,86 @@ class AuditEventPage:
     truncated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class AuditCursorPage:
+    """One `rf audit --since <cursor>` page (#210).
+
+    `status="cursor_gap"` means the cursor is older than the oldest surviving `seq` (some
+    events between them were pruned); the consumer should restart from `watermark` rather than
+    silently skipping the hole. Delivery is at-least-once: replaying the same cursor after a
+    crash between "act" and "persist cursor" reproduces the same events, which the consumer
+    must handle idempotently -- this page never claims exactly-once delivery.
+    """
+
+    status: str
+    events: tuple[dict[str, Any], ...] = ()
+    next_cursor: int = 0
+    watermark: int | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "status": self.status,
+            "next_cursor": self.next_cursor,
+        }
+        if self.status == "ok":
+            payload["events"] = list(self.events)
+        if self.watermark is not None:
+            payload["watermark"] = self.watermark
+        return payload
+
+
+def read_audit_events_since(path: Path, *, cursor: int, limit: int = 500) -> AuditCursorPage:
+    """Return events with `seq > cursor`, oldest first, plus the cursor to resume from.
+
+    Sequence-based, not byte-offset-based, so it survives `prune_audit_log` removing a
+    prefix of the file: pruned events simply vanish from `seqs_seen`, and a `cursor` that
+    would have pointed into the pruned range comes back as `CURSOR_GAP` with the watermark
+    (the lowest surviving `seq`) instead of silently resuming past the hole.
+    """
+
+    if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+        raise ConfigError("cursor must be a non-negative integer")
+    if limit <= 0 or limit > 5_000:
+        raise ConfigError("Audit cursor query limit must be between 1 and 5000")
+    if not path.is_file():
+        return AuditCursorPage(status="ok", events=(), next_cursor=cursor)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - _MAX_SCAN_BYTES))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigError(f"Cannot read audit log {path}: {exc}") from exc
+
+    ordered: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        seq = event.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
+            ordered.append(event)
+        # legacy events written before #210 carry no seq and are unaddressable by cursor
+
+    if not ordered:
+        return AuditCursorPage(status="ok", events=(), next_cursor=cursor)
+
+    watermark = min(int(event["seq"]) for event in ordered)
+    if cursor > 0 and cursor < watermark - 1:
+        return AuditCursorPage(status="cursor_gap", watermark=watermark, next_cursor=cursor)
+
+    matched = [event for event in ordered if int(event["seq"]) > cursor][:limit]
+    next_cursor = int(matched[-1]["seq"]) if matched else cursor
+    return AuditCursorPage(status="ok", events=tuple(matched), next_cursor=next_cursor)
+
+
 def _result_bytes_count(stats: dict[str, Any]) -> int:
     raw = stats.get("result_bytes_count")
     if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:

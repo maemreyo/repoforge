@@ -12,7 +12,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ToolAnnotations
@@ -41,6 +41,7 @@ from ...domain.errors import ConfigError, WorkspaceError, operation_error_from_e
 from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
+from .capabilities import capability_policy_from_context
 from .payload import render_tool_payload
 
 FORGE_V2_IDENTITY = "forge_v2"
@@ -145,7 +146,15 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "repo_history": "Read a commit, recent history, or a bounded comparison between two refs.",
     "repo_issue": "Read, plan, graph, create, link, comment on, close, or reopen a GitHub issue through one typed tool.",
     "repo_pr_read": "Read bounded overview, files, checks, reviews, comments, or failure evidence for one pull request.",
-    "repo_list": "List configured repositories and optionally include reviewed capability detail.",
+    "repo_list": (
+        "List configured repositories and optionally include reviewed capability detail. Pass "
+        "requested_repo as the exact repo_id, display name, or remote name the user explicitly "
+        "named; leave it unset if they did not -- never guess from unrelated wording. Read "
+        "selection.outcome: single_enrolled/exact_match means proceed with selection.repo_id "
+        "without asking; input_required means ask the user to choose from selection.candidates "
+        "(never by recency, filesystem order, default base branch, or your own preference); "
+        "no_match means no repository is enrolled yet."
+    ),
     "repo_policy": "Preview or apply an exact-state-bound repository policy proposal through the reviewed generation pipeline.",
     "workspace_create": "Create one isolated ai/* worktree for a task or deliberate stacked issue chain.",
     "workspace_remove": "Remove a clean local worktree without touching remote data.",
@@ -508,7 +517,18 @@ class ForgeV2FastMCP(FastMCP[None]):
                 raise WorkspaceError(
                     "STALE_WORKSPACE_HEAD: expected_head_sha does not match current HEAD"
                 )
-        return self._service_boundary.call(method, **kwargs)
+        result = self._service_boundary.call(method, **kwargs)
+        if tool_name == "repo_list":
+            selection = result.get("selection")
+            if isinstance(selection, dict) and selection.get("outcome") == "input_required":
+                policy = capability_policy_from_context(self.get_context())
+                candidates = cast("list[dict[str, Any]]", selection.get("candidates", []))
+                result["selection_prompt"] = policy.input_required(
+                    decision_id="repo_selection",
+                    prompt=cast(str, selection.get("guidance", "")),
+                    allowed_options=tuple(candidate["repo_id"] for candidate in candidates),
+                )
+        return result
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         if name not in V2_TOOL_SPECS:
