@@ -371,7 +371,13 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
 
     path.write_text("not json", encoding="utf-8")
     metrics = JsonMetricsSink(tmp_path, locks, FixedClock())
-    assert metrics.snapshot() == {"version": 3, "operations": {}, "buckets": {}}
+    empty_snapshot = {
+        "version": 4,
+        "operations": {},
+        "buckets": {},
+        "latency": {"tool_classes": {}},
+    }
+    assert metrics.snapshot() == empty_snapshot
 
     path.write_text(
         json.dumps({"version": 2, "operations": {}, "buckets": "not-a-dict"}), encoding="utf-8"
@@ -379,7 +385,7 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
     assert metrics.snapshot()["buckets"] == {}
 
     path.write_text(json.dumps({"version": 2, "operations": "not-a-dict"}), encoding="utf-8")
-    assert metrics.snapshot() == {"version": 3, "operations": {}, "buckets": {}}
+    assert metrics.snapshot() == empty_snapshot
 
     metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
     assert metrics.snapshot()["operations"]["workspace_status"]["count"] == 1

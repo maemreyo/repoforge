@@ -208,6 +208,7 @@ class ServerConfig:
     state_root: Path
     max_file_bytes: int = 2_000_000
     max_tool_output_chars: int = 120_000
+    legacy_text_result_duplication: bool = False
     default_command_timeout_seconds: int = 120
     verification_timeout_seconds: int = 1_800
     max_fingerprint_bytes: int = 50 * 1024 * 1024
@@ -891,6 +892,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ),
         max_tool_output_chars=_positive_int(
             server_raw.get("max_tool_output_chars"), 120_000, "server.max_tool_output_chars"
+        ),
+        legacy_text_result_duplication=_boolean(
+            server_raw.get("legacy_text_result_duplication"),
+            False,
+            "server.legacy_text_result_duplication",
         ),
         default_command_timeout_seconds=_positive_int(
             server_raw.get("default_command_timeout_seconds"),

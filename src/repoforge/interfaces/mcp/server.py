@@ -8,15 +8,17 @@ import inspect
 import json
 import os
 import secrets
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ToolAnnotations
 from mcp.types import Tool as McpTool
-from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from ...application.config_admin import ConfigAdminService
@@ -26,10 +28,12 @@ from ...application.service import CodingService
 from ...application.workspace.edit import FileEdit
 from ...config import load_config
 from ...domain.errors import ConfigError, operation_error_from_exception
+from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
 from ...domain.tool_contract import ToolContractRegistry, default_tool_contract_registry
 from .capabilities import client_capabilities_from_context
+from .payload import render_tool_payload
 
 
 class ContractAwareFastMCP(FastMCP[None]):
@@ -39,11 +43,13 @@ class ContractAwareFastMCP(FastMCP[None]):
         self,
         *args: Any,
         contract_registry: ToolContractRegistry,
+        service_boundary: _ServiceErrorBoundary,
         contract_version: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._contract_registry = contract_registry
+        self._service_boundary = service_boundary
         self._contract_version = contract_version
         if contract_version is not None:
             self._contract_registry.tool_names(contract_version, frozenset())
@@ -139,9 +145,72 @@ class ContractAwareFastMCP(FastMCP[None]):
             if alias.active_in(version)
         }
         alias = active_aliases.get(name)
-        if alias is not None:
-            return await super().call_tool(alias.canonical, arguments)
-        return await super().call_tool(name, arguments)
+        target_name = alias.canonical if alias is not None else name
+
+        with self._service_boundary.bind_request_service() as service:
+            started = time.perf_counter()
+            result = await super().call_tool(target_name, arguments)
+            engine_ms = (time.perf_counter() - started) * 1_000.0
+            server_config = getattr(getattr(service, "config", None), "server", None)
+            legacy_duplication = bool(
+                getattr(server_config, "legacy_text_result_duplication", False)
+            )
+
+            existing_meta: dict[str, Any] = {}
+            structured: dict[str, Any] | None = None
+            if isinstance(result, CallToolResult):
+                if isinstance(result.structuredContent, dict):
+                    structured = result.structuredContent
+                raw_meta = getattr(result, "meta", None)
+                if isinstance(raw_meta, dict):
+                    existing_meta = dict(raw_meta)
+            elif isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+                structured = result[1]
+            elif isinstance(result, dict):
+                structured = result
+            if structured is None:
+                return result
+
+            rendered = render_tool_payload(
+                target_name,
+                structured,
+                legacy_text_result_duplication=legacy_duplication,
+            )
+            client_name = "unknown"
+            client_version = "unknown"
+            try:
+                params = self.get_context().session.client_params
+                client_info = getattr(params, "clientInfo", None) or getattr(
+                    params, "client_info", None
+                )
+                if client_info is not None:
+                    client_name = str(getattr(client_info, "name", client_name))
+                    client_version = str(getattr(client_info, "version", client_version))
+            except (LookupError, AttributeError):
+                pass
+
+            trace = LatencyTrace(
+                trace_id=f"trace-{secrets.token_hex(16)}",
+                tool_name=target_name,
+                tool_class=rendered.tool_class,
+                client_name=client_name,
+                client_version=client_version,
+                engine=LatencyObservation.observed(LatencyLayer.ENGINE, engine_ms),
+                connector=LatencyObservation.unobserved(LatencyLayer.CONNECTOR),
+                client_round_trip=LatencyObservation.unobserved(LatencyLayer.CLIENT_ROUND_TRIP),
+                payload=rendered.metrics,
+            )
+            # Observability must never turn a completed tool call into a failure.
+            with suppress(Exception):
+                service.metrics.record_latency(trace)
+
+            existing_meta["repoforge_trace"] = trace.as_dict()
+            return CallToolResult(
+                content=rendered.content,
+                structuredContent=rendered.structured,
+                isError=False,
+                _meta=existing_meta,
+            )
 
 
 class _StructuredMcpToolError(RuntimeError):
@@ -161,14 +230,38 @@ class _ServiceErrorBoundary:
             raise ValueError("Exactly one of service or router must be provided")
         self._service = service
         self._router = router
+        self._bound_service: ContextVar[Any | None] = ContextVar(
+            f"repoforge_bound_service_{id(self)}",
+            default=None,
+        )
 
     @contextmanager
-    def _selected_service(self) -> Iterator[Any]:
+    def _acquire_service(self) -> Iterator[Any]:
         if self._router is None:
             yield self._service
             return
         with self._router.acquire() as container:
             yield container.service
+
+    @contextmanager
+    def bind_request_service(self) -> Iterator[Any]:
+        """Pin one hot-reload generation across execution, rendering, and metrics."""
+
+        with self._acquire_service() as service:
+            token = self._bound_service.set(service)
+            try:
+                yield service
+            finally:
+                self._bound_service.reset(token)
+
+    @contextmanager
+    def _selected_service(self) -> Iterator[Any]:
+        bound = self._bound_service.get()
+        if bound is not None:
+            yield bound
+            return
+        with self._acquire_service() as service:
+            yield service
 
     def call(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         has_idempotency_key = False
@@ -386,6 +479,7 @@ def create_server(
         instructions=SERVER_INSTRUCTIONS,
         log_level="WARNING",
         contract_registry=default_tool_contract_registry(),
+        service_boundary=bounded_service,
         contract_version=contract_version,
     )
 
