@@ -14,6 +14,8 @@ from ...domain.redaction import redact_data
 from ...ports.clock import Clock
 from ..system import SystemClock
 
+_SEQ_RECOVERY_TAIL_BYTES = 65_536
+
 
 class JsonlAuditSink:
     def __init__(
@@ -33,6 +35,35 @@ class JsonlAuditSink:
         self._max_bytes = max(1, max_bytes)
         self._backup_count = max(1, backup_count)
         self._max_event_bytes = max(1_024, max_event_bytes)
+        self._seq = self._recover_last_seq()
+
+    def _recover_last_seq(self) -> int:
+        """Recover the last-assigned monotonic sequence from the tail of an existing log so a
+        fresh process (e.g. a new CLI invocation) keeps issuing increasing sequence numbers
+        instead of resetting to zero (#210)."""
+
+        if not self.path.is_file():
+            return 0
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                handle.seek(max(0, size - _SEQ_RECOVERY_TAIL_BYTES))
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return 0
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            seq = event.get("seq") if isinstance(event, dict) else None
+            if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
+                return seq
+        return 0
 
     @staticmethod
     def _fsync_dir(path: Path) -> None:
@@ -60,25 +91,32 @@ class JsonlAuditSink:
         return True
 
     def record(self, action: str, *, success: bool, details: dict[str, Any]) -> None:
-        payload = {
-            "timestamp": self._clock.now_iso(),
-            "pid": os.getpid(),
-            "action": action,
-            "success": success,
-            "details": redact_data(details),
-        }
-        encoded = (json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
-        if len(encoded) > self._max_event_bytes:
-            payload["details"] = {
-                "event_truncated": True,
-                "event_sha256": hashlib.sha256(encoded).hexdigest(),
-                "original_bytes": len(encoded),
-            }
-            encoded = (json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n").encode(
-                "utf-8"
-            )
         try:
             with self._lock:
+                # Sequence assignment and the append must share one lock scope: two writers
+                # each incrementing under separate acquisitions could still land their writes
+                # out of order, breaking the monotonic-cursor guarantee (#210).
+                self._seq += 1
+                payload = {
+                    "timestamp": self._clock.now_iso(),
+                    "pid": os.getpid(),
+                    "seq": self._seq,
+                    "action": action,
+                    "success": success,
+                    "details": redact_data(details),
+                }
+                encoded = (json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+                if len(encoded) > self._max_event_bytes:
+                    payload["details"] = {
+                        "event_truncated": True,
+                        "event_sha256": hashlib.sha256(encoded).hexdigest(),
+                        "original_bytes": len(encoded),
+                    }
+                    encoded = (
+                        json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n"
+                    ).encode("utf-8")
                 rotated = self._rotate(len(encoded))
                 existed = self.path.exists()
                 descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
