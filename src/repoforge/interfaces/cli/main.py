@@ -68,6 +68,7 @@ from ...bootstrap import (
     default_state_root,
     id_generator,
     prune_audit_log,
+    read_audit_event_page,
     read_audit_events,
     read_runtime_log,
     runtime_log_files,
@@ -1568,6 +1569,7 @@ def _serve(config_path: Path) -> int:
         reload_runtime=reload_in_process,
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_audit_page=read_audit_event_page,
         read_runtime_status=lambda: _runtime_status(store),
     )
     try:

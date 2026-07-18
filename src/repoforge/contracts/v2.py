@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from string import Formatter
 from typing import Annotated, Literal
@@ -1098,6 +1099,21 @@ class OperationInput(StrictModel):
     limit: int = Field(default=50, ge=1, le=200)
     cursor: Cursor | None = None
 
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> OperationInput:
+        if self.action in {OperationAction.GET, OperationAction.CANCEL}:
+            if self.operation_id is None:
+                raise ValueError(f"operation {self.action.value} requires operation_id")
+        elif self.operation_id is not None:
+            raise ValueError("operation_id is only valid for get or cancel")
+        if self.action is not OperationAction.LIST and any(
+            value is not None for value in (self.scope, self.state, self.cursor)
+        ):
+            raise ValueError("scope, state, and cursor are only valid for operation list")
+        if self.action is not OperationAction.CANCEL and self.expected_updated_at is not None:
+            raise ValueError("expected_updated_at is only valid for operation cancel")
+        return self
+
 
 class OperationOutput(ToolResponse):
     action: OperationAction
@@ -1124,6 +1140,10 @@ class ConfigInspectOutput(ToolResponse):
     accepted: ConfigGenerationSummary | None = None
     active: ConfigGenerationSummary | None = None
     pending: tuple[ConfigGenerationSummary, ...] = Field(default=(), max_length=100)
+    capability_delta: (
+        Literal["equivalent", "metadata_only", "expansion", "restriction", "incompatible"] | None
+    ) = None
+    restart_required: bool
     repo_facts: tuple[KeyValue, ...] = Field(default=(), max_length=500)
 
 
@@ -1150,6 +1170,27 @@ class RuntimeLogsReadInput(StrictModel):
     start_time: str | None = Field(default=None, max_length=80)
     end_time: str | None = Field(default=None, max_length=80)
     cursor: Cursor | None = None
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> RuntimeLogsReadInput:
+        parsed: dict[str, datetime] = {}
+        for field, value in (("start_time", self.start_time), ("end_time", self.end_time)):
+            if value is None:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+            if timestamp.tzinfo is None:
+                raise ValueError(f"{field} must include a timezone offset")
+            parsed[field] = timestamp
+        if (
+            "start_time" in parsed
+            and "end_time" in parsed
+            and parsed["start_time"] > parsed["end_time"]
+        ):
+            raise ValueError("start_time must not be after end_time")
+        return self
 
 
 class RuntimeLogsReadOutput(ToolResponse):

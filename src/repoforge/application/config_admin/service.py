@@ -19,16 +19,20 @@ Gating contract (enforced twice — here for UX, and independently by
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ...config import load_config
 from ...domain.config_generation import (
     CapabilityDeltaKind,
+    ConfigGeneration,
     ConfigMutation,
     classify_capability_delta,
     sha256_text,
@@ -41,6 +45,7 @@ from ...domain.policy_patch import (
     ProfilePatch,
     RepositoryPolicyPatch,
 )
+from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
@@ -66,6 +71,43 @@ from ..repository_admin.proposals import RepositoryProposalService
 
 _AUTO_APPLY_DELTAS = frozenset({CapabilityDeltaKind.METADATA_ONLY, CapabilityDeltaKind.RESTRICTION})
 _MAX_LOG_LIMIT = 200
+_HOST_PATH_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9:/])/(?:[^/\s]+/)*[^/\s]+"),
+    re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\(?:[^\\\s]+\\)*[^\\\s]+"),
+)
+
+
+def _redact_host_paths(value: str) -> str:
+    redacted = redact_text(value, limit=4_000)
+    for pattern in _HOST_PATH_PATTERNS:
+        redacted = pattern.sub("<redacted:host_path>", redacted)
+    return redacted
+
+
+class AuditEventPageView(Protocol):
+    @property
+    def events(self) -> list[dict[str, Any]]: ...
+
+    @property
+    def next_cursor(self) -> str | None: ...
+
+    @property
+    def truncated(self) -> bool: ...
+
+
+class AuditPageReader(Protocol):
+    def __call__(
+        self,
+        path: Path,
+        *,
+        limit: int,
+        action: str | None = None,
+        only_failed: bool = False,
+        min_duration_ms: float | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        cursor: str | None = None,
+    ) -> AuditEventPageView: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +137,7 @@ class ConfigAdminService:
         runtime_log_path: Path,
         read_audit: Callable[..., list[dict[str, Any]]],
         read_log: Callable[[Path, int], list[str]],
+        read_audit_page: AuditPageReader | None = None,
         reload_runtime: Callable[[int], dict[str, Any]] | None = None,
         read_runtime_status: Callable[[], dict[str, object]] | None = None,
     ) -> None:
@@ -107,6 +150,7 @@ class ConfigAdminService:
         self._runtime_log_path = runtime_log_path
         self._read_audit = read_audit
         self._read_log = read_log
+        self._read_audit_page = read_audit_page
         self._reload_runtime = reload_runtime
         self._read_runtime_status = read_runtime_status
 
@@ -192,6 +236,310 @@ class ConfigAdminService:
             "repositories": repositories,
             "runtime_health": self._read_runtime_status() if self._read_runtime_status else None,
             "pending_changes": self.pending.summaries(),
+        }
+
+    @staticmethod
+    def _changed_sections(changes: object) -> list[str]:
+        if not isinstance(changes, list):
+            return []
+        sections: set[str] = set()
+        for item in changes:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            if isinstance(path, str) and path:
+                sections.add(path.split(".", 1)[0])
+        return sorted(sections)[:100]
+
+    def _generation_summary(self, generation: ConfigGeneration, state: str) -> dict[str, Any]:
+        changed_sections: list[str]
+        previous = getattr(generation, "previous_generation", None)
+        if isinstance(previous, int) and previous > 0:
+            delta = classify_capability_delta(
+                self._store.read_resolved_text(previous),
+                self._store.read_resolved_text(generation.generation),
+            )
+            changed_sections = sorted({item.path.split(".", 1)[0] for item in delta.changes})[:100]
+        else:
+            document = parse_resolved(self._store.read_resolved_text(generation.generation))
+            changed_sections = sorted(
+                key for key in document if key not in {"repoforge_lock", "schema_version"}
+            )[:100]
+        return {
+            "generation": generation.generation,
+            "state": state,
+            "digest": generation.resolved_sha256,
+            "changed_sections": changed_sections,
+        }
+
+    def config_inspect_v2(
+        self, repo_id: str | None = None, include_pending: bool = True
+    ) -> dict[str, Any]:
+        current = self._store.current()
+        if current is None:
+            raise ConfigError("No accepted configuration generation")
+        active = self._store.active()
+        document = parse_resolved(self._store.read_resolved_text(current.generation))
+        repositories = document.get("repositories", {})
+        if not isinstance(repositories, dict):
+            raise ConfigError("Resolved configuration repositories must be a table")
+        if repo_id is not None and repo_id not in repositories:
+            raise ConfigError(f"Unknown repository id: {repo_id}")
+        selected = [repo_id] if repo_id is not None else sorted(str(key) for key in repositories)
+        facts: list[dict[str, str]] = []
+        for name in selected:
+            entry = repositories.get(name)
+            if not isinstance(entry, dict):
+                continue
+            prefix = "" if repo_id is not None or len(selected) == 1 else f"{name}."
+            profiles = entry.get("profiles")
+            diagnostics = entry.get("diagnostics")
+            values = {
+                "repo_id": name,
+                "read_only": str(bool(entry.get("read_only", False))).lower(),
+                "publish_enabled": str(bool(entry.get("publish_enabled", False))).lower(),
+                "default_base": str(entry.get("default_base", "")),
+                "profile_count": str(len(profiles) if isinstance(profiles, dict) else 0),
+                "diagnostic_count": str(len(diagnostics) if isinstance(diagnostics, dict) else 0),
+                "execution_mode": str(entry.get("execution_mode", "strict")),
+            }
+            facts.extend(
+                {"key": prefix + key, "value": value[:10_000]}
+                for key, value in sorted(values.items())
+            )
+        pending: list[dict[str, Any]] = []
+        if include_pending:
+            for item in self.pending.summaries()[:100]:
+                expected = item.get("expected_generation")
+                if not isinstance(expected, int) or expected <= 0:
+                    continue
+                encoded = json.dumps(item, sort_keys=True, default=str, separators=(",", ":"))
+                pending.append(
+                    {
+                        "generation": expected,
+                        "state": "pending",
+                        "digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                        "changed_sections": self._changed_sections(item.get("changes")),
+                    }
+                )
+        restart_required = active is None or active.generation != current.generation
+        return {
+            "status": "ok",
+            "summary": f"Inspected accepted configuration generation {current.generation}",
+            "error": None,
+            "accepted": self._generation_summary(current, "accepted"),
+            "active": self._generation_summary(active, "active") if active is not None else None,
+            "pending": pending,
+            "capability_delta": current.delta.value,
+            "restart_required": restart_required,
+            "repo_facts": facts,
+        }
+
+    @staticmethod
+    def _parse_log_time(value: str | None, field: str) -> datetime | None:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ConfigError(f"{field} must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            raise ConfigError(f"{field} must include a timezone offset")
+        return parsed
+
+    @staticmethod
+    def _runtime_cursor_binding(
+        *,
+        source: str,
+        action: str | None,
+        only_failed: bool,
+        min_duration_ms: float | None,
+        start_time: str | None,
+        end_time: str | None,
+    ) -> str:
+        payload = {
+            "action": action,
+            "end_time": end_time,
+            "min_duration_ms": min_duration_ms,
+            "only_failed": only_failed,
+            "source": source,
+            "start_time": start_time,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:24]
+
+    @staticmethod
+    def _runtime_entry(line: str) -> dict[str, Any]:
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            raw = None
+        if isinstance(raw, dict):
+            timestamp = raw.get("timestamp")
+            level = raw.get("level", "INFO")
+            message = raw.get("message", "")
+            action = raw.get("action")
+            duration = raw.get("duration_ms")
+            return {
+                "timestamp": (
+                    timestamp
+                    if isinstance(timestamp, str) and timestamp
+                    else "1970-01-01T00:00:00+00:00"
+                ),
+                "source": "runtime",
+                "action": action if isinstance(action, str) else None,
+                "level": str(level)[:30] or "INFO",
+                "message": _redact_host_paths(str(message)),
+                "duration_ms": (
+                    float(duration)
+                    if isinstance(duration, (int, float)) and duration >= 0
+                    else None
+                ),
+            }
+        return {
+            "timestamp": "1970-01-01T00:00:00+00:00",
+            "source": "runtime",
+            "action": None,
+            "level": "INFO",
+            "message": _redact_host_paths(line),
+            "duration_ms": None,
+        }
+
+    def runtime_logs_read_v2(
+        self,
+        source: str = "audit",
+        *,
+        limit: int = 50,
+        action: str | None = None,
+        only_failed: bool = False,
+        min_duration_ms: float | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        if source not in {"audit", "runtime"}:
+            raise ConfigError("runtime_logs_read source must be 'audit' or 'runtime'")
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= _MAX_LOG_LIMIT
+        ):
+            raise ConfigError(f"runtime_logs_read limit must be between 1 and {_MAX_LOG_LIMIT}")
+        start = self._parse_log_time(start_time, "start_time")
+        end = self._parse_log_time(end_time, "end_time")
+        if start is not None and end is not None and start > end:
+            raise ConfigError("start_time must not be after end_time")
+        if source == "audit":
+            if self._read_audit_page is None:
+                raise ConfigError("Bounded audit paging is not configured")
+            page = self._read_audit_page(
+                self._audit_log_path,
+                limit=limit,
+                action=action,
+                only_failed=only_failed,
+                min_duration_ms=min_duration_ms,
+                start_time=start_time,
+                end_time=end_time,
+                cursor=cursor,
+            )
+            entries: list[dict[str, Any]] = []
+            for event in page.events:
+                details = event.get("details")
+                duration = details.get("duration_ms") if isinstance(details, dict) else None
+                success = bool(event.get("success", True))
+                error_code = details.get("error_code") if isinstance(details, dict) else None
+                entries.append(
+                    {
+                        "timestamp": str(event.get("timestamp") or "1970-01-01T00:00:00+00:00")[
+                            :80
+                        ],
+                        "source": "audit",
+                        "action": (
+                            str(event["action"])[:160]
+                            if isinstance(event.get("action"), str)
+                            else None
+                        ),
+                        "level": "INFO" if success else "ERROR",
+                        "message": (
+                            "succeeded"
+                            if success
+                            else f"failed{f' ({error_code})' if isinstance(error_code, str) else ''}"
+                        ),
+                        "duration_ms": (
+                            float(duration)
+                            if isinstance(duration, (int, float)) and duration >= 0
+                            else None
+                        ),
+                    }
+                )
+            return {
+                "status": "ok",
+                "summary": f"Read {len(entries)} bounded audit log entries",
+                "error": None,
+                "source": "audit",
+                "entries": entries,
+                "truncated": bool(page.truncated),
+                "next_cursor": page.next_cursor,
+            }
+        binding = self._runtime_cursor_binding(
+            source=source,
+            action=action,
+            only_failed=only_failed,
+            min_duration_ms=min_duration_ms,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        raw_lines = list(reversed(self._read_log(self._runtime_log_path, 1_000)))
+        snapshot = hashlib.sha256(
+            json.dumps(raw_lines, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:24]
+        offset = 0
+        if cursor is not None:
+            parts = cursor.split(":", 3)
+            if (
+                len(parts) != 4
+                or parts[0] != "runtime-v1"
+                or parts[1] != binding
+                or not parts[3].isdigit()
+            ):
+                raise ConfigError("Runtime log cursor is invalid or belongs to different filters")
+            if parts[2] != snapshot:
+                raise ConfigError("Runtime log cursor is stale because the log snapshot changed")
+            offset = int(parts[3])
+        matched: list[dict[str, Any]] = []
+        for line in raw_lines:
+            entry = self._runtime_entry(line)
+            if action is not None and entry["action"] != action:
+                continue
+            if only_failed and str(entry["level"]).upper() not in {"ERROR", "CRITICAL"}:
+                continue
+            duration = entry["duration_ms"]
+            if min_duration_ms is not None and (
+                not isinstance(duration, (int, float)) or duration < min_duration_ms
+            ):
+                continue
+            timestamp = self._parse_log_time(str(entry["timestamp"]), "runtime timestamp")
+            if start is not None and (timestamp is None or timestamp < start):
+                continue
+            if end is not None and (timestamp is None or timestamp > end):
+                continue
+            matched.append(entry)
+        selected = matched[offset : offset + limit]
+        has_more = offset + len(selected) < len(matched)
+        next_cursor = (
+            f"runtime-v1:{binding}:{snapshot}:{offset + len(selected)}"
+            if selected and has_more
+            else None
+        )
+        return {
+            "status": "ok",
+            "summary": f"Read {len(selected)} bounded runtime log entries",
+            "error": None,
+            "source": "runtime",
+            "entries": selected,
+            "truncated": has_more or len(raw_lines) >= 1_000,
+            "next_cursor": next_cursor,
         }
 
     def runtime_logs_read(

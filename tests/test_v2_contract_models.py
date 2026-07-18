@@ -98,6 +98,42 @@ def test_runtime_log_limit_bound_is_published_and_enforced() -> None:
         raise AssertionError("runtime_logs_read limit=201 must be rejected")
 
 
+def test_operation_contract_publishes_all_terminal_states_and_action_validation() -> None:
+    from pydantic import ValidationError
+
+    common, registry = _contracts()
+    assert {item.value for item in common.OperationState} >= {
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "expired",
+        "orphaned",
+    }
+    model = registry.V2_TOOL_SPECS["operation"].input_model
+    with pytest.raises(ValidationError):
+        model(action="get")
+    with pytest.raises(ValidationError):
+        model(action="list", operation_id="op-000000000000000000000001")
+    with pytest.raises(ValidationError):
+        model(action="cancel", operation_id="op-000000000000000000000001", scope="task:x")
+
+
+def test_runtime_log_time_range_requires_timezone_and_order() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    model = registry.V2_TOOL_SPECS["runtime_logs_read"].input_model
+    with pytest.raises(ValidationError):
+        model(start_time="2026-07-16T00:00:00")
+    with pytest.raises(ValidationError):
+        model(
+            start_time="2026-07-16T00:02:00+00:00",
+            end_time="2026-07-16T00:01:00+00:00",
+        )
+
+
 def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
     _, registry = _contracts()
     expectations = {

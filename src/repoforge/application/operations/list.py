@@ -57,7 +57,7 @@ class OperationLister:
     def execute(self, command: OperationListCommand) -> OperationListResult:
         if not isinstance(command.limit, int) or isinstance(command.limit, bool):
             raise _invalid("Operation list limit must be an integer")
-        limit = max(1, min(command.limit, 100))
+        limit = max(1, min(command.limit, 200))
         scope = _parse_scope(command.scope)
         try:
             selected_state = OperationState(command.state) if command.state is not None else None

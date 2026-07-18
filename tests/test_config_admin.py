@@ -30,6 +30,7 @@ from repoforge.application.configuration.source import (
 from repoforge.application.repository_admin.proposals import RepositoryProposalService
 from repoforge.bootstrap import (
     build_pending_policy_change_store,
+    read_audit_event_page,
     read_audit_events,
     read_runtime_log,
 )
@@ -481,6 +482,7 @@ def _admin(
         runtime_log_path=tmp_path / "state" / "managed-runtime.log",
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_audit_page=read_audit_event_page,
         reload_runtime=reload_runtime,
         read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
     )
@@ -807,6 +809,138 @@ def test_runtime_logs_read_bounds_sources_and_filters(tmp_path: Path) -> None:
         admin.runtime_logs_read("secrets")
     with pytest.raises(ConfigError, match="limit"):
         admin.runtime_logs_read("audit", limit=0)
+
+
+def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path, runtime_status={"socket_path": str(tmp_path / "secret.sock")})
+    result = admin.config_inspect_v2(repo_id="demo", include_pending=True)
+
+    V2_TOOL_SPECS["config_inspect"].validate_output(result)
+    rendered = json.dumps(result, sort_keys=True)
+    assert str(tmp_path) not in rendered
+    assert "source_path" not in rendered
+    assert result["accepted"]["state"] == "accepted"
+    assert result["accepted"]["digest"] == admin._store.current().resolved_sha256
+    assert result["active"] is None
+    assert result["restart_required"] is True
+    assert {item["key"] for item in result["repo_facts"]} >= {
+        "repo_id",
+        "read_only",
+        "publish_enabled",
+        "profile_count",
+    }
+
+
+def test_v2_runtime_logs_support_time_range_cursor_and_no_host_paths(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    audit_path = tmp_path / "state" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "timestamp": "2026-07-16T00:00:00+00:00",
+            "action": "workspace_status",
+            "success": True,
+            "details": {"duration_ms": 2, "path": str(tmp_path / "private")},
+        },
+        {
+            "timestamp": "2026-07-16T00:01:00+00:00",
+            "action": "workspace_verify",
+            "success": False,
+            "details": {"duration_ms": 20, "error_code": "COMMAND_FAILED"},
+        },
+        {
+            "timestamp": "2026-07-16T00:02:00+00:00",
+            "action": "workspace_commit",
+            "success": True,
+            "details": {"duration_ms": 10},
+        },
+    ]
+    audit_path.write_text("\n".join(json.dumps(item) for item in events) + "\n", encoding="utf-8")
+
+    first = admin.runtime_logs_read_v2(
+        source="audit",
+        limit=1,
+        start_time="2026-07-16T00:01:00+00:00",
+        end_time="2026-07-16T00:02:00+00:00",
+    )
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(first)
+    assert [item["action"] for item in first["entries"]] == ["workspace_commit"]
+    assert first["next_cursor"] is not None
+    second = admin.runtime_logs_read_v2(
+        source="audit",
+        limit=1,
+        start_time="2026-07-16T00:01:00+00:00",
+        end_time="2026-07-16T00:02:00+00:00",
+        cursor=first["next_cursor"],
+    )
+    assert [item["action"] for item in second["entries"]] == ["workspace_verify"]
+    assert str(tmp_path) not in json.dumps((first, second), sort_keys=True)
+
+    runtime_path = tmp_path / "state" / "managed-runtime.log"
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-16T00:03:00+00:00",
+                "level": "INFO",
+                "message": f"ready at {tmp_path / 'private.sock'} and C:\\Users\\alice\\token.txt",
+            }
+        )
+        + "\n"
+        + f"plain runtime at {tmp_path / 'plain.sock'}\n",
+        encoding="utf-8",
+    )
+    runtime = admin.runtime_logs_read_v2(source="runtime", limit=10)
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(runtime)
+    messages = [item["message"] for item in runtime["entries"]]
+    assert all("<redacted:host_path>" in message for message in messages)
+    assert str(tmp_path) not in json.dumps(runtime, sort_keys=True)
+    assert all("C:\\Users\\alice" not in message for message in messages)
+
+
+def test_v2_runtime_log_cursor_fails_closed_when_audit_snapshot_changes(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    audit_path = tmp_path / "state" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    initial = [
+        {
+            "timestamp": "2026-07-16T00:01:00+00:00",
+            "action": "workspace_verify",
+            "success": True,
+            "details": {"duration_ms": 20},
+        },
+        {
+            "timestamp": "2026-07-16T00:02:00+00:00",
+            "action": "workspace_commit",
+            "success": True,
+            "details": {"duration_ms": 10},
+        },
+    ]
+    audit_path.write_text(
+        "\n".join(json.dumps(item) for item in initial) + "\n",
+        encoding="utf-8",
+    )
+    first = admin.runtime_logs_read_v2(source="audit", limit=1)
+    assert first["next_cursor"] is not None
+
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-16T00:03:00+00:00",
+                    "action": "workspace_push",
+                    "success": True,
+                    "details": {"duration_ms": 5},
+                }
+            )
+            + "\n"
+        )
+
+    with pytest.raises(ConfigError, match=r"cursor.*stale"):
+        admin.runtime_logs_read_v2(source="audit", limit=1, cursor=first["next_cursor"])
 
 
 # ---------------------------------------------------------------------------

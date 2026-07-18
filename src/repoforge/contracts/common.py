@@ -192,10 +192,13 @@ class WorkspaceSummary(StrictModel):
 
 class OperationState(str, Enum):
     QUEUED = "queued"
+    PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    ORPHANED = "orphaned"
 
 
 class OperationEvidence(StrictModel):
@@ -205,8 +208,14 @@ class OperationEvidence(StrictModel):
     phase: str = Field(min_length=1, max_length=120)
     progress_current: int | None = Field(default=None, ge=0)
     progress_total: int | None = Field(default=None, ge=0)
+    workspace_id: Identifier | None = None
+    result_reference: str | None = Field(default=None, max_length=256)
+    error_code: str | None = Field(default=None, max_length=128)
+    retryability: Literal["none", "manual", "automatic"] = "none"
+    terminal: bool = False
     cancellation_reason: str | None = Field(default=None, max_length=500)
-    poll_after_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
+    poll_after_seconds: float | None = Field(default=1.0, ge=0.1, le=60.0)
+    updated_at: str | None = Field(default=None, max_length=80)
 
 
 class KeyValue(StrictModel):

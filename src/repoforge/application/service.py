@@ -21,6 +21,7 @@ from ..ports import (
 )
 from .dto import to_data
 from .operations.cancel import OperationCancelCommand, OperationCancellationRequester
+from .operations.composite import OperationCommand, OperationCoordinator
 from .operations.list import OperationListCommand, OperationLister
 from .operations.status import OperationStatusCommand, OperationStatusReader
 from .read_batch import FileReadRequest
@@ -321,6 +322,12 @@ class CodingService:
             operations=self.operations,
             background_tasks=self.application.background_tasks,
         )
+        self._operation = OperationCoordinator(
+            status=self._operation_status,
+            lister=self._operation_list,
+            cancel=self._operation_cancel,
+            request_live_cancel=self._request_live_operation_cancel,
+        )
         self._verify = WorkspaceVerifier(
             ctx,
             assessment=self._assessment,
@@ -354,6 +361,37 @@ class CodingService:
         self._remove_v2 = WorkspaceRemoverV2(ctx)
         self._doctor = Doctor(ctx)
 
+    def _request_live_operation_cancel(self, kind: str, operation_id: str) -> bool:
+        if kind == "workspace_run_profile":
+            return self._profile.request_live_cancel(operation_id)
+        if kind == "workspace_run_adhoc":
+            return self._adhoc.request_live_cancel(operation_id)
+        return False
+
+    def operation(
+        self,
+        action: str,
+        operation_id: str | None = None,
+        scope: str | None = None,
+        state: str | None = None,
+        expected_updated_at: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._operation.execute(
+                OperationCommand(
+                    action=action,
+                    operation_id=operation_id,
+                    scope=scope,
+                    state=state,
+                    expected_updated_at=expected_updated_at,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            )
+        )
+
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         return _result(self._operation_status.execute(OperationStatusCommand(operation_id)))
 
@@ -377,10 +415,7 @@ class CodingService:
             OperationCancelCommand(operation_id, expected_updated_at)
         )
         if result.cancellation_requested:
-            if result.operation.kind == "workspace_run_profile":
-                self._profile.request_live_cancel(operation_id)
-            elif result.operation.kind == "workspace_run_adhoc":
-                self._adhoc.request_live_cancel(operation_id)
+            self._request_live_operation_cancel(result.operation.kind, operation_id)
         return _result(result)
 
     def repo_list(self) -> dict[str, Any]:
