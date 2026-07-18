@@ -337,9 +337,12 @@ class WorkspaceProfileRunner:
                 audit_details["business_tests_ran"] = business_tests_ran
                 audit_details["duration_ms"] = round(stage_duration_ms, 3)
                 audit_details["cumulative_duration_ms"] = round(cumulative_duration_ms, 3)
-                if exc.details.get("cancelled"):
+                cancelled = bool(exc.details.get("cancelled")) or bool(
+                    cancel_token is not None and cancel_token.is_cancelled()
+                )
+                if cancelled:
+                    exc.details["cancelled"] = True
                     audit_details["cancelled"] = True
-                if exc.details.get("cancelled"):
                     return
                 if repo.diagnostics:
                     diagnostic_ids = sorted(repo.diagnostics)

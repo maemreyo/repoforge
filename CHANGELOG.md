@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Cut the public MCP surface over to connector identity `forge_v2`: exactly 28 statically registered Pydantic tools, closed input/output schemas, generated schema and release-contract goldens, one unified typed error envelope, and no client-negotiated Forge v1 aliases.
+- Made `structuredContent` authoritative with short text summaries, bounded response tracing, and a deployment-level legacy text-duplication compatibility switch; the retired `forge_v1` identity exposes only `migration_required`.
+- Added the journaled `workspace_mutate` transaction, consolidated read/search/lifecycle/verification/shipping/operation families, impact-routed verification with fail-safe full fallback, and deterministic mutation replay.
+- Added blocking Forge v2 release corpora, installed-wheel verification, a bidirectional persistent-state rollback drill, operator migration docs, and explicit external-write policy for issue and PR comments.
 - Reconciled completed and superseded roadmap foundations after the durable-state and v2 cutover work, preserving #35/#38 as valid future evidence-provider scope while separating post-cutover public TaskCapsule/approval surfaces from their completed durable foundations.
 - Added a central typed secret-safe egress policy with bounded provider/private-key/credential/high-entropy detection, deterministic secret-free findings, false-positive allowlists, recursive structured sanitization at the common `CodingService` result boundary, and compatibility delegation from existing redaction and CI-evidence helpers.
 - Added append-only requirement-evolution and partial-completion governance: typed supersede/split/merge/invalidate relations, bounded comment evidence, cycle and invalidated-assumption diagnostics, selection exclusion for superseded work, fail-closed partial closure, explicit rejected scope, additive graph/next/spec rendering, and complete issue-form authoring fields.

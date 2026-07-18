@@ -36,8 +36,9 @@ scripts/verify-production.sh
 
 During development, `scripts/verify-production.sh --allow-dirty` runs the same source, contract,
 coverage, build, and clean-wheel smoke gates without requiring a committed tree. Never update
-`docs/contracts/release-contract-v1.json` merely to make CI pass; review tool names, descriptions,
-annotations, input/output schemas, and protocol versions first.
+`docs/contracts/release-contract-v2.json` or `docs/contracts/tool-schemas-v2.json` merely to make CI
+pass; review identity, exact tool roster, descriptions, annotations, input/output schemas, hashes,
+and migration impact first. The v1 file is historical rollback evidence, not the current contract.
 
 ## Safety invariants
 

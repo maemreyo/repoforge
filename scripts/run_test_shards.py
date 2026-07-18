@@ -22,8 +22,28 @@ class ShardResult:
 
 
 def order_shard_results(results: tuple[ShardResult, ...]) -> tuple[ShardResult, ...]:
-    """Report failed shards first so bounded callers retain the actionable tail."""
+    """Report failed shards first so bounded callers retain actionable output."""
     return tuple(sorted(results, key=lambda result: (result.returncode == 0, result.index)))
+
+
+def failure_summary(results: tuple[ShardResult, ...]) -> str:
+    """Render compact failing pytest nodes at the final output tail."""
+    lines = ["[pytest-shard-summary]"]
+    for result in sorted(results, key=lambda item: item.index):
+        if result.returncode == 0:
+            continue
+        output_lines = (*result.stdout.splitlines(), *result.stderr.splitlines())
+        actionable = [
+            line.strip() for line in output_lines if line.lstrip().startswith(("FAILED ", "ERROR "))
+        ]
+        details = [line.rstrip() for line in output_lines if line.startswith("E   ")][:8]
+        if actionable:
+            lines.extend(f"shard {result.index}: {line}" for line in actionable)
+            lines.extend(f"shard {result.index} detail: {line}" for line in details)
+        else:
+            lines.append(f"shard {result.index}: failed with exit code {result.returncode}")
+            lines.extend(f"shard {result.index} detail: {line}" for line in details)
+    return "\n".join(lines) + "\n"
 
 
 def partition_test_files(
@@ -144,6 +164,7 @@ def run(root: Path, coverage_dir: Path, shard_count: int) -> int:
         _emit_result(result)
         failed = failed or result.returncode != 0
     if failed:
+        print(failure_summary(results), end="")
         return 1
 
     if _run_coverage_command(root, coverage_dir, ["combine", "--keep", str(coverage_dir)]):

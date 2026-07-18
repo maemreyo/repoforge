@@ -20,8 +20,8 @@ path = "/absolute/path/to/repository"
 # policy_overrides = []
 
 # Reviewed policy customizations (custom profiles, diagnostics, formatters) live in a
-# durable per-repository patch that survives `rf repo refresh`. It is written by approved
-# `repo_policy_apply` changes; edit by hand only with review.
+# durable per-repository patch that survives `rf repo refresh`. The `repo_policy`
+# preview/apply flow writes reviewed changes; edit by hand only with review.
 # [repo.policy_patch]
 # execution_mode = "relaxed"
 # adhoc_runners = ["uv", "python3", "make"]
@@ -31,3 +31,21 @@ path = "/absolute/path/to/repository"
 # description = "One-off debug run"
 # verification = false
 # commands = [["pnpm", "run", "debug:server"]]
+
+# Generated paths name an approved regeneration command. Refresh conflict evidence points agents
+# at this command instead of encouraging hand-merges.
+# [[repositories.example-repository.generated_paths]]
+# glob = "docs/contracts/tool-schemas-v2.json"
+# regeneration_command = ["make", "schemas"]
+# description = "Generated Forge v2 tool schema bundle"
+
+# GitHub issue writes are explicit per-repository authority. Comment is the safe default; enable
+# close/reopen/link/create only after review. Project V2 writes are never enabled here.
+# [repositories.example-repository.issue_writes]
+# enabled_ops = ["comment"]
+# approval_required_ops = []
+# max_writes_per_call = 2
+# max_writes_per_window = 20
+# window_seconds = 3600
+# create_title_prefix = "[TASK]"
+# create_body_template = "## Objective\n{body}\n\n## Evidence\n{evidence_ref}"

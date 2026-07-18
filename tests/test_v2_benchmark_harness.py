@@ -379,6 +379,27 @@ def test_report_publisher_writes_stable_json_and_markdown(tmp_path: Path) -> Non
     assert "syntax" in markdown
 
 
+def test_reference_executor_passes_every_frozen_v2_corpus() -> None:
+    from repoforge.adapters.code_intelligence import TreeSitterCodeIntelligenceProvider
+    from repoforge.benchmark.reference import ReferenceExecutor
+
+    execute_case = ReferenceExecutor(TreeSitterCodeIntelligenceProvider())
+    harness = _benchmark()
+    report = harness.run_release_gates(
+        execute_case,
+        corpus_root=ROOT / "tests/fixtures/v2_corpora",
+    )
+
+    failures = [
+        (case.case_id, execute_case(case).details)
+        for case in harness.load_corpus(ROOT / "tests/fixtures/v2_corpora/patches.json")
+        if not execute_case(case).success
+    ]
+    assert report.passed is True, failures
+    assert all(metric.status == "passed" for metric in report.metrics)
+    assert all(metric.wrong_target_count == 0 for metric in report.metrics)
+
+
 def test_run_release_gates_executes_every_case_once(tmp_path: Path) -> None:
     harness = _benchmark()
     corpus_root = tmp_path / "corpora"

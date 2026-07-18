@@ -107,7 +107,10 @@ def test_example_config_matches_current_source_schema() -> None:
     assert "version = 2" in text
     assert "[[repo]]" in text
     assert 'id = "example-repository"' in text
-    assert "[repositories." not in text
+    assert "repositories.example-repository.generated_paths" in text
+    assert "repositories.example-repository.issue_writes" in text
+    assert "repo_policy" in text
+    assert "repo_policy_apply" not in text
 
 
 def test_repository_profiles_reference_existing_make_targets() -> None:
@@ -221,6 +224,51 @@ def test_make_check_remains_the_stable_full_verification_contract() -> None:
 
     assert "check:" in makefile
     assert "scripts/verify-production.sh --allow-dirty" in makefile
+
+
+def test_forge_v2_release_gates_are_a_required_make_and_production_contract() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    verifier = (ROOT / "scripts/verify-production.sh").read_text(encoding="utf-8")
+
+    assert "v2-gates:" in makefile
+    assert "scripts/run_v2_release_gates.py" in makefile
+    assert "$${TMPDIR:-/tmp}" in makefile
+    assert "make v2-gates" in verifier or "$(MAKE) v2-gates" in verifier
+
+
+def test_operator_docs_match_the_static_forge_v2_cutover() -> None:
+    reference = (ROOT / "docs/development/TOOL_REFERENCE.md").read_text(encoding="utf-8")
+    full_flow = (ROOT / "docs/testing/FULL_FLOW_TESTING.md").read_text(encoding="utf-8")
+    plugin_cases = (ROOT / "docs/testing/PLUGIN_TEST_CASES.md").read_text(encoding="utf-8")
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    contracts = (ROOT / "docs/contracts/README.md").read_text(encoding="utf-8")
+    examples = "\n".join(
+        (ROOT / name).read_text(encoding="utf-8")
+        for name in ("config.example.toml", "config.repoforge.toml")
+    )
+
+    assert "exactly 28" in reference
+    assert "forge_v2" in reference
+    assert "forge_v1" in reference and "migration_required" in reference
+    assert "structuredContent" in reference
+    assert "forty-six focused MCP tools" not in reference
+    assert "contract v1 remains supported" not in reference
+    assert "`repo_policy_apply`" not in reference
+    assert "`operation_status`" not in reference
+    for tool in (
+        "workspace_mutate",
+        "workspace_verify",
+        "workspace_pr",
+        "workspace_pr_evidence",
+        "operation",
+    ):
+        assert tool in full_flow
+        assert tool in plugin_cases
+    assert "forge_v2" in plugin_cases
+    assert "repo_policy" in security and "repo_policy_apply" not in security
+    assert "release-contract-v2.json" in contracts
+    assert "release-contract-v1.json" not in contracts
+    assert "repo_policy" in examples and "repo_policy_apply" not in examples
 
 
 def test_repoforge_source_config_enables_reviewed_relaxed_execution() -> None:

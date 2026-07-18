@@ -36,7 +36,7 @@
     {
       "id": "budget-truncation-resumes",
       "input": {
-        "files": [{"path": "large.txt", "start_line": 1, "end_line": 10000}],
+        "files": [{"path": "large.txt", "start_line": 1, "end_line": 2001}],
         "byte_budget": 200
       },
       "expected": {

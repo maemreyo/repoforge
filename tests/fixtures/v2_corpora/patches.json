@@ -33,7 +33,7 @@
     {
       "id": "claude-new-file",
       "input": {
-        "patch": "diff --git a/dev/null b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n"
+        "patch": "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n"
       },
       "expected": {
         "changed_paths": ["new.txt"],

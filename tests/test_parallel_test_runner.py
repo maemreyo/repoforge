@@ -63,3 +63,29 @@ def test_failed_shard_results_are_reported_before_successes() -> None:
     ordered = runner_module.order_shard_results((passed_last, failed, passed_first))
 
     assert [result.index for result in ordered] == [2, 1, 3]
+
+
+def test_failed_shard_summary_keeps_actionable_pytest_nodes_at_tail() -> None:
+    failed = runner_module.ShardResult(
+        2,
+        (),
+        1,
+        "E   Failed: Timeout (>60.0s) from pytest-timeout.\n"
+        "E   AssertionError: expected exact contract\n"
+        "FAILED tests/test_alpha.py::test_one - AssertionError\n"
+        "ERROR tests/test_beta.py::test_two - RuntimeError\n",
+        "worker warning\n",
+    )
+    opaque = runner_module.ShardResult(3, (), 2, "collection interrupted\n", "")
+    passed = runner_module.ShardResult(1, (), 0, "12 passed\n", "")
+
+    summary = runner_module.failure_summary((passed, failed, opaque))
+
+    assert summary == (
+        "[pytest-shard-summary]\n"
+        "shard 2: FAILED tests/test_alpha.py::test_one - AssertionError\n"
+        "shard 2: ERROR tests/test_beta.py::test_two - RuntimeError\n"
+        "shard 2 detail: E   Failed: Timeout (>60.0s) from pytest-timeout.\n"
+        "shard 2 detail: E   AssertionError: expected exact contract\n"
+        "shard 3: failed with exit code 2\n"
+    )
