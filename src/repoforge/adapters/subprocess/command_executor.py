@@ -89,8 +89,8 @@ class SubprocessCommandExecutor:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                     process.wait(timeout=2)
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    with contextlib.suppress(ProcessLookupError):
+                except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
                 raise CommandError(

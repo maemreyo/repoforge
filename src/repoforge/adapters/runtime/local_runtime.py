@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -226,13 +227,15 @@ def stop_managed_runtime(path: Path, timeout_seconds: int = 15) -> ManagedRuntim
     runtime = read_managed_runtime(path)
     if runtime is None:
         return None
-    os.killpg(runtime.pid, signal.SIGTERM)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(runtime.pid, signal.SIGTERM)
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if read_managed_runtime(path) is None:
             return runtime
         time.sleep(0.1)
-    os.killpg(runtime.pid, signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(runtime.pid, signal.SIGKILL)
     path.unlink(missing_ok=True)
     return runtime
 

@@ -400,7 +400,9 @@ class TunnelCliClient:
             return
         try:
             os.killpg(child.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # Darwin can report EPERM instead of ESRCH for a process group that
+            # has already been reaped; both mean there is nothing left to signal.
             self._finalize_child(child.pid)
             return
         deadline = time.monotonic() + grace_seconds
@@ -408,7 +410,7 @@ class TunnelCliClient:
             if not self.is_alive(child):
                 return
             time.sleep(0.05)
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(child.pid, signal.SIGKILL)
         process = self._children.get(child.pid)
         if process is not None:
