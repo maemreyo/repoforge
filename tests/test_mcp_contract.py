@@ -94,12 +94,7 @@ async def test_representative_v2_tools_execute_through_protocol(
             if read.isError
             else {}
         )
-        assert read.isError is False, {
-            "error_code": read_error.get("error_code"),
-            "what_happened": read_error.get("what_happened"),
-            "why": read_error.get("why"),
-            "details": read_error.get("details"),
-        }
+        assert read.isError is False, read_error.get("error")
         assert read.structuredContent is not None
         V2_TOOL_SPECS["repo_read"].validate_output(read.structuredContent)
 
@@ -144,7 +139,7 @@ async def test_mcp_validation_and_application_errors_use_one_typed_envelope(
         invalid_text = "\n".join(getattr(item, "text", "") for item in invalid.content)
         invalid_payload = json.loads(invalid_text)
         assert invalid_payload["status"] == "failed"
-        assert invalid_payload["correlation_id"]
+        assert invalid_payload["error"]["details"]["correlation_id"]
 
         missing = await session.call_tool(
             "repo_read",
@@ -153,12 +148,13 @@ async def test_mcp_validation_and_application_errors_use_one_typed_envelope(
         assert missing.isError is True
         missing_text = "\n".join(getattr(item, "text", "") for item in missing.content)
         missing_payload = json.loads(missing_text)
-        assert set(missing_payload) >= {
-            "status",
-            "error_code",
-            "what_happened",
+        assert set(missing_payload) >= {"status", "summary", "error"}
+        assert set(missing_payload["error"]) >= {
+            "code",
+            "message",
             "why",
-            "correlation_id",
+            "details",
             "safe_next_action",
             "retryable",
         }
+        assert missing_payload["error"]["details"]["correlation_id"]

@@ -36,7 +36,7 @@ async def test_mcp_structured_failure_preserves_protocol_error_semantics() -> No
         item.text for item in result.content if getattr(item, "type", None) == "text"
     )
     assert '"status": "failed"' in rendered
-    assert '"error_code": "NOT_FOUND"' in rendered
+    assert '"code": "NOT_FOUND"' in rendered
     assert "Unknown repository id" in rendered
 
 

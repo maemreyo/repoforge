@@ -22,7 +22,13 @@ from repoforge.application.workspace.mutate import (
     TextReplacement,
     WriteMutation,
 )
-from repoforge.domain.errors import ConfigError, ErrorCode, SecurityError, WorkspaceError
+from repoforge.domain.errors import (
+    ConfigError,
+    ErrorCode,
+    RepoForgeError,
+    SecurityError,
+    WorkspaceError,
+)
 from repoforge.domain.filesystem_transaction import SimulatedTransactionCrash
 
 
@@ -215,6 +221,37 @@ def test_patch_and_restore_are_planned_into_the_same_transaction_model(
     assert (root / "README.md").read_text(encoding="utf-8") == (
         "# Demo\n\nRepository instructions.\n"
     )
+
+
+def test_git_apply_check_independently_rejects_a_patch_with_wrong_context(
+    tmp_path: Path,
+) -> None:
+    """#184 requires "patch normalization + git apply --check": an
+    independent verification layer on top of the custom parser. Directly
+    exercise _verify_patch_with_git_apply with a well-formed-looking patch
+    whose context does not match the seeded file content -- real git apply
+    --check must still reject it."""
+    from repoforge.application.workspace.mutate import _verify_patch_with_git_apply
+    from repoforge.bootstrap import build_application
+    from repoforge.config import load_config
+
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path))
+    ctx = application.context
+
+    files = {"demo.txt": "alpha\nbeta\ngamma\n"}
+    bad_patch = (
+        "diff --git a/demo.txt b/demo.txt\n"
+        "--- a/demo.txt\n"
+        "+++ b/demo.txt\n"
+        "@@ -1,3 +1,3 @@\n"
+        " nothing\n"
+        " like\n"
+        "-the actual file\n"
+        "+content at all\n"
+    )
+    with pytest.raises(RepoForgeError, match="git apply --check"):
+        _verify_patch_with_git_apply(ctx, bad_patch, ("demo.txt",), lambda path: files.get(path))
 
 
 def test_change_budget_failure_rolls_back_the_entire_transaction(tmp_path: Path) -> None:

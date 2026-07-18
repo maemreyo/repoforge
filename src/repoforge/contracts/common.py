@@ -60,6 +60,8 @@ class ToolError(StrictModel):
     retryable: bool = False
     safe_next_action: ShortText
     details: ToolErrorDetails | None = None
+    unchanged_state: tuple[ShortText, ...] = Field(default=(), max_length=20)
+    automatic_retry_allowed: bool = False
 
 
 class ToolResponse(StrictModel):

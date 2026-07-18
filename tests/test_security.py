@@ -254,14 +254,12 @@ def test_egress_never_redacts_long_slug_and_hex_compound_identifiers() -> None:
 
 
 def test_egress_still_redacts_lowercase_secret_shaped_values_under_id_keys() -> None:
-    """The compound-identifier exemption is gated on RepoForge's own generated-
-    ID field names AND the exact hex-suffix lengths those generators use --
-    not on "any *_id-suffixed field with a safe charset". A hypothetical
-    session_id/client_id carrying a real, lowercase-shaped bearer token (not
-    one of RepoForge's own field names) must still be caught, even though a
-    mixed-case check alone would miss this: the earlier fix's first version
-    exempted any lowercase-alnum-hyphen value under any *_id key, regardless
-    of field name, which would have let a lowercase secret through unredacted."""
+    """A field name or shape can only ever excuse the generic high-entropy
+    heuristic's false positives; it must never bypass a genuine, explicit
+    secret-pattern match (private key, provider token, bearer, credential
+    URL, sensitive assignment). A hypothetical session_id carrying a real
+    bearer-shaped token must still be caught, even though a mixed-case check
+    alone would miss it."""
     lowercase_secret_shapes = {
         "session_id": "x9k2m7q4z1v8n3j6w0r5t2y7u4i1o8p5a3s6d9f0g2h7",
     }
@@ -274,6 +272,30 @@ def test_egress_still_redacts_lowercase_secret_shaped_values_under_id_keys() -> 
     secret_shaped = {"workspace_id": "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0" * 2}
     redacted = sanitize_egress_data(secret_shaped, destination=EgressDestination.MODEL)
     assert redacted["workspace_id"] != secret_shaped["workspace_id"]
+
+
+def test_egress_catches_a_real_provider_token_even_under_a_generated_id_key() -> None:
+    """A real OpenAI-shaped token whose suffix happens to be composed only of
+    hex-valid characters can coincidentally match the generated-compound-ID
+    shape (<word>-<10-or-24-lowercase-hex>) under one of RepoForge's own
+    generated-ID field names (workspace_id, plan_id, operation_id,
+    acceptance_id, failure_id, receipt_id). The explicit, high-confidence
+    provider-token detector must still catch it -- the identity-field
+    exemption may only suppress the generic entropy heuristic's false
+    positives, never an explicit provider-token match (#225 review: this
+    exact reproduction was previously unredacted)."""
+    token = "sk-proj-" + "a" * 24
+    for key in (
+        "session_id",
+        "workspace_id",
+        "plan_id",
+        "operation_id",
+        "acceptance_id",
+        "failure_id",
+        "receipt_id",
+    ):
+        sanitized = sanitize_egress_data({key: token}, destination=EgressDestination.MODEL)
+        assert sanitized[key] != token, f"provider token leaked under key {key!r}"
 
 
 def test_egress_sanitization_preserves_existing_policy_markers() -> None:

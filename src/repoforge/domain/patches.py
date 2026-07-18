@@ -340,6 +340,7 @@ def _parse_unified(text: str) -> tuple[_UnifiedFile, ...]:
         index += 1
         rename_from: str | None = None
         rename_to: str | None = None
+        similarity_100 = False
         while (
             index < len(lines)
             and not lines[index].startswith("--- ")
@@ -349,17 +350,31 @@ def _parse_unified(text: str) -> tuple[_UnifiedFile, ...]:
                 rename_from = _normalize_path(lines[index][len("rename from ") :])
             elif lines[index].startswith("rename to "):
                 rename_to = _normalize_path(lines[index][len("rename to ") :])
+            elif lines[index].strip() == "similarity index 100%":
+                similarity_100 = True
             index += 1
-        if (
-            (index >= len(lines) or lines[index].startswith("diff --git "))
-            and rename_from is not None
-            and rename_to is not None
-        ):
-            # A pure rename (git similarity index 100%, no content change) has
-            # no ---/+++ headers and no @@ hunks at all; it is fully described
-            # by rename from/rename to alone.
-            files.append(_UnifiedFile(rename_from, rename_to, ()))
-            continue
+        if index >= len(lines) or lines[index].startswith("diff --git "):
+            if rename_from is not None and rename_to is not None and similarity_100:
+                # A pure rename (git similarity index 100%, no content change)
+                # has no ---/+++ headers and no @@ hunks at all; it is fully
+                # described by rename from/rename to alone.
+                files.append(_UnifiedFile(rename_from, rename_to, ()))
+                continue
+            if rename_from is not None and rename_to is not None:
+                # A rename declared with content changes (similarity index
+                # below 100%, or an unstated similarity) must carry the
+                # ---/+++/@@ hunks describing that change; a header-less
+                # section here is a truncated or malformed patch, not a
+                # pure rename, and must not be silently reinterpreted as one.
+                raise _error(
+                    "Rename with content changes is missing ---/+++ file headers",
+                    code=ErrorCode.PATCH_PARSE_FAILED,
+                    safe_next_action=(
+                        "A rename below 100% similarity must include the ---/+++ and @@ "
+                        "hunks describing the content change; regenerate a complete patch."
+                    ),
+                    details={"rename_from": rename_from, "rename_to": rename_to},
+                )
         if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
             raise _error(
                 "Unified diff is missing ---/+++ file headers",

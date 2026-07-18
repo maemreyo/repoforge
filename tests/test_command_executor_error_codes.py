@@ -60,7 +60,10 @@ def test_timeout_cleanup_does_not_hang_when_killpg_reports_permission_error(
     """A killpg PermissionError (the Darwin already-reaped race) is treated as
     "process already gone", but that assumption can be wrong. Prove the final
     output drain is bounded so a process that is in fact still alive and still
-    writing output cannot hang the caller forever (#225 review finding)."""
+    writing output cannot hang the caller forever, AND that the process is
+    not left orphaned: when killpg keeps failing, a direct single-process
+    kill() must still terminate it (#225 review: an earlier version bounded
+    the caller's wait but could silently leave the child running)."""
     executor = _executor(tmp_path)
     script = tmp_path / "ignore_term.py"
     script.write_text(
@@ -85,6 +88,10 @@ def test_timeout_cleanup_does_not_hang_when_killpg_reports_permission_error(
         assert excinfo.value.code is ErrorCode.COMMAND_TIMEOUT
         # 1s run timeout + 2s SIGTERM wait + 2s final drain, well under a hang.
         assert elapsed < 8
+        assert signaled_pids
+        pid = signaled_pids[0]
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
     finally:
         monkeypatch.undo()
         for pid in signaled_pids:

@@ -36,6 +36,7 @@ from ...application.workspace.mutate import (
     WriteMutation,
 )
 from ...config import load_config
+from ...contracts.common import ToolResponse
 from ...contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS, ToolContractSpec
 from ...domain.errors import ConfigError, WorkspaceError, operation_error_from_exception
 from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
@@ -233,6 +234,10 @@ class _StructuredMcpToolError(RuntimeError):
         super().__init__(json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
 
+def _bounded(text: str, limit: int = 500) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def _raise_structured_error(
     operation_name: str,
     exc: Exception,
@@ -241,25 +246,38 @@ def _raise_structured_error(
 ) -> NoReturn:
     envelope = operation_error_from_exception(exc)
     correlation_id = envelope.correlation_id or secrets.token_hex(12)
+    message = redact_text(
+        envelope.what_happened,
+        secrets=(os.environ.get("CONTROL_PLANE_API_KEY", ""),),
+    )
+    unchanged_state = tuple(
+        _bounded(item)
+        for item in (
+            list(envelope.unchanged_state) or ["No unreported state transition was committed."]
+        )[:20]
+    )
+    # This is the same {status, summary, error: ToolError} shape every one of
+    # the 28 tools' own output model inherits from ToolResponse -- a client
+    # can validate an error response against the shared base contract, not
+    # only recover ad-hoc fields by name (#225 review: the earlier flat
+    # envelope did not conform to any advertised output schema).
     payload = {
         "status": "failed",
-        "error_code": envelope.code.value,
-        "what_happened": redact_text(
-            envelope.what_happened,
-            secrets=(os.environ.get("CONTROL_PLANE_API_KEY", ""),),
-        ),
-        "why": envelope.why,
-        "correlation_id": correlation_id,
-        "unchanged_state": list(envelope.unchanged_state)
-        or ["No unreported state transition was committed."],
-        "safe_next_action": envelope.safe_next_action,
-        "retryable": envelope.retryable,
-        "details": envelope.details,
-        "automatic_retry_allowed": automatic_retry_allowed(
-            operation_name,
-            envelope.code,
-            has_idempotency_key=has_idempotency_key,
-        ),
+        "summary": _bounded(message),
+        "error": {
+            "code": envelope.code.value,
+            "message": _bounded(message),
+            "why": _bounded(envelope.why),
+            "retryable": envelope.retryable,
+            "safe_next_action": _bounded(envelope.safe_next_action),
+            "details": {"correlation_id": correlation_id},
+            "unchanged_state": unchanged_state,
+            "automatic_retry_allowed": automatic_retry_allowed(
+                operation_name,
+                envelope.code,
+                has_idempotency_key=has_idempotency_key,
+            ),
+        },
     }
     raise _StructuredMcpToolError(payload) from exc
 
@@ -548,6 +566,12 @@ class ForgeV2FastMCP(FastMCP[None]):
             # The typed error envelope belongs in structuredContent, not only
             # serialized into the text block -- otherwise a client can only
             # recover it by parsing JSON out of free text (#225 review).
+            # Validate against the same ToolResponse/ToolError base contract
+            # every one of the 28 tools' own output model inherits, so a
+            # future shape drift fails loudly here instead of silently
+            # shipping structuredContent a client cannot parse against the
+            # advertised schema.
+            ToolResponse.model_validate(exc.payload)
             return CallToolResult(
                 content=[TextContent(type="text", text=str(exc))],
                 structuredContent=exc.payload,

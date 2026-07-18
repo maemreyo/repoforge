@@ -8,6 +8,7 @@ from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 from pydantic import ValidationError
 
+from repoforge.contracts.common import ToolResponse
 from repoforge.contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS
 from repoforge.interfaces.mcp.grace import (
     FORGE_V1_IDENTITY,
@@ -91,19 +92,30 @@ async def test_protocol_error_is_one_redacted_typed_envelope(
     assert result.isError is True
     rendered = "\n".join(getattr(item, "text", "") for item in result.content)
     envelope = json.loads(rendered)
-    assert set(envelope) >= {
-        "status",
-        "error_code",
-        "what_happened",
-        "why",
-        "correlation_id",
-        "safe_next_action",
-        "retryable",
-    }
     assert envelope["status"] == "failed"
+    assert isinstance(envelope["summary"], str) and envelope["summary"]
+    error = envelope["error"]
+    assert set(error) >= {
+        "code",
+        "message",
+        "why",
+        "retryable",
+        "safe_next_action",
+        "details",
+        "unchanged_state",
+        "automatic_retry_allowed",
+    }
+    assert (
+        isinstance(error["details"]["correlation_id"], str) and error["details"]["correlation_id"]
+    )
     # The typed error envelope must be real structuredContent, not only
-    # recoverable by parsing JSON out of the text block (#225 review).
+    # recoverable by parsing JSON out of the text block (#225 review), and it
+    # must conform to the same {status, summary, error: ToolError} contract
+    # every one of the 28 tools' own output model inherits from ToolResponse
+    # -- not an ad-hoc shape a client cannot validate against any advertised
+    # output schema.
     assert result.structuredContent == envelope
+    ToolResponse.model_validate(envelope)
 
 
 def test_surface_hash_is_v2_identity_bound_and_version_negotiation_is_gone() -> None:

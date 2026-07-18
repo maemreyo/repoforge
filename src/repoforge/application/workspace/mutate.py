@@ -6,6 +6,8 @@ import hashlib
 import json
 import re
 import stat
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
@@ -145,6 +147,47 @@ class _VirtualFile:
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.data).hexdigest()
+
+
+def _verify_patch_with_git_apply(
+    ctx: ApplicationContext,
+    normalized_patch: str,
+    paths: tuple[str, ...],
+    read_file: Callable[[str], str | None],
+) -> None:
+    """Independently verify a normalized patch is well-formed using the real
+    `git apply --check`, on top of the custom parser in normalize_patch and
+    materialize_normalized_patch (#184: "patch normalization + git apply
+    --check"). Runs against a throwaway scratch repo seeded with exactly the
+    current (possibly in-batch-staged, via `read_file`) pre-image content of
+    the paths the patch touches -- never the real workspace tree, so an
+    earlier operation in the same journaled transaction is still reflected
+    correctly and a failed check can never touch real state."""
+    with tempfile.TemporaryDirectory(prefix="repoforge-patch-check-") as scratch_dir:
+        scratch = Path(scratch_dir)
+        ctx.commands.run(["git", "init", "--quiet"], cwd=scratch, timeout=10)
+        for relative_path in paths:
+            content = read_file(relative_path)
+            if content is None:
+                continue
+            target = scratch / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        result = ctx.commands.run(
+            ["git", "apply", "--check", "-"],
+            cwd=scratch,
+            input_text=normalized_patch,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RepoForgeError(
+                "git apply --check rejected the normalized patch",
+                code=ErrorCode.PATCH_PARSE_FAILED,
+                safe_next_action=("Read the exact current file content and regenerate the patch."),
+                unchanged_state=("The workspace tree, index, and HEAD were not modified.",),
+                details={"git_apply_stderr": result.stderr[:2000]},
+            )
 
 
 class _MutationPlanner:
@@ -370,6 +413,7 @@ class _MutationPlanner:
             self.repo,  # type: ignore[arg-type]
             max_chars=self.ctx.config.server.max_tool_output_chars * 4,
         )
+        _verify_patch_with_git_apply(self.ctx, normalized.patch, normalized.paths, read_file)
         materialized = materialize_normalized_patch(normalized.patch, read_file)
         changed = False
         before_hashes: list[str] = []

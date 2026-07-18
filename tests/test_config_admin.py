@@ -1079,7 +1079,7 @@ async def test_config_admin_tools_round_trip_through_protocol(tmp_path: Path) ->
             },
         )
         applied_error = json.loads(applied.content[0].text) if applied.isError else None
-        assert applied.isError is False, applied_error["what_happened"]
+        assert applied.isError is False, applied_error["error"]["message"]
         assert applied.structuredContent is not None
         assert applied.structuredContent["result"] == "applied"
 

@@ -1220,9 +1220,12 @@ class FailureEvidenceWorkspaceIdentity(StrictModel):
 
 class FailureRecoveryAction(StrictModel):
     """`kind` is always one of the 28 currently-callable Forge v2 tool names.
-    `mode`/`plan_action` carry the sub-mode a client needs to reconstruct the
-    exact `workspace_verify` call for operations that were consolidated
-    behind that one tool's mode field (#180 static 28-tool surface)."""
+    `mode`/`plan_action`/`refresh_action` carry the sub-mode a client needs to
+    reconstruct the exact call for tools consolidated behind a mode/action
+    field (#180 static 28-tool surface); `operation_id`, `plan_id`,
+    `expected_head_sha`, and `expected_workspace_fingerprint` carry the
+    remaining parameters that specific call actually requires, so a client
+    never has to guess or re-derive them from context."""
 
     kind: Literal[
         "operation",
@@ -1239,6 +1242,11 @@ class FailureRecoveryAction(StrictModel):
     profile_name: Identifier | None = None
     through: Literal["iteration", "full"] | None = None
     relative_paths: tuple[RelativePath, ...] = Field(default=(), max_length=200)
+    operation_id: Identifier | None = None
+    plan_id: Identifier | None = None
+    refresh_action: Literal["preview", "apply"] | None = None
+    expected_head_sha: GitObjectId | None = None
+    expected_workspace_fingerprint: Sha256 | None = None
 
 
 class FailureAffectedScope(StrictModel):

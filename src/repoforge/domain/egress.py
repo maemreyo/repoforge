@@ -708,8 +708,13 @@ def sanitize_egress_data(
             else f"<{evaluation.decision.value}:{evaluation.reason}>"
         )
     if isinstance(value, str):
-        if _safe_identity_field(_key, value):
-            return value
+        # Always run the full detector (private keys, provider tokens, bearer,
+        # credential URLs, sensitive assignments, explicit secrets, and the
+        # generic high-entropy heuristic) -- a field name or shape can only
+        # ever excuse the generic entropy heuristic's false positives, never
+        # bypass a genuine, high-confidence secret-pattern match. A real
+        # provider token stored under a misleadingly-named or -shaped field
+        # must still be caught.
         evaluation = evaluate_egress(
             EgressRequest(
                 value,
@@ -721,9 +726,9 @@ def sanitize_egress_data(
             )
         )
         if (
-            _structured_path_field(_key, value)
-            and evaluation.findings
+            evaluation.findings
             and all(item.category == "high_entropy" for item in evaluation.findings)
+            and (_safe_identity_field(_key, value) or _structured_path_field(_key, value))
         ):
             return value
         return (

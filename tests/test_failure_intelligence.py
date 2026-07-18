@@ -176,7 +176,8 @@ def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -
         {"error_code": ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE.value},
         {"message": "opaque executor failure 77"},
     ):
-        classification = classify_failure(_observation(**overrides))
+        observation = _observation(**overrides)
+        classification = classify_failure(observation)
         for action in classification.safe_actions:
             assert action.kind.value in V2_TOOL_NAMES, (
                 classification.failure_class,
@@ -192,9 +193,40 @@ def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -
                     assert action.plan_action in {"create", "accept", "execute"}
                     if action.plan_action == "execute":
                         assert action.through in {"iteration", "full"}
+                        # execute operates on an existing accepted plan, so the
+                        # plan_id it applies to must be reconstructible too.
+                        assert action.plan_id == observation.plan_id
+                    if action.plan_action == "create":
+                        assert action.plan_id is None
             else:
                 assert action.mode is None
                 assert action.plan_action is None
+            if action.kind is RecoveryActionKind.OPERATION:
+                assert action.operation_id == observation.operation_id
+            else:
+                assert action.operation_id is None
+            if action.kind is RecoveryActionKind.WORKSPACE_REFRESH:
+                assert action.refresh_action == "preview"
+                assert action.expected_head_sha == observation.post_identity.head_sha
+                assert (
+                    action.expected_workspace_fingerprint
+                    == observation.post_identity.workspace_fingerprint
+                )
+            else:
+                assert action.refresh_action is None
+            if action.kind is RecoveryActionKind.WORKSPACE_MUTATE:
+                assert action.relative_paths
+                assert action.expected_head_sha == observation.post_identity.head_sha
+                assert (
+                    action.expected_workspace_fingerprint
+                    == observation.post_identity.workspace_fingerprint
+                )
+            if action.kind not in {
+                RecoveryActionKind.WORKSPACE_REFRESH,
+                RecoveryActionKind.WORKSPACE_MUTATE,
+            }:
+                assert action.expected_head_sha is None
+                assert action.expected_workspace_fingerprint is None
 
 
 def test_structured_classification_precedes_text_and_rejects_injected_actions() -> None:

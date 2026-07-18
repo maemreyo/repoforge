@@ -890,12 +890,16 @@ def test_mcp_error_boundary_returns_stable_redacted_write_failure(
         )
     payload = json.loads(str(error.value))
     assert payload["status"] == "failed"
-    assert payload["error_code"] == "COMMAND_TIMEOUT"
-    assert isinstance(payload["correlation_id"], str) and payload["correlation_id"]
-    assert "top-secret" not in payload["what_happened"]
-    assert "bare-process-secret" not in payload["what_happened"]
-    assert payload["unchanged_state"] == ["Local branch and workspace files remain unchanged."]
-    assert payload["automatic_retry_allowed"] is True
+    error_envelope = payload["error"]
+    assert error_envelope["code"] == "COMMAND_TIMEOUT"
+    correlation_id = error_envelope["details"]["correlation_id"]
+    assert isinstance(correlation_id, str) and correlation_id
+    assert "top-secret" not in error_envelope["message"]
+    assert "bare-process-secret" not in error_envelope["message"]
+    assert error_envelope["unchanged_state"] == [
+        "Local branch and workspace files remain unchanged."
+    ]
+    assert error_envelope["automatic_retry_allowed"] is True
 
 
 def test_phase6_server_limits_are_configurable_and_validated(tmp_path: Path) -> None:
