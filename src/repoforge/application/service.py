@@ -344,8 +344,8 @@ class CodingService:
             self._execution_failure_evidence.read(FailureEvidenceReadCommand(failure_id))
         )
 
-    def repo_list(self) -> dict[str, Any]:
-        return _result(self._repo_list.execute(RepositoryListCommand()))
+    def repo_list(self, requested_repo: str | None = None) -> dict[str, Any]:
+        return _result(self._repo_list.execute(RepositoryListCommand(requested_repo)))
 
     def repo_status(self, repo_id: str) -> dict[str, Any]:
         return _result(self._repo_status.execute(RepositoryStatusCommand(repo_id)))

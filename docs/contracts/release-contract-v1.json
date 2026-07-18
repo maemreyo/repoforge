@@ -77,7 +77,7 @@
   },
   "contract_version": 2,
   "mcp": {
-    "server_instructions_sha256": "e347bee216f799f5913d5461bbfd49fff6d482661d8aa0451c3e6e5d3b4e29b0",
+    "server_instructions_sha256": "e6e489f8961adc266acbc8496f555559fa1f3de1ac9cd1099934d76402bc6948",
     "tool_contract": {
       "aliases": [
         {
@@ -137,7 +137,7 @@
         2
       ]
     },
-    "tool_surface_hash": "54ba0537114663521da85054acaaffd61da969f5e00321c3973c3b2d2ee9fad5",
+    "tool_surface_hash": "4172240b5841a9e64709d8b894408c71f75859cd49479fcf2b592663a03a6427",
     "tools": [
       {
         "annotations": {
@@ -712,9 +712,22 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use this when choosing a repository or discovering its profiles and safety policy.",
+        "description": "Use this first, before any repository-scoped call, to choose a repository and\ndiscover its profiles and safety policy. Pass requested_repo as the exact repo_id,\ndisplay name, or remote name the user explicitly named in this request; leave it unset\nif they did not name one -- never guess from unrelated wording. Read `selection.outcome`\nin the result: `single_enrolled` or `exact_match` means proceed with `selection.repo_id`\nwithout asking; `input_required` means ask the user to choose from `selection.candidates`\n(never pick by recency, filesystem order, default base branch, or your own preference);\n`no_match` means no repository is enrolled yet.",
         "inputSchema": {
-          "properties": {},
+          "properties": {
+            "requested_repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Requested Repo"
+            }
+          },
           "title": "repo_listArguments",
           "type": "object"
         },

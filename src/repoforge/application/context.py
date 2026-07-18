@@ -29,6 +29,7 @@ from ..ports import (
     FailureEvidenceStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
     HygieneBaselineCache,
@@ -243,6 +244,7 @@ class ApplicationContext:
     nudge_tracker: AdoptionNudgeTracker | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
+    github_capabilities: GitHubCapabilityProbe | None = None
     file_transactions: FileTransactionFactory | None = None
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None

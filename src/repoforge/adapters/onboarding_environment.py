@@ -68,6 +68,14 @@ class SystemOnboardingEnvironment:
                     ).returncode
                     == 0
                 )
+            if not gh_authenticated:
+                # GitHub-backed features (ticket graph, sub-issues, dependencies, Project V2
+                # sync) need an authenticated `gh` session; surface this as a preflight
+                # prerequisite rather than letting it surface later as a repository-scoped
+                # capability gap.
+                warnings.append("GH_NOT_AUTHENTICATED")
+        else:
+            warnings.append("GH_NOT_INSTALLED")
         return EnvironmentPreflight(
             current_rf=current_path,
             python=str(Path(sys.executable).resolve()),
