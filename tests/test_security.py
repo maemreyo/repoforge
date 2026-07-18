@@ -235,6 +235,27 @@ def test_egress_rejects_oversized_input_and_recursively_sanitizes_payloads() -> 
     assert "ordinary" in rendered
 
 
+def test_egress_never_redacts_long_slug_and_hex_compound_identifiers() -> None:
+    """A workspace_id/plan_id/operation_id built as "<slug>-<hex-suffix>" can be
+    long and diverse enough to cross the high-entropy threshold; it must never
+    be redacted, since it identifies the workspace the caller must use next."""
+    long_slug_ids = {
+        "workspace_id": "background-parity-check-0f644e5464a1b2c3",
+        "plan_id": "plan-" + "a" * 24,
+        "operation_id": "op-" + "1a2b3c4d5e6f" * 2,
+        "acceptance_id": "accept-" + "9f8e7d6c5b4a" * 2,
+    }
+    sanitized = sanitize_egress_data(long_slug_ids, destination=EgressDestination.MODEL)
+    assert sanitized == long_slug_ids
+
+    # A key ending in _id is not a blank check: disallowed characters (mixed
+    # case, base64 padding, underscores) still fall through to the ordinary
+    # high-entropy scan and can still be redacted.
+    secret_shaped = {"session_id": "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0" * 2}
+    redacted = sanitize_egress_data(secret_shaped, destination=EgressDestination.MODEL)
+    assert redacted["session_id"] != secret_shaped["session_id"]
+
+
 def test_egress_sanitization_preserves_existing_policy_markers() -> None:
     payload = {
         "subject": "token=<redacted>",

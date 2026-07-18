@@ -176,6 +176,12 @@ _PUBLIC_URL_BODY = re.compile(
 _SAFE_SELECTOR = re.compile(
     r"(?:check-run|operation|task|workspace|restore|backup)-[A-Za-z0-9:._-]{1,128}"
 )
+# Matches RepoForge's own internal compound identifiers (e.g. workspace_id
+# "<task-slug>-<hex-suffix>", plan_id "plan-<hex>", operation_id "op-<hex>"):
+# lowercase-alnum-and-hyphen only, so it cannot match base64/JWT/mixed-case
+# secret shapes. A long slug-plus-hex identifier can otherwise cross the
+# high-entropy threshold and be falsely redacted as a secret.
+_COMPOUND_IDENTIFIER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _SANITIZED_MARKER = re.compile(
     r"<(?:redacted(?::[A-Za-z0-9_+.-]+)?|withheld:[A-Za-z0-9_+.-]+|reject_result:[^<>\r\n]+)>"
 )
@@ -604,6 +610,7 @@ def _safe_identity_field(key: str, value: str) -> bool:
         or _INTEGRITY.fullmatch(value) is not None
         or _PUBLIC_URL_BODY.fullmatch(value) is not None
         or _SAFE_SELECTOR.fullmatch(value) is not None
+        or (0 < len(value) <= 128 and _COMPOUND_IDENTIFIER.fullmatch(value) is not None)
     )
 
 
