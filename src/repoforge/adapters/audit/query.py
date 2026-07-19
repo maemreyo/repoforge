@@ -7,6 +7,7 @@ persistence and never touches Git, GitHub, or a workspace.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -16,6 +17,14 @@ from typing import Any
 from ...domain.errors import ConfigError
 
 _MAX_SCAN_BYTES = 20_000_000
+_AUDIT_CURSOR_PREFIX = "audit-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class AuditEventPage:
+    events: list[dict[str, Any]]
+    next_cursor: str | None
+    truncated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +173,128 @@ def read_audit_events(
         if len(matched) >= limit:
             break
     return matched
+
+
+def _aware_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _audit_cursor_binding(
+    *,
+    action: str | None,
+    only_failed: bool,
+    min_duration_ms: float | None,
+    start_time: str | None,
+    end_time: str | None,
+) -> str:
+    payload = {
+        "action": action,
+        "end_time": end_time,
+        "min_duration_ms": min_duration_ms,
+        "only_failed": only_failed,
+        "start_time": start_time,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def read_audit_event_page(
+    path: Path,
+    *,
+    limit: int,
+    action: str | None = None,
+    only_failed: bool = False,
+    min_duration_ms: float | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    cursor: str | None = None,
+) -> AuditEventPage:
+    """Return one newest-first audit page bound to exact filters without exposing file paths."""
+
+    if limit <= 0 or limit > 200:
+        raise ConfigError("Audit page limit must be between 1 and 200")
+    start = _aware_timestamp(start_time) if start_time is not None else None
+    end = _aware_timestamp(end_time) if end_time is not None else None
+    if start_time is not None and start is None:
+        raise ConfigError("start_time must be a timezone-aware ISO-8601 timestamp")
+    if end_time is not None and end is None:
+        raise ConfigError("end_time must be a timezone-aware ISO-8601 timestamp")
+    if start is not None and end is not None and start > end:
+        raise ConfigError("start_time must not be after end_time")
+    binding = _audit_cursor_binding(
+        action=action,
+        only_failed=only_failed,
+        min_duration_ms=min_duration_ms,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    if not path.is_file():
+        if cursor is not None:
+            raise ConfigError("Audit cursor is stale because the log snapshot changed")
+        return AuditEventPage([], None, False)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            truncated_scan = size > _MAX_SCAN_BYTES
+            handle.seek(max(0, size - _MAX_SCAN_BYTES))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigError(f"Cannot read audit log: {exc}") from exc
+    snapshot = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:24]
+    offset = 0
+    if cursor is not None:
+        parts = cursor.split(":", 3)
+        if (
+            len(parts) != 4
+            or parts[0] != _AUDIT_CURSOR_PREFIX
+            or parts[1] != binding
+            or not parts[3].isdigit()
+        ):
+            raise ConfigError("Audit cursor is invalid or belongs to different filters")
+        if parts[2] != snapshot:
+            raise ConfigError("Audit cursor is stale because the log snapshot changed")
+        offset = int(parts[3])
+    matched: list[dict[str, Any]] = []
+    for line in reversed(text.splitlines()):
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        event = {str(key): value for key, value in raw.items()}
+        if action is not None and event.get("action") != action:
+            continue
+        if only_failed and event.get("success", True):
+            continue
+        details = event.get("details")
+        duration = details.get("duration_ms") if isinstance(details, dict) else None
+        if min_duration_ms is not None and (
+            not isinstance(duration, (int, float)) or duration < min_duration_ms
+        ):
+            continue
+        timestamp = _aware_timestamp(event.get("timestamp"))
+        if start is not None and (timestamp is None or timestamp < start):
+            continue
+        if end is not None and (timestamp is None or timestamp > end):
+            continue
+        matched.append(event)
+    selected = matched[offset : offset + limit]
+    has_more = offset + len(selected) < len(matched)
+    next_cursor = (
+        f"{_AUDIT_CURSOR_PREFIX}:{binding}:{snapshot}:{offset + len(selected)}"
+        if selected and has_more
+        else None
+    )
+    return AuditEventPage(selected, next_cursor, truncated_scan or has_more)
 
 
 def summarize_command_source_stats(path: Path) -> list[dict[str, Any]]:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import RepositoryConfig
+from .issue_mutation import RemoteComment
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +90,14 @@ class PullRequestGateway(Protocol):
     def update(
         self, cwd: Path, branch: str, *, title: str | None, body: str | None
     ) -> dict[str, Any]: ...
+
+    def pr_comments(
+        self, cwd: Path, pr_number: int, *, max_comments: int
+    ) -> tuple[tuple[RemoteComment, ...], bool]: ...
+
+    def pr_comment(self, cwd: Path, pr_number: int, body: str) -> RemoteComment: ...
+
+    def pr_review_reply(self, cwd: Path, review_comment_id: int, body: str) -> RemoteComment: ...
 
     def status(self, cwd: Path, branch: str) -> dict[str, Any]: ...
 

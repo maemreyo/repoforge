@@ -176,6 +176,28 @@ _PUBLIC_URL_BODY = re.compile(
 _SAFE_SELECTOR = re.compile(
     r"(?:check-run|operation|task|workspace|restore|backup)-[A-Za-z0-9:._-]{1,128}"
 )
+# RepoForge mints its own compound identifiers as "<slug-or-word>-<hex-suffix>"
+# (workspace_id, plan_id, operation_id, acceptance_id, failure_id, receipt_id);
+# a long, character-diverse slug can otherwise cross the generic high-entropy
+# threshold and be falsely redacted. This is deliberately narrower than "any
+# *_id-suffixed field with a safe charset": it is gated on the exact field
+# names RepoForge's own ID generators populate (never caller- or provider-
+# supplied), and the value must end in a pure lowercase-hex segment of one of
+# the exact lengths `ids.new_hex()`/truncated-digest call sites actually use.
+# A key ending in "_id" that is NOT one of these exact fields (e.g. a
+# hypothetical session_id/client_id carrying a real, lowercase-shaped bearer
+# token) still falls through to the ordinary high-entropy scan.
+_GENERATED_COMPOUND_ID_KEYS = frozenset(
+    {
+        "acceptance_id",
+        "failure_id",
+        "operation_id",
+        "plan_id",
+        "receipt_id",
+        "workspace_id",
+    }
+)
+_GENERATED_COMPOUND_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,101}-(?:[0-9a-f]{10}|[0-9a-f]{24})")
 _SANITIZED_MARKER = re.compile(
     r"<(?:redacted(?::[A-Za-z0-9_+.-]+)?|withheld:[A-Za-z0-9_+.-]+|reject_result:[^<>\r\n]+)>"
 )
@@ -596,6 +618,8 @@ def _normalized_key(value: object) -> str:
 
 
 def _safe_identity_field(key: str, value: str) -> bool:
+    if key in _GENERATED_COMPOUND_ID_KEYS:
+        return _GENERATED_COMPOUND_ID.fullmatch(value) is not None
     if key not in _SAFE_IDENTITY_KEYS and not key.endswith(("_sha", "_hash", "_digest", "_id")):
         return False
     return (
@@ -684,8 +708,13 @@ def sanitize_egress_data(
             else f"<{evaluation.decision.value}:{evaluation.reason}>"
         )
     if isinstance(value, str):
-        if _safe_identity_field(_key, value):
-            return value
+        # Always run the full detector (private keys, provider tokens, bearer,
+        # credential URLs, sensitive assignments, explicit secrets, and the
+        # generic high-entropy heuristic) -- a field name or shape can only
+        # ever excuse the generic entropy heuristic's false positives, never
+        # bypass a genuine, high-confidence secret-pattern match. A real
+        # provider token stored under a misleadingly-named or -shaped field
+        # must still be caught.
         evaluation = evaluate_egress(
             EgressRequest(
                 value,
@@ -697,9 +726,9 @@ def sanitize_egress_data(
             )
         )
         if (
-            _structured_path_field(_key, value)
-            and evaluation.findings
+            evaluation.findings
             and all(item.category == "high_entropy" for item in evaluation.findings)
+            and (_safe_identity_field(_key, value) or _structured_path_field(_key, value))
         ):
             return value
         return (

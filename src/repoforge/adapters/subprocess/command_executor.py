@@ -15,6 +15,7 @@ from ...domain.errors import CommandError, ErrorCode
 from ...domain.redaction import redact_text
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
+from .process_tree import inspect_descendants, kill_identity, wait_identities_gone
 
 
 class SubprocessCommandExecutor:
@@ -86,17 +87,77 @@ class SubprocessCommandExecutor:
             try:
                 return (process, process.communicate(input_data, timeout=timeout))
             except subprocess.TimeoutExpired as exc:
+                # Snapshot descendants before sending any kill signal: a child
+                # that daemonized a grandchild via its own start_new_session/
+                # setsid is still reachable by ppid here as long as it (or
+                # something else in the tree) is still alive -- which it is,
+                # since that's why the overall command timed out in the first
+                # place. Only taken on the timeout path so the common
+                # (successful, fast) case never pays for an extra `ps` call.
+                pre_snapshot = inspect_descendants(process.pid)
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                     process.wait(timeout=2)
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    with contextlib.suppress(ProcessLookupError):
+                except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=2)
+                # Repeat bounded discovery after group termination. This can
+                # catch a child created after the first snapshot while the
+                # root is still attributable; if the root has already exited,
+                # the empty complete result records that the rescan happened.
+                post_snapshot = inspect_descendants(process.pid)
+                # A PermissionError from killpg is treated as "already reaped", but
+                # that assumption can be wrong; verify with a bounded drain, and
+                # if the process is provably still alive, make one last direct
+                # single-process kill() attempt (not the process-group killpg,
+                # which may be the thing that kept failing) before giving up --
+                # this bounds the caller's wait either way, but still tries hard
+                # not to leave the child orphaned.
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        process.kill()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=2)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.communicate(timeout=2)
+                # killpg/kill above only reach processes still in this
+                # session's process group; a descendant that daemonized with
+                # its own start_new_session/setsid escapes that and survives
+                # every attempt above untouched. Sweep both bounded snapshots
+                # through atomic process handles; this does not depend on
+                # group membership and cannot target a reused PID.
+                descendants = {
+                    (identity.pid, identity.start_token): identity
+                    for identity in (
+                        *pre_snapshot.identities,
+                        *post_snapshot.identities,
+                    )
+                }
+                signalled_identities = tuple(
+                    descendant
+                    for descendant in descendants.values()
+                    if kill_identity(descendant, signal.SIGKILL)
+                )
+                survivors = wait_identities_gone(signalled_identities)
                 raise CommandError(
                     f"Command timed out after {timeout}s: {' '.join(argv)}",
                     code=ErrorCode.COMMAND_TIMEOUT,
-                    details={"timeout_seconds": timeout},
+                    details={
+                        "timeout_seconds": timeout,
+                        "descendant_inspection_complete": (
+                            pre_snapshot.inspection_complete and post_snapshot.inspection_complete
+                        ),
+                        "descendant_inspection_status": (
+                            f"pre:{pre_snapshot.diagnostic};post:{post_snapshot.diagnostic}"
+                        ),
+                        "descendant_snapshot_count": len(descendants),
+                        "descendant_signal_count": len(signalled_identities),
+                        "descendant_survivor_count": len(survivors),
+                    },
                 ) from exc
         finally:
             if cancel_token is not None:

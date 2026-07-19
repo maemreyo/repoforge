@@ -99,6 +99,7 @@ class FailureIntelligenceService:
             stage_id=stage.stage_id,
             stage_kind=stage.kind.value,
             target=stage.target,
+            workspace_id=plan.workspace_id,
             pre_identity=pre_identity,
             post_identity=post_identity,
             environment_identity=environment_identity,

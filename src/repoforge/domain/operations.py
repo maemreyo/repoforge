@@ -37,6 +37,7 @@ _KEYED_IDEMPOTENT_ACTIONS = frozenset(
         "workspace_update_draft_pr",
         "workspace_write_file",
         "workspace_edit",
+        "workspace_mutate",
         "workspace_apply_patch",
     }
 )
@@ -68,6 +69,9 @@ _UNCHANGED_STATE: dict[str, tuple[str, ...]] = {
     ),
     "workspace_edit": (
         "Workspace files may have changed only when the error explicitly reports an uncertain mutation outcome.",
+    ),
+    "workspace_mutate": (
+        "Workspace files and its idempotency receipt commit together or recover together.",
     ),
     "workspace_apply_patch": (
         "Workspace files may have changed only when the error explicitly reports an uncertain mutation outcome.",

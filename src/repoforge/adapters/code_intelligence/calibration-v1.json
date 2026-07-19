@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "corpus": "seeded-bugs-v1",
+  "providers": {
+    "syntax": {
+      "javascript": {"cases": 1, "routed_test_recall": 0},
+      "python": {"cases": 2, "routed_test_recall": 100},
+      "typescript": {"cases": 2, "routed_test_recall": 50}
+    },
+    "tree-sitter": {
+      "javascript": {"cases": 1, "routed_test_recall": 100},
+      "python": {"cases": 2, "routed_test_recall": 100},
+      "typescript": {"cases": 2, "routed_test_recall": 100}
+    }
+  }
+}

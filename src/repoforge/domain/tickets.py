@@ -131,6 +131,26 @@ class TicketLiveMetadata:
     comments: tuple[str, ...] = ()
 
 
+class GraphEvidenceCapability(str, Enum):
+    """One independently-observed GitHub read that backs the ticket graph."""
+
+    ISSUE = "issue"
+    COMMENTS = "comments"
+    SUB_ISSUES = "sub_issues"
+    DEPENDENCIES = "dependencies"
+    PROJECT_OVERLAY = "project_overlay"
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityCoverage:
+    """Completeness of one capability, scoped to the issues it actually touched."""
+
+    capability: GraphEvidenceCapability
+    complete: bool
+    unavailable: tuple[int, ...]
+    truncated: bool
+
+
 @dataclass(frozen=True, slots=True)
 class TicketGraphSnapshot:
     """One bounded, internally consistent observation of the GitHub ticket graph."""
@@ -141,6 +161,7 @@ class TicketGraphSnapshot:
     unavailable: tuple[int, ...]
     truncated: bool
     live_issues: tuple[TicketLiveMetadata, ...] = ()
+    capability_coverage: tuple[CapabilityCoverage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

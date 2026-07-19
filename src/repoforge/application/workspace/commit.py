@@ -4,7 +4,7 @@ from typing import Any
 
 from ...config import RepositoryConfig
 from ...domain.command_source import dirty_command_source_paths
-from ...domain.errors import CommandError, WorkspaceError
+from ...domain.errors import CommandError, ErrorCode, WorkspaceError
 from ...domain.publishing import validate_commit_message
 from ..context import ApplicationContext
 
@@ -13,15 +13,21 @@ from ..context import ApplicationContext
 class WorkspaceCommitCommand:
     workspace_id: str
     message: str
+    expected_head_sha: str | None = None
+    expected_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceCommitResult:
+    summary: str
     workspace_id: str
     branch: str
     commit: str
+    previous_head_sha: str
     head_sha: str
+    committed: bool
     verified_profile: str | None
+    verification_fingerprint: str
     change_metrics: dict[str, Any]
     command_source_paths_committed: list[str]
 
@@ -59,6 +65,30 @@ class WorkspaceCommitter:
                 metrics = self.ctx.git.enforce_change_budget(path, repo)
                 dirty = bool(self.ctx.git.status_porcelain(path).strip())
                 current_head = self.ctx.git.head_sha(path)
+                current_fingerprint = self.ctx.git.fingerprint(path)
+                if c.expected_head_sha is not None and c.expected_head_sha != current_head:
+                    raise WorkspaceError(
+                        "STALE_STATE: workspace HEAD changed before commit",
+                        code=ErrorCode.STALE_STATE,
+                        retryable=True,
+                        details={
+                            "expected_head_sha": c.expected_head_sha,
+                            "actual_head_sha": current_head,
+                        },
+                    )
+                if (
+                    c.expected_fingerprint is not None
+                    and c.expected_fingerprint != current_fingerprint
+                ):
+                    raise WorkspaceError(
+                        "STALE_STATE: workspace fingerprint changed before commit",
+                        code=ErrorCode.STALE_STATE,
+                        retryable=True,
+                        details={
+                            "expected_fingerprint": c.expected_fingerprint,
+                            "actual_fingerprint": current_fingerprint,
+                        },
+                    )
                 controlled_refresh = fresh.metadata.get("refresh_commit_sha") == current_head
                 if not dirty and not controlled_refresh:
                     raise WorkspaceError("There are no changes to commit")
@@ -75,9 +105,15 @@ class WorkspaceCommitter:
                 completed = (
                     fresh.last_verification.completed_at if fresh.last_verification else None
                 )
-                before_commit_fingerprint = self.ctx.git.fingerprint(path)
+                before_commit_fingerprint = current_fingerprint
+                verification_fingerprint = (
+                    fresh.last_verification.fingerprint
+                    if fresh.last_verification is not None
+                    else before_commit_fingerprint
+                )
+                committed = not (controlled_refresh and not dirty)
                 try:
-                    if controlled_refresh and not dirty:
+                    if not committed:
                         head = current_head
                         show = self.ctx.git.commit_summary(path)
                     else:
@@ -137,13 +173,21 @@ class WorkspaceCommitter:
                         f"Commit {head} succeeded but workspace registry update failed; do not push until state is repaired"
                     ) from exc
                 return WorkspaceCommitResult(
-                    c.workspace_id,
-                    fresh.branch,
-                    show,
-                    head,
-                    profile,
-                    metrics,
-                    command_source_paths_committed,
+                    summary=(
+                        f"Committed workspace changes at {head}"
+                        if committed
+                        else f"Adopted controlled refresh commit {head}"
+                    ),
+                    workspace_id=c.workspace_id,
+                    branch=fresh.branch,
+                    commit=show,
+                    previous_head_sha=current_head,
+                    head_sha=head,
+                    committed=committed,
+                    verified_profile=profile,
+                    verification_fingerprint=verification_fingerprint,
+                    change_metrics=metrics,
+                    command_source_paths_committed=command_source_paths_committed,
                 )
 
         return self.ctx.audited(

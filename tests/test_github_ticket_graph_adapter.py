@@ -9,7 +9,12 @@ import pytest
 from repoforge.adapters.github.ticket_graph import CommandGitHubTicketGraphGateway
 from repoforge.config import GitHubTicketGraphConfig, ServerConfig
 from repoforge.domain.errors import CommandError
-from repoforge.domain.tickets import TicketGraphError, TicketPriority, TicketStatus
+from repoforge.domain.tickets import (
+    GraphEvidenceCapability,
+    TicketGraphError,
+    TicketPriority,
+    TicketStatus,
+)
 from repoforge.ports.cancellation import CancellationToken
 from repoforge.ports.command import CommandResult
 
@@ -132,6 +137,9 @@ def test_reads_native_subissues_dependencies_and_metadata(tmp_path: Path) -> Non
         "Superseded by: #3\nHandoff notes:\n- Continue in the canonical issue.",
     )
     assert all(call[0] == "gh" for call in executor.calls)
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert {item.complete for item in coverage.values()} == {True}
+    assert {item.unavailable for item in coverage.values()} == {()}
 
 
 def test_marks_partial_evidence_when_one_dependency_read_fails(tmp_path: Path) -> None:
@@ -149,6 +157,35 @@ def test_marks_partial_evidence_when_one_dependency_read_fails(tmp_path: Path) -
     assert snapshot.evidence_complete is False
     assert snapshot.unavailable == (2,)
     assert {node.number for node in snapshot.graph.nodes} == {1, 2, 3}
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.DEPENDENCIES].complete is False
+    assert coverage[GraphEvidenceCapability.DEPENDENCIES].unavailable == (2,)
+    assert coverage[GraphEvidenceCapability.ISSUE].complete is True
+    assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is True
+    assert coverage[GraphEvidenceCapability.COMMENTS].complete is True
+
+
+def test_marks_partial_evidence_when_one_comments_read_fails(tmp_path: Path) -> None:
+    responses = _responses()
+    responses["repos/acme/widgets/issues/3/comments?per_page=20"] = CommandError(
+        "temporary GitHub failure"
+    )
+    gateway = CommandGitHubTicketGraphGateway(
+        GraphExecutor(responses),
+        ServerConfig(tmp_path / "workspaces", tmp_path / "state"),
+    )
+
+    snapshot = gateway.read(tmp_path, GitHubTicketGraphConfig(root_issue=1), max_items=20)
+
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.COMMENTS].complete is False
+    assert coverage[GraphEvidenceCapability.COMMENTS].unavailable == (3,)
+    assert coverage[GraphEvidenceCapability.ISSUE].complete is True
+    assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is True
+    assert coverage[GraphEvidenceCapability.DEPENDENCIES].complete is True
+    # A comments-only gap must not taint the issue metadata that title/state/type/priority
+    # drift checks depend on.
+    assert 3 not in coverage[GraphEvidenceCapability.ISSUE].unavailable
 
 
 @pytest.mark.parametrize("max_items", [0, 201])

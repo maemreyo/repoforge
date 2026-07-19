@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, git
 
+from repoforge.adapters.filesystem.transaction import JournaledFileTransaction
+from repoforge.application.service import CodingService
+from repoforge.application.workspace.refresh_v2 import WorkspaceRefreshV2
 from repoforge.domain.errors import SecurityError, WorkspaceError
+from repoforge.domain.generated_paths import GeneratedPathRule
 
 
 def _clone_publisher(env: ForgeEnvironment, name: str = "publisher") -> Path:
@@ -229,6 +234,423 @@ def test_refresh_preview_becomes_stale_after_workspace_or_remote_base_change(
             str(stable["head_sha"]),
             str(stable["workspace_fingerprint"]),
         )
+
+
+def test_v2_preview_uses_committed_head_even_when_worktree_is_dirty(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", "dirty preview parity")["workspace_id"])
+    _commit_workspace_hello(forge_env, workspace_id, "changed locally\n")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "conflicting upstream change",
+    )
+    clean = service.workspace_status(workspace_id)
+    clean_preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(clean["head_sha"]),
+        expected_fingerprint=str(clean["workspace_fingerprint"]),
+    )
+
+    workspace_path = Path(str(service.workspace_status(workspace_id)["path"]))
+    (workspace_path / "scratch.txt").write_text("dirty but irrelevant\n", encoding="utf-8")
+    dirty = service.workspace_status(workspace_id)
+    dirty_preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(dirty["head_sha"]),
+        expected_fingerprint=str(dirty["workspace_fingerprint"]),
+    )
+
+    assert clean_preview["prediction_scope"] == "committed_head"
+    assert dirty_preview["prediction_scope"] == "committed_head"
+    assert dirty_preview["plan_hash"] == clean_preview["plan_hash"]
+    assert dirty_preview["conflicts"] == clean_preview["conflicts"]
+    assert dirty_preview["apply_blockers"] == ["working_tree_not_clean"]
+
+
+def test_v2_preview_returns_typed_three_way_conflict_evidence(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", "typed conflict evidence")["workspace_id"])
+    _commit_workspace_hello(forge_env, workspace_id, "changed locally\n")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "conflicting upstream change",
+    )
+    status = service.workspace_status(workspace_id)
+
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    assert preview["result"] == "preview"
+    assert preview["plan_token"].startswith("refresh-v2:")
+    assert preview["conflicts"] == [
+        {
+            "path": "hello.txt",
+            "kind": "content",
+            "base": "hello\n",
+            "ours": "changed locally\n",
+            "theirs": "changed remotely\n",
+            "content_truncated": False,
+            "next_action": "Provide one reviewed resolution for this path.",
+            "regeneration_command": [],
+        }
+    ]
+
+
+def test_v2_generated_conflict_is_tagged_and_resolution_warns(
+    forge_env: ForgeEnvironment,
+) -> None:
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    workspace_id = str(service.workspace_create("demo", "generated conflict")["workspace_id"])
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed locally\n",
+        str(current["sha256"]),
+    )
+    service.workspace_run_profile(workspace_id)
+    service.workspace_commit(workspace_id, "change generated output locally")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "change generated output upstream",
+    )
+    status = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    conflict = preview["conflicts"][0]
+    assert conflict["kind"] == "generated"
+    assert conflict["regeneration_command"] == ["python", "scripts/render_hello.py"]
+    assert "do not hand-merge" in conflict["next_action"].lower()
+
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[{"path": "hello.txt", "content": "reviewed generated resolution\n"}],
+    )
+
+    assert applied["result"] == "applied"
+    assert applied["warnings"] == [
+        "hello.txt is generated; merge source inputs and regenerate with: python scripts/render_hello.py"
+    ]
+    assert applied["verify_selector"] == ["hello.txt"]
+
+
+def test_v2_refresh_apply_requires_exact_resolution_set(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", "exact resolutions")["workspace_id"])
+    _commit_workspace_hello(forge_env, workspace_id, "changed locally\n")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "conflicting upstream change",
+    )
+    status = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    with pytest.raises(WorkspaceError, match="exactly one resolution"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(status["head_sha"]),
+            expected_fingerprint=str(status["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[],
+        )
+
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[{"path": "hello.txt", "content": "reviewed combined result\n"}],
+    )
+    workspace_path = Path(str(service.workspace_status(workspace_id)["path"]))
+
+    assert applied["result"] == "applied"
+    assert applied["changed_paths"] == ["hello.txt"]
+    assert applied["verify_selector"] == ["hello.txt"]
+    assert applied["transaction_id"]
+    assert applied["workspace_fingerprint"] != status["workspace_fingerprint"]
+    assert (workspace_path / "hello.txt").read_text(
+        encoding="utf-8"
+    ) == "reviewed combined result\n"
+    assert (
+        git("rev-list", "--parents", "-n", "1", "HEAD", cwd=workspace_path).split().__len__() == 3
+    )
+
+
+def test_v2_refresh_registry_failure_restores_exact_reviewed_state(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", "v2 registry rollback")["workspace_id"])
+    _commit_workspace_hello(forge_env, workspace_id, "changed locally\n")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "conflicting upstream change",
+    )
+    before = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+    original_save = service.state.save
+
+    def fail_refresh_save(record: object) -> None:
+        metadata = getattr(record, "metadata", {})
+        if isinstance(metadata, dict) and "last_refresh_target_sha" in metadata:
+            raise OSError("simulated registry failure")
+        original_save(record)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service.state, "save", fail_refresh_save)
+    with pytest.raises(WorkspaceError, match="reviewed Git and registry state was restored"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.txt", "content": "reviewed resolution\n"}],
+        )
+
+    restored = service.workspace_status(workspace_id)
+    workspace_path = Path(service.state.load(workspace_id).path)
+    assert restored["head_sha"] == before["head_sha"]
+    assert restored["workspace_fingerprint"] == before["workspace_fingerprint"]
+    assert restored["clean"] is True
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "changed locally\n"
+    assert not (forge_env.root / "state" / "workspace-refresh-transactions" / workspace_id).exists()
+
+
+def test_v2_refresh_recovers_prepared_merge_after_process_crash(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", "v2 crash rollback")["workspace_id"])
+    _commit_workspace_hello(forge_env, workspace_id, "changed locally\n")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "conflicting upstream change",
+    )
+    before = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_merge_started":
+            raise KeyboardInterrupt("simulated process death")
+
+    service._refresh_v2 = WorkspaceRefreshV2(
+        service.application.context,
+        fault_injector=crash,
+    )
+    with pytest.raises(KeyboardInterrupt, match="simulated process death"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.txt", "content": "reviewed resolution\n"}],
+        )
+
+    journal = forge_env.root / "state" / "workspace-refresh-transactions" / workspace_id
+    assert journal.exists()
+    service._refresh_v2 = WorkspaceRefreshV2(service.application.context)
+    recovered = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+    restored = service.workspace_status(workspace_id)
+
+    assert recovered["plan_hash"] == preview["plan_hash"]
+    assert restored["head_sha"] == before["head_sha"]
+    assert restored["workspace_fingerprint"] == before["workspace_fingerprint"]
+    assert restored["clean"] is True
+    assert not journal.exists()
+
+
+def test_v2_refresh_recovers_inner_resolution_journal_before_reset(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", "v2 nested crash rollback")["workspace_id"])
+    _commit_workspace_hello(forge_env, workspace_id, "changed locally\n")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "conflicting upstream change",
+    )
+    before = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_apply:0":
+            raise KeyboardInterrupt("simulated nested transaction death")
+
+    service._refresh_v2 = WorkspaceRefreshV2(
+        service.application.context,
+        file_fault_injector=crash,
+    )
+    with pytest.raises(KeyboardInterrupt, match="nested transaction death"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.txt", "content": "reviewed resolution\n"}],
+        )
+
+    workspace_path = Path(service.state.load(workspace_id).path)
+    service._refresh_v2 = WorkspaceRefreshV2(service.application.context)
+    recovered = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+    restored = service.workspace_status(workspace_id)
+
+    assert recovered["plan_hash"] == preview["plan_hash"]
+    assert JournaledFileTransaction(workspace_path).pending_transactions() == ()
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "changed locally\n"
+    assert restored["head_sha"] == before["head_sha"]
+    assert restored["workspace_fingerprint"] == before["workspace_fingerprint"]
+    audit_events = [
+        json.loads(line)
+        for line in (forge_env.root / "state" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    recovery_preview = [event for event in audit_events if event["action"] == "workspace_refresh"][
+        -1
+    ]
+    assert recovery_preview["details"]["action"] == "preview"
+    assert recovery_preview["details"]["recovery_pending"] is True
+    assert recovery_preview["details"]["is_mutating"] is True
+
+
+def test_v2_refresh_finalizes_committed_journal_after_process_crash(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", "v2 crash finalize")["workspace_id"])
+    _push_upstream_file(
+        forge_env,
+        "upstream.txt",
+        "upstream\n",
+        "non-conflicting upstream change",
+    )
+    before = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_commit_marker":
+            raise KeyboardInterrupt("simulated post-commit process death")
+
+    service._refresh_v2 = WorkspaceRefreshV2(
+        service.application.context,
+        fault_injector=crash,
+    )
+    with pytest.raises(KeyboardInterrupt, match="post-commit"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+        )
+
+    journal = forge_env.root / "state" / "workspace-refresh-transactions" / workspace_id
+    committed = service.workspace_status(workspace_id)
+    assert committed["head_sha"] != before["head_sha"]
+    assert journal.exists()
+
+    service._refresh_v2 = WorkspaceRefreshV2(service.application.context)
+    finalized = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(committed["head_sha"]),
+        expected_fingerprint=str(committed["workspace_fingerprint"]),
+    )
+    workspace_path = Path(service.state.load(workspace_id).path)
+
+    assert finalized["result"] == "preview"
+    assert (workspace_path / "upstream.txt").read_text(encoding="utf-8") == "upstream\n"
+    assert not journal.exists()
 
 
 def test_conflicting_refresh_returns_exact_paths_and_restores_original_state(

@@ -24,10 +24,14 @@ class McpRuntimeHost:
         router: AtomicServiceRouter,
         reloader: HotReloadCoordinator,
         on_activated: Callable[[int], None] | None = None,
+        connector_identity: str = "forge_v2",
+        tool_surface_hash: str | None = None,
     ) -> None:
         self.router = router
         self._reloader = reloader
         self._on_activated = on_activated
+        self._connector_identity = connector_identity
+        self._tool_surface_hash = tool_surface_hash
 
     @staticmethod
     def _positive_generation(value: object, field: str) -> int:
@@ -114,6 +118,8 @@ class McpRuntimeHost:
                 "generation": container.generation,
                 "gate": container.gate.snapshot(),
                 "router": self.router.snapshot(),
+                "connector_identity": self._connector_identity,
+                "tool_surface_hash": self._tool_surface_hash or "",
             }
             return ControlResponse(
                 RUNTIME_CONTROL_PROTOCOL_VERSION,
@@ -133,6 +139,9 @@ class McpRuntimeHost:
                         "repository_count": len(repositories),
                         "generation": container.generation,
                         "router": self.router.snapshot(),
+                        "connector_identity": self._connector_identity,
+                        "tool_surface_hash": self._tool_surface_hash or "",
+                        "surface_reported": self._tool_surface_hash is not None,
                     }
                 return ControlResponse(
                     1,

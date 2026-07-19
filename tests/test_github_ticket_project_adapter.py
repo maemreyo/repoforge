@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from repoforge.adapters.github.gh_cli import GhCliGateway
 from repoforge.adapters.github.ticket_project import GhTicketProjectGateway
 from repoforge.config import ServerConfig
 from repoforge.domain.ticket_sync import (
@@ -416,3 +417,114 @@ def test_apply_change_uses_constrained_native_commands_and_view_fallback(tmp_pat
     assert result["manual_actions"] == [
         "Configure Ready Queue sorting in GitHub: Priority asc, Sequence asc."
     ]
+
+
+def _issue_gateway(tmp_path: Path) -> tuple[GhCliGateway, ScriptedCommandExecutor]:
+    executor = ScriptedCommandExecutor()
+    server = ServerConfig(tmp_path / "workspaces", tmp_path / "state")
+    return GhCliGateway(executor, server), executor
+
+
+def test_issue_comment_posts_bounded_body_with_exact_rest_command(tmp_path: Path) -> None:
+    gateway, executor = _issue_gateway(tmp_path)
+    executor.enqueue(
+        _result("acme/demo\n"),
+        _result(
+            json.dumps(
+                {
+                    "id": 91,
+                    "body": "evidence\n<!-- marker -->",
+                    "html_url": "https://github.com/acme/demo/issues/7#issuecomment-91",
+                }
+            )
+        ),
+    )
+
+    comment = gateway.issue_comment(tmp_path, 7, "evidence\n<!-- marker -->")
+
+    assert comment.comment_id == 91
+    assert comment.body.endswith("<!-- marker -->")
+    assert executor.calls[1] == (
+        "gh",
+        "api",
+        "--method",
+        "POST",
+        "repos/acme/demo/issues/7/comments",
+        "-f",
+        "body=evidence\n<!-- marker -->",
+    )
+
+
+def test_issue_native_relationship_commands_use_database_ids(tmp_path: Path) -> None:
+    gateway, executor = _issue_gateway(tmp_path)
+    executor.enqueue(
+        _result("acme/demo\n"),
+        _result(json.dumps({"id": 501, "number": 9, "title": "Child", "state": "open"})),
+        _result("acme/demo\n"),
+        _result(json.dumps({"id": 501, "number": 9, "title": "Child", "state": "open"})),
+    )
+
+    sub_issue = gateway.add_sub_issue(tmp_path, 7, 501)
+    blocker = gateway.add_blocked_by(tmp_path, 7, 501)
+
+    assert sub_issue.issue_number == 9
+    assert blocker.issue_number == 9
+    assert executor.calls[1] == (
+        "gh",
+        "api",
+        "--method",
+        "POST",
+        "repos/acme/demo/issues/7/sub_issues",
+        "-F",
+        "sub_issue_id=501",
+    )
+    assert executor.calls[3] == (
+        "gh",
+        "api",
+        "--method",
+        "POST",
+        "repos/acme/demo/issues/7/dependencies/blocked_by",
+        "-F",
+        "issue_id=501",
+    )
+
+
+def test_issue_reconciliation_reads_are_capped_and_filter_pull_requests(tmp_path: Path) -> None:
+    gateway, executor = _issue_gateway(tmp_path)
+    executor.enqueue(
+        _result("acme/demo\n"),
+        _result(
+            json.dumps(
+                [
+                    {"id": 1, "body": "one", "html_url": "https://example/1"},
+                    {"id": 2, "body": "two", "html_url": "https://example/2"},
+                ]
+            )
+        ),
+        _result("acme/demo\n"),
+        _result(
+            json.dumps(
+                [
+                    {"id": 10, "number": 10, "title": "Issue", "state": "open", "body": "x"},
+                    {
+                        "id": 11,
+                        "number": 11,
+                        "title": "PR",
+                        "state": "open",
+                        "body": "y",
+                        "pull_request": {},
+                    },
+                ]
+            )
+        ),
+    )
+
+    comments, comments_truncated = gateway.issue_comments(tmp_path, 7, max_comments=1)
+    issues, issues_truncated = gateway.recent_issues(tmp_path, max_issues=1)
+
+    assert [item.comment_id for item in comments] == [1]
+    assert comments_truncated is True
+    assert [item.issue_number for item in issues] == [10]
+    assert issues_truncated is True
+    assert "per_page=2" in executor.calls[1][4]
+    assert "per_page=2" in executor.calls[3][4]

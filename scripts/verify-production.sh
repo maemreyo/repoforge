@@ -28,6 +28,8 @@ echo "[integrity] synchronize frozen dependencies"
 uv sync --extra dev --frozen
 echo "[integrity] validate release contract"
 uv run python scripts/check_release_contracts.py
+echo "[integrity] run Forge v2 release corpora"
+make v2-gates
 echo "[integrity] check formatting, lint, and types"
 uv run ruff format --check src tests scripts
 uv run ruff check src tests scripts

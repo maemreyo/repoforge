@@ -43,6 +43,7 @@ class WorkspaceRunAdhocCommand:
     argv: tuple[str, ...]
     working_directory: str | None = None
     background: bool = False
+    expected_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +194,7 @@ class WorkspaceAdhocRunner:
             "runner": argv[0],
             "argv_length": len(argv),
             "network_policy": _NETWORK_POLICY_LABEL,
+            "expected_fingerprint": c.expected_fingerprint,
         }
 
         def record_command_failure(exc: CommandError) -> None:
@@ -208,6 +210,13 @@ class WorkspaceAdhocRunner:
                     self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, locked_workspace
                 )
                 before_fingerprint = before.fingerprint
+                if (
+                    c.expected_fingerprint is not None
+                    and c.expected_fingerprint != before_fingerprint
+                ):
+                    raise WorkspaceError(
+                        "Workspace changed since the verification plan was reviewed"
+                    )
                 audit_details["fingerprint_source"] = before.source
 
                 started = time.monotonic()

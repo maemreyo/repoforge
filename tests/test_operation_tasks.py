@@ -590,25 +590,25 @@ async def test_operation_tools_are_exposed_through_actual_mcp_protocol(
     server = create_server(service=forge_env.service)
     async with create_connected_server_and_client_session(server) as session:
         tools = {item.name: item for item in (await session.list_tools()).tools}
-        assert {"operation_status", "operation_list", "operation_cancel"}.issubset(tools)
-        assert tools["operation_status"].annotations.readOnlyHint is True
-        assert tools["operation_list"].annotations.readOnlyHint is True
-        assert tools["operation_cancel"].annotations.readOnlyHint is False
-        assert tools["operation_cancel"].annotations.destructiveHint is False
-        assert tools["operation_cancel"].annotations.idempotentHint is True
+        assert "operation" in tools
+        assert tools["operation"].annotations.readOnlyHint is False
+        assert tools["operation"].annotations.destructiveHint is False
+        assert tools["operation"].annotations.idempotentHint is True
 
-        status = await session.call_tool("operation_status", {"operation_id": task.operation_id})
+        status = await session.call_tool(
+            "operation", {"action": "get", "operation_id": task.operation_id}
+        )
         assert status.isError is False
-        assert status.structuredContent["state"] == "running"
+        assert status.structuredContent["operation"]["state"] == "running"
         listed = await session.call_tool(
-            "operation_list",
-            {"scope": "task:task-mcp", "state": "running", "limit": 20},
+            "operation",
+            {"action": "list", "scope": "task:task-mcp", "state": "running", "limit": 20},
         )
         assert listed.isError is False
         assert listed.structuredContent["operations"][0]["operation_id"] == task.operation_id
         cancelled = await session.call_tool(
-            "operation_cancel",
-            {"operation_id": task.operation_id},
+            "operation",
+            {"action": "cancel", "operation_id": task.operation_id},
         )
         assert cancelled.isError is False
         assert cancelled.structuredContent["cancellation_requested"] is True
@@ -676,3 +676,92 @@ def test_operation_cli_status_list_and_cancel_delegate_to_service(
         == 0
     )
     assert json.loads(capsys.readouterr().out)["cancellation_requested"] is True
+
+
+def test_v2_operation_composite_exposes_typed_lifecycle_and_adaptive_polling(
+    forge_env: ForgeEnvironment,
+) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    pending = forge_env.service.operations.create(
+        kind="index",
+        phase="queued",
+        cancel_supported=True,
+        task_id="task-v2-ops",
+        workspace_id="workspace-v2-ops",
+    )
+    pending_result = forge_env.service.operation(action="get", operation_id=pending.operation_id)
+    V2_TOOL_SPECS["operation"].validate_output(pending_result)
+    assert pending_result["operation"]["state"] == "pending"
+    assert pending_result["operation"]["terminal"] is False
+    assert pending_result["operation"]["poll_after_seconds"] > 0
+    assert pending_result["operation"]["updated_at"] == pending.updated_at
+
+    running = forge_env.service.operations.start(pending.operation_id)
+    cancelled = forge_env.service.operation(
+        action="cancel",
+        operation_id=pending.operation_id,
+        expected_updated_at=running.updated_at,
+    )
+    assert cancelled["cancellation_requested"] is True
+    assert cancelled["operation"]["cancellation_reason"] == "cancellation_requested"
+    assert cancelled["operation"]["poll_after_seconds"] <= 1.0
+
+    forge_env.service.operations.cancelled(pending.operation_id)
+    terminal = forge_env.service.operation(action="get", operation_id=pending.operation_id)
+    assert terminal["operation"]["state"] == "cancelled"
+    assert terminal["operation"]["terminal"] is True
+    assert terminal["operation"]["poll_after_seconds"] is None
+    assert terminal["operation"]["cancellation_reason"] == "cancelled"
+
+
+def test_v2_operation_composite_lists_with_filters_and_cursor(
+    forge_env: ForgeEnvironment,
+) -> None:
+    first = forge_env.service.operations.create(
+        kind="watch",
+        phase="queued",
+        cancel_supported=True,
+        task_id="task-v2-list",
+    )
+    second = forge_env.service.operations.create(
+        kind="watch",
+        phase="queued",
+        cancel_supported=True,
+        task_id="task-v2-list",
+    )
+    forge_env.service.operations.start(first.operation_id)
+    forge_env.service.operations.start(second.operation_id)
+
+    page = forge_env.service.operation(
+        action="list",
+        scope="task:task-v2-list",
+        state="running",
+        limit=1,
+    )
+    assert len(page["operations"]) == 1
+    assert page["next_cursor"] is not None
+    resumed = forge_env.service.operation(
+        action="list",
+        scope="task:task-v2-list",
+        state="running",
+        limit=1,
+        cursor=page["next_cursor"],
+    )
+    assert resumed["operations"][0]["operation_id"] != page["operations"][0]["operation_id"]
+
+    with pytest.raises(ValueError):
+        from repoforge.contracts.registry import V2_TOOL_SPECS
+
+        V2_TOOL_SPECS["operation"].validate_input(
+            {"action": "list", "operation_id": first.operation_id}
+        )
+
+
+def test_v2_operation_composite_rejects_invalid_direct_actions_with_typed_error(
+    forge_env: ForgeEnvironment,
+) -> None:
+    with pytest.raises(RepoForgeError) as invalid:
+        forge_env.service.operation(action="delete")
+
+    assert invalid.value.code is ErrorCode.OPERATION_INVALID

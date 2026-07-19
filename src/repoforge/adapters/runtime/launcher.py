@@ -62,14 +62,14 @@ class SubprocessRuntimeLauncher:
             or process_identity(record.pid) != record.process_identity
         ):
             return False
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(record.pid, signal.SIGTERM)
         deadline = time.monotonic() + max(0.0, grace_seconds)
         while time.monotonic() < deadline:
             if process_identity(record.pid) != record.process_identity:
                 return True
             time.sleep(0.05)
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(record.pid, signal.SIGKILL)
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:

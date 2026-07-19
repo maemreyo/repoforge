@@ -186,8 +186,31 @@ if args[:2] == ["pr", "view"]:
 
 if args and args[0] == "api":
     data = load()
-    endpoint = next((arg for arg in args[1:] if not arg.startswith("-") and arg not in {{"GET", "per_page=100", "filter=latest"}}), "")
+    endpoint = next((arg for arg in args[1:] if not arg.startswith("-") and arg not in {{"GET", "POST", "PATCH", "per_page=100", "filter=latest"}}), "")
+    method = arg_value(args, "--method", "GET")
+    body_field = next((arg.split("=", 1)[1] for arg in args if arg.startswith("body=")), "")
+    endpoint_path = endpoint.split("?", 1)[0]
     current_head = head_sha()
+    if "/issues/" in endpoint_path and endpoint_path.endswith("/comments"):
+        comments = data.setdefault("pr_comments", [])
+        if method == "POST":
+            item = {{"id": len(comments) + 1001, "body": body_field, "html_url": f"https://github.com/owner/demo/issues/42#issuecomment-{{len(comments) + 1001}}"}}
+            comments.append(item)
+            save(data)
+            print(json.dumps(item))
+        else:
+            print(json.dumps(comments))
+        raise SystemExit(0)
+    if "/pulls/" in endpoint_path and endpoint_path.endswith("/comments"):
+        print(json.dumps(data.get("pr_review_comments", [])))
+        raise SystemExit(0)
+    if "/pulls/comments/" in endpoint_path and endpoint_path.endswith("/replies"):
+        comments = data.setdefault("pr_review_comments", [])
+        item = {{"id": len(comments) + 2001, "body": body_field, "html_url": f"https://github.com/owner/demo/pull/42#discussion_r{{len(comments) + 2001}}"}}
+        comments.append(item)
+        save(data)
+        print(json.dumps(item))
+        raise SystemExit(0)
     if endpoint.endswith("/check-runs") and "/commits/" in endpoint:
         runs = data.get("check_runs") or {{
             "101": {{"id": 101, "name": "unit", "head_sha": current_head, "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/demo/actions/runs/1001/job/101", "html_url": "https://github.com/owner/demo/actions/runs/1001/job/101", "started_at": "", "completed_at": "", "output": {{"title": "", "summary": "", "text": "", "annotations_count": 0}}, "app": {{"name": "GitHub Actions"}}}},

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...domain.tickets import (
@@ -18,6 +18,7 @@ from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
 from ..tickets.readiness import derive_ticket_readiness
 from .issue_graph import (
     _incomplete_graph_diagnostic,
+    capability_coverage_payload,
     node_payload,
     read_github_ticket_snapshot,
 )
@@ -109,6 +110,7 @@ class RepositoryIssueNextResult:
     tickets: list[dict[str, Any]]
     assessments: list[dict[str, Any]]
     metadata_repairs: list[dict[str, Any]]
+    capability_coverage: list[dict[str, Any]] = field(default_factory=list)
 
 
 class RepositoryIssueNextReader:
@@ -118,6 +120,18 @@ class RepositoryIssueNextReader:
         self.ctx = ctx
 
     def execute(self, c: RepositoryIssueNextCommand) -> RepositoryIssueNextResult:
+        return self._execute(c, audited=True)
+
+    def compute(self, c: RepositoryIssueNextCommand) -> RepositoryIssueNextResult:
+        """Derive readiness without creating a nested audit event."""
+        return self._execute(c, audited=False)
+
+    def _execute(
+        self,
+        c: RepositoryIssueNextCommand,
+        *,
+        audited: bool,
+    ) -> RepositoryIssueNextResult:
         details: dict[str, object] = {
             "repo_id": c.repo_id,
             "root_issue": c.root_issue,
@@ -147,6 +161,7 @@ class RepositoryIssueNextReader:
                 tickets,
                 assessments,
                 repairs,
+                capability_coverage_payload(snapshot),
             )
 
         def op() -> RepositoryIssueNextResult:
@@ -305,4 +320,4 @@ class RepositoryIssueNextReader:
                 repairs=repairs,
             )
 
-        return self.ctx.audited("repo_issue_next", details, op)
+        return self.ctx.audited("repo_issue_next", details, op) if audited else op()

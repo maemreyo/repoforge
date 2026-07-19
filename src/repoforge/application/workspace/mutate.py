@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import stat
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
@@ -18,14 +21,19 @@ from ...domain.filesystem_transaction import (
     TransactionPlan,
     WriteFile,
 )
+from ...domain.operations import hash_idempotency_key, request_fingerprint
 from ...domain.patches import materialize_normalized_patch, normalize_patch
 from ...domain.policy import assert_path_allowed, resolve_workspace_path, validate_patch
+from ...domain.redaction import sanitize_persisted_data
+from ...ports.file_transactions import FileTransaction
 from ..context import ApplicationContext
+from ..dto import to_data
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_OPERATIONS = 100
 _MAX_REPLACEMENTS = 20
+_RECEIPT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +105,7 @@ class WorkspaceMutateCommand:
     operations: tuple[WorkspaceMutation, ...]
     expected_workspace_fingerprint: str
     dry_run: bool = False
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +147,47 @@ class _VirtualFile:
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.data).hexdigest()
+
+
+def _verify_patch_with_git_apply(
+    ctx: ApplicationContext,
+    normalized_patch: str,
+    paths: tuple[str, ...],
+    read_file: Callable[[str], str | None],
+) -> None:
+    """Independently verify a normalized patch is well-formed using the real
+    `git apply --check`, on top of the custom parser in normalize_patch and
+    materialize_normalized_patch (#184: "patch normalization + git apply
+    --check"). Runs against a throwaway scratch repo seeded with exactly the
+    current (possibly in-batch-staged, via `read_file`) pre-image content of
+    the paths the patch touches -- never the real workspace tree, so an
+    earlier operation in the same journaled transaction is still reflected
+    correctly and a failed check can never touch real state."""
+    with tempfile.TemporaryDirectory(prefix="repoforge-patch-check-") as scratch_dir:
+        scratch = Path(scratch_dir)
+        ctx.commands.run(["git", "init", "--quiet"], cwd=scratch, timeout=10)
+        for relative_path in paths:
+            content = read_file(relative_path)
+            if content is None:
+                continue
+            target = scratch / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        result = ctx.commands.run(
+            ["git", "apply", "--check", "-"],
+            cwd=scratch,
+            input_text=normalized_patch,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RepoForgeError(
+                "git apply --check rejected the normalized patch",
+                code=ErrorCode.PATCH_PARSE_FAILED,
+                safe_next_action=("Read the exact current file content and regenerate the patch."),
+                unchanged_state=("The workspace tree, index, and HEAD were not modified.",),
+                details={"git_apply_stderr": result.stderr[:2000]},
+            )
 
 
 class _MutationPlanner:
@@ -363,6 +413,7 @@ class _MutationPlanner:
             self.repo,  # type: ignore[arg-type]
             max_chars=self.ctx.config.server.max_tool_output_chars * 4,
         )
+        _verify_patch_with_git_apply(self.ctx, normalized.patch, normalized.paths, read_file)
         materialized = materialize_normalized_patch(normalized.patch, read_file)
         changed = False
         before_hashes: list[str] = []
@@ -482,6 +533,26 @@ class WorkspaceMutator:
             "ops": list(op_names),
             "dry_run": command.dry_run,
         }
+        key_hash: str | None = None
+        request_digest: str | None = None
+        receipt_name: str | None = None
+        if command.idempotency_key is not None:
+            try:
+                key_hash = hash_idempotency_key(command.idempotency_key)
+                request_digest = request_fingerprint(
+                    {
+                        "action": "workspace_mutate",
+                        "repo_id": record.repo_id,
+                        "workspace_id": command.workspace_id,
+                        "operations": to_data(operations),
+                        "expected_workspace_fingerprint": command.expected_workspace_fingerprint,
+                        "dry_run": command.dry_run,
+                    }
+                )
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            receipt_name = f"workspace_mutate-{key_hash}.json"
+            audit_details["idempotency_key_hash"] = key_hash[:16]
 
         def run() -> WorkspaceMutateResult:
             with self.ctx.locks.lock(command.workspace_id):
@@ -489,6 +560,20 @@ class WorkspaceMutator:
                 recovery = engine.recover_pending()
                 audit_details["recovered_rolled_back"] = recovery.rolled_back
                 audit_details["recovered_finalized"] = recovery.finalized
+                if key_hash is not None and request_digest is not None and receipt_name is not None:
+                    persisted = engine.load_commit_receipt(receipt_name)
+                    if persisted is not None:
+                        audit_details["idempotent_replay"] = True
+                        result = self._decode_receipt(
+                            persisted,
+                            key_hash=key_hash,
+                            request_digest=request_digest,
+                            workspace_id=command.workspace_id,
+                        )
+                        if result.changed:
+                            record.last_verification = None
+                            self.ctx.store.save(record)
+                        return result
                 before_lookup = read_fingerprint(
                     self.ctx.fingerprint_cache,
                     command.workspace_id,
@@ -565,7 +650,7 @@ class WorkspaceMutator:
                 ready = all(item.status != "failed" for item in diagnostics)
                 would_change = any(item.changed for item in diagnostics)
                 if command.dry_run:
-                    return WorkspaceMutateResult(
+                    result = WorkspaceMutateResult(
                         command.workspace_id,
                         True,
                         ready,
@@ -580,8 +665,16 @@ class WorkspaceMutator:
                         self.ctx.git.change_metrics(workspace, repo),
                         None,
                     )
+                    self._persist_receipt_only(
+                        engine,
+                        result,
+                        key_hash=key_hash,
+                        request_digest=request_digest,
+                        receipt_name=receipt_name,
+                    )
+                    return result
                 if not actions:
-                    return WorkspaceMutateResult(
+                    result = WorkspaceMutateResult(
                         command.workspace_id,
                         False,
                         True,
@@ -596,40 +689,329 @@ class WorkspaceMutator:
                         self.ctx.git.change_metrics(workspace, repo),
                         None,
                     )
+                    self._persist_receipt_only(
+                        engine,
+                        result,
+                        key_hash=key_hash,
+                        request_digest=request_digest,
+                        receipt_name=receipt_name,
+                    )
+                    return result
 
                 def validate_budget() -> None:
                     self.ctx.git.enforce_change_budget(workspace, repo)
 
+                committed_result: WorkspaceMutateResult | None = None
+
+                def commit_receipt_factory(
+                    transaction_id: str,
+                    changed_paths: tuple[str, ...],
+                ) -> tuple[str, bytes]:
+                    nonlocal committed_result
+                    if key_hash is None or request_digest is None or receipt_name is None:
+                        raise AssertionError(
+                            "Keyed receipt factory called without an idempotency binding"
+                        )
+                    after = prime_fingerprint(
+                        self.ctx.fingerprint_cache,
+                        command.workspace_id,
+                        self.ctx.git,
+                        workspace,
+                    )
+                    committed_result = WorkspaceMutateResult(
+                        command.workspace_id,
+                        False,
+                        True,
+                        True,
+                        True,
+                        len(operations),
+                        tuple(diagnostics),
+                        changed_paths,
+                        after.fingerprint,
+                        self.ctx.git.head_sha(workspace),
+                        self.ctx.git.diff_stat(workspace),
+                        self.ctx.git.change_metrics(workspace, repo),
+                        transaction_id,
+                    )
+                    return (
+                        receipt_name,
+                        self._encode_receipt(
+                            committed_result,
+                            key_hash=key_hash,
+                            request_digest=request_digest,
+                        ),
+                    )
+
                 receipt = engine.commit(
                     TransactionPlan(actions),
                     precommit_validator=validate_budget,
+                    commit_receipt_factory=(
+                        commit_receipt_factory
+                        if key_hash is not None
+                        and request_digest is not None
+                        and receipt_name is not None
+                        else None
+                    ),
                 )
-                after = prime_fingerprint(
-                    self.ctx.fingerprint_cache,
-                    command.workspace_id,
-                    self.ctx.git,
-                    workspace,
-                )
+                if committed_result is None:
+                    after = prime_fingerprint(
+                        self.ctx.fingerprint_cache,
+                        command.workspace_id,
+                        self.ctx.git,
+                        workspace,
+                    )
+                    committed_result = WorkspaceMutateResult(
+                        command.workspace_id,
+                        False,
+                        True,
+                        True,
+                        True,
+                        len(operations),
+                        tuple(diagnostics),
+                        receipt.changed_paths,
+                        after.fingerprint,
+                        self.ctx.git.head_sha(workspace),
+                        self.ctx.git.diff_stat(workspace),
+                        self.ctx.git.change_metrics(workspace, repo),
+                        receipt.transaction_id,
+                    )
                 record.last_verification = None
                 self.ctx.store.save(record)
-                metrics = self.ctx.git.change_metrics(workspace, repo)
-                return WorkspaceMutateResult(
-                    command.workspace_id,
-                    False,
-                    True,
-                    True,
-                    True,
-                    len(operations),
-                    tuple(diagnostics),
-                    receipt.changed_paths,
-                    after.fingerprint,
-                    self.ctx.git.head_sha(workspace),
-                    self.ctx.git.diff_stat(workspace),
-                    metrics,
-                    receipt.transaction_id,
-                )
+                return committed_result
 
         return self.ctx.audited("workspace_mutate", audit_details, run)
+
+    def _persist_receipt_only(
+        self,
+        engine: FileTransaction,
+        result: WorkspaceMutateResult,
+        *,
+        key_hash: str | None,
+        request_digest: str | None,
+        receipt_name: str | None,
+    ) -> None:
+        if key_hash is None or request_digest is None or receipt_name is None:
+            return
+        engine.commit(
+            TransactionPlan(()),
+            commit_receipt_factory=lambda _transaction_id, _changed_paths: (
+                receipt_name,
+                self._encode_receipt(
+                    result,
+                    key_hash=key_hash,
+                    request_digest=request_digest,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _encode_receipt(
+        result: WorkspaceMutateResult,
+        *,
+        key_hash: str,
+        request_digest: str,
+    ) -> bytes:
+        payload = sanitize_persisted_data(
+            {
+                "schema_version": _RECEIPT_SCHEMA_VERSION,
+                "action": "workspace_mutate",
+                "key_hash": key_hash,
+                "request_fingerprint": request_digest,
+                "result": to_data(result),
+            }
+        )
+        return (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    @staticmethod
+    def _decode_receipt(
+        payload: bytes,
+        *,
+        key_hash: str,
+        request_digest: str,
+        workspace_id: str,
+    ) -> WorkspaceMutateResult:
+        try:
+            raw = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise WorkspaceMutator._corrupt_receipt(
+                "receipt is not valid UTF-8 JSON",
+                exc,
+            ) from exc
+        if not isinstance(raw, dict) or set(raw) != {
+            "schema_version",
+            "action",
+            "key_hash",
+            "request_fingerprint",
+            "result",
+        }:
+            raise WorkspaceMutator._corrupt_receipt("receipt fields do not match schema version 1")
+        if raw.get("schema_version") != _RECEIPT_SCHEMA_VERSION:
+            raise WorkspaceMutator._corrupt_receipt("receipt schema version is unsupported")
+        if raw.get("action") != "workspace_mutate" or raw.get("key_hash") != key_hash:
+            raise WorkspaceMutator._corrupt_receipt("receipt identity does not match its key")
+        if raw.get("request_fingerprint") != request_digest:
+            raise ConfigError(
+                "IDEMPOTENCY_CONFLICT: the key is already bound to different input or expected state",
+                code=ErrorCode.IDEMPOTENCY_CONFLICT,
+                retryable=False,
+                safe_next_action=(
+                    "Use the original reviewed request or choose a new idempotency key."
+                ),
+            )
+        result = raw.get("result")
+        expected_fields = {
+            "workspace_id",
+            "dry_run",
+            "ready",
+            "changed",
+            "would_change",
+            "operation_count",
+            "operations",
+            "changed_paths",
+            "workspace_fingerprint",
+            "head_sha",
+            "diff_stat",
+            "change_metrics",
+            "transaction_id",
+        }
+        if not isinstance(result, dict) or set(result) != expected_fields:
+            raise WorkspaceMutator._corrupt_receipt("receipt result fields are invalid")
+        if result.get("workspace_id") != workspace_id:
+            raise WorkspaceMutator._corrupt_receipt("receipt belongs to another workspace")
+        raw_operations = result.get("operations")
+        raw_changed_paths = result.get("changed_paths")
+        raw_metrics = result.get("change_metrics")
+        if (
+            not isinstance(raw_operations, list)
+            or not isinstance(raw_changed_paths, list)
+            or not isinstance(raw_metrics, dict)
+        ):
+            raise WorkspaceMutator._corrupt_receipt("receipt result collections are invalid")
+        boolean_fields = ("dry_run", "ready", "changed", "would_change")
+        if any(not isinstance(result.get(field), bool) for field in boolean_fields):
+            raise WorkspaceMutator._corrupt_receipt("receipt result booleans are invalid")
+        operation_count = result.get("operation_count")
+        if (
+            not isinstance(operation_count, int)
+            or isinstance(operation_count, bool)
+            or not 1 <= operation_count <= _MAX_OPERATIONS
+        ):
+            raise WorkspaceMutator._corrupt_receipt("receipt operation_count is invalid")
+        if not all(isinstance(path, str) for path in raw_changed_paths):
+            raise WorkspaceMutator._corrupt_receipt("receipt changed_paths are invalid")
+        for field in ("workspace_fingerprint", "head_sha", "diff_stat"):
+            if not isinstance(result.get(field), str):
+                raise WorkspaceMutator._corrupt_receipt(f"receipt result {field} is invalid")
+        transaction_id = result.get("transaction_id")
+        if transaction_id is not None and not isinstance(transaction_id, str):
+            raise WorkspaceMutator._corrupt_receipt("receipt transaction_id is invalid")
+        diagnostic_fields = {
+            "index",
+            "op",
+            "path",
+            "status",
+            "changed",
+            "before_sha256",
+            "after_sha256",
+            "candidate_context",
+            "failure_reason",
+            "repair_actions",
+        }
+        for item in raw_operations:
+            if not isinstance(item, dict) or set(item) != diagnostic_fields:
+                raise WorkspaceMutator._corrupt_receipt("receipt operation fields are invalid")
+            index = item.get("index")
+            if (
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or not 0 <= index < _MAX_OPERATIONS
+            ):
+                raise WorkspaceMutator._corrupt_receipt("receipt operation index is invalid")
+            if not isinstance(item.get("op"), str) or not isinstance(item.get("status"), str):
+                raise WorkspaceMutator._corrupt_receipt("receipt operation labels are invalid")
+            if not isinstance(item.get("changed"), bool):
+                raise WorkspaceMutator._corrupt_receipt("receipt operation changed flag is invalid")
+            for field in (
+                "path",
+                "before_sha256",
+                "after_sha256",
+                "candidate_context",
+                "failure_reason",
+            ):
+                value = item.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise WorkspaceMutator._corrupt_receipt(f"receipt operation {field} is invalid")
+            repair_actions = item.get("repair_actions")
+            if not isinstance(repair_actions, list) or not all(
+                isinstance(action, str) for action in repair_actions
+            ):
+                raise WorkspaceMutator._corrupt_receipt(
+                    "receipt operation repair_actions are invalid"
+                )
+        try:
+            diagnostics = tuple(
+                MutationDiagnostic(
+                    index=item["index"],
+                    op=item["op"],
+                    path=item["path"],
+                    status=item["status"],
+                    changed=item["changed"],
+                    before_sha256=item["before_sha256"],
+                    after_sha256=item["after_sha256"],
+                    candidate_context=item["candidate_context"],
+                    failure_reason=item["failure_reason"],
+                    repair_actions=tuple(item["repair_actions"]),
+                )
+                for item in raw_operations
+            )
+            return WorkspaceMutateResult(
+                workspace_id=result["workspace_id"],
+                dry_run=result["dry_run"],
+                ready=result["ready"],
+                changed=result["changed"],
+                would_change=result["would_change"],
+                operation_count=operation_count,
+                operations=diagnostics,
+                changed_paths=tuple(raw_changed_paths),
+                workspace_fingerprint=result["workspace_fingerprint"],
+                head_sha=result["head_sha"],
+                diff_stat=result["diff_stat"],
+                change_metrics=dict(raw_metrics),
+                transaction_id=transaction_id,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorkspaceMutator._corrupt_receipt(
+                "receipt result cannot be decoded",
+                exc,
+            ) from exc
+
+    @staticmethod
+    def _corrupt_receipt(
+        message: str,
+        exc: BaseException | None = None,
+    ) -> ConfigError:
+        details: dict[str, object] | None = (
+            {"original_error_type": type(exc).__name__} if exc is not None else None
+        )
+        return ConfigError(
+            f"STATE_PERSISTENCE_FAILED: workspace_mutate idempotency {message}",
+            code=ErrorCode.STATE_PERSISTENCE_FAILED,
+            retryable=False,
+            safe_next_action=(
+                "Inspect private idempotency state and filesystem health; do not retry with a new "
+                "key until the corrupt receipt is resolved."
+            ),
+            details=details,
+        )
 
     @staticmethod
     def _op_name(operation: WorkspaceMutation) -> str:

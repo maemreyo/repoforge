@@ -20,7 +20,11 @@ from repoforge.adapters.runtime.local_runtime import (
     write_runtime_state,
 )
 from repoforge.domain.errors import ConfigError
-from repoforge.interfaces.mcp.server import create_server, tool_surface_hash
+from repoforge.interfaces.mcp.server import (
+    FORGE_V2_IDENTITY,
+    create_server,
+    tool_surface_hash,
+)
 
 
 class FakeService:
@@ -32,7 +36,7 @@ class FakeService:
 
 def test_mcp_server_registration_executes_complete_tool_surface() -> None:
     server = create_server(service=FakeService())  # type: ignore[arg-type]
-    assert server.name == "RepoForge"
+    assert server.name == FORGE_V2_IDENTITY == "forge_v2"
     assert len(tool_surface_hash()) == 64
 
 

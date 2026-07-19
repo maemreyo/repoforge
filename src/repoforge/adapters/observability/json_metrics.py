@@ -1,17 +1,19 @@
 """Crash-safe bounded aggregate operation metrics.
 
-Persists two views of the same recorded calls in one private, atomic,
-lock-guarded JSON file:
+Persists three views of recorded calls in one private, atomic, lock-guarded
+JSON file:
 
 - ``operations``: lifetime totals per action, unbounded in time (unchanged
   since schema version 1, kept for backward compatibility).
 - ``buckets``: per-day totals per action, bounded to a fixed retention
   window (pruned on every write) so a before/after comparison across a
   shipped fix is possible without unbounded growth.
+- ``latency``: bounded histograms and approximate p95 values for engine,
+  connector, client round-trip, and emitted payload bytes. Raw trace IDs are
+  never persisted.
 
-A version-1 file (``operations`` only) loads without error; lifetime totals
-keep accumulating and ``buckets`` starts empty, then fills in as new calls
-are recorded.
+Files from schema versions 1-3 load without error; lifetime totals keep
+accumulating while missing or malformed newer views restart empty.
 
 Each per-action stat also carries ``result_bytes_total``/``result_bytes_max``,
 the compact-JSON size of successful results, alongside the existing duration
@@ -27,11 +29,22 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from ...domain.latency import (
+    DURATION_BUCKETS_MS,
+    PAYLOAD_BUCKETS_BYTES,
+    LatencyStatus,
+    LatencyTrace,
+    ToolPayloadClass,
+    histogram_bucket,
+    histogram_percentile,
+    histogram_template,
+    payload_budget,
+)
 from ...ports.clock import Clock
 from ...ports.locking import LockManager
 from ..system import SystemClock
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 DEFAULT_RETENTION_DAYS = 30
 
 
@@ -47,6 +60,37 @@ def _empty_stat() -> dict[str, Any]:
         "result_bytes_count": 0,
         "failure_categories": {},
     }
+
+
+def _empty_latency_layer() -> dict[str, Any]:
+    return {
+        "observed_count": 0,
+        "unobserved_count": 0,
+        "unavailable_count": 0,
+        "failed_count": 0,
+        "histogram": histogram_template(DURATION_BUCKETS_MS),
+        "p95_ms": 0.0,
+    }
+
+
+def _empty_tool_class_latency(tool_class: ToolPayloadClass) -> dict[str, Any]:
+    return {
+        "count": 0,
+        "engine": _empty_latency_layer(),
+        "connector": _empty_latency_layer(),
+        "client_round_trip": _empty_latency_layer(),
+        "payload": {
+            "histogram": histogram_template(PAYLOAD_BUCKETS_BYTES),
+            "p95_bytes": 0.0,
+            "budget_bytes": payload_budget(tool_class),
+            "over_budget_count": 0,
+            "legacy_duplication_count": 0,
+        },
+    }
+
+
+def _empty_latency() -> dict[str, Any]:
+    return {"tool_classes": {}}
 
 
 def _legacy_result_bytes_count(stats: dict[str, Any]) -> int:
@@ -95,7 +139,12 @@ class JsonMetricsSink:
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"version": _SCHEMA_VERSION, "operations": {}, "buckets": {}}
+        return {
+            "version": _SCHEMA_VERSION,
+            "operations": {},
+            "buckets": {},
+            "latency": _empty_latency(),
+        }
 
     def snapshot(self) -> dict[str, Any]:
         if not self.path.is_file():
@@ -107,10 +156,14 @@ class JsonMetricsSink:
         if not isinstance(raw, dict) or not isinstance(raw.get("operations"), dict):
             return self._empty()
         buckets = raw.get("buckets")
+        latency = raw.get("latency")
+        if not isinstance(latency, dict) or not isinstance(latency.get("tool_classes"), dict):
+            latency = _empty_latency()
         return {
             "version": _SCHEMA_VERSION,
             "operations": raw["operations"],
             "buckets": buckets if isinstance(buckets, dict) else {},
+            "latency": latency,
         }
 
     def _write(self, payload: dict[str, Any]) -> None:
@@ -219,5 +272,71 @@ class JsonMetricsSink:
                     result_bytes=normalized_bytes,
                 )
                 self._prune_buckets(buckets, today)
+            payload["version"] = _SCHEMA_VERSION
+            self._write(payload)
+
+    def record_latency(self, trace: LatencyTrace) -> None:
+        """Persist bounded aggregates only; never retain raw trace identities."""
+
+        with self._locks.lock("operation-metrics", timeout_seconds=2):
+            payload = self.snapshot()
+            latency = payload.setdefault("latency", _empty_latency())
+            tool_classes = latency.setdefault("tool_classes", {})
+            stats = tool_classes.setdefault(
+                trace.tool_class.value,
+                _empty_tool_class_latency(trace.tool_class),
+            )
+            stats["count"] = int(stats.get("count", 0)) + 1
+
+            for layer_name, observation in (
+                ("engine", trace.engine),
+                ("connector", trace.connector),
+                ("client_round_trip", trace.client_round_trip),
+            ):
+                layer = stats.setdefault(layer_name, _empty_latency_layer())
+                count_key = f"{observation.status.value}_count"
+                layer[count_key] = int(layer.get(count_key, 0)) + 1
+                if (
+                    observation.status is LatencyStatus.OBSERVED
+                    and observation.duration_ms is not None
+                ):
+                    histogram = layer.setdefault(
+                        "histogram", histogram_template(DURATION_BUCKETS_MS)
+                    )
+                    bucket = histogram_bucket(observation.duration_ms, DURATION_BUCKETS_MS)
+                    histogram[bucket] = int(histogram.get(bucket, 0)) + 1
+                    layer["p95_ms"] = histogram_percentile(
+                        histogram,
+                        DURATION_BUCKETS_MS,
+                        percentile=0.95,
+                    )
+
+            payload_stats = stats.setdefault(
+                "payload",
+                _empty_tool_class_latency(trace.tool_class)["payload"],
+            )
+            payload_histogram = payload_stats.setdefault(
+                "histogram", histogram_template(PAYLOAD_BUCKETS_BYTES)
+            )
+            payload_bucket = histogram_bucket(
+                float(trace.payload.emitted_bytes),
+                PAYLOAD_BUCKETS_BYTES,
+            )
+            payload_histogram[payload_bucket] = int(payload_histogram.get(payload_bucket, 0)) + 1
+            payload_stats["p95_bytes"] = histogram_percentile(
+                payload_histogram,
+                PAYLOAD_BUCKETS_BYTES,
+                percentile=0.95,
+            )
+            payload_stats["budget_bytes"] = trace.payload.budget_bytes
+            if not trace.payload.within_budget:
+                payload_stats["over_budget_count"] = (
+                    int(payload_stats.get("over_budget_count", 0)) + 1
+                )
+            if trace.payload.legacy_text_duplication:
+                payload_stats["legacy_duplication_count"] = (
+                    int(payload_stats.get("legacy_duplication_count", 0)) + 1
+                )
+
             payload["version"] = _SCHEMA_VERSION
             self._write(payload)

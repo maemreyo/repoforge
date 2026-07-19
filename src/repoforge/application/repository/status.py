@@ -25,17 +25,21 @@ class RepositoryStatusReader:
         self.ctx = ctx
 
     def execute(self, c: RepositoryStatusCommand) -> RepositoryStatusResult:
+        return self.ctx.audited(
+            "repo_status",
+            {"repo_id": c.repo_id},
+            lambda: self.compute(c),
+        )
+
+    def compute(self, c: RepositoryStatusCommand) -> RepositoryStatusResult:
+        """Read source status without creating a nested audit event."""
         repo = self.ctx.repo(c.repo_id)
-
-        def op() -> RepositoryStatusResult:
-            ok, auth = self.ctx.github.auth_status(repo.path)
-            return RepositoryStatusResult(
-                c.repo_id,
-                str(repo.path),
-                self.ctx.git.status_short_branch(repo.path),
-                self.ctx.git.remote_verbose(repo.path),
-                ok,
-                auth,
-            )
-
-        return self.ctx.audited("repo_status", {"repo_id": c.repo_id}, op)
+        ok, auth = self.ctx.github.auth_status(repo.path)
+        return RepositoryStatusResult(
+            c.repo_id,
+            str(repo.path),
+            self.ctx.git.status_short_branch(repo.path),
+            self.ctx.git.remote_verbose(repo.path),
+            ok,
+            auth,
+        )

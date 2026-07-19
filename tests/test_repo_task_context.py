@@ -43,6 +43,34 @@ def _audit_events(root: Path, action: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def test_v2_task_context_selects_sections_and_never_exposes_host_paths(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 task context")["workspace_id"]
+
+    result = service.repo_task_context_v2(
+        "demo",
+        issue_number=55,
+        workspace_id=workspace_id,
+        sections=["repository", "status", "ticket", "workspace", "recent_commits"],
+        byte_budget=20_000,
+    )
+
+    assert [section["name"] for section in result["sections"]] == [
+        "repository",
+        "status",
+        "ticket",
+        "workspace",
+        "recent_commits",
+    ]
+    assert all(section["freshness"] in {"local", "live", "cache"} for section in result["sections"])
+    rendered = json.dumps(result)
+    assert str(forge_env.source) not in rendered
+    assert str(forge_env.root) not in rendered
+    assert result["truncated"] is False
+
+
 def test_bundle_matches_standalone_tools_field_for_field(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
     created = service.workspace_create("demo", "resume-task")
@@ -468,7 +496,7 @@ async def test_mcp_repo_task_context_tool(forge_env: ForgeEnvironment) -> None:
     async with create_connected_server_and_client_session(server) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
         tool = tools["repo_task_context"]
-        assert tool.description.startswith("Use this")
+        assert "bounded repository" in tool.description
         assert tool.annotations is not None
         assert tool.annotations.readOnlyHint is True
         assert tool.annotations.destructiveHint is False
@@ -477,9 +505,22 @@ async def test_mcp_repo_task_context_tool(forge_env: ForgeEnvironment) -> None:
         assert result.isError is False
         structured = result.structuredContent
         assert structured is not None
-        assert structured["ticket"] is None
-        assert structured["workspace"] is None
-        assert structured["repository"]["repo_id"] == "demo"
+        sections = {section["name"]: section for section in structured["sections"]}
+        assert sections["repository"]["complete"] is True
+        assert sections["ticket"] == {
+            "name": "ticket",
+            "freshness": "unavailable",
+            "complete": False,
+            "truncated": False,
+            "facts": [],
+        }
+        assert sections["workspace"] == {
+            "name": "workspace",
+            "freshness": "unavailable",
+            "complete": False,
+            "truncated": False,
+            "facts": [],
+        }
 
         error_result = await session.call_tool("repo_task_context", {"repo_id": "missing-repo"})
         assert error_result.isError is True

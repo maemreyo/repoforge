@@ -371,7 +371,13 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
 
     path.write_text("not json", encoding="utf-8")
     metrics = JsonMetricsSink(tmp_path, locks, FixedClock())
-    assert metrics.snapshot() == {"version": 3, "operations": {}, "buckets": {}}
+    empty_snapshot = {
+        "version": 4,
+        "operations": {},
+        "buckets": {},
+        "latency": {"tool_classes": {}},
+    }
+    assert metrics.snapshot() == empty_snapshot
 
     path.write_text(
         json.dumps({"version": 2, "operations": {}, "buckets": "not-a-dict"}), encoding="utf-8"
@@ -379,7 +385,7 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
     assert metrics.snapshot()["buckets"] == {}
 
     path.write_text(json.dumps({"version": 2, "operations": "not-a-dict"}), encoding="utf-8")
-    assert metrics.snapshot() == {"version": 3, "operations": {}, "buckets": {}}
+    assert metrics.snapshot() == empty_snapshot
 
     metrics.record("workspace_status", success=True, duration_ms=1.0, error_code=None)
     assert metrics.snapshot()["operations"]["workspace_status"]["count"] == 1
@@ -880,16 +886,20 @@ def test_mcp_error_boundary_returns_stable_redacted_write_failure(
     monkeypatch.setenv("CONTROL_PLANE_API_KEY", "bare-process-secret")
     with pytest.raises(RuntimeError) as error:
         _ServiceErrorBoundary(Service()).call(
-            "workspace_push", "demo", idempotency_key="retry-key-0001"
+            "workspace_push", workspace_id="demo", idempotency_key="retry-key-0001"
         )
     payload = json.loads(str(error.value))
     assert payload["status"] == "failed"
-    assert payload["error_code"] == "COMMAND_TIMEOUT"
-    assert isinstance(payload["correlation_id"], str) and payload["correlation_id"]
-    assert "top-secret" not in payload["what_happened"]
-    assert "bare-process-secret" not in payload["what_happened"]
-    assert payload["unchanged_state"] == ["Local branch and workspace files remain unchanged."]
-    assert payload["automatic_retry_allowed"] is True
+    error_envelope = payload["error"]
+    assert error_envelope["code"] == "COMMAND_TIMEOUT"
+    correlation_id = error_envelope["details"]["correlation_id"]
+    assert isinstance(correlation_id, str) and correlation_id
+    assert "top-secret" not in error_envelope["message"]
+    assert "bare-process-secret" not in error_envelope["message"]
+    assert error_envelope["unchanged_state"] == [
+        "Local branch and workspace files remain unchanged."
+    ]
+    assert error_envelope["automatic_retry_allowed"] is True
 
 
 def test_phase6_server_limits_are_configurable_and_validated(tmp_path: Path) -> None:

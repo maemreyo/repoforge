@@ -12,6 +12,8 @@ import pytest
 from conftest import ForgeEnvironment
 
 import repoforge.application.workspace.file_write as file_write_module
+from repoforge.adapters.locking import FcntlLockManager
+from repoforge.adapters.persistence import JsonExternalMutationLedger
 from repoforge.domain.errors import ConfigError, ErrorCode
 
 
@@ -19,6 +21,59 @@ def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
     path = root / "state" / "audit.jsonl"
     events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     return [event for event in events if event["action"] == action]
+
+
+def test_external_mutation_ledger_reserves_once_and_enforces_window(tmp_path: Path) -> None:
+    ledger = JsonExternalMutationLedger(tmp_path / "state", FcntlLockManager(tmp_path / "locks"))
+
+    first = ledger.reserve(
+        "demo",
+        "effect-a",
+        count=1,
+        now_epoch=100.0,
+        max_in_window=2,
+        window_seconds=60,
+    )
+    replay = ledger.reserve(
+        "demo",
+        "effect-a",
+        count=1,
+        now_epoch=101.0,
+        max_in_window=2,
+        window_seconds=60,
+    )
+    second = ledger.reserve(
+        "demo",
+        "effect-b",
+        count=1,
+        now_epoch=102.0,
+        max_in_window=2,
+        window_seconds=60,
+    )
+
+    assert first == 1
+    assert replay == 1
+    assert second == 2
+    with pytest.raises(ConfigError, match="external mutation window limit"):
+        ledger.reserve(
+            "demo",
+            "effect-c",
+            count=1,
+            now_epoch=103.0,
+            max_in_window=2,
+            window_seconds=60,
+        )
+    assert (
+        ledger.reserve(
+            "demo",
+            "effect-c",
+            count=1,
+            now_epoch=200.0,
+            max_in_window=2,
+            window_seconds=60,
+        )
+        == 1
+    )
 
 
 def test_cross_process_keyed_write_executes_effect_once(

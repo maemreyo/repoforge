@@ -30,9 +30,11 @@ from repoforge.application.configuration.source import (
 from repoforge.application.repository_admin.proposals import RepositoryProposalService
 from repoforge.bootstrap import (
     build_pending_policy_change_store,
+    read_audit_event_page,
     read_audit_events,
     read_runtime_log,
 )
+from repoforge.config import load_config
 from repoforge.domain.config_generation import sha256_text
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.policy_patch import (
@@ -171,6 +173,78 @@ def test_source_round_trips_policy_patch() -> None:
     )
     text = render_source(config)
     assert parse_source(text) == config
+
+
+def test_source_round_trips_generated_paths_metadata() -> None:
+    text = """version = 2
+[[repo]]
+id = "demo"
+path = "/tmp/demo"
+
+[repositories.demo]
+generated_paths = [
+  { glob = "docs/contracts/*.json", regeneration_command = ["uv", "run", "python", "scripts/render_contract.py"], description = "Generated MCP contracts" },
+]
+"""
+
+    parsed = parse_source(text)
+    generated = parsed.repositories[0].generated_paths
+
+    assert len(generated) == 1
+    assert generated[0].glob == "docs/contracts/*.json"
+    assert generated[0].regeneration_command == (
+        "uv",
+        "run",
+        "python",
+        "scripts/render_contract.py",
+    )
+    assert generated[0].description == "Generated MCP contracts"
+    assert parse_source(render_source(parsed)) == parsed
+
+
+def test_source_round_trips_issue_write_policy() -> None:
+    text = """version = 2
+[[repo]]
+id = "demo"
+path = "/tmp/demo"
+
+[repositories.demo]
+issue_writes = { enabled_ops = ["comment", "close", "create"], approval_required_ops = ["close"], max_writes_per_call = 3, max_writes_per_window = 12, window_seconds = 900, create_title_prefix = "[FOLLOWUP]", create_body_template = "## Objective\\n{body}\\n\\n## Evidence\\n{evidence_ref}" }
+"""
+
+    parsed = parse_source(text)
+    policy = parsed.repositories[0].issue_writes
+
+    assert policy.enabled_ops == ("comment", "close", "create")
+    assert policy.approval_required_ops == ("close",)
+    assert policy.max_writes_per_window == 12
+    assert parse_source(render_source(parsed)) == parsed
+
+
+def test_resolved_config_loads_generated_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "demo"
+    repo.mkdir()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'''[server]
+workspace_root = "{tmp_path / "workspaces"}"
+state_root = "{tmp_path / "state"}"
+
+[repositories.demo]
+path = "{repo}"
+default_base = "main"
+allowed_base_branches = ["main"]
+generated_paths = [
+  {{ glob = "docs/contracts/*.json", regeneration_command = ["python", "render.py"], description = "Generated contracts" }},
+]
+''',
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path).repositories["demo"].generated_paths
+
+    assert loaded[0].glob == "docs/contracts/*.json"
+    assert loaded[0].regeneration_command == ("python", "render.py")
 
 
 def test_source_round_trips_ticket_graph_metadata() -> None:
@@ -408,6 +482,7 @@ def _admin(
         runtime_log_path=tmp_path / "state" / "managed-runtime.log",
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_audit_page=read_audit_event_page,
         reload_runtime=reload_runtime,
         read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
     )
@@ -555,6 +630,105 @@ def test_expansion_requires_operator_approval_and_never_applies(tmp_path: Path) 
     assert persisted.repositories[0].policy_patch.is_empty()
 
 
+def test_repo_policy_preview_token_binds_exact_apply_request(tmp_path: Path) -> None:
+    reload_calls: list[int] = []
+    admin = _admin(tmp_path, reload_calls=reload_calls)
+
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        mutations=[
+            {
+                "section": "profile",
+                "name": "quick",
+                "operation": "remove",
+                "value": None,
+            }
+        ],
+        generated_paths=[
+            {
+                "glob": "docs/contracts/*.json",
+                "regeneration_command": ["python", "scripts/render_contract.py"],
+                "description": "Generated contracts",
+            }
+        ],
+        issue_writes={
+            "enabled_ops": ["comment", "close"],
+            "approval_required_ops": ["close"],
+            "max_writes_per_call": 2,
+            "max_writes_per_window": 20,
+            "window_seconds": 3600,
+            "create_title_prefix": "[TASK]",
+            "create_body_template": "## Objective\n{body}\n\n## Evidence\n{evidence_ref}",
+        },
+    )
+
+    assert preview["result"] == "preview"
+    assert preview["preview_token"].startswith("apr-")
+    assert preview["changes"]
+    assert preview["issue_writes"]["enabled_ops"] == ["comment", "close"]
+    assert admin._store.current().generation == 1
+
+    applied = admin.repo_policy(
+        "demo",
+        action="apply",
+        preview_token=preview["preview_token"],
+    )
+
+    assert applied["result"] in {"applied", "pending_approval"}
+    assert applied["issue_writes"]["approval_required_ops"] == ["close"]
+    assert admin.pending.payloads.read(preview["preview_token"]) is None
+
+
+def test_repo_policy_preview_supports_override_removal(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        mutations=[
+            {
+                "section": "override",
+                "name": "dependency_install",
+                "operation": "remove",
+                "value": None,
+            }
+        ],
+    )
+
+    assert preview["result"] == "preview"
+    assert preview["changes"] == [
+        {
+            "section": "override",
+            "name": "dependency_install",
+            "operation": "remove",
+            "value": None,
+        }
+    ]
+
+
+def test_repo_policy_rejects_stale_or_mismatched_preview_token(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        mutations=[
+            {
+                "section": "profile",
+                "name": "quick",
+                "operation": "remove",
+                "value": None,
+            }
+        ],
+    )
+    admin.repo_policy_apply("demo", remove_profiles=["quick"])
+
+    with pytest.raises(ConfigError, match="stale"):
+        admin.repo_policy("demo", action="apply", preview_token=preview["preview_token"])
+    with pytest.raises(ConfigError, match="preview_token"):
+        admin.repo_policy("other", action="apply", preview_token=preview["preview_token"])
+
+
 def test_dry_run_previews_without_state_change(tmp_path: Path) -> None:
     admin = _admin(tmp_path)
     result = admin.repo_policy_apply(
@@ -635,6 +809,138 @@ def test_runtime_logs_read_bounds_sources_and_filters(tmp_path: Path) -> None:
         admin.runtime_logs_read("secrets")
     with pytest.raises(ConfigError, match="limit"):
         admin.runtime_logs_read("audit", limit=0)
+
+
+def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path, runtime_status={"socket_path": str(tmp_path / "secret.sock")})
+    result = admin.config_inspect_v2(repo_id="demo", include_pending=True)
+
+    V2_TOOL_SPECS["config_inspect"].validate_output(result)
+    rendered = json.dumps(result, sort_keys=True)
+    assert str(tmp_path) not in rendered
+    assert "source_path" not in rendered
+    assert result["accepted"]["state"] == "accepted"
+    assert result["accepted"]["digest"] == admin._store.current().resolved_sha256
+    assert result["active"] is None
+    assert result["restart_required"] is True
+    assert {item["key"] for item in result["repo_facts"]} >= {
+        "repo_id",
+        "read_only",
+        "publish_enabled",
+        "profile_count",
+    }
+
+
+def test_v2_runtime_logs_support_time_range_cursor_and_no_host_paths(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    audit_path = tmp_path / "state" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "timestamp": "2026-07-16T00:00:00+00:00",
+            "action": "workspace_status",
+            "success": True,
+            "details": {"duration_ms": 2, "path": str(tmp_path / "private")},
+        },
+        {
+            "timestamp": "2026-07-16T00:01:00+00:00",
+            "action": "workspace_verify",
+            "success": False,
+            "details": {"duration_ms": 20, "error_code": "COMMAND_FAILED"},
+        },
+        {
+            "timestamp": "2026-07-16T00:02:00+00:00",
+            "action": "workspace_commit",
+            "success": True,
+            "details": {"duration_ms": 10},
+        },
+    ]
+    audit_path.write_text("\n".join(json.dumps(item) for item in events) + "\n", encoding="utf-8")
+
+    first = admin.runtime_logs_read_v2(
+        source="audit",
+        limit=1,
+        start_time="2026-07-16T00:01:00+00:00",
+        end_time="2026-07-16T00:02:00+00:00",
+    )
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(first)
+    assert [item["action"] for item in first["entries"]] == ["workspace_commit"]
+    assert first["next_cursor"] is not None
+    second = admin.runtime_logs_read_v2(
+        source="audit",
+        limit=1,
+        start_time="2026-07-16T00:01:00+00:00",
+        end_time="2026-07-16T00:02:00+00:00",
+        cursor=first["next_cursor"],
+    )
+    assert [item["action"] for item in second["entries"]] == ["workspace_verify"]
+    assert str(tmp_path) not in json.dumps((first, second), sort_keys=True)
+
+    runtime_path = tmp_path / "state" / "managed-runtime.log"
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-16T00:03:00+00:00",
+                "level": "INFO",
+                "message": f"ready at {tmp_path / 'private.sock'} and C:\\Users\\alice\\token.txt",
+            }
+        )
+        + "\n"
+        + f"plain runtime at {tmp_path / 'plain.sock'}\n",
+        encoding="utf-8",
+    )
+    runtime = admin.runtime_logs_read_v2(source="runtime", limit=10)
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(runtime)
+    messages = [item["message"] for item in runtime["entries"]]
+    assert all("<redacted:host_path>" in message for message in messages)
+    assert str(tmp_path) not in json.dumps(runtime, sort_keys=True)
+    assert all("C:\\Users\\alice" not in message for message in messages)
+
+
+def test_v2_runtime_log_cursor_fails_closed_when_audit_snapshot_changes(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    audit_path = tmp_path / "state" / "audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    initial = [
+        {
+            "timestamp": "2026-07-16T00:01:00+00:00",
+            "action": "workspace_verify",
+            "success": True,
+            "details": {"duration_ms": 20},
+        },
+        {
+            "timestamp": "2026-07-16T00:02:00+00:00",
+            "action": "workspace_commit",
+            "success": True,
+            "details": {"duration_ms": 10},
+        },
+    ]
+    audit_path.write_text(
+        "\n".join(json.dumps(item) for item in initial) + "\n",
+        encoding="utf-8",
+    )
+    first = admin.runtime_logs_read_v2(source="audit", limit=1)
+    assert first["next_cursor"] is not None
+
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-16T00:03:00+00:00",
+                    "action": "workspace_push",
+                    "success": True,
+                    "details": {"duration_ms": 5},
+                }
+            )
+            + "\n"
+        )
+
+    with pytest.raises(ConfigError, match=r"cursor.*stale"):
+        admin.runtime_logs_read_v2(source="audit", limit=1, cursor=first["next_cursor"])
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +1039,7 @@ async def test_config_admin_tools_are_registered_and_fail_closed_without_admin()
     server = create_server(service=_FakeCodingService())  # type: ignore[arg-type]
     async with create_connected_server_and_client_session(server) as session:
         tools = {tool.name for tool in (await session.list_tools()).tools}
-        assert {"config_inspect", "runtime_logs_read", "repo_policy_apply"} <= tools
+        assert {"config_inspect", "runtime_logs_read", "repo_policy"} <= tools
         result = await session.call_tool("config_inspect", {})
     assert result.isError is True
     rendered = "\n".join(
@@ -750,39 +1056,32 @@ async def test_config_admin_tools_round_trip_through_protocol(tmp_path: Path) ->
         inspected = await session.call_tool("config_inspect", {"repo_id": "demo"})
         assert inspected.isError is False
         assert inspected.structuredContent is not None
-        assert "client_capabilities" in inspected.structuredContent
-        assert "features" in inspected.structuredContent["client_capabilities"]
+        assert inspected.structuredContent["accepted"]["generation"] == 1
+        assert inspected.structuredContent["repo_facts"]
+
+        mutation = {"section": "profile", "name": "quick", "operation": "remove"}
         preview = await session.call_tool(
-            "repo_policy_apply",
-            {
-                "repo_id": "demo",
-                "set_profiles": [{"name": "debug", "commands": [["pnpm", "run", "debug:server"]]}],
-                "dry_run": True,
-            },
+            "repo_policy",
+            {"repo_id": "demo", "action": "preview", "mutations": [mutation]},
         )
         assert preview.isError is False
         assert preview.structuredContent is not None
-        assert preview.structuredContent["status"] == "preview"
-        assert preview.structuredContent["capability_delta"] == "expansion"
-        execution_preview = await session.call_tool(
-            "repo_policy_apply",
+        assert preview.structuredContent["result"] == "preview"
+        preview_token = preview.structuredContent["preview_token"]
+        assert isinstance(preview_token, str)
+
+        applied = await session.call_tool(
+            "repo_policy",
             {
                 "repo_id": "demo",
-                "execution_mode": "relaxed",
-                "adhoc_runners": ["pnpm", "node"],
-                "adhoc_timeout_seconds": 600,
-                "dry_run": True,
+                "action": "apply",
+                "preview_token": preview_token,
             },
         )
-        assert execution_preview.isError is False
-        assert execution_preview.structuredContent is not None
-        assert execution_preview.structuredContent["capability_delta"] == "expansion"
-        applied = await session.call_tool(
-            "repo_policy_apply",
-            {"repo_id": "demo", "remove_profiles": ["quick"]},
-        )
-        assert applied.isError is False
+        applied_error = json.loads(applied.content[0].text) if applied.isError else None
+        assert applied.isError is False, applied_error["error"]["message"]
         assert applied.structuredContent is not None
-        assert applied.structuredContent["status"] == "applied"
+        assert applied.structuredContent["result"] == "applied"
+
         logs = await session.call_tool("runtime_logs_read", {"source": "runtime", "limit": 5})
         assert logs.isError is False

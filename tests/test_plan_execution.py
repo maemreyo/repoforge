@@ -119,6 +119,60 @@ def test_full_execution_runs_final_profile_and_preserves_authoritative_receipt(
     assert verification["fingerprint_matches"] is True
 
 
+def test_workspace_verify_plan_mode_drives_the_execution_plan_lifecycle(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """The create/accept/execute execution-plan lifecycle is reachable through
+    `workspace_verify(mode="plan", plan_action=...)` without a standalone tool (#180
+    keeps the static 28-tool surface; the legacy machinery is nested here instead)."""
+    service, runner = _manual_service(forge_env)
+    workspace_id = service.workspace_create("demo", "verify plan action")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id, "hello.txt", "changed via verify plan_action\n", current["sha256"]
+    )
+
+    created = service.workspace_verify(
+        workspace_id, mode="plan", plan_action="create", plan_task_id="task-verify"
+    )
+    assert created["outcome"] == "planned"
+    assert created["operation"] is None
+    assert created["plan"]["final_profile"] == "full"
+    assert created["plan"]["accepted"] is False
+    assert created["head_sha"] and created["workspace_fingerprint"]
+    plan_id = created["plan"]["plan_id"]
+
+    accepted = service.workspace_verify(
+        workspace_id,
+        mode="plan",
+        plan_action="accept",
+        plan_id=plan_id,
+        plan_task_id="task-verify",
+    )
+    assert accepted["plan"]["plan_id"] == plan_id
+    assert accepted["plan"]["accepted"] is True
+
+    executed = service.workspace_verify(
+        workspace_id,
+        mode="plan",
+        plan_action="execute",
+        plan_id=plan_id,
+        plan_through="full",
+    )
+    assert executed["outcome"] == "running"
+    assert executed["plan"] is None
+    operation_id = executed["operation"]["operation_id"]
+    assert executed["operation"]["kind"] == "workspace_execute_plan"
+    assert executed["operation"]["state"] == "running"
+    assert executed["head_sha"] == created["head_sha"]
+    assert executed["workspace_fingerprint"] == created["workspace_fingerprint"]
+
+    runner.run(operation_id)
+    final = service.operation_status(operation_id)
+    assert final["state"] == "succeeded"
+    assert final["result"]["satisfies_commit_gate"] is True
+
+
 def test_execute_plan_rejects_unaccepted_or_stale_plan(forge_env: ForgeEnvironment) -> None:
     service, _ = _manual_service(forge_env)
     workspace_id = service.workspace_create("demo", "unaccepted plan")["workspace_id"]
@@ -175,30 +229,60 @@ def test_plan_execution_failure_records_partial_receipt_and_stops_required_stage
 
 
 @pytest.mark.anyio
-async def test_workspace_execute_plan_is_exposed_through_actual_mcp_session(
+async def test_execution_plan_lifecycle_is_exposed_through_workspace_verify_plan_mode(
     forge_env: ForgeEnvironment,
 ) -> None:
+    """The static 28-tool Forge v2 surface has no standalone `workspace_execute_plan`
+    tool (#180); the create/accept/execute lifecycle is reachable only through
+    `workspace_verify(mode="plan", plan_action=...)`."""
     service, runner = _manual_service(forge_env)
-    workspace_id, plan_id = _accepted_plan(service, task_slug="mcp")
+    workspace_id = service.workspace_create("demo", "verify plan mcp")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id, "hello.txt", "changed for mcp plan\n", current["sha256"]
+    )
     server = create_server(service=service)
 
     async with create_connected_server_and_client_session(server) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-        execute = tools["workspace_execute_plan"]
-        assert execute.annotations.readOnlyHint is False
-        assert execute.annotations.destructiveHint is False
-        assert execute.annotations.openWorldHint is False
-        assert set(execute.inputSchema["properties"]) == {
-            "workspace_id",
-            "plan_id",
-            "through",
-        }
-        called = await session.call_tool(
-            "workspace_execute_plan",
-            {"workspace_id": workspace_id, "plan_id": plan_id, "through": "iteration"},
+        assert "workspace_execute_plan" not in tools
+        verify_tool = tools["workspace_verify"]
+        assert {"plan_action", "plan_id", "plan_through"} <= set(
+            verify_tool.inputSchema["properties"]
         )
-        assert called.isError is False
-        operation_id = called.structuredContent["operation_id"]
+
+        created = await session.call_tool(
+            "workspace_verify",
+            {"workspace_id": workspace_id, "mode": "plan", "plan_action": "create"},
+        )
+        assert created.isError is False
+        plan_id = created.structuredContent["plan"]["plan_id"]
+
+        accepted = await session.call_tool(
+            "workspace_verify",
+            {
+                "workspace_id": workspace_id,
+                "mode": "plan",
+                "plan_action": "accept",
+                "plan_id": plan_id,
+            },
+        )
+        assert accepted.isError is False
+        assert accepted.structuredContent["plan"]["accepted"] is True
+
+        executed = await session.call_tool(
+            "workspace_verify",
+            {
+                "workspace_id": workspace_id,
+                "mode": "plan",
+                "plan_action": "execute",
+                "plan_id": plan_id,
+                "plan_through": "iteration",
+            },
+        )
+        assert executed.isError is False
+        assert executed.structuredContent["outcome"] == "running"
+        operation_id = executed.structuredContent["operation"]["operation_id"]
 
     runner.run(operation_id)
     assert service.operation_status(operation_id)["state"] == "succeeded"

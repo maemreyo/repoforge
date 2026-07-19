@@ -17,11 +17,16 @@ def test_release_contract_matches_frozen_golden() -> None:
     from repoforge.interfaces.mcp.contract import build_release_contract
 
     expected = json.loads(
-        (ROOT / "docs/contracts/release-contract-v1.json").read_text(encoding="utf-8")
+        (ROOT / "docs/contracts/release-contract-v2.json").read_text(encoding="utf-8")
     )
     actual = asyncio.run(build_release_contract())
     actual["cli"] = build_cli_release_contract()
     assert actual == expected
+    assert expected["mcp"]["identity"] == "forge_v2"
+    assert expected["mcp"]["retired_identity"] == "forge_v1"
+    assert expected["mcp"]["tool_count"] == 28
+    assert len(expected["mcp"]["tool_names"]) == 28
+    assert "tools" not in expected["mcp"]
     assert "onboard" in expected["cli"]["commands"]
     assert expected["cli"]["commands"]["repo discover"]["read_only"] is True
 
@@ -80,6 +85,8 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
     assert "macos-latest" in workflow
     wheel_verifier = (ROOT / "scripts/verify-wheel-install.sh").read_text(encoding="utf-8")
     assert "scripts/verify-wheel-e2e.py" in wheel_verifier
+    assert 'contract["mcp"]["identity"] == "forge_v2"' in wheel_verifier
+    assert 'len(contract["mcp"]["tool_names"]) == 28' in wheel_verifier
     assert "${REPOFORGE_SMOKE_PYTHON:-python3}" in wheel_verifier
     assert (ROOT / "scripts/verify-wheel-e2e.py").is_file()
 

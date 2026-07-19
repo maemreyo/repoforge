@@ -97,6 +97,7 @@ class WorkspaceRunProfileCommand:
     profile_name: str | None = None
     background: bool = False
     force_rerun: bool = False
+    expected_fingerprint: str | None = None
     cancellation_token: CancellationToken | None = None
     before_command: Callable[[], None] | None = None
 
@@ -266,6 +267,8 @@ class WorkspaceProfileRunner:
                 self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, path
             )
             before_fingerprint = before.fingerprint
+            if c.expected_fingerprint is not None and c.expected_fingerprint != before_fingerprint:
+                raise WorkspaceError("Workspace changed since the verification plan was reviewed")
             stage_telemetry: list[tuple[float, float]] = []
 
             # Command-source integrity stamp (issue #170): a zero-cost guard when the
@@ -336,9 +339,12 @@ class WorkspaceProfileRunner:
                 audit_details["business_tests_ran"] = business_tests_ran
                 audit_details["duration_ms"] = round(stage_duration_ms, 3)
                 audit_details["cumulative_duration_ms"] = round(cumulative_duration_ms, 3)
-                if exc.details.get("cancelled"):
+                cancelled = bool(exc.details.get("cancelled")) or bool(
+                    cancel_token is not None and cancel_token.is_cancelled()
+                )
+                if cancelled:
+                    exc.details["cancelled"] = True
                     audit_details["cancelled"] = True
-                if exc.details.get("cancelled"):
                     return
                 if repo.diagnostics:
                     diagnostic_ids = sorted(repo.diagnostics)
@@ -753,6 +759,7 @@ class WorkspaceProfileRunner:
             "profile": profile.name,
             "used_default": used_default,
             "force_rerun": c.force_rerun,
+            "expected_fingerprint": c.expected_fingerprint,
         }
 
         if not c.background:

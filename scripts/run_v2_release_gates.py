@@ -14,10 +14,17 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from repoforge.adapters.code_intelligence import (  # noqa: E402
+    SyntaxCodeIntelligenceProvider,
+    TreeSitterCodeIntelligenceProvider,
+)
+from repoforge.benchmark.code_intelligence import measure_provider_recall  # noqa: E402
 from repoforge.benchmark.harness import (  # noqa: E402
     CaseExecutor,
     CorpusCase,
+    ProviderRecallObservation,
     evaluate_release_gates,
+    load_corpus,
     observations_from_json,
     publish_report,
     run_release_gates,
@@ -48,6 +55,16 @@ def _load_executor(reference: str) -> CaseExecutor:
     return checked
 
 
+def _provider_recall_observations(
+    corpus_root: Path,
+) -> tuple[ProviderRecallObservation, ...]:
+    cases = load_corpus(corpus_root / "seeded_bugs.json")
+    return (
+        *measure_provider_recall(TreeSitterCodeIntelligenceProvider(), cases),
+        *measure_provider_recall(SyntaxCodeIntelligenceProvider(), cases),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -65,13 +82,18 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        provider_recall = _provider_recall_observations(args.corpus_root)
         if args.executor:
             report = run_release_gates(
                 _load_executor(args.executor),
                 corpus_root=args.corpus_root,
+                provider_recall_observations=provider_recall,
             )
         else:
-            report = evaluate_release_gates(observations_from_json(args.observations))
+            report = evaluate_release_gates(
+                observations_from_json(args.observations),
+                provider_recall_observations=provider_recall,
+            )
         paths = publish_report(report, args.report_dir)
     except (ImportError, AttributeError, OSError, TypeError, ValueError) as exc:
         print(f"Forge v2 release gates could not run: {exc}", file=sys.stderr)
@@ -84,6 +106,12 @@ def main() -> int:
             f"{metric.corpus}: {metric.status} "
             f"({metric.success_count}/{metric.total_count}, "
             f"wrong_target={metric.wrong_target_count})"
+        )
+    for metric in report.provider_recall:
+        print(
+            f"provider-recall {metric.provider_id}/{metric.language}: "
+            f"{metric.matched_test_count}/{metric.expected_test_count} "
+            f"({metric.recall:.1%})"
         )
     return 0 if report.passed else 1
 

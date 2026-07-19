@@ -12,7 +12,7 @@ export
 endif
 
 .PHONY: default start dev-server restart status stop logs doctor
-.PHONY: setup lint typecheck test build check install release
+.PHONY: setup schemas lint typecheck test test-fast v2-gates build check install release
 .PHONY: smoke clean
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
 
@@ -23,9 +23,12 @@ help:  # Show available commands without changing local or runtime state
 	  'RepoForge development and operator commands:' \
 	  '' \
 	  '  make setup             Sync locked development dependencies' \
+	  '  make schemas           Regenerate reviewed Forge v2 contract goldens' \
 	  '  make lint              Run Ruff lint' \
 	  '  make typecheck         Run strict Mypy' \
 	  '  make test              Run tests with coverage' \
+	  '  make test-fast         Run tests in parallel (3 workers), no coverage' \
+	  '  make v2-gates          Run frozen Forge v2 release corpora' \
 	  '  make check             Run the full dirty-tree production gate' \
 	  '  make production-check  Run the clean-tree production gate' \
 	  '  make tickets           Run deterministic ticket-governance tests' \
@@ -44,6 +47,10 @@ help:  # Show available commands without changing local or runtime state
 setup:  # Synchronize the locked RepoForge development environment
 	uv sync --extra dev
 
+schemas:  # Regenerate reviewed Forge v2 schemas and compact release contract
+	uv run --extra dev python scripts/generate_tool_schemas.py --write
+	uv run --extra dev python scripts/check_release_contracts.py --write
+
 lint:  # Lint all source, tests, and scripts
 	uv run --extra dev ruff check .
 
@@ -52,6 +59,20 @@ typecheck:  # Type-check the full source tree
 
 test:  # Run the complete suite with the repository coverage policy
 	uv run --extra dev pytest --cov=repoforge --cov-report=term-missing
+
+test-fast:  # Run the complete suite in parallel without coverage, for fast local iteration.
+	# -n 3 was measured against -n 2 and -n 4 on this repo: -n 3 is both the
+	# fastest and the only worker count that stayed stable (-n 4 crashed a
+	# worker and produced contention-flaky failures in shared-cache tests).
+	uv run --extra dev pytest -n 3
+
+v2-gates:  # Execute frozen mutation, patch, bug-routing, read, and provider-recall corpora
+	@set -eu; \
+		report_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/repoforge-v2-gates.XXXXXX"); \
+		trap 'rm -rf "$$report_dir"' EXIT INT TERM; \
+		uv run --extra dev python scripts/run_v2_release_gates.py \
+			--executor v2_release_reference:execute_case \
+			--report-dir "$$report_dir"
 
 check:  # Authoritative full verification gate for dirty development workspaces
 	scripts/verify-production.sh --allow-dirty

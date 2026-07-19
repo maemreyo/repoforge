@@ -12,6 +12,8 @@ from typing import Any, cast
 from ...config import GitHubTicketGraphConfig, ServerConfig
 from ...domain.errors import CommandError
 from ...domain.tickets import (
+    CapabilityCoverage,
+    GraphEvidenceCapability,
     TicketGraph,
     TicketGraphError,
     TicketGraphSnapshot,
@@ -204,12 +206,20 @@ class CommandGitHubTicketGraphGateway:
         issues: dict[int, dict[str, Any]] = {}
         unavailable: set[int] = set()
         truncated = False
+        issue_unavailable: set[int] = set()
+        sub_issues_unavailable: set[int] = set()
+        sub_issues_truncated = False
+        comments_unavailable: set[int] = set()
+        comments_truncated = False
+        dependencies_unavailable: set[int] = set()
+        dependencies_truncated = False
 
         while queue:
             number = queue.popleft()
             if len(issues) >= max_items:
                 truncated = True
                 unavailable.add(number)
+                issue_unavailable.add(number)
                 break
             try:
                 issue = self._object(
@@ -220,9 +230,11 @@ class CommandGitHubTicketGraphGateway:
                 if number == source.root_issue:
                     raise
                 unavailable.add(number)
+                issue_unavailable.add(number)
                 continue
             if issue.get("number") != number or "pull_request" in issue:
                 unavailable.add(number)
+                issue_unavailable.add(number)
                 continue
             title = issue.get("title")
             state = issue.get("state")
@@ -235,6 +247,7 @@ class CommandGitHubTicketGraphGateway:
                 or len(body) > _MAX_BODY_CHARS
             ):
                 unavailable.add(number)
+                issue_unavailable.add(number)
                 continue
             issues[number] = issue
             try:
@@ -244,9 +257,11 @@ class CommandGitHubTicketGraphGateway:
                 )
             except CommandError:
                 unavailable.add(number)
+                sub_issues_unavailable.add(number)
                 continue
             if len(children) == 100:
                 truncated = True
+                sub_issues_truncated = True
             for child in children:
                 child_number = child.get("number")
                 if (
@@ -277,10 +292,12 @@ class CommandGitHubTicketGraphGateway:
                 )
             except CommandError:
                 unavailable.add(number)
+                comments_unavailable.add(number)
                 comments_by_number[number] = ()
                 continue
             if len(raw_comments) == _MAX_COMMENTS:
                 truncated = True
+                comments_truncated = True
             comments: list[str] = []
             malformed = False
             for raw_comment in raw_comments[:_MAX_COMMENTS]:
@@ -291,6 +308,7 @@ class CommandGitHubTicketGraphGateway:
                 comments.append(comment_body)
             if malformed:
                 unavailable.add(number)
+                comments_unavailable.add(number)
             comments_by_number[number] = tuple(comments)
 
         blockers_by_number: dict[int, set[int]] = {number: set() for number in wanted}
@@ -305,9 +323,11 @@ class CommandGitHubTicketGraphGateway:
                 )
             except CommandError:
                 unavailable.add(number)
+                dependencies_unavailable.add(number)
                 continue
             if len(blockers) == 100:
                 truncated = True
+                dependencies_truncated = True
             blockers_by_number[number].update(
                 blocker_number
                 for blocker in blockers
@@ -356,9 +376,11 @@ class CommandGitHubTicketGraphGateway:
             if status is None:
                 status = TicketStatus.BACKLOG
                 unavailable.add(number)
+                issue_unavailable.add(number)
             if priority is None:
                 priority = TicketPriority.P3
                 unavailable.add(number)
+                issue_unavailable.add(number)
             if ticket_type is None:
                 if number == source.root_issue:
                     ticket_type = TicketType.PROGRAM
@@ -398,6 +420,38 @@ class CommandGitHubTicketGraphGateway:
 
         if source.root_issue not in wanted:
             raise TicketGraphError(f"GitHub ticket graph root #{source.root_issue} is unavailable")
+        capability_coverage = (
+            CapabilityCoverage(
+                GraphEvidenceCapability.ISSUE,
+                not issue_unavailable,
+                tuple(sorted(issue_unavailable)),
+                False,
+            ),
+            CapabilityCoverage(
+                GraphEvidenceCapability.SUB_ISSUES,
+                not sub_issues_unavailable and not sub_issues_truncated,
+                tuple(sorted(sub_issues_unavailable)),
+                sub_issues_truncated,
+            ),
+            CapabilityCoverage(
+                GraphEvidenceCapability.COMMENTS,
+                not comments_unavailable and not comments_truncated,
+                tuple(sorted(comments_unavailable)),
+                comments_truncated,
+            ),
+            CapabilityCoverage(
+                GraphEvidenceCapability.DEPENDENCIES,
+                not dependencies_unavailable and not dependencies_truncated,
+                tuple(sorted(dependencies_unavailable)),
+                dependencies_truncated,
+            ),
+            CapabilityCoverage(
+                GraphEvidenceCapability.PROJECT_OVERLAY,
+                project_complete,
+                (),
+                not project_complete,
+            ),
+        )
         snapshot = TicketGraphSnapshot(
             graph=TicketGraph(1, source.root_issue, tuple(nodes)),
             observed_at=datetime.now(timezone.utc).isoformat(),
@@ -405,6 +459,7 @@ class CommandGitHubTicketGraphGateway:
             unavailable=tuple(sorted(unavailable)),
             truncated=truncated,
             live_issues=tuple(live),
+            capability_coverage=capability_coverage,
         )
         return snapshot
 

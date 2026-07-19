@@ -6,6 +6,8 @@ from typing import Any
 from ...config import GitHubTicketGraphConfig, RepositoryConfig
 from ...domain.errors import ConfigError
 from ...domain.tickets import (
+    CapabilityCoverage,
+    GraphEvidenceCapability,
     TicketGraph,
     TicketGraphError,
     TicketGraphSnapshot,
@@ -55,6 +57,43 @@ def _parse_priority(value: str | None) -> TicketPriority | None:
         raise TicketGraphError(f"priority must be one of: {allowed}") from exc
 
 
+def _capability_payload(coverage: CapabilityCoverage) -> dict[str, Any]:
+    return {
+        "capability": coverage.capability.value,
+        "complete": coverage.complete,
+        "unavailable": list(coverage.unavailable),
+        "truncated": coverage.truncated,
+    }
+
+
+def capability_coverage_payload(snapshot: TicketGraphSnapshot | None) -> list[dict[str, Any]]:
+    """Per-capability completeness (issue, comments, sub_issues, dependencies,
+    project_overlay) so a caller can tell exactly which GitHub read is missing
+    instead of one blanket `evidence_complete` flag."""
+    if snapshot is None:
+        return []
+    return [_capability_payload(item) for item in snapshot.capability_coverage]
+
+
+def is_capability_complete_for_issue(
+    snapshot: TicketGraphSnapshot | None,
+    capability: GraphEvidenceCapability,
+    issue_number: int,
+) -> bool:
+    """Whether one specific capability's evidence is trustworthy for one issue.
+
+    A capability with no coverage entry (older cached snapshot, or a snapshot
+    that never observed this issue) is treated as complete: absence of
+    evidence about a capability is not evidence the capability failed.
+    """
+    if snapshot is None:
+        return False
+    for coverage in snapshot.capability_coverage:
+        if coverage.capability is capability:
+            return issue_number not in coverage.unavailable
+    return True
+
+
 def _coverage(
     configured_root: int | None, snapshot: TicketGraphSnapshot | None = None
 ) -> dict[str, Any]:
@@ -65,11 +104,17 @@ def _coverage(
         "unavailable": list(snapshot.unavailable) if snapshot is not None else [],
         "truncated": snapshot.truncated if snapshot is not None else False,
         "evidence_complete": snapshot.evidence_complete if snapshot is not None else False,
+        "capabilities": capability_coverage_payload(snapshot),
     }
 
 
 def _incomplete_graph_diagnostic(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
     reasons: list[str] = []
+    incomplete_capabilities = [
+        item.capability.value for item in snapshot.capability_coverage if not item.complete
+    ]
+    if incomplete_capabilities:
+        reasons.append("incomplete capabilities: " + ", ".join(incomplete_capabilities))
     if snapshot.unavailable:
         reasons.append(
             "unavailable issues: " + ", ".join(str(item) for item in snapshot.unavailable)
@@ -111,6 +156,7 @@ def _snapshot_payload(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
         "evidence_complete": snapshot.evidence_complete,
         "unavailable": list(snapshot.unavailable),
         "truncated": snapshot.truncated,
+        "capability_coverage": capability_coverage_payload(snapshot),
         "live_issues": [
             {
                 "number": issue.number,
@@ -177,6 +223,19 @@ def _snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
             or not isinstance(truncated, bool)
         ):
             return None
+        raw_coverage = payload.get("capability_coverage", [])
+        if not isinstance(raw_coverage, list):
+            return None
+        capability_coverage = tuple(
+            CapabilityCoverage(
+                capability=GraphEvidenceCapability(str(item["capability"])),
+                complete=bool(item["complete"]),
+                unavailable=_positive_integer_tuple(item["unavailable"]),
+                truncated=bool(item["truncated"]),
+            )
+            for item in raw_coverage
+            if isinstance(item, dict)
+        )
         graph = TicketGraph(int(payload["schema_version"]), int(payload["program_issue"]), nodes)
         return TicketGraphSnapshot(
             graph=graph,
@@ -185,6 +244,7 @@ def _snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
             unavailable=_positive_integer_tuple(payload["unavailable"]),
             truncated=truncated,
             live_issues=live,
+            capability_coverage=capability_coverage,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -277,6 +337,18 @@ class RepositoryIssueGraphReader:
         self.ctx = ctx
 
     def execute(self, c: RepositoryIssueGraphCommand) -> RepositoryIssueGraphResult:
+        return self._execute(c, audited=True)
+
+    def compute(self, c: RepositoryIssueGraphCommand) -> RepositoryIssueGraphResult:
+        """Read graph state without creating a nested audit event."""
+        return self._execute(c, audited=False)
+
+    def _execute(
+        self,
+        c: RepositoryIssueGraphCommand,
+        *,
+        audited: bool,
+    ) -> RepositoryIssueGraphResult:
         repo = self.ctx.repo(c.repo_id)
         details: dict[str, object] = {
             "repo_id": c.repo_id,
@@ -374,4 +446,4 @@ class RepositoryIssueGraphReader:
                 ),
             )
 
-        return self.ctx.audited("repo_issue_graph", details, op)
+        return self.ctx.audited("repo_issue_graph", details, op) if audited else op()

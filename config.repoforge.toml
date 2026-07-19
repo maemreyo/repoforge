@@ -34,6 +34,25 @@ decisions = [
 root_issue = 3
 repository = "maemreyo/repoforge"
 
+[[repositories.repoforge.generated_paths]]
+glob = "docs/contracts/tool-schemas-v2.json"
+regeneration_command = ["make", "schemas"]
+description = "Generated Forge v2 Pydantic tool-schema bundle"
+
+[[repositories.repoforge.generated_paths]]
+glob = "docs/contracts/release-contract-v2.json"
+regeneration_command = ["make", "schemas"]
+description = "Generated Forge v2 public release contract"
+
+[repositories.repoforge.issue_writes]
+enabled_ops = ["comment", "close", "reopen", "link", "create"]
+approval_required_ops = ["create"]
+max_writes_per_call = 8
+max_writes_per_window = 80
+window_seconds = 3600
+create_title_prefix = "[TASK]"
+create_body_template = "## Objective\n{body}\n\n## Evidence\n{evidence_ref}"
+
 [repositories.repoforge.risk]
 low_max = 24
 medium_max = 49
@@ -73,6 +92,12 @@ description = "Synchronize the locked RepoForge development environment"
 verification = false
 timeout_seconds = 900
 commands = [["make", "setup"]]
+
+[repo.policy_patch.profiles.schemas]
+description = "Regenerate reviewed Forge v2 schema and release-contract goldens"
+verification = false
+timeout_seconds = 300
+commands = [["make", "schemas"]]
 
 [repo.policy_patch.profiles.quick]
 description = "Run Ruff and strict Mypy without the full test/build gate"

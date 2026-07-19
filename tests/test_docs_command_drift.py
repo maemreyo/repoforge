@@ -107,7 +107,10 @@ def test_example_config_matches_current_source_schema() -> None:
     assert "version = 2" in text
     assert "[[repo]]" in text
     assert 'id = "example-repository"' in text
-    assert "[repositories." not in text
+    assert "repositories.example-repository.generated_paths" in text
+    assert "repositories.example-repository.issue_writes" in text
+    assert "repo_policy" in text
+    assert "repo_policy_apply" not in text
 
 
 def test_repository_profiles_reference_existing_make_targets() -> None:
@@ -138,6 +141,52 @@ def test_make_default_is_read_only_and_verification_targets_remain_available() -
     assert re.search(r"^tickets:\s*(?:#.*)?$", makefile, re.MULTILINE)
     assert re.search(r"^inspector:\s*(?:#.*)?$", makefile, re.MULTILINE)
     assert re.search(r"^install-hooks:\s*(?:#.*)?$", makefile, re.MULTILINE)
+
+
+def test_pre_push_autoformats_but_requires_generated_changes_to_be_committed() -> None:
+    script = (ROOT / "scripts/pre-push.sh").read_text(encoding="utf-8")
+
+    format_index = script.index('run_check "ruff format" uv run ruff format src tests')
+    lint_index = script.index('run_check "ruff check --fix" uv run ruff check --fix src tests')
+    typecheck_index = script.index('run_check "mypy --strict" uv run mypy --strict src/repoforge')
+
+    assert "workspace_fingerprint" in script
+    assert "ruff format --check" not in script
+    assert format_index < lint_index < typecheck_index
+    assert "Auto-format changed the working tree" in script
+    assert "Review and commit those changes before pushing again" in script
+
+
+def test_tree_sitter_dependencies_are_exact_and_hash_locked() -> None:
+    project = tomli.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = set(project["project"]["dependencies"])
+    pins = {
+        "tree-sitter==0.25.2",
+        "tree-sitter-javascript==0.25.0",
+        "tree-sitter-python==0.25.0",
+        "tree-sitter-typescript==0.23.2",
+    }
+
+    assert pins <= dependencies
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    for requirement in pins:
+        name, version = requirement.split("==", 1)
+        package = re.search(
+            rf'\[\[package\]\]\nname = "{re.escape(name)}"\nversion = "{re.escape(version)}"(?P<body>.*?)(?=\n\[\[package\]\]|\Z)',
+            lock,
+            re.DOTALL,
+        )
+        assert package is not None, f"missing locked package {requirement}"
+        assert re.search(r'hash = "sha256:[0-9a-f]{64}"', package.group("body"))
+
+
+def test_v2_release_gate_measures_primary_and_fallback_provider_recall() -> None:
+    script = (ROOT / "scripts/run_v2_release_gates.py").read_text(encoding="utf-8")
+
+    assert "TreeSitterCodeIntelligenceProvider" in script
+    assert "SyntaxCodeIntelligenceProvider" in script
+    assert "measure_provider_recall" in script
+    assert "provider_recall_observations=" in script
 
 
 def test_release_script_requires_an_explicit_bump_and_is_cross_platform() -> None:
@@ -175,6 +224,51 @@ def test_make_check_remains_the_stable_full_verification_contract() -> None:
 
     assert "check:" in makefile
     assert "scripts/verify-production.sh --allow-dirty" in makefile
+
+
+def test_forge_v2_release_gates_are_a_required_make_and_production_contract() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    verifier = (ROOT / "scripts/verify-production.sh").read_text(encoding="utf-8")
+
+    assert "v2-gates:" in makefile
+    assert "scripts/run_v2_release_gates.py" in makefile
+    assert "$${TMPDIR:-/tmp}" in makefile
+    assert "make v2-gates" in verifier or "$(MAKE) v2-gates" in verifier
+
+
+def test_operator_docs_match_the_static_forge_v2_cutover() -> None:
+    reference = (ROOT / "docs/development/TOOL_REFERENCE.md").read_text(encoding="utf-8")
+    full_flow = (ROOT / "docs/testing/FULL_FLOW_TESTING.md").read_text(encoding="utf-8")
+    plugin_cases = (ROOT / "docs/testing/PLUGIN_TEST_CASES.md").read_text(encoding="utf-8")
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    contracts = (ROOT / "docs/contracts/README.md").read_text(encoding="utf-8")
+    examples = "\n".join(
+        (ROOT / name).read_text(encoding="utf-8")
+        for name in ("config.example.toml", "config.repoforge.toml")
+    )
+
+    assert "exactly 28" in reference
+    assert "forge_v2" in reference
+    assert "forge_v1" in reference and "migration_required" in reference
+    assert "structuredContent" in reference
+    assert "forty-six focused MCP tools" not in reference
+    assert "contract v1 remains supported" not in reference
+    assert "`repo_policy_apply`" not in reference
+    assert "`operation_status`" not in reference
+    for tool in (
+        "workspace_mutate",
+        "workspace_verify",
+        "workspace_pr",
+        "workspace_pr_evidence",
+        "operation",
+    ):
+        assert tool in full_flow
+        assert tool in plugin_cases
+    assert "forge_v2" in plugin_cases
+    assert "repo_policy" in security and "repo_policy_apply" not in security
+    assert "release-contract-v2.json" in contracts
+    assert "release-contract-v1.json" not in contracts
+    assert "repo_policy" in examples and "repo_policy_apply" not in examples
 
 
 def test_repoforge_source_config_enables_reviewed_relaxed_execution() -> None:

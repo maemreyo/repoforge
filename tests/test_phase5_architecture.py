@@ -77,10 +77,12 @@ def test_service_is_a_delegating_facade() -> None:
     )
 
 
-def test_bootstrap_is_composition_root() -> None:
-    assert "adapters" in (PACKAGE / "bootstrap.py").read_text(encoding="utf-8")
+def test_bootstrap_modules_are_composition_roots() -> None:
+    composition_roots = {PACKAGE / "bootstrap.py"}
+    for root in composition_roots:
+        assert "adapters" in root.read_text(encoding="utf-8")
     for path in PACKAGE.rglob("*.py"):
-        if path == PACKAGE / "bootstrap.py" or "adapters" in path.parts:
+        if path in composition_roots or "adapters" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
         assert "repoforge.adapters" not in text, path

@@ -18,7 +18,10 @@ from ..retrieval import (
     paginate,
     parse_unified_diff,
     search_files,
+    structured_regex_matches,
     tree_entries,
+    validate_path_glob,
+    validate_regex,
 )
 
 
@@ -111,7 +114,6 @@ class WorkspaceRetrieval:
 
         def operation() -> WorkspaceSearchV2Result:
             head_sha, fingerprint = self._identity(command.workspace_id, workspace)
-            paths, source_truncated = self.ctx.git.list_files(workspace, repo, 10_000)
 
             def load_text(raw: str) -> str | None:
                 normalized = assert_path_allowed(raw, repo)
@@ -132,14 +134,32 @@ class WorkspaceRetrieval:
                 except UnicodeDecodeError:
                     return None
 
-            matches = search_files(
-                paths,
-                load_text=load_text,
-                query=command.query,
-                mode=command.mode,
-                path_glob=command.path_glob,
-                context_lines=command.context_lines,
-            )
+            if command.mode is SearchMode.REGEX:
+                validate_path_glob(command.path_glob)
+                validate_regex(command.query)
+                locations, source_truncated = self.ctx.git.search_regex_locations(
+                    workspace,
+                    repo,
+                    command.query,
+                    command.path_glob,
+                    10_000,
+                    timeout_seconds=1,
+                )
+                matches = structured_regex_matches(
+                    locations,
+                    load_text=load_text,
+                    context_lines=command.context_lines,
+                )
+            else:
+                paths, source_truncated = self.ctx.git.list_files(workspace, repo, 10_000)
+                matches = search_files(
+                    paths,
+                    load_text=load_text,
+                    query=command.query,
+                    mode=command.mode,
+                    path_glob=command.path_glob,
+                    context_lines=command.context_lines,
+                )
             page = paginate(
                 matches,
                 kind="workspace_search_v2",
@@ -226,11 +246,14 @@ class WorkspaceRetrieval:
         _, repo, workspace = self.ctx.workspace(command.workspace_id)
 
         def operation() -> WorkspaceDiffV2Result:
+            validate_path_glob(command.path_glob)
             head_sha, fingerprint = self._identity(command.workspace_id, workspace)
             source_truncated = False
             if command.staged:
                 raw = self.ctx.git.diff(workspace, repo, staged=True)
                 files = list(parse_unified_diff(raw["diff"]))
+                for parsed_file in files:
+                    assert_path_allowed(parsed_file.path, repo)
                 source_truncated = bool(raw["truncated"])
             else:
                 files = []
@@ -253,9 +276,9 @@ class WorkspaceRetrieval:
                         current = candidate.read_bytes()
                     else:
                         current = None
-                    item = build_diff_file(path, base, current)
-                    if item is not None:
-                        files.append(item)
+                    diff_file = build_diff_file(path, base, current)
+                    if diff_file is not None:
+                        files.append(diff_file)
             if command.path_glob is not None and command.staged:
                 files = [
                     item for item in files if PurePosixPath(item.path).match(command.path_glob)
@@ -272,11 +295,23 @@ class WorkspaceRetrieval:
                 byte_budget=command.byte_budget,
                 cursor=command.cursor,
             )
+            raw_metrics = self.ctx.git.change_metrics(workspace, repo)
+            public_metrics = {
+                key: raw_metrics[key]
+                for key in (
+                    "changed_files",
+                    "added_lines",
+                    "deleted_lines",
+                    "diff_lines",
+                    "total_current_bytes",
+                    "within_limits",
+                )
+            }
             return WorkspaceDiffV2Result(
                 command.workspace_id,
                 command.staged,
                 tuple(page.items),  # type: ignore[arg-type]
-                self.ctx.git.change_metrics(workspace, repo),
+                public_metrics,
                 head_sha,
                 fingerprint,
                 page.truncated or source_truncated,

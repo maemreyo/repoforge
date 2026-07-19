@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 
 def _contracts():
     from repoforge.contracts import common, registry
@@ -96,16 +98,62 @@ def test_runtime_log_limit_bound_is_published_and_enforced() -> None:
         raise AssertionError("runtime_logs_read limit=201 must be rejected")
 
 
+def test_operation_contract_publishes_all_terminal_states_and_action_validation() -> None:
+    from pydantic import ValidationError
+
+    common, registry = _contracts()
+    assert {item.value for item in common.OperationState} >= {
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "expired",
+        "orphaned",
+    }
+    model = registry.V2_TOOL_SPECS["operation"].input_model
+    with pytest.raises(ValidationError):
+        model(action="get")
+    with pytest.raises(ValidationError):
+        model(action="list", operation_id="op-000000000000000000000001")
+    with pytest.raises(ValidationError):
+        model(action="cancel", operation_id="op-000000000000000000000001", scope="task:x")
+
+
+def test_runtime_log_time_range_requires_timezone_and_order() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    model = registry.V2_TOOL_SPECS["runtime_logs_read"].input_model
+    with pytest.raises(ValidationError):
+        model(start_time="2026-07-16T00:00:00")
+    with pytest.raises(ValidationError):
+        model(
+            start_time="2026-07-16T00:02:00+00:00",
+            end_time="2026-07-16T00:01:00+00:00",
+        )
+
+
 def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
     _, registry = _contracts()
     expectations = {
         "repo_history": {"commit", "log", "compare"},
-        "repo_issue": {"read", "spec", "graph", "next"},
+        "repo_issue": {
+            "read",
+            "spec",
+            "graph",
+            "next",
+            "comment",
+            "close",
+            "reopen",
+            "link",
+            "create",
+        },
         "repo_policy": {"preview", "apply"},
         "workspace_refresh": {"preview", "apply"},
-        "workspace_verify": {"auto", "diagnostic", "profile", "adhoc"},
-        "workspace_pr": {"create_draft", "update", "watch"},
-        "operation": {"get", "list", "cancel"},
+        "workspace_verify": {"plan", "auto", "diagnostic", "profile", "adhoc"},
+        "workspace_pr": {"create_draft", "update", "comment", "watch"},
+        "operation": {"get", "list", "cancel", "failure_evidence"},
     }
 
     for tool_name, expected in expectations.items():
@@ -122,8 +170,19 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
 def test_all_outputs_share_one_typed_error_contract() -> None:
     common, registry = _contracts()
     for tool_name, spec in registry.V2_TOOL_SPECS.items():
-        field = spec.output_model.model_fields["error"]
-        assert common.ToolError in getattr(field.annotation, "__args__", ()), tool_name
+        validated = spec.validate_output(
+            {
+                "status": "failed",
+                "summary": "Request failed",
+                "error": {
+                    "code": "NOT_FOUND",
+                    "message": "Resource not found",
+                    "why": "The requested resource does not exist.",
+                    "safe_next_action": "Refresh state and choose an existing resource.",
+                },
+            }
+        )
+        assert isinstance(validated, common.ToolFailure), tool_name
 
 
 def test_registry_runtime_validation_rejects_unknown_fields() -> None:
@@ -136,6 +195,220 @@ def test_registry_runtime_validation_rejects_unknown_fields() -> None:
         pass
     else:
         raise AssertionError("unknown input fields must be rejected")
+
+
+def test_retrieval_contracts_publish_budget_and_truncation_metadata() -> None:
+    _, registry = _contracts()
+    expected_output_fields = {
+        "repo_search": {"omitted_count", "source_truncated"},
+        "repo_tree": {"omitted_count", "source_truncated"},
+        "workspace_search": {"omitted_count", "source_truncated"},
+        "workspace_tree": {"omitted_count", "source_truncated"},
+        "workspace_diff": {"staged", "omitted_count", "source_truncated"},
+    }
+    for tool_name, fields in expected_output_fields.items():
+        model_fields = registry.V2_TOOL_SPECS[tool_name].output_model.model_fields
+        assert fields <= set(model_fields), (tool_name, set(model_fields))
+
+    diff_input = registry.V2_TOOL_SPECS["workspace_diff"].input_model
+    assert diff_input.model_fields["max_files"].default == 100
+    schema = diff_input.model_json_schema()["properties"]["max_files"]
+    assert schema["minimum"] == 1
+    assert schema["maximum"] == 1000
+
+
+def test_repo_policy_contract_carries_typed_generated_paths() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["repo_policy"]
+
+    validated = spec.validate_input(
+        {
+            "repo_id": "demo",
+            "action": "preview",
+            "mutations": [],
+            "generated_paths": [
+                {
+                    "glob": "docs/contracts/*.json",
+                    "regeneration_command": ["python", "render.py"],
+                    "description": "Generated contracts",
+                }
+            ],
+        }
+    )
+
+    assert validated.generated_paths[0].glob == "docs/contracts/*.json"
+    schema = spec.input_model.model_json_schema()
+    generated = schema["properties"]["generated_paths"]
+    assert generated["maxItems"] == 64
+
+
+def test_repo_policy_contract_rejects_unknown_issue_template_fields() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["repo_policy"]
+
+    with pytest.raises(ValueError, match=r"exactly.*body.*evidence_ref"):
+        spec.validate_input(
+            {
+                "repo_id": "demo",
+                "action": "preview",
+                "issue_writes": {
+                    "create_body_template": "{body}\n{evidence_ref}\n{unknown}",
+                },
+            }
+        )
+
+
+def test_workspace_refresh_contract_has_typed_conflicts_and_resolutions() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_refresh"]
+
+    validated = spec.validate_input(
+        {
+            "workspace_id": "demo-workspace",
+            "action": "apply",
+            "expected_head_sha": "a" * 40,
+            "expected_fingerprint": "b" * 64,
+            "plan_token": "refresh-v2:" + "c" * 40 + ":" + "d" * 64 + ":" + "e" * 64,
+            "resolutions": [
+                {
+                    "path": "hello.txt",
+                    "content": "reviewed resolution\n",
+                }
+            ],
+        }
+    )
+
+    assert validated.resolutions[0].path == "hello.txt"
+    input_schema = spec.input_model.model_json_schema()
+    assert input_schema["properties"]["resolutions"]["maxItems"] == 100
+    output_fields = set(spec.output_model.model_fields)
+    assert {
+        "prediction_scope",
+        "apply_blockers",
+        "conflicts",
+        "warnings",
+        "changed_paths",
+        "verify_selector",
+        "invalidated_receipts",
+        "transaction_id",
+    } <= output_fields
+
+
+def test_repo_issue_contract_exposes_governed_write_modes() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["repo_issue"]
+    comment = spec.validate_input(
+        {
+            "repo_id": "demo",
+            "mode": "comment",
+            "issue_number": 7,
+            "body": "Verification evidence is attached.",
+            "evidence_ref": "commit:abc123",
+            "idempotency_key": "repo-issue-comment-0001",
+        }
+    )
+
+    assert comment.mode.value == "comment"
+    assert comment.evidence_ref == "commit:abc123"
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "repo_id": "demo",
+                "mode": "close",
+                "issue_number": 7,
+                "idempotency_key": "repo-issue-close-0001",
+            }
+        )
+    schema = spec.input_model.model_json_schema()
+    assert set(schema["$defs"]["IssueMode"]["enum"]) == {
+        "read",
+        "spec",
+        "graph",
+        "next",
+        "comment",
+        "close",
+        "reopen",
+        "link",
+        "create",
+    }
+    output = spec.validate_output(
+        {
+            "summary": "Applied repo_issue comment",
+            "repo_id": "demo",
+            "mode": "comment",
+            "graph_status": "not_requested",
+            "mutation": {
+                "operation": "comment",
+                "result": "applied",
+                "issue_number": 7,
+                "marker": "<!-- repoforge-issue-write:" + "a" * 64 + " -->",
+                "external_writes": 1,
+                "url": "https://github.com/acme/demo/issues/7#issuecomment-1",
+            },
+        }
+    )
+    assert output.mutation is not None
+    assert output.mutation.external_writes == 1
+
+
+def test_workspace_verify_contract_exposes_planning_routing_and_evidence_fields() -> None:
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_verify"]
+
+    validated = spec.validate_input(
+        {
+            "workspace_id": "demo-workspace",
+            "mode": "diagnostic",
+            "diagnostic_id": "pytest-target",
+            "selector": ["tests/test_one.py", "tests/test_two.py"],
+            "intent": "tdd_green",
+            "expectation": "pass",
+            "force_rerun": True,
+            "impact_paths": ["src/one.py"],
+            "artifact_output_path": "build/verify/result.json",
+        }
+    )
+
+    assert validated.mode.value == "diagnostic"
+    assert validated.intent.value == "tdd_green"
+    assert validated.force_rerun is True
+    assert validated.impact_paths == ("src/one.py",)
+    output_fields = set(spec.output_model.model_fields)
+    assert {
+        "assessment",
+        "recommendations",
+        "staleness_warning",
+        "steps",
+        "failed_step",
+        "failure_domain",
+        "business_tests_ran",
+        "valid_tdd_red_evidence",
+        "failure_reused",
+        "artifact_paths",
+    } <= output_fields
+
+
+def test_workspace_verify_selector_sequences_publish_practical_bounds() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_verify"]
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "workspace_id": "demo-workspace",
+                "selector": ["x" for _ in range(101)],
+            }
+        )
+
+    schema = spec.input_model.model_json_schema(mode="validation")
+    for field_name in ("selector", "selector2"):
+        nullable = schema["properties"][field_name]["anyOf"]
+        array_branch = next(branch for branch in nullable if branch.get("type") == "array")
+        assert array_branch["maxItems"] == 100
+        assert array_branch["items"]["maxLength"] == 4096
 
 
 def test_mutation_schema_exposes_all_ops_and_bounds() -> None:

@@ -206,3 +206,34 @@ Restrictions or follow-up work:
 ```text
 None.
 ```
+
+## Recorded metadata verification — 2026-07-19 Round 4
+
+This record covers the contract-hardening changes on PR #225. Automated checks exercise the
+in-process MCP server and generated JSON Schema. A live ChatGPT/Claude connector and its model tool
+selection are not available in this execution environment, so prompt-selection rows are explicitly
+recorded as **Not run**, not inferred from unit tests.
+
+| Case | Verification performed | Observed result | Result |
+|---|---|---|---|
+| Direct: transactional edit | Inspected discovered `workspace_mutate` metadata and validated a bounded operation payload | Tool is advertised with `destructiveHint = true`; strict input remains callable | Pass |
+| Direct: verification plan | Inspected discovered `workspace_verify` metadata and validated plan input | Tool is advertised with `idempotentHint = false`; plan creation remains callable | Pass |
+| Direct: lean payload | Called the in-process MCP server through success and failure paths | Success uses the tool-specific branch; failure validates against the advertised shared `ToolFailure` branch | Pass |
+| Indirect: failure recovery | Reconstructed every emitted recovery action without a translation layer | Each `arguments` object validates directly against `V2_TOOL_SPECS[kind]` | Pass |
+| Negative: over-limit verification input | Submitted 101 selector items and a selector item over 4096 characters | Strict input validation rejects both; schema advertises `maxItems = 100` and `maxLength = 4096` | Pass |
+| Negative: timed-out descendant cleanup | Exercised identity-matched, PID-reused, reparented-process, rescan, and inspection-failure cases | Linux pidfd signals the captured process object; reused PIDs and hosts without atomic handles are not signalled; probe failures are diagnostic | Pass |
+| Direct/indirect/negative live prompt selection | ChatGPT/Claude connector prompt suite in `PLUGIN_TEST_CASES.md` | No live connector/client available in this environment | Not run |
+
+| Release-candidate check | Observed result | Result |
+|---|---|---|
+| Ruff | `All checks passed!` | Pass |
+| Mypy | `Success: no issues found in 363 source files` | Pass |
+| Focused Round-4 pytest | 74 passed, 1 sandbox-dependent process test skipped | Pass |
+| Schema/release contract | 28 tools; generated contract matches surface hash `755547e9...9191e2b` | Pass |
+| Forge v2 gates | generated changes 8/8, patches 8/8, seeded bugs 7/7, reads 6/6; zero wrong-target | Pass |
+| Complete pytest | 1271 passed, 1 skipped, 11 blocked by denied Unix sockets or unavailable `/proc` identities | Environment blocked |
+| `verify-production.sh --allow-dirty` | Integrity, contracts, gates, format, lint, and types passed; deterministic pytest shards hit the same sandbox restrictions | Environment blocked |
+
+Live-client follow-up remains required before a production rollout: reconnect a fresh `forge_v2`
+client and execute the direct, indirect, and negative prompts from `PLUGIN_TEST_CASES.md`, recording
+the exact selected tools, bounded arguments, and confirmation behavior in a copied release record.

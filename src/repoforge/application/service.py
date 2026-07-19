@@ -21,6 +21,7 @@ from ..ports import (
 )
 from .dto import to_data
 from .operations.cancel import OperationCancelCommand, OperationCancellationRequester
+from .operations.composite import OperationCommand, OperationCoordinator
 from .operations.list import OperationListCommand, OperationLister
 from .operations.status import OperationStatusCommand, OperationStatusReader
 from .read_batch import FileReadRequest
@@ -34,6 +35,18 @@ from .repository.context import (
     RepositoryContextReader,
 )
 from .repository.doctor import Doctor, DoctorCommand
+from .repository.family_v2 import (
+    RepositoryHistoryV2,
+    RepositoryHistoryV2Command,
+    RepositoryIssueV2,
+    RepositoryIssueV2Command,
+    RepositoryListV2,
+    RepositoryListV2Command,
+    RepositoryPrReadV2,
+    RepositoryPrReadV2Command,
+    RepositoryTaskContextV2,
+    RepositoryTaskContextV2Command,
+)
 from .repository.file_read import RepositoryFileReadCommand, RepositoryFileReader
 from .repository.files_read import RepositoryFilesReadCommand, RepositoryFilesReader
 from .repository.issue_graph import RepositoryIssueGraphCommand, RepositoryIssueGraphReader
@@ -89,11 +102,24 @@ from .workspace.execute_plan import (
 from .workspace.execution_plan import (
     AcceptExecutionPlanCommand,
     CreateExecutionPlanCommand,
+    ExecutionPlanResult,
     ExecutionPlanService,
 )
 from .workspace.failure_intelligence import (
     FailureEvidenceReadCommand,
     FailureIntelligenceService,
+)
+from .workspace.family_v2 import (
+    WorkspaceChangedFormatterV2,
+    WorkspaceCreateV2Command,
+    WorkspaceCreatorV2,
+    WorkspaceFormatChangedV2Command,
+    WorkspaceListerV2,
+    WorkspaceListV2Command,
+    WorkspaceRemoverV2,
+    WorkspaceRemoveV2Command,
+    WorkspaceStatusV2,
+    WorkspaceStatusV2Command,
 )
 from .workspace.file_read import (
     WorkspaceFileReadCommand,
@@ -116,11 +142,12 @@ from .workspace.hygiene_status import (
     WorkspaceHygieneStatusReader,
 )
 from .workspace.list import WorkspaceListCommand, WorkspaceLister
-from .workspace.mutate import (
+from .workspace.mutate_enhanced import (
     WorkspaceMutateCommand,
     WorkspaceMutation,
     WorkspaceMutator,
 )
+from .workspace.pr import WorkspacePrCommand, WorkspacePrCoordinator
 from .workspace.pr_check_details import (
     WorkspacePrCheckDetailsCommand,
     WorkspacePrCheckDetailsReader,
@@ -128,6 +155,10 @@ from .workspace.pr_check_details import (
 from .workspace.pr_checks import (
     WorkspacePrChecksCommand,
     WorkspacePrChecksReader,
+)
+from .workspace.pr_evidence import (
+    WorkspacePrEvidenceCommand,
+    WorkspacePrEvidenceReader,
 )
 from .workspace.pr_failure_evidence import (
     WorkspacePrFailureEvidenceCommand,
@@ -144,6 +175,11 @@ from .workspace.refresh import WorkspaceRefreshCommand, WorkspaceRefresher
 from .workspace.refresh_preview import (
     WorkspaceRefreshPreviewCommand,
     WorkspaceRefreshPreviewer,
+)
+from .workspace.refresh_v2 import (
+    RefreshResolution,
+    WorkspaceRefreshV2,
+    WorkspaceRefreshV2Command,
 )
 from .workspace.remove import WorkspaceRemoveCommand, WorkspaceRemover
 from .workspace.restore_paths import (
@@ -175,6 +211,59 @@ from .workspace.update_draft_pr import (
     DraftPullRequestUpdater,
     WorkspaceUpdateDraftPrCommand,
 )
+from .workspace.verify import WorkspaceVerifier, WorkspaceVerifyCommand
+
+
+def _execution_plan_evidence(result: ExecutionPlanResult) -> dict[str, Any]:
+    return {
+        "plan_id": result.plan_id,
+        "plan_hash": result.plan_hash,
+        "task_id": result.task_id,
+        "ordered_stages": list(result.ordered_stages),
+        "final_profile": result.final_profile,
+        "stage_definition_hash": result.stage_definition_hash,
+        "created_at": result.created_at,
+        "expires_at": result.expires_at,
+        "accepted": result.accepted,
+        "acceptance_id": result.acceptance_id,
+    }
+
+
+def _workspace_verify_plan_envelope(
+    workspace_id: str,
+    *,
+    summary: str,
+    plan: dict[str, Any] | None,
+    operation: dict[str, Any] | None,
+    outcome: str,
+    head_sha: str,
+    workspace_fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        "summary": summary,
+        "workspace_id": workspace_id,
+        "requested_mode": "plan",
+        "selected_mode": "plan",
+        "routing_reason": "Explicit plan mode was requested.",
+        "impact_evidence": None,
+        "assessment": None,
+        "recommendations": [],
+        "staleness_warning": None,
+        "operation": operation,
+        "commands": [],
+        "steps": [],
+        "failed_step": None,
+        "failure_domain": None,
+        "business_tests_ran": False,
+        "valid_tdd_red_evidence": False,
+        "failure_reused": False,
+        "artifact_paths": [],
+        "outcome": outcome,
+        "satisfies_commit_gate": False,
+        "head_sha": head_sha,
+        "workspace_fingerprint": workspace_fingerprint,
+        "plan": plan,
+    }
 
 
 def _result(value: object) -> dict[str, Any]:
@@ -243,6 +332,11 @@ class CodingService:
         self._repo_context = RepositoryContextReader(ctx)
         self._repo_commit = RepositoryCommitReader(ctx)
         self._repo_compare = RepositoryComparer(ctx)
+        self._repo_history_v2 = RepositoryHistoryV2(ctx)
+        self._repo_list_v2 = RepositoryListV2(ctx)
+        self._repo_issue_v2 = RepositoryIssueV2(ctx)
+        self._repo_pr_v2 = RepositoryPrReadV2(ctx)
+        self._task_context_v2 = RepositoryTaskContextV2(ctx)
         self._repo_tree = RepositoryTreeReader(ctx)
         self._repo_read = RepositoryFileReader(ctx)
         self._repo_reads = RepositoryFilesReader(ctx)
@@ -258,8 +352,11 @@ class CodingService:
         self._task_context = RepoTaskContextReader(ctx)
         self._ticket_project_sync = TicketProjectSyncer(ctx)
         self._create = WorkspaceCreator(ctx)
+        self._create_v2 = WorkspaceCreatorV2(ctx)
         self._list = WorkspaceLister(ctx)
+        self._list_v2 = WorkspaceListerV2(ctx)
         self._status = WorkspaceStatusReader(ctx)
+        self._status_v2 = WorkspaceStatusV2(ctx)
         self._assessment = WorkspaceAssessmentReader(ctx)
         self._execution_plans = ExecutionPlanService(ctx)
         self._base_status = WorkspaceBaseStatusReader(ctx)
@@ -276,6 +373,7 @@ class CodingService:
         self._restore = WorkspacePathsRestorer(ctx)
         self._refresh_preview = WorkspaceRefreshPreviewer(ctx)
         self._refresh = WorkspaceRefresher(ctx)
+        self._refresh_v2 = WorkspaceRefreshV2(ctx)
         self._diff = WorkspaceDiffReader(ctx)
         self._profile = WorkspaceProfileRunner(
             ctx,
@@ -294,10 +392,25 @@ class CodingService:
         )
         self._hygiene_status = WorkspaceHygieneStatusReader(ctx)
         self._format_changed = WorkspaceChangedFormatter(ctx)
+        self._format_changed_v2 = WorkspaceChangedFormatterV2(ctx)
         self._adhoc = WorkspaceAdhocRunner(
             ctx,
             operations=self.operations,
             background_tasks=self.application.background_tasks,
+        )
+        self._operation = OperationCoordinator(
+            status=self._operation_status,
+            lister=self._operation_list,
+            cancel=self._operation_cancel,
+            failure_evidence=self._execution_failure_evidence,
+            request_live_cancel=self._request_live_operation_cancel,
+        )
+        self._verify = WorkspaceVerifier(
+            ctx,
+            assessment=self._assessment,
+            profile=self._profile,
+            diagnostic=self._diagnostic,
+            adhoc=self._adhoc,
         )
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
@@ -308,8 +421,57 @@ class CodingService:
         self._check_details = WorkspacePrCheckDetailsReader(ctx)
         self._failure_evidence = WorkspacePrFailureEvidenceReader(ctx)
         self._pr_watch = self.application.pr_check_watches
+        self._pr = WorkspacePrCoordinator(
+            ctx,
+            creator=self._create_pr,
+            updater=self._update_pr,
+            watch=self._pr_watch,
+        )
+        self._pr_evidence = WorkspacePrEvidenceReader(
+            ctx,
+            status=self._pr_status,
+            checks=self._checks,
+            details=self._check_details,
+            failure=self._failure_evidence,
+        )
         self._remove = WorkspaceRemover(ctx)
+        self._remove_v2 = WorkspaceRemoverV2(ctx)
         self._doctor = Doctor(ctx)
+
+    def _request_live_operation_cancel(self, kind: str, operation_id: str) -> bool:
+        if kind == "workspace_run_profile":
+            return self._profile.request_live_cancel(operation_id)
+        if kind == "workspace_run_adhoc":
+            return self._adhoc.request_live_cancel(operation_id)
+        if kind == "workspace_execute_plan":
+            return self._plan_executor.request_live_cancel(operation_id)
+        return False
+
+    def operation(
+        self,
+        action: str,
+        operation_id: str | None = None,
+        scope: str | None = None,
+        state: str | None = None,
+        expected_updated_at: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+        failure_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._operation.execute(
+                OperationCommand(
+                    action=action,
+                    operation_id=operation_id,
+                    scope=scope,
+                    state=state,
+                    expected_updated_at=expected_updated_at,
+                    limit=limit,
+                    cursor=cursor,
+                    failure_id=failure_id,
+                )
+            )
+        )
 
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         return _result(self._operation_status.execute(OperationStatusCommand(operation_id)))
@@ -333,10 +495,8 @@ class CodingService:
         result = self._operation_cancel.execute(
             OperationCancelCommand(operation_id, expected_updated_at)
         )
-        if result.cancellation_requested and result.operation.kind == "workspace_run_profile":
-            self._profile.request_live_cancel(operation_id)
-        if result.cancellation_requested and result.operation.kind == "workspace_execute_plan":
-            self._plan_executor.request_live_cancel(operation_id)
+        if result.cancellation_requested:
+            self._request_live_operation_cancel(result.operation.kind, operation_id)
         return _result(result)
 
     def failure_evidence_read(self, failure_id: str) -> dict[str, Any]:
@@ -346,6 +506,19 @@ class CodingService:
 
     def repo_list(self, requested_repo: str | None = None) -> dict[str, Any]:
         return _result(self._repo_list.execute(RepositoryListCommand(requested_repo)))
+
+    def repo_list_v2(
+        self,
+        detail: bool = False,
+        cursor: str | None = None,
+        limit: int = 50,
+        requested_repo: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_list_v2.execute(
+                RepositoryListV2Command(detail, cursor, limit, requested_repo)
+            )
+        )
 
     def repo_status(self, repo_id: str) -> dict[str, Any]:
         return _result(self._repo_status.execute(RepositoryStatusCommand(repo_id)))
@@ -506,6 +679,36 @@ class CodingService:
     def repo_recent_commits(self, repo_id: str, limit: int = 20) -> dict[str, Any]:
         return _result(self._recent.execute(RecentCommitsCommand(repo_id, limit)))
 
+    def repo_history_v2(
+        self,
+        repo_id: str,
+        mode: str,
+        ref: str | None = None,
+        base_ref: str | None = None,
+        head_ref: str | None = None,
+        path_glob: str | None = None,
+        limit: int = 20,
+        include_patch: bool = False,
+        byte_budget: int = 60_000,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_history_v2.execute(
+                RepositoryHistoryV2Command(
+                    repo_id,
+                    mode,
+                    ref,
+                    base_ref,
+                    head_ref,
+                    path_glob,
+                    limit,
+                    include_patch,
+                    byte_budget,
+                    cursor,
+                )
+            )
+        )
+
     def repo_issue_read(
         self, repo_id: str, issue_number: int, fresh: bool = False
     ) -> dict[str, Any]:
@@ -563,8 +766,66 @@ class CodingService:
             self._issue_spec.execute(RepositoryIssueSpecCommand(repo_id, issue_number, fresh))
         )
 
+    def repo_issue_v2(
+        self,
+        repo_id: str,
+        mode: str,
+        issue_number: int | None = None,
+        root_issue: int | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        initiative: int | None = None,
+        limit: int = 10,
+        fresh: bool = False,
+        cursor: str | None = None,
+        body: str | None = None,
+        title: str | None = None,
+        evidence_ref: str | None = None,
+        target_issue: int | None = None,
+        link_type: str | None = None,
+        idempotency_key: str | None = None,
+        approval_request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_issue_v2.execute(
+                RepositoryIssueV2Command(
+                    repo_id=repo_id,
+                    mode=mode,
+                    issue_number=issue_number,
+                    root_issue=root_issue,
+                    status=status,
+                    priority=priority,
+                    initiative=initiative,
+                    limit=limit,
+                    fresh=fresh,
+                    cursor=cursor,
+                    body=body,
+                    title=title,
+                    evidence_ref=evidence_ref,
+                    target_issue=target_issue,
+                    link_type=link_type,
+                    idempotency_key=idempotency_key,
+                    approval_request_id=approval_request_id,
+                )
+            )
+        )
+
     def repo_pr_read(self, repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
         return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number, fresh)))
+
+    def repo_pr_read_v2(
+        self,
+        repo_id: str,
+        pr_number: int,
+        fresh: bool = False,
+        detail: str = "overview",
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_pr_v2.execute(
+                RepositoryPrReadV2Command(repo_id, pr_number, fresh, detail, cursor)
+            )
+        )
 
     def repo_task_context(
         self,
@@ -574,6 +835,32 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._task_context.execute(RepoTaskContextCommand(repo_id, issue_number, workspace_id))
+        )
+
+    def repo_task_context_v2(
+        self,
+        repo_id: str,
+        issue_number: int | None = None,
+        workspace_id: str | None = None,
+        sections: list[str] | tuple[str, ...] = (
+            "repository",
+            "status",
+            "ticket",
+            "workspace",
+            "recent_commits",
+        ),
+        byte_budget: int = 96_000,
+    ) -> dict[str, Any]:
+        return _result(
+            self._task_context_v2.execute(
+                RepositoryTaskContextV2Command(
+                    repo_id,
+                    issue_number,
+                    workspace_id,
+                    tuple(sections),
+                    byte_budget,
+                )
+            )
         )
 
     def ticket_project_sync(
@@ -613,11 +900,47 @@ class CodingService:
             )
         )
 
+    def workspace_create_v2(
+        self,
+        repo_id: str,
+        task_slug: str,
+        base: str | None = None,
+        idempotency_key: str | None = None,
+        issue_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        return _result(
+            self._create_v2.execute(
+                WorkspaceCreateV2Command(repo_id, task_slug, base, idempotency_key, issue_ids)
+            )
+        )
+
     def workspace_list(self) -> dict[str, Any]:
         return _result(self._list.execute(WorkspaceListCommand()))
 
+    def workspace_list_v2(
+        self,
+        exists: bool | None = True,
+        lifecycle: str | None = None,
+        repo_id: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._list_v2.execute(WorkspaceListV2Command(exists, lifecycle, repo_id, limit, cursor))
+        )
+
     def workspace_status(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._status.execute(WorkspaceStatusCommand(workspace_id)))
+
+    def workspace_status_v2(
+        self,
+        workspace_id: str,
+        sections: tuple[str, ...] = ("local",),
+        byte_budget: int = 60_000,
+    ) -> dict[str, Any]:
+        return _result(
+            self._status_v2.execute(WorkspaceStatusV2Command(workspace_id, sections, byte_budget))
+        )
 
     def workspace_assessment(self, workspace_id: str) -> dict[str, Any]:
         return _result(self._assessment.execute(WorkspaceAssessmentCommand(workspace_id)))
@@ -820,6 +1143,7 @@ class CodingService:
         operations: list[WorkspaceMutation],
         expected_workspace_fingerprint: str,
         dry_run: bool = False,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._mutate.execute(
@@ -828,6 +1152,7 @@ class CodingService:
                     tuple(operations),
                     expected_workspace_fingerprint,
                     dry_run,
+                    idempotency_key,
                 )
             )
         )
@@ -896,6 +1221,32 @@ class CodingService:
                     preview_id,
                     expected_head_sha,
                     expected_fingerprint,
+                )
+            )
+        )
+
+    def workspace_refresh_v2(
+        self,
+        workspace_id: str,
+        *,
+        action: str,
+        expected_head_sha: str,
+        expected_fingerprint: str,
+        plan_token: str | None = None,
+        resolutions: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        normalized = tuple(
+            RefreshResolution(item["path"], item["content"]) for item in (resolutions or [])
+        )
+        return _result(
+            self._refresh_v2.execute(
+                WorkspaceRefreshV2Command(
+                    workspace_id,
+                    action,
+                    expected_head_sha,
+                    expected_fingerprint,
+                    plan_token,
+                    normalized,
                 )
             )
         )
@@ -992,18 +1343,232 @@ class CodingService:
             )
         )
 
-    def workspace_verify(
-        self, workspace_id: str, profile_name: str | None = None
+    def workspace_format_changed_v2(
+        self,
+        workspace_id: str,
+        expected_fingerprint: str,
+        formatter_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.workspace_run_profile(workspace_id, profile_name)
+        return _result(
+            self._format_changed_v2.execute(
+                WorkspaceFormatChangedV2Command(
+                    workspace_id,
+                    expected_fingerprint,
+                    formatter_id,
+                )
+            )
+        )
 
-    def workspace_commit(self, workspace_id: str, message: str) -> dict[str, Any]:
-        return _result(self._commit.execute(WorkspaceCommitCommand(workspace_id, message)))
+    def workspace_verify(
+        self,
+        workspace_id: str,
+        mode: str = "auto",
+        diagnostic_id: str | None = None,
+        selector: str | list[str] | None = None,
+        selector2: str | list[str] | None = None,
+        profile_name: str | None = None,
+        argv: tuple[str, ...] | None = None,
+        working_directory: str | None = None,
+        expected_fingerprint: str | None = None,
+        background: bool = False,
+        intent: str | None = None,
+        expectation: str | None = None,
+        expected_failure_class: str | None = None,
+        force_rerun: bool = False,
+        impact_paths: tuple[str, ...] = (),
+        artifact_output_path: str | None = None,
+        plan_action: str = "preview",
+        plan_id: str | None = None,
+        plan_task_id: str | None = None,
+        plan_expires_at: str | None = None,
+        plan_through: str = "iteration",
+    ) -> dict[str, Any]:
+        if mode == "plan" and plan_action != "preview":
+            return self._workspace_verify_plan_action(
+                workspace_id,
+                plan_action,
+                plan_id=plan_id,
+                plan_task_id=plan_task_id,
+                plan_expires_at=plan_expires_at,
+                plan_through=plan_through,
+            )
+        return _result(
+            self._verify.execute(
+                WorkspaceVerifyCommand(
+                    workspace_id=workspace_id,
+                    mode=mode,  # type: ignore[arg-type]
+                    diagnostic_id=diagnostic_id,
+                    selector=selector,
+                    selector2=selector2,
+                    profile_name=profile_name,
+                    argv=argv,
+                    working_directory=working_directory,
+                    expected_fingerprint=expected_fingerprint,
+                    background=background,
+                    intent=intent,
+                    expectation=expectation,
+                    expected_failure_class=expected_failure_class,
+                    force_rerun=force_rerun,
+                    impact_paths=impact_paths,
+                    artifact_output_path=artifact_output_path,
+                )
+            )
+        )
+
+    def _workspace_verify_plan_action(
+        self,
+        workspace_id: str,
+        plan_action: str,
+        *,
+        plan_id: str | None,
+        plan_task_id: str | None,
+        plan_expires_at: str | None,
+        plan_through: str,
+    ) -> dict[str, Any]:
+        if plan_action == "create":
+            result = self._execution_plans.create(
+                CreateExecutionPlanCommand(workspace_id, plan_task_id, plan_expires_at)
+            )
+            return _result(
+                _workspace_verify_plan_envelope(
+                    workspace_id,
+                    summary=f"Created execution plan {result.plan_id}",
+                    plan=_execution_plan_evidence(result),
+                    operation=None,
+                    outcome="planned",
+                    head_sha=str(result.binding["head_sha"]),
+                    workspace_fingerprint=str(result.binding["workspace_fingerprint"]),
+                )
+            )
+        if plan_action == "accept":
+            if plan_id is None:
+                raise ValueError("plan_action=accept requires plan_id")
+            result = self._execution_plans.accept(
+                AcceptExecutionPlanCommand(workspace_id, plan_id, plan_task_id)
+            )
+            return _result(
+                _workspace_verify_plan_envelope(
+                    workspace_id,
+                    summary=f"Accepted execution plan {result.plan_id}",
+                    plan=_execution_plan_evidence(result),
+                    operation=None,
+                    outcome="planned",
+                    head_sha=str(result.binding["head_sha"]),
+                    workspace_fingerprint=str(result.binding["workspace_fingerprint"]),
+                )
+            )
+        if plan_action != "execute":
+            raise ValueError(f"Unknown workspace_verify plan_action: {plan_action}")
+        if plan_id is None:
+            raise ValueError("plan_action=execute requires plan_id")
+        admission = self._plan_executor.execute(
+            WorkspaceExecutePlanCommand(workspace_id, plan_id, plan_through)
+        )
+        plan_store = self.application.context.execution_plans
+        envelope = plan_store.read(plan_id) if plan_store is not None else None
+        binding = envelope.value.binding if envelope is not None else None
+        return _result(
+            _workspace_verify_plan_envelope(
+                workspace_id,
+                summary=f"Executing execution plan {plan_id}",
+                plan=None,
+                operation={
+                    "operation_id": admission.operation_id,
+                    "kind": "workspace_execute_plan",
+                    "state": "running",
+                    "phase": admission.phase,
+                    "progress_current": None,
+                    "progress_total": None,
+                    "cancellation_reason": None,
+                    "poll_after_seconds": 1.0,
+                },
+                outcome="running",
+                head_sha=binding.head_sha if binding is not None else "",
+                workspace_fingerprint=binding.workspace_fingerprint if binding is not None else "",
+            )
+        )
+
+    def workspace_commit(
+        self,
+        workspace_id: str,
+        message: str,
+        expected_head_sha: str | None = None,
+        expected_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._commit.execute(
+                WorkspaceCommitCommand(
+                    workspace_id,
+                    message,
+                    expected_head_sha,
+                    expected_fingerprint,
+                )
+            )
+        )
 
     def workspace_push(
-        self, workspace_id: str, idempotency_key: str | None = None
+        self,
+        workspace_id: str,
+        idempotency_key: str | None = None,
+        expected_remote_head: str | None = None,
     ) -> dict[str, Any]:
-        return _result(self._push.execute(WorkspacePushCommand(workspace_id, idempotency_key)))
+        return _result(
+            self._push.execute(
+                WorkspacePushCommand(workspace_id, idempotency_key, expected_remote_head)
+            )
+        )
+
+    def workspace_pr(
+        self,
+        workspace_id: str,
+        action: str,
+        title: str | None = None,
+        body: str | None = None,
+        evidence_ref: str | None = None,
+        review_comment_id: int | None = None,
+        idempotency_key: str | None = None,
+        expected_remote_version: str | None = None,
+        until: str = "all_completed",
+        timeout_seconds: int = 900,
+        event_cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return _result(
+            self._pr.execute(
+                WorkspacePrCommand(
+                    workspace_id=workspace_id,
+                    action=action,
+                    title=title,
+                    body=body,
+                    evidence_ref=evidence_ref,
+                    review_comment_id=review_comment_id,
+                    idempotency_key=idempotency_key,
+                    expected_remote_version=expected_remote_version,
+                    until=until,
+                    timeout_seconds=timeout_seconds,
+                    event_cursor=event_cursor,
+                )
+            )
+        )
+
+    def workspace_pr_evidence(
+        self,
+        workspace_id: str,
+        detail: str = "overview",
+        check_selector: str | None = None,
+        since: str | None = None,
+        max_excerpt_lines: int = 80,
+    ) -> dict[str, Any]:
+        return _result(
+            self._pr_evidence.execute(
+                WorkspacePrEvidenceCommand(
+                    workspace_id,
+                    detail,
+                    check_selector,
+                    since,
+                    max_excerpt_lines,
+                )
+            )
+        )
 
     def workspace_create_draft_pr(
         self,
@@ -1087,6 +1652,13 @@ class CodingService:
     ) -> dict[str, Any]:
         return _result(
             self._remove.execute(WorkspaceRemoveCommand(workspace_id, delete_local_branch))
+        )
+
+    def workspace_remove_v2(
+        self, workspace_id: str, delete_local_branch: bool = False
+    ) -> dict[str, Any]:
+        return _result(
+            self._remove_v2.execute(WorkspaceRemoveV2Command(workspace_id, delete_local_branch))
         )
 
     def doctor(self) -> dict[str, Any]:

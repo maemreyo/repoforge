@@ -1,131 +1,297 @@
-"""Thin MCP interface: parse typed inputs, call CodingService, return stable dictionaries."""
+"""Forge v2 MCP composition backed by the authoritative 28-tool registry."""
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import inspect
 import json
 import os
 import secrets
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import asdict
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Any, NoReturn, cast
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp.types import Tool as McpTool
-from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel
 
 from ...application.config_admin import ConfigAdminService
-from ...application.config_admin.service import ProfileDefinition
+from ...application.read_batch import FileReadRequest
+from ...application.retrieval import SearchMode as ApplicationSearchMode
 from ...application.runtime.hot_reload import AtomicServiceRouter
 from ...application.service import CodingService
-from ...application.workspace.edit import FileEdit
+from ...application.workspace.mutate import (
+    ApplyPatchMutation,
+    CreateMutation,
+    DeleteMutation,
+    MoveMutation,
+    ReplaceTextMutation,
+    RestoreMutation,
+    TextReplacement,
+    WorkspaceMutation,
+    WriteMutation,
+)
 from ...config import load_config
-from ...domain.errors import ConfigError, operation_error_from_exception
+from ...contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS, ToolContractSpec
+from ...domain.errors import ConfigError, WorkspaceError, operation_error_from_exception
+from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
-from ...domain.tool_contract import ToolContractRegistry, default_tool_contract_registry
-from .capabilities import capability_policy_from_context, client_capabilities_from_context
+from .capabilities import capability_policy_from_context
+from .payload import render_tool_payload
+
+FORGE_V2_IDENTITY = "forge_v2"
+FORGE_V2_CONTRACT_VERSION = 2
+
+SERVER_INSTRUCTIONS = """
+Forge v2 connects ChatGPT to allowlisted local Git repositories through isolated worktrees.
+Begin with repo_list, then use repo_task_context before creating or resuming a workspace. The public
+surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
+composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
+profiles, and workspace_pr for draft-PR lifecycle operations. Review workspace_diff after meaningful
+changes. Run final verification immediately before workspace_commit. Never merge, force-push, modify
+protected branches, request secrets, or bypass policy. Use config_inspect and runtime_logs_read for
+bounded operational evidence, and repo_policy for reviewed policy preview/apply flows.
+""".strip()
+
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+EXTERNAL_READ = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
+EXTERNAL_MUTATE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+LOCAL_CREATE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+LOCAL_MUTATE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+LOCAL_IDEMPOTENT_MUTATE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+LOCAL_DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+EXTERNAL_WRITE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+
+_TOOL_TITLES: Mapping[str, str] = {
+    "repo_task_context": "Assemble task context",
+    "repo_read": "Read repository files",
+    "repo_search": "Search repository snapshot",
+    "repo_tree": "List repository tree",
+    "repo_history": "Read repository history",
+    "repo_issue": "Read or change repository issue",
+    "repo_pr_read": "Read pull request evidence",
+    "repo_list": "List configured repositories",
+    "repo_policy": "Preview or apply repository policy",
+    "workspace_create": "Create isolated workspace",
+    "workspace_remove": "Remove local workspace",
+    "workspace_list": "List workspaces",
+    "workspace_refresh": "Preview or apply base refresh",
+    "workspace_status": "Read workspace status",
+    "workspace_format_changed": "Format changed paths",
+    "workspace_read": "Read workspace files",
+    "workspace_search": "Search workspace files",
+    "workspace_tree": "List workspace tree",
+    "workspace_diff": "Read workspace diff",
+    "workspace_mutate": "Apply exact-state workspace mutations",
+    "workspace_verify": "Plan or run workspace verification",
+    "workspace_commit": "Commit verified workspace",
+    "workspace_push": "Push workspace branch",
+    "workspace_pr": "Manage draft pull request",
+    "workspace_pr_evidence": "Read pull request evidence",
+    "operation": "Read or cancel durable operations",
+    "config_inspect": "Inspect reviewed configuration",
+    "runtime_logs_read": "Read bounded runtime logs",
+}
+
+_TOOL_DESCRIPTIONS: Mapping[str, str] = {
+    "repo_task_context": "Return bounded repository, ticket, workspace, and recent-commit context for one task.",
+    "repo_read": "Read one or more UTF-8 files from one immutable reviewed repository snapshot.",
+    "repo_search": "Run bounded literal, regex, or filename search in one immutable repository snapshot.",
+    "repo_tree": "List a bounded repository subtree with resumable cursor evidence.",
+    "repo_history": "Read a commit, recent history, or a bounded comparison between two refs.",
+    "repo_issue": "Read, plan, graph, create, link, comment on, close, or reopen a GitHub issue through one typed tool.",
+    "repo_pr_read": "Read bounded overview, files, checks, reviews, comments, or failure evidence for one pull request.",
+    "repo_list": (
+        "List configured repositories and optionally include reviewed capability detail. Pass "
+        "requested_repo as the exact repo_id, display name, or remote name the user explicitly "
+        "named; leave it unset if they did not -- never guess from unrelated wording. Read "
+        "selection.outcome: single_enrolled/exact_match means proceed with selection.repo_id "
+        "without asking; input_required means ask the user to choose from selection.candidates "
+        "(never by recency, filesystem order, default base branch, or your own preference); "
+        "no_match means no repository is enrolled yet."
+    ),
+    "repo_policy": "Preview or apply an exact-state-bound repository policy proposal through the reviewed generation pipeline.",
+    "workspace_create": "Create one isolated ai/* worktree for a task or deliberate stacked issue chain.",
+    "workspace_remove": "Remove a clean local worktree without touching remote data.",
+    "workspace_list": "List bounded workspace lifecycle and cleanup evidence.",
+    "workspace_refresh": "Preview or apply a merge-based refresh against the configured remote base.",
+    "workspace_status": "Return selected local, base, and verification status sections with exact fingerprints.",
+    "workspace_format_changed": "Run reviewed formatters over server-derived changed paths only.",
+    "workspace_read": "Read one or more allowed UTF-8 workspace files under one byte budget.",
+    "workspace_search": "Run bounded literal, regex, or filename search in allowed workspace files.",
+    "workspace_tree": "List a bounded allowed workspace subtree with exact-state evidence.",
+    "workspace_diff": "Return a structured bounded diff for the current workspace tree.",
+    "workspace_mutate": "Atomically plan or apply typed exact-state mutations under workspace policy and budgets.",
+    "workspace_verify": "Plan, route, or run reviewed diagnostics, profiles, or relaxed-mode adhoc verification.",
+    "workspace_commit": "Commit only the exact verified tree with optional exact-head and fingerprint locks.",
+    "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
+    "workspace_pr": "Create, update, comment on, watch, or otherwise manage the workspace draft pull request.",
+    "workspace_pr_evidence": "Read bounded overview, delta, check, review, comment, or failure evidence for the workspace PR.",
+    "operation": "Get, list, or request cancellation of durable background operations.",
+    "config_inspect": "Inspect accepted and active configuration, effective policy, pending changes, and runtime identity.",
+    "runtime_logs_read": "Read bounded redacted audit or managed-runtime log entries with filters and cursors.",
+}
+
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "repo_task_context",
+        "repo_read",
+        "repo_search",
+        "repo_tree",
+        "repo_history",
+        "repo_list",
+        "workspace_list",
+        "workspace_status",
+        "workspace_read",
+        "workspace_search",
+        "workspace_tree",
+        "workspace_diff",
+        "config_inspect",
+        "runtime_logs_read",
+    }
+)
+_EXTERNAL_READ_TOOLS = frozenset({"repo_pr_read", "workspace_pr_evidence"})
+_EXTERNAL_MUTATE_TOOLS = frozenset({"repo_issue"})
+_EXTERNAL_WRITE_TOOLS = frozenset({"workspace_push", "workspace_pr"})
+_LOCAL_CREATE_TOOLS = frozenset({"workspace_create"})
+# workspace_mutate can run delete/restore operations that irreversibly
+# discard content, so it is not honestly annotated non-destructive (#225
+# round-3 review).
+_LOCAL_DESTRUCTIVE_TOOLS = frozenset({"workspace_remove", "workspace_mutate"})
+# workspace_verify is deliberately excluded: its mode=plan/plan_action=create
+# sub-mode allocates a new, distinct plan_id on every call, so the tool as a
+# whole is not idempotent even though its read-only sub-modes (auto,
+# diagnostic, profile, adhoc) are (#225 round-3 review). MCP annotations are
+# per-tool, not per-mode, so the honest tool-wide hint is the default
+# LOCAL_MUTATE (idempotentHint=False).
+_LOCAL_IDEMPOTENT_TOOLS = frozenset({"workspace_format_changed", "operation"})
 
 
-class ContractAwareFastMCP(FastMCP[None]):
-    """Expose one request-scoped reviewed tool contract without mutating registration."""
-
-    def __init__(
-        self,
-        *args: Any,
-        contract_registry: ToolContractRegistry,
-        contract_version: int | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self._contract_registry = contract_registry
-        self._contract_version = contract_version
-        if contract_version is not None:
-            self._contract_registry.tool_names(contract_version, frozenset())
-
-    def _selected_contract_version(self) -> int:
-        if self._contract_version is not None:
-            return self._contract_version
-        try:
-            capabilities = client_capabilities_from_context(self.get_context())
-        except (LookupError, ValueError, AttributeError):
-            return self._contract_registry.current_version
-        return self._contract_registry.resolve(capabilities).version
-
-    @staticmethod
-    def _resolve_schema_defs(schema: dict[str, Any]) -> dict[str, Any]:
-        """Recursively inline ``$defs`` references so clients see concrete types."""
-        defs = schema.get("$defs", {})
-
-        def _resolve(value: object) -> Any:
-            if isinstance(value, dict):
-                ref = value.get("$ref", "")
-                if ref.startswith("#/$defs/"):
-                    key = ref[len("#/$defs/") :]
-                    resolved = defs.get(key)
-                    if resolved is not None:
-                        return _resolve(resolved)
-                return {k: _resolve(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [_resolve(item) for item in value]
-            return value
-
-        resolved = cast("dict[str, Any]", _resolve(schema))
-        resolved.pop("$defs", None)
-        return resolved
-
-    async def list_tools(self) -> list[McpTool]:
-        tools = await super().list_tools()
-        version = self._selected_contract_version()
-        allowed = self._contract_registry.tool_names(
-            version,
-            frozenset(tool.name for tool in tools),
-        )
-        aliases = {
-            alias.alias: alias
-            for alias in self._contract_registry.aliases
-            if alias.active_in(version)
-        }
-        visible: list[McpTool] = []
-        for tool in tools:
-            if tool.name not in allowed:
-                continue
-            alias = aliases.get(tool.name)
-            if alias is None:
-                visible.append(tool)
-                continue
-            description = f"{alias.notice} {tool.description or ''}".strip()
-            visible.append(tool.model_copy(update={"description": description}))
-        # Resolve $defs in every tool's input schema so clients see concrete types.
-        resolved: list[McpTool] = []
-        for tool in visible:
-            schema = self._resolve_schema_defs(tool.inputSchema)
-            resolved.append(tool.model_copy(update={"inputSchema": schema}))
-        return resolved
-
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        all_tools = await super().list_tools()
-        registered = frozenset(tool.name for tool in all_tools)
-        version = self._selected_contract_version()
-        allowed = self._contract_registry.tool_names(version, registered)
-        if name in registered and name not in allowed:
-            raise ValueError(
-                f"Tool {name!r} is not available in RepoForge tool contract v{version}"
-            )
-        return await super().call_tool(name, arguments)
+def _tool_annotations(name: str) -> ToolAnnotations:
+    if name in _READ_ONLY_TOOLS:
+        return READ_ONLY
+    if name in _EXTERNAL_READ_TOOLS:
+        return EXTERNAL_READ
+    if name in _EXTERNAL_MUTATE_TOOLS:
+        return EXTERNAL_MUTATE
+    if name in _EXTERNAL_WRITE_TOOLS:
+        return EXTERNAL_WRITE
+    if name in _LOCAL_CREATE_TOOLS:
+        return LOCAL_CREATE
+    if name in _LOCAL_DESTRUCTIVE_TOOLS:
+        return LOCAL_DESTRUCTIVE
+    if name in _LOCAL_IDEMPOTENT_TOOLS:
+        return LOCAL_IDEMPOTENT_MUTATE
+    return LOCAL_MUTATE
 
 
 class _StructuredMcpToolError(RuntimeError):
-    """Signal a stable structured failure while preserving MCP isError semantics."""
+    """Signal a stable structured failure while preserving MCP isError semantics.
+
+    `payload` carries the same typed error envelope as the message text so
+    `call_tool` can surface it as real `structuredContent` on the wire
+    instead of leaving callers to parse JSON out of the text block."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+
+def _bounded(text: str, limit: int = 500) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _raise_structured_error(
+    operation_name: str,
+    exc: Exception,
+    *,
+    has_idempotency_key: bool = False,
+) -> NoReturn:
+    envelope = operation_error_from_exception(exc)
+    correlation_id = envelope.correlation_id or secrets.token_hex(12)
+    message = redact_text(
+        envelope.what_happened,
+        secrets=(os.environ.get("CONTROL_PLANE_API_KEY", ""),),
+    )
+    unchanged_state = tuple(
+        _bounded(item)
+        for item in (
+            list(envelope.unchanged_state) or ["No unreported state transition was committed."]
+        )[:20]
+    )
+    # This is the same {status, summary, error: ToolError} shape every one of
+    # the 28 tools' own output model inherits from ToolResponse -- a client
+    # can validate an error response against the shared base contract, not
+    # only recover ad-hoc fields by name (#225 review: the earlier flat
+    # envelope did not conform to any advertised output schema).
+    payload = {
+        "status": "failed",
+        "summary": _bounded(message),
+        "error": {
+            "code": envelope.code.value,
+            "message": _bounded(message),
+            "why": _bounded(envelope.why),
+            "retryable": envelope.retryable,
+            "safe_next_action": _bounded(envelope.safe_next_action),
+            "details": {"correlation_id": correlation_id},
+            "unchanged_state": unchanged_state,
+            "automatic_retry_allowed": automatic_retry_allowed(
+                operation_name,
+                envelope.code,
+                has_idempotency_key=has_idempotency_key,
+            ),
+        },
+    }
+    raise _StructuredMcpToolError(payload) from exc
 
 
 class _ServiceErrorBoundary:
-    """Convert known application failures into the stable structured MCP envelope."""
+    """Pin one service generation and convert application failures to one error envelope."""
 
     def __init__(
         self,
@@ -137,219 +303,392 @@ class _ServiceErrorBoundary:
             raise ValueError("Exactly one of service or router must be provided")
         self._service = service
         self._router = router
+        self._bound_service: ContextVar[Any | None] = ContextVar(
+            f"repoforge_bound_service_{id(self)}",
+            default=None,
+        )
 
     @contextmanager
-    def _selected_service(self) -> Iterator[Any]:
+    def _acquire_service(self) -> Iterator[Any]:
         if self._router is None:
             yield self._service
             return
         with self._router.acquire() as container:
             yield container.service
 
-    def call(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        has_idempotency_key = False
+    @contextmanager
+    def bind_request_service(self) -> Iterator[Any]:
+        with self._acquire_service() as service:
+            token = self._bound_service.set(service)
+            try:
+                yield service
+            finally:
+                self._bound_service.reset(token)
+
+    @contextmanager
+    def _selected_service(self) -> Iterator[Any]:
+        bound = self._bound_service.get()
+        if bound is not None:
+            yield bound
+            return
+        with self._acquire_service() as service:
+            yield service
+
+    def call(self, name: str, **kwargs: Any) -> dict[str, Any]:
+        has_idempotency_key = bool(kwargs.get("idempotency_key"))
         try:
             with self._selected_service() as service:
                 target = getattr(service, name)
-                bound = inspect.signature(target).bind_partial(*args, **kwargs)
-                has_idempotency_key = bool(bound.arguments.get("idempotency_key"))
-                result = target(*args, **kwargs)
+                result = target(**kwargs)
             if not isinstance(result, dict):
                 raise TypeError("MCP service operation must return an object")
             return result
         except Exception as exc:
-            envelope = operation_error_from_exception(exc)
-            correlation_id = envelope.correlation_id or secrets.token_hex(12)
-            payload = {
-                "status": "failed",
-                "error_code": envelope.code.value,
-                "what_happened": redact_text(
-                    envelope.what_happened,
-                    secrets=(os.environ.get("CONTROL_PLANE_API_KEY", ""),),
-                ),
-                "why": envelope.why,
-                "correlation_id": correlation_id,
-                "unchanged_state": list(envelope.unchanged_state)
-                or ["No unreported state transition was committed."],
-                "safe_next_action": envelope.safe_next_action,
-                "retryable": envelope.retryable,
-                "details": envelope.details,
-                "automatic_retry_allowed": automatic_retry_allowed(
-                    name,
-                    envelope.code,
-                    has_idempotency_key=has_idempotency_key,
-                ),
-            }
-            raise _StructuredMcpToolError(
-                json.dumps(payload, sort_keys=True, ensure_ascii=False)
-            ) from exc
-
-
-SERVER_INSTRUCTIONS = "RepoForge connects ChatGPT to allowlisted local Git repositories through isolated worktrees.\nAlways begin with repo_list, then open a session with repo_task_context (pass issue_number and/or an\nexisting workspace_id when known) to gather bounded repository, ticket, workspace, and recent-commit\ncontext in one call before creating a workspace. Inspect before editing.\nNever guess which repository to use. Read repo_list's selection.outcome: single_enrolled or\nexact_match means proceed with selection.repo_id; input_required means ask the user to choose from\nselection.candidates before any repository-scoped call -- never by recency, filesystem order, default\nbase branch, or your own preference; no_match means no repository is enrolled yet.\nDefault to one issue per workspace_create call; pass every issue_id at creation time only when a\ndeliberate chain of dependent (stacked) issues must be worked sequentially in the same worktree.\nissue_ids cannot be changed after creation. Prefer exact text replacement or a small validated patch.\nReview workspace_diff after every meaningful change. While iterating on edits, check work with the\nquick profile or workspace_run_diagnostic; they are cheap and meant for the edit-test loop. Reserve the\nfull verification profile for one workspace_run_profile call immediately before commit; omit\nprofile_name to use the repository default. Never claim verification succeeded unless the tool returned\nsuccess. Commit, push, and create only draft pull requests. Never merge, force-push, modify protected\nbranches, request secrets, or bypass path/change-budget policies. Use workspace_restore_paths to safely\nundo selected uncommitted mistakes after refreshing status. Use workspace_list to review workspace age,\ndirty state, and issue_ids before removing or reusing a workspace.\nWhen helping the operator set up or debug RepoForge itself, start with config_inspect for the\nreviewed policy and runtime_logs_read for bounded redacted evidence. Propose configuration changes\nonly through repo_policy_apply (dry_run first): restrictions apply immediately, while any capability\nexpansion returns pending_approval with an `rf config approve <change_id>` instruction the operator\nmust run in a terminal -- relay that instruction and never claim the change is active until\nconfig_inspect shows the new generation.".strip()
-READ_ONLY = ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-)
-EXTERNAL_READ = ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-)
-EXTERNAL_MUTATE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
-)
-LOCAL_CREATE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-)
-LOCAL_MUTATE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-)
-LOCAL_IDEMPOTENT_MUTATE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
-)
-LOCAL_DESTRUCTIVE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
-)
-EXTERNAL_WRITE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
-)
-
-_WORKSPACE_CREATE_DESCRIPTION = (
-    "Use this before editing to create an isolated ai/* worktree; use an idempotency key for\n"
-    "retries. Create one workspace per issue; pass issue_ids only when several dependent\n"
-    "(stacked) issues are deliberately worked in this same workspace. issue_ids is\n"
-    "display-only metadata, not validated against any tracker."
-)
-_WORKSPACE_LIST_DESCRIPTION = (
-    "Use this when resuming work or finding active RepoForge workspaces; each entry reports age,\n"
-    "dirty state, and linked issue_ids to help decide what to reuse or remove."
-)
-_MULTILINE_TOOL_DESCRIPTIONS = {
-    "repo_list": (
-        "Use this first, before any repository-scoped call, to choose a repository and\n"
-        "discover its profiles and safety policy. Pass requested_repo as the exact repo_id,\n"
-        "display name, or remote name the user explicitly named in this request; leave it unset\n"
-        "if they did not name one -- never guess from unrelated wording. Read `selection.outcome`\n"
-        "in the result: `single_enrolled` or `exact_match` means proceed with `selection.repo_id`\n"
-        "without asking; `input_required` means ask the user to choose from `selection.candidates`\n"
-        "(never pick by recency, filesystem order, default base branch, or your own preference);\n"
-        "`no_match` means no repository is enrolled yet."
-    ),
-    "repo_search": (
-        "Use this to locate literal text in an immutable reviewed repository snapshot. Pass\n"
-        "context_lines (0-5) to also return that many surrounding lines on each side of a match\n"
-        "instead of a follow-up repo_read_file call; context lines are marked with `-` instead of\n"
-        "`:` after the path and line number, and still count toward max_results."
-    ),
-    "repo_issue_read": (
-        "Use this when implementation requirements are defined by a GitHub issue. A recent\n"
-        "read of the same issue in this session may be served from a short-lived local cache\n"
-        "(marked `cache_hit: true`); pass `fresh=true` to force a live read, e.g. before acting\n"
-        "on a check or review that must not be stale."
-    ),
-    "repo_pr_read": (
-        "Use this when reviewing an existing pull request, checks, commits, files, or reviews.\n"
-        "A recent read of the same pull request in this session may be served from a short-lived\n"
-        "local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read before\n"
-        "acting on checks or reviews that must not be stale."
-    ),
-    "repo_task_context": (
-        "Use this when starting or resuming a task to assemble repository context, one\n"
-        "ticket's specification, workspace status, and recent commits in a single bounded call\n"
-        "instead of chaining repo_context, repo_issue_spec, workspace_status, and\n"
-        "repo_recent_commits. Pass issue_number and/or workspace_id to include those sections;\n"
-        "omitting either yields an explicit null, not an error. A supplied workspace_id must\n"
-        "belong to repo_id or the call fails closed. The ticket section reuses the same\n"
-        "short-lived local GitHub read cache as repo_issue_spec. Each section is independently\n"
-        "bounded and reports its own `truncated` flag, and the whole bundle is capped at 96 KB,\n"
-        "truncating recent_commits first, then ticket, then workspace, then repository last."
-    ),
-    "workspace_search": (
-        "Use this when locating literal text in allowed workspace files; it is not a shell tool.\n"
-        "Pass context_lines (0-5) to also return that many surrounding lines on each side of a\n"
-        "match instead of a follow-up workspace_read_file call; context lines are marked with `-`\n"
-        "instead of `:` after the path and line number, and still count toward max_results."
-    ),
-}
-
-
-def _canonical_ast_value(value: object) -> object:
-    """Serialize selected AST nodes without Python-minor-specific pretty-printing."""
-
-    if isinstance(value, ast.AST):
-        return {
-            "node": type(value).__name__,
-            "fields": {
-                name: _canonical_ast_value(field_value)
-                for name, field_value in sorted(ast.iter_fields(value))
-            },
-        }
-    if isinstance(value, list):
-        return [_canonical_ast_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_canonical_ast_value(item) for item in value]
-    return value
-
-
-def tool_surface_hash(contract_version: int | None = None) -> str:
-    module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    create = next(
-        n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "create_server"
-    )
-    tools = []
-    for node in create.body:
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        decorator = next(
-            (
-                d
-                for d in node.decorator_list
-                if isinstance(d, ast.Call)
-                and isinstance(d.func, ast.Attribute)
-                and (d.func.attr == "tool")
-            ),
-            None,
-        )
-        if decorator is None:
-            continue
-        keywords = {
-            keyword.arg: _canonical_ast_value(keyword.value)
-            for keyword in decorator.keywords
-            if keyword.arg is not None
-        }
-        tools.append(
-            {
-                "name": node.name,
-                "arguments": _canonical_ast_value(node.args),
-                "returns": _canonical_ast_value(node.returns),
-                "title": keywords.get("title"),
-                "annotations": keywords.get("annotations"),
-                "structured_output": keywords.get("structured_output"),
-            }
-        )
-    registry = default_tool_contract_registry()
-    version = contract_version or registry.current_version
-    allowed = registry.tool_names(version, frozenset(str(tool["name"]) for tool in tools))
-    versioned_tools = [tool for tool in tools if str(tool["name"]) in allowed]
-    return hashlib.sha256(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "contract_version": version,
-                "tools": sorted(versioned_tools, key=lambda item: item["name"]),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+            _raise_structured_error(
+                name,
+                exc,
+                has_idempotency_key=has_idempotency_key,
+            )
 
 
 class _UnavailableConfigAdmin:
-    """Fail closed with a structured error when no admin service is wired."""
-
     def __getattr__(self, name: str) -> Any:
         raise ConfigError(
-            "CONFIG_ADMIN_UNAVAILABLE: configuration administration is not available on "
-            "this transport. Ask the operator to run the server through `rf serve` or the "
-            "managed runtime, or to use the `rf config` CLI instead."
+            "CONFIG_ADMIN_UNAVAILABLE: configuration administration is not available on this "
+            "transport. Run the server through `rf serve` or the managed runtime."
         )
+
+
+_SERVICE_METHODS: Mapping[str, str] = {
+    "repo_task_context": "repo_task_context_v2",
+    "repo_read": "repo_read",
+    "repo_search": "repo_search_v2",
+    "repo_tree": "repo_tree_v2",
+    "repo_history": "repo_history_v2",
+    "repo_issue": "repo_issue_v2",
+    "repo_pr_read": "repo_pr_read_v2",
+    "repo_list": "repo_list_v2",
+    "workspace_create": "workspace_create_v2",
+    "workspace_remove": "workspace_remove_v2",
+    "workspace_list": "workspace_list_v2",
+    "workspace_refresh": "workspace_refresh_v2",
+    "workspace_status": "workspace_status_v2",
+    "workspace_format_changed": "workspace_format_changed_v2",
+    "workspace_read": "workspace_read",
+    "workspace_search": "workspace_search_v2",
+    "workspace_tree": "workspace_tree_v2",
+    "workspace_diff": "workspace_diff_v2",
+    "workspace_mutate": "workspace_mutate",
+    "workspace_verify": "workspace_verify",
+    "workspace_commit": "workspace_commit",
+    "workspace_push": "workspace_push",
+    "workspace_pr": "workspace_pr",
+    "workspace_pr_evidence": "workspace_pr_evidence",
+    "operation": "operation",
+}
+_ADMIN_METHODS: Mapping[str, str] = {
+    "repo_policy": "repo_policy",
+    "config_inspect": "config_inspect_v2",
+    "runtime_logs_read": "runtime_logs_read_v2",
+}
+
+
+def _read_requests(raw: list[dict[str, Any]]) -> list[FileReadRequest]:
+    return [
+        FileReadRequest(
+            path=str(item["path"]),
+            start_line=int(item.get("start_line", 1)),
+            end_line=int(item.get("end_line", 500)),
+        )
+        for item in raw
+    ]
+
+
+def _mutation_operations(raw: list[dict[str, Any]]) -> list[WorkspaceMutation]:
+    operations: list[WorkspaceMutation] = []
+    for item in raw:
+        op = item["op"]
+        if op == "replace_text":
+            operations.append(
+                ReplaceTextMutation(
+                    path=item["path"],
+                    expected_sha256=item["expected_sha256"],
+                    edits=tuple(
+                        TextReplacement(
+                            old_text=edit["old_text"],
+                            new_text=edit["new_text"],
+                            expected_occurrences=edit.get("expected_occurrences", 1),
+                        )
+                        for edit in item["edits"]
+                    ),
+                )
+            )
+        elif op == "write":
+            operations.append(
+                WriteMutation(
+                    path=item["path"],
+                    content=item["content"],
+                    expected_sha256=item["expected_sha256"],
+                )
+            )
+        elif op == "create":
+            operations.append(
+                CreateMutation(
+                    path=item["path"],
+                    content=item["content"],
+                    mode=item.get("mode", 0o644),
+                )
+            )
+        elif op == "delete":
+            operations.append(DeleteMutation(item["path"], item["expected_sha256"]))
+        elif op == "move":
+            operations.append(
+                MoveMutation(
+                    item["source"],
+                    item["destination"],
+                    item["expected_source_sha256"],
+                )
+            )
+        elif op == "apply_patch":
+            operations.append(ApplyPatchMutation(item["patch"]))
+        elif op == "restore":
+            operations.append(RestoreMutation(tuple(item["paths"])))
+        else:  # pragma: no cover - discriminated Pydantic input prevents this
+            raise ValueError(f"Unsupported mutation operation: {op}")
+    return operations
+
+
+def _dispatch_kwargs(tool_name: str, model: BaseModel) -> dict[str, Any]:
+    kwargs = model.model_dump(mode="json")
+    if tool_name in {"repo_read", "workspace_read"}:
+        kwargs["files"] = _read_requests(kwargs["files"])
+    if tool_name in {"repo_search", "workspace_search"}:
+        kwargs["mode"] = ApplicationSearchMode(kwargs["mode"])
+    if tool_name == "repo_policy" and kwargs["action"] == "apply":
+        for field in ("mutations", "generated_paths", "issue_writes"):
+            if field not in model.model_fields_set:
+                kwargs.pop(field, None)
+    if tool_name == "workspace_create":
+        kwargs["issue_ids"] = tuple(kwargs["issue_ids"])
+    if tool_name == "workspace_mutate":
+        kwargs["operations"] = _mutation_operations(kwargs["operations"])
+    return kwargs
+
+
+def _public_output(tool_name: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """Adapt domain evidence to the strict public envelope without hiding failures."""
+
+    payload = dict(raw)
+    if tool_name in {"repo_read", "workspace_read"}:
+        errors = payload.pop("errors", [])
+        requested = int(payload.pop("requested", len(payload.get("files", []))))
+        succeeded = int(payload.pop("succeeded", len(payload.get("files", []))))
+        if errors:
+            first = errors[0] if isinstance(errors, list) else errors
+            raise WorkspaceError(
+                f"{tool_name.upper()}_PARTIAL_FAILURE: {first}; "
+                f"succeeded {succeeded} of {requested} requested files"
+            )
+        files: list[dict[str, Any]] = []
+        for item in payload.get("files", []):
+            public_item = dict(item)
+            public_item.pop("size_bytes", None)
+            files.append(public_item)
+        payload["files"] = files
+
+    payload.setdefault("status", "ok")
+    payload.setdefault("error", None)
+    if "summary" not in payload:
+        count = len(payload.get("files", payload.get("matches", payload.get("entries", []))))
+        noun = "item" if count == 1 else "items"
+        payload["summary"] = f"{tool_name} completed with {count} {noun}"
+    return payload
+
+
+class ForgeV2FastMCP(FastMCP[None]):
+    """Publish and execute only the static Forge v2 registry."""
+
+    def __init__(
+        self,
+        *,
+        service_boundary: _ServiceErrorBoundary,
+        admin_boundary: _ServiceErrorBoundary,
+    ) -> None:
+        super().__init__(
+            FORGE_V2_IDENTITY,
+            instructions=SERVER_INSTRUCTIONS,
+            log_level="WARNING",
+        )
+        self._service_boundary = service_boundary
+        self._admin_boundary = admin_boundary
+
+    async def list_tools(self) -> list[McpTool]:
+        return [
+            McpTool(
+                name=name,
+                title=_TOOL_TITLES[name],
+                description=_TOOL_DESCRIPTIONS[name],
+                inputSchema=V2_TOOL_SPECS[name].input_model.model_json_schema(mode="validation"),
+                outputSchema=V2_TOOL_SPECS[name].output_schema(),
+                annotations=_tool_annotations(name),
+            )
+            for name in V2_TOOL_NAMES
+        ]
+
+    def _dispatch(self, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if tool_name in _ADMIN_METHODS:
+            return self._admin_boundary.call(_ADMIN_METHODS[tool_name], **kwargs)
+        method = _SERVICE_METHODS[tool_name]
+        if tool_name == "workspace_mutate":
+            expected_head_sha = kwargs.pop("expected_head_sha")
+            status = self._service_boundary.call(
+                "workspace_status_v2",
+                workspace_id=kwargs["workspace_id"],
+                sections=("local",),
+                byte_budget=60_000,
+            )
+            if status.get("head_sha") != expected_head_sha:
+                raise WorkspaceError(
+                    "STALE_WORKSPACE_HEAD: expected_head_sha does not match current HEAD"
+                )
+        result = self._service_boundary.call(method, **kwargs)
+        if tool_name == "repo_list":
+            selection = result.get("selection")
+            if isinstance(selection, dict) and selection.get("outcome") == "input_required":
+                policy = capability_policy_from_context(self.get_context())
+                candidates = cast("list[dict[str, Any]]", selection.get("candidates", []))
+                result["selection_prompt"] = policy.input_required(
+                    decision_id="repo_selection",
+                    prompt=cast(str, selection.get("guidance", "")),
+                    allowed_options=tuple(candidate["repo_id"] for candidate in candidates),
+                )
+        return result
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        if name not in V2_TOOL_SPECS:
+            raise ValueError(f"Unknown Forge v2 tool: {name}")
+        spec = V2_TOOL_SPECS[name]
+        try:
+            return await self._call_tool(name, arguments, spec)
+        except _StructuredMcpToolError as exc:
+            # The typed error envelope belongs in structuredContent, not only
+            # serialized into the text block -- otherwise a client can only
+            # recover it by parsing JSON out of free text (#225 review).
+            # Validate against the same ToolResponse/ToolError base contract
+            # every one of the 28 tools' own output model inherits, so a
+            # future shape drift fails loudly here instead of silently
+            # shipping structuredContent a client cannot parse against the
+            # advertised schema.
+            spec.validate_failure_output(exc.payload)
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(exc))],
+                structuredContent=exc.payload,
+                isError=True,
+            )
+
+    async def _call_tool(
+        self, name: str, arguments: dict[str, Any], spec: ToolContractSpec
+    ) -> CallToolResult:
+        try:
+            validated_input = spec.validate_input(arguments)
+        except Exception as exc:
+            _raise_structured_error(name, exc)
+
+        with self._service_boundary.bind_request_service() as service:
+            started = time.perf_counter()
+            try:
+                raw = self._dispatch(name, _dispatch_kwargs(name, validated_input))
+                validated_output = spec.validate_success_output(_public_output(name, raw))
+                structured = validated_output.model_dump(mode="json", by_alias=True)
+            except _StructuredMcpToolError:
+                raise
+            except Exception as exc:
+                _raise_structured_error(
+                    name,
+                    exc,
+                    has_idempotency_key=bool(arguments.get("idempotency_key")),
+                )
+            engine_ms = (time.perf_counter() - started) * 1_000.0
+
+            server_config = getattr(getattr(service, "config", None), "server", None)
+            legacy_duplication = bool(
+                getattr(server_config, "legacy_text_result_duplication", False)
+            )
+            rendered = render_tool_payload(
+                name,
+                structured,
+                legacy_text_result_duplication=legacy_duplication,
+            )
+
+            client_name = "unknown"
+            client_version = "unknown"
+            try:
+                params = self.get_context().session.client_params
+                client_info = getattr(params, "clientInfo", None) or getattr(
+                    params, "client_info", None
+                )
+                if client_info is not None:
+                    client_name = str(getattr(client_info, "name", client_name))
+                    client_version = str(getattr(client_info, "version", client_version))
+            except (LookupError, AttributeError):
+                pass
+
+            trace = LatencyTrace(
+                trace_id=f"trace-{secrets.token_hex(16)}",
+                tool_name=name,
+                tool_class=rendered.tool_class,
+                client_name=client_name,
+                client_version=client_version,
+                engine=LatencyObservation.observed(LatencyLayer.ENGINE, engine_ms),
+                connector=LatencyObservation.unobserved(LatencyLayer.CONNECTOR),
+                client_round_trip=LatencyObservation.unobserved(LatencyLayer.CLIENT_ROUND_TRIP),
+                payload=rendered.metrics,
+            )
+            with suppress(Exception):
+                service.metrics.record_latency(trace)
+
+            return CallToolResult(
+                content=rendered.content,
+                structuredContent=rendered.structured,
+                isError=False,
+                _meta={"repoforge_trace": trace.as_dict()},
+            )
+
+
+def _surface_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 3,
+        "identity": FORGE_V2_IDENTITY,
+        "contract_version": FORGE_V2_CONTRACT_VERSION,
+        "tools": [
+            {
+                "name": name,
+                "title": _TOOL_TITLES[name],
+                "description": inspect.cleandoc(_TOOL_DESCRIPTIONS[name]),
+                "annotations": _tool_annotations(name).model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                ),
+                "input_schema": V2_TOOL_SPECS[name].input_model.model_json_schema(
+                    mode="validation"
+                ),
+                "output_schema": V2_TOOL_SPECS[name].output_schema(),
+            }
+            for name in V2_TOOL_NAMES
+        ],
+    }
+
+
+def tool_surface_hash(contract_version: int | None = None) -> str:
+    if contract_version not in {None, FORGE_V2_CONTRACT_VERSION}:
+        raise ValueError("Forge v2 server only supports contract v2")
+    return hashlib.sha256(
+        json.dumps(
+            _surface_payload(),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def create_server(
@@ -360,842 +699,29 @@ def create_server(
     contract_version: int | None = None,
     admin: ConfigAdminService | None = None,
 ) -> FastMCP:
+    if contract_version not in {None, FORGE_V2_CONTRACT_VERSION}:
+        raise ValueError("Forge v2 server only supports contract v2")
     if service is not None and router is not None:
         raise ValueError("create_server accepts either service or router, not both")
     raw_service = service or (
         None if router is not None else CodingService(load_config(config_path))
     )
-    bounded_service = _ServiceErrorBoundary(raw_service, router=router)
-    bounded_admin = _ServiceErrorBoundary(admin if admin is not None else _UnavailableConfigAdmin())
-    mcp = ContractAwareFastMCP(
-        "RepoForge",
-        instructions=SERVER_INSTRUCTIONS,
-        log_level="WARNING",
-        contract_registry=default_tool_contract_registry(),
-        contract_version=contract_version,
+    service_boundary = _ServiceErrorBoundary(raw_service, router=router)
+    admin_boundary = _ServiceErrorBoundary(
+        admin if admin is not None else _UnavailableConfigAdmin()
+    )
+    return ForgeV2FastMCP(
+        service_boundary=service_boundary,
+        admin_boundary=admin_boundary,
     )
 
-    @mcp.tool(title="Read durable operation status", annotations=READ_ONLY, structured_output=True)
-    def operation_status(operation_id: str) -> dict[str, Any]:
-        """Use this to inspect one exact durable operation and its bounded progress metadata."""
-        return bounded_service.call("operation_status", operation_id)
 
-    @mcp.tool(title="List durable operations", annotations=READ_ONLY, structured_output=True)
-    def operation_list(
-        scope: str | None = None,
-        state: str | None = None,
-        limit: int = 50,
-        cursor: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this to list bounded durable operations by optional task/workspace scope and state."""
-        return bounded_service.call("operation_list", scope, state, limit, cursor)
-
-    @mcp.tool(
-        title="Request operation cancellation",
-        annotations=LOCAL_IDEMPOTENT_MUTATE,
-        structured_output=True,
-    )
-    def operation_cancel(
-        operation_id: str,
-        expected_updated_at: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this to idempotently request cancellation without marking terminal cancellation."""
-        return bounded_service.call("operation_cancel", operation_id, expected_updated_at)
-
-    @mcp.tool(
-        title="Read execution failure evidence",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def failure_evidence_read(failure_id: str) -> dict[str, Any]:
-        """Use this with an exact failure_id from operation_status or workspace_status to read one bounded redacted execution failure and its typed recovery choices."""
-        return bounded_service.call("failure_evidence_read", failure_id)
-
-    @mcp.tool(
-        title="List configured repositories",
-        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_list"],
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def repo_list(requested_repo: str | None = None) -> dict[str, Any]:
-        """Use this first, before any repository-scoped call, to choose a repository and
-        discover its profiles and safety policy."""
-        result = bounded_service.call("repo_list", requested_repo)
-        selection = result.get("selection")
-        if isinstance(selection, dict) and selection.get("outcome") == "input_required":
-            policy = capability_policy_from_context(mcp.get_context())
-            candidates = cast("list[dict[str, Any]]", selection.get("candidates", []))
-            result["selection_prompt"] = policy.input_required(
-                decision_id="repo_selection",
-                prompt=cast(str, selection.get("guidance", "")),
-                allowed_options=tuple(candidate["repo_id"] for candidate in candidates),
-            )
-        return result
-
-    @mcp.tool(
-        title="Inspect repository status",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def repo_status(repo_id: str) -> dict[str, Any]:
-        """Use this when checking the source clone, remotes, branch state, and gh authentication."""
-        return bounded_service.call("repo_status", repo_id)
-
-    @mcp.tool(title="Read repository context", annotations=READ_ONLY, structured_output=True)
-    def repo_context(repo_id: str) -> dict[str, Any]:
-        """Use this before planning to inspect manifests, scripts, root files, and instruction previews."""
-        return bounded_service.call("repo_context", repo_id)
-
-    @mcp.tool(title="Read committed change evidence", annotations=READ_ONLY, structured_output=True)
-    def repo_commit_read(
-        repo_id: str,
-        ref: str,
-        max_files: int = 100,
-        include_patch: bool = False,
-    ) -> dict[str, Any]:
-        """Use this to inspect one exact reviewed commit with bounded file statistics and optional patch evidence."""
-        return bounded_service.call("repo_commit_read", repo_id, ref, max_files, include_patch)
-
-    @mcp.tool(
-        title="Compare committed repository refs", annotations=READ_ONLY, structured_output=True
-    )
-    def repo_compare(
-        repo_id: str,
-        base_ref: str,
-        head_ref: str,
-        path_glob: str | None = None,
-        max_files: int = 100,
-        include_patch: bool = False,
-    ) -> dict[str, Any]:
-        """Use this to compare two exact reviewed commits with merge-base, divergence, bounded files, and optional patch evidence."""
-        return bounded_service.call(
-            "repo_compare",
-            repo_id,
-            base_ref,
-            head_ref,
-            path_glob,
-            max_files,
-            include_patch,
-        )
-
-    @mcp.tool(
-        title="List committed repository files", annotations=READ_ONLY, structured_output=True
-    )
-    def repo_tree(
-        repo_id: str,
-        ref: str | None = None,
-        max_entries: int = 2000,
-    ) -> dict[str, Any]:
-        """Use this to list files from an immutable reviewed repository snapshot without a workspace."""
-        return bounded_service.call("repo_tree", repo_id, ref, max_entries)
-
-    @mcp.tool(title="Read committed repository file", annotations=READ_ONLY, structured_output=True)
-    def repo_read_file(
-        repo_id: str,
-        relative_path: str,
-        ref: str | None = None,
-        start_line: int = 1,
-        end_line: int = 500,
-    ) -> dict[str, Any]:
-        """Use this to read one UTF-8 file from an immutable reviewed repository snapshot."""
-        return bounded_service.call(
-            "repo_read_file", repo_id, relative_path, ref, start_line, end_line
-        )
-
-    @mcp.tool(
-        title="Read multiple committed repository files",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def repo_read_files(
-        repo_id: str,
-        relative_paths: list[str],
-        ref: str | None = None,
-        start_line: int = 1,
-        end_line: int = 500,
-    ) -> dict[str, Any]:
-        """Use this to read the same bounded line range from several files in one immutable snapshot."""
-        return bounded_service.call(
-            "repo_read_files", repo_id, relative_paths, ref, start_line, end_line
-        )
-
-    @mcp.tool(
-        title="Search committed repository code",
-        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_search"],
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def repo_search(
-        repo_id: str,
-        query: str,
-        ref: str | None = None,
-        path_glob: str | None = None,
-        max_results: Annotated[int, Field(ge=1, le=200)] = 200,
-        context_lines: Annotated[int, Field(ge=0, le=5)] = 0,
-    ) -> dict[str, Any]:
-        """Use this to locate literal text in an immutable reviewed repository snapshot. Pass
-        context_lines (0-5) to also return that many surrounding lines on each side of a match
-        instead of a follow-up repo_read_file call; context lines are marked with `-` instead of
-        `:` after the path and line number, and still count toward max_results."""
-        return bounded_service.call(
-            "repo_search", repo_id, query, ref, path_glob, max_results, context_lines
-        )
-
-    @mcp.tool(title="Read recent commits", annotations=READ_ONLY, structured_output=True)
-    def repo_recent_commits(repo_id: str, limit: int = 20) -> dict[str, Any]:
-        """Use this when recent history or commit conventions are relevant to the task."""
-        return bounded_service.call("repo_recent_commits", repo_id, limit)
-
-    @mcp.tool(
-        title="Read GitHub issue",
-        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_issue_read"],
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def repo_issue_read(repo_id: str, issue_number: int, fresh: bool = False) -> dict[str, Any]:
-        """Use this when implementation requirements are defined by a GitHub issue. A recent
-        read of the same issue in this session may be served from a short-lived local cache
-        (marked `cache_hit: true`); pass `fresh=true` to force a live read, e.g. before acting
-        on a check or review that must not be stale."""
-        return bounded_service.call("repo_issue_read", repo_id, issue_number, fresh)
-
-    @mcp.tool(
-        title="Query the GitHub-native ticket graph",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def repo_issue_graph(
-        repo_id: str,
-        root_issue: int | None = None,
-        status: str | None = None,
-        priority: str | None = None,
-        initiative: int | None = None,
-        fresh: bool = False,
-    ) -> dict[str, Any]:
-        """Use this to list or filter native GitHub sub-issues and blocked-by relationships. Reads are bounded and cached briefly; pass fresh=true to bypass the cache."""
-        return bounded_service.call(
-            "repo_issue_graph", repo_id, root_issue, status, priority, initiative, fresh
-        )
-
-    @mcp.tool(
-        title="Select the next ready roadmap ticket",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def repo_issue_next(
-        repo_id: str,
-        root_issue: int | None = None,
-        limit: int = 1,
-        p0_wip_limit: int = 2,
-        p1_wip_limit: int = 3,
-        p2_wip_limit: int = 4,
-        p3_wip_limit: int = 4,
-        initiative_wip_limit: int = 2,
-        fresh: bool = False,
-    ) -> dict[str, Any]:
-        """Use this to derive selectable tickets from one bounded GitHub-native graph snapshot, complete specs, closed blockers, active parents, WIP limits, and deterministic delivery order. Pass fresh=true to bypass the cache."""
-        return bounded_service.call(
-            "repo_issue_next",
-            repo_id,
-            root_issue,
-            limit,
-            p0_wip_limit,
-            p1_wip_limit,
-            p2_wip_limit,
-            p3_wip_limit,
-            initiative_wip_limit,
-            fresh,
-        )
-
-    @mcp.tool(
-        title="Read one ticket's specification and graph evidence",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def repo_issue_spec(repo_id: str, issue_number: int, fresh: bool = False) -> dict[str, Any]:
-        """Use this before implementing one ticket to combine its live GitHub contract, GitHub-native graph membership and metadata drift, and comment references without reconstructing prior chat. Evidence may be served from short-lived caches; pass `fresh=true` to force live reads."""
-        return bounded_service.call("repo_issue_spec", repo_id, issue_number, fresh)
-
-    @mcp.tool(
-        title="Read GitHub pull request",
-        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_pr_read"],
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def repo_pr_read(repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
-        """Use this when reviewing an existing pull request, checks, commits, files, or reviews.
-        A recent read of the same pull request in this session may be served from a short-lived
-        local cache (marked `cache_hit: true`); pass `fresh=true` to force a live read before
-        acting on checks or reviews that must not be stale."""
-        return bounded_service.call("repo_pr_read", repo_id, pr_number, fresh)
-
-    @mcp.tool(
-        title="Read bounded task-context bundle",
-        description=_MULTILINE_TOOL_DESCRIPTIONS["repo_task_context"],
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def repo_task_context(
-        repo_id: str,
-        issue_number: int | None = None,
-        workspace_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this when starting or resuming a task to assemble repository context, one
-        ticket's specification, workspace status, and recent commits in a single bounded call
-        instead of chaining repo_context, repo_issue_spec, workspace_status, and
-        repo_recent_commits. Pass issue_number and/or workspace_id to include those sections;
-        omitting either yields an explicit null, not an error. A supplied workspace_id must
-        belong to repo_id or the call fails closed. The ticket section reuses the same
-        short-lived local GitHub read cache as repo_issue_spec. Each section is independently
-        bounded and reports its own `truncated` flag, and the whole bundle is capped at 96 KB,
-        truncating recent_commits first, then ticket, then workspace, then repository last."""
-        return bounded_service.call("repo_task_context", repo_id, issue_number, workspace_id)
-
-    @mcp.tool(
-        title="Create isolated coding workspace",
-        description=_WORKSPACE_CREATE_DESCRIPTION,
-        annotations=LOCAL_CREATE,
-        structured_output=True,
-    )
-    def workspace_create(
-        repo_id: str,
-        task_slug: str,
-        base: str | None = None,
-        idempotency_key: str | None = None,
-        issue_ids: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Use this before editing to create an isolated ai/* worktree; use an idempotency key for
-        retries. Create one workspace per issue; pass issue_ids only when several dependent
-        (stacked) issues are deliberately worked in this same workspace. issue_ids is
-        display-only metadata, not validated against any tracker."""
-        return bounded_service.call(
-            "workspace_create",
-            repo_id,
-            task_slug,
-            base,
-            idempotency_key,
-            tuple(issue_ids or ()),
-        )
-
-    @mcp.tool(
-        title="List coding workspaces",
-        description=_WORKSPACE_LIST_DESCRIPTION,
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def workspace_list() -> dict[str, Any]:
-        """Use this when resuming work or finding active RepoForge workspaces; each entry reports age,
-        dirty state, and linked issue_ids to help decide what to reuse or remove."""
-        return bounded_service.call(
-            "workspace_list",
-        )
-
-    @mcp.tool(title="Inspect workspace status", annotations=READ_ONLY, structured_output=True)
-    def workspace_status(workspace_id: str) -> dict[str, Any]:
-        """Use this before writes to refresh HEAD, fingerprint, change budget, and verification state."""
-        return bounded_service.call("workspace_status", workspace_id)
-
-    @mcp.tool(
-        title="Inspect workspace base freshness",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def workspace_base_status(workspace_id: str) -> dict[str, Any]:
-        """Use this to compare the workspace base with configured local and latest remote base state."""
-        return bounded_service.call("workspace_base_status", workspace_id)
-
-    @mcp.tool(title="List workspace files", annotations=READ_ONLY, structured_output=True)
-    def workspace_tree(workspace_id: str, max_entries: int = 2000) -> dict[str, Any]:
-        """Use this when exploring tracked and untracked files allowed by repository policy."""
-        return bounded_service.call("workspace_tree", workspace_id, max_entries)
-
-    @mcp.tool(title="Read workspace file", annotations=READ_ONLY, structured_output=True)
-    def workspace_read_file(
-        workspace_id: str, relative_path: str, start_line: int = 1, end_line: int = 500
-    ) -> dict[str, Any]:
-        """Use this when reading one UTF-8 file and obtaining its optimistic-lock SHA-256."""
-        return bounded_service.call(
-            "workspace_read_file", workspace_id, relative_path, start_line, end_line
-        )
-
-    @mcp.tool(
-        title="Read multiple workspace files",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def workspace_read_files(
-        workspace_id: str,
-        relative_paths: list[str],
-        start_line: int = 1,
-        end_line: int = 500,
-    ) -> dict[str, Any]:
-        """Use this when the same bounded line range is needed from several related files."""
-        return bounded_service.call(
-            "workspace_read_files", workspace_id, relative_paths, start_line, end_line
-        )
-
-    @mcp.tool(
-        title="Search workspace code",
-        description=_MULTILINE_TOOL_DESCRIPTIONS["workspace_search"],
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def workspace_search(
-        workspace_id: str,
-        query: str,
-        path_glob: str | None = None,
-        max_results: Annotated[int, Field(ge=1, le=200)] = 200,
-        context_lines: Annotated[int, Field(ge=0, le=5)] = 0,
-    ) -> dict[str, Any]:
-        """Use this when locating literal text in allowed workspace files; it is not a shell tool.
-        Pass context_lines (0-5) to also return that many surrounding lines on each side of a
-        match instead of a follow-up workspace_read_file call; context lines are marked with `-`
-        instead of `:` after the path and line number, and still count toward max_results."""
-        return bounded_service.call(
-            "workspace_search", workspace_id, query, path_glob, max_results, context_lines
-        )
-
-    @mcp.tool(
-        title="Write complete file",
-        annotations=LOCAL_DESTRUCTIVE,
-        structured_output=True,
-    )
-    def workspace_write_file(
-        workspace_id: str,
-        relative_path: str,
-        content: str,
-        expected_sha256: str,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this to create or fully replace one UTF-8 file with optimistic locking; use an idempotency key for safe retries. The response carries a fresh workspace_fingerprint and head_sha for the next locked call, so workspace_status is not required in between."""
-        return bounded_service.call(
-            "workspace_write_file",
-            workspace_id,
-            relative_path,
-            content,
-            expected_sha256,
-            idempotency_key,
-        )
-
-    @mcp.tool(
-        title="Edit files",
-        annotations=LOCAL_DESTRUCTIVE,
-        structured_output=True,
-    )
-    def workspace_edit(
-        workspace_id: str,
-        files: list[FileEdit],
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this for precise exact-text replacements across one or more files after validating each file's SHA and occurrence counts; use an idempotency key for safe retries. Pass one or more file entries, each with its own expected_sha256 and an ordered edits list (up to 20 edits per file, up to 20 files per call). All files are validated before anything is written, so the whole call is atomic -- if any file's SHA or occurrence count doesn't match, nothing is written. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
-        return bounded_service.call("workspace_edit", workspace_id, files, idempotency_key)
-
-    @mcp.tool(
-        title="Apply validated patch",
-        annotations=LOCAL_DESTRUCTIVE,
-        structured_output=True,
-    )
-    def workspace_apply_patch(
-        workspace_id: str,
-        patch: str,
-        expected_head_sha: str,
-        expected_workspace_fingerprint: str,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this for a git-style unified diff or OpenAI apply_patch envelope against an unchanged workspace; use an idempotency key for safe retries. Use workspace_edit for exact edits or workspace_write_file for full reviewed content. The response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
-        return bounded_service.call(
-            "workspace_apply_patch",
-            workspace_id,
-            patch,
-            expected_head_sha,
-            expected_workspace_fingerprint,
-            idempotency_key,
-        )
-
-    @mcp.tool(
-        title="Restore selected workspace paths",
-        annotations=LOCAL_DESTRUCTIVE,
-        structured_output=True,
-    )
-    def workspace_restore_paths(
-        workspace_id: str,
-        relative_paths: list[str],
-        expected_workspace_fingerprint: str,
-    ) -> dict[str, Any]:
-        """Use this to undo selected uncommitted tracked changes or remove selected untracked files; the response carries a fresh workspace_fingerprint and head_sha for the next locked call."""
-        return bounded_service.call(
-            "workspace_restore_paths", workspace_id, relative_paths, expected_workspace_fingerprint
-        )
-
-    @mcp.tool(
-        title="Preview workspace base refresh",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def workspace_refresh_preview(
-        workspace_id: str,
-        expected_head_sha: str,
-        expected_fingerprint: str,
-    ) -> dict[str, Any]:
-        """Use this to review one immutable merge preview against the latest configured remote base."""
-        return bounded_service.call(
-            "workspace_refresh_preview",
-            workspace_id,
-            expected_head_sha,
-            expected_fingerprint,
-        )
-
-    @mcp.tool(
-        title="Refresh workspace from reviewed base",
-        annotations=EXTERNAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_refresh(
-        workspace_id: str,
-        preview_id: str,
-        expected_head_sha: str,
-        expected_fingerprint: str,
-    ) -> dict[str, Any]:
-        """Use this to merge the exact reviewed base target without rebase, force push, or remote write; the response carries a fresh workspace_fingerprint for the next locked call."""
-        return bounded_service.call(
-            "workspace_refresh",
-            workspace_id,
-            preview_id,
-            expected_head_sha,
-            expected_fingerprint,
-        )
-
-    @mcp.tool(title="Inspect workspace diff", annotations=READ_ONLY, structured_output=True)
-    def workspace_diff(workspace_id: str, staged: bool = False) -> dict[str, Any]:
-        """Use this after edits and before verification, commit, or publishing to review exact changes."""
-        return bounded_service.call("workspace_diff", workspace_id, staged)
-
-    @mcp.tool(
-        title="Execute accepted workspace plan",
-        annotations=LOCAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_execute_plan(
-        workspace_id: str,
-        plan_id: str,
-        through: Literal["iteration", "full"] = "iteration",
-    ) -> dict[str, Any]:
-        """Use this to execute an exact accepted immutable plan through iteration stages or the final full verification boundary; poll the returned durable operation with operation_status."""
-        return bounded_service.call("workspace_execute_plan", workspace_id, plan_id, through)
-
-    @mcp.tool(
-        title="Run configured command profile",
-        annotations=LOCAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_run_profile(
-        workspace_id: str,
-        profile_name: str | None = None,
-        background: bool = False,
-        force_rerun: bool = False,
-    ) -> dict[str, Any]:
-        """Use this for an allowlisted setup, fix, build, or verification profile. Omit profile_name to run the repository-default verification profile. During the edit-test loop, prefer the quick profile or workspace_run_diagnostic; they are faster and cheaper to run repeatedly. Deterministic failures may be reused only when every reviewed binding is unchanged; set force_rerun=true to bypass that evidence reuse and execute commands again. Run the full or repository-default profile only once, right before workspace_commit. The response carries a fresh fingerprint and head_sha for the next locked call. Set background=true for a profile expected to run long: the call validates inputs, holds the workspace lock for the whole run, and returns an operation_id immediately -- poll it with operation_status (and cancel with operation_cancel if needed) instead of blocking this turn. The workspace stays locked to other mutations until the background run finishes."""
-        return bounded_service.call(
-            "workspace_run_profile", workspace_id, profile_name, background, force_rerun
-        )
-
-    @mcp.tool(
-        title="Run reviewed workspace diagnostic",
-        annotations=LOCAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_run_diagnostic(
-        workspace_id: str,
-        diagnostic_id: str,
-        selector: str | list[str] | None = None,
-        expected_fingerprint: str | None = None,
-        intent: str | None = None,
-        expectation: str | None = None,
-        expected_failure_class: str | None = None,
-        selector2: str | list[str] | None = None,
-        force_rerun: bool = False,
-    ) -> dict[str, Any]:
-        """Use this to run one typed repository-reviewed diagnostic; deterministic failures may be reused only when every reviewed binding is unchanged, and force_rerun=true bypasses that evidence reuse. The response carries fingerprint_after and head_sha for the next locked call when the fingerprint changed. Pass a single string or a bounded list of strings for a multi-value selector; use selector2 only when the diagnostic declares a second named placeholder. Call repo_task_context or repo_status first to see each enrolled diagnostic's selector schema (kind, character classes, max_values, expansion) before constructing a call."""
-        return bounded_service.call(
-            "workspace_run_diagnostic",
-            workspace_id,
-            diagnostic_id,
-            selector,
-            expected_fingerprint,
-            intent,
-            expectation,
-            expected_failure_class,
-            selector2,
-            force_rerun,
-        )
-
-    @mcp.tool(
-        title="Run audited ad-hoc command",
-        annotations=LOCAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_run_adhoc(
-        workspace_id: str,
-        argv: list[str],
-        working_directory: str | None = None,
-        background: bool = False,
-    ) -> dict[str, Any]:
-        """Use this only in a repository the owner has explicitly configured with execution_mode="relaxed", when no enrolled workspace_run_diagnostic template fits. argv is a bounded list (no shell, no shell metacharacters expanded) whose first element must be one of the repository's configured adhoc_runners. The result is evidence only: it is fully audited but never satisfies require_verification_before_commit -- run an enrolled verification profile on the exact tree immediately before workspace_commit. In a strict-mode repository this call returns a structured EXECUTION_MODE_STRICT error naming the enrolled-diagnostic and configuration alternatives instead of running anything. Set background=true for a long-running command; poll with operation_status."""
-        return bounded_service.call(
-            "workspace_run_adhoc", workspace_id, argv, working_directory, background
-        )
-
-    @mcp.tool(
-        title="Read baseline-aware workspace hygiene",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def workspace_hygiene_status(
-        workspace_id: str,
-        formatter_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this to compare exact-base and current-workspace formatter findings without mutating repository or workspace state."""
-        return bounded_service.call(
-            "workspace_hygiene_status",
-            workspace_id,
-            formatter_id,
-        )
-
-    @mcp.tool(
-        title="Format policy-allowed changed paths",
-        annotations=LOCAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_format_changed(
-        workspace_id: str,
-        expected_fingerprint: str,
-        formatter_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this after editing to run one reviewed formatter over server-derived policy-allowed changed paths only; callers cannot provide argv, executables, environment values, working directories, or path lists."""
-        return bounded_service.call(
-            "workspace_format_changed",
-            workspace_id,
-            expected_fingerprint,
-            formatter_id,
-        )
-
-    @mcp.tool(
-        title="Verify workspace (deprecated alias)",
-        annotations=LOCAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_verify(workspace_id: str, profile_name: str | None = None) -> dict[str, Any]:
-        """Use this compatibility alias only while migrating to workspace_run_profile."""
-        return bounded_service.call("workspace_verify", workspace_id, profile_name)
-
-    @mcp.tool(
-        title="Commit verified changes",
-        annotations=LOCAL_CREATE,
-        structured_output=True,
-    )
-    def workspace_commit(workspace_id: str, message: str) -> dict[str, Any]:
-        """Use this after successful verification to stage and commit the exact verified tree."""
-        return bounded_service.call("workspace_commit", workspace_id, message)
-
-    @mcp.tool(title="Push AI branch", annotations=EXTERNAL_WRITE, structured_output=True)
-    def workspace_push(workspace_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
-        """Use this after commit to push the allowlisted ai/* branch without force."""
-        return bounded_service.call("workspace_push", workspace_id, idempotency_key)
-
-    @mcp.tool(
-        title="Create draft pull request",
-        annotations=EXTERNAL_WRITE,
-        structured_output=True,
-    )
-    def workspace_create_draft_pr(
-        workspace_id: str,
-        title: str,
-        body: str,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this after push to create a draft PR with configured labels and reviewers."""
-        return bounded_service.call(
-            "workspace_create_draft_pr", workspace_id, title, body, idempotency_key
-        )
-
-    @mcp.tool(
-        title="Update draft pull request",
-        annotations=EXTERNAL_WRITE,
-        structured_output=True,
-    )
-    def workspace_update_draft_pr(
-        workspace_id: str,
-        title: str | None = None,
-        body: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Use this to update the existing workspace PR title or body; it does not mark it ready or merge."""
-        return bounded_service.call(
-            "workspace_update_draft_pr", workspace_id, title, body, idempotency_key
-        )
-
-    @mcp.tool(
-        title="Read workspace PR status",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def workspace_pr_status(workspace_id: str) -> dict[str, Any]:
-        """Use this to read draft state, mergeability, review decision, and rolled-up checks."""
-        return bounded_service.call("workspace_pr_status", workspace_id)
-
-    @mcp.tool(
-        title="Read workspace PR checks",
-        annotations=EXTERNAL_READ,
-        structured_output=True,
-    )
-    def workspace_pr_checks(workspace_id: str, required_only: bool = False) -> dict[str, Any]:
-        """Use this to get compact pass, fail, pending, and skipped CI check buckets."""
-        return bounded_service.call("workspace_pr_checks", workspace_id, required_only)
-
-    @mcp.tool(
-        title="Watch workspace PR checks",
-        annotations=EXTERNAL_MUTATE,
-        structured_output=True,
-    )
-    def workspace_pr_watch(
-        workspace_id: str,
-        until: str = "all_completed",
-        timeout_seconds: int = 900,
-        include_failure_evidence: bool = True,
-    ) -> dict[str, Any]:
-        """Use this to start a durable exact-SHA check watch and return its operation reference."""
-        return bounded_service.call(
-            "workspace_pr_watch",
-            workspace_id,
-            until,
-            timeout_seconds,
-            include_failure_evidence,
-        )
-
-    @mcp.tool(
-        title="Read structured PR check details",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def workspace_pr_check_details(
-        workspace_id: str,
-        check_selector: str,
-    ) -> dict[str, Any]:
-        """Use this with an exact selector from workspace_pr_checks to inspect one Check Run."""
-        return bounded_service.call(
-            "workspace_pr_check_details",
-            workspace_id,
-            check_selector,
-        )
-
-    @mcp.tool(
-        title="Read bounded PR failure evidence",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def workspace_pr_failure_evidence(
-        workspace_id: str,
-        check_selector: str,
-        max_excerpt_lines: int = 80,
-    ) -> dict[str, Any]:
-        """Use this with a failed check selector to get redacted, bounded diagnostic evidence."""
-        return bounded_service.call(
-            "workspace_pr_failure_evidence",
-            workspace_id,
-            check_selector,
-            max_excerpt_lines,
-        )
-
-    @mcp.tool(
-        title="Remove local workspace",
-        annotations=LOCAL_DESTRUCTIVE,
-        structured_output=True,
-    )
-    def workspace_remove(workspace_id: str, delete_local_branch: bool = False) -> dict[str, Any]:
-        """Use this only after work is complete to remove a clean local worktree; remote data is untouched."""
-        return bounded_service.call("workspace_remove", workspace_id, delete_local_branch)
-
-    @mcp.tool(
-        title="Inspect reviewed configuration",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def config_inspect(repo_id: str | None = None) -> dict[str, Any]:
-        """Use this when helping with setup or debugging to read accepted/effective policy,
-        runtime package/generation/tool-surface health, connection-scoped negotiated client
-        capabilities, and policy changes still waiting for operator approval."""
-        payload = bounded_admin.call("config_inspect", repo_id)
-        payload["client_capabilities"] = client_capabilities_from_context(
-            mcp.get_context()
-        ).as_dict()
-        return payload
-
-    @mcp.tool(
-        title="Read bounded operational logs",
-        annotations=READ_ONLY,
-        structured_output=True,
-    )
-    def runtime_logs_read(
-        source: str = "audit",
-        limit: Annotated[int, Field(ge=1, le=200)] = 50,
-        action: str | None = None,
-        only_failed: bool = False,
-        min_duration_ms: float | None = None,
-    ) -> dict[str, Any]:
-        """Use this when diagnosing server or tool failures to read the redacted local
-        audit trail (source="audit"; filter by action name, failures only, or minimum
-        duration) or the managed runtime log tail (source="runtime"). Output is bounded
-        and never contains secrets or file bodies."""
-        return bounded_admin.call(
-            "runtime_logs_read",
-            source,
-            limit,
-            action,
-            only_failed,
-            min_duration_ms,
-        )
-
-    @mcp.tool(
-        title="Request gated repository policy change",
-        annotations=LOCAL_MUTATE,
-        structured_output=True,
-    )
-    def repo_policy_apply(
-        repo_id: str,
-        set_profiles: list[ProfileDefinition] | None = None,
-        remove_profiles: list[str] | None = None,
-        set_diagnostics: dict[str, dict[str, Any]] | None = None,
-        remove_diagnostics: list[str] | None = None,
-        set_formatters: dict[str, dict[str, Any]] | None = None,
-        remove_formatters: list[str] | None = None,
-        execution_mode: Literal["strict", "relaxed"] | None = None,
-        adhoc_runners: list[str] | None = None,
-        adhoc_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] | None = None,
-        policy_overrides: dict[str, str] | None = None,
-        dry_run: bool = False,
-    ) -> dict[str, Any]:
-        """Use this to change one repository's command profiles, diagnostics, formatters,
-        relaxed-execution policy, or policy overrides through the reviewed immutable-generation
-        pipeline. Pass dry_run=true first to preview the capability delta. Restrictions and metadata-only
-        changes are applied immediately and hot reloaded; any capability expansion is only
-        stored as a pending change that the operator must approve in a terminal with
-        `rf config approve <change_id>` -- report that instruction and never claim an
-        expansion is active until config_inspect shows the new generation."""
-        profiles = [asdict(item) for item in (set_profiles or [])]
-        return bounded_admin.call(
-            "repo_policy_apply",
-            repo_id,
-            set_profiles=profiles,
-            remove_profiles=remove_profiles,
-            set_diagnostics=set_diagnostics,
-            remove_diagnostics=remove_diagnostics,
-            set_formatters=set_formatters,
-            remove_formatters=remove_formatters,
-            execution_mode=execution_mode,
-            adhoc_runners=adhoc_runners,
-            adhoc_timeout_seconds=adhoc_timeout_seconds,
-            policy_overrides=policy_overrides,
-            dry_run=dry_run,
-        )
-
-    return mcp
+__all__ = [
+    "FORGE_V2_CONTRACT_VERSION",
+    "FORGE_V2_IDENTITY",
+    "SERVER_INSTRUCTIONS",
+    "ForgeV2FastMCP",
+    "_ServiceErrorBoundary",
+    "create_server",
+    "tool_surface_hash",
+]

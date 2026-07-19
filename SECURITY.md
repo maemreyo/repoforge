@@ -22,11 +22,16 @@ Its main controls are:
 - code-intelligence providers receive only bounded policy-visible paths and their results are rejected when the workspace identity changes during collection;
 - runtime health returns normalized capability facts and hashes, not raw MCP initialize payloads;
 - tool and command activity is written to a local JSONL audit log;
-- model-requested configuration changes (`repo_policy_apply`) pass through the same immutable
-  generation pipeline as the CLI and are gated by capability delta: restrictions and
-  metadata-only edits apply immediately, while any capability expansion (new commands, broader
-  paths) is only stored as a pending change the operator must approve out of band with
-  `rf config approve`; the approval token never passes through the model conversation.
+- model-requested configuration changes use `repo_policy` preview/apply and pass through the same
+  immutable generation pipeline as the CLI. Restrictions and metadata-only edits may activate
+  immediately; capability expansion is stored as a pending approval for the operator to accept out
+  of band with `rf config approve`. The approval token never passes through the model conversation;
+- GitHub issue writes are an explicit external-mutation capability class. `repo_issue` comment is
+  enabled by default, while close, reopen, link, and create require per-repository enablement; close
+  requires an evidence reference, every write is bounded and idempotent, and Project V2 remains
+  read-only;
+- `workspace_pr` comments use the same bounded, redacted, idempotent external-write policy. Draft PR
+  creation/update remain supported, but ready/merge/administration actions remain unavailable.
 
 ## Important limitations
 

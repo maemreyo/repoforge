@@ -492,7 +492,7 @@ Tasks:
 - [x] Add CI for Python 3.10–3.13 running Ruff, mypy, pytest with branch coverage, package build, and
   install-from-wheel smoke and real Git/worktree lifecycle tests, including a macOS Python 3.13 runtime lane.
 - [x] Record the MCP tool list, descriptions, annotations, input/output schemas, server instruction
-  hash, and tool-surface hash in `docs/contracts/release-contract-v1.json`.
+  hash, and tool-surface hash in `docs/contracts/release-contract-v2.json`.
 - [x] Add deterministic minimal-v2 and legacy-v1 config compatibility fixtures.
 - [x] Preserve characterization tests for restart/reload behavior after repository mutation.
 - [x] Add a release gate that fails when documentation, MCP/runtime/config contracts, and

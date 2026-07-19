@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..domain.latency import LatencyTrace
+
 
 class MetricsSink(Protocol):
     @property
@@ -19,5 +21,7 @@ class MetricsSink(Protocol):
         error_code: str | None,
         result_bytes: int | None = None,
     ) -> None: ...
+
+    def record_latency(self, trace: LatencyTrace) -> None: ...
 
     def snapshot(self) -> dict[str, Any]: ...

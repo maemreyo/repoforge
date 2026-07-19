@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import inspect
 import json
-import runpy
+import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +10,7 @@ from conftest import ForgeEnvironment, create_forge_environment, git
 
 from repoforge.application.service import _result
 from repoforge.application.workspace.edit import FileEdit, TextEdit
+from repoforge.domain.approval import ApprovalStatus, decide_approval
 from repoforge.domain.errors import (
     CommandError,
     ConfigError,
@@ -17,6 +18,101 @@ from repoforge.domain.errors import (
     SecurityError,
     WorkspaceError,
 )
+from repoforge.domain.issue_writes import IssueWritePolicy
+from repoforge.ports.issue_mutation import RemoteComment, RemoteIssue
+
+
+class _FakeIssueMutationGateway:
+    def __init__(self) -> None:
+        self.issues: dict[int, RemoteIssue] = {
+            7: RemoteIssue(7, 7007, "Existing issue", "open", "", "https://example/7"),
+            8: RemoteIssue(8, 7008, "Target issue", "open", "", "https://example/8"),
+        }
+        self.comments: dict[int, list[RemoteComment]] = {}
+        self.sub_issue_links: dict[int, set[int]] = {}
+        self.blocked_by_links: dict[int, set[int]] = {}
+        self.fail_comment_after_effect_once = False
+        self.force_comment_scan_truncated = False
+        self._next_comment = 1
+        self._next_issue = 20
+
+    def issue_details(self, cwd: Path, issue_number: int) -> RemoteIssue:
+        del cwd
+        return self.issues[issue_number]
+
+    def issue_comments(
+        self, cwd: Path, issue_number: int, *, max_comments: int
+    ) -> tuple[tuple[RemoteComment, ...], bool]:
+        del cwd
+        values = self.comments.get(issue_number, [])
+        return (
+            tuple(values[:max_comments]),
+            self.force_comment_scan_truncated or len(values) > max_comments,
+        )
+
+    def recent_issues(self, cwd: Path, *, max_issues: int) -> tuple[tuple[RemoteIssue, ...], bool]:
+        del cwd
+        values = sorted(self.issues.values(), key=lambda item: item.issue_number, reverse=True)
+        return tuple(values[:max_issues]), len(values) > max_issues
+
+    def issue_comment(self, cwd: Path, issue_number: int, body: str) -> RemoteComment:
+        del cwd
+        comment = RemoteComment(
+            self._next_comment,
+            body,
+            f"https://example/{issue_number}#comment-{self._next_comment}",
+        )
+        self._next_comment += 1
+        self.comments.setdefault(issue_number, []).append(comment)
+        if self.fail_comment_after_effect_once:
+            self.fail_comment_after_effect_once = False
+            raise CommandError("simulated lost GitHub response")
+        return comment
+
+    def set_issue_state(self, cwd: Path, issue_number: int, state: str) -> RemoteIssue:
+        del cwd
+        current = self.issues[issue_number]
+        updated = replace(current, state=state)
+        self.issues[issue_number] = updated
+        return updated
+
+    def create_issue(self, cwd: Path, title: str, body: str) -> RemoteIssue:
+        del cwd
+        number = self._next_issue
+        self._next_issue += 1
+        issue = RemoteIssue(number, number + 7000, title, "open", body, f"https://example/{number}")
+        self.issues[number] = issue
+        return issue
+
+    def sub_issues(
+        self, cwd: Path, issue_number: int, *, max_issues: int
+    ) -> tuple[tuple[RemoteIssue, ...], bool]:
+        del cwd
+        values = [
+            self.issues[number] for number in sorted(self.sub_issue_links.get(issue_number, set()))
+        ]
+        return tuple(values[:max_issues]), len(values) > max_issues
+
+    def blocked_by(
+        self, cwd: Path, issue_number: int, *, max_issues: int
+    ) -> tuple[tuple[RemoteIssue, ...], bool]:
+        del cwd
+        values = [
+            self.issues[number] for number in sorted(self.blocked_by_links.get(issue_number, set()))
+        ]
+        return tuple(values[:max_issues]), len(values) > max_issues
+
+    def add_sub_issue(self, cwd: Path, issue_number: int, sub_issue_id: int) -> RemoteIssue:
+        del cwd
+        target = next(item for item in self.issues.values() if item.database_id == sub_issue_id)
+        self.sub_issue_links.setdefault(issue_number, set()).add(target.issue_number)
+        return target
+
+    def add_blocked_by(self, cwd: Path, issue_number: int, blocker_issue_id: int) -> RemoteIssue:
+        del cwd
+        target = next(item for item in self.issues.values() if item.database_id == blocker_issue_id)
+        self.blocked_by_links.setdefault(issue_number, set()).add(target.issue_number)
+        return target
 
 
 def test_service_result_enforces_secret_safe_egress_recursively() -> None:
@@ -160,6 +256,427 @@ def test_workspace_apply_patch_replays_keyed_result_and_rejects_conflict(
     assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
 
+def test_v2_repo_list_history_and_pr_facades_are_compact_and_path_safe(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+
+    listed = service.repo_list_v2(limit=10)
+    assert listed["repositories"] == [
+        {
+            "repo_id": "demo",
+            "capabilities": ["read", "write", "publish", "verify"],
+            "default_ref": "main",
+        }
+    ]
+    assert str(forge_env.source) not in json.dumps(listed)
+
+    log = service.repo_history_v2("demo", mode="log", limit=5)
+    assert log["mode"] == "log"
+    assert log["commits"][0]["subject"] == "initial"
+    assert log["commit"] is None
+    assert log["comparison"] is None
+
+    commit = service.repo_history_v2("demo", mode="commit", ref="main")
+    assert commit["commit"]["sha"] == log["commits"][0]["sha"]
+    assert commit["commits"] == []
+
+    comparison = service.repo_history_v2(
+        "demo",
+        mode="compare",
+        base_ref="main",
+        head_ref="main",
+    )
+    assert comparison["comparison"]["ahead"] == 0
+    assert comparison["comparison"]["behind"] == 0
+    assert comparison["comparison"]["files"] == []
+
+    pr = service.repo_pr_read_v2("demo", 8, detail="overview")
+    assert pr["pull_request"]["number"] == 8
+    assert pr["pull_request"]["freshness"] == "live"
+    assert str(forge_env.source) not in json.dumps(pr)
+
+
+def test_v2_repo_history_cursor_continues_exact_log_page(
+    forge_env: ForgeEnvironment,
+) -> None:
+    for index in range(3):
+        path = forge_env.source / f"history-{index}.txt"
+        path.write_text(f"{index}\n", encoding="utf-8")
+        git("add", path.name, cwd=forge_env.source)
+        git("commit", "-m", f"history {index}", cwd=forge_env.source)
+
+    first = forge_env.service.repo_history_v2("demo", mode="log", limit=2)
+    assert [item["subject"] for item in first["commits"]] == ["history 2", "history 1"]
+    assert first["next_cursor"] is not None
+
+    second = forge_env.service.repo_history_v2(
+        "demo",
+        mode="log",
+        limit=2,
+        cursor=first["next_cursor"],
+    )
+    assert [item["subject"] for item in second["commits"]] == ["history 0", "initial"]
+    assert second["next_cursor"] is None
+
+
+def test_v2_repo_issue_comment_replays_and_reconciles_lost_response(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    object.__setattr__(service.application.context, "issue_mutations", gateway)
+
+    first = service.repo_issue_v2(
+        "demo",
+        mode="comment",
+        issue_number=7,
+        body="Verification passed. token=secret-value",
+        evidence_ref="commit:abc123",
+        idempotency_key="repo-issue-comment-0001",
+    )
+    replay = service.repo_issue_v2(
+        "demo",
+        mode="comment",
+        issue_number=7,
+        body="Verification passed. token=secret-value",
+        evidence_ref="commit:abc123",
+        idempotency_key="repo-issue-comment-0001",
+    )
+
+    assert replay == first
+    assert first["mutation"]["result"] == "applied"
+    assert first["mutation"]["external_writes"] == 1
+    assert len(gateway.comments[7]) == 1
+    assert "secret-value" not in gateway.comments[7][0].body
+    assert "<!-- repoforge-issue-write:" in gateway.comments[7][0].body
+
+    gateway.fail_comment_after_effect_once = True
+    with pytest.raises(ConfigError) as uncertain:
+        service.repo_issue_v2(
+            "demo",
+            mode="comment",
+            issue_number=7,
+            body="Second verified result.",
+            evidence_ref="verification:run-2",
+            idempotency_key="repo-issue-comment-0002",
+        )
+    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    reconciled = service.repo_issue_v2(
+        "demo",
+        mode="comment",
+        issue_number=7,
+        body="Second verified result.",
+        evidence_ref="verification:run-2",
+        idempotency_key="repo-issue-comment-0002",
+    )
+
+    assert reconciled["mutation"]["result"] == "reconciled"
+    assert reconciled["mutation"]["external_writes"] == 0
+    assert len(gateway.comments[7]) == 2
+
+
+def test_v2_repo_issue_policy_approval_create_and_rate_gates(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    ctx = service.application.context
+    object.__setattr__(ctx, "issue_mutations", gateway)
+    configured = service.config.repositories["demo"]
+    policy = IssueWritePolicy(
+        enabled_ops=("comment", "close", "create"),
+        approval_required_ops=("close",),
+        max_writes_per_call=2,
+        max_writes_per_window=2,
+        window_seconds=3600,
+        create_title_prefix="[FOLLOWUP]",
+    )
+    config = replace(
+        service.config,
+        repositories={
+            **service.config.repositories,
+            "demo": replace(configured, issue_writes=policy),
+        },
+    )
+    object.__setattr__(ctx, "config", config)
+    service.config = config
+
+    pending = service.repo_issue_v2(
+        "demo",
+        mode="close",
+        issue_number=7,
+        evidence_ref="verification:full-green",
+        idempotency_key="repo-issue-close-0001",
+    )
+    approval_id = pending["mutation"]["approval_request_id"]
+    assert pending["mutation"]["result"] == "pending_approval"
+    assert gateway.issues[7].state == "open"
+
+    approvals, _ = ctx.approval_stores()
+    envelope = approvals.read(approval_id)
+    assert envelope is not None
+    approved = decide_approval(
+        envelope.value,
+        ApprovalStatus.ACCEPTED,
+        actor="operator@example.com",
+        decided_at="2026-07-17T10:00:00+00:00",
+        reason="Reviewed exact issue mutation.",
+    )
+    approvals.save(approved, expected_revision=envelope.revision)
+    closed = service.repo_issue_v2(
+        "demo",
+        mode="close",
+        issue_number=7,
+        evidence_ref="verification:full-green",
+        idempotency_key="repo-issue-close-0001",
+        approval_request_id=approval_id,
+    )
+
+    assert closed["mutation"]["result"] == "applied"
+    assert closed["mutation"]["external_writes"] == 2
+    assert gateway.issues[7].state == "closed"
+
+    with pytest.raises(ConfigError, match="external mutation window limit"):
+        service.repo_issue_v2(
+            "demo",
+            mode="create",
+            title="Missing prefix is normalized",
+            body="Follow-up work.",
+            evidence_ref="issue:7",
+            idempotency_key="repo-issue-create-0001",
+        )
+
+
+def test_v2_repo_issue_create_reopen_and_native_links_are_explicit(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    ctx = service.application.context
+    object.__setattr__(ctx, "issue_mutations", gateway)
+    configured = service.config.repositories["demo"]
+    policy = IssueWritePolicy(
+        enabled_ops=("comment", "reopen", "link", "create"),
+        max_writes_per_call=2,
+        max_writes_per_window=20,
+        create_title_prefix="[FOLLOWUP]",
+    )
+    config = replace(
+        service.config,
+        repositories={
+            **service.config.repositories,
+            "demo": replace(configured, issue_writes=policy),
+        },
+    )
+    object.__setattr__(ctx, "config", config)
+    service.config = config
+    gateway.issues[7] = replace(gateway.issues[7], state="closed")
+
+    created = service.repo_issue_v2(
+        "demo",
+        mode="create",
+        title="Investigate regression",
+        body="Reproduce and fix the regression.",
+        evidence_ref="issue:7",
+        idempotency_key="repo-issue-create-0002",
+    )
+    created_issue = gateway.issues[created["mutation"]["issue_number"]]
+    assert created_issue.title == "[FOLLOWUP] Investigate regression"
+    assert "## Objective" in created_issue.body
+    assert "<!-- repoforge-issue-write:" in created_issue.body
+
+    reopened = service.repo_issue_v2(
+        "demo",
+        mode="reopen",
+        issue_number=7,
+        evidence_ref="verification:reopened",
+        idempotency_key="repo-issue-reopen-0001",
+    )
+    assert reopened["mutation"]["external_writes"] == 2
+    assert gateway.issues[7].state == "open"
+
+    sub_issue = service.repo_issue_v2(
+        "demo",
+        mode="link",
+        issue_number=7,
+        target_issue=8,
+        link_type="sub_issue",
+        evidence_ref="roadmap:7",
+        idempotency_key="repo-issue-link-sub-0001",
+    )
+    blocked_by = service.repo_issue_v2(
+        "demo",
+        mode="link",
+        issue_number=7,
+        target_issue=8,
+        link_type="blocked_by",
+        evidence_ref="dependency:8",
+        idempotency_key="repo-issue-link-block-0001",
+    )
+    superseded = service.repo_issue_v2(
+        "demo",
+        mode="link",
+        issue_number=7,
+        target_issue=8,
+        link_type="supersede",
+        evidence_ref="replacement:8",
+        idempotency_key="repo-issue-link-super-0001",
+    )
+
+    assert sub_issue["mutation"]["link_type"] == "sub_issue"
+    assert blocked_by["mutation"]["link_type"] == "blocked_by"
+    assert superseded["mutation"]["link_type"] == "supersede"
+    assert gateway.sub_issue_links[7] == {8}
+    assert gateway.blocked_by_links[7] == {8}
+    assert any(comment.body.startswith("Duplicate of #8") for comment in gateway.comments[7])
+    assert gateway.issues[7].state == "open"
+
+
+def test_v2_repo_issue_incomplete_reconciliation_fails_closed(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    gateway.force_comment_scan_truncated = True
+    object.__setattr__(service.application.context, "issue_mutations", gateway)
+
+    with pytest.raises(ConfigError, match="reconciliation is incomplete"):
+        service.repo_issue_v2(
+            "demo",
+            mode="comment",
+            issue_number=7,
+            body="Do not post blindly.",
+            evidence_ref="verification:bounded-scan",
+            idempotency_key="repo-issue-comment-incomplete",
+        )
+    assert gateway.comments == {}
+
+
+def test_v2_repo_issue_disabled_operation_fails_before_remote_write(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    gateway = _FakeIssueMutationGateway()
+    object.__setattr__(service.application.context, "issue_mutations", gateway)
+
+    with pytest.raises(ConfigError, match="not enabled"):
+        service.repo_issue_v2(
+            "demo",
+            mode="close",
+            issue_number=7,
+            evidence_ref="verification:none",
+            idempotency_key="repo-issue-close-disabled",
+        )
+    assert gateway.comments == {}
+    assert gateway.issues[7].state == "open"
+
+
+def test_v2_workspace_lifecycle_is_path_safe_filtered_and_sectioned(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    first = service.workspace_create_v2(
+        "demo",
+        "v2 lifecycle first",
+        idempotency_key="workspace-create-v2-first-0001",
+        issue_ids=("188",),
+    )
+    second = service.workspace_create_v2(
+        "demo",
+        "v2 lifecycle second",
+        idempotency_key="workspace-create-v2-second-0001",
+    )
+
+    assert "path" not in first
+    assert first["workspace_fingerprint"]
+    assert first["issue_ids"] == ["188"]
+    assert str(forge_env.root) not in json.dumps(first)
+
+    page_one = service.workspace_list_v2(limit=1)
+    assert len(page_one["workspaces"]) == 1
+    assert page_one["next_cursor"] is not None
+    assert "path" not in page_one["workspaces"][0]
+    page_two = service.workspace_list_v2(limit=1, cursor=page_one["next_cursor"])
+    assert len(page_two["workspaces"]) == 1
+    assert {
+        page_one["workspaces"][0]["workspace_id"],
+        page_two["workspaces"][0]["workspace_id"],
+    } == {first["workspace_id"], second["workspace_id"]}
+    assert str(forge_env.root) not in json.dumps(page_one)
+
+    status = service.workspace_status_v2(
+        first["workspace_id"],
+        sections=("local", "base", "hygiene"),
+    )
+    assert [section["section"] for section in status["sections"]] == [
+        "local",
+        "base",
+        "hygiene",
+    ]
+    assert status["fingerprint_source"] in {"cache", "scan"}
+    assert status["workspace_fingerprint"] == first["workspace_fingerprint"]
+    assert str(forge_env.root) not in json.dumps(status)
+
+    bounded = service.workspace_status_v2(
+        first["workspace_id"],
+        sections=("local", "base", "hygiene"),
+        byte_budget=250,
+    )
+    assert bounded["truncated"] is True
+
+    removed = service.workspace_remove_v2(second["workspace_id"])
+    assert removed["removed"] is True
+    assert removed["remote_untouched"] is True
+    assert "Remote branches" in removed["tombstone"]
+
+
+def test_v2_workspace_list_surfaces_missing_worktree_cleanup_guidance(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create_v2("demo", "missing v2 worktree")
+    record = service.state.load(created["workspace_id"])
+    shutil.rmtree(record.path)
+
+    missing = service.workspace_list_v2(exists=False)
+
+    assert [item["workspace_id"] for item in missing["workspaces"]] == [created["workspace_id"]]
+    assert missing["cleanup_guidance"]
+    assert str(forge_env.root) not in json.dumps(missing)
+
+
+def test_v2_workspace_format_changed_reports_changed_and_noop_evidence(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create_v2("demo", "v2 format changed")
+    workspace_id = created["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "needs-format\n",
+        current["sha256"],
+    )
+    dirty = service.workspace_status(workspace_id)
+
+    changed = service.workspace_format_changed_v2(
+        workspace_id,
+        dirty["workspace_fingerprint"],
+    )
+
+    assert changed["changed"] is True
+    assert changed["formatters"][0]["outcome"] == "changed"
+    assert changed["formatters"][0]["changed_paths"] == ["hello.txt"]
+    noop = service.workspace_format_changed_v2(
+        workspace_id,
+        changed["workspace_fingerprint"],
+    )
+    assert noop["changed"] is False
+    assert noop["formatters"][0]["outcome"] == "no_op"
+
+
 def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
 
@@ -281,14 +798,14 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
     assert removed["remote_branch_untouched"] is True
 
 
-def test_run_profile_default_and_verify_alias_share_canonical_contract(
+def test_run_profile_default_and_workspace_verify_profile_share_execution_contract(
     forge_env: ForgeEnvironment,
 ) -> None:
     service = forge_env.service
-    canonical_workspace = service.workspace_create("demo", "canonical verification")["workspace_id"]
-    alias_workspace = service.workspace_create("demo", "legacy verification alias")["workspace_id"]
+    profile_workspace = service.workspace_create("demo", "canonical verification")["workspace_id"]
+    verify_workspace = service.workspace_create("demo", "consolidated verification")["workspace_id"]
 
-    for workspace_id in (canonical_workspace, alias_workspace):
+    for workspace_id in (profile_workspace, verify_workspace):
         current = service.workspace_read_file(workspace_id, "hello.txt")
         service.workspace_write_file(
             workspace_id,
@@ -297,40 +814,26 @@ def test_run_profile_default_and_verify_alias_share_canonical_contract(
             current["sha256"],
         )
 
-    canonical = service.workspace_run_profile(canonical_workspace)
-    alias = service.workspace_verify(alias_workspace)
+    canonical = service.workspace_run_profile(profile_workspace)
+    consolidated = service.workspace_verify(verify_workspace, mode="profile")
 
     assert canonical["used_default"] is True
     assert canonical["repo_id"] == "demo"
-    for key in (
-        "profile",
-        "description",
-        "verification",
-        "satisfies_commit_gate",
-        "used_default",
-        "repo_id",
-        "working_directory",
+    assert consolidated["selected_mode"] == "profile"
+    assert consolidated["outcome"] == "passed"
+    assert consolidated["satisfies_commit_gate"] is True
+    assert consolidated["assessment"]["final_profile"] == canonical["profile"]
+    assert len(consolidated["commands"]) == len(canonical["commands"])
+    for verify_command, canonical_command in zip(
+        consolidated["commands"], canonical["commands"], strict=True
     ):
-        assert alias[key] == canonical[key]
-    assert len(alias["commands"]) == len(canonical["commands"])
-    for alias_command, canonical_command in zip(
-        alias["commands"], canonical["commands"], strict=True
-    ):
-        assert alias_command["duration_ms"] >= 0
+        assert verify_command["argv"] == canonical_command["argv"]
+        assert verify_command["returncode"] == canonical_command["returncode"]
+        assert verify_command["duration_ms"] >= 0
         assert canonical_command["duration_ms"] >= 0
-        assert alias_command["cumulative_duration_ms"] >= alias_command["duration_ms"]
-        assert canonical_command["cumulative_duration_ms"] >= canonical_command["duration_ms"]
-        assert {
-            key: value
-            for key, value in alias_command.items()
-            if key not in {"duration_ms", "cumulative_duration_ms"}
-        } == {
-            key: value
-            for key, value in canonical_command.items()
-            if key not in {"duration_ms", "cumulative_duration_ms"}
-        }
+    assert len(consolidated["steps"]) == len(canonical["completed_steps"])
     assert len(_audit_events(forge_env.root, "workspace_run_profile")) == 2
-    assert _audit_events(forge_env.root, "workspace_verify") == []
+    assert len(_audit_events(forge_env.root, "workspace_verify")) == 1
 
 
 @pytest.mark.parametrize(
@@ -509,6 +1012,41 @@ def test_commit_failure_reports_stage_and_invalidates_mutated_verified_tree(
     assert context.store.load(workspace_id).last_verification is None
 
 
+def test_push_rejection_is_non_retrying_and_preserves_remote_head_evidence(
+    forge_env: ForgeEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "push rejection evidence")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id, "hello.txt", "changed before rejected push\n", current["sha256"]
+    )
+    service.workspace_run_profile(workspace_id)
+    service.workspace_commit(workspace_id, "Prepare rejected push")
+    context = service.application.context
+
+    def rejected_push(path: Path, remote: str, branch: str, timeout: int):
+        del path, remote, branch, timeout
+        raise CommandError(
+            "push rejected",
+            details={
+                "stderr_excerpt": "! [rejected] HEAD -> branch (non-fast-forward)",
+                "exit_code": 1,
+            },
+        )
+
+    monkeypatch.setattr(context.git, "push", rejected_push)
+    with pytest.raises(CommandError) as excinfo:
+        service.workspace_push(workspace_id, idempotency_key="push-rejection-0001")
+
+    error = excinfo.value
+    assert error.retryable is False
+    assert error.details["remote_head_before"] is None
+    assert error.details["remote_head_after"] is None
+    assert error.details["retryable_rejection"] is False
+    assert "Refresh the workspace" in (error.safe_next_action or "")
+
+
 def test_change_budget_blocks_verification_and_commit(tmp_path: Path) -> None:
     env = create_forge_environment(tmp_path, max_changed_files=1, require_verification=False)
     service = env.service
@@ -583,18 +1121,3 @@ def test_workspace_list_audits_failure_without_leaking_internal_error_state(
     assert "error_code" in event["details"]
     assert "workspace_count" not in event["details"]
     assert "/secret/state/path" not in json.dumps(event["details"])
-
-
-def test_v2_retrieval_untracked_suite_bridge(tmp_path: Path) -> None:
-    namespace = runpy.run_path(str(Path(__file__).with_name("test_v2_retrieval.py")))
-    forge_factory = __import__("conftest").create_forge_environment
-    for name, candidate in sorted(namespace.items()):
-        if not name.startswith("test_") or not callable(candidate):
-            continue
-        parameters = inspect.signature(candidate).parameters
-        case_root = tmp_path / name
-        case_root.mkdir()
-        if tuple(parameters) == ("forge_env",):
-            candidate(forge_factory(case_root))
-        else:
-            candidate()

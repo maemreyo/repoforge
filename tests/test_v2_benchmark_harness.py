@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def _benchmark():
     from repoforge.benchmark import harness
@@ -80,6 +84,203 @@ def test_seeded_bug_gate_accepts_detection_or_explicit_full_fallback() -> None:
     assert metric.passed is True
 
 
+def test_provider_recall_is_measured_separately_by_provider_and_language() -> None:
+    harness = _benchmark()
+    metrics = harness.evaluate_provider_recall(
+        [
+            harness.ProviderRecallObservation(
+                provider_id="tree-sitter",
+                language="python",
+                case_id="python-direct",
+                expected_tests=("tests/test_value.py",),
+                routed_tests=("tests/test_value.py",),
+            ),
+            harness.ProviderRecallObservation(
+                provider_id="tree-sitter",
+                language="typescript",
+                case_id="typescript-reexport",
+                expected_tests=("src/app.test.tsx",),
+                routed_tests=("src/app.test.tsx",),
+            ),
+            harness.ProviderRecallObservation(
+                provider_id="syntax",
+                language="typescript",
+                case_id="typescript-reexport",
+                expected_tests=("src/app.test.tsx",),
+                routed_tests=(),
+            ),
+        ]
+    )
+
+    assert [(metric.provider_id, metric.language) for metric in metrics] == [
+        ("syntax", "typescript"),
+        ("tree-sitter", "python"),
+        ("tree-sitter", "typescript"),
+    ]
+    assert metrics[0].recall == 0.0
+    assert metrics[1].recall == 1.0
+    assert metrics[2].recall == 1.0
+    assert metrics[1].passed is True
+    assert metrics[0].passed is False
+
+
+def test_provider_recall_measurement_skips_unmarked_cases_and_rejects_bad_fixtures() -> None:
+    from repoforge.adapters.code_intelligence import TreeSitterCodeIntelligenceProvider
+    from repoforge.benchmark.code_intelligence import measure_provider_recall
+
+    harness = _benchmark()
+    skipped = harness.CorpusCase(
+        corpus="seeded_bugs",
+        case_id="not-measured",
+        input={},
+        expected={},
+        metadata={},
+    )
+    invalid = harness.CorpusCase(
+        corpus="seeded_bugs",
+        case_id="invalid-fixture",
+        input={"files": [], "changed_paths": ["src/value.py"]},
+        expected={"candidate_tests": ["tests/test_value.py"]},
+        metadata={"provider_recall": True, "language": "python"},
+    )
+
+    assert measure_provider_recall(TreeSitterCodeIntelligenceProvider(), (skipped,)) == ()
+    with pytest.raises(ValueError, match="must map relative paths"):
+        measure_provider_recall(TreeSitterCodeIntelligenceProvider(), (invalid,))
+
+
+def test_provider_recall_validation_fails_closed() -> None:
+    harness = _benchmark()
+    empty_expected = harness.ProviderRecallObservation(
+        provider_id="tree-sitter",
+        language="python",
+        case_id="empty",
+        expected_tests=(),
+        routed_tests=(),
+    )
+    unknown_provider = harness.ProviderRecallObservation(
+        provider_id="unknown",
+        language="python",
+        case_id="unknown",
+        expected_tests=("tests/test_value.py",),
+        routed_tests=("tests/test_value.py",),
+    )
+
+    with pytest.raises(ValueError, match="require expected tests"):
+        harness.evaluate_provider_recall([empty_expected])
+    with pytest.raises(ValueError, match="missing a reviewed threshold"):
+        harness.evaluate_provider_recall([unknown_provider])
+
+
+def test_seeded_corpus_calibration_matches_actual_provider_recall() -> None:
+    from repoforge.adapters.code_intelligence import (
+        SyntaxCodeIntelligenceProvider,
+        TreeSitterCodeIntelligenceProvider,
+    )
+    from repoforge.benchmark.code_intelligence import measure_provider_recall
+
+    harness = _benchmark()
+    cases = harness.load_corpus(ROOT / "tests/fixtures/v2_corpora/seeded_bugs.json")
+    observations = (
+        *measure_provider_recall(TreeSitterCodeIntelligenceProvider(), cases),
+        *measure_provider_recall(SyntaxCodeIntelligenceProvider(), cases),
+    )
+    metrics = harness.evaluate_provider_recall(observations)
+    calibration = json.loads(
+        (ROOT / "src/repoforge/adapters/code_intelligence/calibration-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert {(metric.provider_id, metric.language) for metric in metrics} == {
+        ("syntax", "javascript"),
+        ("syntax", "python"),
+        ("syntax", "typescript"),
+        ("tree-sitter", "javascript"),
+        ("tree-sitter", "python"),
+        ("tree-sitter", "typescript"),
+    }
+    for metric in metrics:
+        entry = calibration["providers"][metric.provider_id][metric.language]
+        assert entry["cases"] == metric.case_count
+        assert entry["routed_test_recall"] == round(metric.recall * 100)
+
+
+def test_release_report_requires_complete_primary_provider_recall() -> None:
+    harness = _benchmark()
+    corpus_observations = [
+        _observation("generated_changes", "g1"),
+        _observation("patches", "p1"),
+        _observation("seeded_bugs", "s1", regression_caught=True),
+        _observation("read_golden", "r1"),
+    ]
+    incomplete = [
+        harness.ProviderRecallObservation(
+            provider_id="tree-sitter",
+            language="python",
+            case_id="python",
+            expected_tests=("tests/test_python.py",),
+            routed_tests=("tests/test_python.py",),
+        ),
+        harness.ProviderRecallObservation(
+            provider_id="tree-sitter",
+            language="typescript",
+            case_id="typescript",
+            expected_tests=("tests/app.test.ts",),
+            routed_tests=("tests/app.test.ts",),
+        ),
+    ]
+
+    report = harness.evaluate_release_gates(
+        corpus_observations,
+        provider_recall_observations=incomplete,
+    )
+
+    assert report.passed is False
+    assert report.provider_recall_passed is False
+
+
+def test_fallback_recall_is_reported_without_blocking_passing_primary() -> None:
+    harness = _benchmark()
+    corpus_observations = [
+        _observation("generated_changes", "g1"),
+        _observation("patches", "p1"),
+        _observation("seeded_bugs", "s1", regression_caught=True),
+        _observation("read_golden", "r1"),
+    ]
+    provider_observations = [
+        *(
+            harness.ProviderRecallObservation(
+                provider_id="tree-sitter",
+                language=language,
+                case_id=language,
+                expected_tests=(f"tests/test_{language}.py",),
+                routed_tests=(f"tests/test_{language}.py",),
+            )
+            for language in ("javascript", "python", "typescript")
+        ),
+        harness.ProviderRecallObservation(
+            provider_id="syntax",
+            language="javascript",
+            case_id="fallback-javascript",
+            expected_tests=("tests/loader.test.js",),
+            routed_tests=(),
+        ),
+    ]
+
+    report = harness.evaluate_release_gates(
+        corpus_observations,
+        provider_recall_observations=provider_observations,
+    )
+
+    assert report.passed is True
+    assert report.provider_recall_passed is True
+    assert any(
+        metric.provider_id == "syntax" and metric.passed is False
+        for metric in report.provider_recall
+    )
+
+
 def test_read_gate_requires_resume_metadata_for_every_truncation() -> None:
     harness = _benchmark()
     report = harness.evaluate_release_gates(
@@ -140,7 +341,26 @@ def test_report_publisher_writes_stable_json_and_markdown(tmp_path: Path) -> Non
             _observation("patches", "p1"),
             _observation("seeded_bugs", "s1", regression_caught=True),
             _observation("read_golden", "r1"),
-        ]
+        ],
+        provider_recall_observations=[
+            *(
+                harness.ProviderRecallObservation(
+                    provider_id="tree-sitter",
+                    language=language,
+                    case_id=language,
+                    expected_tests=(f"tests/test_{language}.py",),
+                    routed_tests=(f"tests/test_{language}.py",),
+                )
+                for language in ("javascript", "python", "typescript")
+            ),
+            harness.ProviderRecallObservation(
+                provider_id="syntax",
+                language="javascript",
+                case_id="fallback-javascript",
+                expected_tests=("tests/loader.test.js",),
+                routed_tests=(),
+            ),
+        ],
     )
 
     paths = harness.publish_report(report, tmp_path)
@@ -149,9 +369,35 @@ def test_report_publisher_writes_stable_json_and_markdown(tmp_path: Path) -> Non
     assert paths.markdown_path.name == "forge-v2-release-gates.md"
     decoded = json.loads(paths.json_path.read_text(encoding="utf-8"))
     assert decoded["passed"] is True
+    assert decoded["provider_recall_passed"] is True
+    assert len(decoded["provider_recall"]) == 4
     markdown = paths.markdown_path.read_text(encoding="utf-8")
     assert "# Forge v2 Release Gates" in markdown
     assert "generated_changes" in markdown
+    assert "Provider routed-test recall" in markdown
+    assert "tree-sitter" in markdown
+    assert "syntax" in markdown
+
+
+def test_reference_executor_passes_every_frozen_v2_corpus() -> None:
+    from repoforge.adapters.code_intelligence import TreeSitterCodeIntelligenceProvider
+    from repoforge.benchmark.reference import ReferenceExecutor
+
+    execute_case = ReferenceExecutor(TreeSitterCodeIntelligenceProvider())
+    harness = _benchmark()
+    report = harness.run_release_gates(
+        execute_case,
+        corpus_root=ROOT / "tests/fixtures/v2_corpora",
+    )
+
+    failures = [
+        (case.case_id, execute_case(case).details)
+        for case in harness.load_corpus(ROOT / "tests/fixtures/v2_corpora/patches.json")
+        if not execute_case(case).success
+    ]
+    assert report.passed is True, failures
+    assert all(metric.status == "passed" for metric in report.metrics)
+    assert all(metric.wrong_target_count == 0 for metric in report.metrics)
 
 
 def test_run_release_gates_executes_every_case_once(tmp_path: Path) -> None:

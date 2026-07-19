@@ -47,6 +47,7 @@ def _observation(**overrides: object) -> FailureObservation:
         "stage_id": "stage-01-profile",
         "stage_kind": "profile",
         "target": "full",
+        "workspace_id": "ws-demo-01",
         "pre_identity": _identity(),
         "post_identity": _identity(),
         "environment_identity": "d" * 64,
@@ -140,6 +141,84 @@ def test_representative_failures_classify_deterministically(
         not hasattr(action, "argv") and not hasattr(action, "command")
         for action in classification.safe_actions
     )
+
+
+def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -> None:
+    """Every recovery action's kind must be one of the 28 currently-callable
+    Forge v2 tools -- not a retired v1 tool name a client cannot execute.
+    The public action must contain the target tool's exact `arguments`; this
+    test deliberately has no per-kind translator that could hide a mismatch
+    between recovery evidence and the real callable contract."""
+    from repoforge.contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS
+
+    for overrides in (
+        {"error_code": ErrorCode.DIAGNOSTIC_TOOL_MISSING.value},
+        {"message": "ModuleNotFoundError: No module named httpx"},
+        {"message": "Python environment mismatch: expected 3.13"},
+        {"error_code": ErrorCode.CONFIG_INVALID.value},
+        {"error_code": ErrorCode.COMMAND_TIMEOUT.value},
+        {"details": {"cancelled": True}},
+        {"failure_domain": "static_analysis"},
+        {"failure_domain": "typecheck"},
+        {"failure_domain": "business_tests"},
+        {"failure_domain": "build"},
+        {"message": "DNS resolution failed with HTTP 503"},
+        {"message": "Permission denied while reading tool cache"},
+        {"error_code": ErrorCode.SECURITY_POLICY_VIOLATION.value},
+        {"error_code": ErrorCode.DIAGNOSTIC_STALE_WORKSPACE.value},
+        {"error_code": ErrorCode.STATE_STALE.value, "details": {"plan_id": "plan-x"}},
+        {"error_code": ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION.value},
+        {
+            "error_code": ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION.value,
+            "changed_paths": ("src/a.py",),
+        },
+        {"error_code": ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE.value},
+        {"message": "opaque executor failure 77"},
+    ):
+        observation = _observation(**overrides)
+        classification = classify_failure(observation)
+        for action in classification.safe_actions:
+            assert action.kind.value in V2_TOOL_NAMES, (
+                classification.failure_class,
+                action.kind,
+            )
+            wire_action = action.payload()
+            assert set(wire_action) == {"kind", "precondition", "arguments"}
+            real_payload = wire_action["arguments"]
+            assert isinstance(real_payload, dict)
+            spec = V2_TOOL_SPECS[action.kind.value]
+            validated = spec.validate_input(real_payload)
+            assert validated is not None, (classification.failure_class, action.kind, real_payload)
+
+            if action.kind is RecoveryActionKind.WORKSPACE_VERIFY and action.mode == "plan":
+                if action.plan_action == "execute":
+                    # execute operates on an existing accepted plan bound to
+                    # this exact failed attempt's plan_id would just retry the
+                    # binding that was already involved in the failure -- the
+                    # only recovery actually offered is always a fresh plan.
+                    raise AssertionError("execute must not be offered as a recovery action")
+                if action.plan_action == "create":
+                    assert action.plan_id is None
+            if action.kind is RecoveryActionKind.OPERATION:
+                assert action.operation_id == observation.operation_id
+            if action.kind is RecoveryActionKind.WORKSPACE_MUTATE:
+                assert action.relative_paths
+
+
+def test_stale_plan_recovery_never_recommends_reexecuting_the_known_stale_plan_id() -> None:
+    """A stale-plan failure's own `observation.plan_id` is the plan that was
+    just found stale; recommending `workspace_verify(plan_action="execute",
+    plan_id=<that same id>)` would just reproduce the staleness. The only
+    safe recovery is creating a fresh plan (#225 round-3 review: "a logical
+    bug, not just a schema-shape bug")."""
+    observation = _observation(
+        error_code=ErrorCode.STATE_STALE.value, details={"plan_id": "plan-x"}
+    )
+    classification = classify_failure(observation)
+    assert classification.failure_class is FailureClass.STALE_PLAN
+    for action in classification.safe_actions:
+        if action.kind is RecoveryActionKind.WORKSPACE_VERIFY:
+            assert not (action.mode == "plan" and action.plan_action == "execute")
 
 
 def test_structured_classification_precedes_text_and_rejects_injected_actions() -> None:
@@ -327,6 +406,9 @@ def test_failed_plan_stage_persists_one_reusable_evidence_id_for_all_consumers(
 async def test_failure_evidence_read_is_exposed_through_actual_mcp_session(
     forge_env: ForgeEnvironment,
 ) -> None:
+    """The static 28-tool Forge v2 surface has no standalone `failure_evidence_read`
+    tool (#180); failure evidence is reachable only through `operation(action=
+    "failure_evidence")` on the durable-operation composite."""
     service, runner = _failing_service(forge_env)
     workspace_id, plan_id = _accepted_failing_plan(service)
     admission = service.workspace_execute_plan(workspace_id, plan_id, through="full")
@@ -336,10 +418,13 @@ async def test_failure_evidence_read_is_exposed_through_actual_mcp_session(
     server = create_server(service=service)
     async with create_connected_server_and_client_session(server) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-        tool = tools["failure_evidence_read"]
-        assert tool.annotations.readOnlyHint is True
-        assert set(tool.inputSchema["properties"]) == {"failure_id"}
-        result = await session.call_tool("failure_evidence_read", {"failure_id": failure_id})
+        assert "failure_evidence_read" not in tools
+        tool = tools["operation"]
+        assert "failure_id" in tool.inputSchema["properties"]
+        result = await session.call_tool(
+            "operation", {"action": "failure_evidence", "failure_id": failure_id}
+        )
         assert result.isError is False
-        assert result.structuredContent["failure_id"] == failure_id
-        assert result.structuredContent["failure_class"] == "test_failure"
+        assert result.structuredContent["action"] == "failure_evidence"
+        assert result.structuredContent["failure_evidence"]["failure_id"] == failure_id
+        assert result.structuredContent["failure_evidence"]["failure_class"] == "test_failure"

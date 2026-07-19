@@ -23,6 +23,7 @@ from ...ports.git import (
     GitComparisonEvidence,
     GitMergePreview,
     GitMergeResult,
+    GitSearchLocation,
     GitSnapshotBlob,
     ResolvedRepositoryRef,
 )
@@ -427,16 +428,10 @@ class GitCliRepository:
         )
         if result.returncode == 0:
             return GitMergeResult("refreshed", self.head_sha(path), ())
-        raw = self._executor.run_bytes(
-            ["git", "diff", "--name-only", "--diff-filter=U", "-z", "--"],
-            cwd=path,
-            max_bytes=self.server.max_fingerprint_bytes,
-        ).decode("utf-8", errors="strict")
-        raw_paths = [item for item in raw.split("\x00") if item]
+        raw_paths = list(self.unmerged_paths(path, repo))
         merge_in_progress = self._commit_ref(path, "MERGE_HEAD", check=False) is not None
         if not merge_in_progress:
             raise CommandError(result.combined or "Workspace base merge failed")
-        conflicts = self._bounded_policy_paths(raw_paths, repo)
         aborted = self._executor.run(
             ["git", "merge", "--abort"],
             cwd=path,
@@ -448,9 +443,68 @@ class GitCliRepository:
                 "Workspace refresh conflict could not be aborted cleanly",
                 safe_next_action="Inspect the isolated workspace before any further mutation.",
             )
+        return GitMergeResult("conflict", self.head_sha(path), tuple(raw_paths))
+
+    def begin_merge_no_ff(
+        self, path: Path, repo: RepositoryConfig, target_sha: str
+    ) -> GitMergeResult:
+        head = self.head_sha(path)
+        if self._is_ancestor(path, target_sha, head):
+            return GitMergeResult("current", head, ())
+        result = self._executor.run(
+            ["git", "merge", "--no-ff", "--no-commit", "--no-edit", target_sha],
+            cwd=path,
+            check=False,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=self.server.max_tool_output_chars,
+        )
+        if result.returncode == 0:
+            return GitMergeResult("ready", head, ())
+        merge_in_progress = self._commit_ref(path, "MERGE_HEAD", check=False) is not None
+        if not merge_in_progress:
+            raise CommandError(result.combined or "Workspace base merge failed")
+        conflicts = self.unmerged_paths(path, repo)
+        if not conflicts:
+            raise CommandError(
+                result.combined or "Workspace merge failed without conflict evidence"
+            )
+        return GitMergeResult("conflict", head, conflicts)
+
+    def unmerged_paths(self, path: Path, repo: RepositoryConfig) -> tuple[str, ...]:
+        raw = self._executor.run_bytes(
+            ["git", "diff", "--name-only", "--diff-filter=U", "-z", "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        ).decode("utf-8", errors="strict")
+        raw_paths = [item for item in raw.split("\x00") if item]
+        conflicts = self._bounded_policy_paths(raw_paths, repo)
         if raw_paths and not conflicts:
             raise SecurityError("Workspace refresh conflicts touch only denied repository paths")
-        return GitMergeResult("conflict", self.head_sha(path), tuple(conflicts))
+        return tuple(conflicts)
+
+    def stage_paths(
+        self, path: Path, repo: RepositoryConfig, relative_paths: tuple[str, ...]
+    ) -> None:
+        normalized = tuple(assert_path_allowed(item, repo) for item in relative_paths)
+        if not normalized:
+            return
+        self._executor.run(
+            ["git", "add", "--", *normalized],
+            cwd=path,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=2048,
+        )
+
+    def commit_merge(self, path: Path) -> str:
+        if self._commit_ref(path, "MERGE_HEAD", check=False) is None:
+            raise WorkspaceError("No reviewed merge is in progress")
+        self._executor.run(
+            ["git", "commit", "--no-edit"],
+            cwd=path,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=self.server.max_tool_output_chars,
+        )
+        return self.head_sha(path)
 
     def reset_hard(self, path: Path, target_sha: str) -> None:
         self._executor.run(["git", "reset", "--hard", target_sha], cwd=path, output_limit=2048)
@@ -892,6 +946,87 @@ class GitCliRepository:
         ]
         truncated = executor_truncated or len(context_lines_out) > max_results
         return context_lines_out[:max_results], truncated
+
+    def search_regex_locations(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        query: str,
+        path_glob: str | None,
+        max_results: int,
+        *,
+        commit_sha: str | None = None,
+        timeout_seconds: int = 1,
+    ) -> tuple[list[GitSearchLocation], bool]:
+        if not query or len(query) > 500 or "\x00" in query:
+            raise ValueError("Regex query must contain between 1 and 500 non-NUL characters")
+        if not 1 <= max_results <= 10_000:
+            raise ValueError("max_results must be between 1 and 10000")
+        if not 1 <= timeout_seconds <= 10:
+            raise ValueError("timeout_seconds must be between 1 and 10")
+        argv = [
+            "git",
+            "grep",
+            "-z",
+            "-n",
+            "--column",
+            "-o",
+            "-I",
+            "-E",
+            "--full-name",
+        ]
+        if commit_sha is None:
+            argv.append("--untracked")
+        argv.extend(["-e", query])
+        if commit_sha is not None:
+            argv.append(commit_sha)
+        argv.append("--")
+        if path_glob is not None:
+            argv.append(f":(glob){path_glob}")
+        result = self._executor.run(
+            argv,
+            cwd=path,
+            check=False,
+            timeout=timeout_seconds,
+            output_limit=self.server.max_fingerprint_bytes,
+        )
+        if result.returncode == 1:
+            return [], False
+        if result.returncode != 0:
+            message = result.stderr.strip() or "Git regex search failed"
+            if "regular expression" in message.lower() or "regex" in message.lower():
+                raise ValueError(f"Invalid regex: {message}")
+            raise CommandError(message)
+
+        prefix = f"{commit_sha}:" if commit_sha is not None else ""
+        locations: list[GitSearchLocation] = []
+        for raw_line in result.stdout.splitlines():
+            fields = raw_line.split("\x00")
+            if len(fields) != 4:
+                if result.stdout_truncated:
+                    continue
+                raise CommandError("Git returned an invalid regex search record")
+            raw_path, line_text, column_text, matched = fields
+            if prefix:
+                if not raw_path.startswith(prefix):
+                    raise CommandError("Git returned a regex match outside the requested snapshot")
+                raw_path = raw_path[len(prefix) :]
+            try:
+                normalized = assert_path_allowed(raw_path, repo)
+                line_number = int(line_text)
+                column = int(column_text)
+            except (SecurityError, ValueError):
+                if result.stdout_truncated:
+                    continue
+                raise CommandError("Git returned an invalid regex search location") from None
+            if line_number < 1 or column < 1 or not matched:
+                raise CommandError("Git returned an invalid regex match")
+            locations.append(GitSearchLocation(normalized, line_number, column, matched[:4000]))
+        locations.sort(key=lambda item: (item.path, item.line, item.column, item.match))
+        return (
+            locations[:max_results],
+            result.stdout_truncated or len(locations) > max_results,
+        )
 
     @staticmethod
     def _raise_evidence_error(message: str, code: ErrorCode) -> NoReturn:
@@ -1620,6 +1755,30 @@ class GitCliRepository:
             cwd=path,
             timeout=timeout,
         )
+
+    def remote_branch_sha(self, path: Path, remote: str, branch: str, timeout: int) -> str | None:
+        result = self._executor.run(
+            ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+            cwd=path,
+            timeout=timeout,
+            output_limit=512,
+        )
+        rendered = result.stdout.strip()
+        if not rendered:
+            return None
+        lines = rendered.splitlines()
+        if len(lines) != 1:
+            raise CommandError("Git returned ambiguous remote branch evidence")
+        fields = lines[0].split()
+        expected_ref = f"refs/heads/{branch}"
+        if (
+            len(fields) != 2
+            or len(fields[0]) != 40
+            or any(character not in "0123456789abcdefABCDEF" for character in fields[0])
+            or fields[1] != expected_ref
+        ):
+            raise CommandError("Git returned invalid remote branch evidence")
+        return fields[0].lower()
 
     def upstream_name(self, path: Path) -> str | None:
         r = self._executor.run(

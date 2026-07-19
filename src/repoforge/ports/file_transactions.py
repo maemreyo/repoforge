@@ -12,15 +12,21 @@ from ..domain.filesystem_transaction import (
     TransactionReceipt,
 )
 
+CommitReceiptFactory = Callable[[str, tuple[str, ...]], tuple[str, bytes]]
+"""Given (transaction_id, changed_paths) return (name, payload) for the receipt."""
+
 
 class FileTransaction(Protocol):
     def recover_pending(self) -> RecoveryReport: ...
+
+    def load_commit_receipt(self, name: str) -> bytes | None: ...
 
     def commit(
         self,
         plan: TransactionPlan,
         *,
         precommit_validator: Callable[[], None] | None = None,
+        commit_receipt_factory: CommitReceiptFactory | None = None,
     ) -> TransactionReceipt: ...
 
 

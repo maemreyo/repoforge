@@ -35,6 +35,41 @@ def test_committed_golden_matches_generated_schema_bundle() -> None:
     assert expected == render_v2_schema_bundle()
 
 
+def test_committed_golden_is_byte_stable() -> None:
+    actual = GOLDEN.read_text(encoding="utf-8")
+    expected = (
+        json.dumps(
+            render_v2_schema_bundle(),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    if actual != expected:
+        mismatch = next(
+            (
+                index
+                for index, pair in enumerate(zip(actual, expected, strict=False))
+                if pair[0] != pair[1]
+            ),
+            min(len(actual), len(expected)),
+        )
+        window_start = max(0, mismatch - 80)
+        window_end = mismatch + 160
+        raise AssertionError(
+            {
+                "mismatch": mismatch,
+                "actual_length": len(actual),
+                "expected_length": len(expected),
+                "actual_ends_newline": actual.endswith("\n"),
+                "expected_ends_newline": expected.endswith("\n"),
+                "actual_window": actual[window_start:window_end],
+                "expected_window": expected[window_start:window_end],
+            }
+        )
+
+
 def test_pydantic_is_an_explicit_runtime_dependency() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     dependencies = project["dependencies"]

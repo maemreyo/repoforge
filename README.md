@@ -29,6 +29,11 @@ RepoForge is a local [Model Context Protocol](https://modelcontextprotocol.io/) 
 
 It sits between an AI client and your development environment, enforcing a safe, reviewable workflow for repository inspection, isolated code changes, verification, Git operations, and draft pull-request publication.
 
+The current public connector identity is **`forge_v2`**. It exposes exactly 28 statically registered,
+Pydantic-typed tools. Composite operations replace the former stage-specific Forge v1 surface,
+`structuredContent` is authoritative, and the retired `forge_v1` identity exposes only the typed
+`migration_required` grace response.
+
 RepoForge is designed around a simple principle:
 
 > An AI-generated change is not ready merely because the code looks plausible.  
@@ -224,25 +229,27 @@ See [ticket governance](docs/development/TICKET_GOVERNANCE.md),
 
 ### Controlled file operations
 
-- Bounded UTF-8 file reads.
-- Batched reads with configured limits.
-- Literal repository search.
-- Exact text replacement with optimistic locking.
-- Validated unified patches.
-- Path restoration.
-- Exact diff review and change-budget enforcement.
+- `repo_read` and `workspace_read` provide bounded multi-file ranges with exact resume cursors.
+- `repo_search`, `workspace_search`, `repo_tree`, `workspace_tree`, and `workspace_diff` return typed,
+  budgeted evidence.
+- `workspace_mutate` is the only public filesystem mutation tool. It executes replace, write, create,
+  delete, move, patch, and restore operations in one journaled transaction.
+- Per-call idempotency, optimistic state binding, dry-run diagnostics, no-op detection, denied-path
+  enforcement, and change budgets remain fail-closed.
 
 ### Verification and publication
 
-- Execute explicitly named repository profiles compiled into typed verification steps.
-- Report completed, failed, and not-run stages plus the exact failure domain.
-- Support strict-clean or exact-base no-regression hygiene policy without treating hygiene evidence as commit eligibility.
-- Reuse deterministic non-retryable failure evidence only when workspace, target, command source, configuration, and environment identities still match; `force_rerun` is explicit.
-- Store verification receipts only for successful authoritative runs on the exact resulting tree.
-- Commit only after the configured gate succeeds.
-- Push without force.
-- Create and update draft pull requests.
-- Read mergeability and compact CI status.
+- `workspace_verify` consolidates planning, affected-test auto-routing, typed diagnostics, reviewed
+  profiles, and policy-gated ad-hoc evidence.
+- Low-confidence impact evidence falls back to the full profile; inference never weakens the final
+  exact-tree gate.
+- Report completed, failed, and not-run typed steps, timings, failure domains, and whether business
+  tests actually ran.
+- Reuse deterministic non-retryable failure evidence only when every binding still matches;
+  `force_rerun` is explicit.
+- `workspace_commit` accepts only the exact verified tree, and `workspace_push` never forces.
+- `workspace_pr` creates/updates/watches/comments on draft PRs; `workspace_pr_evidence` returns bounded
+  checks, annotations, and failure evidence. RepoForge still cannot mark ready or merge.
 
 ### Configuration and runtime operations
 

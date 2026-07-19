@@ -26,6 +26,14 @@ class GitSnapshotBlob:
 
 
 @dataclass(frozen=True, slots=True)
+class GitSearchLocation:
+    path: str
+    line: int
+    column: int
+    match: str
+
+
+@dataclass(frozen=True, slots=True)
 class GitActorIdentity:
     name: str
     email: str
@@ -165,6 +173,18 @@ class GitRepository(Protocol):
         self, path: Path, repo: RepositoryConfig, target_sha: str
     ) -> GitMergeResult: ...
 
+    def begin_merge_no_ff(
+        self, path: Path, repo: RepositoryConfig, target_sha: str
+    ) -> GitMergeResult: ...
+
+    def unmerged_paths(self, path: Path, repo: RepositoryConfig) -> tuple[str, ...]: ...
+
+    def stage_paths(
+        self, path: Path, repo: RepositoryConfig, relative_paths: tuple[str, ...]
+    ) -> None: ...
+
+    def commit_merge(self, path: Path) -> str: ...
+
     def reset_hard(self, path: Path, target_sha: str) -> None: ...
 
     def list_files(
@@ -205,6 +225,18 @@ class GitRepository(Protocol):
         max_results: int,
         context_lines: int = 0,
     ) -> tuple[list[str], bool]: ...
+
+    def search_regex_locations(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        query: str,
+        path_glob: str | None,
+        max_results: int,
+        *,
+        commit_sha: str | None = None,
+        timeout_seconds: int = 1,
+    ) -> tuple[list[GitSearchLocation], bool]: ...
 
     def read_commit_evidence(
         self,
@@ -259,6 +291,10 @@ class GitRepository(Protocol):
     def commit_summary(self, path: Path) -> str: ...
 
     def push(self, path: Path, remote: str, branch: str, timeout: int) -> CommandResult: ...
+
+    def remote_branch_sha(
+        self, path: Path, remote: str, branch: str, timeout: int
+    ) -> str | None: ...
 
     def upstream_name(self, path: Path) -> str | None: ...
 

@@ -376,6 +376,57 @@ def _body_metadata(body: str, label: str) -> str | None:
     return match.group(1).strip().rstrip(".").strip()
 
 
+_ISSUE_REFERENCE = re.compile(r"#(\d+)")
+_MAX_DECLARED_BLOCKERS = 10
+
+
+def declared_blocker_numbers(body: str) -> tuple[int, ...]:
+    """Extract the issue numbers an issue's own body declares as blockers.
+
+    Pure text parsing, independent of ticket-graph membership -- callers
+    combine this with a live read of each referenced issue to detect a
+    stale ``Blocked by`` reference (#187 addendum 2 / #195: closed-blocker
+    drift must be detectable without graph membership)."""
+    declared = _body_metadata(body, "Blocked by")
+    if declared is None:
+        return ()
+    numbers = tuple(int(match) for match in _ISSUE_REFERENCE.findall(declared))
+    return tuple(sorted(dict.fromkeys(numbers)))[:_MAX_DECLARED_BLOCKERS]
+
+
+def _lenient_status(value: str) -> TicketStatus | None:
+    normalized = value.strip().casefold()
+    for candidate in TicketStatus:
+        if candidate.value.casefold() == normalized:
+            return candidate
+    return None
+
+
+def declared_status_drift(issue_number: int, body: str, state: str) -> TicketDiagnostic | None:
+    """Compare an issue's own self-declared ``Status:`` metadata against its
+    live GitHub open/closed state.
+
+    This runs independently of ticket-graph membership (#187 addendum 2:
+    drift checks must run for any issue, graph member or not) -- it only
+    needs the one live issue already fetched, not a graph node to compare
+    against."""
+    declared = _body_metadata(body, "Status")
+    if declared is None:
+        return None
+    status = _lenient_status(declared)
+    if status is None:
+        return None
+    expected_state = "CLOSED" if status is TicketStatus.DONE else "OPEN"
+    observed_state = state.strip().upper()
+    if observed_state not in {"OPEN", "CLOSED"} or observed_state == expected_state:
+        return None
+    return _diagnostic(
+        "LIVE_STATE_DRIFT",
+        issue_number,
+        f"expected GitHub state {expected_state}, got {observed_state}",
+    )
+
+
 def compare_live_ticket_metadata(
     graph: TicketGraph,
     live_metadata: tuple[TicketLiveMetadata, ...],

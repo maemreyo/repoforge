@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
 from .adapters.audit.query import prune_audit_log as prune_audit_log
+from .adapters.audit.query import read_audit_event_page as read_audit_event_page
 from .adapters.audit.query import read_audit_events as read_audit_events
 from .adapters.audit.query import read_audit_events_since as read_audit_events_since
 from .adapters.audit.query import (
@@ -19,10 +20,17 @@ from .adapters.audit.query import (
 from .adapters.audit.query import summarize_operation_metrics as summarize_operation_metrics
 from .adapters.background import SystemSleeper, ThreadBackgroundTaskRunner
 from .adapters.capabilities import SystemExecutableLocator
-from .adapters.code_intelligence import SyntaxCodeIntelligenceProvider
+from .adapters.code_intelligence import (
+    FallbackCodeIntelligenceProvider,
+    SyntaxCodeIntelligenceProvider,
+    TreeSitterCodeIntelligenceProvider,
+)
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
+from .adapters.filesystem.receipt_transaction_factory import (
+    ReceiptJournaledFileTransactionFactory,
+)
 from .adapters.git import GitCliRepository
 from .adapters.github import (
     CommandGitHubCapabilityProbe,
@@ -40,6 +48,7 @@ from .adapters.persistence import (
     JsonExecutionPlanAcceptanceStore,
     JsonExecutionPlanStore,
     JsonExecutionReceiptStore,
+    JsonExternalMutationLedger,
     JsonFailureEvidenceStore,
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
@@ -105,6 +114,7 @@ from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
+from .application.extended_context import ExtendedApplicationContext
 from .application.fingerprint_cache import FingerprintCache
 from .application.nudges import AdoptionNudgeTracker
 from .application.onboarding.activation import ConfigurationActivator
@@ -178,6 +188,11 @@ from .ports import (
     WorkflowRecordingStore,
     WorkspaceStore,
 )
+from .ports.external_mutation_ledger import ExternalMutationLedger
+from .ports.filesystem_transaction import (
+    FileTransactionFactory as ReceiptFileTransactionFactory,
+)
+from .ports.issue_mutation import IssueMutationGateway
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +226,11 @@ class AdapterOverrides:
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
+    approvals: ApprovalStore | None = None
+    approval_payloads: ApprovalPayloadStore | None = None
+    issue_mutations: IssueMutationGateway | None = None
+    external_mutations: ExternalMutationLedger | None = None
+    receipt_file_transactions: ReceiptFileTransactionFactory | None = None
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
     execution_receipts: ExecutionReceiptStore | None = None
@@ -469,7 +489,21 @@ def build_application(
     filesystem = o.filesystem or LocalFileSystem()
     file_transactions = o.file_transactions or JournaledFileTransactionFactory()
     git = o.git or GitCliRepository(command, config.server)
-    github = o.github or GhCliGateway(command, config.server)
+    default_github = GhCliGateway(command, config.server)
+    github = o.github or default_github
+    issue_mutations = o.issue_mutations or default_github
+    external_mutations = o.external_mutations or JsonExternalMutationLedger(
+        config.server.state_root,
+        locks,
+    )
+    approvals = o.approvals or JsonApprovalStore(config.server.state_root, locks)
+    approval_payloads = o.approval_payloads or JsonApprovalPayloadStore(
+        config.server.state_root,
+        locks,
+    )
+    receipt_file_transactions = (
+        o.receipt_file_transactions or ReceiptJournaledFileTransactionFactory()
+    )
     ticket_graphs = o.ticket_graphs or CommandGitHubTicketGraphGateway(command, config.server)
     ticket_projects = o.ticket_projects or GhTicketProjectGateway(command, config.server)
     github_capabilities = o.github_capabilities or CommandGitHubCapabilityProbe(
@@ -478,7 +512,10 @@ def build_application(
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
-    code_intelligence = o.code_intelligence or SyntaxCodeIntelligenceProvider()
+    code_intelligence = o.code_intelligence or FallbackCodeIntelligenceProvider(
+        primary=TreeSitterCodeIntelligenceProvider(),
+        fallback=SyntaxCodeIntelligenceProvider(),
+    )
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     execution_plans = o.execution_plans or JsonExecutionPlanStore(config.server.state_root, locks)
@@ -511,7 +548,7 @@ def build_application(
     )
     background_tasks = o.background_tasks or ThreadBackgroundTaskRunner()
     sleeper = o.sleeper or SystemSleeper()
-    context = ApplicationContext(
+    context = ExtendedApplicationContext(
         config=config,
         fingerprint_cache=FingerprintCache(),
         nudge_tracker=AdoptionNudgeTracker(),
@@ -539,6 +576,11 @@ def build_application(
         hygiene_cache=hygiene_cache,
         ticket_graphs=ticket_graphs,
         ticket_projects=ticket_projects,
+        issue_mutations=issue_mutations,
+        external_mutations=external_mutations,
+        approvals=approvals,
+        approval_payloads=approval_payloads,
+        receipt_file_transactions=receipt_file_transactions,
         github_capabilities=github_capabilities,
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
@@ -572,10 +614,16 @@ def build_application(
     )
 
 
-def run_runtime_worker(config_path: Path) -> int:
-    """Construct and run the long-lived supervisor for one reviewed configuration."""
-    from .interfaces.mcp.server import tool_surface_hash
+def run_runtime_worker(
+    config_path: Path,
+    *,
+    connector_identity: str = "forge_v2",
+) -> int:
+    """Construct and run the long-lived supervisor for the Forge v2 identity."""
+    from .interfaces.mcp.server import FORGE_V2_IDENTITY, tool_surface_hash
 
+    if connector_identity != FORGE_V2_IDENTITY:
+        raise ConfigError("Managed runtime supports only the forge_v2 connector identity")
     config_path = config_path.expanduser().resolve()
     configs = build_configuration_store(config_path)
     target = configs.activation_target() or configs.active()
@@ -611,7 +659,16 @@ def run_runtime_worker(config_path: Path) -> int:
     if not tunnel_version:
         raise ConfigError("Cannot determine tunnel-client version")
     tunnel_id_fingerprint = hashlib.sha256(tunnel_id.encode()).hexdigest()
-    mcp_argv = (sys.executable, "-m", "repoforge", "--config", str(config_path), "serve")
+    mcp_argv = (
+        sys.executable,
+        "-m",
+        "repoforge",
+        "--config",
+        str(config_path),
+        "serve",
+        "--connector-identity",
+        connector_identity,
+    )
     profile = TunnelProfile(
         tunnel_id_fingerprint,
         profile_name,

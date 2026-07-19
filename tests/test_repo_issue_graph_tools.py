@@ -13,7 +13,13 @@ from repoforge.application.service import CodingService
 from repoforge.application.tickets.graph import load_ticket_graph
 from repoforge.config import GitHubTicketGraphConfig, load_config
 from repoforge.domain.errors import ConfigError
-from repoforge.domain.tickets import TicketGraphError, TicketGraphSnapshot, TicketLiveMetadata
+from repoforge.domain.tickets import (
+    CapabilityCoverage,
+    GraphEvidenceCapability,
+    TicketGraphError,
+    TicketGraphSnapshot,
+    TicketLiveMetadata,
+)
 
 
 def _write_manifest(
@@ -88,6 +94,15 @@ class FixtureTicketGraphGateway:
             )
             for node in graph.nodes
         )
+        capability_coverage = tuple(
+            CapabilityCoverage(
+                GraphEvidenceCapability(str(item["capability"])),
+                bool(item["complete"]),
+                tuple(int(number) for number in item.get("unavailable", [])),
+                bool(item.get("truncated", False)),
+            )
+            for item in state_payload.get("capability_coverage", [])
+        )
         return TicketGraphSnapshot(
             graph,
             "2026-07-16T00:00:00+00:00",
@@ -95,6 +110,7 @@ class FixtureTicketGraphGateway:
             tuple(int(item) for item in state_payload.get("unavailable", [])),
             bool(state_payload.get("truncated", False)),
             live,
+            capability_coverage,
         )
 
 
@@ -136,6 +152,52 @@ def _audit_events_with_prefix(root: Path, prefix: str) -> list[dict[str, object]
     return [event for event in events if str(event.get("action", "")).startswith(prefix)]
 
 
+def test_v2_repo_issue_reports_graph_unavailable_with_next_action(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path, configured=False)
+
+    result = service.repo_issue_v2("demo", mode="graph")
+
+    assert result["graph_status"] == "graph_unavailable"
+    assert result["nodes"] == []
+    assert result["selected"] == []
+    assert result["next_action"]
+    assert "configure" in result["next_action"].lower()
+    assert len(_audit_events(environment.root, "repo_issue")) == 1
+    assert _audit_events(environment.root, "repo_issue_graph") == []
+
+
+def test_v2_repo_issue_graph_exposes_capability_scoped_coverage(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ticket = _node(9)
+    _write_manifest(environment.source, [program, ticket])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {},
+                "capability_coverage": [
+                    {"capability": "issue", "complete": True, "unavailable": []},
+                    {"capability": "sub_issues", "complete": True, "unavailable": []},
+                    {"capability": "comments", "complete": False, "unavailable": [9]},
+                    {"capability": "dependencies", "complete": True, "unavailable": []},
+                    {"capability": "project_overlay", "complete": True, "unavailable": []},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_v2("demo", mode="graph", fresh=True)
+
+    coverage = {item["capability"]: item for item in result["capability_coverage"]}
+    assert coverage["comments"]["complete"] is False
+    assert coverage["comments"]["unavailable"] == [9]
+    assert coverage["issue"]["complete"] is True
+    assert coverage["sub_issues"]["complete"] is True
+    assert coverage["dependencies"]["complete"] is True
+    assert coverage["project_overlay"]["complete"] is True
+
+
 def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Path) -> None:
     service, _ = _service(tmp_path, configured=False)
 
@@ -157,6 +219,7 @@ def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Pat
         "unavailable": [],
         "truncated": False,
         "evidence_complete": False,
+        "capabilities": [],
     }
     assert "rf repo refresh demo" in result["safe_next_action"]
 
@@ -402,13 +465,159 @@ def test_repo_issue_spec_combines_manifest_node_and_live_issue(tmp_path: Path) -
     }
 
 
-def test_repo_issue_spec_works_without_a_manifest_node(tmp_path: Path) -> None:
-    service, _ = _service(tmp_path)
-    result = service.repo_issue_spec("demo", 999)
+def test_repo_issue_spec_skips_metadata_drift_when_issue_capability_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ticket = _node(9, priority="P0", status="Done")
+    _write_manifest(environment.source, [program, ticket])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"9": {"state": "OPEN"}},
+                "capability_coverage": [
+                    {"capability": "issue", "complete": False, "unavailable": [9]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_spec("demo", 9, fresh=True)
+
+    assert result["graph_member"] is True
+    assert result["capability_coverage"] == [
+        {"capability": "issue", "complete": False, "unavailable": [9], "truncated": False}
+    ]
+    # Manifest expects DONE/CLOSED but the live fixture reports OPEN -- without the fix this
+    # would raise a LIVE_STATE_DRIFT diagnostic even though the graph's own evidence for this
+    # issue is known-incomplete and should not be trusted for comparison.
+    assert result["drift"] == [
+        {
+            "code": "GRAPH_EVIDENCE_INCOMPLETE_FOR_ISSUE",
+            "message": (
+                "graph metadata for this issue (status/priority/type) could not be fully "
+                "resolved from GitHub; skipping metadata drift comparison to avoid comparing "
+                "against a defaulted value"
+            ),
+        }
+    ]
+
+
+def test_repo_issue_spec_reports_live_spec_drift_without_a_graph_node(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps({"issues": {"999": {"body": "Issue body", "comments": []}}}),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
     assert result["graph_member"] is False
     assert result["node"] is None
-    assert result["drift"] == []
+    assert result["drift"] == [
+        {
+            "code": "LIVE_SPEC_INCOMPLETE",
+            "message": "live issue is missing objective, acceptance, or verification evidence",
+        }
+    ]
     assert result["live"]["title"] == "Implement safer workflow"
+
+
+def test_repo_issue_spec_detects_stale_status_without_a_graph_node(tmp_path: Path) -> None:
+    """#187 addendum 2: drift checks must run for any issue, graph member or
+    not. An issue that is not enrolled in the ticket graph still declares its
+    own Status metadata in its body; that self-declared status must still be
+    checked against the issue's live open/closed state."""
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "999": {
+                        "body": (
+                            "Objective: ship it.\n"
+                            "Acceptance criteria: it works.\n"
+                            "Tests: run the gate.\n"
+                            "Status: Done."
+                        ),
+                        "state": "OPEN",
+                        "comments": [],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
+    assert result["graph_member"] is False
+    assert result["node"] is None
+    assert {
+        "code": "LIVE_STATE_DRIFT",
+        "message": "expected GitHub state CLOSED, got OPEN",
+    } in result["drift"]
+
+
+def test_repo_issue_spec_detects_a_closed_declared_blocker_without_a_graph_node(
+    tmp_path: Path,
+) -> None:
+    """#187 addendum 2 / #195: closed-blocker drift must be detectable
+    without ticket-graph membership. An issue that is not enrolled in the
+    graph still declares its blockers in its own body; a declared blocker
+    that is already closed on GitHub is a stale reference worth surfacing."""
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "999": {
+                        "body": (
+                            "Objective: ship it.\n"
+                            "Acceptance criteria: it works.\n"
+                            "Tests: run the gate.\n"
+                            "Blocked by: #106."
+                        ),
+                        "state": "OPEN",
+                        "comments": [],
+                    },
+                    "106": {"state": "CLOSED"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
+    assert result["graph_member"] is False
+    assert {
+        "code": "STALE_BLOCKER_REFERENCE",
+        "message": "declared blocker #106 is already closed on GitHub",
+    } in result["drift"]
+
+
+def test_repo_issue_spec_does_not_flag_a_blocker_that_is_still_open(tmp_path: Path) -> None:
+    """A declared blocker that is still open is not a stale reference."""
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "999": {
+                        "body": (
+                            "Objective: ship it.\n"
+                            "Acceptance criteria: it works.\n"
+                            "Tests: run the gate.\n"
+                            "Blocked by: #106."
+                        ),
+                        "state": "OPEN",
+                        "comments": [],
+                    },
+                    "106": {"state": "OPEN"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = service.repo_issue_spec("demo", 999, fresh=True)
+    assert not any(item["code"] == "STALE_BLOCKER_REFERENCE" for item in result["drift"])
 
 
 def test_repo_issue_graph_produces_exactly_one_bounded_audit_event(tmp_path: Path) -> None:
