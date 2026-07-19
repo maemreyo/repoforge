@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
 from ..workspace.failure_intelligence import FailureEvidenceReadCommand, FailureIntelligenceService
 from .cancel import OperationCancelCommand, OperationCancellationRequester
-from .dto import OperationStatusView, OperationSummary
+from .dto import OperationStatusView, OperationSummary, operation_summary
 from .list import OperationListCommand, OperationLister
 from .status import OperationStatusCommand, OperationStatusReader
 
-_ACTIONS = frozenset({"get", "list", "cancel", "failure_evidence"})
+_ACTIONS = frozenset({"get", "wait", "list", "cancel", "failure_evidence"})
 
 
 def _invalid(message: str) -> RepoForgeError:
@@ -21,7 +23,7 @@ def _invalid(message: str) -> RepoForgeError:
         message,
         code=ErrorCode.OPERATION_INVALID,
         safe_next_action=(
-            "Use operation with action=get, list, cancel, or failure_evidence and only "
+            "Use operation with action=get, wait, list, cancel, or failure_evidence and only "
             "the fields valid for that action."
         ),
     )
@@ -37,6 +39,8 @@ class OperationCommand:
     limit: int = 50
     cursor: str | None = None
     failure_id: str | None = None
+    since_updated_at: str | None = None
+    timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +53,8 @@ class OperationResult:
     truncated: bool
     next_cursor: str | None
     failure_evidence: dict[str, object] | None = None
+    changed_since: bool = False
+    timed_out: bool = False
 
 
 def _poll_after(view: OperationSummary | OperationStatusView) -> float | None:
@@ -66,6 +72,29 @@ def _poll_after(view: OperationSummary | OperationStatusView) -> float | None:
         remaining = max(0, view.progress.total - view.progress.current)
         return 0.5 if remaining <= 1 else 1.0
     return 2.0
+
+
+def _eta_seconds(view: OperationSummary | OperationStatusView) -> float | None:
+    try:
+        state = OperationState(view.state)
+    except ValueError:
+        return None
+    if state in TERMINAL_OPERATION_STATES:
+        return 0.0
+    total = view.progress.total
+    current = view.progress.current
+    if total is None or total <= 0 or current <= 0 or current >= total:
+        return None
+    try:
+        started = datetime.fromisoformat(view.created_at)
+        updated = datetime.fromisoformat(view.updated_at)
+    except ValueError:
+        return None
+    elapsed_seconds = max(0.0, (updated - started).total_seconds())
+    if elapsed_seconds <= 0:
+        return None
+    remaining = total - current
+    return round((elapsed_seconds / current) * remaining, 3)
 
 
 def _cancellation_reason(view: OperationSummary | OperationStatusView) -> str | None:
@@ -96,6 +125,8 @@ def operation_evidence(view: OperationSummary | OperationStatusView) -> dict[str
         "phase": view.phase,
         "progress_current": view.progress.current,
         "progress_total": view.progress.total,
+        "progress_unit": view.progress.unit,
+        "progress_message": view.progress.message,
         "workspace_id": view.workspace_id,
         "result_reference": view.result_reference,
         "error_code": view.error_code,
@@ -103,6 +134,8 @@ def operation_evidence(view: OperationSummary | OperationStatusView) -> dict[str
         "terminal": terminal,
         "cancellation_reason": _cancellation_reason(view),
         "poll_after_seconds": _poll_after(view),
+        "suggested_poll_after_s": _poll_after(view),
+        "eta_seconds": _eta_seconds(view),
         "updated_at": view.updated_at,
     }
 
@@ -139,6 +172,45 @@ class OperationCoordinator:
                 truncated=False,
                 next_cursor=None,
                 failure_evidence=evidence,
+            )
+        if command.action == "wait":
+            if command.operation_id is None:
+                raise _invalid("operation wait requires operation_id")
+            timeout_seconds = command.timeout_seconds if command.timeout_seconds is not None else 30
+            if not 1 <= timeout_seconds <= 60:
+                raise _invalid("operation wait timeout_seconds must be between 1 and 60")
+            current = operation_summary(self.status.operations.status(command.operation_id))
+            baseline = command.since_updated_at or current.updated_at
+            terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
+            changed_since = command.since_updated_at is not None and current.updated_at != baseline
+            deadline = time.monotonic() + timeout_seconds
+            while not terminal and not changed_since:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.1, remaining))
+                current = operation_summary(self.status.operations.status(command.operation_id))
+                terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
+                changed_since = current.updated_at != baseline
+            timed_out = not terminal and not changed_since
+            return OperationResult(
+                summary=(
+                    f"Operation {command.operation_id} reached terminal state"
+                    if terminal
+                    else (
+                        f"Operation {command.operation_id} advanced"
+                        if changed_since
+                        else f"Operation {command.operation_id} wait timed out"
+                    )
+                ),
+                action="wait",
+                operation=operation_evidence(current),
+                operations=[],
+                cancellation_requested=False,
+                truncated=False,
+                next_cursor=None,
+                changed_since=changed_since,
+                timed_out=timed_out,
             )
         if command.action == "get":
             if command.operation_id is None:

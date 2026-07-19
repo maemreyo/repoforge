@@ -172,7 +172,7 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
     "workspace_pr": "Create, update, comment on, watch, or otherwise manage the workspace draft pull request.",
     "workspace_pr_evidence": "Read bounded overview, delta, check, review, comment, or failure evidence for the workspace PR.",
-    "operation": "Get, list, or request cancellation of durable background operations.",
+    "operation": "Get, wait for progress, list, cancel, or read failure evidence for durable operations.",
     "config_inspect": "Inspect accepted and active configuration, effective policy, pending changes, and runtime identity.",
     "runtime_logs_read": "Read bounded redacted audit or managed-runtime log entries with filters and cursors.",
 }
