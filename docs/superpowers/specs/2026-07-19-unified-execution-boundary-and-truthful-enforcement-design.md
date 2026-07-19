@@ -253,6 +253,11 @@ Paths are internal values and are not serialized into public results. The coordi
 ### Execution request
 
 ```python
+class CommandFailureMode(str, Enum):
+    RAISE = "raise"
+    RETURN = "return"
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
     scope: ExecutionScope
@@ -261,10 +266,11 @@ class ExecutionRequest:
     timeout_seconds: int
     output_limit: int
     artifact_paths: tuple[str, ...]
+    failure_mode: CommandFailureMode
     cancel_token: CancellationToken | None
 ```
 
-`reviewed_commands` is the closed command set used for identity and session admission. The exact argv for one process is passed only to the coordinator-owned session's `execute(argv)` method, which rejects any argv not present in this set. The model never supplies backend flags, mounts, images, devices, users, credentials, or environment values.
+`reviewed_commands` is the closed command set used for identity and session admission. The exact argv for one process is passed only to the coordinator-owned session's `execute(argv)` method, which rejects any argv not present in this set. `RAISE` preserves profile fail-stop behavior by surfacing non-zero exit status as `CommandError`; `RETURN` preserves diagnostic, ad-hoc, and hygiene behavior by returning the non-zero `CommandResult` for typed parsing. Failure mode is compiled from reviewed caller configuration and is never model-selectable. The model never supplies backend flags, mounts, images, devices, users, credentials, or environment values.
 
 ### Prepared environment session
 
@@ -293,9 +299,10 @@ class EnvironmentInspection:
     requested_policy_hash: str
     effective_policy: EffectiveExecutionPolicy
     effective_policy_hash: str
+    warnings: tuple[str, ...] = ()
 ```
 
-Inspection may perform bounded backend metadata and reviewed tool-version probes, but it must not run repository command bodies, mutate the source root, install dependencies, or create external state.
+Inspection may perform bounded backend metadata and reviewed tool-version probes, but it must not run repository command bodies, mutate the source root, install dependencies, or create external state. The coordinator merges doctor and backend inspection warnings into this bounded, deterministic field so callers can construct public evidence without reaching into the backend.
 
 ### Execution receipt
 
@@ -536,6 +543,7 @@ class EnforcementEvidence:
 @dataclass(frozen=True, slots=True)
 class ExecutionEvidence:
     adapter_kind: str
+    identity_schema_version: int
     environment_identity_hash: str
     requested_policy_hash: str
     effective_policy_hash: str
@@ -548,7 +556,7 @@ class ExecutionEvidence:
     warnings: tuple[str, ...]
 ```
 
-Every string field has a closed enum or explicit length bound. `warnings` is deterministically ordered, limited to ten entries, and each entry is bounded to 500 characters. For a completed single- or multi-command use case, `ExecutionEvidence.environment_identity_hash` comes from the final post-run inspection; per-command receipts separately retain `session_start_identity_hash` for lifecycle audit.
+Every string field has a closed enum or explicit length bound. `identity_schema_version` is a positive bounded integer and allows cache/receipt consumers to reject incompatible identity evidence without inferring schema from a hash. `warnings` is deterministically ordered, limited to ten entries, and each entry is bounded to 500 characters. For a completed single- or multi-command use case, `ExecutionEvidence.environment_identity_hash` comes from the final post-run inspection; per-command receipts separately retain `session_start_identity_hash` for lifecycle audit.
 
 Closed Forge v2 output schemas and release goldens must be updated for additive projection. Compatibility aliases must return identical execution evidence.
 
