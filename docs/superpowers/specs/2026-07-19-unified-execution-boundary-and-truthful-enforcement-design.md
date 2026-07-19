@@ -236,7 +236,6 @@ Repository tooling runs against more than one root. Formatter baseline inspectio
 class ExecutionScopeKind(str, Enum):
     WORKSPACE = "workspace"
     SNAPSHOT_READ_ONLY = "snapshot_read_only"
-    MANAGED_TEMP = "managed_temp"
 ```
 
 ```python
@@ -249,7 +248,7 @@ class ExecutionScope:
     working_directory_policy: str
 ```
 
-Paths are internal values and are not serialized into public results. The coordinator validates that `command_cwd` is inside `root`. Workspace roots have already passed repository/workspace allowlisting. Snapshot and managed-temp roots must be created by RepoForge-owned adapters, not supplied by the model.
+Paths are internal values and are not serialized into public results. The coordinator validates that `command_cwd` is inside `root`. Workspace roots have already passed repository/workspace allowlisting. Snapshot roots must be materialized by RepoForge-owned infrastructure, not supplied by the model. A generic managed-temporary scope has no consumer in this slice and is deliberately deferred rather than added speculatively.
 
 ### Execution request
 
@@ -257,7 +256,7 @@ Paths are internal values and are not serialized into public results. The coordi
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
     scope: ExecutionScope
-    commands: tuple[tuple[str, ...], ...]
+    reviewed_commands: tuple[tuple[str, ...], ...]
     requested_policy: RequestedExecutionPolicy
     timeout_seconds: int
     output_limit: int
@@ -265,7 +264,7 @@ class ExecutionRequest:
     cancel_token: CancellationToken | None
 ```
 
-`commands` contains the reviewed command set used for identity. A single execution also carries one exact argv selected from that set. The model never supplies backend flags, mounts, images, devices, users, credentials, or environment values.
+`reviewed_commands` is the closed command set used for identity and session admission. The exact argv for one process is passed only to the coordinator-owned session's `execute(argv)` method, which rejects any argv not present in this set. The model never supplies backend flags, mounts, images, devices, users, credentials, or environment values.
 
 ### Prepared environment session
 
@@ -304,7 +303,7 @@ Inspection may perform bounded backend metadata and reviewed tool-version probes
 @dataclass(frozen=True, slots=True)
 class ExecutionReceipt:
     argv: tuple[str, ...]
-    environment_identity_hash: str
+    session_start_identity_hash: str
     requested_policy_hash: str
     effective_policy_hash: str
     effective_policy: EffectiveExecutionPolicy
@@ -312,7 +311,7 @@ class ExecutionReceipt:
     artifacts: tuple[ArtifactResult, ...]
 ```
 
-The coordinator constructs this receipt from the prepared session, command result, and collected artifacts. Workspace fingerprint and mutation evidence remain in the enclosing workspace use-case result because they require Git/repository policy and differ by caller.
+The coordinator constructs this per-command receipt from the prepared session, command result, and collected artifacts. `session_start_identity_hash` is audit evidence for the environment admitted before the command; it is not the identity used for final commit eligibility. Workspace fingerprint and mutation evidence remain in the enclosing workspace use-case result because they require Git/repository policy and differ by caller.
 
 ## Environment identity version 2
 
@@ -342,7 +341,7 @@ working-directory policy hash
 
 The identity must describe effective behavior. The native adapter must no longer copy requested `offline` or `source_read` values into identity fields as though they were enforced. It records effective `host_inherited` network and `host_account_access` filesystem behavior with advisory enforcement.
 
-Unknown tool versions keep the identity incomplete and non-cacheable. They do not block execution unless the selected repository policy requires a complete environment identity.
+Unknown tool versions keep the identity incomplete and non-cacheable. This slice introduces no policy requiring complete identity, so incompleteness does not block native execution or commit when all required hashes are present and stable. A reviewed completeness requirement belongs to a later sandbox/configuration design.
 
 The version-2 identity is secret-safe and deterministic. It excludes absolute host paths, source bodies, command output bodies, raw environment values, raw credentials, backend logs, and unbounded package inventories.
 
@@ -360,6 +359,11 @@ class ExecutionEnvironmentPort(Protocol):
         session: PreparedEnvironmentSession,
         argv: tuple[str, ...],
     ) -> CommandResult: ...
+    def inspect_session(
+        self,
+        session: PreparedEnvironmentSession,
+        request: ExecutionRequest,
+    ) -> EnvironmentInspection: ...
     def collect_artifacts(
         self,
         session: PreparedEnvironmentSession,
@@ -368,9 +372,9 @@ class ExecutionEnvironmentPort(Protocol):
     def cleanup(self, session: PreparedEnvironmentSession) -> None: ...
 ```
 
-`inspect()` resolves current effective policy and identity without running repository command bodies. `prepare()` performs the same policy resolution and creates a session suitable for execution. If `enforcement_required` cannot be satisfied, both paths raise a structured policy error before command start or source/external mutation.
+`inspect()` resolves current effective policy and identity without running repository command bodies. `prepare()` performs the same policy resolution and creates a session suitable for execution. `inspect_session()` re-inspects the same prepared environment after one or more commands and before cleanup; a future persistent or ephemeral sandbox adapter must inspect that exact sandbox generation rather than a newly prepared replacement. If `enforcement_required` cannot be satisfied, inspection and preparation raise a structured policy error before command start or source/external mutation.
 
-For a stable backend and unchanged reviewed inputs, `inspect(request)` and the session returned by `prepare(request)` must produce the same identity and policy hashes. A mismatch is a backend drift error and command execution does not begin.
+For a stable backend and unchanged reviewed inputs, `inspect(request)` and the session returned by `prepare(request)` must produce the same initial identity and policy hashes. A mismatch is a backend drift error and command execution does not begin. Post-command `inspect_session()` may legitimately differ when a command changes reviewed lockfiles, manifests, toolchain state, or other identity inputs.
 
 `cleanup()` is idempotent. Cleanup failure is recorded as bounded execution evidence and can make an operation incomplete, but it does not rewrite the command result. Persistent sandbox lifecycle and restart reconciliation are deferred to a later design.
 
@@ -378,22 +382,32 @@ For a stable backend and unchanged reviewed inputs, `inspect(request)` and the s
 
 A new application service owns the shared lifecycle:
 
-```text
-ExecutionCoordinator.inspect
-  1. validate scope and request bounds
-  2. call backend doctor/inspect
-  3. verify policy resolution is allowed
-  4. return current identity and policy evidence
+```python
+class ExecutionSession(Protocol):
+    @property
+    def prepared(self) -> PreparedEnvironmentSession: ...
 
-ExecutionCoordinator.run
-  1. validate scope and request bounds
-  2. call backend doctor/prepare
-  3. verify policy resolution is allowed and stable
-  4. execute exact reviewed argv
-  5. collect declared artifacts
-  6. cleanup in finally
-  7. construct and return one typed receipt
+    def execute(self, argv: tuple[str, ...]) -> ExecutionReceipt: ...
+
+    def inspect_current(self) -> EnvironmentInspection: ...
+
+
+class ExecutionCoordinator:
+    def inspect(self, request: ExecutionRequest) -> EnvironmentInspection: ...
+
+    @contextmanager
+    def session(self, request: ExecutionRequest) -> Iterator[ExecutionSession]: ...
+
+    def run(
+        self,
+        request: ExecutionRequest,
+        argv: tuple[str, ...],
+    ) -> tuple[ExecutionReceipt, EnvironmentInspection]: ...
 ```
+
+`session()` validates the request, calls backend doctor/prepare, checks initial inspection stability, and yields a coordinator-owned wrapper. `ExecutionSession.execute()` verifies exact membership in `reviewed_commands`, invokes the port, and collects declared artifacts. `inspect_current()` delegates to `inspect_session()` for the same prepared environment. The context manager performs cleanup exactly once in `finally`.
+
+`run()` is only a single-command convenience implemented in terms of `session()`: execute one admitted argv, perform post-run inspection, then close. Multi-step callers use one context-managed session and retain fail-stop control between steps without gaining direct access to `ExecutionEnvironmentPort` or its backend session handle.
 
 Suggested location:
 
@@ -403,7 +417,7 @@ src/repoforge/application/execution/coordinator.py
 
 The coordinator does not acquire workspace locks or calculate Git fingerprints. Callers retain their existing lock scope so background operation and mutation semantics do not change.
 
-The coordinator is the only application service allowed to invoke `ExecutionEnvironmentPort`. Workspace use cases call the coordinator; adapters and Git/GitHub/runtime infrastructure may continue using their own lower-level ports for non-repository-code operations.
+The coordinator is the only application service allowed to invoke `ExecutionEnvironmentPort`. `ApplicationContext` receives a required, non-optional `ExecutionCoordinator`; the raw execution-environment port is private to coordinator/bootstrap wiring rather than an optional application dependency. Bootstrap fails closed if the coordinator cannot be constructed, and all test contexts must supply a real or recording coordinator. Existing `None` checks and raw-command fallback branches are removed. Workspace use cases call the coordinator; adapters and Git/GitHub/runtime infrastructure may continue using their own lower-level ports for non-repository-code operations.
 
 ## Caller migration
 
@@ -412,13 +426,14 @@ The coordinator is the only application service allowed to invoke `ExecutionEnvi
 `WorkspaceProfileRunner` already has the closest lifecycle. It will:
 
 1. compile a single requested policy for the reviewed profile;
-2. prepare one environment session for all profile steps;
-3. execute each reviewed step through the coordinator/session;
+2. open one coordinator-owned environment session for all profile steps;
+3. execute each reviewed step through `ExecutionSession.execute()` with existing fail-stop behavior;
 4. retain per-step failure evidence and telemetry;
-5. store the session identity and policy hashes in the final verification receipt;
-6. clean up exactly once.
+5. after the final successful step, call `inspect_current()` before cleanup;
+6. store the post-run identity and policy hashes in the final verification receipt;
+7. clean up exactly once through the context manager.
 
-Existing no-regression accepted steps remain synthetic receipts but inherit the same prepared session identity and policy hashes. They do not trigger a command.
+Existing no-regression accepted steps remain synthetic receipts but inherit the prepared session's policy evidence and do not trigger a command. They do not replace the mandatory post-run inspection. This mirrors the existing post-run workspace fingerprint: if verification updates a lockfile or manifest, the resulting receipt binds the updated state and can converge once the mutation becomes idempotent.
 
 Profiles have no reviewed network field in the current configuration model. This slice therefore assigns existing profiles a requested `public_general` intent, matching current native behavior, and reports the effective native policy as advisory `host_inherited`. Adding per-profile network policy belongs to the later sandbox/configuration design and must go through capability-delta review.
 
@@ -475,7 +490,11 @@ The formatter's current custom environment digest is replaced by the common envi
 
 `WorkspacePlanExecutor` continues to delegate execution to profile and diagnostic runners. It must stop independently synthesizing a platform/toolchain environment digest when a real execution receipt exists.
 
-Stage receipts and iteration-cache keys use the environment identity and effective policy hash returned by the delegated runner. Cache hits remain impossible for incomplete, degraded when disallowed, mutating, or final-verification stages.
+Stage receipts and iteration-cache keys use the post-run environment identity and effective policy hash returned by the delegated runner. Cache hits remain impossible for incomplete identities, enforcement-required degradation, mutating stages, or final-verification stages.
+
+Reuse admission is deliberately separate from enforcement truthfulness. The current `EnvironmentIdentity.cache_eligible` property is removed rather than extended: identity exposes structural completeness, while a typed `ReuseEligibility` decision combines completeness, stage mutability/finality, repository enforcement requirement, requested policy, effective policy, and backend capability. Network broadness is not hidden inside the identity hash.
+
+In this compatibility slice, an advisory native backend is not automatically non-reusable when the repository accepts `advisory_backend_allowed`: existing read-only iteration-cache and deterministic-failure reuse remain eligible when all current exact bindings match, the identity is complete, and the requested/effective policy hashes are identical to the stored evidence. The effective policy hash is part of every key, preventing reuse across backend or policy changes. Such a hit is reported as advisory reuse and does not claim hermeticity. A later reviewed policy may require enforced isolation and thereby disable native reuse.
 
 ### Other command paths
 
@@ -484,14 +503,14 @@ During implementation, a repository-wide search must classify every `CommandExec
 Allowed direct command users are limited to infrastructure whose command does not execute repository-controlled code, such as:
 
 ```text
-Git adapter
+Git adapter, including bounded exact-commit snapshot materialization
 GitHub CLI adapter
 runtime/tunnel process management
 reviewed executable version discovery inside an execution adapter
 onboarding host preflight
 ```
 
-Any ambiguous path is treated as repository-code execution and routed through the coordinator or explicitly documented with a negative test proving why it cannot execute repository-controlled input.
+Any ambiguous path is treated as repository-code execution and routed through the coordinator or explicitly documented with a negative test proving why it cannot execute repository-controlled input. The current hygiene gateway's direct `git archive` call is moved behind the Git repository port/adapter; archive extraction and path/byte validation may remain in hygiene, but hygiene no longer owns a raw executor.
 
 ## Public result and audit projection
 
@@ -529,7 +548,7 @@ class ExecutionEvidence:
     warnings: tuple[str, ...]
 ```
 
-Every string field has a closed enum or explicit length bound. `warnings` is deterministically ordered, limited to ten entries, and each entry is bounded to 500 characters.
+Every string field has a closed enum or explicit length bound. `warnings` is deterministically ordered, limited to ten entries, and each entry is bounded to 500 characters. For a completed single- or multi-command use case, `ExecutionEvidence.environment_identity_hash` comes from the final post-run inspection; per-command receipts separately retain `session_start_identity_hash` for lifecycle audit.
 
 Closed Forge v2 output schemas and release goldens must be updated for additive projection. Compatibility aliases must return identical execution evidence.
 
@@ -577,7 +596,7 @@ current profile target hash    == receipt profile target hash
 current config identity        == receipt config identity
 ```
 
-If identity inspection is unavailable, incomplete where completeness is required, or resolves to a different effective policy, commit fails closed and instructs the caller to rerun final verification.
+If identity inspection is unavailable or resolves to a different identity/effective policy, commit fails closed and instructs the caller to rerun final verification. Identity incompleteness alone does not block commit in this slice because no completeness requirement is introduced; it only disables cache/reuse admission.
 
 A future persistent sandbox backend may include sandbox generation/state in its identity. The commit gate therefore needs no application-contract redesign when that backend arrives.
 
@@ -599,7 +618,7 @@ No automatic fallback to native execution is permitted.
 
 ### Command failure
 
-Existing structured `CommandError` behavior, exit code, timeout classification, output bounding, redaction, retry guidance, and failure intelligence remain intact. The execution receipt may be attached as bounded failure details when a process started.
+Existing structured `CommandError` behavior, exit code, timeout classification, output bounding, redaction, retry guidance, and failure intelligence remain intact. The execution receipt may be attached as bounded failure details when a process started. Before cleanup, the coordinator attempts `inspect_current()` even after a started command fails, times out, or is cancelled; deterministic failure reuse binds to that post-attempt identity. If post-failure inspection is unavailable or incomplete, the failure remains reportable but is not reusable.
 
 ### Cancellation
 
@@ -631,9 +650,10 @@ The effective configuration and repository overview may expose these derived val
 - Environment identity schema v1 remains readable for historical evidence.
 - Newly generated identities use schema v2.
 - Verification receipts missing the new binding fields are readable but cannot satisfy a future commit after upgrade; one re-verification repairs the state.
-- Iteration-cache entries bound to schema-v1 environment identities are misses with a stable `environment_identity_schema_changed` reason.
+- Iteration-cache persistence advances to schema version 2 and adds `CacheMissReason.ENVIRONMENT_IDENTITY_SCHEMA_CHANGED`. The adapter retains a bounded legacy-key decoder, distinguishes schema-v1 envelopes from corruption, and returns that reason only when a legacy entry matches every current key dimension except the environment-identity schema/hash. Unrelated legacy entries do not mask a normal `not_found`; old records are ignored for reuse and are not rewritten in place.
 - Reusable deterministic failures bound to an old environment identity are not reused.
 - No in-place mutation of old receipt/cache records is required.
+- Commit-time inspection performs bounded tool-version probes plus lockfile, manifest, and approved-environment hashing. A server restart or operator environment change can therefore make a previously successful receipt stale even when the source fingerprint is unchanged. The actionable recovery is one fresh full verification under the current environment; this behavior is intentional and must be documented in operator guidance.
 
 ### Public contracts
 
@@ -660,6 +680,7 @@ This slice does not claim containment of native commands. It makes that limitati
 ### Pure domain tests
 
 - deterministic requested/effective policy hashes;
+- structural identity completeness and typed reuse-eligibility decisions remain separate;
 - stable enforcement serialization and bounds;
 - invalid capability combinations;
 - advisory versus enforcement-required resolution;
@@ -673,6 +694,8 @@ This slice does not claim containment of native commands. It makes that limitati
 - native timeout, output, and process cleanup are marked enforced;
 - unsupported CPU/memory/disk/PID/network-byte limits are not marked enforced;
 - prepare rejects enforcement-required isolation before process start;
+- session execution rejects argv outside the closed reviewed command set;
+- multi-step sessions prepare once, fail-stop between steps, post-inspect the same session, and clean up once;
 - execute preserves exact argv, cwd, timeout, output bounds, and cancellation;
 - cleanup is idempotent;
 - artifact collection retains escape, symlink, regular-file, and byte-limit checks.
@@ -681,12 +704,14 @@ This slice does not claim containment of native commands. It makes that limitati
 
 Use recording/failing execution-environment fakes to prove:
 
-- profile steps use the coordinator and port;
+- profile steps use one coordinator-owned multi-step session with no raw-port access;
 - diagnostic execution uses the coordinator and port;
 - ad-hoc execution uses the coordinator and port;
 - workspace formatter inspection/remediation uses the coordinator and port;
 - committed-baseline hygiene uses snapshot-read-only scope through the coordinator;
 - plan execution consumes delegated environment receipts instead of synthesizing a second identity;
+- `ApplicationContext` cannot be constructed without a coordinator and no `None` fallback reaches the raw command executor;
+- hygiene snapshot materialization reaches Git only through the Git repository port/adapter;
 - no repository-code path reaches the raw command executor.
 
 ### Workspace integrity tests
@@ -700,12 +725,15 @@ Use recording/failing execution-environment fakes to prove:
 
 ### Verification and cache tests
 
+- a profile that updates a lockfile or manifest binds post-run identity and converges after an idempotent rerun;
+- a failed command with unavailable post-failure inspection is not entered into deterministic failure reuse;
 - environment identity change invalidates commit eligibility;
 - effective policy change invalidates commit eligibility;
 - adapter kind/version change invalidates commit eligibility;
 - profile/config target change invalidates commit eligibility;
 - legacy receipt requires re-verification;
-- schema-v1 cache and deterministic-failure entries are not reused;
+- schema-v1 cache entries report `environment_identity_schema_changed`, and schema-v1 deterministic-failure entries are not reused;
+- advisory native reuse remains available only under exact requested/effective-policy and identity bindings;
 - final verification remains non-cacheable;
 - ad-hoc and iteration evidence never opens the commit gate.
 
@@ -753,13 +781,13 @@ This design intentionally unlocks, but does not absorb, the following specs:
 
 The design is complete when implementation can demonstrate all of the following:
 
-- every repository-code command path is routed through `ExecutionCoordinator` and `ExecutionEnvironmentPort`;
+- every repository-code command path is routed through a required `ExecutionCoordinator` and its private `ExecutionEnvironmentPort`;
 - no future sandbox backend can be bypassed by diagnostic, ad-hoc, formatter, hygiene, or plan execution;
 - native results explicitly report advisory host network/filesystem behavior;
 - unsupported resource limits are never represented as enforced;
 - enforcement-required policy mismatch fails before process start with no native fallback;
 - all execution-capable results and audit events carry bounded requested/effective policy evidence;
-- final verification receipts bind environment identity, effective policy, profile target, and config identity;
+- final verification receipts bind post-run environment identity, effective policy, profile target, and config identity;
 - commit rejects source, environment, policy, adapter, profile, or config drift;
 - one fresh verification replaces an incomplete legacy receipt;
 - existing strict/relaxed execution-mode behavior, exact-tree mutation invalidation, output bounds, cancellation, audit redaction, non-force push, and draft-only publication remain intact;
