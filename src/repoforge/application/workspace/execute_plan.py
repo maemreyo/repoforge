@@ -14,6 +14,7 @@ from typing import Literal
 
 from ...domain.diagnostics import DiagnosticMutability
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError
+from ...domain.execution_environment import build_execution_evidence
 from ...domain.execution_plan import (
     ExecutionPlan,
     PlanStage,
@@ -219,7 +220,7 @@ class WorkspacePlanExecutor:
             return to_data(repo.profiles[stage.target])
         return to_data(repo.diagnostics[stage.target])
 
-    def _environment_identity(self, plan: ExecutionPlan, stage: PlanStage) -> str:
+    def _execution_evidence(self, plan: ExecutionPlan, stage: PlanStage) -> dict[str, object]:
         _, repo, workspace = self.ctx.workspace(plan.workspace_id)
         if stage.kind is PlanStageKind.PROFILE:
             profile = repo.profiles[stage.target]
@@ -249,7 +250,68 @@ class WorkspacePlanExecutor:
                 read_only=diagnostic.mutability is DiagnosticMutability.READ_ONLY,
                 artifact_paths=diagnostic.artifact_paths,
             )
-        return self.ctx.execution.inspect(request).identity.identity_hash
+        inspection = self.ctx.execution.inspect(request)
+        evidence = to_data(
+            build_execution_evidence(
+                request.requested_policy,
+                inspection.identity,
+                inspection.effective_policy,
+                inspection.warnings,
+            )
+        )
+        if not isinstance(evidence, dict):
+            raise RepoForgeError(
+                "Execution evidence is not structured",
+                code=ErrorCode.CHECK_EVIDENCE_UNAVAILABLE,
+            )
+        return self._require_execution_evidence({"execution_evidence": evidence})
+
+    @staticmethod
+    def _require_execution_evidence(result: dict[str, object]) -> dict[str, object]:
+        evidence = result.get("execution_evidence")
+        if not isinstance(evidence, dict):
+            raise RepoForgeError(
+                "Delegated stage result lacks execution evidence",
+                code=ErrorCode.CHECK_EVIDENCE_UNAVAILABLE,
+            )
+        schema = evidence.get("identity_schema_version")
+        hashes = (
+            evidence.get("environment_identity_hash"),
+            evidence.get("requested_policy_hash"),
+            evidence.get("effective_policy_hash"),
+        )
+        if (
+            not isinstance(schema, int)
+            or isinstance(schema, bool)
+            or schema < 1
+            or any(not isinstance(value, str) or len(value) != 64 for value in hashes)
+        ):
+            raise RepoForgeError(
+                "Delegated stage execution evidence is incomplete",
+                code=ErrorCode.CHECK_EVIDENCE_UNAVAILABLE,
+            )
+        return evidence
+
+    @staticmethod
+    def _evidence_binding(
+        evidence: dict[str, object],
+    ) -> tuple[int, str, str, str]:
+        schema = evidence.get("identity_schema_version")
+        environment = evidence.get("environment_identity_hash")
+        requested = evidence.get("requested_policy_hash")
+        effective = evidence.get("effective_policy_hash")
+        if (
+            not isinstance(schema, int)
+            or isinstance(schema, bool)
+            or not isinstance(environment, str)
+            or not isinstance(requested, str)
+            or not isinstance(effective, str)
+        ):
+            raise RepoForgeError(
+                "Delegated stage execution evidence binding is invalid",
+                code=ErrorCode.CHECK_EVIDENCE_UNAVAILABLE,
+            )
+        return schema, environment, requested, effective
 
     def _cache_key(
         self,
@@ -258,6 +320,7 @@ class WorkspacePlanExecutor:
         dag_stage: VerificationDagStage,
         identity: WorkspaceIdentity,
         receipts_by_stage: dict[str, StageReceipt],
+        execution_evidence: dict[str, object],
     ) -> IterationCacheKey:
         _, _, workspace = self.ctx.workspace(plan.workspace_id)
         target_payload = self._target_payload(plan, stage)
@@ -274,13 +337,19 @@ class WorkspacePlanExecutor:
             }
         )
         provider_hash = _stable_digest(to_data(self.ctx.config.providers))
+        identity_schema, environment, requested, effective = self._evidence_binding(
+            execution_evidence
+        )
         return build_iteration_cache_key(
             workspace_identity=identity.workspace_fingerprint,
             declared_input_hash=identity.workspace_fingerprint,
             stage_definition_hash=dag_stage.definition_hash,
             target_identity=_stable_digest(target_payload),
             working_directory=dag_stage.working_directory,
-            environment_identity=self._environment_identity(plan, stage),
+            environment_identity=environment,
+            environment_identity_schema_version=identity_schema,
+            requested_policy_hash=requested,
+            effective_policy_hash=effective,
             toolchain_hash=toolchain_hash,
             lockfile_hash=_workspace_files_digest(
                 workspace,
@@ -391,12 +460,15 @@ class WorkspacePlanExecutor:
         failure_class: str | None,
         cache_status: StageCacheStatus = StageCacheStatus.NOT_CACHEABLE,
         result_reference: str | None = None,
-        environment_identity: str | None = None,
+        execution_evidence: dict[str, object],
         artifact_digests: tuple[ArtifactDigest, ...] | None = None,
     ) -> StageReceipt:
         post_identity = self._identity(plan.workspace_id)
         source_changed = pre_identity.workspace_fingerprint != post_identity.workspace_fingerprint
         reference = result_reference or f"stage-result-{operation_id.removeprefix('op-')}-{ordinal}"
+        identity_schema, environment, requested, effective = self._evidence_binding(
+            execution_evidence
+        )
         receipt = create_stage_receipt(
             operation_id=operation_id,
             ordinal=ordinal,
@@ -412,7 +484,10 @@ class WorkspacePlanExecutor:
             pre_identity=pre_identity,
             post_identity=post_identity,
             target_identity=stage.definition_hash,
-            environment_identity=environment_identity,
+            environment_identity_schema_version=identity_schema,
+            environment_identity=environment,
+            requested_policy_hash=requested,
+            effective_policy_hash=effective,
             status=status,
             failure_class=failure_class,
             result_reference=reference,
@@ -458,7 +533,7 @@ class WorkspacePlanExecutor:
             cacheable = dag_stage.cache_policy is CachePolicy.READ_ONLY and cache is not None
             cache_key: IterationCacheKey | None = None
             miss_reason: CacheMissReason | None = None
-            environment_identity = self._environment_identity(plan, stage)
+            preflight_evidence = self._execution_evidence(plan, stage)
             if cacheable and cache is not None:
                 cache_key = self._cache_key(
                     plan,
@@ -466,6 +541,7 @@ class WorkspacePlanExecutor:
                     dag_stage,
                     pre_identity,
                     receipts_by_stage,
+                    preflight_evidence,
                 )
                 lookup = cache.lookup(cache_key, workspace_root=workspace_root)
                 if lookup.hit and lookup.entry is not None:
@@ -482,7 +558,7 @@ class WorkspacePlanExecutor:
                         result_reference=(
                             f"cache-hit:{lookup.entry.entry_id}:{cache_key.cache_key[:16]}"
                         ),
-                        environment_identity=environment_identity,
+                        execution_evidence=preflight_evidence,
                         artifact_digests=lookup.entry.artifact_digests,
                     )
                     receipts.append(receipt)
@@ -506,7 +582,22 @@ class WorkspacePlanExecutor:
                 else None
             )
             try:
-                self._execute_stage(operation_id, plan, stage, token)
+                stage_result = self._execute_stage(operation_id, plan, stage, token)
+                delegated_evidence = self._require_execution_evidence(stage_result)
+                if cache_key is not None:
+                    delegated_key = self._cache_key(
+                        plan,
+                        stage,
+                        dag_stage,
+                        pre_identity,
+                        receipts_by_stage,
+                        delegated_evidence,
+                    )
+                    if delegated_key.cache_key != cache_key.cache_key:
+                        raise RepoForgeError(
+                            "Delegated stage execution evidence changed from cache admission",
+                            code=ErrorCode.EXECUTION_ENVIRONMENT_DRIFT,
+                        )
                 receipt = self._persist_receipt(
                     operation_id=operation_id,
                     ordinal=ordinal,
@@ -518,7 +609,7 @@ class WorkspacePlanExecutor:
                     failure_class=None,
                     cache_status=cache_status,
                     result_reference=reference,
-                    environment_identity=environment_identity,
+                    execution_evidence=delegated_evidence,
                 )
                 receipts.append(receipt)
                 receipts_by_stage[stage.stage_id] = receipt
@@ -557,7 +648,7 @@ class WorkspacePlanExecutor:
                     exc=exc,
                     pre_identity=pre_identity,
                     post_identity=post_identity,
-                    environment_identity=environment_identity,
+                    environment_identity=str(preflight_evidence["environment_identity_hash"]),
                     changed_paths=tuple(self.ctx.git.changed_paths(workspace_root, locked_repo)),
                     prior_receipts=prior_receipts,
                 )
@@ -576,7 +667,7 @@ class WorkspacePlanExecutor:
                     failure_class=evidence.failure_class.value,
                     cache_status=cache_status,
                     result_reference=f"failure:{evidence.failure_id}",
-                    environment_identity=environment_identity,
+                    execution_evidence=preflight_evidence,
                 )
                 stored_evidence = self.failure_intelligence.persist_for_workspace(
                     evidence,
