@@ -36,7 +36,6 @@ from ...application.workspace.mutate import (
     WriteMutation,
 )
 from ...config import load_config
-from ...contracts.common import ToolResponse
 from ...contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS, ToolContractSpec
 from ...domain.errors import ConfigError, WorkspaceError, operation_error_from_exception
 from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
@@ -530,7 +529,7 @@ class ForgeV2FastMCP(FastMCP[None]):
                 title=_TOOL_TITLES[name],
                 description=_TOOL_DESCRIPTIONS[name],
                 inputSchema=V2_TOOL_SPECS[name].input_model.model_json_schema(mode="validation"),
-                outputSchema=V2_TOOL_SPECS[name].output_model.model_json_schema(mode="validation"),
+                outputSchema=V2_TOOL_SPECS[name].output_schema(),
                 annotations=_tool_annotations(name),
             )
             for name in V2_TOOL_NAMES
@@ -580,7 +579,7 @@ class ForgeV2FastMCP(FastMCP[None]):
             # future shape drift fails loudly here instead of silently
             # shipping structuredContent a client cannot parse against the
             # advertised schema.
-            ToolResponse.model_validate(exc.payload)
+            spec.validate_failure_output(exc.payload)
             return CallToolResult(
                 content=[TextContent(type="text", text=str(exc))],
                 structuredContent=exc.payload,
@@ -599,7 +598,7 @@ class ForgeV2FastMCP(FastMCP[None]):
             started = time.perf_counter()
             try:
                 raw = self._dispatch(name, _dispatch_kwargs(name, validated_input))
-                validated_output = spec.validate_output(_public_output(name, raw))
+                validated_output = spec.validate_success_output(_public_output(name, raw))
                 structured = validated_output.model_dump(mode="json", by_alias=True)
             except _StructuredMcpToolError:
                 raise
@@ -672,9 +671,7 @@ def _surface_payload() -> dict[str, Any]:
                 "input_schema": V2_TOOL_SPECS[name].input_model.model_json_schema(
                     mode="validation"
                 ),
-                "output_schema": V2_TOOL_SPECS[name].output_model.model_json_schema(
-                    mode="validation"
-                ),
+                "output_schema": V2_TOOL_SPECS[name].output_schema(),
             }
             for name in V2_TOOL_NAMES
         ],

@@ -8,7 +8,6 @@ from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 from pydantic import ValidationError
 
-from repoforge.contracts.common import ToolResponse
 from repoforge.contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS
 from repoforge.interfaces.mcp.grace import (
     FORGE_V1_IDENTITY,
@@ -19,6 +18,30 @@ from repoforge.interfaces.mcp.server import (
     create_server,
     tool_surface_hash,
 )
+
+
+def _failure_payload() -> dict[str, object]:
+    return {
+        "status": "failed",
+        "summary": "Request failed",
+        "error": {
+            "code": "NOT_FOUND",
+            "message": "Repository not found",
+            "why": "The repository id is not enrolled.",
+            "retryable": False,
+            "safe_next_action": "Choose an enrolled repository.",
+            "details": {"correlation_id": "corr-1"},
+            "unchanged_state": ["No state changed."],
+            "automatic_retry_allowed": False,
+        },
+    }
+
+
+def test_every_advertised_output_schema_accepts_shared_failure() -> None:
+    for spec in V2_TOOL_SPECS.values():
+        validated = spec.validate_output(_failure_payload())
+        assert validated.status == "failed"
+        assert "anyOf" in spec.output_schema()
 
 
 @pytest.mark.anyio
@@ -38,7 +61,7 @@ async def test_forge_v2_identity_publishes_exact_authoritative_roster_and_schema
     for tool in tools:
         spec = V2_TOOL_SPECS[tool.name]
         assert tool.inputSchema == spec.input_model.model_json_schema(mode="validation")
-        assert tool.outputSchema == spec.output_model.model_json_schema(mode="validation")
+        assert tool.outputSchema == spec.output_schema()
         assert tool.annotations is not None
 
 
@@ -115,7 +138,8 @@ async def test_protocol_error_is_one_redacted_typed_envelope(
     # -- not an ad-hoc shape a client cannot validate against any advertised
     # output schema.
     assert result.structuredContent == envelope
-    ToolResponse.model_validate(envelope)
+    validated = V2_TOOL_SPECS["repo_read"].validate_output(envelope)
+    assert validated.status == "failed"
 
 
 def test_surface_hash_is_v2_identity_bound_and_version_negotiation_is_gone() -> None:

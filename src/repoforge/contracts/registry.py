@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
-from .common import StrictModel, ToolResponse
+from .common import StrictModel, ToolFailure, ToolResponse
 from .v2 import MODEL_PAIRS
 
 
@@ -18,12 +19,29 @@ class ToolContractSpec:
     name: str
     input_model: type[StrictModel]
     output_model: type[ToolResponse]
+    _output_adapter: TypeAdapter[Any] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_output_adapter",
+            TypeAdapter(self.output_model | ToolFailure),
+        )
 
     def validate_input(self, payload: Mapping[str, object]) -> BaseModel:
         return self.input_model.model_validate(payload)
 
-    def validate_output(self, payload: Mapping[str, object]) -> BaseModel:
+    def output_schema(self) -> dict[str, Any]:
+        return self._output_adapter.json_schema(mode="validation")
+
+    def validate_success_output(self, payload: Mapping[str, object]) -> ToolResponse:
         return self.output_model.model_validate(payload)
+
+    def validate_failure_output(self, payload: Mapping[str, object]) -> ToolFailure:
+        return ToolFailure.model_validate(payload)
+
+    def validate_output(self, payload: Mapping[str, object]) -> BaseModel:
+        return cast(BaseModel, self._output_adapter.validate_python(payload))
 
 
 V2_TOOL_NAMES: tuple[str, ...] = tuple(name for name, _, _ in MODEL_PAIRS)
@@ -64,7 +82,7 @@ def render_v2_schema_bundle() -> dict[str, object]:
         spec = V2_TOOL_SPECS[name]
         tools[name] = {
             "input": spec.input_model.model_json_schema(mode="validation"),
-            "output": spec.output_model.model_json_schema(mode="validation"),
+            "output": spec.output_schema(),
         }
     return {
         "contract_version": 2,

@@ -62,7 +62,7 @@ async def test_mcp_protocol_contract_and_annotations(
     for tool in tools:
         spec = V2_TOOL_SPECS[tool.name]
         assert tool.inputSchema == spec.input_model.model_json_schema(mode="validation")
-        assert tool.outputSchema == spec.output_model.model_json_schema(mode="validation")
+        assert tool.outputSchema == spec.output_schema()
         assert tool.annotations is not None
 
     by_name = {tool.name: tool for tool in tools}
