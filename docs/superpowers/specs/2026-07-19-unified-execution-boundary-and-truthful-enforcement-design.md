@@ -1,6 +1,6 @@
 # Unified Execution Boundary and Truthful Enforcement Design
 
-**Status:** Implemented on the rebuilt Forge v2 branch; pending final production gate and publication  
+**Status:** Implemented and production-verified on the rebuilt Forge v2 branch; draft-PR publication only  
 **Date:** 2026-07-19  
 **Source:** Revalidated from `ai/unified-execution-boundary-spec-dc59d003db` against Forge v2 `main` at `9f01d7c691c4891055988a582c1cf83234fd82d8`  
 **Program:** Fast, Reproducible Execution / Security and Trust

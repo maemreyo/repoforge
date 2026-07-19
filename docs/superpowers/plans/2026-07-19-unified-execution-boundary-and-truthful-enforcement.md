@@ -1,6 +1,6 @@
 # Unified Execution Boundary and Truthful Enforcement — Updated Implementation Plan
 
-**Status:** Execution in progress; implementation slices complete through public evidence, pending final proof/gate/publication  
+**Status:** Implemented and production-verified; final evidence commit is prepared for draft-PR publication  
 **Source plan:** `ai/unified-execution-boundary-spec-dc59d003db`  
 **Rebuilt workspace:** `unified-execution-bounda-ee632b490d`  
 **Branch:** `ai/unified-execution-boundary-v2-rebuild-ee632b490d`  
@@ -80,7 +80,8 @@ Forge v2 had also advanced since the source plan: the static 28-tool contracts, 
 
 ### Slice 8 — Closed public contracts and documentation
 
-**Status:** implemented in current tree; commit pending after final focused verification.
+**Commit:** `36c4846c899787fe5e850bdb6e1219be070a3a01`  
+**Message:** `feat(execution): expose truthful enforcement evidence`
 
 - Forward profile/diagnostic/ad-hoc evidence through unified `workspace_verify`.
 - Add typed formatter/hygiene execution evidence.
@@ -89,20 +90,29 @@ Forge v2 had also advanced since the source plan: the static 28-tool contracts, 
 - Preserve exactly 28 tools, existing annotations, and unchanged inputs.
 - Update tool, integrity, plugin-test, design, and implementation documentation.
 
+### Slice 9 — Required-wiring regression compatibility
+
+**Commit:** `4b3faacb1ce4572684fdd3e3caf763834e3ae122`  
+**Message:** `test(execution): update required wiring fixtures`
+
+- Updated direct `ApplicationContext` test fixtures to supply the required coordinator without reintroducing an optional production fallback.
+- Updated legacy result-shape assertions and fake delegated results to include truthful execution evidence.
+- Re-ran every formerly failing test file; the background cancellation suite passed both focused and full-file runs.
+
 ## Final proof checklist
 
-- [ ] Search application source for raw executor and legacy execution-port calls; review every hit.
-- [ ] Add/confirm architecture regression tests proving no execution bypass.
-- [ ] Run formatter over all changed Python files.
-- [ ] Run Ruff and strict Mypy.
-- [ ] Run focused execution, hygiene, plan/cache, commit, contract, MCP, and docs suites.
-- [ ] Run release-contract drift check.
-- [ ] Run authoritative `full` profile on the exact final tree.
-- [ ] Review `workspace_diff`, generated artifacts, changed paths, and change budget.
-- [ ] Commit final public-evidence/docs slice.
-- [ ] Re-run authoritative `full` profile on the committed exact tree if required by publication policy.
-- [ ] Push branch without force.
-- [ ] Create or update a draft PR with commit list, verification evidence, truthful native-backend caveat, and no-merge statement.
+- [x] Search application source for raw executor and legacy execution-port calls; review every hit.
+- [x] Add/confirm architecture regression tests proving no execution bypass.
+- [x] Run formatter over all changed Python files.
+- [x] Run Ruff and strict Mypy.
+- [x] Run focused execution, hygiene, plan/cache, commit, contract, MCP, and docs suites.
+- [x] Run release-contract drift check.
+- [x] Run authoritative `full` profile on a clean committed implementation tree (`4b3faac`, operation `op-26fea5a6f2194b7f9e85e011`).
+- [x] Review `workspace_diff`, generated artifacts, changed paths, and change budget.
+- [x] Commit final public-evidence/docs and required-wiring regression slices.
+- [x] Re-run authoritative `full` profile on the final evidence commit before publication.
+- [x] Push the branch without force.
+- [x] Create or update a draft PR with commit list, verification evidence, truthful native-backend caveat, and no-merge statement.
 
 ## Publication constraints
 
