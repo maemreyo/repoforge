@@ -208,6 +208,32 @@ def test_identity_safe_kill_rechecks_after_opening_atomic_handle(
         os.close(write_fd)
 
 
+def test_wait_identities_gone_handles_delayed_terminal_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = process_tree.ProcessIdentity(pid=123, ppid=12, start_token="same-start")
+    checks = 0
+
+    def still_current(identity: process_tree.ProcessIdentity) -> bool:
+        nonlocal checks
+        checks += 1
+        return checks == 1
+
+    monkeypatch.setattr(process_tree, "identity_is_current", still_current)
+
+    assert process_tree.wait_identities_gone((captured,), timeout=0.1) == ()
+    assert checks == 2
+
+
+def test_wait_identities_gone_returns_survivors_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = process_tree.ProcessIdentity(pid=123, ppid=12, start_token="same-start")
+    monkeypatch.setattr(process_tree, "identity_is_current", lambda identity: True)
+
+    assert process_tree.wait_identities_gone((captured,), timeout=0) == (captured,)
+
+
 def test_timeout_rescans_descendants_and_reports_inspection_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

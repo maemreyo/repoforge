@@ -218,6 +218,27 @@ def identity_is_current(identity: ProcessIdentity) -> bool:
     )
 
 
+def wait_identities_gone(
+    identities: tuple[ProcessIdentity, ...],
+    *,
+    timeout: float = 1.0,
+    poll_interval: float = 0.01,
+) -> tuple[ProcessIdentity, ...]:
+    """Wait under one shared deadline for captured processes to become non-live."""
+
+    pending = list(identities[:_MAX_PROCESSES])
+    deadline = time.monotonic() + max(0.0, timeout)
+    while pending:
+        pending = [identity for identity in pending if identity_is_current(identity)]
+        if not pending:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(max(0.001, poll_interval), remaining))
+    return tuple(pending)
+
+
 def _pidfd_open(pid: int) -> int | None:
     opener = getattr(os, "pidfd_open", None)
     if opener is None:

@@ -15,7 +15,7 @@ from ...domain.errors import CommandError, ErrorCode
 from ...domain.redaction import redact_text
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
-from .process_tree import inspect_descendants, kill_identity
+from .process_tree import inspect_descendants, kill_identity, wait_identities_gone
 
 
 class SubprocessCommandExecutor:
@@ -137,9 +137,12 @@ class SubprocessCommandExecutor:
                         *post_snapshot.identities,
                     )
                 }
-                signalled = sum(
-                    kill_identity(descendant, signal.SIGKILL) for descendant in descendants.values()
+                signalled_identities = tuple(
+                    descendant
+                    for descendant in descendants.values()
+                    if kill_identity(descendant, signal.SIGKILL)
                 )
+                survivors = wait_identities_gone(signalled_identities)
                 raise CommandError(
                     f"Command timed out after {timeout}s: {' '.join(argv)}",
                     code=ErrorCode.COMMAND_TIMEOUT,
@@ -152,7 +155,8 @@ class SubprocessCommandExecutor:
                             f"pre:{pre_snapshot.diagnostic};post:{post_snapshot.diagnostic}"
                         ),
                         "descendant_snapshot_count": len(descendants),
-                        "descendant_signal_count": signalled,
+                        "descendant_signal_count": len(signalled_identities),
+                        "descendant_survivor_count": len(survivors),
                     },
                 ) from exc
         finally:
