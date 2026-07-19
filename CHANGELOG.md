@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.2.0 — 2026-07-19
+
 - Integrated the pre-cutover execution-plan and failure-intelligence machinery into the static 28-tool surface instead of dropping it: `workspace_verify.mode = "plan"` gained a `plan_action = "create" | "accept" | "execute"` lifecycle for the immutable multi-stage DAG, and `operation` gained a `failure_evidence` action for exact, content-addressed failure lookup by `failure_id`. No tool was added or renamed.
 - `repo_list` now performs deterministic repository selection (`requested_repo` hint, `exact_match` / `single_enrolled` / `input_required` / `no_match` outcomes) with a capability-independent `selection_prompt` fallback, instead of leaving ambiguous multi-repo selection to the caller.
 - GitHub ticket-graph evidence completeness is now reported per capability (`issue`, `sub_issues`, `comments`, `dependencies`, `project_overlay`) instead of one blanket `evidence_complete` flag, so callers can tell exactly which GitHub read is incomplete; `repo_issue_spec` skips metadata drift comparison for an issue whose own `issue` capability is incomplete rather than comparing against a possibly-defaulted status/priority.

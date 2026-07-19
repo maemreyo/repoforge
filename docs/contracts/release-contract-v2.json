@@ -162,7 +162,7 @@
     "tool_schema_bundle_sha256": "0457c208c62b2b0ca6b756a5694e2be37b16e0f62f9a90caf8c4d2adcefedc67",
     "tool_surface_hash": "755547e9f8e49ce0e2185a2d20681eeeb6aaa2721f33252ac4da414fd9191e2b"
   },
-  "package_version": "2.1.0",
+  "package_version": "2.2.0",
   "runtime": {
     "control_protocol_version": 1,
     "diagnostics_schema_version": 1
