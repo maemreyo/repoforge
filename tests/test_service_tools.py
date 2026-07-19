@@ -981,6 +981,28 @@ def test_stale_locks_and_verification_invalidation(forge_env: ForgeEnvironment) 
         service.workspace_restore_paths(workspace_id, ["hello.txt"], stale)
 
 
+def test_commit_rejects_execution_environment_drift(forge_env: ForgeEnvironment) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "execution drift")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed before execution drift\n",
+        current["sha256"],
+    )
+    service.workspace_run_profile(workspace_id)
+    record = service.state.load(workspace_id)
+    assert record.last_verification is not None
+    record.last_verification.environment_identity_hash = "0" * 64
+    service.state.save(record)
+
+    with pytest.raises(WorkspaceError) as excinfo:
+        service.workspace_commit(workspace_id, "Should reject execution drift")
+
+    assert excinfo.value.code is ErrorCode.EXECUTION_ENVIRONMENT_DRIFT
+
+
 def test_commit_failure_reports_stage_and_invalidates_mutated_verified_tree(
     forge_env: ForgeEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:

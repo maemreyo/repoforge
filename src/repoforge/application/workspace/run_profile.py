@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
+from ...domain.execution_environment import build_execution_evidence
 from ...domain.operation_task import OperationRetryability, OperationState
 from ...domain.policy import normalize_relative_path
 from ...domain.retry_guidance import (
@@ -125,6 +126,7 @@ class WorkspaceRunProfileResult:
     business_tests_ran: bool
     valid_tdd_red_evidence: bool
     hygiene_receipt: dict[str, object] | None
+    execution_evidence: dict[str, object]
     working_directory: str | None = None
 
 
@@ -533,6 +535,9 @@ class WorkspaceProfileRunner:
 
             timeout = profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
             environment_hash: str | None = None
+            requested_policy_hash = ""
+            effective_policy_hash = ""
+            execution_evidence_data: dict[str, object] = {}
             hygiene_receipt_data: dict[str, object] | None = None
 
             def accepted_no_regression_step(
@@ -638,7 +643,17 @@ class WorkspaceProfileRunner:
                             (time.monotonic() - run_started) * 1_000,
                         )
                     )
-                session.inspect()
+                inspection = session.inspect()
+                requested_policy_hash = inspection.requested_policy_hash
+                effective_policy_hash = inspection.effective_policy_hash
+                execution_evidence_data = to_data(
+                    build_execution_evidence(
+                        execution_request.requested_policy,
+                        inspection.identity,
+                        inspection.effective_policy,
+                        inspection.warnings,
+                    )
+                )
                 results = [receipt.result for receipt in receipts]
             _ = self.ctx.git.changed_paths(path, repo)
             metrics = self.ctx.git.enforce_change_budget(path, repo)
@@ -658,13 +673,16 @@ class WorkspaceProfileRunner:
             )
             if profile.verification:
                 fresh.last_verification = VerificationReceipt(
-                    profile.name,
-                    fp,
-                    self.ctx.clock.now_iso(),
-                    [self.receipt(r) for r in results],
-                    environment_hash,
-                    command_source_dirty,
-                    list(command_source_dirty_paths),
+                    profile=profile.name,
+                    fingerprint=fp,
+                    completed_at=self.ctx.clock.now_iso(),
+                    commands=[self.receipt(r) for r in results],
+                    environment_identity_hash=environment_hash,
+                    command_source_dirty=command_source_dirty,
+                    command_source_dirty_paths=list(command_source_dirty_paths),
+                    requested_policy_hash=requested_policy_hash,
+                    effective_policy_hash=effective_policy_hash,
+                    execution_evidence=execution_evidence_data,
                 )
                 self.ctx.store.save(fresh)
             elif cleared_retry_history or cleared_reuse_history:
@@ -702,6 +720,7 @@ class WorkspaceProfileRunner:
                 ),
                 valid_tdd_red_evidence=False,
                 hygiene_receipt=hygiene_receipt_data,
+                execution_evidence=execution_evidence_data,
             )
 
         audit_details: dict[str, object] = {
