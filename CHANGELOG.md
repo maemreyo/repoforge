@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-- Added durable per-step background profile progress and an additive `operation.action = "wait"` long-poll mode. Step start/completion updates expose bounded liveness evidence; wait wakes on progress or terminal state, caps `timeout_seconds` at 60, returns typed timeout evidence instead of an empty poll, and publishes `suggested_poll_after_s`, progress unit/message, and ETA when computable. Acceptance coverage reaches terminal state in at most five non-empty wait calls.
-
 ## 2.2.0 — 2026-07-19
 
 - Integrated the pre-cutover execution-plan and failure-intelligence machinery into the static 28-tool surface instead of dropping it: `workspace_verify.mode = "plan"` gained a `plan_action = "create" | "accept" | "execute"` lifecycle for the immutable multi-stage DAG, and `operation` gained a `failure_evidence` action for exact, content-addressed failure lookup by `failure_id`. No tool was added or renamed.
