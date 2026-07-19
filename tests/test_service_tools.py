@@ -669,6 +669,8 @@ def test_v2_workspace_format_changed_reports_changed_and_noop_evidence(
     assert changed["changed"] is True
     assert changed["formatters"][0]["outcome"] == "changed"
     assert changed["formatters"][0]["changed_paths"] == ["hello.txt"]
+    assert changed["execution_evidence"]["requested_network"] == "offline"
+    assert changed["execution_evidence"]["effective_network"] == "host_inherited"
     noop = service.workspace_format_changed_v2(
         workspace_id,
         changed["workspace_fingerprint"],
@@ -823,6 +825,7 @@ def test_run_profile_default_and_workspace_verify_profile_share_execution_contra
     assert consolidated["outcome"] == "passed"
     assert consolidated["satisfies_commit_gate"] is True
     assert consolidated["assessment"]["final_profile"] == canonical["profile"]
+    assert consolidated["execution_evidence"] == canonical["execution_evidence"]
     assert len(consolidated["commands"]) == len(canonical["commands"])
     for verify_command, canonical_command in zip(
         consolidated["commands"], canonical["commands"], strict=True

@@ -445,6 +445,8 @@ def test_execution_request_compilers_preserve_surface_semantics(tmp_path: Path) 
         "src/repoforge/application/workspace/run_profile.py",
         "src/repoforge/application/workspace/run_diagnostic.py",
         "src/repoforge/application/workspace/run_adhoc.py",
+        "src/repoforge/application/workspace/execute_plan.py",
+        "src/repoforge/application/workspace/format_changed.py",
     ],
 )
 def test_repository_runners_do_not_bypass_execution_coordinator(

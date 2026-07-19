@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from ...application.execution.coordinator import ExecutionCoordinator
 from ...application.execution.requests import hygiene_execution_request
 from ...domain.errors import CommandError, SecurityError, WorkspaceError
+from ...domain.execution_environment import build_execution_evidence
 from ...domain.hygiene import FormatterPolicy, HygieneFinding, HygieneParserKind
 from ...ports.command import CommandResult
 from ...ports.hygiene import HygieneFormatReceipt, HygieneInspection
@@ -81,14 +82,26 @@ class CommandHygieneGateway:
         )
         if not resolved_paths:
             inspection = self._execution.inspect(request)
-            return HygieneInspection((), inspection.identity.identity_hash, "", False)
+            evidence = build_execution_evidence(
+                request.requested_policy,
+                inspection.identity,
+                inspection.effective_policy,
+                inspection.warnings,
+            )
+            return HygieneInspection((), inspection.identity.identity_hash, "", False, evidence)
         for relative in resolved_paths:
             candidate = root / relative
             if candidate.is_symlink() or not candidate.is_file():
                 raise SecurityError(f"Formatter input is not a regular file: {relative}")
         with self._execution.prepare(request) as session:
             receipt = session.execute(argv)
-            session.inspect()
+            inspection = session.inspect()
+        evidence = build_execution_evidence(
+            request.requested_policy,
+            inspection.identity,
+            inspection.effective_policy,
+            inspection.warnings,
+        )
         result = receipt.result
         if policy.parser is HygieneParserKind.RUFF_FORMAT:
             findings = self._parse_ruff_format(result)
@@ -99,6 +112,7 @@ class CommandHygieneGateway:
             receipt.session_start_identity_hash,
             result.combined,
             result.stdout_truncated or result.stderr_truncated,
+            evidence,
         )
 
     @staticmethod
@@ -214,14 +228,26 @@ class CommandHygieneGateway:
         )
         if not resolved_paths:
             inspection = self._execution.inspect(request)
-            return HygieneFormatReceipt(inspection.identity.identity_hash, "", False)
+            evidence = build_execution_evidence(
+                request.requested_policy,
+                inspection.identity,
+                inspection.effective_policy,
+                inspection.warnings,
+            )
+            return HygieneFormatReceipt(inspection.identity.identity_hash, "", False, evidence)
         for relative in resolved_paths:
             candidate = workspace / relative
             if candidate.is_symlink() or not candidate.is_file():
                 raise SecurityError(f"Formatter input is not a regular file: {relative}")
         with self._execution.prepare(request) as session:
             receipt = session.execute(argv)
-            session.inspect()
+            inspection = session.inspect()
+        evidence = build_execution_evidence(
+            request.requested_policy,
+            inspection.identity,
+            inspection.effective_policy,
+            inspection.warnings,
+        )
         result = receipt.result
         if result.returncode != 0:
             raise CommandError(
@@ -232,4 +258,5 @@ class CommandHygieneGateway:
             receipt.session_start_identity_hash,
             result.combined,
             result.stdout_truncated or result.stderr_truncated,
+            evidence,
         )
