@@ -43,6 +43,7 @@ class SyntaxDiagnostics:
     analyzed_paths: tuple[str, ...] = ()
     unknown_paths: tuple[str, ...] = ()
     truncated: bool = False
+    legacy_receipt: bool = False
 
     def __post_init__(self) -> None:
         if len(self.diagnostics) > MAX_SYNTAX_DIAGNOSTICS:
@@ -52,12 +53,21 @@ class SyntaxDiagnostics:
         if tuple(sorted(set(self.unknown_paths))) != self.unknown_paths:
             raise ValueError("unknown paths must be sorted and unique")
         if self.state is SyntaxDiagnosticState.OK:
-            if self.parse_ok is not True or self.diagnostics or self.unknown_paths:
+            if (
+                self.parse_ok is not True
+                or self.diagnostics
+                or self.unknown_paths
+                or self.legacy_receipt
+            ):
                 raise ValueError("ok syntax evidence must be complete and error-free")
         elif self.state is SyntaxDiagnosticState.ERROR:
-            if self.parse_ok is not False or not self.diagnostics:
+            if self.parse_ok is not False or not self.diagnostics or self.legacy_receipt:
                 raise ValueError("error syntax evidence requires diagnostics")
-        elif self.parse_ok is not None or self.diagnostics or not self.unknown_paths:
+        elif (
+            self.parse_ok is not None
+            or self.diagnostics
+            or (not self.unknown_paths and not self.legacy_receipt)
+        ):
             raise ValueError("unknown syntax evidence requires unresolved paths only")
 
 
