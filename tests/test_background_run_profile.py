@@ -100,6 +100,33 @@ def _add_slow_profile(env: ForgeEnvironment) -> None:
     env.config_path.write_text(text + _SLOW_PROFILE_TOML, encoding="utf-8")
 
 
+def _add_progress_profile(env: ForgeEnvironment, release: Path) -> None:
+    first = ["python3", "-c", "print('first step complete')"]
+    wait_script = (
+        "import time; from pathlib import Path; "
+        f"release = Path({str(release)!r}); "
+        'exec("while not release.exists():\\n    time.sleep(0.01)")'
+    )
+    second = ["python3", "-c", wait_script]
+    profile = (
+        "\n[repositories.demo.profiles.progress]\n"
+        'description = "Expose intermediate background progress"\n'
+        "verification = true\n"
+        f"commands = {json.dumps([first, second])}\n"
+        "timeout_seconds = 30\n"
+        "\n[[repositories.demo.profiles.progress.steps]]\n"
+        'id = "lint"\n'
+        'kind = "static_analysis"\n'
+        f"command = {json.dumps(first)}\n"
+        "\n[[repositories.demo.profiles.progress.steps]]\n"
+        'id = "tests"\n'
+        'kind = "business_tests"\n'
+        f"command = {json.dumps(second)}\n"
+    )
+    text = env.config_path.read_text(encoding="utf-8")
+    env.config_path.write_text(text + profile, encoding="utf-8")
+
+
 def _add_counting_failure_profile(env: ForgeEnvironment, counter: Path) -> None:
     script = (
         "from pathlib import Path; import sys; "
@@ -378,6 +405,55 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
     receipt = service.workspace_status(workspace_id)["last_verification"]
     assert receipt is not None
     assert receipt["profile"] == "slow"
+
+
+def test_background_profile_emits_observable_per_step_progress(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release-progress-step"
+    _add_progress_profile(forge_env, release)
+    service = _reload_service(forge_env)
+    workspace_id = service.workspace_create("demo", "background progress")["workspace_id"]
+
+    admission = service.workspace_run_profile(workspace_id, "progress", background=True)
+    operation_id = admission["operation_id"]
+
+    def second_step_running() -> dict[str, object] | None:
+        status = service.operation_status(operation_id)
+        progress = status.get("progress")
+        if not isinstance(progress, dict):
+            return None
+        message = progress.get("message")
+        if (
+            status["state"] == "running"
+            and status.get("phase") == "running"
+            and progress.get("current") == 1
+            and progress.get("total") == 2
+            and progress.get("unit") == "steps"
+            and isinstance(message, str)
+            and "business_tests" in message
+            and "step 2/2" in message
+        ):
+            return status
+        return None
+
+    observed = _poll(second_step_running)
+    assert observed["updated_at"] != observed["created_at"]
+
+    release.write_text("continue\n", encoding="utf-8")
+
+    def terminal() -> dict[str, object] | None:
+        status = service.operation_status(operation_id)
+        return status if status["state"] in {"succeeded", "failed", "cancelled"} else None
+
+    final = _poll(terminal)
+    assert final["state"] == "succeeded"
+    progress = final["progress"]
+    assert isinstance(progress, dict)
+    assert progress["current"] == 2
+    assert progress["total"] == 2
+    assert progress["unit"] == "steps"
 
 
 def test_background_submit_raising_releases_lock_and_fails_the_operation(
