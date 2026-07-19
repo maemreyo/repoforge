@@ -41,11 +41,12 @@ def _parse_linux_stat(value: str) -> ProcessIdentity | None:
     try:
         pid = int(value[:name_start].strip())
         fields = value[name_end + 1 :].split()
+        state = fields[0]
         ppid = int(fields[1])
         start_token = fields[19]
     except (IndexError, ValueError):
         return None
-    if pid <= 0 or ppid < 0 or not start_token:
+    if pid <= 0 or ppid < 0 or not start_token or state == "Z":
         return None
     return ProcessIdentity(pid=pid, ppid=ppid, start_token=start_token)
 
@@ -235,6 +236,23 @@ def _pidfd_send_signal(fd: int, sig: int) -> bool:
         sender(fd, sig, None, 0)
     except OSError:
         return False
+    return True
+
+
+def atomic_process_signalling_available() -> bool:
+    """Return whether this host can bind and signal one exact process object."""
+
+    if not sys.platform.startswith("linux"):
+        return False
+    if not callable(getattr(os, "pidfd_open", None)) or not callable(
+        getattr(signal, "pidfd_send_signal", None)
+    ):
+        return False
+    fd = _pidfd_open(os.getpid())
+    if fd is None:
+        return False
+    with contextlib.suppress(OSError):
+        os.close(fd)
     return True
 
 

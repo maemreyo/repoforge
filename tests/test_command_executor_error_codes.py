@@ -110,6 +110,9 @@ def test_timeout_cleanup_kills_a_descendant_that_escaped_the_process_group(
     blocked, which is *why* the overall command timed out). The cleanup path
     must sweep such escaped descendants directly by PID, not only killpg the
     group (#225 round-3 review: reproduced a surviving grandchild)."""
+    if not process_tree.atomic_process_signalling_available():
+        pytest.skip("atomic descendant signalling is unavailable on this host")
+
     executor = _executor(tmp_path)
     script = tmp_path / "daemonize.py"
     pid_file = tmp_path / "escaped.pid"
@@ -315,6 +318,15 @@ def test_linux_stat_parser_handles_parentheses_in_process_name() -> None:
         pid=123,
         ppid=42,
         start_token="123456",
+    )
+
+
+def test_linux_stat_parser_treats_zombie_as_not_live() -> None:
+    fields_after_name = ["Z", "42", *("0" for _ in range(17)), "123456", "0"]
+
+    assert (
+        process_tree._parse_linux_stat(f"123 (finished worker) {' '.join(fields_after_name)}")
+        is None
     )
 
 
