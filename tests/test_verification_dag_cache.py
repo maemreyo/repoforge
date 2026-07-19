@@ -136,6 +136,9 @@ def _cache_key(stage: VerificationDagStage, **overrides: object):
         "target_identity": "c" * 64,
         "working_directory": ".",
         "environment_identity": "d" * 64,
+        "environment_identity_schema_version": 2,
+        "requested_policy_hash": "5" * 64,
+        "effective_policy_hash": "6" * 64,
         "toolchain_hash": "e" * 64,
         "lockfile_hash": "f" * 64,
         "config_generation": "1" * 64,
@@ -215,6 +218,9 @@ def test_cache_key_changes_for_every_compatibility_dimension() -> None:
         "target_identity": "6" * 64,
         "working_directory": "src",
         "environment_identity": "5" * 64,
+        "environment_identity_schema_version": 3,
+        "requested_policy_hash": "7" * 64,
+        "effective_policy_hash": "8" * 64,
         "toolchain_hash": "0" * 64,
         "lockfile_hash": "a" * 64,
         "config_generation": "b" * 64,
@@ -227,6 +233,74 @@ def test_cache_key_changes_for_every_compatibility_dimension() -> None:
         changed = _cache_key(stage, **{field: value})
         assert changed.cache_key != baseline.cache_key, field
     assert _cache_key(stage) == baseline
+
+
+def _write_legacy_v1_cache_record(
+    store: JsonIterationCache,
+    current_key: object,
+    *,
+    stage_definition_hash: str | None = None,
+) -> None:
+    key = current_key
+    legacy_key = {
+        "cache_key": "9" * 64,
+        "workspace_identity": key.workspace_identity,
+        "declared_input_hash": key.declared_input_hash,
+        "stage_definition_hash": stage_definition_hash or key.stage_definition_hash,
+        "target_identity": key.target_identity,
+        "working_directory": key.working_directory,
+        "environment_identity": "0" * 64,
+        "toolchain_hash": key.toolchain_hash,
+        "lockfile_hash": key.lockfile_hash,
+        "config_generation": key.config_generation,
+        "policy_hash": key.policy_hash,
+        "provider_hash": key.provider_hash,
+        "network_policy": key.network_policy,
+        "dependency_receipt_hashes": list(key.dependency_receipt_hashes),
+        "schema_version": 1,
+    }
+    record_id = "cache-" + "9" * 24
+    envelope = {
+        "payload": {
+            "artifact_digests": [],
+            "created_at": "2026-07-17T00:00:00+00:00",
+            "entry_id": record_id,
+            "key": legacy_key,
+            "schema_version": 1,
+            "source_receipt_id": "receipt-" + "8" * 24,
+        },
+        "record_id": record_id,
+        "revision": 1,
+        "schema_version": 1,
+    }
+    (store.root / f"{record_id}.json").write_text(json.dumps(envelope), encoding="utf-8")
+
+
+def test_legacy_v1_cache_reports_environment_schema_change_only_when_compatible(
+    tmp_path: Path,
+) -> None:
+    store = JsonIterationCache(tmp_path / "state", FcntlLockManager(tmp_path / "locks"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    key = _cache_key(_dag_stage("cache"))
+    _write_legacy_v1_cache_record(store, key)
+
+    compatible = store.lookup(key, workspace_root=workspace)
+
+    assert compatible.hit is False
+    assert compatible.reason is CacheMissReason.ENVIRONMENT_IDENTITY_SCHEMA_CHANGED
+
+    unrelated = JsonIterationCache(
+        tmp_path / "other-state", FcntlLockManager(tmp_path / "other-locks")
+    )
+    _write_legacy_v1_cache_record(
+        unrelated,
+        key,
+        stage_definition_hash="7" * 64,
+    )
+    miss = unrelated.lookup(key, workspace_root=workspace)
+    assert miss.hit is False
+    assert miss.reason is CacheMissReason.NOT_FOUND
 
 
 def test_iteration_cache_hit_miss_artifact_integrity_corruption_and_eviction(
@@ -366,7 +440,12 @@ def test_plan_executor_reuses_only_read_only_iteration_stage_and_always_runs_fin
     first = service.workspace_execute_plan(workspace_id, plan["plan_id"], through="iteration")
     runner.run(first["operation_id"])
     first_result = service.operation_status(first["operation_id"])["result"]
-    assert first_result["stage_receipts"][0]["cache_status"] == "miss"
+    first_receipt = first_result["stage_receipts"][0]
+    assert first_receipt["cache_status"] == "miss"
+    assert first_receipt["schema_version"] == 2
+    assert first_receipt["environment_identity_schema_version"] == 2
+    assert len(first_receipt["requested_policy_hash"]) == 64
+    assert len(first_receipt["effective_policy_hash"]) == 64
     diagnostic_runs = _audit_count(forge_env, "workspace_run_diagnostic")
 
     second = service.workspace_execute_plan(workspace_id, plan["plan_id"], through="iteration")

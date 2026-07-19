@@ -24,6 +24,11 @@ clean installed-package smoke check rather than trusting a stale generated list.
 6. **No residue.** Temporary caches, coverage data, build output, and installation state
    live below a disposable temporary root. A clean production run must not change the
    checkout.
+7. **Truthful execution binding.** Verification evidence records requested policy separately
+   from effective backend behavior and binds the environment identity plus requested/effective
+   policy hashes. Commit re-inspects the current backend and rejects toolchain, adapter, policy,
+   or configuration drift even when workspace bytes are unchanged. Native host execution is
+   advisory for network/filesystem isolation and unsupported resource controls are explicit.
 
 ## Scope and exclusions
 
@@ -49,6 +54,8 @@ include the reviewed `pyproject.toml` and `uv.lock` diff. Generated distribution
 committed as evidence; CI or the local gate recreates them from the reviewed tree.
 
 A failure at any stage is authoritative. Do not regenerate expected data merely to make
-the gate green. Diagnose whether the source, lockfile, contract, test, build, permission,
+the gate green. Generated contract files may be updated only after reviewing that tool count,
+tool names, annotations, runtime protocol, and all input schemas remain stable and that output
+changes are intentional, bounded, and closed. Diagnose whether the source, lockfile, contract, test, build, permission,
 or clean-tree invariant changed, then make a reviewed correction and rerun the complete
 gate on the new exact tree.

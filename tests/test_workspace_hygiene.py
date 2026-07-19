@@ -10,11 +10,13 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, git
 
+from repoforge.adapters.execution.native import NativeReviewedAdapter
 from repoforge.adapters.hygiene import CommandHygieneGateway
 from repoforge.adapters.locking import FcntlLockManager
 from repoforge.adapters.persistence.json_hygiene_cache import JsonHygieneBaselineCache
 from repoforge.adapters.subprocess import SubprocessCommandExecutor
 from repoforge.application.configuration.document import render_resolved
+from repoforge.application.execution.coordinator import ExecutionCoordinator
 from repoforge.application.service import CodingService
 from repoforge.application.workspace.hygiene_common import select_policy_paths
 from repoforge.config import ServerConfig, load_config
@@ -327,7 +329,8 @@ def _command_gateway(tmp_path: Path) -> CommandHygieneGateway:
         state_root=tmp_path / "state",
         path_prefixes=("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"),
     )
-    return CommandHygieneGateway(SubprocessCommandExecutor(server))
+    executor = SubprocessCommandExecutor(server)
+    return CommandHygieneGateway(ExecutionCoordinator(NativeReviewedAdapter(executor)))
 
 
 def test_exact_base_inspection_uses_commit_archive_and_ignores_dirty_clone(
@@ -369,7 +372,9 @@ class _ArchiveExecutor:
         return {}
 
     def run(self, *args: object, **kwargs: object) -> CommandResult:
-        raise AssertionError("unsafe archive must fail before formatter execution")
+        del kwargs
+        argv = tuple(str(item) for item in args[0])
+        return CommandResult(argv, ".", 0, "git version 2.50.0", "")
 
     def run_bytes(self, *args: object, **kwargs: object) -> bytes:
         return self.archive
@@ -405,7 +410,8 @@ def test_exact_base_archive_rejects_unsafe_or_non_regular_entries(
     name: str,
     entry_type: bytes,
 ) -> None:
-    gateway = CommandHygieneGateway(_ArchiveExecutor(_tar_entry(name, entry_type=entry_type)))
+    executor = _ArchiveExecutor(_tar_entry(name, entry_type=entry_type))
+    gateway = CommandHygieneGateway(ExecutionCoordinator(NativeReviewedAdapter(executor)))
 
     with pytest.raises(SecurityError):
         gateway.inspect_base(
@@ -415,6 +421,14 @@ def test_exact_base_archive_rejects_unsafe_or_non_regular_entries(
             ("safe.py",),
             max_archive_bytes=1_000_000,
         )
+
+
+def test_hygiene_gateway_has_no_raw_command_executor_bypass() -> None:
+    source = Path("src/repoforge/adapters/hygiene/command.py").read_text(encoding="utf-8")
+
+    assert "CommandExecutor" not in source
+    assert "self._executor.run(" not in source
+    assert "self._executor.run_bytes(" not in source
 
 
 def _cache_key() -> HygieneCacheKey:

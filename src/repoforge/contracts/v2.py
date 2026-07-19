@@ -16,6 +16,7 @@ from .common import (
     CommitSummary,
     Cursor,
     DiffFile,
+    ExecutionEvidenceModel,
     Freshness,
     GitObjectId,
     GitRef,
@@ -653,6 +654,7 @@ class WorkspaceFormatChangedOutput(ToolResponse):
     changed: bool
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
+    execution_evidence: ExecutionEvidenceModel | None = None
 
 
 class WorkspaceReadInput(StrictModel):
@@ -1028,6 +1030,7 @@ class WorkspaceVerifyOutput(ToolResponse):
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
     plan: ExecutionPlanEvidence | None = None
+    execution_evidence: ExecutionEvidenceModel | None = None
 
 
 class ShippingChangeLimits(StrictModel):

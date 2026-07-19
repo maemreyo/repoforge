@@ -65,10 +65,16 @@ commands = [["python", "-c", "from pathlib import Path; assert Path('hello.txt')
     assert workspace_path.joinpath("hello.txt").stat().st_mode & 0o777 == 0o755
     verified = service.workspace_run_profile(workspace_id, "full")
     assert verified["satisfies_commit_gate"] is True
+    assert verified["execution_evidence"]["requested_network"] == "offline"
+    assert verified["execution_evidence"]["effective_network"] == "host_inherited"
+    assert verified["execution_evidence"]["enforcement"]["network"] == "advisory"
     receipt = service.state.load(workspace_id).last_verification
     assert receipt is not None
     assert receipt.environment_identity_hash is not None
     assert len(receipt.environment_identity_hash) == 64
+    assert len(receipt.requested_policy_hash) == 64
+    assert len(receipt.effective_policy_hash) == 64
+    assert receipt.execution_evidence["effective_filesystem"] == "host_account_access"
     committed = service.workspace_commit(workspace_id, "Change greeting")
     assert committed["head_sha"] != created["head_sha"]
     service.workspace_push(workspace_id)

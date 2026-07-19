@@ -22,7 +22,6 @@ from ..ports import (
     CodeIntelligenceProvider,
     CommandExecutor,
     ExecutableLocator,
-    ExecutionEnvironmentPort,
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
     ExecutionReceiptStore,
@@ -49,6 +48,7 @@ from ..ports import (
     WorkspaceStore,
 )
 from .dto import to_data
+from .execution.coordinator import ExecutionCoordinator
 from .fingerprint_cache import FingerprintCache
 from .idempotency import IdempotencyEffectBoundary, execute_idempotent
 from .nudges import AdoptionNudgeTracker
@@ -230,12 +230,12 @@ class ApplicationContext:
     clock: Clock
     ids: IdGenerator
     executables: ExecutableLocator
+    execution: ExecutionCoordinator
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
     operation_result_store: OperationResultStore | None = None
     fingerprint_cache: FingerprintCache | None = None
-    execution_environment: ExecutionEnvironmentPort | None = None
     provider_registry: ProviderRegistry | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
     github_read_cache: GitHubReadCache | None = None

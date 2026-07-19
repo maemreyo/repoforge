@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
-from ...domain.execution_environment import EnvironmentIdentityRequest
+from ...domain.execution_environment import build_execution_evidence
 from ...domain.operation_task import OperationRetryability, OperationState
 from ...domain.policy import normalize_relative_path
 from ...domain.retry_guidance import (
@@ -36,10 +36,11 @@ from ...domain.workspace import VerificationReceipt, is_commit_sha
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
-from ...ports.execution_environment import ApprovedExecution, ExecutionReceipt
+from ...ports.execution_environment import ExecutionReceipt
 from ..code_intelligence import CodeIntelligenceAnalyzer, CodeIntelligenceCommand
 from ..context import ApplicationContext
 from ..dto import to_data
+from ..execution.requests import profile_execution_request
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..operations.manager import OperationManager
 from ..verification_reuse import (
@@ -125,6 +126,7 @@ class WorkspaceRunProfileResult:
     business_tests_ran: bool
     valid_tdd_red_evidence: bool
     hygiene_receipt: dict[str, object] | None
+    execution_evidence: dict[str, object]
     working_directory: str | None = None
 
 
@@ -533,6 +535,9 @@ class WorkspaceProfileRunner:
 
             timeout = profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
             environment_hash: str | None = None
+            requested_policy_hash = ""
+            effective_policy_hash = ""
+            execution_evidence_data: dict[str, object] = {}
             hygiene_receipt_data: dict[str, object] | None = None
 
             def accepted_no_regression_step(
@@ -571,125 +576,85 @@ class WorkspaceProfileRunner:
                     "",
                 )
 
-            execution_environment = self.ctx.execution_environment
-            environment_request: EnvironmentIdentityRequest | None = None
-            prepared_environment = False
+            execution_request = profile_execution_request(
+                workspace_id=c.workspace_id,
+                workspace_root=path,
+                command_cwd=command_cwd,
+                commands=tuple(step.command for step in steps),
+                working_directory_policy=profile.working_directory or ".",
+                timeout_seconds=timeout,
+                output_limit=self.ctx.config.server.max_tool_output_chars,
+                cancel_token=cancel_token,
+            )
             results: list[CommandResult] = []
-            try:
-                if execution_environment is not None:
-                    environment_request = EnvironmentIdentityRequest(
-                        workspace_root=path,
-                        command_cwd=command_cwd,
-                        commands=tuple(step.command for step in steps),
-                        working_directory_policy=profile.working_directory or ".",
+            with self.ctx.execution.prepare(execution_request) as session:
+                identity = session.prepared.identity
+                environment_hash = identity.identity_hash
+                reuse_binding = failure_reuse_binding(
+                    fingerprint=before_fingerprint,
+                    target_identity=target_identity,
+                    command_source_identity_value=command_source_identity(
+                        path, profile.command_source_paths
+                    ),
+                    config_identity_value=config_identity(self.ctx.config.source_path),
+                    environment_identity=environment_hash,
+                )
+                if not c.force_rerun and reuse_binding is not None:
+                    cached = reusable_failure(
+                        fresh.metadata,
+                        target=target,
+                        binding=reuse_binding,
                     )
-                    execution_environment.prepare(environment_request)
-                    prepared_environment = True
-                    identity = execution_environment.identity(environment_request)
-                    environment_hash = identity.identity_hash
-                    reuse_binding = failure_reuse_binding(
-                        fingerprint=before_fingerprint,
-                        target_identity=target_identity,
-                        command_source_identity_value=command_source_identity(
-                            path, profile.command_source_paths
-                        ),
-                        config_identity_value=config_identity(self.ctx.config.source_path),
-                        environment_identity=environment_hash,
+                    if cached is not None:
+                        raise_reused_failure(cached)
+                receipts: list[ExecutionReceipt] = []
+                for step_index, verification_step in enumerate(steps):
+                    command = verification_step.command
+                    accepted = accepted_no_regression_step(verification_step)
+                    if accepted is not None:
+                        receipts.append(
+                            ExecutionReceipt(
+                                argv=command,
+                                session_start_identity_hash=identity.identity_hash,
+                                result=accepted,
+                                requested_policy_hash=session.prepared.requested_policy_hash,
+                                effective_policy_hash=session.prepared.effective_policy_hash,
+                                effective_policy=session.prepared.effective_policy,
+                            )
+                        )
+                        stage_telemetry.append((0.0, (time.monotonic() - run_started) * 1_000))
+                        continue
+                    if on_before_command is not None:
+                        on_before_command()
+                    stage_started = time.monotonic()
+                    try:
+                        receipts.append(session.execute(command))
+                    except CommandError as exc:
+                        record_command_failure(
+                            exc,
+                            verification_step,
+                            step_index,
+                            (time.monotonic() - stage_started) * 1_000,
+                        )
+                        raise
+                    stage_telemetry.append(
+                        (
+                            (time.monotonic() - stage_started) * 1_000,
+                            (time.monotonic() - run_started) * 1_000,
+                        )
                     )
-                    if not c.force_rerun and reuse_binding is not None:
-                        cached = reusable_failure(
-                            fresh.metadata,
-                            target=target,
-                            binding=reuse_binding,
-                        )
-                        if cached is not None:
-                            raise_reused_failure(cached)
-                    receipts: list[ExecutionReceipt] = []
-                    for step_index, verification_step in enumerate(steps):
-                        command = verification_step.command
-                        accepted = accepted_no_regression_step(verification_step)
-                        if accepted is not None:
-                            receipts.append(
-                                ExecutionReceipt(command, identity.identity_hash, accepted)
-                            )
-                            stage_telemetry.append((0.0, (time.monotonic() - run_started) * 1_000))
-                            continue
-                        if on_before_command is not None:
-                            on_before_command()
-                        stage_started = time.monotonic()
-                        try:
-                            receipts.append(
-                                execution_environment.execute(
-                                    ApprovedExecution(
-                                        command,
-                                        environment_request,
-                                        identity,
-                                        timeout,
-                                        cancel_token,
-                                    )
-                                )
-                            )
-                        except CommandError as exc:
-                            record_command_failure(
-                                exc,
-                                verification_step,
-                                step_index,
-                                (time.monotonic() - stage_started) * 1_000,
-                            )
-                            raise
-                        stage_telemetry.append(
-                            (
-                                (time.monotonic() - stage_started) * 1_000,
-                                (time.monotonic() - run_started) * 1_000,
-                            )
-                        )
-                    results = [receipt.result for receipt in receipts]
-                else:
-                    for step_index, verification_step in enumerate(steps):
-                        command = verification_step.command
-                        accepted = accepted_no_regression_step(verification_step)
-                        if accepted is not None:
-                            results.append(accepted)
-                            stage_telemetry.append((0.0, (time.monotonic() - run_started) * 1_000))
-                            continue
-                        if on_before_command is not None:
-                            on_before_command()
-                        stage_started = time.monotonic()
-                        try:
-                            if cancel_token is None:
-                                results.append(
-                                    self.ctx.commands.run(command, cwd=command_cwd, timeout=timeout)
-                                )
-                            else:
-                                results.append(
-                                    self.ctx.commands.run(
-                                        command,
-                                        cwd=command_cwd,
-                                        timeout=timeout,
-                                        cancel_token=cancel_token,
-                                    )
-                                )
-                        except CommandError as exc:
-                            record_command_failure(
-                                exc,
-                                verification_step,
-                                step_index,
-                                (time.monotonic() - stage_started) * 1_000,
-                            )
-                            raise
-                        stage_telemetry.append(
-                            (
-                                (time.monotonic() - stage_started) * 1_000,
-                                (time.monotonic() - run_started) * 1_000,
-                            )
-                        )
-            finally:
-                if (
-                    execution_environment is not None
-                    and environment_request is not None
-                    and prepared_environment
-                ):
-                    execution_environment.cleanup(environment_request)
+                inspection = session.inspect()
+                requested_policy_hash = inspection.requested_policy_hash
+                effective_policy_hash = inspection.effective_policy_hash
+                execution_evidence_data = to_data(
+                    build_execution_evidence(
+                        execution_request.requested_policy,
+                        inspection.identity,
+                        inspection.effective_policy,
+                        inspection.warnings,
+                    )
+                )
+                results = [receipt.result for receipt in receipts]
             _ = self.ctx.git.changed_paths(path, repo)
             metrics = self.ctx.git.enforce_change_budget(path, repo)
             fingerprint = prime_fingerprint(
@@ -708,13 +673,16 @@ class WorkspaceProfileRunner:
             )
             if profile.verification:
                 fresh.last_verification = VerificationReceipt(
-                    profile.name,
-                    fp,
-                    self.ctx.clock.now_iso(),
-                    [self.receipt(r) for r in results],
-                    environment_hash,
-                    command_source_dirty,
-                    list(command_source_dirty_paths),
+                    profile=profile.name,
+                    fingerprint=fp,
+                    completed_at=self.ctx.clock.now_iso(),
+                    commands=[self.receipt(r) for r in results],
+                    environment_identity_hash=environment_hash,
+                    command_source_dirty=command_source_dirty,
+                    command_source_dirty_paths=list(command_source_dirty_paths),
+                    requested_policy_hash=requested_policy_hash,
+                    effective_policy_hash=effective_policy_hash,
+                    execution_evidence=execution_evidence_data,
                 )
                 self.ctx.store.save(fresh)
             elif cleared_retry_history or cleared_reuse_history:
@@ -752,6 +720,7 @@ class WorkspaceProfileRunner:
                 ),
                 valid_tdd_red_evidence=False,
                 hygiene_receipt=hygiene_receipt_data,
+                execution_evidence=execution_evidence_data,
             )
 
         audit_details: dict[str, object] = {

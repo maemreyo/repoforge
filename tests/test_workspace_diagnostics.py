@@ -1163,6 +1163,9 @@ def test_workspace_diagnostic_read_only_success_and_stale_guard(
         expected_fingerprint=status["workspace_fingerprint"],
     )
     assert result["outcome"] == "passed"
+    assert result["execution_evidence"]["requested_network"] == "offline"
+    assert result["execution_evidence"]["effective_network"] == "host_inherited"
+    assert result["execution_evidence"]["enforcement"]["network"] == "advisory"
     assert result["excerpt"] == "diagnostic-ok"
     assert result["fingerprint_changed"] is False
     assert result["fingerprint_before"] == result["fingerprint_after"]

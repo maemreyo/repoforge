@@ -387,7 +387,79 @@ def test_workspace_verify_contract_exposes_planning_routing_and_evidence_fields(
         "valid_tdd_red_evidence",
         "failure_reused",
         "artifact_paths",
+        "execution_evidence",
     } <= output_fields
+
+
+def test_execution_capable_outputs_expose_closed_truthful_evidence() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    for tool_name in ("workspace_verify", "workspace_format_changed"):
+        schema = registry.V2_TOOL_SPECS[tool_name].output_model.model_json_schema()
+        rendered = str(schema)
+        for field in (
+            "adapter_kind",
+            "identity_schema_version",
+            "environment_identity_hash",
+            "requested_policy_hash",
+            "effective_policy_hash",
+            "requested_network",
+            "effective_network",
+            "requested_filesystem",
+            "effective_filesystem",
+            "degraded",
+            "enforcement",
+            "warnings",
+        ):
+            assert field in rendered, (tool_name, field)
+
+    evidence_model = (
+        registry.V2_TOOL_SPECS["workspace_verify"]
+        .output_model.model_fields["execution_evidence"]
+        .annotation
+    )
+    assert evidence_model is not None
+    with pytest.raises(ValidationError):
+        registry.V2_TOOL_SPECS["workspace_verify"].validate_output(
+            {
+                "summary": "Verification passed",
+                "workspace_id": "workspace-1",
+                "requested_mode": "profile",
+                "selected_mode": "profile",
+                "routing_reason": "Explicit profile mode was requested.",
+                "outcome": "passed",
+                "satisfies_commit_gate": True,
+                "head_sha": "a" * 40,
+                "workspace_fingerprint": "b" * 64,
+                "execution_evidence": {
+                    "adapter_kind": "native",
+                    "identity_schema_version": 2,
+                    "environment_identity_hash": "c" * 64,
+                    "requested_policy_hash": "d" * 64,
+                    "effective_policy_hash": "e" * 64,
+                    "requested_network": "offline",
+                    "effective_network": "host_inherited",
+                    "requested_filesystem": "workspace_write",
+                    "effective_filesystem": "host_account_access",
+                    "degraded": True,
+                    "enforcement": {
+                        "network": "advisory",
+                        "filesystem": "advisory",
+                        "timeout": "enforced",
+                        "output": "enforced",
+                        "process_cleanup": "enforced",
+                        "cpu": "unsupported",
+                        "memory": "unsupported",
+                        "disk": "unsupported",
+                        "subprocess_count": "unsupported",
+                        "network_bytes": "unsupported",
+                    },
+                    "warnings": [],
+                    "unknown": "rejected",
+                },
+            }
+        )
 
 
 def test_workspace_verify_selector_sequences_publish_practical_bounds() -> None:

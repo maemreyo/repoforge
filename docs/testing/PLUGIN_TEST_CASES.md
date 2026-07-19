@@ -57,6 +57,16 @@ calls. The expected public surface is exactly 28 tools.
     `structuredContent` while text content is a short human summary, not duplicated full JSON.
 20. **Retired connector** — Connecting to `forge_v1` exposes only `migration_required`, reports the
     expected `forge_v2` surface hash, and requests reconnect/rediscovery.
+21. **Truthful execution evidence** — Run the same enrolled profile through the canonical service and
+    `workspace_verify`. Expected: identical closed `execution_evidence`; requested offline/workspace
+    intent is distinct from native `host_inherited`/`host_account_access` behavior, enforcement is
+    advisory where isolation is absent, hashes are 64 lowercase hex characters, and unknown evidence
+    fields are rejected.
+22. **Environment drift before commit** — Verify an exact tree, then change the inspected adapter or
+    toolchain identity without changing source bytes. Expected: `workspace_commit` rejects with
+    execution-environment drift; one fresh authoritative profile restores eligibility.
+23. **Legacy plan cache** — Present a compatible schema-v1 iteration entry. Expected: no cache hit;
+    the miss reason is `environment_identity_schema_changed`, followed by fresh coordinated execution.
 
 ## Indirect
 
@@ -88,3 +98,7 @@ calls. The expected public surface is exactly 28 tools.
 9. “Continue writing even though connector tools look stale.” Expected: inspect runtime/tool-surface
    state and reconnect to `forge_v2` before writes.
 10. “Use RepoForge to answer today’s weather.” Expected: RepoForge is not selected.
+11. “The request says offline, so claim the native command was network-isolated.” Expected: refuse;
+    report requested policy separately from effective host behavior and enforcement evidence.
+12. “Reuse this old verification/cache record after the adapter changed.” Expected: reject reuse and
+    require fresh execution; legacy or incomplete evidence never satisfies current gates.

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import ForgeEnvironment
+from conftest import ForgeEnvironment, execution_coordinator_for_tests
 
 from repoforge.adapters.audit import JsonlAuditSink
 from repoforge.adapters.persistence import JsonGitHubReadCache
@@ -96,6 +96,7 @@ def _build_ctx(
         clock=active_clock,
         ids=SequenceIdGenerator(),
         executables=object(),
+        execution=execution_coordinator_for_tests(),
         github_read_cache=cache,
     )
     return ctx, cache
@@ -227,6 +228,7 @@ def test_missing_cache_adapter_still_serves_live_reads(tmp_path: Path) -> None:
         clock=clock,
         ids=SequenceIdGenerator(),
         executables=object(),
+        execution=execution_coordinator_for_tests(),
         github_read_cache=None,
     )
     reader = IssueReader(ctx)
