@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added advisory post-mutation Tree-sitter syntax evidence to every `workspace_mutate` dry-run, no-op, apply, keyed receipt, and keyed replay response. Python, JavaScript, JSX, TypeScript, and TSX return bounded same-response diagnostics; unsupported grammars, invalid UTF-8, parser failures, observed budget overruns, and historical v1 receipts report explicit `unknown` rather than implicit success. Syntax errors never block the journaled mutation, while the response summary prominently reports `parse_ok=false`; generated contracts and a frozen-corpus p95 acceptance test cover the public shape and 100 ms/file budget.
+
 ## 2.2.0 — 2026-07-19
 
 - Integrated the pre-cutover execution-plan and failure-intelligence machinery into the static 28-tool surface instead of dropping it: `workspace_verify.mode = "plan"` gained a `plan_action = "create" | "accept" | "execute"` lifecycle for the immutable multi-stage DAG, and `operation` gained a `failure_evidence` action for exact, content-addressed failure lookup by `failure_id`. No tool was added or renamed.

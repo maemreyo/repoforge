@@ -501,3 +501,87 @@ def test_mutation_schema_exposes_all_ops_and_bounds() -> None:
         "restore",
     ):
         assert operation in rendered
+
+
+def test_workspace_mutate_output_publishes_closed_bounded_syntax_evidence() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_mutate"]
+    payload = {
+        "summary": "Applied mutation with parse_ok=false",
+        "workspace_id": "demo-workspace",
+        "dry_run": False,
+        "ready": True,
+        "changed": True,
+        "would_change": True,
+        "operation_count": 1,
+        "operations": [
+            {
+                "index": 0,
+                "op": "create",
+                "path": "src/broken.py",
+                "status": "ready",
+                "changed": True,
+            }
+        ],
+        "changed_paths": ["src/broken.py"],
+        "head_sha": "a" * 40,
+        "workspace_fingerprint": "b" * 64,
+        "diff_stat": "1 file changed",
+        "change_metrics": {
+            "changed_files": 1,
+            "added_lines": 1,
+            "deleted_lines": 0,
+            "diff_lines": 1,
+            "binary_files": 0,
+            "total_current_bytes": 12,
+            "limits": {
+                "max_changed_files": 150,
+                "max_diff_lines": 12_000,
+                "max_total_changed_bytes": 26_214_400,
+            },
+            "within_limits": True,
+        },
+        "syntax_diagnostics": {
+            "state": "error",
+            "parse_ok": False,
+            "diagnostics": [
+                {
+                    "path": "src/broken.py",
+                    "line": 1,
+                    "message": "Unexpected syntax.",
+                    "severity": "error",
+                }
+            ],
+            "analyzed_paths": ["src/broken.py"],
+            "unknown_paths": [],
+            "truncated": False,
+            "legacy_receipt": False,
+        },
+        "transaction_id": "tx-demo",
+    }
+
+    output = spec.validate_output(payload)
+    assert output.syntax_diagnostics.state.value == "error"
+    assert output.syntax_diagnostics.diagnostics[0].severity.value == "error"
+    assert output.change_metrics.binary_files == 0
+    assert output.change_metrics.limits.max_changed_files == 150
+
+    schema = spec.output_model.model_json_schema(mode="validation")
+    syntax = schema["$defs"]["SyntaxDiagnosticsEvidence"]
+    assert syntax["properties"]["diagnostics"]["maxItems"] == 100
+    assert syntax["properties"]["analyzed_paths"]["maxItems"] == 1000
+    assert syntax["properties"]["unknown_paths"]["maxItems"] == 1000
+    assert set(schema["$defs"]["SyntaxDiagnosticState"]["enum"]) == {
+        "ok",
+        "error",
+        "unknown",
+    }
+    assert schema["$defs"]["SyntaxDiagnosticSeverity"]["enum"] == ["error"]
+
+    invalid = dict(payload)
+    invalid["syntax_diagnostics"] = dict(payload["syntax_diagnostics"])
+    invalid["syntax_diagnostics"]["parse_ok"] = True
+    with pytest.raises(ValidationError):
+        spec.validate_output(invalid)

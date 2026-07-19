@@ -102,6 +102,8 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 
 A batch is all-or-nothing. The transaction journal is private, bounded, recoverable after interruption, and never becomes Git-visible state. `dry_run` returns typed diagnostics without changing files.
 
+Every response also includes advisory `syntax_diagnostics` for the planner's final changed, non-deleted virtual files. Pinned Tree-sitter grammars cover Python, JavaScript, JSX, TypeScript, and TSX. `state = "ok"` means all analyzed files parsed and `parse_ok = true`; `state = "error"` returns bounded `{path, line, message, severity}` items and makes the response summary prominently include `parse_ok=false`; `state = "unknown"` uses `parse_ok = null` when a grammar is unavailable, UTF-8 is invalid, parsing raises, or the observed 100 ms/file budget is exceeded. Diagnostics never block or roll back an otherwise valid mutation. The section is capped at 100 diagnostics with an explicit `truncated` marker, and source bodies and absolute host paths are never returned. Keyed receipt schema v2 replays the same evidence; historical v1 receipts remain readable and return explicit `legacy_receipt = true` unknown evidence rather than an implicit pass.
+
 Because `workspace_mutate` can delete or restore content, its tool-wide MCP annotation is
 `destructiveHint = true`, including when a particular invocation is a dry run.
 
@@ -177,6 +179,7 @@ Rollback to a last-v1 artifact requires stopping v2, installing the reviewed las
 - `docs/contracts/tool-schemas-v2.json` is the byte-stable complete schema bundle for all 28 tools.
 - `docs/contracts/release-contract-v2.json` is the compact public release manifest: identities, exact names, per-tool metadata/schema hashes, schema-bundle hash, CLI contract, runtime protocol, and configuration versions.
 - `make v2-gates` executes frozen generated-change, patch, seeded-bug, read/resume, and provider-recall corpora without leaving repository artifacts.
+- The syntax-gate acceptance test reuses the frozen generated-change corpus and enforces an in-process p95 budget of at most 100 ms per supported-language file.
 - `make check` runs release-contract validation, `make v2-gates`, formatting, lint, strict typing, deterministic pytest shards with branch coverage, source/wheel builds, and isolated installed-wheel lifecycle verification.
 
 Any intended public drift requires an explicit compatibility review and regenerated golden contract. Additive output fields still require tolerant readers; removed or renamed tools require a new reviewed identity/contract rather than hidden aliases.
