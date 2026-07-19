@@ -942,18 +942,16 @@ class WorkspaceVerifyAssessment(StrictModel):
 
 
 _SelectorItem = Annotated[str, Field(min_length=1, max_length=4096)]
+_SelectorItems = Annotated[tuple[_SelectorItem, ...], Field(max_length=100)]
+_Selector = _SelectorItem | _SelectorItems
 
 
 class WorkspaceVerifyInput(StrictModel):
     workspace_id: Identifier
     mode: VerifyMode = VerifyMode.AUTO
     diagnostic_id: Identifier | None = None
-    selector: _SelectorItem | tuple[_SelectorItem, ...] | None = Field(
-        default=None, max_length=4096
-    )
-    selector2: _SelectorItem | tuple[_SelectorItem, ...] | None = Field(
-        default=None, max_length=4096
-    )
+    selector: _Selector | None = None
+    selector2: _Selector | None = None
     profile_name: Identifier | None = None
     argv: tuple[_SelectorItem, ...] | None = Field(default=None, max_length=100)
     working_directory: RelativePath | None = None

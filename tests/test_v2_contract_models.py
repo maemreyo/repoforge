@@ -390,6 +390,27 @@ def test_workspace_verify_contract_exposes_planning_routing_and_evidence_fields(
     } <= output_fields
 
 
+def test_workspace_verify_selector_sequences_publish_practical_bounds() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_verify"]
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "workspace_id": "demo-workspace",
+                "selector": ["x" for _ in range(101)],
+            }
+        )
+
+    schema = spec.input_model.model_json_schema(mode="validation")
+    for field_name in ("selector", "selector2"):
+        nullable = schema["properties"][field_name]["anyOf"]
+        array_branch = next(branch for branch in nullable if branch.get("type") == "array")
+        assert array_branch["maxItems"] == 100
+        assert array_branch["items"]["maxLength"] == 4096
+
+
 def test_mutation_schema_exposes_all_ops_and_bounds() -> None:
     _, registry = _contracts()
     schema = registry.V2_TOOL_SPECS["workspace_mutate"].input_model.model_json_schema()
