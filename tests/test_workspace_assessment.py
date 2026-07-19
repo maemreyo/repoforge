@@ -127,6 +127,34 @@ def _changed_workspace(env: ForgeEnvironment) -> str:
     return workspace_id
 
 
+def _execution_evidence() -> dict[str, object]:
+    return {
+        "adapter_kind": "native_reviewed",
+        "identity_schema_version": 2,
+        "environment_identity_hash": "c" * 64,
+        "requested_policy_hash": "d" * 64,
+        "effective_policy_hash": "e" * 64,
+        "requested_network": "offline",
+        "effective_network": "host_inherited",
+        "requested_filesystem": "workspace_write",
+        "effective_filesystem": "host_account_access",
+        "degraded": True,
+        "enforcement": {
+            "network": "advisory",
+            "filesystem": "advisory",
+            "timeout": "enforced",
+            "output": "enforced",
+            "process_cleanup": "enforced",
+            "cpu": "unsupported",
+            "memory": "unsupported",
+            "disk": "unsupported",
+            "subprocess_count": "unsupported",
+            "network_bytes": "unsupported",
+        },
+        "warnings": [],
+    }
+
+
 def _diagnostic_result(
     workspace_id: str, fingerprint: str, head_sha: str
 ) -> WorkspaceRunDiagnosticResult:
@@ -164,6 +192,7 @@ def _diagnostic_result(
         verification_invalidated=False,
         satisfies_commit_gate=False,
         next_safe_actions=[],
+        execution_evidence=_execution_evidence(),
     )
 
 
@@ -202,6 +231,7 @@ def _profile_result(
         business_tests_ran=True,
         valid_tdd_red_evidence=False,
         hygiene_receipt=None,
+        execution_evidence=_execution_evidence(),
     )
 
 
