@@ -15,7 +15,7 @@ from ...domain.errors import CommandError, ErrorCode
 from ...domain.redaction import redact_text
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
-from .process_tree import kill_identity, snapshot_descendants
+from .process_tree import inspect_descendants, kill_identity
 
 
 class SubprocessCommandExecutor:
@@ -94,7 +94,7 @@ class SubprocessCommandExecutor:
                 # since that's why the overall command timed out in the first
                 # place. Only taken on the timeout path so the common
                 # (successful, fast) case never pays for an extra `ps` call.
-                descendants = snapshot_descendants(process.pid)
+                pre_snapshot = inspect_descendants(process.pid)
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                     process.wait(timeout=2)
@@ -103,6 +103,11 @@ class SubprocessCommandExecutor:
                         os.killpg(process.pid, signal.SIGKILL)
                     with contextlib.suppress(subprocess.TimeoutExpired):
                         process.wait(timeout=2)
+                # Repeat bounded discovery after group termination. This can
+                # catch a child created after the first snapshot while the
+                # root is still attributable; if the root has already exited,
+                # the empty complete result records that the rescan happened.
+                post_snapshot = inspect_descendants(process.pid)
                 # A PermissionError from killpg is treated as "already reaped", but
                 # that assumption can be wrong; verify with a bounded drain, and
                 # if the process is provably still alive, make one last direct
@@ -122,14 +127,33 @@ class SubprocessCommandExecutor:
                 # killpg/kill above only reach processes still in this
                 # session's process group; a descendant that daemonized with
                 # its own start_new_session/setsid escapes that and survives
-                # every attempt above untouched. Sweep the pre-kill snapshot
-                # by PID directly -- this doesn't depend on group membership.
-                for descendant in descendants:
-                    kill_identity(descendant, signal.SIGKILL)
+                # every attempt above untouched. Sweep both bounded snapshots
+                # through atomic process handles; this does not depend on
+                # group membership and cannot target a reused PID.
+                descendants = {
+                    (identity.pid, identity.start_token): identity
+                    for identity in (
+                        *pre_snapshot.identities,
+                        *post_snapshot.identities,
+                    )
+                }
+                signalled = sum(
+                    kill_identity(descendant, signal.SIGKILL) for descendant in descendants.values()
+                )
                 raise CommandError(
                     f"Command timed out after {timeout}s: {' '.join(argv)}",
                     code=ErrorCode.COMMAND_TIMEOUT,
-                    details={"timeout_seconds": timeout},
+                    details={
+                        "timeout_seconds": timeout,
+                        "descendant_inspection_complete": (
+                            pre_snapshot.inspection_complete and post_snapshot.inspection_complete
+                        ),
+                        "descendant_inspection_status": (
+                            f"pre:{pre_snapshot.diagnostic};post:{post_snapshot.diagnostic}"
+                        ),
+                        "descendant_snapshot_count": len(descendants),
+                        "descendant_signal_count": signalled,
+                    },
                 ) from exc
         finally:
             if cancel_token is not None:

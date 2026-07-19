@@ -42,9 +42,9 @@ Fresh-plan behavior remains mandatory: stale, timed-out, and cancelled execution
 
 ## Process cleanup
 
-Timeout cleanup uses a bounded process-identity snapshot, not bare PIDs. A process identity contains at least PID and an OS-observed start token. Before every direct signal, the implementation re-reads identity and skips a PID whose start token changed.
+Timeout cleanup uses a bounded process-identity snapshot, not bare PIDs. A process identity contains at least PID and an OS-observed start token. Linux opens an atomic pidfd, then re-reads identity before signalling through that handle; this closes the check-to-signal PID-reuse race. When an atomic process handle is unavailable, RepoForge skips the direct descendant signal and records the incomplete cleanup instead of falling back to a racy `kill(pid)` call.
 
-Linux uses bounded `/proc` inspection so it does not depend on an external `ps` binary. macOS uses one bounded `ps` query and parses PID, PPID, and start identity. Unsupported or failed inspection remains fail-safe for the caller: the original process group and direct process are still terminated within existing timeouts, while descendant-inspection failure is explicit in internal diagnostics rather than causing an unbounded wait.
+Linux uses bounded `/proc` inspection so it does not depend on an external `ps` binary. macOS uses one bounded `ps` query and parses PID, PPID, and start identity. Unsupported or failed inspection remains fail-safe for the caller: the original process group and direct process are still terminated within existing timeouts, while descendant-inspection failure is explicit in internal diagnostics rather than causing an unbounded wait. macOS currently has no standard-library atomic process handle, so its bounded `ps` evidence is diagnostic and direct out-of-group descendant signalling fails closed.
 
 The snapshot walks descendants before group termination and repeats a bounded discovery/sweep after termination to catch descendants that remain attributable. A daemon already reparented before the first snapshot cannot safely be attributed without cgroups/subreaper ownership; this limitation is documented rather than hidden. RepoForge must never signal a PID after identity reuse.
 

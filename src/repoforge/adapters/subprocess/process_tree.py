@@ -24,6 +24,13 @@ class ProcessIdentity:
     start_token: str
 
 
+@dataclass(frozen=True, slots=True)
+class DescendantSnapshot:
+    identities: tuple[ProcessIdentity, ...]
+    inspection_complete: bool
+    diagnostic: str
+
+
 def _parse_linux_stat(value: str) -> ProcessIdentity | None:
     """Parse `/proc/<pid>/stat` without assuming the command contains no `)`."""
 
@@ -91,6 +98,8 @@ def _bounded_ps(argv: list[str]) -> str | None:
         if process.returncode not in {0, None}:
             return None
         return b"".join(chunks).decode("utf-8", errors="replace")
+    except OSError:
+        return None
     finally:
         selector.close()
         if process.poll() is None:
@@ -114,21 +123,21 @@ def _parse_ps_line(line: str) -> ProcessIdentity | None:
     return ProcessIdentity(pid=pid, ppid=ppid, start_token=parts[2])
 
 
-def _read_ps_identities(pid: int | None = None) -> tuple[ProcessIdentity, ...]:
+def _read_ps_identities(pid: int | None = None) -> tuple[ProcessIdentity, ...] | None:
     argv = ["ps"]
     if pid is not None:
         argv.extend(["-p", str(pid)])
     argv.extend(["-o", "pid=,ppid=,lstart="])
     output = _bounded_ps(argv)
     if output is None:
-        return ()
+        return None
     identities: list[ProcessIdentity] = []
     for line in output.splitlines():
         identity = _parse_ps_line(line)
         if identity is not None:
             identities.append(identity)
         if len(identities) > _MAX_PROCESSES:
-            return ()
+            return None
     return tuple(identities)
 
 
@@ -138,10 +147,14 @@ def read_identity(pid: int) -> ProcessIdentity | None:
     if sys.platform.startswith("linux"):
         return _read_linux_identity(pid)
     identities = _read_ps_identities(pid)
-    return identities[0] if len(identities) == 1 and identities[0].pid == pid else None
+    return (
+        identities[0]
+        if identities is not None and len(identities) == 1 and identities[0].pid == pid
+        else None
+    )
 
 
-def _all_identities(limit: int) -> tuple[ProcessIdentity, ...]:
+def _all_identities(limit: int) -> DescendantSnapshot:
     actual_limit = min(max(1, limit), _MAX_PROCESSES)
     if sys.platform.startswith("linux"):
         identities: list[ProcessIdentity] = []
@@ -154,18 +167,26 @@ def _all_identities(limit: int) -> tuple[ProcessIdentity, ...]:
                     if identity is not None:
                         identities.append(identity)
                     if len(identities) > actual_limit:
-                        return ()
+                        return DescendantSnapshot((), False, "process_limit_exceeded")
         except OSError:
-            return ()
-        return tuple(identities)
+            return DescendantSnapshot((), False, "proc_unavailable")
+        return DescendantSnapshot(tuple(identities), True, "complete")
     identities = _read_ps_identities()
-    return identities if len(identities) <= actual_limit else ()
+    if identities is None:
+        return DescendantSnapshot((), False, "ps_probe_failed")
+    if len(identities) > actual_limit:
+        return DescendantSnapshot((), False, "process_limit_exceeded")
+    return DescendantSnapshot(identities, True, "complete")
 
 
-def snapshot_descendants(
-    root_pid: int, *, limit: int = _MAX_PROCESSES
-) -> tuple[ProcessIdentity, ...]:
-    identities = _all_identities(limit)
+def inspect_descendants(root_pid: int, *, limit: int = _MAX_PROCESSES) -> DescendantSnapshot:
+    if root_pid <= 0:
+        return DescendantSnapshot((), False, "invalid_root_pid")
+    inspected = _all_identities(limit)
+    if not inspected.inspection_complete:
+        return inspected
+    actual_limit = min(max(1, limit), _MAX_PROCESSES)
+    identities = inspected.identities
     children_of: dict[int, list[ProcessIdentity]] = {}
     for identity in identities:
         children_of.setdefault(identity.ppid, []).append(identity)
@@ -175,10 +196,16 @@ def snapshot_descendants(
         parent = frontier.pop()
         for child in children_of.get(parent, []):
             descendants.append(child)
-            if len(descendants) > limit:
-                return ()
+            if len(descendants) > actual_limit:
+                return DescendantSnapshot((), False, "descendant_limit_exceeded")
             frontier.append(child.pid)
-    return tuple(descendants)
+    return DescendantSnapshot(tuple(descendants), True, "complete")
+
+
+def snapshot_descendants(
+    root_pid: int, *, limit: int = _MAX_PROCESSES
+) -> tuple[ProcessIdentity, ...]:
+    return inspect_descendants(root_pid, limit=limit).identities
 
 
 def identity_is_current(identity: ProcessIdentity) -> bool:
@@ -190,13 +217,43 @@ def identity_is_current(identity: ProcessIdentity) -> bool:
     )
 
 
-def kill_identity(identity: ProcessIdentity, sig: int = signal.SIGKILL) -> bool:
-    """Signal only the exact process captured, never a reused PID."""
+def _pidfd_open(pid: int) -> int | None:
+    opener = getattr(os, "pidfd_open", None)
+    if opener is None:
+        return None
+    try:
+        return int(opener(pid, 0))
+    except OSError:
+        return None
 
-    if not identity_is_current(identity):
+
+def _pidfd_send_signal(fd: int, sig: int) -> bool:
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if sender is None:
         return False
     try:
-        os.kill(identity.pid, sig)
-    except (ProcessLookupError, PermissionError):
+        sender(fd, sig, None, 0)
+    except OSError:
         return False
     return True
+
+
+def kill_identity(identity: ProcessIdentity, sig: int = signal.SIGKILL) -> bool:
+    """Atomically signal the captured process, or skip when that is unavailable.
+
+    Opening a Linux pidfd binds the kernel process object. Identity is re-read
+    after the handle is open, so a PID reused before the open is rejected and a
+    PID reused afterward cannot redirect the signal. Hosts without an atomic
+    process handle fail closed instead of using a racy check-then-``kill(pid)``.
+    """
+
+    fd = _pidfd_open(identity.pid)
+    if fd is None:
+        return False
+    try:
+        if not identity_is_current(identity):
+            return False
+        return _pidfd_send_signal(fd, sig)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from repoforge.adapters.subprocess import SubprocessCommandExecutor, process_tree
+from repoforge.adapters.subprocess import command_executor as command_executor_module
 from repoforge.config import ServerConfig
 from repoforge.domain.errors import CommandError, ErrorCode
 from repoforge.ports.cancellation import CancellationToken
@@ -142,13 +143,11 @@ def test_timeout_cleanup_kills_a_descendant_that_escaped_the_process_group(
     assert process_tree.identity_is_current(captured) is False
 
 
-def test_identity_safe_kill_skips_a_reused_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_identity_safe_kill_skips_when_atomic_handle_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured = process_tree.ProcessIdentity(pid=123, ppid=12, start_token="old")
-    monkeypatch.setattr(
-        process_tree,
-        "read_identity",
-        lambda pid: process_tree.ProcessIdentity(pid=pid, ppid=1, start_token="new"),
-    )
+    monkeypatch.setattr(process_tree, "_pidfd_open", lambda pid: None)
     kills: list[tuple[int, int]] = []
     monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
@@ -160,23 +159,157 @@ def test_identity_safe_kill_allows_same_process_after_reparenting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured = process_tree.ProcessIdentity(pid=123, ppid=12, start_token="same-start")
+    read_fd, write_fd = os.pipe()
     monkeypatch.setattr(
         process_tree,
         "read_identity",
         lambda pid: process_tree.ProcessIdentity(pid=pid, ppid=1, start_token="same-start"),
     )
-    kills: list[tuple[int, int]] = []
-    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr(process_tree, "_pidfd_open", lambda pid: read_fd)
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        process_tree,
+        "_pidfd_send_signal",
+        lambda fd, sig: signals.append((fd, sig)) or True,
+    )
 
-    assert process_tree.kill_identity(captured, signal.SIGKILL) is True
-    assert kills == [(123, signal.SIGKILL)]
+    try:
+        assert process_tree.kill_identity(captured, signal.SIGKILL) is True
+        assert signals == [(read_fd, signal.SIGKILL)]
+    finally:
+        os.close(write_fd)
+
+
+def test_identity_safe_kill_rechecks_after_opening_atomic_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = process_tree.ProcessIdentity(pid=123, ppid=12, start_token="old")
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(process_tree, "_pidfd_open", lambda pid: read_fd)
+    monkeypatch.setattr(
+        process_tree,
+        "read_identity",
+        lambda pid: process_tree.ProcessIdentity(pid=pid, ppid=1, start_token="reused"),
+    )
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        process_tree,
+        "_pidfd_send_signal",
+        lambda fd, sig: signals.append((fd, sig)),
+    )
+
+    try:
+        assert process_tree.kill_identity(captured, signal.SIGKILL) is False
+        assert signals == []
+    finally:
+        os.close(write_fd)
+
+
+def test_timeout_rescans_descendants_and_reports_inspection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "ignore_term_for_rescan.py"
+    script.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True: time.sleep(0.05)\n"
+    )
+    late = process_tree.ProcessIdentity(pid=987654, ppid=123, start_token="late")
+    snapshots = (
+        process_tree.DescendantSnapshot((), True, "complete"),
+        process_tree.DescendantSnapshot((late,), False, "process_limit_exceeded"),
+    )
+    inspection_calls: list[int] = []
+
+    def inspect(pid: int) -> process_tree.DescendantSnapshot:
+        inspection_calls.append(pid)
+        return snapshots[(len(inspection_calls) - 1) % 2]
+
+    monkeypatch.setattr(
+        command_executor_module,
+        "inspect_descendants",
+        inspect,
+    )
+    signalled: list[process_tree.ProcessIdentity] = []
+    monkeypatch.setattr(
+        command_executor_module,
+        "kill_identity",
+        lambda identity, sig: signalled.append(identity) or True,
+    )
+
+    with pytest.raises(CommandError) as excinfo:
+        executor.run(["python3", str(script)], cwd=tmp_path, timeout=1)
+
+    assert set(signalled) == {late}
+    assert len(inspection_calls) >= 2
+    assert excinfo.value.details["descendant_inspection_complete"] is False
+    assert excinfo.value.details["descendant_inspection_status"] == (
+        "pre:complete;post:process_limit_exceeded"
+    )
+
+
+def test_ps_identity_parser_and_probe_failure_are_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = process_tree._parse_ps_line("123 42 Sun Jul 19 12:34:56 2026")
+    assert parsed == process_tree.ProcessIdentity(
+        pid=123,
+        ppid=42,
+        start_token="Sun Jul 19 12:34:56 2026",
+    )
+    monkeypatch.setattr(
+        process_tree.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("ps unavailable")),
+    )
+    assert process_tree._bounded_ps(["ps"]) is None
+
+
+def test_ps_identity_probe_parses_rows_and_contains_selector_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        process_tree,
+        "_bounded_ps",
+        lambda argv: "123 42 Sun Jul 19 12:34:56 2026\n124 42 Sun Jul 19 12:34:57 2026\n",
+    )
+    assert process_tree._read_ps_identities() == (
+        process_tree.ProcessIdentity(123, 42, "Sun Jul 19 12:34:56 2026"),
+        process_tree.ProcessIdentity(124, 42, "Sun Jul 19 12:34:57 2026"),
+    )
+
+
+def test_bounded_ps_contains_selector_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+
+    class BrokenSelector:
+        def register(self, fileobj: object, events: int) -> None:
+            raise OSError("selector unavailable")
+
+        def close(self) -> None:
+            pass
+
+    class Probe:
+        stdout = object()
+        returncode = None
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float) -> None:
+            pass
+
+    monkeypatch.setattr(process_tree.subprocess, "Popen", lambda *args, **kwargs: Probe())
+    monkeypatch.setattr(process_tree.selectors, "DefaultSelector", BrokenSelector)
+    assert process_tree._bounded_ps(["ps"]) is None
 
 
 def test_linux_stat_parser_handles_parentheses_in_process_name() -> None:
     fields_after_name = ["S", "42", *("0" for _ in range(17)), "123456", "0"]
-    parsed = process_tree._parse_linux_stat(
-        f"123 (worker ) helper) {' '.join(fields_after_name)}"
-    )
+    parsed = process_tree._parse_linux_stat(f"123 (worker ) helper) {' '.join(fields_after_name)}")
 
     assert parsed == process_tree.ProcessIdentity(
         pid=123,
