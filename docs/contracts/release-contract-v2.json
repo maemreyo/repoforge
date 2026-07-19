@@ -101,7 +101,7 @@
     "tool_count": 28,
     "tool_hashes": {
       "config_inspect": "4dedc62c9544add9b49c388de576a61ca32272de360d05ed5ea506742592872e",
-      "operation": "9c7ab99dbf49c6795c9903a8ee84316c06724d6bb084d9e7a9c8167898b1eca0",
+      "operation": "a1f56ef09c88a97a7572c535e4d5235708369ce809d1aeba7f5c26a793caf40a",
       "repo_history": "6b86ef176756f8b81827901c92264b72fe67f936d10c162323144ecd741cb941",
       "repo_issue": "5bac143e1319d7840a8df5cf4d15b95f8aba7430b236f8ac5185d6404bbe1644",
       "repo_list": "36fa03efc4259fd2daba5d48f237c312d7453de86697c71084366d95342a4e25",
@@ -118,7 +118,7 @@
       "workspace_format_changed": "34af10f7889a955420899e71aa7f539c76870ef7d67dda58a89d34a7fb1a14f9",
       "workspace_list": "fa3f2a80bc4d450e744e115f9a77df5283652de864f2ae6a74c2f3575f84ae76",
       "workspace_mutate": "4c9572421eeba2c71fce496ce480305237fa2fa324b779a0ffca8e3f077a669a",
-      "workspace_pr": "ee8e9c36bed004bbdc34613b7b160fbf6cc8f7fcd0d37bd5a9d0d844f82eacf8",
+      "workspace_pr": "2f98ec006acee4b60165c8050173c86894c6b5e4951ae6f739a89decd7ec1aa7",
       "workspace_pr_evidence": "e90cef4b43956a1d254f6c369b0998b3e74ba7249b6bcb411da4bf4ce750f9be",
       "workspace_push": "cc2bab9c0d913ea31b8d83499e33c8689f61e15c4b75fd74c498e8e448fa0242",
       "workspace_read": "893a40afa0d9b92aa3c931abab7ce84c98caf0318cbead22f1ee06a201e83077",
@@ -127,7 +127,7 @@
       "workspace_search": "c0c777b71bed014366875f0b786dad98fcde041360e3f07662b43ed5b4879c49",
       "workspace_status": "e92c192bfa33ea7c093906ae35f6194ac31aae1a5e712427a9bf8a893ffde4b1",
       "workspace_tree": "327ed100f7a8e9d451e9db8f9a08e4ec4ddecd1b42ddd3def6ae9ca1aa36b837",
-      "workspace_verify": "006baf7d19abbcccdf0ca5a03f4ddf67f0e53020fb130303b492e5a5398d772f"
+      "workspace_verify": "500365a6dfd3cdea72be8b875ca83214414003b094be39a3a5b1c97c5cd7303b"
     },
     "tool_names": [
       "repo_task_context",
@@ -159,8 +159,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "646926303af50f15e6a1dc6b2c4493e1fb801804b31f04227d25447ad4a340da",
-    "tool_surface_hash": "9772bb4272832fe46e0444ac37257ec2ca8714a69f96077fade65dbc25746048"
+    "tool_schema_bundle_sha256": "dc5f87a6c2c862ca877be853460d0dc156b707c464d84cc54a9af14a7c52ea9a",
+    "tool_surface_hash": "fec39acc896a4ba9f25ffab9e9ad8d30701986e4b9294e12041559d7ce62f21b"
   },
   "package_version": "2.2.0",
   "runtime": {

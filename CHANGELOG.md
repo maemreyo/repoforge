@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added durable per-step background profile progress and an additive `operation.action = "wait"` long-poll mode. Step start/completion updates expose bounded liveness evidence; wait wakes on progress or terminal state, caps `timeout_seconds` at 60, returns typed timeout evidence instead of an empty poll, and publishes `suggested_poll_after_s`, progress unit/message, and ETA when computable. Acceptance coverage reaches terminal state in at most five non-empty wait calls.
 - Added advisory post-mutation Tree-sitter syntax evidence to every `workspace_mutate` dry-run, no-op, apply, keyed receipt, and keyed replay response. Python, JavaScript, JSX, TypeScript, and TSX return bounded same-response diagnostics; unsupported grammars, invalid UTF-8, parser failures, observed budget overruns, and historical v1 receipts report explicit `unknown` rather than implicit success. Syntax errors never block the journaled mutation, while the response summary prominently reports `parse_ok=false`; generated contracts and a frozen-corpus p95 acceptance test cover the public shape and 100 ms/file budget.
 
 ## 2.2.0 — 2026-07-19
