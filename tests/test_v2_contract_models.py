@@ -120,6 +120,40 @@ def test_operation_contract_publishes_all_terminal_states_and_action_validation(
         model(action="cancel", operation_id="op-000000000000000000000001", scope="task:x")
 
 
+def test_operation_wait_contract_bounds_timeout_and_cursor_fields() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["operation"]
+    model = spec.input_model
+    operation_id = "op-000000000000000000000001"
+
+    validated = model(
+        action="wait",
+        operation_id=operation_id,
+        since_updated_at="2026-07-19T00:00:00+00:00",
+        timeout_seconds=30,
+    )
+    assert validated.action.value == "wait"
+    assert validated.timeout_seconds == 30
+
+    with pytest.raises(ValidationError):
+        model(action="wait", operation_id=operation_id, timeout_seconds=61)
+    with pytest.raises(ValidationError):
+        model(action="get", operation_id=operation_id, timeout_seconds=30)
+    with pytest.raises(ValidationError):
+        model(action="list", since_updated_at="2026-07-19T00:00:00+00:00")
+
+    output_fields = set(spec.output_model.model_fields)
+    assert {"changed_since", "timed_out"} <= output_fields
+    operation_schema = spec.output_model.model_json_schema()
+    rendered = str(operation_schema)
+    assert "suggested_poll_after_s" in rendered
+    assert "eta_seconds" in rendered
+    assert "progress_message" in rendered
+    assert "progress_unit" in rendered
+
+
 def test_runtime_log_time_range_requires_timezone_and_order() -> None:
     from pydantic import ValidationError
 
@@ -153,7 +187,7 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
         "workspace_refresh": {"preview", "apply"},
         "workspace_verify": {"plan", "auto", "diagnostic", "profile", "adhoc"},
         "workspace_pr": {"create_draft", "update", "comment", "watch"},
-        "operation": {"get", "list", "cancel", "failure_evidence"},
+        "operation": {"get", "wait", "list", "cancel", "failure_evidence"},
     }
 
     for tool_name, expected in expectations.items():

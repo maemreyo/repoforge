@@ -142,6 +142,40 @@ async def test_protocol_error_is_one_redacted_typed_envelope(
     assert validated.status == "failed"
 
 
+@pytest.mark.anyio
+async def test_protocol_operation_wait_returns_typed_terminal_evidence(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(kind="watch", phase="queued", cancel_supported=False)
+    running = manager.start(task.operation_id)
+    manager.succeed(task.operation_id, result_reference="watch:done")
+    server = create_server(service=forge_env.service)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "operation",
+            {
+                "action": "wait",
+                "operation_id": task.operation_id,
+                "since_updated_at": running.updated_at,
+                "timeout_seconds": 60,
+            },
+        )
+
+    assert result.isError is False
+    payload = result.structuredContent
+    assert payload is not None
+    assert payload["action"] == "wait"
+    assert payload["changed_since"] is True
+    assert payload["timed_out"] is False
+    operation = payload["operation"]
+    assert operation["terminal"] is True
+    assert operation["suggested_poll_after_s"] is None
+    assert operation["eta_seconds"] == 0.0
+    V2_TOOL_SPECS["operation"].validate_output(payload)
+
+
 def test_surface_hash_is_v2_identity_bound_and_version_negotiation_is_gone() -> None:
     assert tool_surface_hash() == tool_surface_hash()
     assert len(tool_surface_hash()) == 64

@@ -218,6 +218,8 @@ class OperationEvidence(StrictModel):
     phase: str = Field(min_length=1, max_length=120)
     progress_current: int | None = Field(default=None, ge=0)
     progress_total: int | None = Field(default=None, ge=0)
+    progress_unit: str | None = Field(default=None, max_length=64)
+    progress_message: str | None = Field(default=None, max_length=2_000)
     workspace_id: Identifier | None = None
     result_reference: str | None = Field(default=None, max_length=256)
     error_code: str | None = Field(default=None, max_length=128)
@@ -225,6 +227,8 @@ class OperationEvidence(StrictModel):
     terminal: bool = False
     cancellation_reason: str | None = Field(default=None, max_length=500)
     poll_after_seconds: float | None = Field(default=1.0, ge=0.1, le=60.0)
+    suggested_poll_after_s: float | None = Field(default=1.0, ge=0.1, le=60.0)
+    eta_seconds: float | None = Field(default=None, ge=0.0, le=31_536_000.0)
     updated_at: str | None = Field(default=None, max_length=80)
 
 

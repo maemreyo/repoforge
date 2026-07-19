@@ -457,6 +457,8 @@ class CodingService:
         limit: int = 50,
         cursor: str | None = None,
         failure_id: str | None = None,
+        since_updated_at: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._operation.execute(
@@ -469,6 +471,8 @@ class CodingService:
                     limit=limit,
                     cursor=cursor,
                     failure_id=failure_id,
+                    since_updated_at=since_updated_at,
+                    timeout_seconds=timeout_seconds,
                 )
             )
         )
