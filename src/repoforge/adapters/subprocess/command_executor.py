@@ -15,6 +15,7 @@ from ...domain.errors import CommandError, ErrorCode
 from ...domain.redaction import redact_text
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
+from .process_tree import kill_identity, snapshot_descendants
 
 
 class SubprocessCommandExecutor:
@@ -33,44 +34,6 @@ class SubprocessCommandExecutor:
         if extra:
             env.update(extra)
         return env
-
-    @staticmethod
-    def _descendant_pids(root_pid: int) -> tuple[int, ...]:
-        """Snapshot every live descendant of `root_pid` by walking `ps` ppid links.
-
-        A descendant that daemonizes with its own `start_new_session`/`setsid`
-        leaves the process group `killpg` targets, but the kernel parent/child
-        link (ppid) is unaffected -- so a ppid walk still finds it. This must
-        be called *before* any kill signal is sent: once the direct child is
-        reaped, orphaned grandchildren are reparented to init and vanish from
-        a walk rooted at `root_pid`.
-        """
-        try:
-            output = subprocess.run(
-                ["ps", "-Ao", "pid=,ppid="],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            ).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return ()
-        children_of: dict[int, list[int]] = {}
-        for line in output.splitlines():
-            parts = line.split()
-            if len(parts) != 2:
-                continue
-            try:
-                pid, ppid = int(parts[0]), int(parts[1])
-            except ValueError:
-                continue
-            children_of.setdefault(ppid, []).append(pid)
-        descendants: list[int] = []
-        frontier = [root_pid]
-        while frontier:
-            for child in children_of.get(frontier.pop(), []):
-                descendants.append(child)
-                frontier.append(child)
-        return tuple(descendants)
 
     @staticmethod
     def _truncate(text: str, limit: int) -> tuple[str, bool]:
@@ -131,7 +94,7 @@ class SubprocessCommandExecutor:
                 # since that's why the overall command timed out in the first
                 # place. Only taken on the timeout path so the common
                 # (successful, fast) case never pays for an extra `ps` call.
-                descendants = self._descendant_pids(process.pid)
+                descendants = snapshot_descendants(process.pid)
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                     process.wait(timeout=2)
@@ -161,9 +124,8 @@ class SubprocessCommandExecutor:
                 # its own start_new_session/setsid escapes that and survives
                 # every attempt above untouched. Sweep the pre-kill snapshot
                 # by PID directly -- this doesn't depend on group membership.
-                for descendant_pid in descendants:
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.kill(descendant_pid, signal.SIGKILL)
+                for descendant in descendants:
+                    kill_identity(descendant, signal.SIGKILL)
                 raise CommandError(
                     f"Command timed out after {timeout}s: {' '.join(argv)}",
                     code=ErrorCode.COMMAND_TIMEOUT,

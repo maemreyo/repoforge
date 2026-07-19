@@ -1,14 +1,13 @@
 import contextlib
 import os
 import signal
-import subprocess
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from repoforge.adapters.subprocess import SubprocessCommandExecutor
+from repoforge.adapters.subprocess import SubprocessCommandExecutor, process_tree
 from repoforge.config import ServerConfig
 from repoforge.domain.errors import CommandError, ErrorCode
 from repoforge.ports.cancellation import CancellationToken
@@ -112,26 +111,78 @@ def test_timeout_cleanup_kills_a_descendant_that_escaped_the_process_group(
     group (#225 round-3 review: reproduced a surviving grandchild)."""
     executor = _executor(tmp_path)
     script = tmp_path / "daemonize.py"
+    pid_file = tmp_path / "escaped.pid"
     script.write_text(
-        "import subprocess, time\n"
-        "subprocess.Popen(['sleep', '120'], start_new_session=True,"
+        "import pathlib, subprocess, time\n"
+        "child = subprocess.Popen(['sleep', '120'], start_new_session=True,"
         " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path('escaped.pid').write_text(str(child.pid))\n"
         "time.sleep(60)\n"
     )
-    with pytest.raises(CommandError) as excinfo:
-        executor.run(["python3", str(script)], cwd=tmp_path, timeout=1)
-    assert excinfo.value.code is ErrorCode.COMMAND_TIMEOUT
+    failures: list[CommandError] = []
 
+    def run_timed_command() -> None:
+        try:
+            executor.run(["python3", str(script)], cwd=tmp_path, timeout=1)
+        except CommandError as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=run_timed_command)
+    worker.start()
     deadline = time.monotonic() + 3
-    survivors = "unchecked"
-    while time.monotonic() < deadline:
-        survivors = subprocess.run(
-            ["pgrep", "-f", "sleep 120"], capture_output=True, text=True
-        ).stdout
-        if not survivors.strip():
-            break
-        time.sleep(0.2)
-    assert not survivors.strip(), f"escaped descendant still alive: {survivors!r}"
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert pid_file.exists()
+    captured = process_tree.read_identity(int(pid_file.read_text()))
+    if captured is None:
+        pytest.skip("process identity inspection is unavailable in this test sandbox")
+    worker.join(timeout=8)
+    assert not worker.is_alive()
+    assert failures and failures[0].code is ErrorCode.COMMAND_TIMEOUT
+    assert process_tree.identity_is_current(captured) is False
+
+
+def test_identity_safe_kill_skips_a_reused_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = process_tree.ProcessIdentity(pid=123, ppid=12, start_token="old")
+    monkeypatch.setattr(
+        process_tree,
+        "read_identity",
+        lambda pid: process_tree.ProcessIdentity(pid=pid, ppid=1, start_token="new"),
+    )
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    assert process_tree.kill_identity(captured, signal.SIGKILL) is False
+    assert kills == []
+
+
+def test_identity_safe_kill_allows_same_process_after_reparenting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = process_tree.ProcessIdentity(pid=123, ppid=12, start_token="same-start")
+    monkeypatch.setattr(
+        process_tree,
+        "read_identity",
+        lambda pid: process_tree.ProcessIdentity(pid=pid, ppid=1, start_token="same-start"),
+    )
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    assert process_tree.kill_identity(captured, signal.SIGKILL) is True
+    assert kills == [(123, signal.SIGKILL)]
+
+
+def test_linux_stat_parser_handles_parentheses_in_process_name() -> None:
+    fields_after_name = ["S", "42", *("0" for _ in range(17)), "123456", "0"]
+    parsed = process_tree._parse_linux_stat(
+        f"123 (worker ) helper) {' '.join(fields_after_name)}"
+    )
+
+    assert parsed == process_tree.ProcessIdentity(
+        pid=123,
+        ppid=42,
+        start_token="123456",
+    )
 
 
 def test_run_missing_executable_is_not_found_even_with_not_found_in_message(
