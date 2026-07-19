@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import math
+import time
 from collections.abc import Iterator
+from pathlib import Path
 
 from repoforge.application.syntax_diagnostics import SyntaxDiagnosticAnalyzer
 from repoforge.domain.syntax_diagnostics import SyntaxDiagnosticState, SyntaxSeverity
@@ -107,3 +111,33 @@ def test_observed_parse_budget_overrun_reports_unknown() -> None:
     assert result.analyzed_paths == ()
     assert result.unknown_paths == ("src/value.py",)
     assert result.diagnostics == ()
+
+
+def test_syntax_gate_p95_stays_within_declared_budget_on_generated_changes_corpus() -> None:
+    corpus_path = Path(__file__).parent / "fixtures/v2_corpora/generated_changes.json"
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    samples: list[tuple[str, bytes]] = []
+    for case in corpus["cases"]:
+        for operation in case["input"].get("operations", []):
+            path = operation.get("path")
+            content = operation.get("content")
+            if (
+                isinstance(path, str)
+                and path.endswith((".py", ".js", ".jsx", ".ts", ".tsx"))
+                and isinstance(content, str)
+            ):
+                samples.append((path, content.encode("utf-8")))
+
+    assert samples, "generated_changes corpus must contain supported-language content"
+    analyzer = SyntaxDiagnosticAnalyzer()
+    durations_ms: list[float] = []
+    for _ in range(25):
+        for path, source in samples:
+            started = time.perf_counter()
+            result = analyzer.analyze({path: source})
+            durations_ms.append((time.perf_counter() - started) * 1_000.0)
+            assert result.state is not SyntaxDiagnosticState.UNKNOWN
+
+    ordered = sorted(durations_ms)
+    p95 = ordered[math.ceil(len(ordered) * 0.95) - 1]
+    assert p95 <= 100.0, f"syntax gate p95 {p95:.3f} ms exceeded 100 ms/file"
