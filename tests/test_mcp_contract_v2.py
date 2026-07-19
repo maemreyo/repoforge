@@ -102,6 +102,41 @@ async def test_protocol_validates_output_against_authoritative_model() -> None:
 
 
 @pytest.mark.anyio
+async def test_protocol_workspace_mutate_surfaces_parse_failure_in_same_response(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id = forge_env.service.workspace_create("demo", "mcp syntax gate")["workspace_id"]
+    status = forge_env.service.workspace_status(workspace_id)
+    server = create_server(service=forge_env.service)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "workspace_mutate",
+            {
+                "workspace_id": workspace_id,
+                "operations": [
+                    {
+                        "op": "create",
+                        "path": "src/broken.py",
+                        "content": "def broken(:\n",
+                    }
+                ],
+                "expected_head_sha": status["head_sha"],
+                "expected_workspace_fingerprint": status["workspace_fingerprint"],
+            },
+        )
+
+    assert result.isError is False
+    payload = result.structuredContent
+    assert payload is not None
+    assert "parse_ok=false" in payload["summary"]
+    assert payload["syntax_diagnostics"]["state"] == "error"
+    assert payload["syntax_diagnostics"]["parse_ok"] is False
+    assert payload["syntax_diagnostics"]["diagnostics"][0]["path"] == "src/broken.py"
+    V2_TOOL_SPECS["workspace_mutate"].validate_output(payload)
+
+
+@pytest.mark.anyio
 async def test_protocol_error_is_one_redacted_typed_envelope(
     forge_env: ForgeEnvironment,
 ) -> None:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError
+from ...domain.execution_environment import ExecutionEvidence
 from ..context import ApplicationContext
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from .hygiene_common import select_formatter, select_policy_paths
@@ -36,6 +37,7 @@ class WorkspaceFormatChangedResult:
     head_sha: str
     verification_invalidated: bool
     next_safe_actions: list[dict[str, object]]
+    execution_evidence: ExecutionEvidence | None
 
 
 def _file_digest(workspace: Path, relative_path: str) -> str:
@@ -196,6 +198,7 @@ class WorkspaceChangedFormatter:
                     head_sha=self.ctx.git.head_sha(workspace),
                     verification_invalidated=verification_invalidated,
                     next_safe_actions=actions,
+                    execution_evidence=receipt.execution_evidence,
                 )
 
         return self.ctx.audited(

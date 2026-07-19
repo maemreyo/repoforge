@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import execution_coordinator_for_tests
 
 from repoforge.application.context import ApplicationContext
 from repoforge.application.workspace.create import (
@@ -150,6 +151,7 @@ def test_workspace_creation_compensates_when_registry_save_fails(
         FixedClock(),
         FixedIds(),
         NullExecutable(),
+        execution_coordinator_for_tests(),
     )
     with pytest.raises(OSError, match="injected"):
         WorkspaceCreator(ctx).execute(WorkspaceCreateCommand("demo", "task"))

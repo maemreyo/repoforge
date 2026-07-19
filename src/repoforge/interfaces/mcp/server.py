@@ -498,6 +498,16 @@ def _public_output(tool_name: str, raw: dict[str, Any]) -> dict[str, Any]:
 
     payload.setdefault("status", "ok")
     payload.setdefault("error", None)
+    syntax = payload.get("syntax_diagnostics")
+    if (
+        tool_name == "workspace_mutate"
+        and isinstance(syntax, dict)
+        and syntax.get("parse_ok") is False
+    ):
+        diagnostic_count = len(syntax.get("diagnostics", ()))
+        noun = "diagnostic" if diagnostic_count == 1 else "diagnostics"
+        mode = "Dry-run mutation" if payload.get("dry_run") is True else "Applied mutation"
+        payload["summary"] = f"{mode}; parse_ok=false with {diagnostic_count} syntax {noun}"
     if "summary" not in payload:
         count = len(payload.get("files", payload.get("matches", payload.get("entries", []))))
         noun = "item" if count == 1 else "items"
