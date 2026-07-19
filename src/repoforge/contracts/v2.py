@@ -941,14 +941,21 @@ class WorkspaceVerifyAssessment(StrictModel):
     evidence_coverage: tuple[KeyValue, ...] = Field(default=(), max_length=32)
 
 
+_SelectorItem = Annotated[str, Field(min_length=1, max_length=4096)]
+
+
 class WorkspaceVerifyInput(StrictModel):
     workspace_id: Identifier
     mode: VerifyMode = VerifyMode.AUTO
     diagnostic_id: Identifier | None = None
-    selector: str | tuple[str, ...] | None = None
-    selector2: str | tuple[str, ...] | None = None
+    selector: _SelectorItem | tuple[_SelectorItem, ...] | None = Field(
+        default=None, max_length=4096
+    )
+    selector2: _SelectorItem | tuple[_SelectorItem, ...] | None = Field(
+        default=None, max_length=4096
+    )
     profile_name: Identifier | None = None
-    argv: tuple[str, ...] | None = Field(default=None, max_length=100)
+    argv: tuple[_SelectorItem, ...] | None = Field(default=None, max_length=100)
     working_directory: RelativePath | None = None
     expected_fingerprint: Sha256 | None = None
     background: bool = False
@@ -1219,13 +1226,16 @@ class FailureEvidenceWorkspaceIdentity(StrictModel):
 
 
 class FailureRecoveryAction(StrictModel):
-    """`kind` is always one of the 28 currently-callable Forge v2 tool names.
-    `mode`/`plan_action`/`refresh_action` carry the sub-mode a client needs to
-    reconstruct the exact call for tools consolidated behind a mode/action
-    field (#180 static 28-tool surface); `operation_id`, `plan_id`,
-    `expected_head_sha`, and `expected_workspace_fingerprint` carry the
-    remaining parameters that specific call actually requires, so a client
-    never has to guess or re-derive them from context."""
+    """`kind` is always one of the 28 currently-callable Forge v2 tool names,
+    and every other field here names a real field on that tool's real Input
+    model (verified against this module), so a client can reconstruct the
+    exact call rather than guess or re-derive parameters from context.
+    `action` carries `OperationInput.action` ("get"/"cancel") for `operation`
+    and `WorkspaceRefreshInput.action` ("preview"/"apply") for
+    `workspace_refresh` -- two different tools' fields that happen to share a
+    name; which one applies is determined by `kind`. `mode`/`plan_action`/
+    `plan_through` carry the sub-mode for `workspace_verify`'s consolidated
+    mode/action field (#180 static 28-tool surface)."""
 
     kind: Literal[
         "operation",
@@ -1236,15 +1246,16 @@ class FailureRecoveryAction(StrictModel):
         "config_inspect",
     ]
     precondition: str = Field(min_length=1, max_length=500)
+    workspace_id: Identifier | None = None
     mode: Literal["auto", "diagnostic", "profile", "plan"] | None = None
     plan_action: Literal["create", "accept", "execute"] | None = None
     diagnostic_id: Identifier | None = None
     profile_name: Identifier | None = None
-    through: Literal["iteration", "full"] | None = None
+    plan_through: Literal["iteration", "full"] | None = None
     relative_paths: tuple[RelativePath, ...] = Field(default=(), max_length=200)
     operation_id: Identifier | None = None
     plan_id: Identifier | None = None
-    refresh_action: Literal["preview", "apply"] | None = None
+    action: Literal["get", "cancel", "preview", "apply"] | None = None
     expected_head_sha: GitObjectId | None = None
     expected_workspace_fingerprint: Sha256 | None = None
 

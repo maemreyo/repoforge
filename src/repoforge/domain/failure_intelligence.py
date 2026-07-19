@@ -83,19 +83,38 @@ class RecoveryActionKind(str, Enum):
     CONFIG_INSPECT = "config_inspect"
 
 
+_KINDS_REQUIRING_WORKSPACE_ID = frozenset(
+    {
+        RecoveryActionKind.WORKSPACE_STATUS,
+        RecoveryActionKind.WORKSPACE_VERIFY,
+        RecoveryActionKind.WORKSPACE_REFRESH,
+        RecoveryActionKind.WORKSPACE_MUTATE,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryAction:
+    """Every field here names a real field on the real Forge v2 tool Input
+    model for `kind` (verified against `contracts/v2.py`), so a caller can
+    reconstruct the exact tool call rather than guess or re-derive parameters
+    from context. `action` carries `OperationInput.action` for `operation`
+    (e.g. "get") and `WorkspaceRefreshInput.action` for `workspace_refresh`
+    (e.g. "preview"/"apply") -- two different tools' fields that happen to
+    share a name; which one applies is determined by `kind`."""
+
     kind: RecoveryActionKind
     precondition: str
+    workspace_id: str | None = None
     mode: str | None = None
     plan_action: str | None = None
     diagnostic_id: str | None = None
     profile_name: str | None = None
-    through: str | None = None
+    plan_through: str | None = None
     relative_paths: tuple[str, ...] = ()
     operation_id: str | None = None
     plan_id: str | None = None
-    refresh_action: str | None = None
+    action: str | None = None
     expected_head_sha: str | None = None
     expected_workspace_fingerprint: str | None = None
 
@@ -107,12 +126,18 @@ class RecoveryAction:
         ):
             if value is not None and _SAFE_ID.fullmatch(value) is None:
                 _invalid(f"Recovery action {field} is invalid")
+        if self.workspace_id is not None and _SAFE_ID.fullmatch(self.workspace_id) is None:
+            _invalid("Recovery action workspace_id is invalid")
+        if self.kind in _KINDS_REQUIRING_WORKSPACE_ID and self.workspace_id is None:
+            _invalid(f"{self.kind.value} recovery action requires workspace_id")
+        if self.kind not in _KINDS_REQUIRING_WORKSPACE_ID and self.workspace_id is not None:
+            _invalid(f"workspace_id is not valid for {self.kind.value} recovery actions")
         if self.operation_id is not None and _OPERATION_ID.fullmatch(self.operation_id) is None:
             _invalid("Recovery action operation_id is invalid")
         if self.plan_id is not None and _PLAN_ID.fullmatch(self.plan_id) is None:
             _invalid("Recovery action plan_id is invalid")
-        if self.through is not None and self.through not in {"iteration", "full"}:
-            _invalid("Recovery action through boundary is invalid")
+        if self.plan_through is not None and self.plan_through not in {"iteration", "full"}:
+            _invalid("Recovery action plan_through boundary is invalid")
         if self.mode is not None and self.mode not in {"auto", "diagnostic", "profile", "plan"}:
             _invalid("Recovery action mode is invalid")
         if self.plan_action is not None and self.plan_action not in {
@@ -121,8 +146,6 @@ class RecoveryAction:
             "execute",
         }:
             _invalid("Recovery action plan_action is invalid")
-        if self.refresh_action is not None and self.refresh_action not in {"preview", "apply"}:
-            _invalid("Recovery action refresh_action is invalid")
         if (
             self.expected_head_sha is not None
             and _GIT_SHA.fullmatch(self.expected_head_sha) is None
@@ -140,11 +163,11 @@ class RecoveryAction:
         )
         verify_only = (self.mode, self.plan_action, self.diagnostic_id, self.profile_name)
         if self.kind is not RecoveryActionKind.WORKSPACE_VERIFY and (
-            any(value is not None for value in verify_only) or self.through is not None
+            any(value is not None for value in verify_only) or self.plan_through is not None
         ):
             _invalid(
-                "mode, plan_action, diagnostic_id, profile_name, and through are only valid "
-                "for workspace_verify recovery actions"
+                "mode, plan_action, diagnostic_id, profile_name, and plan_through are only "
+                "valid for workspace_verify recovery actions"
             )
         if self.kind is RecoveryActionKind.WORKSPACE_VERIFY:
             if self.mode is None:
@@ -156,26 +179,32 @@ class RecoveryAction:
             if self.mode == "plan":
                 if self.plan_action is None:
                     _invalid("Plan recovery action requires plan_action")
-                if self.plan_action == "execute" and self.through is None:
-                    _invalid("Plan execute recovery action requires through")
+                if self.plan_action == "execute" and self.plan_through is None:
+                    _invalid("Plan execute recovery action requires plan_through")
                 if self.plan_action in {"accept", "execute"} and self.plan_id is None:
                     _invalid(f"Plan {self.plan_action} recovery action requires plan_id")
         elif self.plan_id is not None:
             _invalid("plan_id is only valid for workspace_verify plan accept or execute")
-        if self.kind is RecoveryActionKind.OPERATION and self.operation_id is None:
-            _invalid("operation recovery action requires operation_id")
-        if self.kind is not RecoveryActionKind.OPERATION and self.operation_id is not None:
-            _invalid("operation_id is only valid for operation recovery actions")
+        if self.kind is RecoveryActionKind.OPERATION:
+            if self.operation_id is None:
+                _invalid("operation recovery action requires operation_id")
+            if self.action not in {"get", "cancel"}:
+                _invalid("operation recovery action requires action of get or cancel")
+        else:
+            if self.operation_id is not None:
+                _invalid("operation_id is only valid for operation recovery actions")
         if self.kind is RecoveryActionKind.WORKSPACE_REFRESH:
-            if self.refresh_action is None:
-                _invalid("workspace_refresh recovery action requires refresh_action")
+            if self.action is None:
+                _invalid("workspace_refresh recovery action requires action")
+            if self.action not in {"preview", "apply"}:
+                _invalid("Recovery action action is invalid for workspace_refresh")
             if self.expected_head_sha is None or self.expected_workspace_fingerprint is None:
                 _invalid(
                     "workspace_refresh recovery action requires expected_head_sha and "
                     "expected_workspace_fingerprint"
                 )
-        elif self.refresh_action is not None:
-            _invalid("refresh_action is only valid for workspace_refresh recovery actions")
+        elif self.kind is not RecoveryActionKind.OPERATION and self.action is not None:
+            _invalid("action is only valid for operation or workspace_refresh recovery actions")
         if self.kind is RecoveryActionKind.WORKSPACE_MUTATE:
             if not self.relative_paths:
                 _invalid("Restore recovery action requires relative_paths")
@@ -197,6 +226,7 @@ class RecoveryAction:
 
     def payload(self) -> dict[str, object]:
         return {
+            "action": self.action,
             "diagnostic_id": self.diagnostic_id,
             "expected_head_sha": self.expected_head_sha,
             "expected_workspace_fingerprint": self.expected_workspace_fingerprint,
@@ -205,11 +235,11 @@ class RecoveryAction:
             "operation_id": self.operation_id,
             "plan_action": self.plan_action,
             "plan_id": self.plan_id,
+            "plan_through": self.plan_through,
             "precondition": self.precondition,
             "profile_name": self.profile_name,
-            "refresh_action": self.refresh_action,
             "relative_paths": list(self.relative_paths),
-            "through": self.through,
+            "workspace_id": self.workspace_id,
         }
 
 
@@ -233,6 +263,7 @@ class FailureObservation:
     stage_id: str
     stage_kind: str
     target: str
+    workspace_id: str
     pre_identity: WorkspaceIdentity
     post_identity: WorkspaceIdentity
     environment_identity: str | None
@@ -245,6 +276,8 @@ class FailureObservation:
     compatibility_binding: str | None = None
 
     def __post_init__(self) -> None:
+        if _SAFE_ID.fullmatch(self.workspace_id) is None:
+            _invalid("Failure observation workspace_id is invalid")
         if _OPERATION_ID.fullmatch(self.operation_id) is None:
             _invalid("Failure observation operation_id is invalid")
         if _PLAN_ID.fullmatch(self.plan_id) is None or _SHA64.fullmatch(self.plan_hash) is None:
@@ -569,31 +602,27 @@ def _actions(
     status = _action(
         RecoveryActionKind.WORKSPACE_STATUS,
         "The workspace still exists and the caller needs a fresh HEAD and fingerprint.",
+        workspace_id=observation.workspace_id,
     )
     operation = _action(
         RecoveryActionKind.OPERATION,
         "The durable operation ID remains available.",
         operation_id=observation.operation_id,
+        action="get",
     )
     profile = _action(
         RecoveryActionKind.WORKSPACE_VERIFY,
         "The named reviewed profile remains configured for this repository.",
+        workspace_id=observation.workspace_id,
         mode="profile",
         profile_name=observation.target if observation.stage_kind == "profile" else "quick",
     )
     plan = _action(
         RecoveryActionKind.WORKSPACE_VERIFY,
         "Workspace status, configuration, policy, and assessment evidence are current.",
+        workspace_id=observation.workspace_id,
         mode="plan",
         plan_action="create",
-    )
-    execute = _action(
-        RecoveryActionKind.WORKSPACE_VERIFY,
-        "A fresh exact plan has been accepted and its bindings are current.",
-        mode="plan",
-        plan_action="execute",
-        plan_id=observation.plan_id,
-        through="full",
     )
     config = _action(
         RecoveryActionKind.CONFIG_INSPECT,
@@ -603,6 +632,7 @@ def _actions(
         setup = _action(
             RecoveryActionKind.WORKSPACE_VERIFY,
             "The reviewed setup profile is configured and network policy permits dependency preparation.",
+            workspace_id=observation.workspace_id,
             mode="profile",
             profile_name="setup",
         )
@@ -612,7 +642,12 @@ def _actions(
     if failure_class is FailureClass.CONFIGURATION_INVALID:
         return (config, status, plan)
     if failure_class in {FailureClass.TIMEOUT, FailureClass.CANCELLED}:
-        return (operation, status, execute)
+        # A fresh plan, not a re-execute of the plan bound to this failed
+        # attempt: the stage that just timed out/was cancelled belongs to
+        # `observation.plan_id`, and re-executing that exact plan_id would
+        # just retry the same accepted stage sequence against workspace
+        # bindings that are, at minimum, unverified since the failure.
+        return (operation, status, plan)
     if failure_class in {
         FailureClass.LINT_FAILURE,
         FailureClass.TYPE_FAILURE,
@@ -629,18 +664,23 @@ def _actions(
         refresh = _action(
             RecoveryActionKind.WORKSPACE_REFRESH,
             "The workspace is clean enough to review a new exact remote-base preview.",
-            refresh_action="preview",
+            workspace_id=observation.workspace_id,
+            action="preview",
             expected_head_sha=observation.post_identity.head_sha,
             expected_workspace_fingerprint=observation.post_identity.workspace_fingerprint,
         )
         return (status, refresh, plan)
     if failure_class is FailureClass.STALE_PLAN:
-        return (status, plan, execute)
+        # `observation.plan_id` is the plan this classification just found
+        # stale -- recommending an execute of that same plan_id would just
+        # reproduce the staleness. The only safe recovery is a fresh plan.
+        return (status, plan)
     if failure_class is FailureClass.UNEXPECTED_MUTATION:
         if observation.changed_paths:
             restore = _action(
                 RecoveryActionKind.WORKSPACE_MUTATE,
                 "The listed paths were reviewed and the operator intends to discard those exact changes.",
+                workspace_id=observation.workspace_id,
                 relative_paths=observation.changed_paths,
                 expected_head_sha=observation.post_identity.head_sha,
                 expected_workspace_fingerprint=observation.post_identity.workspace_fingerprint,
@@ -872,6 +912,9 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
             RecoveryAction(
                 kind=RecoveryActionKind(str(raw.get("kind", ""))),
                 precondition=str(raw.get("precondition", "")),
+                workspace_id=(
+                    str(raw["workspace_id"]) if raw.get("workspace_id") is not None else None
+                ),
                 mode=(str(raw["mode"]) if raw.get("mode") is not None else None),
                 plan_action=(
                     str(raw["plan_action"]) if raw.get("plan_action") is not None else None
@@ -882,15 +925,15 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
                 profile_name=(
                     str(raw["profile_name"]) if raw.get("profile_name") is not None else None
                 ),
-                through=(str(raw["through"]) if raw.get("through") is not None else None),
+                plan_through=(
+                    str(raw["plan_through"]) if raw.get("plan_through") is not None else None
+                ),
                 relative_paths=tuple(str(item) for item in raw_paths),
                 operation_id=(
                     str(raw["operation_id"]) if raw.get("operation_id") is not None else None
                 ),
                 plan_id=(str(raw["plan_id"]) if raw.get("plan_id") is not None else None),
-                refresh_action=(
-                    str(raw["refresh_action"]) if raw.get("refresh_action") is not None else None
-                ),
+                action=(str(raw["action"]) if raw.get("action") is not None else None),
                 expected_head_sha=(
                     str(raw["expected_head_sha"])
                     if raw.get("expected_head_sha") is not None

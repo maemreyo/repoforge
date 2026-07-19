@@ -200,8 +200,17 @@ _EXTERNAL_READ_TOOLS = frozenset({"repo_pr_read", "workspace_pr_evidence"})
 _EXTERNAL_MUTATE_TOOLS = frozenset({"repo_issue"})
 _EXTERNAL_WRITE_TOOLS = frozenset({"workspace_push", "workspace_pr"})
 _LOCAL_CREATE_TOOLS = frozenset({"workspace_create"})
-_LOCAL_DESTRUCTIVE_TOOLS = frozenset({"workspace_remove"})
-_LOCAL_IDEMPOTENT_TOOLS = frozenset({"workspace_format_changed", "workspace_verify", "operation"})
+# workspace_mutate can run delete/restore operations that irreversibly
+# discard content, so it is not honestly annotated non-destructive (#225
+# round-3 review).
+_LOCAL_DESTRUCTIVE_TOOLS = frozenset({"workspace_remove", "workspace_mutate"})
+# workspace_verify is deliberately excluded: its mode=plan/plan_action=create
+# sub-mode allocates a new, distinct plan_id on every call, so the tool as a
+# whole is not idempotent even though its read-only sub-modes (auto,
+# diagnostic, profile, adhoc) are (#225 round-3 review). MCP annotations are
+# per-tool, not per-mode, so the honest tool-wide hint is the default
+# LOCAL_MUTATE (idempotentHint=False).
+_LOCAL_IDEMPOTENT_TOOLS = frozenset({"workspace_format_changed", "operation"})
 
 
 def _tool_annotations(name: str) -> ToolAnnotations:

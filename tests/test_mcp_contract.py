@@ -70,7 +70,15 @@ async def test_mcp_protocol_contract_and_annotations(
     assert by_name["repo_read"].annotations.openWorldHint is False
     assert by_name["repo_pr_read"].annotations.openWorldHint is True
     assert by_name["workspace_remove"].annotations.destructiveHint is True
-    assert by_name["workspace_verify"].annotations.idempotentHint is True
+    # workspace_mutate can run delete/restore operations that irreversibly
+    # discard content, so it is not honestly annotated non-destructive.
+    assert by_name["workspace_mutate"].annotations.destructiveHint is True
+    # workspace_verify's mode=plan/plan_action=create sub-mode allocates a
+    # fresh, distinct plan_id on every call, so the tool as a whole is not
+    # idempotent even though its read-only sub-modes are (#225 round-3
+    # review). MCP annotations are per-tool, not per-mode.
+    assert by_name["workspace_verify"].annotations.idempotentHint is False
+    assert by_name["operation"].annotations.idempotentHint is True
     assert by_name["workspace_push"].annotations.openWorldHint is True
 
 

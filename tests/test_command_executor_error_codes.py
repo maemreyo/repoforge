@@ -1,6 +1,7 @@
 import contextlib
 import os
 import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -97,6 +98,40 @@ def test_timeout_cleanup_does_not_hang_when_killpg_reports_permission_error(
         for pid in signaled_pids:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 real_killpg(pid, signal.SIGKILL)
+
+
+def test_timeout_cleanup_kills_a_descendant_that_escaped_the_process_group(
+    tmp_path: Path,
+) -> None:
+    """A child can daemonize a grandchild via its own start_new_session/setsid,
+    which leaves the process group killpg targets -- but not the kernel
+    parent/child link, as long as the daemonizing child is still alive when
+    the timeout fires (the realistic case: something in the tree is still
+    blocked, which is *why* the overall command timed out). The cleanup path
+    must sweep such escaped descendants directly by PID, not only killpg the
+    group (#225 round-3 review: reproduced a surviving grandchild)."""
+    executor = _executor(tmp_path)
+    script = tmp_path / "daemonize.py"
+    script.write_text(
+        "import subprocess, time\n"
+        "subprocess.Popen(['sleep', '120'], start_new_session=True,"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.raises(CommandError) as excinfo:
+        executor.run(["python3", str(script)], cwd=tmp_path, timeout=1)
+    assert excinfo.value.code is ErrorCode.COMMAND_TIMEOUT
+
+    deadline = time.monotonic() + 3
+    survivors = "unchecked"
+    while time.monotonic() < deadline:
+        survivors = subprocess.run(
+            ["pgrep", "-f", "sleep 120"], capture_output=True, text=True
+        ).stdout
+        if not survivors.strip():
+            break
+        time.sleep(0.2)
+    assert not survivors.strip(), f"escaped descendant still alive: {survivors!r}"
 
 
 def test_run_missing_executable_is_not_found_even_with_not_found_in_message(

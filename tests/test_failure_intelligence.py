@@ -21,6 +21,7 @@ from repoforge.domain.failure_intelligence import (
     FailureHistorySignal,
     FailureObservation,
     FailureReproducibility,
+    RecoveryAction,
     RecoveryActionKind,
     build_failure_evidence,
     classify_failure,
@@ -47,6 +48,7 @@ def _observation(**overrides: object) -> FailureObservation:
         "stage_id": "stage-01-profile",
         "stage_kind": "profile",
         "target": "full",
+        "workspace_id": "ws-demo-01",
         "pre_identity": _identity(),
         "post_identity": _identity(),
         "environment_identity": "d" * 64,
@@ -142,15 +144,64 @@ def test_representative_failures_classify_deterministically(
     )
 
 
+def _reconstruct_real_input(
+    action: RecoveryAction, observation: FailureObservation
+) -> dict[str, object]:
+    """Translate a `RecoveryAction` into the exact payload its real v2 tool
+    Input model expects. This mirrors what a client reconstructing the call
+    must do -- including the field-name/shape differences between the
+    domain's `RecoveryAction` and the wire contracts it names (e.g.
+    `WorkspaceRefreshInput.expected_fingerprint` vs `WorkspaceMutateInput.
+    expected_workspace_fingerprint`, and `WorkspaceMutateInput.operations`'
+    nested `{"op": "restore", "paths": [...]}` shape vs the flat
+    `relative_paths` the domain model carries)."""
+    kind = action.kind
+    if kind is RecoveryActionKind.OPERATION:
+        return {"action": action.action, "operation_id": action.operation_id}
+    if kind is RecoveryActionKind.WORKSPACE_STATUS:
+        return {"workspace_id": action.workspace_id}
+    if kind is RecoveryActionKind.CONFIG_INSPECT:
+        return {}
+    if kind is RecoveryActionKind.WORKSPACE_VERIFY:
+        payload: dict[str, object] = {"workspace_id": action.workspace_id, "mode": action.mode}
+        if action.mode == "diagnostic":
+            payload["diagnostic_id"] = action.diagnostic_id
+        if action.mode == "profile":
+            payload["profile_name"] = action.profile_name
+        if action.mode == "plan":
+            payload["plan_action"] = action.plan_action
+            if action.plan_action in {"accept", "execute"}:
+                payload["plan_id"] = action.plan_id
+            if action.plan_action == "execute":
+                payload["plan_through"] = action.plan_through
+        return payload
+    if kind is RecoveryActionKind.WORKSPACE_REFRESH:
+        return {
+            "workspace_id": action.workspace_id,
+            "action": action.action,
+            "expected_head_sha": action.expected_head_sha,
+            "expected_fingerprint": action.expected_workspace_fingerprint,
+        }
+    if kind is RecoveryActionKind.WORKSPACE_MUTATE:
+        return {
+            "workspace_id": action.workspace_id,
+            "operations": [{"op": "restore", "paths": list(action.relative_paths)}],
+            "expected_head_sha": action.expected_head_sha,
+            "expected_workspace_fingerprint": action.expected_workspace_fingerprint,
+        }
+    raise AssertionError(f"unhandled recovery action kind: {kind}")
+
+
 def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -> None:
     """Every recovery action's kind must be one of the 28 currently-callable
     Forge v2 tools -- not a retired v1 tool name a client cannot execute.
-    workspace_verify actions must additionally carry enough of mode/
-    plan_action/diagnostic_id/profile_name/through to reconstruct the exact
-    call (#180 review: recovery actions still referenced workspace_execute_plan,
-    workspace_refresh_preview, workspace_restore_paths -- none of which exist
-    as standalone tools on the static 28-tool surface)."""
-    from repoforge.contracts.registry import V2_TOOL_NAMES
+    This proves reconstructability by actually building the real tool's
+    Input payload from the action and calling `validate_input()` on it --
+    not just asserting individual fields are present, which can pass while
+    the field names/shapes still don't match the real contract (#225 round-3
+    review: `test_failure_intelligence.py` "checks individual fields instead
+    of proving a real tool call can be reconstructed")."""
+    from repoforge.contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS
 
     for overrides in (
         {"error_code": ErrorCode.DIAGNOSTIC_TOOL_MISSING.value},
@@ -183,50 +234,40 @@ def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -
                 classification.failure_class,
                 action.kind,
             )
-            if action.kind is RecoveryActionKind.WORKSPACE_VERIFY:
-                assert action.mode in {"auto", "diagnostic", "profile", "plan"}
-                if action.mode == "diagnostic":
-                    assert action.diagnostic_id is not None
-                if action.mode == "profile":
-                    assert action.profile_name is not None
-                if action.mode == "plan":
-                    assert action.plan_action in {"create", "accept", "execute"}
-                    if action.plan_action == "execute":
-                        assert action.through in {"iteration", "full"}
-                        # execute operates on an existing accepted plan, so the
-                        # plan_id it applies to must be reconstructible too.
-                        assert action.plan_id == observation.plan_id
-                    if action.plan_action == "create":
-                        assert action.plan_id is None
-            else:
-                assert action.mode is None
-                assert action.plan_action is None
+            real_payload = _reconstruct_real_input(action, observation)
+            spec = V2_TOOL_SPECS[action.kind.value]
+            validated = spec.validate_input(real_payload)
+            assert validated is not None, (classification.failure_class, action.kind, real_payload)
+
+            if action.kind is RecoveryActionKind.WORKSPACE_VERIFY and action.mode == "plan":
+                if action.plan_action == "execute":
+                    # execute operates on an existing accepted plan bound to
+                    # this exact failed attempt's plan_id would just retry the
+                    # binding that was already involved in the failure -- the
+                    # only recovery actually offered is always a fresh plan.
+                    raise AssertionError("execute must not be offered as a recovery action")
+                if action.plan_action == "create":
+                    assert action.plan_id is None
             if action.kind is RecoveryActionKind.OPERATION:
                 assert action.operation_id == observation.operation_id
-            else:
-                assert action.operation_id is None
-            if action.kind is RecoveryActionKind.WORKSPACE_REFRESH:
-                assert action.refresh_action == "preview"
-                assert action.expected_head_sha == observation.post_identity.head_sha
-                assert (
-                    action.expected_workspace_fingerprint
-                    == observation.post_identity.workspace_fingerprint
-                )
-            else:
-                assert action.refresh_action is None
             if action.kind is RecoveryActionKind.WORKSPACE_MUTATE:
                 assert action.relative_paths
-                assert action.expected_head_sha == observation.post_identity.head_sha
-                assert (
-                    action.expected_workspace_fingerprint
-                    == observation.post_identity.workspace_fingerprint
-                )
-            if action.kind not in {
-                RecoveryActionKind.WORKSPACE_REFRESH,
-                RecoveryActionKind.WORKSPACE_MUTATE,
-            }:
-                assert action.expected_head_sha is None
-                assert action.expected_workspace_fingerprint is None
+
+
+def test_stale_plan_recovery_never_recommends_reexecuting_the_known_stale_plan_id() -> None:
+    """A stale-plan failure's own `observation.plan_id` is the plan that was
+    just found stale; recommending `workspace_verify(plan_action="execute",
+    plan_id=<that same id>)` would just reproduce the staleness. The only
+    safe recovery is creating a fresh plan (#225 round-3 review: "a logical
+    bug, not just a schema-shape bug")."""
+    observation = _observation(
+        error_code=ErrorCode.STATE_STALE.value, details={"plan_id": "plan-x"}
+    )
+    classification = classify_failure(observation)
+    assert classification.failure_class is FailureClass.STALE_PLAN
+    for action in classification.safe_actions:
+        if action.kind is RecoveryActionKind.WORKSPACE_VERIFY:
+            assert not (action.mode == "plan" and action.plan_action == "execute")
 
 
 def test_structured_classification_precedes_text_and_rejects_injected_actions() -> None:
