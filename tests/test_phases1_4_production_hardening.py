@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import execution_coordinator_for_tests
 
 from repoforge.adapters.configuration import ConfigGenerationStore
 from repoforge.adapters.git import GitCliRepository
@@ -414,6 +415,7 @@ def test_read_only_repository_is_enforced_centrally_before_write_adapter(tmp_pat
         FixedClock(),
         SequenceIdGenerator(),
         _NullExecutables(),  # type: ignore[arg-type]
+        execution_coordinator_for_tests(),
     )
     with pytest.raises(SecurityError, match="read-only"):
         ctx.audited("workspace_write_file", {"repo_id": "demo"}, lambda: None)

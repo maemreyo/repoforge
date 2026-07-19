@@ -16,6 +16,7 @@ from .common import (
     CommitSummary,
     Cursor,
     DiffFile,
+    ExecutionEvidenceModel,
     Freshness,
     GitObjectId,
     GitRef,
@@ -653,6 +654,7 @@ class WorkspaceFormatChangedOutput(ToolResponse):
     changed: bool
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
+    execution_evidence: ExecutionEvidenceModel | None = None
 
 
 class WorkspaceReadInput(StrictModel):
@@ -820,6 +822,56 @@ class MutationDiagnostic(StrictModel):
     repair_actions: tuple[str, ...] = Field(default=(), max_length=20)
 
 
+class SyntaxDiagnosticState(str, Enum):
+    OK = "ok"
+    ERROR = "error"
+    UNKNOWN = "unknown"
+
+
+class SyntaxDiagnosticSeverity(str, Enum):
+    ERROR = "error"
+
+
+class SyntaxDiagnosticItem(StrictModel):
+    path: RelativePath
+    line: int = Field(ge=1, le=10_000_000)
+    message: str = Field(min_length=1, max_length=500)
+    severity: SyntaxDiagnosticSeverity
+
+
+class SyntaxDiagnosticsEvidence(StrictModel):
+    state: SyntaxDiagnosticState
+    parse_ok: bool | None
+    diagnostics: tuple[SyntaxDiagnosticItem, ...] = Field(default=(), max_length=100)
+    analyzed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    unknown_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    truncated: bool = False
+    legacy_receipt: bool = False
+
+    @model_validator(mode="after")
+    def validate_state(self) -> SyntaxDiagnosticsEvidence:
+        if self.state is SyntaxDiagnosticState.OK:
+            if (
+                self.parse_ok is not True
+                or self.diagnostics
+                or self.unknown_paths
+                or self.legacy_receipt
+            ):
+                raise ValueError("ok syntax evidence must be complete and error-free")
+        elif self.state is SyntaxDiagnosticState.ERROR:
+            if self.parse_ok is not False or not self.diagnostics or self.legacy_receipt:
+                raise ValueError("error syntax evidence requires diagnostics")
+        elif (
+            self.parse_ok is not None
+            or self.diagnostics
+            or (not self.unknown_paths and not self.legacy_receipt)
+        ):
+            raise ValueError(
+                "unknown syntax evidence requires unresolved paths or legacy provenance"
+            )
+        return self
+
+
 class WorkspaceMutateOutput(ToolResponse):
     workspace_id: Identifier
     dry_run: bool
@@ -833,6 +885,7 @@ class WorkspaceMutateOutput(ToolResponse):
     workspace_fingerprint: Sha256
     diff_stat: str = Field(default="", max_length=20_000)
     change_metrics: ChangeMetrics
+    syntax_diagnostics: SyntaxDiagnosticsEvidence
     transaction_id: Identifier | None = None
 
 
@@ -1028,6 +1081,7 @@ class WorkspaceVerifyOutput(ToolResponse):
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
     plan: ExecutionPlanEvidence | None = None
+    execution_evidence: ExecutionEvidenceModel | None = None
 
 
 class ShippingChangeLimits(StrictModel):
@@ -1211,6 +1265,7 @@ class WorkspacePrEvidenceOutput(ToolResponse):
 
 class OperationAction(str, Enum):
     GET = "get"
+    WAIT = "wait"
     LIST = "list"
     CANCEL = "cancel"
     FAILURE_EVIDENCE = "failure_evidence"
@@ -1339,20 +1394,28 @@ class OperationInput(StrictModel):
     limit: int = Field(default=50, ge=1, le=200)
     cursor: Cursor | None = None
     failure_id: Identifier | None = None
+    since_updated_at: str | None = Field(default=None, max_length=80)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=60)
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> OperationInput:
-        if self.action in {OperationAction.GET, OperationAction.CANCEL}:
+        if self.action in {OperationAction.GET, OperationAction.WAIT, OperationAction.CANCEL}:
             if self.operation_id is None:
                 raise ValueError(f"operation {self.action.value} requires operation_id")
         elif self.operation_id is not None:
-            raise ValueError("operation_id is only valid for get or cancel")
+            raise ValueError("operation_id is only valid for get, wait, or cancel")
         if self.action is not OperationAction.LIST and any(
             value is not None for value in (self.scope, self.state, self.cursor)
         ):
             raise ValueError("scope, state, and cursor are only valid for operation list")
         if self.action is not OperationAction.CANCEL and self.expected_updated_at is not None:
             raise ValueError("expected_updated_at is only valid for operation cancel")
+        if self.action is not OperationAction.WAIT and any(
+            value is not None for value in (self.since_updated_at, self.timeout_seconds)
+        ):
+            raise ValueError(
+                "since_updated_at and timeout_seconds are only valid for operation wait"
+            )
         if self.action is OperationAction.FAILURE_EVIDENCE and self.failure_id is None:
             raise ValueError("operation failure_evidence requires failure_id")
         if self.action is not OperationAction.FAILURE_EVIDENCE and self.failure_id is not None:
@@ -1368,6 +1431,8 @@ class OperationOutput(ToolResponse):
     truncated: bool = False
     next_cursor: Cursor | None = None
     failure_evidence: FailureEvidenceDetail | None = None
+    changed_since: bool = False
+    timed_out: bool = False
 
 
 class ConfigInspectInput(StrictModel):

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import execution_coordinator_for_tests
 
 from repoforge.adapters.audit import JsonlAuditSink
 from repoforge.adapters.audit.query import read_audit_events
@@ -173,6 +174,7 @@ def _context(tmp_path: Path) -> ApplicationContext:
         clock,
         SequenceIdGenerator(("correlation-000000000000",)),
         NullExecutable(),
+        execution_coordinator_for_tests(),
         JsonMetricsSink(state_root, locks),
         JsonIdempotencyStore(state_root),
     )

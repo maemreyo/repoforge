@@ -7,6 +7,7 @@ from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import CommandError, ErrorCode, WorkspaceError
 from ...domain.publishing import validate_commit_message
 from ..context import ApplicationContext
+from ..execution.requests import profile_execution_request
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,50 @@ class WorkspaceCommitter:
                     if self.ctx.git.fingerprint(path) != fresh.last_verification.fingerprint:
                         raise WorkspaceError(
                             "Working tree changed after verification; run a verification profile again"
+                        )
+                    verified_profile = repo.profiles.get(fresh.last_verification.profile)
+                    if verified_profile is None:
+                        raise WorkspaceError(
+                            "Verified profile is no longer enrolled",
+                            code=ErrorCode.EXECUTION_ENVIRONMENT_DRIFT,
+                        )
+                    request = profile_execution_request(
+                        workspace_id=c.workspace_id,
+                        workspace_root=path,
+                        command_cwd=(path / (verified_profile.working_directory or ".")).resolve(
+                            strict=False
+                        ),
+                        commands=tuple(step.command for step in verified_profile.steps),
+                        working_directory_policy=verified_profile.working_directory or ".",
+                        timeout_seconds=(
+                            verified_profile.timeout_seconds
+                            or self.ctx.config.server.verification_timeout_seconds
+                        ),
+                        output_limit=self.ctx.config.server.max_tool_output_chars,
+                    )
+                    inspection = self.ctx.execution.inspect(request)
+                    drift_dimensions: list[str] = []
+                    if (
+                        inspection.identity.identity_hash
+                        != fresh.last_verification.environment_identity_hash
+                    ):
+                        drift_dimensions.append("environment_identity")
+                    if (
+                        inspection.requested_policy_hash
+                        != fresh.last_verification.requested_policy_hash
+                    ):
+                        drift_dimensions.append("requested_policy")
+                    if (
+                        inspection.effective_policy_hash
+                        != fresh.last_verification.effective_policy_hash
+                    ):
+                        drift_dimensions.append("effective_policy")
+                    if drift_dimensions:
+                        raise WorkspaceError(
+                            "Execution environment changed after verification; run the verification profile again",
+                            code=ErrorCode.EXECUTION_ENVIRONMENT_DRIFT,
+                            details={"drift_dimensions": drift_dimensions},
+                            unchanged_state=("No commit was created.",),
                         )
                 profile = fresh.last_verification.profile if fresh.last_verification else None
                 completed = (

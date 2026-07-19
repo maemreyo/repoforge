@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from ..domain.execution_environment import ExecutionEvidence
 from ..domain.hygiene import FormatterPolicy, HygieneFinding
 
 
@@ -15,6 +16,7 @@ class HygieneInspection:
     environment_identity: str
     excerpt: str
     output_truncated: bool
+    execution_evidence: ExecutionEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +24,7 @@ class HygieneFormatReceipt:
     environment_identity: str
     excerpt: str
     output_truncated: bool
+    execution_evidence: ExecutionEvidence | None = None
 
 
 class HygieneGateway(Protocol):

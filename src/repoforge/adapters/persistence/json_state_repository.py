@@ -306,6 +306,45 @@ class JsonStateRepository(Generic[T]):
             return None
         return self._decode(data, expected_record_id=safe_id)
 
+    def read_raw_envelope(self, record_id: str) -> dict[str, object] | None:
+        """Read a bounded validated envelope without applying the current codec."""
+        safe_id = self._record_id(record_id)
+        data = self._files.read_bytes(safe_id)
+        if data is None:
+            return None
+        if len(data) > self._max_record_bytes:
+            raise self._error(
+                "State record exceeds its encoded size bound", ErrorCode.STATE_TOO_LARGE
+            )
+        try:
+            raw: Any = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise self._error(
+                "State record is not valid UTF-8 JSON", ErrorCode.STATE_CORRUPT
+            ) from exc
+        if not isinstance(raw, dict) or set(raw) != {
+            "payload",
+            "record_id",
+            "revision",
+            "schema_version",
+        }:
+            raise self._error(
+                "State record fields do not match the envelope", ErrorCode.STATE_CORRUPT
+            )
+        if raw.get("record_id") != safe_id:
+            raise self._error(
+                "State record identity does not match its filename", ErrorCode.STATE_CORRUPT
+            )
+        if not isinstance(raw.get("revision"), int) or isinstance(raw.get("revision"), bool):
+            raise self._error("State revision is invalid", ErrorCode.STATE_CORRUPT)
+        if not isinstance(raw.get("schema_version"), int) or isinstance(
+            raw.get("schema_version"), bool
+        ):
+            raise self._error("State schema version is invalid", ErrorCode.STATE_CORRUPT)
+        if not isinstance(raw.get("payload"), dict):
+            raise self._error("State payload must be an object", ErrorCode.STATE_CORRUPT)
+        return dict(raw)
+
     def save(
         self,
         record_id: str,

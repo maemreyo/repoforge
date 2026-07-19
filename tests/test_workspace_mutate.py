@@ -550,3 +550,159 @@ def test_corrupt_keyed_mutate_receipt_fails_closed(
         )
     assert corrupt.value.code is ErrorCode.STATE_PERSISTENCE_FAILED
     assert (root / "corrupt-receipt.txt").read_text(encoding="utf-8") == "stable\n"
+
+
+def test_mutate_dry_run_reports_syntax_error_without_applying(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "syntax dry run")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    root = Path(before["path"])
+
+    result = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="src/broken.py", content="def broken(:\n")],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        dry_run=True,
+    )
+
+    assert result["changed"] is False
+    assert result["would_change"] is True
+    assert result["syntax_diagnostics"]["state"] == "error"
+    assert result["syntax_diagnostics"]["parse_ok"] is False
+    assert result["syntax_diagnostics"]["diagnostics"][0]["path"] == "src/broken.py"
+    assert result["syntax_diagnostics"]["diagnostics"][0]["line"] == 1
+    assert not (root / "src/broken.py").exists()
+
+
+def test_applied_syntax_break_then_fix_returns_error_then_ok(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "syntax break fix")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    root = Path(before["path"])
+
+    broken = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="src/value.py", content="def value(:\n")],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+    )
+
+    assert broken["changed"] is True
+    assert broken["syntax_diagnostics"]["state"] == "error"
+    assert broken["syntax_diagnostics"]["parse_ok"] is False
+    assert (root / "src/value.py").exists()
+
+    fixed = service.workspace_mutate(
+        workspace_id,
+        [
+            WriteMutation(
+                path="src/value.py",
+                content="def value():\n    return 1\n",
+                expected_sha256=_sha(root / "src/value.py"),
+            )
+        ],
+        expected_workspace_fingerprint=broken["workspace_fingerprint"],
+    )
+
+    assert fixed["changed"] is True
+    assert fixed["syntax_diagnostics"]["state"] == "ok"
+    assert fixed["syntax_diagnostics"]["parse_ok"] is True
+    assert fixed["syntax_diagnostics"]["diagnostics"] == []
+
+
+def test_mutate_reports_unknown_for_unsupported_changed_file(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "syntax unknown")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+
+    result = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="notes.md", content="# Notes\n")],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+    )
+
+    assert result["changed"] is True
+    assert result["syntax_diagnostics"]["state"] == "unknown"
+    assert result["syntax_diagnostics"]["parse_ok"] is None
+    assert result["syntax_diagnostics"]["unknown_paths"] == ["notes.md"]
+
+
+def test_no_op_mutate_still_reports_syntax_for_reviewed_virtual_file(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "syntax no op")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    created = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="value.py", content="value = 1\n")],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+    )
+    root = Path(service.workspace_status(workspace_id)["path"])
+
+    result = service.workspace_mutate(
+        workspace_id,
+        [
+            WriteMutation(
+                path="value.py",
+                content="value = 1\n",
+                expected_sha256=_sha(root / "value.py"),
+            )
+        ],
+        expected_workspace_fingerprint=created["workspace_fingerprint"],
+    )
+
+    assert result["changed"] is False
+    assert result["would_change"] is False
+    assert result["syntax_diagnostics"]["state"] == "ok"
+    assert result["syntax_diagnostics"]["analyzed_paths"] == []
+
+
+def test_keyed_mutate_replays_identical_syntax_evidence_and_reads_v1_receipt(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "syntax keyed replay")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    operation = CreateMutation(path="legacy.py", content="def legacy(:\n")
+    key = "workspace-mutate-syntax-key-0001"
+
+    first = service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key=key,
+    )
+    replay = service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key=key,
+    )
+
+    assert replay["syntax_diagnostics"] == first["syntax_diagnostics"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    receipt = next(
+        (root.parent / ".repoforge-transaction-receipts").rglob("workspace_mutate-*.json")
+    )
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    payload["result"].pop("syntax_diagnostics")
+    receipt.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    legacy = service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key=key,
+    )
+
+    assert legacy["syntax_diagnostics"]["state"] == "unknown"
+    assert legacy["syntax_diagnostics"]["parse_ok"] is None
+    assert legacy["syntax_diagnostics"]["unknown_paths"] == []
+    assert legacy["syntax_diagnostics"]["legacy_receipt"] is True

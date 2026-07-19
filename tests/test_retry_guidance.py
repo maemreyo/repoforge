@@ -467,6 +467,7 @@ def test_success_path_is_unaffected_by_retry_guidance(forge_env: ForgeEnvironmen
         "valid_tdd_red_evidence",
         "hygiene_receipt",
         "working_directory",
+        "execution_evidence",
     }
 
 

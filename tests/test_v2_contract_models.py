@@ -120,6 +120,40 @@ def test_operation_contract_publishes_all_terminal_states_and_action_validation(
         model(action="cancel", operation_id="op-000000000000000000000001", scope="task:x")
 
 
+def test_operation_wait_contract_bounds_timeout_and_cursor_fields() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["operation"]
+    model = spec.input_model
+    operation_id = "op-000000000000000000000001"
+
+    validated = model(
+        action="wait",
+        operation_id=operation_id,
+        since_updated_at="2026-07-19T00:00:00+00:00",
+        timeout_seconds=30,
+    )
+    assert validated.action.value == "wait"
+    assert validated.timeout_seconds == 30
+
+    with pytest.raises(ValidationError):
+        model(action="wait", operation_id=operation_id, timeout_seconds=61)
+    with pytest.raises(ValidationError):
+        model(action="get", operation_id=operation_id, timeout_seconds=30)
+    with pytest.raises(ValidationError):
+        model(action="list", since_updated_at="2026-07-19T00:00:00+00:00")
+
+    output_fields = set(spec.output_model.model_fields)
+    assert {"changed_since", "timed_out"} <= output_fields
+    operation_schema = spec.output_model.model_json_schema()
+    rendered = str(operation_schema)
+    assert "suggested_poll_after_s" in rendered
+    assert "eta_seconds" in rendered
+    assert "progress_message" in rendered
+    assert "progress_unit" in rendered
+
+
 def test_runtime_log_time_range_requires_timezone_and_order() -> None:
     from pydantic import ValidationError
 
@@ -153,7 +187,7 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
         "workspace_refresh": {"preview", "apply"},
         "workspace_verify": {"plan", "auto", "diagnostic", "profile", "adhoc"},
         "workspace_pr": {"create_draft", "update", "comment", "watch"},
-        "operation": {"get", "list", "cancel", "failure_evidence"},
+        "operation": {"get", "wait", "list", "cancel", "failure_evidence"},
     }
 
     for tool_name, expected in expectations.items():
@@ -387,7 +421,79 @@ def test_workspace_verify_contract_exposes_planning_routing_and_evidence_fields(
         "valid_tdd_red_evidence",
         "failure_reused",
         "artifact_paths",
+        "execution_evidence",
     } <= output_fields
+
+
+def test_execution_capable_outputs_expose_closed_truthful_evidence() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    for tool_name in ("workspace_verify", "workspace_format_changed"):
+        schema = registry.V2_TOOL_SPECS[tool_name].output_model.model_json_schema()
+        rendered = str(schema)
+        for field in (
+            "adapter_kind",
+            "identity_schema_version",
+            "environment_identity_hash",
+            "requested_policy_hash",
+            "effective_policy_hash",
+            "requested_network",
+            "effective_network",
+            "requested_filesystem",
+            "effective_filesystem",
+            "degraded",
+            "enforcement",
+            "warnings",
+        ):
+            assert field in rendered, (tool_name, field)
+
+    evidence_model = (
+        registry.V2_TOOL_SPECS["workspace_verify"]
+        .output_model.model_fields["execution_evidence"]
+        .annotation
+    )
+    assert evidence_model is not None
+    with pytest.raises(ValidationError):
+        registry.V2_TOOL_SPECS["workspace_verify"].validate_output(
+            {
+                "summary": "Verification passed",
+                "workspace_id": "workspace-1",
+                "requested_mode": "profile",
+                "selected_mode": "profile",
+                "routing_reason": "Explicit profile mode was requested.",
+                "outcome": "passed",
+                "satisfies_commit_gate": True,
+                "head_sha": "a" * 40,
+                "workspace_fingerprint": "b" * 64,
+                "execution_evidence": {
+                    "adapter_kind": "native",
+                    "identity_schema_version": 2,
+                    "environment_identity_hash": "c" * 64,
+                    "requested_policy_hash": "d" * 64,
+                    "effective_policy_hash": "e" * 64,
+                    "requested_network": "offline",
+                    "effective_network": "host_inherited",
+                    "requested_filesystem": "workspace_write",
+                    "effective_filesystem": "host_account_access",
+                    "degraded": True,
+                    "enforcement": {
+                        "network": "advisory",
+                        "filesystem": "advisory",
+                        "timeout": "enforced",
+                        "output": "enforced",
+                        "process_cleanup": "enforced",
+                        "cpu": "unsupported",
+                        "memory": "unsupported",
+                        "disk": "unsupported",
+                        "subprocess_count": "unsupported",
+                        "network_bytes": "unsupported",
+                    },
+                    "warnings": [],
+                    "unknown": "rejected",
+                },
+            }
+        )
 
 
 def test_workspace_verify_selector_sequences_publish_practical_bounds() -> None:
@@ -429,3 +535,87 @@ def test_mutation_schema_exposes_all_ops_and_bounds() -> None:
         "restore",
     ):
         assert operation in rendered
+
+
+def test_workspace_mutate_output_publishes_closed_bounded_syntax_evidence() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_mutate"]
+    payload = {
+        "summary": "Applied mutation with parse_ok=false",
+        "workspace_id": "demo-workspace",
+        "dry_run": False,
+        "ready": True,
+        "changed": True,
+        "would_change": True,
+        "operation_count": 1,
+        "operations": [
+            {
+                "index": 0,
+                "op": "create",
+                "path": "src/broken.py",
+                "status": "ready",
+                "changed": True,
+            }
+        ],
+        "changed_paths": ["src/broken.py"],
+        "head_sha": "a" * 40,
+        "workspace_fingerprint": "b" * 64,
+        "diff_stat": "1 file changed",
+        "change_metrics": {
+            "changed_files": 1,
+            "added_lines": 1,
+            "deleted_lines": 0,
+            "diff_lines": 1,
+            "binary_files": 0,
+            "total_current_bytes": 12,
+            "limits": {
+                "max_changed_files": 150,
+                "max_diff_lines": 12_000,
+                "max_total_changed_bytes": 26_214_400,
+            },
+            "within_limits": True,
+        },
+        "syntax_diagnostics": {
+            "state": "error",
+            "parse_ok": False,
+            "diagnostics": [
+                {
+                    "path": "src/broken.py",
+                    "line": 1,
+                    "message": "Unexpected syntax.",
+                    "severity": "error",
+                }
+            ],
+            "analyzed_paths": ["src/broken.py"],
+            "unknown_paths": [],
+            "truncated": False,
+            "legacy_receipt": False,
+        },
+        "transaction_id": "tx-demo",
+    }
+
+    output = spec.validate_output(payload)
+    assert output.syntax_diagnostics.state.value == "error"
+    assert output.syntax_diagnostics.diagnostics[0].severity.value == "error"
+    assert output.change_metrics.binary_files == 0
+    assert output.change_metrics.limits.max_changed_files == 150
+
+    schema = spec.output_model.model_json_schema(mode="validation")
+    syntax = schema["$defs"]["SyntaxDiagnosticsEvidence"]
+    assert syntax["properties"]["diagnostics"]["maxItems"] == 100
+    assert syntax["properties"]["analyzed_paths"]["maxItems"] == 1000
+    assert syntax["properties"]["unknown_paths"]["maxItems"] == 1000
+    assert set(schema["$defs"]["SyntaxDiagnosticState"]["enum"]) == {
+        "ok",
+        "error",
+        "unknown",
+    }
+    assert schema["$defs"]["SyntaxDiagnosticSeverity"]["enum"] == ["error"]
+
+    invalid = dict(payload)
+    invalid["syntax_diagnostics"] = dict(payload["syntax_diagnostics"])
+    invalid["syntax_diagnostics"]["parse_ok"] = True
+    with pytest.raises(ValidationError):
+        spec.validate_output(invalid)

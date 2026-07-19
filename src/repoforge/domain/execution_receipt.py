@@ -12,7 +12,7 @@ from typing import Any, NoReturn
 
 from .errors import ErrorCode, RepoForgeError
 
-EXECUTION_RECEIPT_SCHEMA_VERSION = 1
+EXECUTION_RECEIPT_SCHEMA_VERSION = 2
 _RECEIPT_ID = re.compile(r"^receipt-[0-9a-f]{24}$")
 _OPERATION_ID = re.compile(r"^op-[0-9a-f]{24}$")
 _PLAN_ID = re.compile(r"^plan-[0-9a-f]{24}$")
@@ -99,7 +99,10 @@ class StageReceipt:
     pre_identity: WorkspaceIdentity
     post_identity: WorkspaceIdentity
     target_identity: str
-    environment_identity: str | None
+    environment_identity_schema_version: int
+    environment_identity: str
+    requested_policy_hash: str
+    effective_policy_hash: str
     status: StageReceiptStatus
     failure_class: str | None
     result_reference: str | None
@@ -165,7 +168,10 @@ def _semantic_payload(
     pre_identity: WorkspaceIdentity,
     post_identity: WorkspaceIdentity,
     target_identity: str,
-    environment_identity: str | None,
+    environment_identity_schema_version: int,
+    environment_identity: str,
+    requested_policy_hash: str,
+    effective_policy_hash: str,
     status: StageReceiptStatus,
     failure_class: str | None,
     result_reference: str | None,
@@ -177,7 +183,9 @@ def _semantic_payload(
         "artifact_digests": [artifact.payload() for artifact in artifact_digests],
         "boundary": boundary,
         "cache_status": cache_status.value,
+        "effective_policy_hash": effective_policy_hash,
         "environment_identity": environment_identity,
+        "environment_identity_schema_version": environment_identity_schema_version,
         "failure_class": failure_class,
         "finished_at": finished_at,
         "kind": kind,
@@ -187,6 +195,7 @@ def _semantic_payload(
         "plan_id": plan_id,
         "post_identity": post_identity.payload(),
         "pre_identity": pre_identity.payload(),
+        "requested_policy_hash": requested_policy_hash,
         "result_reference": result_reference,
         "source_changed": source_changed,
         "stage_id": stage_id,
@@ -214,7 +223,10 @@ def create_stage_receipt(
     pre_identity: WorkspaceIdentity,
     post_identity: WorkspaceIdentity,
     target_identity: str,
-    environment_identity: str | None,
+    environment_identity_schema_version: int,
+    environment_identity: str,
+    requested_policy_hash: str,
+    effective_policy_hash: str,
     status: StageReceiptStatus,
     failure_class: str | None = None,
     result_reference: str | None = None,
@@ -239,8 +251,19 @@ def create_stage_receipt(
             _invalid(f"Stage receipt {field} is invalid")
     if _SHA64.fullmatch(target_identity) is None:
         _invalid("Stage receipt target identity is invalid")
-    if environment_identity is not None and _SHA64.fullmatch(environment_identity) is None:
-        _invalid("Stage receipt environment identity is invalid")
+    if (
+        not isinstance(environment_identity_schema_version, int)
+        or isinstance(environment_identity_schema_version, bool)
+        or environment_identity_schema_version < 1
+    ):
+        _invalid("Stage receipt environment identity schema version is invalid")
+    for field, value in (
+        ("environment identity", environment_identity),
+        ("requested policy hash", requested_policy_hash),
+        ("effective policy hash", effective_policy_hash),
+    ):
+        if _SHA64.fullmatch(value) is None:
+            _invalid(f"Stage receipt {field} is invalid")
     _safe_optional(failure_class, "failure_class", limit=128)
     _safe_optional(result_reference, "result_reference", limit=256)
     if len(artifact_digests) > 64 or len({item.path for item in artifact_digests}) != len(
@@ -270,7 +293,10 @@ def create_stage_receipt(
         pre_identity=pre_identity,
         post_identity=post_identity,
         target_identity=target_identity,
+        environment_identity_schema_version=environment_identity_schema_version,
         environment_identity=environment_identity,
+        requested_policy_hash=requested_policy_hash,
+        effective_policy_hash=effective_policy_hash,
         status=status,
         failure_class=failure_class,
         result_reference=result_reference,
@@ -295,7 +321,10 @@ def create_stage_receipt(
         pre_identity=pre_identity,
         post_identity=post_identity,
         target_identity=target_identity,
+        environment_identity_schema_version=environment_identity_schema_version,
         environment_identity=environment_identity,
+        requested_policy_hash=requested_policy_hash,
+        effective_policy_hash=effective_policy_hash,
         status=status,
         failure_class=failure_class,
         result_reference=result_reference,
@@ -324,7 +353,10 @@ def receipt_payload(receipt: StageReceipt) -> dict[str, object]:
             pre_identity=receipt.pre_identity,
             post_identity=receipt.post_identity,
             target_identity=receipt.target_identity,
+            environment_identity_schema_version=receipt.environment_identity_schema_version,
             environment_identity=receipt.environment_identity,
+            requested_policy_hash=receipt.requested_policy_hash,
+            effective_policy_hash=receipt.effective_policy_hash,
             status=receipt.status,
             failure_class=receipt.failure_class,
             result_reference=receipt.result_reference,
@@ -353,7 +385,10 @@ def validate_stage_receipt(receipt: StageReceipt) -> StageReceipt:
         pre_identity=receipt.pre_identity,
         post_identity=receipt.post_identity,
         target_identity=receipt.target_identity,
+        environment_identity_schema_version=receipt.environment_identity_schema_version,
         environment_identity=receipt.environment_identity,
+        requested_policy_hash=receipt.requested_policy_hash,
+        effective_policy_hash=receipt.effective_policy_hash,
         status=receipt.status,
         failure_class=receipt.failure_class,
         result_reference=receipt.result_reference,
@@ -397,6 +432,9 @@ def stage_receipt_from_payload(payload: dict[str, Any]) -> StageReceipt:
         _invalid("Stage receipt ordinal payload is invalid")
     if not isinstance(schema_version, int) or isinstance(schema_version, bool):
         _invalid("Stage receipt schema payload is invalid")
+    identity_schema_version = payload.get("environment_identity_schema_version")
+    if not isinstance(identity_schema_version, int) or isinstance(identity_schema_version, bool):
+        _invalid("Stage receipt environment identity schema payload is invalid")
     receipt = StageReceipt(
         receipt_id=str(payload.get("receipt_id", "")),
         operation_id=str(payload.get("operation_id", "")),
@@ -413,11 +451,10 @@ def stage_receipt_from_payload(payload: dict[str, Any]) -> StageReceipt:
         pre_identity=identity("pre_identity"),
         post_identity=identity("post_identity"),
         target_identity=str(payload.get("target_identity", "")),
-        environment_identity=(
-            str(payload["environment_identity"])
-            if payload.get("environment_identity") is not None
-            else None
-        ),
+        environment_identity_schema_version=identity_schema_version,
+        environment_identity=str(payload.get("environment_identity", "")),
+        requested_policy_hash=str(payload.get("requested_policy_hash", "")),
+        effective_policy_hash=str(payload.get("effective_policy_hash", "")),
         status=StageReceiptStatus(str(payload.get("status", ""))),
         failure_class=(
             str(payload["failure_class"]) if payload.get("failure_class") is not None else None

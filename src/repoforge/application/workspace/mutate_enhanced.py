@@ -23,17 +23,24 @@ from ...domain.operations import hash_idempotency_key, request_fingerprint
 from ...domain.patches import materialize_normalized_patch, normalize_patch
 from ...domain.policy import assert_path_allowed, resolve_workspace_path, validate_patch
 from ...domain.redaction import sanitize_persisted_data
+from ...domain.syntax_diagnostics import (
+    SyntaxDiagnostic,
+    SyntaxDiagnostics,
+    SyntaxDiagnosticState,
+    SyntaxSeverity,
+)
 from ...ports.filesystem_transaction import FileTransaction
 from ..context import ApplicationContext
 from ..dto import to_data
 from ..file_transactions import open_file_transaction
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
+from ..syntax_diagnostics import SyntaxDiagnosticAnalyzer
 from . import mutate as baseline_mutate
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_OPERATIONS = 100
 _MAX_REPLACEMENTS = 20
-_RECEIPT_SCHEMA_VERSION = 1
+_RECEIPT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +143,7 @@ class WorkspaceMutateResult:
     head_sha: str
     diff_stat: str
     change_metrics: dict[str, object]
+    syntax_diagnostics: SyntaxDiagnostics
     transaction_id: str | None
 
 
@@ -469,10 +477,21 @@ class _MutationPlanner:
                 actions.append(WriteFile(path, after.data, preserve_mode=True))
         return tuple(actions)
 
+    def syntax_files(self) -> dict[str, bytes | None]:
+        files: dict[str, bytes | None] = {}
+        for path in sorted(set(self.original) | set(self.current)):
+            before = self.original.get(path)
+            after = self.current.get(path)
+            if before == after:
+                continue
+            files[path] = None if after is None else after.data
+        return files
+
 
 class WorkspaceMutator:
     def __init__(self, ctx: ApplicationContext):
         self.ctx = ctx
+        self.syntax_analyzer = SyntaxDiagnosticAnalyzer()
 
     def execute(self, command: WorkspaceMutateCommand) -> WorkspaceMutateResult:
         operations = tuple(self._normalize_operation(item) for item in command.operations)
@@ -602,6 +621,7 @@ class WorkspaceMutator:
                             )
                         )
                 actions = planner.transaction_actions()
+                syntax_diagnostics = self.syntax_analyzer.analyze(planner.syntax_files())
                 ready = all(item.status != "failed" for item in diagnostics)
                 would_change = any(item.changed for item in diagnostics)
                 if command.dry_run:
@@ -618,6 +638,7 @@ class WorkspaceMutator:
                         head_sha,
                         self.ctx.git.diff_stat(workspace),
                         self.ctx.git.change_metrics(workspace, repo),
+                        syntax_diagnostics,
                         None,
                     )
                     self._persist_receipt_only(
@@ -642,6 +663,7 @@ class WorkspaceMutator:
                         head_sha,
                         self.ctx.git.diff_stat(workspace),
                         self.ctx.git.change_metrics(workspace, repo),
+                        syntax_diagnostics,
                         None,
                     )
                     self._persist_receipt_only(
@@ -686,6 +708,7 @@ class WorkspaceMutator:
                         self.ctx.git.head_sha(workspace),
                         self.ctx.git.diff_stat(workspace),
                         self.ctx.git.change_metrics(workspace, repo),
+                        syntax_diagnostics,
                         transaction_id,
                     )
                     return (
@@ -728,6 +751,7 @@ class WorkspaceMutator:
                         self.ctx.git.head_sha(workspace),
                         self.ctx.git.diff_stat(workspace),
                         self.ctx.git.change_metrics(workspace, repo),
+                        syntax_diagnostics,
                         receipt.transaction_id,
                     )
                 record.last_verification = None
@@ -809,7 +833,8 @@ class WorkspaceMutator:
             "result",
         }:
             raise WorkspaceMutator._corrupt_receipt("receipt fields do not match schema version 1")
-        if raw.get("schema_version") != _RECEIPT_SCHEMA_VERSION:
+        schema_version = raw.get("schema_version")
+        if schema_version not in (1, _RECEIPT_SCHEMA_VERSION):
             raise WorkspaceMutator._corrupt_receipt("receipt schema version is unsupported")
         if raw.get("action") != "workspace_mutate" or raw.get("key_hash") != key_hash:
             raise WorkspaceMutator._corrupt_receipt("receipt identity does not match its key")
@@ -838,6 +863,8 @@ class WorkspaceMutator:
             "change_metrics",
             "transaction_id",
         }
+        if schema_version == _RECEIPT_SCHEMA_VERSION:
+            expected_fields.add("syntax_diagnostics")
         if not isinstance(result, dict) or set(result) != expected_fields:
             raise WorkspaceMutator._corrupt_receipt("receipt result fields are invalid")
         if result.get("workspace_id") != workspace_id:
@@ -928,6 +955,15 @@ class WorkspaceMutator:
                 )
                 for item in raw_operations
             )
+            syntax_diagnostics = (
+                WorkspaceMutator._decode_syntax_diagnostics(result["syntax_diagnostics"])
+                if schema_version == _RECEIPT_SCHEMA_VERSION
+                else SyntaxDiagnostics(
+                    state=SyntaxDiagnosticState.UNKNOWN,
+                    parse_ok=None,
+                    legacy_receipt=True,
+                )
+            )
             return WorkspaceMutateResult(
                 workspace_id=result["workspace_id"],
                 dry_run=result["dry_run"],
@@ -941,6 +977,7 @@ class WorkspaceMutator:
                 head_sha=result["head_sha"],
                 diff_stat=result["diff_stat"],
                 change_metrics=dict(raw_metrics),
+                syntax_diagnostics=syntax_diagnostics,
                 transaction_id=transaction_id,
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -948,6 +985,77 @@ class WorkspaceMutator:
                 "receipt result cannot be decoded",
                 exc,
             ) from exc
+
+    @staticmethod
+    def _decode_syntax_diagnostics(raw: object) -> SyntaxDiagnostics:
+        fields = {
+            "state",
+            "parse_ok",
+            "diagnostics",
+            "analyzed_paths",
+            "unknown_paths",
+            "truncated",
+            "legacy_receipt",
+        }
+        if not isinstance(raw, dict) or set(raw) != fields:
+            raise ValueError("receipt syntax diagnostic fields are invalid")
+        raw_diagnostics = raw.get("diagnostics")
+        analyzed_paths = raw.get("analyzed_paths")
+        unknown_paths = raw.get("unknown_paths")
+        if (
+            not isinstance(raw_diagnostics, list)
+            or not isinstance(analyzed_paths, list)
+            or not isinstance(unknown_paths, list)
+            or not all(isinstance(path, str) for path in analyzed_paths)
+            or not all(isinstance(path, str) for path in unknown_paths)
+        ):
+            raise ValueError("receipt syntax diagnostic collections are invalid")
+        diagnostics: list[SyntaxDiagnostic] = []
+        item_fields = {"path", "line", "message", "severity"}
+        for item in raw_diagnostics:
+            if not isinstance(item, dict) or set(item) != item_fields:
+                raise ValueError("receipt syntax diagnostic item fields are invalid")
+            line = item.get("line")
+            path = item.get("path")
+            message = item.get("message")
+            severity = item.get("severity")
+            if (
+                not isinstance(line, int)
+                or isinstance(line, bool)
+                or not isinstance(path, str)
+                or not isinstance(message, str)
+                or not isinstance(severity, str)
+            ):
+                raise ValueError("receipt syntax diagnostic item values are invalid")
+            diagnostics.append(
+                SyntaxDiagnostic(
+                    path=path,
+                    line=line,
+                    message=message,
+                    severity=SyntaxSeverity(severity),
+                )
+            )
+        parse_ok = raw.get("parse_ok")
+        if parse_ok is not None and not isinstance(parse_ok, bool):
+            raise ValueError("receipt syntax parse_ok is invalid")
+        truncated = raw.get("truncated")
+        legacy_receipt = raw.get("legacy_receipt")
+        state = raw.get("state")
+        if (
+            not isinstance(truncated, bool)
+            or not isinstance(legacy_receipt, bool)
+            or not isinstance(state, str)
+        ):
+            raise ValueError("receipt syntax flags are invalid")
+        return SyntaxDiagnostics(
+            state=SyntaxDiagnosticState(state),
+            parse_ok=parse_ok,
+            diagnostics=tuple(diagnostics),
+            analyzed_paths=tuple(analyzed_paths),
+            unknown_paths=tuple(unknown_paths),
+            truncated=truncated,
+            legacy_receipt=legacy_receipt,
+        )
 
     @staticmethod
     def _corrupt_receipt(

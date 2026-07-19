@@ -57,6 +57,9 @@ class VerificationReceipt:
     environment_identity_hash: str | None = None
     command_source_dirty: bool = False
     command_source_dirty_paths: list[str] = field(default_factory=list)
+    requested_policy_hash: str = ""
+    effective_policy_hash: str = ""
+    execution_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

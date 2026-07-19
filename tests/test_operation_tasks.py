@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -416,6 +418,159 @@ def test_internal_manager_public_status_list_and_cancel(forge_env: ForgeEnvironm
     audit = (forge_env.root / "state" / "audit.jsonl").read_text(encoding="utf-8")
     assert "manager-secret" not in audit
     assert "progress_message" not in audit
+
+
+def test_operation_wait_returns_on_progress_delta_with_pacing_and_eta(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(
+        kind="workspace_run_profile",
+        phase="queued",
+        cancel_supported=True,
+        workspace_id="workspace-wait",
+    )
+    running = manager.start(task.operation_id)
+
+    def advance() -> None:
+        time.sleep(0.05)
+        manager.progress(
+            task.operation_id,
+            phase="running",
+            current=1,
+            total=4,
+            unit="steps",
+            message="completed static_analysis (step 1/4, 50.000 ms)",
+        )
+
+    worker = threading.Thread(target=advance)
+    worker.start()
+    try:
+        result = forge_env.service.operation(
+            "wait",
+            operation_id=task.operation_id,
+            since_updated_at=running.updated_at,
+            timeout_seconds=1,
+        )
+    finally:
+        worker.join(timeout=2)
+
+    assert result["action"] == "wait"
+    assert result["changed_since"] is True
+    assert result["timed_out"] is False
+    operation = result["operation"]
+    assert operation["progress_current"] == 1
+    assert operation["progress_total"] == 4
+    assert operation["progress_unit"] == "steps"
+    assert "step 1/4" in operation["progress_message"]
+    assert 0.1 <= operation["suggested_poll_after_s"] <= 60.0
+    assert operation["eta_seconds"] is not None
+    assert operation["eta_seconds"] >= 0
+
+
+def test_operation_wait_reaches_terminal_in_at_most_five_nonempty_calls(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(kind="workspace_run_profile", phase="queued", cancel_supported=True)
+    running = manager.start(task.operation_id)
+
+    def advance_to_terminal() -> None:
+        time.sleep(0.05)
+        manager.progress(
+            task.operation_id,
+            phase="running",
+            current=1,
+            total=2,
+            unit="steps",
+            message="completed static_analysis (step 1/2, 50.000 ms)",
+        )
+        time.sleep(0.05)
+        manager.progress(
+            task.operation_id,
+            phase="running",
+            current=2,
+            total=2,
+            unit="steps",
+            message="completed business_tests (step 2/2, 50.000 ms)",
+        )
+        time.sleep(0.05)
+        manager.succeed(task.operation_id, result_reference="workspace_run_profile:done")
+
+    worker = threading.Thread(target=advance_to_terminal)
+    worker.start()
+    cursor = running.updated_at
+    calls = 0
+    try:
+        while True:
+            result = forge_env.service.operation(
+                "wait",
+                operation_id=task.operation_id,
+                since_updated_at=cursor,
+                timeout_seconds=1,
+            )
+            calls += 1
+            operation = result["operation"]
+            assert result["changed_since"] is True or operation["terminal"] is True
+            assert result["timed_out"] is False
+            cursor = operation["updated_at"]
+            if operation["terminal"]:
+                break
+    finally:
+        worker.join(timeout=2)
+
+    assert calls <= 5
+
+
+def test_operation_wait_timeout_returns_typed_current_evidence(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(kind="watch", phase="polling", cancel_supported=True)
+    running = manager.start(task.operation_id)
+
+    started = time.monotonic()
+    result = forge_env.service.operation(
+        "wait",
+        operation_id=task.operation_id,
+        since_updated_at=running.updated_at,
+        timeout_seconds=1,
+    )
+
+    elapsed = time.monotonic() - started
+    assert 0.9 <= elapsed < 2.0
+    assert result["changed_since"] is False
+    assert result["timed_out"] is True
+    operation = result["operation"]
+    assert operation["operation_id"] == task.operation_id
+    assert operation["terminal"] is False
+    assert operation["updated_at"] == running.updated_at
+    assert 0.1 <= operation["suggested_poll_after_s"] <= 60.0
+
+
+def test_operation_wait_returns_terminal_state_without_sleeping(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(kind="watch", phase="queued", cancel_supported=False)
+    running = manager.start(task.operation_id)
+    manager.succeed(task.operation_id, result_reference="watch:done")
+
+    started = time.monotonic()
+    result = forge_env.service.operation(
+        "wait",
+        operation_id=task.operation_id,
+        since_updated_at=running.updated_at,
+        timeout_seconds=60,
+    )
+
+    assert time.monotonic() - started < 0.5
+    assert result["changed_since"] is True
+    assert result["timed_out"] is False
+    assert result["operation"]["terminal"] is True
+    assert result["operation"]["state"] == "succeeded"
+    assert result["operation"]["suggested_poll_after_s"] is None
+    assert result["operation"]["eta_seconds"] == 0.0
 
 
 def test_restart_recovery_orphans_running_expires_due_and_prunes_old_terminal(

@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from ...domain.execution_environment import ExecutionEvidence
 from ..context import ApplicationContext
 from ..fingerprint_cache import read_fingerprint
 from ..retrieval import paginate
@@ -482,6 +483,7 @@ class WorkspaceFormatChangedV2Result:
     changed: bool
     head_sha: str
     workspace_fingerprint: str
+    execution_evidence: ExecutionEvidence | None
 
 
 class WorkspaceChangedFormatterV2:
@@ -516,4 +518,5 @@ class WorkspaceChangedFormatterV2:
             changed,
             result.head_sha,
             result.fingerprint_after,
+            result.execution_evidence,
         )

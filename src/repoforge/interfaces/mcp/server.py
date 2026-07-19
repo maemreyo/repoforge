@@ -172,7 +172,7 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
     "workspace_pr": "Create, update, comment on, watch, or otherwise manage the workspace draft pull request.",
     "workspace_pr_evidence": "Read bounded overview, delta, check, review, comment, or failure evidence for the workspace PR.",
-    "operation": "Get, list, or request cancellation of durable background operations.",
+    "operation": "Get, wait for progress, list, cancel, or read failure evidence for durable operations.",
     "config_inspect": "Inspect accepted and active configuration, effective policy, pending changes, and runtime identity.",
     "runtime_logs_read": "Read bounded redacted audit or managed-runtime log entries with filters and cursors.",
 }
@@ -498,6 +498,16 @@ def _public_output(tool_name: str, raw: dict[str, Any]) -> dict[str, Any]:
 
     payload.setdefault("status", "ok")
     payload.setdefault("error", None)
+    syntax = payload.get("syntax_diagnostics")
+    if (
+        tool_name == "workspace_mutate"
+        and isinstance(syntax, dict)
+        and syntax.get("parse_ok") is False
+    ):
+        diagnostic_count = len(syntax.get("diagnostics", ()))
+        noun = "diagnostic" if diagnostic_count == 1 else "diagnostics"
+        mode = "Dry-run mutation" if payload.get("dry_run") is True else "Applied mutation"
+        payload["summary"] = f"{mode}; parse_ok=false with {diagnostic_count} syntax {noun}"
     if "summary" not in payload:
         count = len(payload.get("files", payload.get("matches", payload.get("entries", []))))
         noun = "item" if count == 1 else "items"
