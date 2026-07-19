@@ -167,12 +167,20 @@ class CommitSummary(StrictModel):
     committed_at: str = Field(min_length=1, max_length=80)
 
 
+class ChangeBudgetLimits(StrictModel):
+    max_changed_files: int = Field(ge=0)
+    max_diff_lines: int = Field(ge=0)
+    max_total_changed_bytes: int = Field(ge=0)
+
+
 class ChangeMetrics(StrictModel):
     changed_files: int = Field(ge=0)
     added_lines: int = Field(ge=0)
     deleted_lines: int = Field(ge=0)
     diff_lines: int = Field(ge=0)
+    binary_files: int = Field(default=0, ge=0)
     total_current_bytes: int = Field(ge=0)
+    limits: ChangeBudgetLimits | None = None
     within_limits: bool
 
 
