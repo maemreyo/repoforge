@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from ...domain.execution_environment import (
@@ -130,4 +131,46 @@ def adhoc_execution_request(
         filesystem=FilesystemAccess.WORKSPACE_WRITE,
         failure_mode=CommandFailureMode.RETURN,
         cancel_token=cancel_token,
+    )
+
+
+def hygiene_execution_request(
+    *,
+    root: Path,
+    command_cwd: Path,
+    argv: tuple[str, ...],
+    timeout_seconds: int,
+    output_limit: int,
+    read_only: bool,
+    snapshot: bool,
+) -> ExecutionRequest:
+    resolved_root = root.resolve(strict=False)
+    workspace_id = (
+        None
+        if snapshot
+        else "hygiene-" + hashlib.sha256(str(resolved_root).encode("utf-8")).hexdigest()[:24]
+    )
+    return ExecutionRequest(
+        scope=ExecutionScope(
+            kind=(
+                ExecutionScopeKind.SNAPSHOT_READ_ONLY if snapshot else ExecutionScopeKind.WORKSPACE
+            ),
+            root=resolved_root,
+            command_cwd=command_cwd.resolve(strict=False),
+            workspace_id=workspace_id,
+            working_directory_policy=".",
+        ),
+        reviewed_commands=(argv,),
+        requested_policy=RequestedExecutionPolicy(
+            network=NetworkAccess.OFFLINE,
+            filesystem=(
+                FilesystemAccess.SOURCE_READ if read_only else FilesystemAccess.WORKSPACE_WRITE
+            ),
+            enforcement_requirement=EnforcementRequirement.ADVISORY_BACKEND_ALLOWED,
+        ),
+        timeout_seconds=timeout_seconds,
+        output_limit=output_limit,
+        failure_mode=CommandFailureMode.RETURN,
+        lockfiles=(),
+        manifests=(),
     )

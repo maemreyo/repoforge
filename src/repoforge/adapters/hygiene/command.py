@@ -1,25 +1,23 @@
-"""Fixed-argv hygiene adapter with exact-commit archive materialization."""
+"""Fixed-argv hygiene adapter routed through the unified execution boundary."""
 
 from __future__ import annotations
 
-import hashlib
 import io
-import json
-import platform
-import sys
 import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
 
+from ...application.execution.coordinator import ExecutionCoordinator
+from ...application.execution.requests import hygiene_execution_request
 from ...domain.errors import CommandError, SecurityError, WorkspaceError
 from ...domain.hygiene import FormatterPolicy, HygieneFinding, HygieneParserKind
-from ...ports.command import CommandExecutor, CommandResult
+from ...ports.command import CommandResult
 from ...ports.hygiene import HygieneFormatReceipt, HygieneInspection
 
 
 class CommandHygieneGateway:
-    def __init__(self, executor: CommandExecutor) -> None:
-        self._executor = executor
+    def __init__(self, execution: ExecutionCoordinator) -> None:
+        self._execution = execution
 
     @staticmethod
     def _validate_paths(paths: tuple[str, ...], policy: FormatterPolicy) -> tuple[str, ...]:
@@ -43,38 +41,6 @@ class CommandHygieneGateway:
                 normalized.append(path)
         return tuple(sorted(normalized))
 
-    def _environment_identity(self, cwd: Path, policy: FormatterPolicy) -> str:
-        try:
-            if policy.parser is HygieneParserKind.RUFF_FORMAT and "format" in policy.check_argv:
-                index = policy.check_argv.index("format")
-                version_argv = (*policy.check_argv[:index], "--version")
-            else:
-                version_argv = (policy.check_argv[0], "--version")
-            result = self._executor.run(
-                version_argv,
-                cwd=cwd,
-                timeout=min(10, policy.timeout_seconds),
-                check=False,
-                output_limit=512,
-            )
-            version = (result.stdout or result.stderr).strip().splitlines()
-            version_text = (
-                version[0][:256] if result.returncode == 0 and version else "<unavailable>"
-            )
-        except CommandError:
-            version_text = "<unavailable>"
-        payload = {
-            "architecture": platform.machine(),
-            "executable": policy.check_argv[0],
-            "platform": platform.system(),
-            "python": platform.python_version(),
-            "runtime": sys.implementation.name,
-            "tool_version": version_text,
-        }
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-
     @staticmethod
     def _parse_ruff_format(result: CommandResult) -> tuple[HygieneFinding, ...]:
         findings: list[HygieneFinding] = []
@@ -87,7 +53,8 @@ class CommandHygieneGateway:
             findings.append(HygieneFinding.create(path, "ruff-format", "Would reformat"))
         if result.returncode not in {0, 1}:
             raise CommandError(
-                f"Formatter check failed with exit code {result.returncode}: {result.combined or '<no output>'}"
+                f"Formatter check failed with exit code {result.returncode}: "
+                f"{result.combined or '<no output>'}"
             )
         if result.returncode == 1 and not findings:
             raise CommandError("Formatter output did not match the reviewed ruff_format parser")
@@ -98,29 +65,38 @@ class CommandHygieneGateway:
         root: Path,
         policy: FormatterPolicy,
         paths: tuple[str, ...],
+        *,
+        snapshot: bool,
     ) -> HygieneInspection:
         resolved_paths = self._validate_paths(paths, policy)
-        environment_identity = self._environment_identity(root, policy)
+        argv = (*policy.check_argv, *resolved_paths)
+        request = hygiene_execution_request(
+            root=root,
+            command_cwd=root,
+            argv=argv,
+            timeout_seconds=policy.timeout_seconds,
+            output_limit=policy.output_limit,
+            read_only=True,
+            snapshot=snapshot,
+        )
         if not resolved_paths:
-            return HygieneInspection((), environment_identity, "", False)
+            inspection = self._execution.inspect(request)
+            return HygieneInspection((), inspection.identity.identity_hash, "", False)
         for relative in resolved_paths:
             candidate = root / relative
             if candidate.is_symlink() or not candidate.is_file():
                 raise SecurityError(f"Formatter input is not a regular file: {relative}")
-        result = self._executor.run(
-            (*policy.check_argv, *resolved_paths),
-            cwd=root,
-            timeout=policy.timeout_seconds,
-            check=False,
-            output_limit=policy.output_limit,
-        )
+        with self._execution.prepare(request) as session:
+            receipt = session.execute(argv)
+            session.inspect()
+        result = receipt.result
         if policy.parser is HygieneParserKind.RUFF_FORMAT:
             findings = self._parse_ruff_format(result)
-        else:  # pragma: no cover - enum is closed, retained as fail-closed guard.
+        else:  # pragma: no cover - closed enum, retained as fail-closed guard.
             raise CommandError(f"Unsupported formatter parser: {policy.parser.value}")
         return HygieneInspection(
             findings,
-            environment_identity,
+            receipt.session_start_identity_hash,
             result.combined,
             result.stdout_truncated or result.stderr_truncated,
         )
@@ -147,12 +123,19 @@ class CommandHygieneGateway:
         max_archive_bytes: int,
         selected_paths: frozenset[str],
     ) -> None:
-        archive = self._executor.run_bytes(
-            ("git", "archive", "--format=tar", commit_sha),
-            cwd=repository,
-            timeout=120,
-            max_bytes=max_archive_bytes,
+        argv = ("git", "archive", "--format=tar", commit_sha)
+        request = hygiene_execution_request(
+            root=repository,
+            command_cwd=repository,
+            argv=argv,
+            timeout_seconds=120,
+            output_limit=max_archive_bytes,
+            read_only=True,
+            snapshot=True,
         )
+        with self._execution.prepare(request) as session:
+            archive = session.execute_bytes(argv, max_bytes=max_archive_bytes)
+            session.inspect()
         total_regular_bytes = 0
         try:
             with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as handle:
@@ -189,7 +172,7 @@ class CommandHygieneGateway:
         policy: FormatterPolicy,
         paths: tuple[str, ...],
     ) -> HygieneInspection:
-        return self._inspect(workspace, policy, paths)
+        return self._inspect(workspace, policy, paths, snapshot=False)
 
     def inspect_base(
         self,
@@ -210,7 +193,7 @@ class CommandHygieneGateway:
                 max_archive_bytes=max_archive_bytes,
                 selected_paths=frozenset(resolved_paths),
             )
-            return self._inspect(root, policy, resolved_paths)
+            return self._inspect(root, policy, resolved_paths, snapshot=True)
 
     def format_paths(
         self,
@@ -219,26 +202,34 @@ class CommandHygieneGateway:
         paths: tuple[str, ...],
     ) -> HygieneFormatReceipt:
         resolved_paths = self._validate_paths(paths, policy)
-        environment_identity = self._environment_identity(workspace, policy)
+        argv = (*policy.fix_argv, *resolved_paths)
+        request = hygiene_execution_request(
+            root=workspace,
+            command_cwd=workspace,
+            argv=argv,
+            timeout_seconds=policy.timeout_seconds,
+            output_limit=policy.output_limit,
+            read_only=False,
+            snapshot=False,
+        )
         if not resolved_paths:
-            return HygieneFormatReceipt(environment_identity, "", False)
+            inspection = self._execution.inspect(request)
+            return HygieneFormatReceipt(inspection.identity.identity_hash, "", False)
         for relative in resolved_paths:
             candidate = workspace / relative
             if candidate.is_symlink() or not candidate.is_file():
                 raise SecurityError(f"Formatter input is not a regular file: {relative}")
-        result = self._executor.run(
-            (*policy.fix_argv, *resolved_paths),
-            cwd=workspace,
-            timeout=policy.timeout_seconds,
-            check=False,
-            output_limit=policy.output_limit,
-        )
+        with self._execution.prepare(request) as session:
+            receipt = session.execute(argv)
+            session.inspect()
+        result = receipt.result
         if result.returncode != 0:
             raise CommandError(
-                f"Formatter fix failed with exit code {result.returncode}: {result.combined or '<no output>'}"
+                f"Formatter fix failed with exit code {result.returncode}: "
+                f"{result.combined or '<no output>'}"
             )
         return HygieneFormatReceipt(
-            environment_identity,
+            receipt.session_start_identity_hash,
             result.combined,
             result.stdout_truncated or result.stderr_truncated,
         )

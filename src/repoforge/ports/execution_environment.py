@@ -138,6 +138,16 @@ class ExecutionEnvironmentPort(Protocol):
         cancel_token: CancellationToken | None = None,
     ) -> CommandResult: ...
 
+    def execute_bytes_in_session(
+        self,
+        session: PreparedEnvironmentSession,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        timeout: int,
+        max_bytes: int,
+    ) -> bytes: ...
+
     def collect_session_artifacts(
         self,
         session: PreparedEnvironmentSession,

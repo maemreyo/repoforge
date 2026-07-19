@@ -237,6 +237,23 @@ class NativeReviewedAdapter:
             cancel_token=cancel_token,
         )
 
+    def execute_bytes_in_session(
+        self,
+        session: PreparedEnvironmentSession,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        timeout: int,
+        max_bytes: int,
+    ) -> bytes:
+        _ = session
+        return self._executor.run_bytes(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+
     def collect_session_artifacts(
         self,
         session: PreparedEnvironmentSession,

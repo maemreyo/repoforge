@@ -73,6 +73,24 @@ class CoordinatedExecutionSession:
             artifacts=artifacts,
         )
 
+    def execute_bytes(self, argv: tuple[str, ...], *, max_bytes: int) -> bytes:
+        self._require_open()
+        if argv not in self.request.reviewed_commands:
+            raise SecurityError(
+                "Command is outside the prepared session's reviewed command set",
+                details={"argv_length": len(argv)},
+                unchanged_state=("No repository command was started.",),
+            )
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        return self._backend.execute_bytes_in_session(
+            self.prepared,
+            argv,
+            cwd=self.request.scope.command_cwd,
+            timeout=self.request.timeout_seconds,
+            max_bytes=max_bytes,
+        )
+
     def inspect(self) -> EnvironmentInspection:
         self._require_open()
         inspection = self._backend.inspect_session(self.request, self.prepared)

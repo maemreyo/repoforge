@@ -214,6 +214,8 @@ class RecordingSessionBackend:
     def __init__(self) -> None:
         self.prepared = 0
         self.executed: list[tuple[tuple[str, ...], bool]] = []
+        self.binary = b""
+        self.binary_executed: list[tuple[str, ...]] = []
         self.inspected = 0
         self.cleaned = 0
         self.collected = 0
@@ -285,6 +287,19 @@ class RecordingSessionBackend:
         del session, timeout, output_limit, cancel_token
         self.executed.append((argv, check))
         return CommandResult(argv, str(cwd), 0, "ok", "")
+
+    def execute_bytes_in_session(
+        self,
+        session: PreparedEnvironmentSession,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        timeout: int,
+        max_bytes: int,
+    ) -> bytes:
+        del session, cwd, timeout
+        self.binary_executed.append(argv)
+        return self.binary[:max_bytes]
 
     def collect_session_artifacts(
         self,
@@ -371,6 +386,18 @@ def test_coordinator_return_mode_disables_check(tmp_path: Path) -> None:
     assert receipt.requested_policy_hash
     assert receipt.effective_policy_hash
     assert backend.executed == [(("python", "-m", "pytest"), False)]
+
+
+def test_coordinator_admits_bounded_binary_execution(tmp_path: Path) -> None:
+    backend = RecordingSessionBackend()
+    backend.binary = b"archive"
+    coordinator = ExecutionCoordinator(backend)
+
+    with coordinator.prepare(coordinator_request(tmp_path, CommandFailureMode.RETURN)) as session:
+        payload = session.execute_bytes(("python", "-m", "pytest"), max_bytes=100)
+
+    assert payload == b"archive"
+    assert backend.binary_executed == [("python", "-m", "pytest")]
 
 
 def test_execution_request_compilers_preserve_surface_semantics(tmp_path: Path) -> None:
