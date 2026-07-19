@@ -85,6 +85,7 @@ class WorkspaceVerifyResult:
     satisfies_commit_gate: bool
     head_sha: str
     workspace_fingerprint: str
+    execution_evidence: dict[str, object] | None = None
 
 
 def _string_list(value: object) -> list[str]:
@@ -492,6 +493,7 @@ class WorkspaceVerifier:
             satisfies_commit_gate=delegated.satisfies_commit_gate,
             head_sha=delegated.head_sha,
             workspace_fingerprint=delegated.fingerprint_after,
+            execution_evidence=delegated.execution_evidence,
         )
 
     def _from_profile(
@@ -565,6 +567,7 @@ class WorkspaceVerifier:
             satisfies_commit_gate=delegated.satisfies_commit_gate,
             head_sha=delegated.head_sha,
             workspace_fingerprint=delegated.fingerprint,
+            execution_evidence=delegated.execution_evidence,
         )
 
     def _from_adhoc(
@@ -644,6 +647,7 @@ class WorkspaceVerifier:
             satisfies_commit_gate=False,
             head_sha=delegated.head_sha,
             workspace_fingerprint=delegated.fingerprint_after,
+            execution_evidence=delegated.execution_evidence,
         )
 
     def _persist_artifact(

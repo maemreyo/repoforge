@@ -114,6 +114,7 @@ from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
+from .application.execution.coordinator import ExecutionCoordinator
 from .application.extended_context import ExtendedApplicationContext
 from .application.fingerprint_cache import FingerprintCache
 from .application.nudges import AdoptionNudgeTracker
@@ -477,6 +478,7 @@ def build_application(
         command,
         max_artifact_bytes=config.server.max_file_bytes,
     )
+    execution = ExecutionCoordinator(execution_environment)
     store = o.store or JsonWorkspaceStore(config.server.state_root)
     locks = o.locks or FcntlLockManager(config.server.state_root / "locks")
     gate = o.gate or InProcessOperationGate()
@@ -536,7 +538,7 @@ def build_application(
         max_result_bytes=config.server.max_tool_output_chars,
     )
     github_read_cache = o.github_read_cache or JsonGitHubReadCache(config.server.state_root, locks)
-    hygiene = o.hygiene or CommandHygieneGateway(command)
+    hygiene = o.hygiene or CommandHygieneGateway(execution)
     hygiene_cache = o.hygiene_cache or JsonHygieneBaselineCache(config.server.state_root, locks)
     pr_check_watch_store = o.pr_check_watches or JsonPrCheckWatchStore(
         config.server.state_root,
@@ -564,7 +566,7 @@ def build_application(
         clock=clock,
         ids=ids,
         executables=executables,
-        execution_environment=execution_environment,
+        execution=execution,
         provider_registry=provider_registry,
         code_intelligence=code_intelligence,
         metrics=metrics,

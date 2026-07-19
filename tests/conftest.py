@@ -7,11 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from repoforge.adapters.execution.native import NativeReviewedAdapter
+from repoforge.application.execution.coordinator import ExecutionCoordinator
 from repoforge.application.service import CodingService
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.domain.mutation_policy import MUTATION_OPS
 from repoforge.ports.clock import Clock
+from repoforge.testing import ScriptedCommandExecutor
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -28,6 +31,12 @@ class ForgeEnvironment:
     gh_state: Path
     config_path: Path
     service: CodingService
+
+
+def execution_coordinator_for_tests() -> ExecutionCoordinator:
+    """Provide required deterministic execution wiring to non-execution unit fixtures."""
+
+    return ExecutionCoordinator(NativeReviewedAdapter(ScriptedCommandExecutor()))
 
 
 def _write_fake_gh(fake_bin: Path, state_path: Path) -> None:

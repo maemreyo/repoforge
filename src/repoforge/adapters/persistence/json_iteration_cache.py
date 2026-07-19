@@ -62,25 +62,100 @@ class JsonIterationCache(IterationCache):
         self.root = self._records.root
         self.max_entries = max_entries
 
-    def _scan(self) -> tuple[list[IterationCacheEntry], bool]:
+    @staticmethod
+    def _legacy_v1_compatible(
+        raw: dict[str, object] | None,
+        key: IterationCacheKey,
+    ) -> bool | None:
+        if raw is None or raw.get("schema_version") != 1:
+            return None
+        payload = raw.get("payload")
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return None
+        raw_key = payload.get("key")
+        expected_fields = {
+            "cache_key",
+            "workspace_identity",
+            "declared_input_hash",
+            "stage_definition_hash",
+            "target_identity",
+            "working_directory",
+            "environment_identity",
+            "toolchain_hash",
+            "lockfile_hash",
+            "config_generation",
+            "policy_hash",
+            "provider_hash",
+            "network_policy",
+            "dependency_receipt_hashes",
+            "schema_version",
+        }
+        if not isinstance(raw_key, dict) or set(raw_key) != expected_fields:
+            return None
+        dependencies = raw_key.get("dependency_receipt_hashes")
+        scalar_fields = expected_fields - {
+            "cache_key",
+            "dependency_receipt_hashes",
+            "schema_version",
+        }
+        if (
+            raw_key.get("schema_version") != 1
+            or not isinstance(dependencies, list)
+            or any(not isinstance(item, str) for item in dependencies)
+            or any(not isinstance(raw_key.get(field), str) for field in scalar_fields)
+        ):
+            return None
+        compatibility = {
+            "config_generation": raw_key["config_generation"],
+            "declared_input_hash": raw_key["declared_input_hash"],
+            "dependency_receipt_hashes": dependencies,
+            "lockfile_hash": raw_key["lockfile_hash"],
+            "network_policy": raw_key["network_policy"],
+            "policy_hash": raw_key["policy_hash"],
+            "provider_hash": raw_key["provider_hash"],
+            "stage_definition_hash": raw_key["stage_definition_hash"],
+            "target_identity": raw_key["target_identity"],
+            "toolchain_hash": raw_key["toolchain_hash"],
+            "working_directory": raw_key["working_directory"],
+            "workspace_identity": raw_key["workspace_identity"],
+        }
+        return compatibility == key.compatibility_payload()
+
+    def _scan(
+        self,
+        *,
+        compatibility_key: IterationCacheKey | None = None,
+    ) -> tuple[list[IterationCacheEntry], bool, bool]:
         entries: list[IterationCacheEntry] = []
         corrupt = False
+        environment_schema_changed = False
         for path in sorted(self.root.glob("cache-*.json"))[:2_000]:
             try:
                 envelope = self._records.read(path.stem)
             except RepoForgeError as exc:
-                if exc.code in {
-                    ErrorCode.STATE_CORRUPT,
-                    ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-                    ErrorCode.STATE_TOO_LARGE,
-                }:
+                if exc.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED:
+                    if compatibility_key is not None:
+                        try:
+                            compatible = self._legacy_v1_compatible(
+                                self._records.read_raw_envelope(path.stem),
+                                compatibility_key,
+                            )
+                        except RepoForgeError:
+                            corrupt = True
+                        else:
+                            if compatible is None:
+                                corrupt = True
+                            elif compatible:
+                                environment_schema_changed = True
+                    continue
+                if exc.code in {ErrorCode.STATE_CORRUPT, ErrorCode.STATE_TOO_LARGE}:
                     corrupt = True
                     continue
                 raise
             if envelope is not None:
                 entries.append(envelope.value)
         entries.sort(key=lambda item: (item.created_at, item.entry_id), reverse=True)
-        return entries, corrupt
+        return entries, corrupt, environment_schema_changed
 
     @staticmethod
     def _artifact_status(
@@ -99,7 +174,7 @@ class JsonIterationCache(IterationCache):
         return None
 
     def lookup(self, key: IterationCacheKey, *, workspace_root: Path) -> CacheLookup:
-        entries, corrupt = self._scan()
+        entries, corrupt, environment_schema_changed = self._scan(compatibility_key=key)
         for entry in entries:
             if entry.key.cache_key != key.cache_key:
                 continue
@@ -107,6 +182,12 @@ class JsonIterationCache(IterationCache):
             if artifact_reason is not None:
                 return CacheLookup(False, artifact_reason, None)
             return CacheLookup(True, None, entry)
+        if environment_schema_changed:
+            return CacheLookup(
+                False,
+                CacheMissReason.ENVIRONMENT_IDENTITY_SCHEMA_CHANGED,
+                None,
+            )
         if corrupt:
             return CacheLookup(False, CacheMissReason.CORRUPT, None)
         return CacheLookup(False, CacheMissReason.NOT_FOUND, None)
@@ -118,7 +199,6 @@ class JsonIterationCache(IterationCache):
             except RepoForgeError as exc:
                 if exc.code in {
                     ErrorCode.STATE_CORRUPT,
-                    ErrorCode.STATE_SCHEMA_UNSUPPORTED,
                     ErrorCode.STATE_TOO_LARGE,
                 }:
                     self._records.delete(path.stem)
@@ -152,7 +232,7 @@ class JsonIterationCache(IterationCache):
                 "Iteration cache entry id is already bound to different content",
                 code=ErrorCode.ALREADY_EXISTS,
             )
-        entries, _ = self._scan()
+        entries, _, _ = self._scan()
         stale_same_key = [
             item
             for item in entries
@@ -161,7 +241,7 @@ class JsonIterationCache(IterationCache):
         for item in stale_same_key:
             if item.entry_id not in protected:
                 self._records.delete(item.entry_id)
-        entries, _ = self._scan()
+        entries, _, _ = self._scan()
         oldest_first = sorted(entries, key=lambda item: (item.created_at, item.entry_id))
         while len(oldest_first) > self.max_entries:
             victim = next(

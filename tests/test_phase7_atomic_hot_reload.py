@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import execution_coordinator_for_tests
 
 from repoforge.application.context import (
     ApplicationContext,
@@ -455,6 +456,7 @@ def test_removed_repository_workspace_uses_snapshotted_read_policy_and_blocks_wr
         Clock(),
         Ids(),
         object(),
+        execution_coordinator_for_tests(),
     )
 
     loaded, orphaned, path = context.workspace("workspace")
@@ -909,6 +911,7 @@ def test_tampered_orphan_policy_snapshot_fails_closed_to_metadata_only(tmp_path:
         Clock(),
         Ids(),
         object(),
+        execution_coordinator_for_tests(),
     )
 
     _, orphaned, _ = context.workspace("workspace")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ...domain.errors import ConfigError
+from ...domain.execution_environment import ExecutionEvidence
 from ...domain.hygiene import compare_hygiene_findings
 from ...ports.hygiene import HygieneCacheKey
 from ..context import ApplicationContext
@@ -44,6 +45,7 @@ class WorkspaceHygieneStatusResult:
     changed_path_findings: list[dict[str, str]]
     output_truncated: bool
     next_safe_actions: list[dict[str, object]]
+    execution_evidence: ExecutionEvidence | None = None
 
 
 class WorkspaceHygieneStatusReader:
@@ -210,4 +212,5 @@ class WorkspaceHygieneStatusReader:
             changed_path_findings=[finding_data(item) for item in comparison.changed_path_findings],
             output_truncated=output_truncated,
             next_safe_actions=next_actions,
+            execution_evidence=workspace_inspection.execution_evidence,
         )

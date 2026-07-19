@@ -211,6 +211,7 @@ def test_background_false_keeps_synchronous_contract(forge_env: ForgeEnvironment
         "business_tests_ran",
         "valid_tdd_red_evidence",
         "hygiene_receipt",
+        "execution_evidence",
     }
     for key in set(implicit) - {"commands"}:
         assert implicit[key] == explicit[key]

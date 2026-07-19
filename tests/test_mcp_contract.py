@@ -110,7 +110,12 @@ async def test_representative_v2_tools_execute_through_protocol(
             "repo_search",
             {"repo_id": "demo", "query": "Repository", "context_lines": 1},
         )
-        assert searched.isError is False
+        search_error = (
+            json.loads("\n".join(getattr(item, "text", "") for item in searched.content))
+            if searched.isError
+            else {}
+        )
+        assert searched.isError is False, search_error.get("error")
         assert searched.structuredContent is not None
         V2_TOOL_SPECS["repo_search"].validate_output(searched.structuredContent)
 

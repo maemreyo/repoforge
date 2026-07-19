@@ -191,6 +191,34 @@ class CommandEvidence(StrictModel):
     output_excerpt: str = Field(default="", max_length=12_000)
 
 
+class EnforcementEvidenceModel(StrictModel):
+    network: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    filesystem: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    timeout: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    output: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    process_cleanup: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    cpu: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    memory: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    disk: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    subprocess_count: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    network_bytes: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+
+
+class ExecutionEvidenceModel(StrictModel):
+    adapter_kind: str = Field(min_length=1, max_length=80)
+    identity_schema_version: int = Field(ge=1, le=100)
+    environment_identity_hash: Sha256
+    requested_policy_hash: Sha256
+    effective_policy_hash: Sha256
+    requested_network: str = Field(min_length=1, max_length=80)
+    effective_network: str = Field(min_length=1, max_length=80)
+    requested_filesystem: str = Field(min_length=1, max_length=80)
+    effective_filesystem: str = Field(min_length=1, max_length=80)
+    degraded: bool
+    enforcement: EnforcementEvidenceModel
+    warnings: tuple[str, ...] = Field(default=(), max_length=20)
+
+
 class RepositorySummary(StrictModel):
     repo_id: RepoId
     capabilities: tuple[str, ...] = Field(default=(), max_length=100)

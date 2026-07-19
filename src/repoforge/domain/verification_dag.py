@@ -20,7 +20,7 @@ from .execution_plan import (
 from .execution_receipt import ArtifactDigest
 
 VERIFICATION_DAG_SCHEMA_VERSION = 1
-ITERATION_CACHE_SCHEMA_VERSION = 1
+ITERATION_CACHE_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _PLAN_ID = re.compile(r"^plan-[0-9a-f]{24}$")
 _RECEIPT_ID = re.compile(r"^receipt-[0-9a-f]{24}$")
@@ -44,6 +44,7 @@ class CacheMissReason(str, Enum):
     CORRUPT = "corrupt"
     ARTIFACT_MISSING = "artifact_missing"
     ARTIFACT_MISMATCH = "artifact_mismatch"
+    ENVIRONMENT_IDENTITY_SCHEMA_CHANGED = "environment_identity_schema_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +162,9 @@ class IterationCacheKey:
     target_identity: str
     working_directory: str
     environment_identity: str
+    environment_identity_schema_version: int
+    requested_policy_hash: str
+    effective_policy_hash: str
     toolchain_hash: str
     lockfile_hash: str
     config_generation: str
@@ -175,11 +179,14 @@ class IterationCacheKey:
             "config_generation": self.config_generation,
             "declared_input_hash": self.declared_input_hash,
             "dependency_receipt_hashes": list(self.dependency_receipt_hashes),
+            "effective_policy_hash": self.effective_policy_hash,
             "environment_identity": self.environment_identity,
+            "environment_identity_schema_version": self.environment_identity_schema_version,
             "lockfile_hash": self.lockfile_hash,
             "network_policy": self.network_policy,
             "policy_hash": self.policy_hash,
             "provider_hash": self.provider_hash,
+            "requested_policy_hash": self.requested_policy_hash,
             "schema_version": self.schema_version,
             "stage_definition_hash": self.stage_definition_hash,
             "target_identity": self.target_identity,
@@ -187,6 +194,19 @@ class IterationCacheKey:
             "working_directory": self.working_directory,
             "workspace_identity": self.workspace_identity,
         }
+
+    def compatibility_payload(self) -> dict[str, object]:
+        """Return v1-shared dimensions without environment identity semantics."""
+        payload = self.payload()
+        for field in (
+            "effective_policy_hash",
+            "environment_identity",
+            "environment_identity_schema_version",
+            "requested_policy_hash",
+            "schema_version",
+        ):
+            payload.pop(field, None)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +386,9 @@ def build_iteration_cache_key(
     target_identity: str,
     working_directory: str,
     environment_identity: str,
+    environment_identity_schema_version: int,
+    requested_policy_hash: str,
+    effective_policy_hash: str,
     toolchain_hash: str,
     lockfile_hash: str,
     config_generation: str,
@@ -380,6 +403,8 @@ def build_iteration_cache_key(
         ("stage definition hash", stage_definition_hash),
         ("target identity", target_identity),
         ("environment identity", environment_identity),
+        ("requested policy hash", requested_policy_hash),
+        ("effective policy hash", effective_policy_hash),
         ("toolchain hash", toolchain_hash),
         ("lockfile hash", lockfile_hash),
         ("configuration generation", config_generation),
@@ -387,6 +412,12 @@ def build_iteration_cache_key(
         ("provider hash", provider_hash),
     ):
         _validate_sha(value, field)
+    if (
+        not isinstance(environment_identity_schema_version, int)
+        or isinstance(environment_identity_schema_version, bool)
+        or environment_identity_schema_version < 1
+    ):
+        _invalid("Iteration cache environment identity schema version is invalid")
     if not working_directory or len(working_directory) > 512:
         _invalid("Iteration cache working directory is invalid")
     if _SAFE_ID.fullmatch(network_policy) is None:
@@ -399,11 +430,14 @@ def build_iteration_cache_key(
         "config_generation": config_generation,
         "declared_input_hash": declared_input_hash,
         "dependency_receipt_hashes": list(dependency_receipt_hashes),
+        "effective_policy_hash": effective_policy_hash,
         "environment_identity": environment_identity,
+        "environment_identity_schema_version": environment_identity_schema_version,
         "lockfile_hash": lockfile_hash,
         "network_policy": network_policy,
         "policy_hash": policy_hash,
         "provider_hash": provider_hash,
+        "requested_policy_hash": requested_policy_hash,
         "schema_version": ITERATION_CACHE_SCHEMA_VERSION,
         "stage_definition_hash": stage_definition_hash,
         "target_identity": target_identity,
@@ -472,6 +506,9 @@ def iteration_cache_entry_from_payload(payload: dict[str, Any]) -> IterationCach
         target_identity=str(raw_key.get("target_identity", "")),
         working_directory=str(raw_key.get("working_directory", "")),
         environment_identity=str(raw_key.get("environment_identity", "")),
+        environment_identity_schema_version=raw_key.get("environment_identity_schema_version", 0),
+        requested_policy_hash=str(raw_key.get("requested_policy_hash", "")),
+        effective_policy_hash=str(raw_key.get("effective_policy_hash", "")),
         toolchain_hash=str(raw_key.get("toolchain_hash", "")),
         lockfile_hash=str(raw_key.get("lockfile_hash", "")),
         config_generation=str(raw_key.get("config_generation", "")),

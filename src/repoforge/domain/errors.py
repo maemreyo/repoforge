@@ -14,6 +14,8 @@ class ErrorCode(str, Enum):
     SECURITY_POLICY_VIOLATION = "SECURITY_POLICY_VIOLATION"
     COMMAND_FAILED = "COMMAND_FAILED"
     COMMAND_TIMEOUT = "COMMAND_TIMEOUT"
+    EXECUTION_POLICY_UNSUPPORTED = "EXECUTION_POLICY_UNSUPPORTED"
+    EXECUTION_ENVIRONMENT_DRIFT = "EXECUTION_ENVIRONMENT_DRIFT"
     WORKSPACE_INVALID = "WORKSPACE_INVALID"
     WORKSPACE_PATH_MISSING = "WORKSPACE_PATH_MISSING"
     WORKTREE_REGISTRATION_STALE = "WORKTREE_REGISTRATION_STALE"
@@ -329,6 +331,8 @@ def operation_error_from_exception(
         ErrorCode.EXECUTION_MODE_STRICT: "This repository is enrolled strict; the ad-hoc runner is disabled by configuration.",
         ErrorCode.ADHOC_RUNNER_NOT_ALLOWED: "The requested argv[0] is not an allowlisted ad-hoc runner for this repository.",
         ErrorCode.ADHOC_ARGV_INVALID: "The ad-hoc argv violates the bounded list/element shape RepoForge accepts.",
+        ErrorCode.EXECUTION_POLICY_UNSUPPORTED: "The selected execution backend cannot truthfully satisfy a required execution policy.",
+        ErrorCode.EXECUTION_ENVIRONMENT_DRIFT: "The execution environment identity changed across a reviewed session or commit gate.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,
