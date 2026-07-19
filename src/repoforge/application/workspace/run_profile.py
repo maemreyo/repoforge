@@ -51,7 +51,6 @@ from ..verification_reuse import (
 from .hygiene_status import WorkspaceHygieneStatusCommand, WorkspaceHygieneStatusReader
 
 _KIND = "workspace_run_profile"
-_ProgressCallback = Callable[[str, int, int, str, str], None]
 _REUSABLE_PROFILE_STEP_KINDS = frozenset(
     {
         VerificationStepKind.HYGIENE,
@@ -261,7 +260,6 @@ class WorkspaceProfileRunner:
         def run_body(
             cancel_token: CancellationToken | None,
             on_before_command: Callable[[], None] | None,
-            on_progress: _ProgressCallback | None,
         ) -> WorkspaceRunProfileResult:
             fresh = self.ctx.store.load(c.workspace_id)
             run_started = time.monotonic()
@@ -272,27 +270,6 @@ class WorkspaceProfileRunner:
             if c.expected_fingerprint is not None and c.expected_fingerprint != before_fingerprint:
                 raise WorkspaceError("Workspace changed since the verification plan was reviewed")
             stage_telemetry: list[tuple[float, float]] = []
-
-            def emit_step_progress(
-                step_index: int,
-                verification_step: VerificationStep,
-                *,
-                completed: bool,
-                duration_ms: float | None = None,
-            ) -> None:
-                if on_progress is None:
-                    return
-                ordinal = step_index + 1
-                total = len(steps)
-                kind = verification_step.kind.value
-                if completed:
-                    assert duration_ms is not None
-                    message = f"completed {kind} (step {ordinal}/{total}, {duration_ms:.3f} ms)"
-                    current = ordinal
-                else:
-                    message = f"running {kind} (step {ordinal}/{total})"
-                    current = step_index
-                on_progress("running", current, total, "steps", message)
 
             # Command-source integrity stamp (issue #170): a zero-cost guard when the
             # profile has no declared/derived command-source paths; otherwise one cheap,
@@ -629,7 +606,6 @@ class WorkspaceProfileRunner:
                             raise_reused_failure(cached)
                     receipts: list[ExecutionReceipt] = []
                     for step_index, verification_step in enumerate(steps):
-                        emit_step_progress(step_index, verification_step, completed=False)
                         command = verification_step.command
                         accepted = accepted_no_regression_step(verification_step)
                         if accepted is not None:
@@ -637,12 +613,6 @@ class WorkspaceProfileRunner:
                                 ExecutionReceipt(command, identity.identity_hash, accepted)
                             )
                             stage_telemetry.append((0.0, (time.monotonic() - run_started) * 1_000))
-                            emit_step_progress(
-                                step_index,
-                                verification_step,
-                                completed=True,
-                                duration_ms=0.0,
-                            )
                             continue
                         if on_before_command is not None:
                             on_before_command()
@@ -667,34 +637,20 @@ class WorkspaceProfileRunner:
                                 (time.monotonic() - stage_started) * 1_000,
                             )
                             raise
-                        stage_duration_ms = (time.monotonic() - stage_started) * 1_000
                         stage_telemetry.append(
                             (
-                                stage_duration_ms,
+                                (time.monotonic() - stage_started) * 1_000,
                                 (time.monotonic() - run_started) * 1_000,
                             )
-                        )
-                        emit_step_progress(
-                            step_index,
-                            verification_step,
-                            completed=True,
-                            duration_ms=stage_duration_ms,
                         )
                     results = [receipt.result for receipt in receipts]
                 else:
                     for step_index, verification_step in enumerate(steps):
-                        emit_step_progress(step_index, verification_step, completed=False)
                         command = verification_step.command
                         accepted = accepted_no_regression_step(verification_step)
                         if accepted is not None:
                             results.append(accepted)
                             stage_telemetry.append((0.0, (time.monotonic() - run_started) * 1_000))
-                            emit_step_progress(
-                                step_index,
-                                verification_step,
-                                completed=True,
-                                duration_ms=0.0,
-                            )
                             continue
                         if on_before_command is not None:
                             on_before_command()
@@ -721,18 +677,11 @@ class WorkspaceProfileRunner:
                                 (time.monotonic() - stage_started) * 1_000,
                             )
                             raise
-                        stage_duration_ms = (time.monotonic() - stage_started) * 1_000
                         stage_telemetry.append(
                             (
-                                stage_duration_ms,
+                                (time.monotonic() - stage_started) * 1_000,
                                 (time.monotonic() - run_started) * 1_000,
                             )
-                        )
-                        emit_step_progress(
-                            step_index,
-                            verification_step,
-                            completed=True,
-                            duration_ms=stage_duration_ms,
                         )
             finally:
                 if (
@@ -817,7 +766,7 @@ class WorkspaceProfileRunner:
 
             def op() -> WorkspaceRunProfileResult:
                 with self.ctx.locks.lock(c.workspace_id):
-                    return run_body(c.cancellation_token, c.before_command, None)
+                    return run_body(c.cancellation_token, c.before_command)
 
             return self.ctx.audited(
                 "workspace_run_profile",
@@ -831,8 +780,7 @@ class WorkspaceProfileRunner:
         self,
         c: WorkspaceRunProfileCommand,
         run_body: Callable[
-            [CancellationToken | None, Callable[[], None] | None, _ProgressCallback | None],
-            WorkspaceRunProfileResult,
+            [CancellationToken | None, Callable[[], None] | None], WorkspaceRunProfileResult
         ],
         audit_details: dict[str, object],
     ) -> WorkspaceRunProfileBackgroundResult:
@@ -936,23 +884,6 @@ class WorkspaceProfileRunner:
                     details={"cancelled": True},
                 )
 
-        def on_progress(
-            phase: str,
-            current: int,
-            total: int,
-            unit: str,
-            message: str,
-        ) -> None:
-            with contextlib.suppress(RepoForgeError):
-                operations.progress(
-                    operation_id,
-                    phase=phase,
-                    current=current,
-                    total=total,
-                    unit=unit,
-                    message=message,
-                )
-
         def finish_terminal(
             exc: Exception | None,
             result: WorkspaceRunProfileResult | None,
@@ -1025,7 +956,7 @@ class WorkspaceProfileRunner:
                     result = self.ctx.audited(
                         "workspace_run_profile",
                         audit_details,
-                        lambda: run_body(cancel_token, on_before_command, on_progress),
+                        lambda: run_body(cancel_token, on_before_command),
                     )
                 except Exception as exc:
                     failure = exc
