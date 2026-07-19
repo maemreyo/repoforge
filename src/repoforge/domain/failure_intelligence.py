@@ -1017,9 +1017,7 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
                 plan_id=(
                     str(arguments["plan_id"]) if arguments.get("plan_id") is not None else None
                 ),
-                action=(
-                    str(arguments["action"]) if arguments.get("action") is not None else None
-                ),
+                action=(str(arguments["action"]) if arguments.get("action") is not None else None),
                 expected_head_sha=(
                     str(arguments["expected_head_sha"])
                     if arguments.get("expected_head_sha") is not None
