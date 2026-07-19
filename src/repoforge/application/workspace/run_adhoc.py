@@ -28,6 +28,7 @@ from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
 from ..dto import to_data
+from ..execution.requests import adhoc_execution_request
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..operations.manager import OperationManager
 
@@ -222,14 +223,20 @@ class WorkspaceAdhocRunner:
                 started = time.monotonic()
                 result: CommandResult | None = None
                 command_error: CommandError | None = None
+                execution_request = adhoc_execution_request(
+                    workspace_id=c.workspace_id,
+                    workspace_root=locked_workspace,
+                    command_cwd=command_cwd,
+                    argv=argv,
+                    working_directory_policy=c.working_directory or ".",
+                    timeout_seconds=locked_repo.adhoc_timeout_seconds,
+                    output_limit=self.ctx.config.server.max_tool_output_chars,
+                    cancel_token=cancel_token,
+                )
                 try:
-                    result = self.ctx.commands.run(
-                        argv,
-                        cwd=command_cwd,
-                        timeout=locked_repo.adhoc_timeout_seconds,
-                        check=False,
-                        cancel_token=cancel_token,
-                    )
+                    with self.ctx.execution.prepare(execution_request) as session:
+                        result = session.execute(argv).result
+                        session.inspect()
                 except CommandError as exc:
                     command_error = exc
                     record_command_failure(exc)

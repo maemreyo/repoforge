@@ -114,6 +114,7 @@ from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
+from .application.execution.coordinator import ExecutionCoordinator
 from .application.extended_context import ExtendedApplicationContext
 from .application.fingerprint_cache import FingerprintCache
 from .application.nudges import AdoptionNudgeTracker
@@ -564,7 +565,7 @@ def build_application(
         clock=clock,
         ids=ids,
         executables=executables,
-        execution_environment=execution_environment,
+        execution=ExecutionCoordinator(execution_environment),
         provider_registry=provider_registry,
         code_intelligence=code_intelligence,
         metrics=metrics,

@@ -18,11 +18,6 @@ from ...domain.diagnostics import (
     validate_diagnostic_expectation,
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
-from ...domain.execution_environment import (
-    EnvironmentIdentityRequest,
-    FilesystemCapability,
-    NetworkPolicy,
-)
 from ...domain.policy import normalize_relative_path
 from ...domain.retry_guidance import (
     clear_reusable_failure,
@@ -34,6 +29,7 @@ from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ..context import ApplicationContext
 from ..dto import to_data
+from ..execution.requests import diagnostic_execution_request
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..verification_reuse import (
     command_source_identity,
@@ -274,26 +270,25 @@ class WorkspaceDiagnosticRunner:
                     expectation=expectation.value,
                     expected_failure_class=expected_failure_value,
                 )
+                execution_request = diagnostic_execution_request(
+                    workspace_id=command.workspace_id,
+                    workspace_root=locked_workspace,
+                    command_cwd=command_cwd,
+                    argv=resolved.argv,
+                    working_directory_policy=locked_profile.working_directory or ".",
+                    timeout_seconds=locked_profile.timeout_seconds,
+                    output_limit=locked_profile.output_limit,
+                    read_only=locked_profile.mutability is DiagnosticMutability.READ_ONLY,
+                    artifact_paths=locked_profile.artifact_paths,
+                    cancel_token=command.cancellation_token,
+                )
                 environment_identity_value: str | None = None
-                if self.ctx.execution_environment is not None:
-                    identity_request = EnvironmentIdentityRequest(
-                        workspace_root=locked_workspace,
-                        command_cwd=command_cwd,
-                        commands=(resolved.argv,),
-                        working_directory_policy=locked_profile.working_directory or ".",
-                        network_policy=NetworkPolicy.NONE,
-                        filesystem_capability=(
-                            FilesystemCapability.READ
-                            if locked_profile.mutability is DiagnosticMutability.READ_ONLY
-                            else FilesystemCapability.WORKSPACE_WRITE
-                        ),
-                    )
-                    try:
-                        environment_identity_value = self.ctx.execution_environment.identity(
-                            identity_request
-                        ).identity_hash
-                    except Exception:
-                        audit_details["failure_reuse_unavailable"] = "environment_identity"
+                try:
+                    environment_identity_value = self.ctx.execution.inspect(
+                        execution_request
+                    ).identity.identity_hash
+                except Exception:
+                    audit_details["failure_reuse_unavailable"] = "environment_identity"
                 reuse_binding = failure_reuse_binding(
                     fingerprint=before_fingerprint,
                     target_identity=target_identity_value,
@@ -338,14 +333,9 @@ class WorkspaceDiagnosticRunner:
                 try:
                     if command.before_command is not None:
                         command.before_command()
-                    result = self.ctx.commands.run(
-                        resolved.argv,
-                        cwd=command_cwd,
-                        timeout=locked_profile.timeout_seconds,
-                        check=False,
-                        output_limit=locked_profile.output_limit,
-                        cancel_token=command.cancellation_token,
-                    )
+                    with self.ctx.execution.prepare(execution_request) as session:
+                        result = session.execute(resolved.argv).result
+                        session.inspect()
                 except CommandError as exc:
                     command_error = exc
 

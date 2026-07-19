@@ -7,6 +7,11 @@ import pytest
 
 from repoforge.adapters.execution.native import NativeReviewedAdapter
 from repoforge.application.execution.coordinator import ExecutionCoordinator
+from repoforge.application.execution.requests import (
+    adhoc_execution_request,
+    diagnostic_execution_request,
+    profile_execution_request,
+)
 from repoforge.domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError
 from repoforge.domain.execution_environment import (
     CommandFailureMode,
@@ -366,3 +371,59 @@ def test_coordinator_return_mode_disables_check(tmp_path: Path) -> None:
     assert receipt.requested_policy_hash
     assert receipt.effective_policy_hash
     assert backend.executed == [(("python", "-m", "pytest"), False)]
+
+
+def test_execution_request_compilers_preserve_surface_semantics(tmp_path: Path) -> None:
+    profile = profile_execution_request(
+        workspace_id="workspace-1",
+        workspace_root=tmp_path,
+        command_cwd=tmp_path,
+        commands=(("python", "-m", "pytest"),),
+        working_directory_policy=".",
+        timeout_seconds=30,
+        output_limit=1_000,
+    )
+    diagnostic = diagnostic_execution_request(
+        workspace_id="workspace-1",
+        workspace_root=tmp_path,
+        command_cwd=tmp_path,
+        argv=("python", "-m", "pytest"),
+        working_directory_policy=".",
+        timeout_seconds=30,
+        output_limit=1_000,
+        read_only=True,
+        artifact_paths=(),
+    )
+    adhoc = adhoc_execution_request(
+        workspace_id="workspace-1",
+        workspace_root=tmp_path,
+        command_cwd=tmp_path,
+        argv=("python", "-m", "pytest"),
+        working_directory_policy=".",
+        timeout_seconds=30,
+        output_limit=1_000,
+    )
+
+    assert profile.failure_mode is CommandFailureMode.RAISE
+    assert profile.requested_policy.filesystem is FilesystemAccess.WORKSPACE_WRITE
+    assert diagnostic.failure_mode is CommandFailureMode.RETURN
+    assert diagnostic.requested_policy.filesystem is FilesystemAccess.SOURCE_READ
+    assert adhoc.failure_mode is CommandFailureMode.RETURN
+    assert adhoc.requested_policy.filesystem is FilesystemAccess.WORKSPACE_WRITE
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "src/repoforge/application/workspace/run_profile.py",
+        "src/repoforge/application/workspace/run_diagnostic.py",
+        "src/repoforge/application/workspace/run_adhoc.py",
+    ],
+)
+def test_repository_runners_do_not_bypass_execution_coordinator(
+    relative_path: str,
+) -> None:
+    source = Path(relative_path).read_text(encoding="utf-8")
+
+    assert "self.ctx.commands.run(" not in source
+    assert "self.ctx.execution_environment" not in source

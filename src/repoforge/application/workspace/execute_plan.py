@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ...domain.diagnostics import DiagnosticMutability
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError
 from ...domain.execution_plan import (
     ExecutionPlan,
@@ -45,6 +46,10 @@ from ...ports.execution_receipt_store import ExecutionReceiptStore
 from ...ports.iteration_cache import IterationCache
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
+from ..execution.requests import (
+    diagnostic_execution_request,
+    profile_execution_request,
+)
 from ..operations.manager import OperationManager
 from .execution_plan import ExecutionPlanService
 from .failure_intelligence import FailureIntelligenceService
@@ -215,16 +220,36 @@ class WorkspacePlanExecutor:
         return to_data(repo.diagnostics[stage.target])
 
     def _environment_identity(self, plan: ExecutionPlan, stage: PlanStage) -> str:
-        adapter = self.ctx.execution_environment
-        return _stable_digest(
-            {
-                "adapter": type(adapter).__qualname__ if adapter is not None else "none",
-                "machine": platform.machine(),
-                "platform": platform.platform(),
-                "python": sys.version,
-                "target": self._target_payload(plan, stage),
-            }
-        )
+        _, repo, workspace = self.ctx.workspace(plan.workspace_id)
+        if stage.kind is PlanStageKind.PROFILE:
+            profile = repo.profiles[stage.target]
+            request = profile_execution_request(
+                workspace_id=plan.workspace_id,
+                workspace_root=workspace,
+                command_cwd=(workspace / (profile.working_directory or ".")).resolve(strict=False),
+                commands=profile.commands,
+                working_directory_policy=profile.working_directory or ".",
+                timeout_seconds=(
+                    profile.timeout_seconds or self.ctx.config.server.verification_timeout_seconds
+                ),
+                output_limit=self.ctx.config.server.max_tool_output_chars,
+            )
+        else:
+            diagnostic = repo.diagnostics[stage.target]
+            request = diagnostic_execution_request(
+                workspace_id=plan.workspace_id,
+                workspace_root=workspace,
+                command_cwd=(workspace / (diagnostic.working_directory or ".")).resolve(
+                    strict=False
+                ),
+                argv=diagnostic.argv_template,
+                working_directory_policy=diagnostic.working_directory or ".",
+                timeout_seconds=diagnostic.timeout_seconds,
+                output_limit=diagnostic.output_limit,
+                read_only=diagnostic.mutability is DiagnosticMutability.READ_ONLY,
+                artifact_paths=diagnostic.artifact_paths,
+            )
+        return self.ctx.execution.inspect(request).identity.identity_hash
 
     def _cache_key(
         self,
