@@ -51,7 +51,7 @@
 - Produces: `ToolFailure`, `ToolContractSpec.output_schema()`, `validate_success_output()`, `validate_failure_output()`, and union-aware `validate_output()`.
 - Preserves: `ToolContractSpec.output_model` as the tool-specific success model.
 
-- [ ] **Step 1: Write failing public-union tests**
+- [x] **Step 1: Write failing public-union tests**
 
 Add tests that build one valid shared failure envelope, then for every spec assert both union-schema visibility and failure validation:
 
@@ -83,7 +83,7 @@ def test_every_advertised_output_schema_accepts_shared_failure() -> None:
 
 Update the protocol error test to call `V2_TOOL_SPECS["repo_read"].validate_output(result.structuredContent)` rather than validating only `ToolResponse`.
 
-- [ ] **Step 2: Run RED tests**
+- [x] **Step 2: Run RED tests**
 
 Run:
 
@@ -95,7 +95,7 @@ uv run --extra dev pytest -q \
 
 Expected: failure because concrete tool output models require success fields and no union schema exists.
 
-- [ ] **Step 3: Add the shared failure and registry adapter**
+- [x] **Step 3: Add the shared failure and registry adapter**
 
 In `common.py`, make successful metadata success-only and add:
 
@@ -141,11 +141,11 @@ class ToolContractSpec:
 
 Cache the adapter in the frozen spec if profiling shows construction is material; do not introduce a global mutable cache.
 
-- [ ] **Step 4: Wire discovery and server validation**
+- [x] **Step 4: Wire discovery and server validation**
 
 Use `spec.output_schema()` in schema bundles and MCP `list_tools`. Use `validate_success_output()` in the normal path and `validate_failure_output()` in the structured-error path.
 
-- [ ] **Step 5: Run GREEN tests and commit**
+- [x] **Step 5: Run GREEN tests and commit**
 
 Run the two RED tests plus `tests/test_mcp_contract.py` and `tests/test_v2_schema_golden.py`. Expected: all pass except the golden mismatch intentionally addressed in Task 5.
 
@@ -171,7 +171,7 @@ git commit -m "fix(contract): advertise typed failure unions"
 - Produces: public recovery shape `{kind, precondition, arguments}`.
 - Consumes: existing `RecoveryAction` domain invariants and each existing v2 input model.
 
-- [ ] **Step 1: Replace the test-only translator with a failing direct assertion**
+- [x] **Step 1: Replace the test-only translator with a failing direct assertion**
 
 Delete `_reconstruct_real_input`. For every produced action assert:
 
@@ -185,13 +185,13 @@ assert set(payload) == {"kind", "precondition", "arguments"}
 
 Add contract-schema assertions that each `kind` variant has a typed `arguments` schema rather than one generic optional-field bag.
 
-- [ ] **Step 2: Run RED test**
+- [x] **Step 2: Run RED test**
 
 Run `uv run --extra dev pytest -q tests/test_failure_intelligence.py::test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls`.
 
 Expected: failure because `payload()` exposes flattened generic fields and mutate/refresh need translation.
 
-- [ ] **Step 3: Render exact arguments in the domain**
+- [x] **Step 3: Render exact arguments in the domain**
 
 Keep typed invariant fields internally, but make `payload()` dispatch by `kind` and return only exact input arguments. The mutate branch must produce:
 
@@ -206,7 +206,7 @@ arguments = {
 
 The refresh branch uses `expected_fingerprint`; verify uses `plan_through`; operation includes `action="get"`. Remove `None` values before returning.
 
-- [ ] **Step 4: Replace the public generic model with discriminated variants**
+- [x] **Step 4: Replace the public generic model with discriminated variants**
 
 Define six strict action variants in `v2.py`, reusing the exact existing input models as their `arguments` type:
 
@@ -228,7 +228,7 @@ FailureRecoveryAction = Annotated[
 ]
 ```
 
-- [ ] **Step 5: Run GREEN tests and commit**
+- [x] **Step 5: Run GREEN tests and commit**
 
 Run all `tests/test_failure_intelligence.py` and contract model tests. Expected: pass.
 
@@ -253,7 +253,7 @@ git commit -m "fix(recovery): emit exact callable arguments"
 - Produces: `ProcessIdentity(pid: int, ppid: int, start_token: str)`, `snapshot_descendants(root_pid, limit=4096)`, `identity_is_current(identity)`, `kill_identity(identity, sig)`.
 - Consumes: standard-library `/proc`, bounded `ps`, `os.kill`, and existing timeout orchestration.
 
-- [ ] **Step 1: Write RED tests for exact identity and isolated descendant cleanup**
+- [x] **Step 1: Write RED tests for exact identity and isolated descendant cleanup**
 
 Replace global `pgrep` with a child PID file and unique marker. Assert the exact recorded identity disappears. Add a unit test:
 
@@ -269,21 +269,21 @@ def test_kill_identity_skips_reused_pid(monkeypatch: pytest.MonkeyPatch) -> None
 
 Add parser tests for Linux `/proc/<pid>/stat` including a command name containing spaces/parentheses.
 
-- [ ] **Step 2: Run RED tests**
+- [x] **Step 2: Run RED tests**
 
 Run the new process-tree tests and exact descendant test. Expected: import/function failures and the old global test removed.
 
-- [ ] **Step 3: Implement bounded process identity discovery**
+- [x] **Step 3: Implement bounded process identity discovery**
 
 Create a frozen `ProcessIdentity`. On Linux, enumerate at most 4,096 numeric `/proc` entries and parse PPID/starttime from stat field 4/22 using the final `)` boundary. On Darwin, read at most 1 MiB from `ps -Ao pid=,ppid=,lstart=` with a two-second deadline, terminate the probe after the byte cap, and parse a stable start token. Return an empty snapshot on unsupported platforms or bounded probe failure.
 
 `kill_identity` must re-read identity immediately before `os.kill` and return false on absence or token mismatch.
 
-- [ ] **Step 4: Integrate identity-safe timeout sweeping**
+- [x] **Step 4: Integrate identity-safe timeout sweeping**
 
 In `_communicate`, snapshot descendants before the first group signal. Replace direct PID sweeping with `kill_identity`. Keep all existing bounded waits and direct root-process fallback. Never call `os.kill` on a captured descendant without identity revalidation.
 
-- [ ] **Step 5: Run GREEN tests and commit**
+- [x] **Step 5: Run GREEN tests and commit**
 
 Run all command-executor and cancellation tests. Expected: pass without global process matching.
 
@@ -308,7 +308,7 @@ git commit -m "fix(runtime): validate process identity before cleanup"
 **Interfaces:**
 - Produces: selector scalar-or-sequence schema with `maxItems=100` and item `maxLength=4096`.
 
-- [ ] **Step 1: Write RED runtime and schema tests**
+- [x] **Step 1: Write RED runtime and schema tests**
 
 Add assertions that 101 selector items fail validation and that both selector array branches publish `maxItems: 100`:
 
@@ -321,11 +321,11 @@ assert array_branch["maxItems"] == 100
 assert array_branch["items"]["maxLength"] == 4096
 ```
 
-- [ ] **Step 2: Run RED tests**
+- [x] **Step 2: Run RED tests**
 
 Expected: runtime accepts 101 items or discovery lacks `maxItems`.
 
-- [ ] **Step 3: Put constraints on the sequence branch**
+- [x] **Step 3: Put constraints on the sequence branch**
 
 Use:
 
@@ -337,7 +337,7 @@ _Selector = _SelectorItem | _SelectorItems
 
 Declare `selector: _Selector | None = None` and the same for `selector2`; do not put `max_length` on the outer union field.
 
-- [ ] **Step 4: Run GREEN tests and commit**
+- [x] **Step 4: Run GREEN tests and commit**
 
 Run contract-model and schema tests. Expected: pass before golden regeneration.
 
@@ -363,7 +363,7 @@ git commit -m "fix(contract): publish selector item limits"
 - Consumes: completed Tasks 1-4.
 - Produces: reviewed generated contracts and recorded metadata verification.
 
-- [ ] **Step 1: Update documentation**
+- [x] **Step 1: Update documentation**
 
 Document that every tool advertises success-or-`ToolFailure`, recovery actions contain exact `arguments`, workspace mutate/verify annotations are conservative tool-wide hints, and verify selectors/argv use 100 × 4,096 limits.
 
@@ -371,7 +371,7 @@ Document that every tool advertises success-or-`ToolFailure`, recovery actions c
 
 Execute the direct, indirect, and negative cases in `docs/testing/PLUGIN_TEST_CASES.md`. Append one dated row/section to `TEST_RUN_RECORD.md` with exact cases, observed tool choices, confirmation behavior, and pass/fail; do not claim unavailable live-client evidence.
 
-- [ ] **Step 3: Regenerate reviewed goldens**
+- [x] **Step 3: Regenerate reviewed goldens**
 
 Run:
 
@@ -398,7 +398,7 @@ git diff --check
 
 Expected: every command exits zero. If any command flakes, diagnose it; do not record a retry as proof without fixing or explicitly documenting the nondeterminism.
 
-- [ ] **Step 5: Review and commit**
+- [x] **Step 5: Review and commit**
 
 Run the repository code-review workflow against `36c51f1...HEAD`, fix actionable findings, then commit:
 

@@ -8,13 +8,18 @@ The retired connector identity `forge_v1` exposes only `migration_required`. It 
 
 Successful calls return a short human-readable text block plus the complete typed object in MCP `structuredContent`. The structured object is the source of truth. Full JSON duplication into text is disabled by default; operators may temporarily restore it with the deployment-only `server.legacy_text_result_duplication` compatibility setting.
 
-Every public output has a closed schema and includes:
+Every advertised tool output is the closed union of its tool-specific success model and the shared
+`ToolFailure` model. Success models include:
 
-- `status`: `ok` or `failed`;
+- `status`: exactly `ok`;
 - `summary`: a bounded human-readable result;
-- `error`: one typed error union or `null`.
+- `error`: exactly `null`.
 
-Protocol failures use one redacted envelope with a stable error code, explanation, retryability, correlation ID, safe next action, and bounded details. Public results, errors, audit entries, and traces must not expose absolute host paths, credentials, or arbitrary process output.
+Failures use `status = "failed"`, a bounded summary, and one typed, redacted `ToolError` envelope
+with a stable error code, explanation, retryability, correlation ID, safe next action, and bounded
+details. Runtime success and failure payloads are validated against their respective branch before
+they are returned. Public results, errors, audit entries, and traces must not expose absolute host
+paths, credentials, or arbitrary process output.
 
 ## Recommended agent flow
 
@@ -97,6 +102,9 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 
 A batch is all-or-nothing. The transaction journal is private, bounded, recoverable after interruption, and never becomes Git-visible state. `dry_run` returns typed diagnostics without changing files.
 
+Because `workspace_mutate` can delete or restore content, its tool-wide MCP annotation is
+`destructiveHint = true`, including when a particular invocation is a dry run.
+
 `workspace_verify.mode` is `plan`, `auto`, `diagnostic`, `profile`, or `adhoc`:
 
 - `plan` returns the assessment, selected route, uncertainty, and recommended steps without execution;
@@ -106,6 +114,12 @@ A batch is all-or-nothing. The transaction journal is private, bounded, recovera
 - `adhoc` accepts only allowlisted runners under relaxed policy.
 
 Only a successful verification-enabled profile on the exact current fingerprint satisfies the commit gate. A low-confidence or unavailable code-intelligence provider broadens verification; it never narrows a safety gate.
+
+Each `workspace_verify.selector`, `selector2`, and `argv` collection accepts at most 100 items, and
+each item is limited to 4096 characters. The limits are present in the advertised JSON Schema as
+well as runtime validation. Because `mode = "plan", plan_action = "create"` allocates a new plan,
+the composite tool's MCP annotation is `idempotentHint = false` even though other modes may be
+idempotent for the same inputs.
 
 ### Commit, push, draft PR, and CI evidence
 
@@ -122,7 +136,7 @@ Only a successful verification-enabled profile on the exact current fingerprint 
 
 | Tool | Purpose |
 | --- | --- |
-| `operation` | `get`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. |
+| `operation` | `get`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. Each recovery action is exactly `{kind, precondition, arguments}`; `arguments` validates directly as the input of the named public tool, without a caller-side translation layer. |
 | `config_inspect` | Read accepted/active configuration generations, repository facts, pending changes, runtime identity, and health. |
 | `runtime_logs_read` | Read bounded redacted audit or runtime-log evidence with filters and cursors. |
 
