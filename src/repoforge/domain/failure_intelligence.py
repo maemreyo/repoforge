@@ -224,7 +224,57 @@ class RecoveryAction:
                 "workspace_refresh or workspace_mutate recovery actions"
             )
 
+    def _exact_arguments(self) -> dict[str, object]:
+        if self.kind is RecoveryActionKind.OPERATION:
+            return {"action": self.action, "operation_id": self.operation_id}
+        if self.kind is RecoveryActionKind.WORKSPACE_STATUS:
+            return {"workspace_id": self.workspace_id}
+        if self.kind is RecoveryActionKind.CONFIG_INSPECT:
+            return {}
+        if self.kind is RecoveryActionKind.WORKSPACE_VERIFY:
+            arguments: dict[str, object] = {
+                "workspace_id": self.workspace_id,
+                "mode": self.mode,
+            }
+            if self.diagnostic_id is not None:
+                arguments["diagnostic_id"] = self.diagnostic_id
+            if self.profile_name is not None:
+                arguments["profile_name"] = self.profile_name
+            if self.plan_action is not None:
+                arguments["plan_action"] = self.plan_action
+            if self.plan_id is not None:
+                arguments["plan_id"] = self.plan_id
+            if self.plan_through is not None:
+                arguments["plan_through"] = self.plan_through
+            return arguments
+        if self.kind is RecoveryActionKind.WORKSPACE_REFRESH:
+            return {
+                "workspace_id": self.workspace_id,
+                "action": self.action,
+                "expected_head_sha": self.expected_head_sha,
+                "expected_fingerprint": self.expected_workspace_fingerprint,
+            }
+        if self.kind is RecoveryActionKind.WORKSPACE_MUTATE:
+            return {
+                "workspace_id": self.workspace_id,
+                "operations": [{"op": "restore", "paths": list(self.relative_paths)}],
+                "expected_head_sha": self.expected_head_sha,
+                "expected_workspace_fingerprint": self.expected_workspace_fingerprint,
+            }
+        raise AssertionError(f"Unhandled recovery action kind: {self.kind.value}")
+
     def payload(self) -> dict[str, object]:
+        """Return a directly callable public recovery action."""
+
+        return {
+            "kind": self.kind.value,
+            "precondition": self.precondition,
+            "arguments": self._exact_arguments(),
+        }
+
+    def legacy_payload(self) -> dict[str, object]:
+        """Stable schema-v1 identity representation used by persisted evidence hashes."""
+
         return {
             "action": self.action,
             "diagnostic_id": self.diagnostic_id,
@@ -743,7 +793,9 @@ def _detail_strings(details: dict[str, object], key: str) -> tuple[str, ...]:
     return tuple(str(item) for item in value[:_MAX_SCOPE_ITEMS] if isinstance(item, str))
 
 
-def _evidence_identity_payload(evidence: FailureEvidence) -> dict[str, object]:
+def _evidence_identity_payload(
+    evidence: FailureEvidence, *, public_actions: bool = False
+) -> dict[str, object]:
     return {
         "affected_scope": evidence.affected_scope.payload(),
         "compatibility_binding": evidence.compatibility_binding,
@@ -762,7 +814,10 @@ def _evidence_identity_payload(evidence: FailureEvidence) -> dict[str, object]:
         "pre_identity": _identity_payload(evidence.pre_identity),
         "reproducibility": evidence.reproducibility.value,
         "retryable": evidence.retryable,
-        "safe_actions": [action.payload() for action in evidence.safe_actions],
+        "safe_actions": [
+            action.payload() if public_actions else action.legacy_payload()
+            for action in evidence.safe_actions
+        ],
         "schema_version": evidence.schema_version,
         "source_digest": evidence.source_digest,
         "stable_error_code": evidence.stable_error_code,
@@ -876,7 +931,7 @@ def failure_evidence_payload(evidence: FailureEvidence) -> dict[str, object]:
         "failure_id": evidence.failure_id,
         "receipt_id": evidence.receipt_id,
         "excerpt": evidence.excerpt,
-        **_evidence_identity_payload(evidence),
+        **_evidence_identity_payload(evidence, public_actions=True),
     }
 
 
@@ -905,43 +960,80 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
     for raw in raw_actions:
         if not isinstance(raw, dict):
             _invalid("Failure recovery action payload is invalid")
-        raw_paths = raw.get("relative_paths", [])
+        kind = RecoveryActionKind(str(raw.get("kind", "")))
+        raw_arguments = raw.get("arguments")
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else raw
+        raw_operations = arguments.get("operations", [])
+        raw_paths = arguments.get("relative_paths", [])
+        if kind is RecoveryActionKind.WORKSPACE_MUTATE and isinstance(raw_operations, list):
+            restore = next(
+                (
+                    item
+                    for item in raw_operations
+                    if isinstance(item, dict) and item.get("op") == "restore"
+                ),
+                None,
+            )
+            if isinstance(restore, dict):
+                raw_paths = restore.get("paths", [])
         if not isinstance(raw_paths, list):
             _invalid("Failure recovery action paths are invalid")
         actions.append(
             RecoveryAction(
-                kind=RecoveryActionKind(str(raw.get("kind", ""))),
+                kind=kind,
                 precondition=str(raw.get("precondition", "")),
                 workspace_id=(
-                    str(raw["workspace_id"]) if raw.get("workspace_id") is not None else None
+                    str(arguments["workspace_id"])
+                    if arguments.get("workspace_id") is not None
+                    else None
                 ),
-                mode=(str(raw["mode"]) if raw.get("mode") is not None else None),
+                mode=(str(arguments["mode"]) if arguments.get("mode") is not None else None),
                 plan_action=(
-                    str(raw["plan_action"]) if raw.get("plan_action") is not None else None
+                    str(arguments["plan_action"])
+                    if arguments.get("plan_action") is not None
+                    else None
                 ),
                 diagnostic_id=(
-                    str(raw["diagnostic_id"]) if raw.get("diagnostic_id") is not None else None
+                    str(arguments["diagnostic_id"])
+                    if arguments.get("diagnostic_id") is not None
+                    else None
                 ),
                 profile_name=(
-                    str(raw["profile_name"]) if raw.get("profile_name") is not None else None
+                    str(arguments["profile_name"])
+                    if arguments.get("profile_name") is not None
+                    else None
                 ),
                 plan_through=(
-                    str(raw["plan_through"]) if raw.get("plan_through") is not None else None
+                    str(arguments["plan_through"])
+                    if arguments.get("plan_through") is not None
+                    else None
                 ),
                 relative_paths=tuple(str(item) for item in raw_paths),
                 operation_id=(
-                    str(raw["operation_id"]) if raw.get("operation_id") is not None else None
+                    str(arguments["operation_id"])
+                    if arguments.get("operation_id") is not None
+                    else None
                 ),
-                plan_id=(str(raw["plan_id"]) if raw.get("plan_id") is not None else None),
-                action=(str(raw["action"]) if raw.get("action") is not None else None),
+                plan_id=(
+                    str(arguments["plan_id"]) if arguments.get("plan_id") is not None else None
+                ),
+                action=(
+                    str(arguments["action"]) if arguments.get("action") is not None else None
+                ),
                 expected_head_sha=(
-                    str(raw["expected_head_sha"])
-                    if raw.get("expected_head_sha") is not None
+                    str(arguments["expected_head_sha"])
+                    if arguments.get("expected_head_sha") is not None
                     else None
                 ),
                 expected_workspace_fingerprint=(
-                    str(raw["expected_workspace_fingerprint"])
-                    if raw.get("expected_workspace_fingerprint") is not None
+                    str(
+                        arguments.get(
+                            "expected_workspace_fingerprint",
+                            arguments.get("expected_fingerprint"),
+                        )
+                    )
+                    if arguments.get("expected_workspace_fingerprint") is not None
+                    or arguments.get("expected_fingerprint") is not None
                     else None
                 ),
             )

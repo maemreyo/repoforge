@@ -170,8 +170,19 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
 def test_all_outputs_share_one_typed_error_contract() -> None:
     common, registry = _contracts()
     for tool_name, spec in registry.V2_TOOL_SPECS.items():
-        field = spec.output_model.model_fields["error"]
-        assert common.ToolError in getattr(field.annotation, "__args__", ()), tool_name
+        validated = spec.validate_output(
+            {
+                "status": "failed",
+                "summary": "Request failed",
+                "error": {
+                    "code": "NOT_FOUND",
+                    "message": "Resource not found",
+                    "why": "The requested resource does not exist.",
+                    "safe_next_action": "Refresh state and choose an existing resource.",
+                },
+            }
+        )
+        assert isinstance(validated, common.ToolFailure), tool_name
 
 
 def test_registry_runtime_validation_rejects_unknown_fields() -> None:

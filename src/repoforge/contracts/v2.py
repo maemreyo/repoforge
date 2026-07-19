@@ -1225,39 +1225,51 @@ class FailureEvidenceWorkspaceIdentity(StrictModel):
     policy_hash: Sha256
 
 
-class FailureRecoveryAction(StrictModel):
-    """`kind` is always one of the 28 currently-callable Forge v2 tool names,
-    and every other field here names a real field on that tool's real Input
-    model (verified against this module), so a client can reconstruct the
-    exact call rather than guess or re-derive parameters from context.
-    `action` carries `OperationInput.action` ("get"/"cancel") for `operation`
-    and `WorkspaceRefreshInput.action` ("preview"/"apply") for
-    `workspace_refresh` -- two different tools' fields that happen to share a
-    name; which one applies is determined by `kind`. `mode`/`plan_action`/
-    `plan_through` carry the sub-mode for `workspace_verify`'s consolidated
-    mode/action field (#180 static 28-tool surface)."""
-
-    kind: Literal[
-        "operation",
-        "workspace_status",
-        "workspace_verify",
-        "workspace_refresh",
-        "workspace_mutate",
-        "config_inspect",
-    ]
+class OperationRecoveryAction(StrictModel):
+    kind: Literal["operation"]
     precondition: str = Field(min_length=1, max_length=500)
-    workspace_id: Identifier | None = None
-    mode: Literal["auto", "diagnostic", "profile", "plan"] | None = None
-    plan_action: Literal["create", "accept", "execute"] | None = None
-    diagnostic_id: Identifier | None = None
-    profile_name: Identifier | None = None
-    plan_through: Literal["iteration", "full"] | None = None
-    relative_paths: tuple[RelativePath, ...] = Field(default=(), max_length=200)
-    operation_id: Identifier | None = None
-    plan_id: Identifier | None = None
-    action: Literal["get", "cancel", "preview", "apply"] | None = None
-    expected_head_sha: GitObjectId | None = None
-    expected_workspace_fingerprint: Sha256 | None = None
+    arguments: OperationInput
+
+
+class WorkspaceStatusRecoveryAction(StrictModel):
+    kind: Literal["workspace_status"]
+    precondition: str = Field(min_length=1, max_length=500)
+    arguments: WorkspaceStatusInput
+
+
+class WorkspaceVerifyRecoveryAction(StrictModel):
+    kind: Literal["workspace_verify"]
+    precondition: str = Field(min_length=1, max_length=500)
+    arguments: WorkspaceVerifyInput
+
+
+class WorkspaceRefreshRecoveryAction(StrictModel):
+    kind: Literal["workspace_refresh"]
+    precondition: str = Field(min_length=1, max_length=500)
+    arguments: WorkspaceRefreshInput
+
+
+class WorkspaceMutateRecoveryAction(StrictModel):
+    kind: Literal["workspace_mutate"]
+    precondition: str = Field(min_length=1, max_length=500)
+    arguments: WorkspaceMutateInput
+
+
+class ConfigInspectRecoveryAction(StrictModel):
+    kind: Literal["config_inspect"]
+    precondition: str = Field(min_length=1, max_length=500)
+    arguments: ConfigInspectInput
+
+
+FailureRecoveryAction = Annotated[
+    OperationRecoveryAction
+    | WorkspaceStatusRecoveryAction
+    | WorkspaceVerifyRecoveryAction
+    | WorkspaceRefreshRecoveryAction
+    | WorkspaceMutateRecoveryAction
+    | ConfigInspectRecoveryAction,
+    Field(discriminator="kind"),
+]
 
 
 class FailureAffectedScope(StrictModel):

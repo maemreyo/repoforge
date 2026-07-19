@@ -21,7 +21,6 @@ from repoforge.domain.failure_intelligence import (
     FailureHistorySignal,
     FailureObservation,
     FailureReproducibility,
-    RecoveryAction,
     RecoveryActionKind,
     build_failure_evidence,
     classify_failure,
@@ -144,63 +143,12 @@ def test_representative_failures_classify_deterministically(
     )
 
 
-def _reconstruct_real_input(
-    action: RecoveryAction, observation: FailureObservation
-) -> dict[str, object]:
-    """Translate a `RecoveryAction` into the exact payload its real v2 tool
-    Input model expects. This mirrors what a client reconstructing the call
-    must do -- including the field-name/shape differences between the
-    domain's `RecoveryAction` and the wire contracts it names (e.g.
-    `WorkspaceRefreshInput.expected_fingerprint` vs `WorkspaceMutateInput.
-    expected_workspace_fingerprint`, and `WorkspaceMutateInput.operations`'
-    nested `{"op": "restore", "paths": [...]}` shape vs the flat
-    `relative_paths` the domain model carries)."""
-    kind = action.kind
-    if kind is RecoveryActionKind.OPERATION:
-        return {"action": action.action, "operation_id": action.operation_id}
-    if kind is RecoveryActionKind.WORKSPACE_STATUS:
-        return {"workspace_id": action.workspace_id}
-    if kind is RecoveryActionKind.CONFIG_INSPECT:
-        return {}
-    if kind is RecoveryActionKind.WORKSPACE_VERIFY:
-        payload: dict[str, object] = {"workspace_id": action.workspace_id, "mode": action.mode}
-        if action.mode == "diagnostic":
-            payload["diagnostic_id"] = action.diagnostic_id
-        if action.mode == "profile":
-            payload["profile_name"] = action.profile_name
-        if action.mode == "plan":
-            payload["plan_action"] = action.plan_action
-            if action.plan_action in {"accept", "execute"}:
-                payload["plan_id"] = action.plan_id
-            if action.plan_action == "execute":
-                payload["plan_through"] = action.plan_through
-        return payload
-    if kind is RecoveryActionKind.WORKSPACE_REFRESH:
-        return {
-            "workspace_id": action.workspace_id,
-            "action": action.action,
-            "expected_head_sha": action.expected_head_sha,
-            "expected_fingerprint": action.expected_workspace_fingerprint,
-        }
-    if kind is RecoveryActionKind.WORKSPACE_MUTATE:
-        return {
-            "workspace_id": action.workspace_id,
-            "operations": [{"op": "restore", "paths": list(action.relative_paths)}],
-            "expected_head_sha": action.expected_head_sha,
-            "expected_workspace_fingerprint": action.expected_workspace_fingerprint,
-        }
-    raise AssertionError(f"unhandled recovery action kind: {kind}")
-
-
 def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -> None:
     """Every recovery action's kind must be one of the 28 currently-callable
     Forge v2 tools -- not a retired v1 tool name a client cannot execute.
-    This proves reconstructability by actually building the real tool's
-    Input payload from the action and calling `validate_input()` on it --
-    not just asserting individual fields are present, which can pass while
-    the field names/shapes still don't match the real contract (#225 round-3
-    review: `test_failure_intelligence.py` "checks individual fields instead
-    of proving a real tool call can be reconstructed")."""
+    The public action must contain the target tool's exact `arguments`; this
+    test deliberately has no per-kind translator that could hide a mismatch
+    between recovery evidence and the real callable contract."""
     from repoforge.contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS
 
     for overrides in (
@@ -234,7 +182,10 @@ def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -
                 classification.failure_class,
                 action.kind,
             )
-            real_payload = _reconstruct_real_input(action, observation)
+            wire_action = action.payload()
+            assert set(wire_action) == {"kind", "precondition", "arguments"}
+            real_payload = wire_action["arguments"]
+            assert isinstance(real_payload, dict)
             spec = V2_TOOL_SPECS[action.kind.value]
             validated = spec.validate_input(real_payload)
             assert validated is not None, (classification.failure_class, action.kind, real_payload)
