@@ -114,10 +114,10 @@
       "runtime_logs_read": "8b7233f1eb9b3541563252a87a193b256eec00bebebc3a7d144b9e42bd92bedc",
       "workspace_commit": "be7064e6161a235b74cd7f1b8171f8ffc32e75c052d21de59c4d766cf0c56219",
       "workspace_create": "3e0831e2fc55432a813676fa7a3d759a7d78d4ec2d166b8759bc7f7c556c9980",
-      "workspace_diff": "58c333e23858066024b39f7bca9ae224fd6a1e66c8d9df5463c744a163df4f29",
+      "workspace_diff": "2880865ac3d251421ba68dcdb2c2c37f76bd47109061305e713606c7250b99f7",
       "workspace_format_changed": "371292f00f3296e8b64b4aa9e2f8a2512eab6d43f820683ce1a65da814e6ee7c",
       "workspace_list": "00525590530f830fa4e4699da279d821649b79b3cced912063dd336e358a58b9",
-      "workspace_mutate": "637397c0e23d78d42a771b3a2f3572b1824fb59a545f97332e9af11a79deb900",
+      "workspace_mutate": "738c1a02d201d7461f7469eca12fd81a28ea00e2ec5ade41f23253ce27a713ac",
       "workspace_pr": "2cb1e736de139e18879784e2ae192bc4f92d370782347bd5945b6e712bcfa839",
       "workspace_pr_evidence": "960779176b0238029f1fd252184ed3d9fb097a7bc50b566d50f58f2696c46508",
       "workspace_push": "96fbc91f6d7a9e206188703b688114bfb9d558a85159e32d3c477cb2c3b3df13",
@@ -159,8 +159,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "15f180766c83f08a31f9e00c304a0cfea2e04be42c7f05f388ade69ca7cd4ed7",
-    "tool_surface_hash": "c1c0bc752960b61785b3ad27d54704c992a340040c8ce4b7fcf5726ac7a66a42"
+    "tool_schema_bundle_sha256": "0457c208c62b2b0ca6b756a5694e2be37b16e0f62f9a90caf8c4d2adcefedc67",
+    "tool_surface_hash": "755547e9f8e49ce0e2185a2d20681eeeb6aaa2721f33252ac4da414fd9191e2b"
   },
   "package_version": "2.2.0",
   "runtime": {
