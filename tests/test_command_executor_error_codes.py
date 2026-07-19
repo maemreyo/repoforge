@@ -10,12 +10,26 @@ import pytest
 from repoforge.adapters.subprocess import SubprocessCommandExecutor, process_tree
 from repoforge.adapters.subprocess import command_executor as command_executor_module
 from repoforge.config import ServerConfig
-from repoforge.domain.errors import CommandError, ErrorCode
+from repoforge.domain.errors import CommandError, ErrorCode, RepoForgeError
 from repoforge.ports.cancellation import CancellationToken
 
 
 def _executor(tmp_path: Path) -> SubprocessCommandExecutor:
     return SubprocessCommandExecutor(ServerConfig(tmp_path / "w", tmp_path / "s"))
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        ErrorCode.EXECUTION_POLICY_UNSUPPORTED,
+        ErrorCode.EXECUTION_ENVIRONMENT_DRIFT,
+    ],
+)
+def test_execution_boundary_error_codes_are_stable_and_non_retryable(code: ErrorCode) -> None:
+    error = RepoForgeError("execution boundary failure", code=code)
+
+    assert error.code is code
+    assert error.retryable is False
 
 
 def test_run_returns_result_on_success(tmp_path: Path) -> None:

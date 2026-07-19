@@ -6,10 +6,19 @@ from pathlib import Path
 import pytest
 
 from repoforge.adapters.execution.native import NativeReviewedAdapter
-from repoforge.domain.errors import CommandError, SecurityError
-from repoforge.domain.execution_environment import EnvironmentIdentityRequest
+from repoforge.domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError
+from repoforge.domain.execution_environment import (
+    CommandFailureMode,
+    EnforcementRequirement,
+    EnvironmentIdentityRequest,
+    ExecutionScope,
+    ExecutionScopeKind,
+    FilesystemAccess,
+    NetworkAccess,
+    RequestedExecutionPolicy,
+)
 from repoforge.ports.command import CommandResult
-from repoforge.ports.execution_environment import ApprovedExecution
+from repoforge.ports.execution_environment import ApprovedExecution, ExecutionRequest
 
 
 class RecordingExecutor:
@@ -48,6 +57,61 @@ class RecordingExecutor:
 
 def request(root: Path, *commands: tuple[str, ...]) -> EnvironmentIdentityRequest:
     return EnvironmentIdentityRequest(root, root, commands, ".")
+
+
+def session_request(
+    root: Path,
+    *,
+    enforcement: EnforcementRequirement = EnforcementRequirement.ADVISORY_BACKEND_ALLOWED,
+) -> ExecutionRequest:
+    return ExecutionRequest(
+        scope=ExecutionScope(
+            kind=ExecutionScopeKind.WORKSPACE,
+            root=root,
+            command_cwd=root,
+            workspace_id="workspace-1",
+            working_directory_policy=".",
+        ),
+        reviewed_commands=(("python", "-m", "pytest"),),
+        requested_policy=RequestedExecutionPolicy(
+            network=NetworkAccess.OFFLINE,
+            filesystem=FilesystemAccess.SOURCE_READ,
+            enforcement_requirement=enforcement,
+        ),
+        timeout_seconds=30,
+        output_limit=1_000,
+        failure_mode=CommandFailureMode.RETURN,
+    )
+
+
+def test_native_session_reports_truthful_advisory_policy(tmp_path: Path) -> None:
+    adapter = NativeReviewedAdapter(RecordingExecutor())
+    requested = session_request(tmp_path)
+
+    session = adapter.prepare_session(requested)
+    inspection = adapter.inspect_session(requested, session)
+
+    assert session.requested_policy_hash == requested.requested_policy.policy_hash
+    assert session.effective_policy.network is NetworkAccess.HOST_INHERITED
+    assert session.effective_policy.filesystem is FilesystemAccess.HOST_ACCOUNT_ACCESS
+    assert session.effective_policy.enforcement.network.value == "advisory"
+    assert session.identity.schema_version == 2
+    assert inspection.identity.identity_hash == session.identity.identity_hash
+
+
+def test_native_session_rejects_required_enforcement_before_process_start(
+    tmp_path: Path,
+) -> None:
+    executor = RecordingExecutor()
+    adapter = NativeReviewedAdapter(executor)
+
+    with pytest.raises(RepoForgeError) as excinfo:
+        adapter.prepare_session(
+            session_request(tmp_path, enforcement=EnforcementRequirement.ENFORCEMENT_REQUIRED)
+        )
+
+    assert excinfo.value.code is ErrorCode.EXECUTION_POLICY_UNSUPPORTED
+    assert executor.calls == []
 
 
 def test_identity_inspects_only_profile_tools_and_hashes_reviewed_inputs(tmp_path: Path) -> None:

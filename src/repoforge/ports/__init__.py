@@ -11,8 +11,11 @@ from .configuration import ConfigurationStore
 from .execution_environment import (
     ApprovedExecution,
     ArtifactResult,
+    EnvironmentInspection,
     ExecutionEnvironmentPort,
     ExecutionReceipt,
+    ExecutionRequest,
+    PreparedEnvironmentSession,
 )
 from .execution_plan_store import ExecutionPlanAcceptanceStore, ExecutionPlanStore
 from .execution_receipt_store import ExecutionReceiptStore
@@ -97,6 +100,7 @@ __all__ = [
     "CommandResult",
     "ConfigurationStore",
     "DiscoveryRequest",
+    "EnvironmentInspection",
     "EnvironmentPreflight",
     "ExecutableLocator",
     "ExecutionEnvironmentPort",
@@ -104,6 +108,7 @@ __all__ = [
     "ExecutionPlanStore",
     "ExecutionReceipt",
     "ExecutionReceiptStore",
+    "ExecutionRequest",
     "FailureEvidencePage",
     "FailureEvidenceStore",
     "FileSystem",
@@ -141,6 +146,7 @@ __all__ = [
     "OperatorIO",
     "PrCheckWatchPage",
     "PrCheckWatchStore",
+    "PreparedEnvironmentSession",
     "ProcessInspector",
     "ProviderRegistry",
     "PullRequestGateway",
