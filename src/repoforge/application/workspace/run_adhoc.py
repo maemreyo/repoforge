@@ -16,11 +16,12 @@ import hashlib
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...domain.adhoc import ExecutionMode, validate_adhoc_argv
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
+from ...domain.execution_environment import build_execution_evidence
 from ...domain.operation_task import OperationRetryability, OperationState
 from ...domain.policy import normalize_relative_path
 from ...ports.background_tasks import BackgroundTaskRunner
@@ -72,6 +73,7 @@ class WorkspaceRunAdhocResult:
     gate_guidance: str
     enrollment_nudge: str | None
     next_safe_actions: list[dict[str, object]]
+    execution_evidence: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +225,7 @@ class WorkspaceAdhocRunner:
                 started = time.monotonic()
                 result: CommandResult | None = None
                 command_error: CommandError | None = None
+                execution_evidence_data: dict[str, object] = {}
                 execution_request = adhoc_execution_request(
                     workspace_id=c.workspace_id,
                     workspace_root=locked_workspace,
@@ -236,7 +239,15 @@ class WorkspaceAdhocRunner:
                 try:
                     with self.ctx.execution.prepare(execution_request) as session:
                         result = session.execute(argv).result
-                        session.inspect()
+                        inspection = session.inspect()
+                        execution_evidence_data = to_data(
+                            build_execution_evidence(
+                                execution_request.requested_policy,
+                                inspection.identity,
+                                inspection.effective_policy,
+                                inspection.warnings,
+                            )
+                        )
                 except CommandError as exc:
                     command_error = exc
                     record_command_failure(exc)
@@ -321,6 +332,7 @@ class WorkspaceAdhocRunner:
                     gate_guidance=_GATE_GUIDANCE,
                     enrollment_nudge=nudge,
                     next_safe_actions=next_actions,
+                    execution_evidence=execution_evidence_data,
                 )
 
         if not c.background:

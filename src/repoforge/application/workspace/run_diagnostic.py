@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -18,6 +18,7 @@ from ...domain.diagnostics import (
     validate_diagnostic_expectation,
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
+from ...domain.execution_environment import build_execution_evidence
 from ...domain.policy import normalize_relative_path
 from ...domain.retry_guidance import (
     clear_reusable_failure,
@@ -104,6 +105,7 @@ class WorkspaceRunDiagnosticResult:
     next_safe_actions: list[dict[str, object]]
     failure_reused: bool = False
     reuse_binding: str | None = None
+    execution_evidence: dict[str, object] = field(default_factory=dict)
 
 
 def _diagnostic_error(
@@ -330,12 +332,21 @@ class WorkspaceDiagnosticRunner:
 
                 result: CommandResult | None = None
                 command_error: CommandError | None = None
+                execution_evidence_data: dict[str, object] = {}
                 try:
                     if command.before_command is not None:
                         command.before_command()
                     with self.ctx.execution.prepare(execution_request) as session:
                         result = session.execute(resolved.argv).result
-                        session.inspect()
+                        inspection = session.inspect()
+                        execution_evidence_data = to_data(
+                            build_execution_evidence(
+                                execution_request.requested_policy,
+                                inspection.identity,
+                                inspection.effective_policy,
+                                inspection.warnings,
+                            )
+                        )
                 except CommandError as exc:
                     command_error = exc
 
@@ -491,6 +502,7 @@ class WorkspaceDiagnosticRunner:
                     verification_invalidated=verification_invalidated,
                     satisfies_commit_gate=False,
                     next_safe_actions=next_actions,
+                    execution_evidence=execution_evidence_data,
                 )
                 diagnostic_target = f"diagnostic:{locked_profile.diagnostic_id}"
                 metadata_changed = False

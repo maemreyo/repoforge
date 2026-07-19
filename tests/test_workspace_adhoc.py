@@ -116,6 +116,8 @@ def test_relaxed_repo_runs_allowlisted_command_as_evidence_only(tmp_path: Path) 
         ["python3", "-c", "from pathlib import Path; assert Path('hello.txt').exists()"],
     )
     assert result["returncode"] == 0
+    assert result["execution_evidence"]["requested_filesystem"] == "workspace_write"
+    assert result["execution_evidence"]["effective_filesystem"] == "host_account_access"
     assert result["runner"] == "python3"
     assert result["evidence_only"] is True
     assert result["satisfies_commit_gate"] is False
