@@ -124,22 +124,27 @@ class GenerationActivator:
         phase: RuntimePhase,
         code: str,
         message: str,
+        processes_stopped: bool = True,
     ) -> None:
         if isinstance(prior, RuntimeRecord):
             record = replace(
                 prior,
                 phase=phase,
-                pid=None,
-                process_identity=None,
-                child_pid=None,
-                child_process_identity=None,
-                active_generation=None,
                 accepted_generation=generation.generation,
                 updated_at=self._clock.now_iso(),
                 correlation_id=correlation_id,
                 last_error_code=code,
                 last_error=message,
             )
+            if processes_stopped:
+                record = replace(
+                    record,
+                    pid=None,
+                    process_identity=None,
+                    child_pid=None,
+                    child_process_identity=None,
+                    active_generation=None,
+                )
         else:
             record = RuntimeRecord(
                 protocol_version=RUNTIME_CONTROL_PROTOCOL_VERSION,
@@ -302,21 +307,29 @@ class GenerationActivator:
                     stopped = self._wait_stopped(timeout=5.0)
                     if not stopped:
                         stopped = self._launcher.force_stop(running, grace_seconds=5.0)
+                    failure_message = (
+                        "MCP drain/fail-closed control was unavailable; the managed runtime was "
+                        "stopped to revoke external access"
+                        if stopped
+                        else "MCP drain/fail-closed control was unavailable; the managed runtime "
+                        "could not be confirmed stopped, so process identity was retained for "
+                        "safe retry and reconciliation"
+                    )
                     self._mark_terminal_failure(
                         running,
                         generation,
                         correlation_id,
                         phase=RuntimePhase.FAIL_CLOSED,
                         code="RESTRICTION_FORCED_STOP",
-                        message=(
-                            "MCP drain/fail-closed control was unavailable; the managed runtime "
-                            "was stopped to revoke external access"
-                        ),
+                        message=failure_message,
+                        processes_stopped=stopped,
                     )
-                    raise ConfigError(
-                        "RESTRICTION_FORCED_STOP: runtime was stopped because safe drain control "
-                        "was unavailable; retry activation"
+                    outcome = (
+                        "runtime was stopped because safe drain control was unavailable"
+                        if stopped
+                        else "runtime could not be confirmed stopped; process identity was retained"
                     )
+                    raise ConfigError(f"RESTRICTION_FORCED_STOP: {outcome}; retry activation")
                 self._request(self._mcp_control, ControlCommand.RESUME, correlation_id)
                 if observable.phase is RuntimePhase.DRAINING:
                     self._runtime.write(
@@ -354,6 +367,7 @@ class GenerationActivator:
                         else RuntimePhase.FAILED,
                         code="RUNTIME_STOP_TIMEOUT",
                         message="Supervisor did not stop after drain and forced termination",
+                        processes_stopped=forced,
                     )
                     raise ConfigError("RUNTIME_STOP_TIMEOUT: supervisor did not stop after drain")
         staged = self._configs.activation_target()
