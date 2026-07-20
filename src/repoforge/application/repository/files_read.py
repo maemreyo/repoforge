@@ -35,10 +35,14 @@ class RepositoryFilesReader:
 
     def execute(self, command: RepositoryFilesReadCommand) -> RepositoryFilesReadResult:
         if not command.relative_paths:
-            raise ValueError("relative_paths must contain at least one path")
+            raise RepoForgeError(
+                "relative_paths must contain at least one path",
+                code=ErrorCode.INPUT_REQUIRED,
+            )
         if len(command.relative_paths) > self.ctx.config.server.max_batch_files:
-            raise ValueError(
-                f"relative_paths exceeds max_batch_files={self.ctx.config.server.max_batch_files}"
+            raise RepoForgeError(
+                f"relative_paths exceeds max_batch_files={self.ctx.config.server.max_batch_files}",
+                code=ErrorCode.INPUT_REQUIRED,
             )
         unique = list(dict.fromkeys(command.relative_paths))
         repo = self.ctx.repo(command.repo_id)

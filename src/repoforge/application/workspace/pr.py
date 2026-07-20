@@ -186,6 +186,11 @@ class WorkspacePrCoordinator:
     ) -> tuple[WorkspaceRecord, RepositoryConfig, Path, dict[str, Any], str]:
         record, repo, path = self.ctx.workspace(workspace_id)
         payload = self.ctx.github.status(path, record.branch)
+        if payload.get("exists") is False:
+            raise RepoForgeError(
+                "No pull request exists yet for this workspace branch",
+                code=ErrorCode.NOT_FOUND,
+            )
         return record, repo, path, payload, _remote_version(payload)
 
     @staticmethod

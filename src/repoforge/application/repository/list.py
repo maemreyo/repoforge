@@ -9,6 +9,10 @@ from ..context import ApplicationContext
 @dataclass(frozen=True, slots=True)
 class RepositoryListCommand:
     requested_repo: str | None = None
+    #: Set only by internal self-checks (supervisor watchdog, startup, hot
+    #: reload) -- never reachable from an external client -- so their ticks
+    #: don't flood the persisted audit trail. See ApplicationContext.audited.
+    synthetic: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,4 +110,4 @@ class RepositoryLister:
             details["selection_outcome"] = selection.outcome.value
             return RepositoryListResult(repositories, selection.as_dict())
 
-        return self.ctx.audited("repo_list", details, op)
+        return self.ctx.audited("repo_list", details, op, synthetic=command.synthetic)

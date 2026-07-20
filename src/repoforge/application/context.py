@@ -381,7 +381,16 @@ class ApplicationContext:
         *,
         mutating: bool | None = None,
         correlation_id: str | None = None,
+        synthetic: bool = False,
     ) -> T:
+        """Run ``operation`` under the mutation gate, audit trail, and metrics.
+
+        ``synthetic`` marks an internally generated call (a supervisor watchdog
+        tick or startup self-check, never something an external client can
+        request) that should still exercise the real code path and update
+        metrics, but must not spam the persisted audit trail -- see the
+        repo_list watchdog self-check in interfaces/runtime/host.py.
+        """
         correlation = correlation_id or self.ids.new_hex(24)
         is_mutating = action in _MUTATING_ACTIONS if mutating is None else mutating
         started = time.monotonic()
@@ -439,26 +448,27 @@ class ApplicationContext:
             except ValueError:
                 normalized_code = ErrorCode.INTERNAL_ERROR
             try:
-                self._enrich_audit_details(
-                    details, is_mutating=is_mutating, correlation=correlation
-                )
-                self.audit.record(
-                    action,
-                    success=False,
-                    details={
-                        **details,
-                        "correlation_id": correlation,
-                        "duration_ms": duration,
-                        "error_type": type(exc).__name__,
-                        "error_code": code,
-                        "retryable": bool(getattr(exc, "retryable", False)),
-                        "automatic_retry_allowed": automatic_retry_allowed(
-                            action,
-                            normalized_code,
-                            has_idempotency_key="idempotency_key_hash" in details,
-                        ),
-                    },
-                )
+                if not synthetic:
+                    self._enrich_audit_details(
+                        details, is_mutating=is_mutating, correlation=correlation
+                    )
+                    self.audit.record(
+                        action,
+                        success=False,
+                        details={
+                            **details,
+                            "correlation_id": correlation,
+                            "duration_ms": duration,
+                            "error_type": type(exc).__name__,
+                            "error_code": code,
+                            "retryable": bool(getattr(exc, "retryable", False)),
+                            "automatic_retry_allowed": automatic_retry_allowed(
+                                action,
+                                normalized_code,
+                                has_idempotency_key="idempotency_key_hash" in details,
+                            ),
+                        },
+                    )
             except Exception as audit_exc:
                 add_note = getattr(exc, "add_note", None)
                 if callable(add_note):
@@ -475,17 +485,18 @@ class ApplicationContext:
             # Audit must never break a succeeding operation just because its result
             # happens to be unserializable; record the size as unknown instead.
             result_bytes = None
-        self._enrich_audit_details(details, is_mutating=is_mutating, correlation=correlation)
-        self.audit.record(
-            action,
-            success=True,
-            details={
-                **details,
-                "correlation_id": correlation,
-                "duration_ms": duration,
-                "result_bytes": result_bytes,
-            },
-        )
+        if not synthetic:
+            self._enrich_audit_details(details, is_mutating=is_mutating, correlation=correlation)
+            self.audit.record(
+                action,
+                success=True,
+                details={
+                    **details,
+                    "correlation_id": correlation,
+                    "duration_ms": duration,
+                    "result_bytes": result_bytes,
+                },
+            )
         self.record_metric(
             action,
             success=True,

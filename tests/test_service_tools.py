@@ -780,6 +780,9 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
     pushed = service.workspace_push(workspace_id)
     assert pushed["head_sha"] == committed["head_sha"]
 
+    not_yet = service.workspace_pr_status(workspace_id)
+    assert not_yet == {"exists": False, "branch": created["branch"]}
+
     pr = service.workspace_create_draft_pr(
         workspace_id, "Improve developer experience", "## Summary\n\nSafer workflow."
     )
@@ -790,6 +793,7 @@ def test_complete_service_tool_lifecycle(forge_env: ForgeEnvironment) -> None:
     updated = service.workspace_update_draft_pr(workspace_id, title="Improve DX safely")
     assert updated["title"] == "Improve DX safely"
     pr_status = service.workspace_pr_status(workspace_id)
+    assert pr_status["exists"] is True
     assert pr_status["number"] == 42
     checks = service.workspace_pr_checks(workspace_id, required_only=True)
     assert checks["all_passed"] is True
@@ -876,7 +880,7 @@ def test_workspace_invariant_failures_have_specific_error_codes(
 def test_batch_limit_and_denied_path(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "negative tests")["workspace_id"]
-    with pytest.raises(ValueError, match="max_batch_files"):
+    with pytest.raises(WorkspaceError, match="max_batch_files"):
         service.workspace_read_files(workspace_id, ["hello.txt"] * 21)
     with pytest.raises(SecurityError):
         service.workspace_write_file(

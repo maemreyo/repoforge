@@ -618,6 +618,35 @@ def build_application(
     )
 
 
+def _load_dotenv_if_present(path: Path) -> None:
+    """Fill in unset environment variables from a simple ``KEY=VALUE`` .env file.
+
+    Never overrides a variable the environment already provides -- an explicit
+    shell export always wins over a stored default. Deliberately minimal (no
+    python-dotenv dependency): the managed runtime is often launched without
+    an inherited shell environment (a different terminal, cron, a supervisor
+    restart), so a secret like CONTROL_PLANE_API_KEY that only lives in a
+    project .env file would otherwise never reach the process, and startup
+    fails with ConfigError every time no matter how many times it's retried.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ[key] = value
+
+
 def run_runtime_worker(
     config_path: Path,
     *,
@@ -629,6 +658,8 @@ def run_runtime_worker(
     if connector_identity != FORGE_V2_IDENTITY:
         raise ConfigError("Managed runtime supports only the forge_v2 connector identity")
     config_path = config_path.expanduser().resolve()
+    for dotenv_candidate in (config_path.parent / ".env", Path.cwd() / ".env"):
+        _load_dotenv_if_present(dotenv_candidate)
     configs = build_configuration_store(config_path)
     target = configs.activation_target() or configs.active()
     if target is None:

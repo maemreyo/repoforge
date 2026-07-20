@@ -46,7 +46,7 @@ class Service:
     def read(self) -> dict[str, str]:
         return {"value": self.value}
 
-    def repo_list(self) -> dict[str, list[dict[str, str]]]:
+    def repo_list(self, *, synthetic: bool = False) -> dict[str, list[dict[str, str]]]:
         return {"repositories": [{"repo_id": self.value}]}
 
 

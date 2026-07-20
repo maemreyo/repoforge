@@ -508,8 +508,12 @@ class CodingService:
             self._execution_failure_evidence.read(FailureEvidenceReadCommand(failure_id))
         )
 
-    def repo_list(self, requested_repo: str | None = None) -> dict[str, Any]:
-        return _result(self._repo_list.execute(RepositoryListCommand(requested_repo)))
+    def repo_list(
+        self, requested_repo: str | None = None, *, synthetic: bool = False
+    ) -> dict[str, Any]:
+        return _result(
+            self._repo_list.execute(RepositoryListCommand(requested_repo, synthetic=synthetic))
+        )
 
     def repo_list_v2(
         self,

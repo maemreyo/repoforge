@@ -34,9 +34,9 @@ class WorkspacePathsRestorer:
     def execute(self, c: WorkspaceRestorePathsCommand) -> WorkspaceRestorePathsResult:
         _, repo, path = self.ctx.workspace(c.workspace_id)
         if not c.relative_paths:
-            raise ValueError("relative_paths must contain at least one path")
+            raise WorkspaceError("relative_paths must contain at least one path")
         if len(c.relative_paths) > self.ctx.config.server.max_batch_files:
-            raise ValueError(
+            raise WorkspaceError(
                 f"relative_paths exceeds max_batch_files={self.ctx.config.server.max_batch_files}"
             )
         if not _SHA.fullmatch(c.expected_workspace_fingerprint):

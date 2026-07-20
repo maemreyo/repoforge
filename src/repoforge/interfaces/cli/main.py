@@ -1508,7 +1508,7 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
                 correlation_id=f"retired-{generation}",
             )
 
-        repositories = service.repo_list().get("repositories", [])
+        repositories = service.repo_list(synthetic=True).get("repositories", [])
         repository_ids = frozenset(
             str(item["repo_id"])
             for item in repositories
@@ -1524,7 +1524,7 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
 
     initial = build_container(initial_generation.generation, allow_incompatible=True)
     # The initial process startup performs the same self-check as a hot-reload candidate.
-    initial.service.repo_list()
+    initial.service.repo_list(synthetic=True)
     router = AtomicServiceRouter(initial)
 
     def contract_identity_provider() -> RuntimeContractIdentity:
