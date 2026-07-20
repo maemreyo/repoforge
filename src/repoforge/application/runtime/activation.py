@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -49,6 +50,7 @@ class GenerationActivator:
         config_path: Path,
         health_timeout_seconds: float = 45.0,
         drain_timeout_seconds: float = 30.0,
+        validate_contract_artifacts: Callable[[], None] | None = None,
     ) -> None:
         self._configs = configs
         self._runtime = runtime
@@ -60,6 +62,7 @@ class GenerationActivator:
         self._config_path = config_path
         self._health_timeout = health_timeout_seconds
         self._drain_timeout = drain_timeout_seconds
+        self._validate_contract_artifacts = validate_contract_artifacts
 
     def _request_response(
         self,
@@ -207,6 +210,8 @@ class GenerationActivator:
                 "Asynchronous activation cannot guarantee automatic rollback; disable rollback "
                 "explicitly when wait_for_health is false"
             )
+        if self._validate_contract_artifacts is not None:
+            self._validate_contract_artifacts()
         correlation_id = self._ids.new_hex(24)
         previous = self._configs.active()
         running = self._runtime.read()

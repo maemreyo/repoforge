@@ -310,11 +310,25 @@ def test_serve_control_handler_covers_health_drain_resume_and_fail_closed(
         lambda path, generation, surface: SimpleNamespace(pid=55),
     )
     monkeypatch.setattr(cli, "clear_runtime_state", lambda path, pid: captured.update(cleared=pid))
-    monkeypatch.setattr(mcp_module, "tool_surface_hash", lambda: "surface")
-    monkeypatch.setattr(mcp_module, "create_server", lambda *, router, admin=None: MCP())
+    monkeypatch.setattr(mcp_module, "tool_surface_hash", lambda: "a" * 64)
+
+    def create_server(
+        *,
+        router: object,
+        admin: object | None = None,
+        contract_identity_provider: Any,
+    ) -> MCP:
+        del router, admin
+        identity = contract_identity_provider()
+        assert identity.active_generation == 7
+        captured["contract_identity"] = identity.as_dict()
+        return MCP()
+
+    monkeypatch.setattr(mcp_module, "create_server", create_server)
 
     assert cli._serve(tmp_path / "config.toml") == 0
     assert captured["closed"] is True and captured["cleared"] == 55
+    assert captured["contract_identity"]["active_generation"] == 7
 
 
 def test_serve_health_failure_and_missing_generation(

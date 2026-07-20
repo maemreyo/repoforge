@@ -47,6 +47,7 @@ from ...domain.policy_patch import (
 )
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode
+from ...domain.runtime_contract import RuntimeContractIdentity
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
 from ...ports.ids import IdGenerator
@@ -140,6 +141,7 @@ class ConfigAdminService:
         read_audit_page: AuditPageReader | None = None,
         reload_runtime: Callable[[int], dict[str, Any]] | None = None,
         read_runtime_status: Callable[[], dict[str, object]] | None = None,
+        contract_identity_provider: Callable[[], RuntimeContractIdentity] | None = None,
     ) -> None:
         self._store = store
         self._proposals = proposals
@@ -153,6 +155,7 @@ class ConfigAdminService:
         self._read_audit_page = read_audit_page
         self._reload_runtime = reload_runtime
         self._read_runtime_status = read_runtime_status
+        self._contract_identity_provider = contract_identity_provider
 
     # -- reads ---------------------------------------------------------------
 
@@ -323,6 +326,37 @@ class ConfigAdminService:
                     }
                 )
         restart_required = active is None or active.generation != current.generation
+        source_digest = sha256_text(self._store.read_source_text())
+        runtime_status = (
+            self._read_runtime_status() if self._read_runtime_status is not None else {}
+        )
+        runtime_generation_raw = runtime_status.get("active_generation")
+        runtime_generation = (
+            runtime_generation_raw
+            if isinstance(runtime_generation_raw, int) and runtime_generation_raw > 0
+            else None
+        )
+        if source_digest != current.source_sha256:
+            drift_state = "source_changed"
+            safe_reconciliation_action = (
+                "Review and accept a new configuration generation before activation."
+            )
+        elif active is None or active.generation != current.generation:
+            drift_state = "activation_required"
+            safe_reconciliation_action = (
+                f"Activate accepted configuration generation {current.generation}."
+            )
+        elif runtime_generation is not None and runtime_generation != active.generation:
+            drift_state = "runtime_mismatch"
+            safe_reconciliation_action = f"Reconcile the managed runtime to active configuration generation {active.generation}."
+        else:
+            drift_state = "none"
+            safe_reconciliation_action = "No configuration reconciliation is required."
+        contract_identity = (
+            self._contract_identity_provider().as_dict()
+            if self._contract_identity_provider is not None
+            else None
+        )
         return {
             "status": "ok",
             "summary": f"Inspected accepted configuration generation {current.generation}",
@@ -333,6 +367,16 @@ class ConfigAdminService:
             "capability_delta": current.delta.value,
             "restart_required": restart_required,
             "repo_facts": facts,
+            "contract_identity": contract_identity,
+            "config_projection": {
+                "source_digest": source_digest,
+                "accepted_source_digest": current.source_sha256,
+                "accepted_resolved_digest": current.resolved_sha256,
+                "active_resolved_digest": active.resolved_sha256 if active is not None else None,
+                "runtime_generation": runtime_generation,
+                "drift_state": drift_state,
+                "safe_reconciliation_action": safe_reconciliation_action,
+            },
         }
 
     @staticmethod

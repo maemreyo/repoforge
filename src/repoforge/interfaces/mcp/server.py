@@ -8,7 +8,7 @@ import json
 import os
 import secrets
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -19,6 +19,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp.types import Tool as McpTool
 from pydantic import BaseModel
 
+from ... import __version__
 from ...application.config_admin import ConfigAdminService
 from ...application.read_batch import FileReadRequest
 from ...application.retrieval import SearchMode as ApplicationSearchMode
@@ -36,16 +37,76 @@ from ...application.workspace.mutate import (
     WriteMutation,
 )
 from ...config import load_config
-from ...contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS, ToolContractSpec
-from ...domain.errors import ConfigError, WorkspaceError, operation_error_from_exception
+from ...contracts.registry import (
+    V2_TOOL_NAMES,
+    V2_TOOL_SPECS,
+    ToolContractSpec,
+    contract_schema_digests,
+)
+from ...domain.errors import (
+    ConfigError,
+    ErrorCode,
+    WorkspaceError,
+    operation_error_from_exception,
+)
 from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
+from ...domain.runtime import RUNTIME_CONTROL_PROTOCOL_VERSION
+from ...domain.runtime_contract import RuntimeContractIdentity, changed_contract_fields
 from .capabilities import capability_policy_from_context
 from .payload import render_tool_payload
 
 FORGE_V2_IDENTITY = "forge_v2"
 FORGE_V2_CONTRACT_VERSION = 2
+_PROCESS_START_IDENTITY = secrets.token_hex(32)
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _compute_server_build_sha(
+    package_root: Path,
+    *,
+    explicit_build_ref: str | None = None,
+) -> str:
+    """Fingerprint the exact package bytes loaded by this server process."""
+
+    explicit = (explicit_build_ref or "").strip()
+    if explicit:
+        normalized = explicit.lower()
+        if len(normalized) == 64 and all(
+            character in "0123456789abcdef" for character in normalized
+        ):
+            return normalized
+        return hashlib.sha256(explicit.encode("utf-8")).hexdigest()
+
+    root = package_root.resolve()
+    candidates = sorted(
+        (
+            path
+            for path in root.rglob("*")
+            if path.is_file()
+            and not path.is_symlink()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".pyo"}
+        ),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    if not candidates:
+        raise RuntimeError("RepoForge package build fingerprint has no readable files")
+
+    digest = hashlib.sha256()
+    for path in candidates:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+_SERVER_BUILD_SHA = _compute_server_build_sha(
+    _PACKAGE_ROOT,
+    explicit_build_ref=os.environ.get("REPOFORGE_BUILD_SHA"),
+)
 
 SERVER_INSTRUCTIONS = """
 Forge v2 connects ChatGPT to allowlisted local Git repositories through isolated worktrees.
@@ -523,6 +584,7 @@ class ForgeV2FastMCP(FastMCP[None]):
         *,
         service_boundary: _ServiceErrorBoundary,
         admin_boundary: _ServiceErrorBoundary,
+        contract_identity_provider: Callable[[], RuntimeContractIdentity],
     ) -> None:
         super().__init__(
             FORGE_V2_IDENTITY,
@@ -531,8 +593,47 @@ class ForgeV2FastMCP(FastMCP[None]):
         )
         self._service_boundary = service_boundary
         self._admin_boundary = admin_boundary
+        self._contract_identity_provider = contract_identity_provider
+        self._initial_contract_identity = contract_identity_provider()
+        self._session_contract_identities: dict[int, RuntimeContractIdentity] = {}
+
+    def _session_key(self) -> int | None:
+        try:
+            return id(self.get_context().session)
+        except (LookupError, AttributeError, ValueError):
+            return None
+
+    def _expected_contract_identity(self) -> RuntimeContractIdentity:
+        key = self._session_key()
+        if key is None:
+            return self._initial_contract_identity
+        return self._session_contract_identities.get(key, self._initial_contract_identity)
+
+    def _ensure_contract_fresh(self) -> RuntimeContractIdentity:
+        expected = self._expected_contract_identity()
+        actual = self._contract_identity_provider()
+        changed = changed_contract_fields(expected, actual)
+        if changed:
+            fields = ", ".join(changed)
+            raise ConfigError(
+                f"CLIENT_CONTRACT_STALE: discovery identity changed: {fields}",
+                code=ErrorCode.CLIENT_CONTRACT_STALE,
+                retryable=False,
+                safe_next_action=(
+                    "Rediscover the forge_v2 connector tools, reconnect, and resubmit only after "
+                    "reviewing the new contract identity."
+                ),
+                unchanged_state=("The application use case was not invoked.",),
+                details={"changed_fields": list(changed)},
+            )
+        return actual
 
     async def list_tools(self) -> list[McpTool]:
+        identity = self._contract_identity_provider()
+        key = self._session_key()
+        if key is not None:
+            self._session_contract_identities[key] = identity
+        metadata = {"repoforge_contract_identity": identity.as_dict()}
         return [
             McpTool(
                 name=name,
@@ -541,6 +642,7 @@ class ForgeV2FastMCP(FastMCP[None]):
                 inputSchema=V2_TOOL_SPECS[name].input_model.model_json_schema(mode="validation"),
                 outputSchema=V2_TOOL_SPECS[name].output_schema(),
                 annotations=_tool_annotations(name),
+                _meta=metadata,
             )
             for name in V2_TOOL_NAMES
         ]
@@ -600,6 +702,7 @@ class ForgeV2FastMCP(FastMCP[None]):
         self, name: str, arguments: dict[str, Any], spec: ToolContractSpec
     ) -> CallToolResult:
         try:
+            request_identity = self._ensure_contract_fresh()
             validated_input = spec.validate_input(arguments)
         except Exception as exc:
             _raise_structured_error(name, exc)
@@ -661,7 +764,10 @@ class ForgeV2FastMCP(FastMCP[None]):
                 content=rendered.content,
                 structuredContent=rendered.structured,
                 isError=False,
-                _meta={"repoforge_trace": trace.as_dict()},
+                _meta={
+                    "repoforge_trace": trace.as_dict(),
+                    "repoforge_contract_identity": request_identity.as_dict(),
+                },
             )
 
 
@@ -701,6 +807,23 @@ def tool_surface_hash(contract_version: int | None = None) -> str:
     ).hexdigest()
 
 
+def build_runtime_contract_identity(active_generation: int) -> RuntimeContractIdentity:
+    """Build the redaction-safe identity chain for one active generation."""
+
+    digests = contract_schema_digests()
+    surface_hash = tool_surface_hash()
+    return RuntimeContractIdentity(
+        server_build_sha=_SERVER_BUILD_SHA,
+        server_version=__version__,
+        active_generation=active_generation,
+        tool_surface_hash=surface_hash,
+        input_contract_digest=digests.input_digest,
+        output_contract_digest=digests.output_digest,
+        runtime_protocol_version=RUNTIME_CONTROL_PROTOCOL_VERSION,
+        process_start_identity=_PROCESS_START_IDENTITY,
+    )
+
+
 def create_server(
     config_path: str | Path | None = None,
     *,
@@ -708,6 +831,7 @@ def create_server(
     router: AtomicServiceRouter | None = None,
     contract_version: int | None = None,
     admin: ConfigAdminService | None = None,
+    contract_identity_provider: Callable[[], RuntimeContractIdentity] | None = None,
 ) -> FastMCP:
     if contract_version not in {None, FORGE_V2_CONTRACT_VERSION}:
         raise ValueError("Forge v2 server only supports contract v2")
@@ -720,9 +844,15 @@ def create_server(
     admin_boundary = _ServiceErrorBoundary(
         admin if admin is not None else _UnavailableConfigAdmin()
     )
+    identity_provider = contract_identity_provider or (
+        (lambda: build_runtime_contract_identity(router.active_generation))
+        if router is not None
+        else (lambda: build_runtime_contract_identity(1))
+    )
     return ForgeV2FastMCP(
         service_boundary=service_boundary,
         admin_boundary=admin_boundary,
+        contract_identity_provider=identity_provider,
     )
 
 
@@ -732,6 +862,7 @@ __all__ = [
     "SERVER_INSTRUCTIONS",
     "ForgeV2FastMCP",
     "_ServiceErrorBoundary",
+    "build_runtime_contract_identity",
     "create_server",
     "tool_surface_hash",
 ]

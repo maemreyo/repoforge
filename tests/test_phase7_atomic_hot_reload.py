@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from contextlib import nullcontext
@@ -21,6 +22,10 @@ from repoforge.application.runtime.hot_reload import (
     HotReloadCoordinator,
 )
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig
+from repoforge.contracts.registry import (
+    render_v2_schema_bundle,
+    validate_generated_contract_artifact,
+)
 from repoforge.domain.config_generation import CapabilityDeltaKind, ConfigGeneration
 from repoforge.domain.errors import ConfigError, SecurityError
 from repoforge.domain.runtime import (
@@ -328,6 +333,37 @@ def test_generation_activator_prefers_atomic_hot_reload_for_compatible_generatio
     assert runtime.record.phase is RuntimePhase.HEALTHY
     assert runtime.record.active_generation == 2
     assert runtime.record.accepted_generation == 2
+
+
+def test_generation_activator_rejects_tampered_contract_before_any_runtime_effect(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "tool-schemas-v2.json"
+    tampered = render_v2_schema_bundle()
+    tampered["tool_count"] = 27
+    artifact.write_text(json.dumps(tampered), encoding="utf-8")
+    configs = Configs()
+    runtime = Runtime()
+    control = ReloadControl(configs)
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=NoLaunch(),
+        ids=SequenceIdGenerator(("correlation",)),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        config_path=Path("/config"),
+        validate_contract_artifacts=lambda: validate_generated_contract_artifact(artifact),
+    )
+
+    with pytest.raises(ConfigError, match="CONTRACT_ARTIFACT_MISMATCH"):
+        activator.activate(_generation(2, CapabilityDeltaKind.EXPANSION), extra_env={})
+
+    assert configs.staged == []
+    assert control.commands == []
+    assert runtime.record is not None
+    assert runtime.record.active_generation == 1
 
 
 class Files:

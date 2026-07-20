@@ -9,6 +9,7 @@ from enum import Enum
 class ErrorCode(str, Enum):
     CONFIG_INVALID = "CONFIG_INVALID"
     CONFIG_STALE = "CONFIG_STALE"
+    CLIENT_CONTRACT_STALE = "CLIENT_CONTRACT_STALE"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     INPUT_REQUIRED = "INPUT_REQUIRED"
     SECURITY_POLICY_VIOLATION = "SECURITY_POLICY_VIOLATION"
@@ -129,6 +130,7 @@ class OperationError:
 
 
 _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
+    ("CLIENT_CONTRACT_STALE", ErrorCode.CLIENT_CONTRACT_STALE, False),
     ("DISCOVERY_ROOT_NOT_FOUND", ErrorCode.DISCOVERY_ROOT_NOT_FOUND, False),
     ("DISCOVERY_PERMISSION_DENIED", ErrorCode.DISCOVERY_PERMISSION_DENIED, False),
     ("DUPLICATE_REPOSITORY_ID", ErrorCode.DUPLICATE_REPOSITORY_ID, False),
@@ -251,6 +253,7 @@ def operation_error_from_exception(
         else "Correct the reported invariant or provide the required explicit approval."
     )
     why = {
+        ErrorCode.CLIENT_CONTRACT_STALE: "The client session is bound to a different reviewed runtime contract identity.",
         ErrorCode.CONFIG_STALE: "Another writer changed the reviewed configuration first.",
         ErrorCode.STALE_STATE: "The optimistic-lock snapshot no longer matches current state.",
         ErrorCode.APPROVAL_REQUIRED: "The operation would widen capability without matching approval.",

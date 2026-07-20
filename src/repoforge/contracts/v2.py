@@ -1464,6 +1464,27 @@ class ConfigGenerationSummary(StrictModel):
     changed_sections: tuple[str, ...] = Field(default=(), max_length=100)
 
 
+class RuntimeContractIdentityView(StrictModel):
+    server_build_sha: Sha256
+    server_version: str = Field(min_length=1, max_length=160)
+    active_generation: int = Field(ge=1)
+    tool_surface_hash: Sha256
+    input_contract_digest: Sha256
+    output_contract_digest: Sha256
+    runtime_protocol_version: int = Field(ge=1)
+    process_start_identity: Sha256
+
+
+class ConfigProjectionView(StrictModel):
+    source_digest: Sha256
+    accepted_source_digest: Sha256
+    accepted_resolved_digest: Sha256
+    active_resolved_digest: Sha256 | None = None
+    runtime_generation: int | None = Field(default=None, ge=1)
+    drift_state: Literal["none", "source_changed", "activation_required", "runtime_mismatch"]
+    safe_reconciliation_action: str = Field(min_length=1, max_length=500)
+
+
 class ConfigInspectOutput(ToolResponse):
     accepted: ConfigGenerationSummary | None = None
     active: ConfigGenerationSummary | None = None
@@ -1473,6 +1494,8 @@ class ConfigInspectOutput(ToolResponse):
     ) = None
     restart_required: bool
     repo_facts: tuple[KeyValue, ...] = Field(default=(), max_length=500)
+    contract_identity: RuntimeContractIdentityView | None = None
+    config_projection: ConfigProjectionView | None = None
 
 
 class RuntimeLogSource(str, Enum):

@@ -81,6 +81,7 @@ from ...bootstrap import (
     write_runtime_state,
 )
 from ...config import DEFAULT_CONFIG_PATH, load_config
+from ...contracts.registry import validate_generated_contract_identity
 from ...domain.config_generation import (
     ApprovalEvent,
     CapabilityDeltaKind,
@@ -97,6 +98,7 @@ from ...domain.errors import (
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
+from ...domain.runtime_contract import RuntimeContractIdentity
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
 from ..runtime.host import McpRuntimeHost
@@ -966,6 +968,7 @@ def _activate(
         ids=id_generator(),
         clock=system_clock(),
         config_path=config_path,
+        validate_contract_artifacts=validate_generated_contract_identity,
     )
     return asdict(
         activator.activate(
@@ -1443,6 +1446,7 @@ def _runtime_command(args: argparse.Namespace) -> int:
             ids=id_generator(),
             clock=system_clock(),
             config_path=config_path,
+            validate_contract_artifacts=validate_generated_contract_identity,
         )
         _json(asdict(activator.activate(target, extra_env=_runtime_environment(args))))
         return 0
@@ -1451,7 +1455,12 @@ def _runtime_command(args: argparse.Namespace) -> int:
 
 def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     from ..mcp.grace import FORGE_V1_IDENTITY, create_grace_server
-    from ..mcp.server import FORGE_V2_IDENTITY, create_server, tool_surface_hash
+    from ..mcp.server import (
+        FORGE_V2_IDENTITY,
+        build_runtime_contract_identity,
+        create_server,
+        tool_surface_hash,
+    )
 
     if connector_identity == FORGE_V1_IDENTITY:
         create_grace_server().run(transport="stdio")
@@ -1459,6 +1468,7 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     if connector_identity != FORGE_V2_IDENTITY:
         raise ConfigError(f"Unknown connector identity: {connector_identity}")
 
+    validate_generated_contract_identity()
     store = _ensure_generation(config_path)
     initial_generation = store.activation_target() or store.active() or store.current()
     if initial_generation is None:
@@ -1516,6 +1526,10 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     # The initial process startup performs the same self-check as a hot-reload candidate.
     initial.service.repo_list()
     router = AtomicServiceRouter(initial)
+
+    def contract_identity_provider() -> RuntimeContractIdentity:
+        return build_runtime_contract_identity(router.active_generation)
+
     reloader = HotReloadCoordinator(
         router=router,
         build_candidate=lambda generation: build_container(generation),
@@ -1582,9 +1596,14 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
         read_log=read_runtime_log,
         read_audit_page=read_audit_event_page,
         read_runtime_status=lambda: _runtime_status(store),
+        contract_identity_provider=contract_identity_provider,
     )
     try:
-        create_server(router=router, admin=admin).run(transport="stdio")
+        create_server(
+            router=router,
+            admin=admin,
+            contract_identity_provider=contract_identity_provider,
+        ).run(transport="stdio")
     finally:
         router.close(timeout_seconds=30.0)
         control.close()

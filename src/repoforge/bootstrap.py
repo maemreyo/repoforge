@@ -136,6 +136,7 @@ from .application.workflow import (
 )
 from .application.workspace.pr_watch import PrCheckWatchCoordinator
 from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
+from .contracts.registry import validate_generated_contract_identity
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
 from .ports import (
@@ -315,6 +316,7 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
             ids=id_generator(),
             clock=system_clock(),
             config_path=config_path,
+            validate_contract_artifacts=validate_generated_contract_identity,
         ),
     )
     return OnboardingCoordinator(

@@ -14,7 +14,7 @@ from .errors import WorkspaceError
 _COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _REFRESH_PREVIEW_RE = re.compile(r"refresh-v1:([0-9a-f]{40}(?:[0-9a-f]{24})?):([0-9a-f]{64})")
 
-MAX_ISSUE_IDS = 16
+MAX_ISSUE_IDS = 100
 MAX_ISSUE_ID_LENGTH = 64
 
 WORKSPACE_REFRESH_RECEIPTS = (

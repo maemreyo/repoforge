@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -8,13 +10,24 @@ from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 from pydantic import ValidationError
 
-from repoforge.contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS
+from repoforge.contracts import generated_contract_identity
+from repoforge.contracts.registry import (
+    V2_TOOL_NAMES,
+    V2_TOOL_SPECS,
+    contract_schema_digests,
+    render_contract_identity_artifact,
+    render_v2_schema_bundle,
+    validate_generated_contract_artifact,
+)
+from repoforge.domain.errors import ConfigError
+from repoforge.domain.runtime_contract import RuntimeContractIdentity, changed_contract_fields
 from repoforge.interfaces.mcp.grace import (
     FORGE_V1_IDENTITY,
     create_grace_server,
 )
 from repoforge.interfaces.mcp.server import (
     FORGE_V2_IDENTITY,
+    _compute_server_build_sha,
     create_server,
     tool_surface_hash,
 )
@@ -254,3 +267,166 @@ async def test_retired_forge_v1_identity_exposes_one_typed_grace_error() -> None
 def test_authoritative_models_still_fail_closed_independently() -> None:
     with pytest.raises(ValidationError):
         V2_TOOL_SPECS["repo_list"].validate_input({"undeclared": True})
+
+
+def test_config_inspect_remains_compatible_with_legacy_success_payloads() -> None:
+    legacy = {
+        "status": "ok",
+        "summary": "Inspected accepted configuration generation 1",
+        "accepted": {
+            "generation": 1,
+            "state": "accepted",
+            "digest": "a" * 64,
+            "changed_sections": ["repositories"],
+        },
+        "active": None,
+        "pending": [],
+        "capability_delta": "equivalent",
+        "restart_required": True,
+        "repo_facts": [],
+    }
+
+    validated = V2_TOOL_SPECS["config_inspect"].validate_success_output(legacy)
+
+    assert validated.contract_identity is None
+    assert validated.config_projection is None
+
+
+def _contract_identity(**changes: object) -> RuntimeContractIdentity:
+    base = RuntimeContractIdentity(
+        server_build_sha="a" * 64,
+        server_version="2.0.0",
+        active_generation=7,
+        tool_surface_hash="b" * 64,
+        input_contract_digest="c" * 64,
+        output_contract_digest="d" * 64,
+        runtime_protocol_version=1,
+        process_start_identity="e" * 64,
+    )
+    return replace(base, **changes)
+
+
+def test_contract_schema_digests_are_deterministic_and_separate_input_from_output() -> None:
+    first = contract_schema_digests()
+    second = contract_schema_digests()
+
+    assert first == second
+    assert first.input_digest != first.output_digest
+    assert len(first.input_digest) == len(first.output_digest) == 64
+    assert first.tool_count == 28
+
+
+def test_server_build_sha_fingerprints_package_bytes_and_ignores_bytecode(tmp_path: Path) -> None:
+    package = tmp_path / "repoforge"
+    package.mkdir()
+    module = package / "module.py"
+    module.write_text("VALUE = 1\n", encoding="utf-8")
+
+    first = _compute_server_build_sha(package)
+
+    cache = package / "__pycache__"
+    cache.mkdir()
+    (cache / "module.cpython-313.pyc").write_bytes(b"ignored bytecode")
+    assert _compute_server_build_sha(package) == first
+
+    module.write_text("VALUE = 2\n", encoding="utf-8")
+    assert _compute_server_build_sha(package) != first
+
+
+def test_changed_contract_fields_reports_exact_digest_or_generation_skew() -> None:
+    expected = _contract_identity()
+    actual = _contract_identity(active_generation=8, output_contract_digest="f" * 64)
+
+    assert changed_contract_fields(expected, actual) == (
+        "active_generation",
+        "output_contract_digest",
+    )
+
+
+def test_packaged_contract_identity_matches_the_live_registry() -> None:
+    assert render_contract_identity_artifact() == generated_contract_identity.CONTRACT_IDENTITY
+
+
+def test_generated_contract_artifact_mismatch_fails_closed_without_host_path(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "tool-schemas-v2.json"
+    tampered = render_v2_schema_bundle()
+    tampered["tool_count"] = 27
+    artifact.write_text(json.dumps(tampered), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="CONTRACT_ARTIFACT_MISMATCH") as captured:
+        validate_generated_contract_artifact(artifact)
+
+    assert str(tmp_path) not in str(captured.value)
+
+
+@pytest.mark.anyio
+async def test_discovery_and_success_response_expose_the_same_runtime_identity(
+    forge_env: ForgeEnvironment,
+) -> None:
+    identity = _contract_identity()
+    server = create_server(
+        service=forge_env.service,
+        contract_identity_provider=lambda: identity,
+    )
+
+    tools = await server.list_tools()
+    assert len(tools) == 28
+    direct_discovery = [
+        tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in tools
+    ]
+    for dumped in direct_discovery:
+        assert dumped["_meta"]["repoforge_contract_identity"] == identity.as_dict()
+
+    async with create_connected_server_and_client_session(server) as session:
+        protocol_discovery = await session.list_tools()
+        protocol_tools = [
+            tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for tool in protocol_discovery.tools
+        ]
+        assert protocol_tools == direct_discovery
+        result = await session.call_tool("repo_list", {})
+
+    assert result.isError is False
+    dumped_result = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert dumped_result["_meta"]["repoforge_contract_identity"] == identity.as_dict()
+
+
+@pytest.mark.anyio
+async def test_stale_discovery_identity_is_rejected_before_mutation_handler() -> None:
+    current = [_contract_identity()]
+
+    class Service:
+        config: Any = None
+        metrics: Any = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def workspace_create_v2(self, **_: object) -> dict[str, object]:
+            self.calls += 1
+            raise AssertionError("stale contract must fail before the application use case")
+
+    service = Service()
+    server = create_server(
+        service=service,  # type: ignore[arg-type]
+        contract_identity_provider=lambda: current[0],
+    )
+    async with create_connected_server_and_client_session(server) as session:
+        discovered = await session.list_tools()
+        assert len(discovered.tools) == 28
+        current[0] = _contract_identity(input_contract_digest="f" * 64)
+        result = await session.call_tool(
+            "workspace_create",
+            {"repo_id": "demo", "task_slug": "contract-skew"},
+        )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "CLIENT_CONTRACT_STALE"
+    assert result.structuredContent["error"]["retryable"] is False
+    assert result.structuredContent["error"]["automatic_retry_allowed"] is False
+    assert "input_contract_digest" in result.structuredContent["error"]["message"]
+    assert "reconnect" in result.structuredContent["error"]["safe_next_action"].lower()
+    assert service.calls == 0

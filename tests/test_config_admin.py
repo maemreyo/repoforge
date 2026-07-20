@@ -44,6 +44,7 @@ from repoforge.domain.policy_patch import (
 )
 from repoforge.domain.repository_detection import ManifestFact, RemoteFact, RepositoryFacts
 from repoforge.domain.repository_proposal import EnrollmentMode
+from repoforge.domain.runtime_contract import RuntimeContractIdentity
 from repoforge.domain.verification_steps import (
     HygieneBaselinePolicy,
     VerificationStep,
@@ -432,6 +433,7 @@ def _admin(
     *,
     reload_calls: list[int] | None = None,
     runtime_status: dict[str, object] | None = None,
+    contract_identity: RuntimeContractIdentity | None = None,
 ) -> ConfigAdminService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -470,6 +472,9 @@ def _admin(
             reload_calls.append(generation)
         return {"status": "hot_reloaded", "active_generation": generation}
 
+    identity_options: dict[str, Any] = {}
+    if contract_identity is not None:
+        identity_options["contract_identity_provider"] = lambda: contract_identity
     return ConfigAdminService(
         store=store,
         proposals=RepositoryProposalService(_FakeProbe(repo_root)),
@@ -485,6 +490,7 @@ def _admin(
         read_audit_page=read_audit_event_page,
         reload_runtime=reload_runtime,
         read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
+        **identity_options,
     )
 
 
@@ -831,6 +837,53 @@ def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Pat
         "publish_enabled",
         "profile_count",
     }
+
+
+def test_v2_config_inspect_exposes_contract_identity_and_exact_projection_drift(
+    tmp_path: Path,
+) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    identity = RuntimeContractIdentity(
+        server_build_sha="a" * 64,
+        server_version="2.2.0",
+        active_generation=1,
+        tool_surface_hash="b" * 64,
+        input_contract_digest="c" * 64,
+        output_contract_digest="d" * 64,
+        runtime_protocol_version=1,
+        process_start_identity="e" * 64,
+    )
+    admin = _admin(tmp_path, contract_identity=identity)
+
+    initial = admin.config_inspect_v2(repo_id="demo")
+    V2_TOOL_SPECS["config_inspect"].validate_output(initial)
+    assert initial["contract_identity"] == identity.as_dict()
+    assert (
+        initial["config_projection"]["source_digest"]
+        == initial["config_projection"]["accepted_source_digest"]
+    )
+    assert initial["config_projection"]["drift_state"] == "activation_required"
+    assert initial["config_projection"]["safe_reconciliation_action"] == (
+        "Activate accepted configuration generation 1."
+    )
+
+    admin._store.source_path.write_text(
+        admin._store.read_source_text() + "\n# operator edit after acceptance\n",
+        encoding="utf-8",
+    )
+    drifted = admin.config_inspect_v2(repo_id="demo")
+
+    V2_TOOL_SPECS["config_inspect"].validate_output(drifted)
+    assert drifted["config_projection"]["drift_state"] == "source_changed"
+    assert (
+        drifted["config_projection"]["source_digest"]
+        != drifted["config_projection"]["accepted_source_digest"]
+    )
+    assert drifted["config_projection"]["safe_reconciliation_action"] == (
+        "Review and accept a new configuration generation before activation."
+    )
+    assert str(tmp_path) not in json.dumps(drifted, sort_keys=True)
 
 
 def test_v2_runtime_logs_support_time_range_cursor_and_no_host_paths(tmp_path: Path) -> None:

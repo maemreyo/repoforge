@@ -44,6 +44,11 @@ glob = "docs/contracts/release-contract-v2.json"
 regeneration_command = ["make", "schemas"]
 description = "Generated Forge v2 public release contract"
 
+[[repositories.repoforge.generated_paths]]
+glob = "src/repoforge/contracts/generated_contract_identity.py"
+regeneration_command = ["make", "schemas"]
+description = "Packaged Forge v2 runtime contract identity"
+
 [repositories.repoforge.issue_writes]
 enabled_ops = ["comment", "close", "reopen", "link", "create"]
 approval_required_ops = ["create"]
