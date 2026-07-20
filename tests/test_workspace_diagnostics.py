@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -662,7 +663,7 @@ def test_allow_leading_dash_with_terminator_permits_leading_dash(
     ("kwargs", "message"),
     [
         ({"max_values": 0}, "max_values"),
-        ({"max_values": 17}, "max_values"),
+        ({"max_values": 101}, "max_values"),
         ({"expansion": "scatter"}, "expansion"),
         ({"max_values": 3, "expansion": "join"}, "separator"),
         ({"max_values": 3, "expansion": "join", "separator": " "}, "separator"),
@@ -747,7 +748,7 @@ def test_argv_expansion_beyond_bound_rejected_at_load_time() -> None:
         selector=DiagnosticSelectorConfig(
             kind=DiagnosticSelectorKind.TOKEN,
             char_classes=("alnum",),
-            max_values=16,
+            max_values=100,
             expansion="repeat",
         ),
         working_directory=None,
@@ -881,6 +882,31 @@ def test_parser_reports_dependency_failure_and_truncation() -> None:
     parsed = parse_diagnostic(_profile(), result)
     assert parsed.failure_class == "dependency_missing"
     assert parsed.output_truncated is True
+
+
+def test_pytest_parser_preserves_structured_failures_when_excerpt_is_truncated() -> None:
+    parsed = parse_diagnostic(
+        _profile(),
+        CommandResult(
+            ("pytest", "tests", "-q"),
+            "/workspace",
+            1,
+            "FAILED tests/test_alpha.py::test_one\n... omitted ...",
+            "",
+            stdout_truncated=True,
+            failed_selectors=(
+                "tests/test_alpha.py::test_one",
+                "tests/test_beta.py::test_two",
+            ),
+            output_artifact_reference="failure-output:" + "a" * 64,
+        ),
+    )
+
+    assert parsed.failed_selectors == (
+        "tests/test_alpha.py::test_one",
+        "tests/test_beta.py::test_two",
+    )
+    assert parsed.output_artifact_reference == "failure-output:" + "a" * 64
 
 
 @pytest.mark.parametrize(
@@ -1335,3 +1361,179 @@ def test_doctor_checks_diagnostic_executable_without_running_it(
         if check["name"] == "diagnostic_executable:demo:pytest-target:python3"
     )
     assert diagnostic["ok"] is True
+
+
+def _rerun_failed_profile(diagnostic_id: str, script: str) -> DiagnosticProfileConfig:
+    return DiagnosticProfileConfig(
+        diagnostic_id=diagnostic_id,
+        summary=f"Run {diagnostic_id}",
+        argv_template=("python3", "-c", script, "{selector}"),
+        selector=DiagnosticSelectorConfig(
+            kind=DiagnosticSelectorKind.TOKEN,
+            char_classes=("alnum", "underscore", "path", "brackets", "at", "plus"),
+            max_length=256,
+            max_values=8,
+            expansion="repeat",
+        ),
+        working_directory=None,
+        timeout_seconds=30,
+        network_policy=DiagnosticNetworkPolicy.LOCAL_ONLY,
+        mutability=DiagnosticMutability.READ_ONLY,
+        parser=DiagnosticParserKind.PYTEST,
+        output_limit=100,
+    )
+
+
+def test_workspace_verify_rerun_failed_uses_only_complete_last_failure_set(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "rerun failed selectors")["workspace_id"]
+    counter = tmp_path / "rerun-failed-attempts.txt"
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); n=(int(p.read_text()) if p.exists() else 0)+1; "
+        "p.write_text(str(n)); "
+        "nodes=['tests/test_alpha.py::test_one','tests/test_beta.py::test_two'] "
+        "if n == 1 else sys.argv[1:]; "
+        "print('1 failed in 0.01s'); "
+        "[print('FAILED '+node) for node in nodes]; "
+        "print('x'*5000); sys.exit(1)"
+    )
+    profile = _rerun_failed_profile("rerun-failed", script)
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+
+    first = service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id=profile.diagnostic_id,
+        selector="suite",
+    )
+    assert first["failed_selectors"] == [
+        "tests/test_alpha.py::test_one",
+        "tests/test_beta.py::test_two",
+    ]
+    assert first["output_artifact_reference"].startswith("failure-output:")
+    assert first["failure_expectation"] == "unexpected"
+    chain_id = first["failure_chain_id"]
+
+    rerun = service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id=profile.diagnostic_id,
+        rerun="failed",
+    )
+
+    assert rerun["rerun_of_selectors"] == first["failed_selectors"]
+    assert rerun["failed_selectors"] == first["failed_selectors"]
+    assert rerun["failure_chain_id"] == chain_id
+    assert rerun["commands"][0]["argv"][-2:] == first["failed_selectors"]
+    assert counter.read_text(encoding="utf-8") == "2"
+
+
+def test_workspace_verify_rerun_failed_green_merges_into_same_chain(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "rerun failed green chain")["workspace_id"]
+    counter = tmp_path / "rerun-failed-green-attempts.txt"
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); n=(int(p.read_text()) if p.exists() else 0)+1; "
+        "p.write_text(str(n)); "
+        "print('1 failed in 0.01s') if n == 1 else print('1 passed in 0.01s'); "
+        "print('FAILED tests/test_alpha.py::test_one') if n == 1 else None; "
+        "sys.exit(1 if n == 1 else 0)"
+    )
+    profile = _rerun_failed_profile("rerun-failed-green", script)
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+
+    first = service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id=profile.diagnostic_id,
+        selector="suite",
+    )
+    chain_id = first["failure_chain_id"]
+
+    rerun = service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id=profile.diagnostic_id,
+        rerun="failed",
+    )
+
+    assert rerun["outcome"] == "passed"
+    assert rerun["failed_selectors"] == []
+    assert rerun["rerun_of_selectors"] == ["tests/test_alpha.py::test_one"]
+    assert rerun["failure_chain_id"] == chain_id
+    assert counter.read_text(encoding="utf-8") == "2"
+
+
+def test_workspace_verify_rerun_failed_refuses_fingerprint_drift(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "rerun failed drift")["workspace_id"]
+    counter = tmp_path / "rerun-failed-drift-attempts.txt"
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "print('1 failed in 0.01s'); "
+        "print('FAILED tests/test_alpha.py::test_one'); sys.exit(1)"
+    )
+    profile = _rerun_failed_profile("rerun-failed-drift", script)
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+    service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id=profile.diagnostic_id,
+        selector="suite",
+    )
+    _, _, workspace = service.application.context.workspace(workspace_id)
+    (workspace / "hello.txt").write_text("changed\n", encoding="utf-8")
+
+    with pytest.raises(RepoForgeError) as excinfo:
+        service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            rerun="failed",
+        )
+
+    assert excinfo.value.code is ErrorCode.DIAGNOSTIC_STALE_WORKSPACE
+    assert counter.read_text(encoding="utf-8") == "1"
+
+
+def test_expected_tdd_red_failure_is_classified_separately(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "expected red classification")["workspace_id"]
+    script = "import sys; print('1 failed in 0.01s'); print('FAILED tests/test_x.py::test_red'); sys.exit(1)"
+    profile = _rerun_failed_profile("expected-red", script)
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+
+    result = service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id=profile.diagnostic_id,
+        selector="suite",
+        intent="tdd_red",
+        expectation="fail",
+        expected_failure_class="test_failure",
+    )
+
+    assert result["failure_expectation"] == "expected_red"
+    audit_path = vars(service.application.context.audit)["path"]
+    events = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    event = next(item for item in reversed(events) if item["action"] == "workspace_run_diagnostic")
+    assert event["details"]["failure_expectation"] == "expected_red"
+    assert event["details"]["failed_selector_count"] == 1

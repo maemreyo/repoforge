@@ -19,6 +19,12 @@ from ...domain.diagnostics import (
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
+from ...domain.failed_selectors import (
+    FailedSelectorRecord,
+    clear_failed_selectors,
+    read_failed_selectors,
+    record_failed_selectors,
+)
 from ...domain.policy import normalize_relative_path
 from ...domain.retry_guidance import (
     clear_reusable_failure,
@@ -64,6 +70,7 @@ class WorkspaceRunDiagnosticCommand:
     expected_failure_class: DiagnosticFailureClass | str | None = None
     selector2: SelectorInput = None
     force_rerun: bool = False
+    rerun_failed: bool = False
     cancellation_token: CancellationToken | None = None
     before_command: Callable[[], None] | None = None
 
@@ -106,6 +113,11 @@ class WorkspaceRunDiagnosticResult:
     failure_reused: bool = False
     reuse_binding: str | None = None
     execution_evidence: dict[str, object] = field(default_factory=dict)
+    failed_selectors: list[str] = field(default_factory=list)
+    output_artifact_reference: str | None = None
+    failure_expectation: str | None = None
+    failure_chain_id: str | None = None
+    rerun_of_selectors: list[str] = field(default_factory=list)
 
 
 def _diagnostic_error(
@@ -221,6 +233,7 @@ class WorkspaceDiagnosticRunner:
                 expected_failure_class.value if expected_failure_class is not None else None
             ),
             "force_rerun": command.force_rerun,
+            "rerun_failed": command.rerun_failed,
         }
 
         def operation() -> WorkspaceRunDiagnosticResult:
@@ -253,10 +266,39 @@ class WorkspaceDiagnosticRunner:
                         ErrorCode.DIAGNOSTIC_STALE_WORKSPACE,
                         retryable=True,
                     )
+                diagnostic_target = f"diagnostic:{locked_profile.diagnostic_id}"
+                rerun_record: FailedSelectorRecord | None = None
+                effective_selector = command.selector
+                effective_selector2 = command.selector2
+                if command.rerun_failed:
+                    rerun_record = read_failed_selectors(
+                        fresh.metadata,
+                        target=diagnostic_target,
+                    )
+                    if rerun_record is None:
+                        raise _diagnostic_error(
+                            "No complete failed-selector set is available for this diagnostic",
+                            ErrorCode.STATE_NOT_FOUND,
+                        )
+                    if rerun_record.fingerprint != before_fingerprint:
+                        raise _diagnostic_error(
+                            "Workspace changed since the failed selector set was recorded: "
+                            f"expected {rerun_record.fingerprint}, current {before_fingerprint}",
+                            ErrorCode.DIAGNOSTIC_STALE_WORKSPACE,
+                            retryable=True,
+                        )
+                    effective_selector = list(rerun_record.selectors)
+                    effective_selector2 = None
+                    audit_details.update(
+                        {
+                            "failure_chain_id": rerun_record.chain_id,
+                            "rerun_selector_count": len(rerun_record.selectors),
+                        }
+                    )
                 resolved = resolve_diagnostic_selector(
                     locked_profile,
-                    command.selector,
-                    command.selector2,
+                    effective_selector,
+                    effective_selector2,
                     workspace=locked_workspace,
                     repo=locked_repo,
                     git=self.ctx.git,
@@ -301,7 +343,11 @@ class WorkspaceDiagnosticRunner:
                     config_identity_value=config_identity(self.ctx.config.source_path),
                     environment_identity=environment_identity_value,
                 )
-                if not command.force_rerun and reuse_binding is not None:
+                if (
+                    not command.force_rerun
+                    and not command.rerun_failed
+                    and reuse_binding is not None
+                ):
                     cached = reusable_failure(
                         fresh.metadata,
                         target=f"diagnostic:{locked_profile.diagnostic_id}",
@@ -466,6 +512,49 @@ class WorkspaceDiagnosticRunner:
                             "required": False,
                         }
                     )
+                failure_expectation = (
+                    "expected_red"
+                    if parsed.outcome == "failed" and evaluation.valid_tdd_red_evidence
+                    else "unexpected"
+                    if parsed.outcome == "failed"
+                    else None
+                )
+                selector_record = rerun_record
+                selector_metadata_changed = False
+                if (
+                    parsed.outcome == "failed"
+                    and parsed.failed_selectors
+                    and not fingerprint_changed
+                ):
+                    selector_record = record_failed_selectors(
+                        fresh.metadata,
+                        target=diagnostic_target,
+                        fingerprint=before_fingerprint,
+                        selectors=parsed.failed_selectors,
+                        chain_id=rerun_record.chain_id if rerun_record is not None else None,
+                    )
+                    selector_metadata_changed = selector_record is not None
+                else:
+                    selector_metadata_changed = clear_failed_selectors(
+                        fresh.metadata,
+                        target=diagnostic_target,
+                    )
+                    if selector_metadata_changed:
+                        selector_record = None
+                evidence_chain_id = (
+                    rerun_record.chain_id
+                    if rerun_record is not None
+                    else selector_record.chain_id
+                    if selector_record is not None
+                    else None
+                )
+                audit_details.update(
+                    {
+                        "failed_selector_count": len(parsed.failed_selectors),
+                        "failure_expectation": failure_expectation,
+                        "failure_chain_id": evidence_chain_id,
+                    }
+                )
                 diagnostic_result = WorkspaceRunDiagnosticResult(
                     workspace_id=command.workspace_id,
                     diagnostic_id=locked_profile.diagnostic_id,
@@ -503,9 +592,15 @@ class WorkspaceDiagnosticRunner:
                     satisfies_commit_gate=False,
                     next_safe_actions=next_actions,
                     execution_evidence=execution_evidence_data,
+                    failed_selectors=list(parsed.failed_selectors),
+                    output_artifact_reference=parsed.output_artifact_reference,
+                    failure_expectation=failure_expectation,
+                    failure_chain_id=evidence_chain_id,
+                    rerun_of_selectors=(
+                        list(rerun_record.selectors) if rerun_record is not None else []
+                    ),
                 )
-                diagnostic_target = f"diagnostic:{locked_profile.diagnostic_id}"
-                metadata_changed = False
+                metadata_changed = selector_metadata_changed
                 if (
                     reuse_binding is not None
                     and parsed.outcome == "failed"
@@ -513,7 +608,7 @@ class WorkspaceDiagnosticRunner:
                     and not parsed.output_truncated
                     and not fingerprint_changed
                 ):
-                    metadata_changed = record_reusable_failure(
+                    reusable_recorded = record_reusable_failure(
                         fresh.metadata,
                         target=diagnostic_target,
                         binding=reuse_binding,
@@ -522,13 +617,17 @@ class WorkspaceDiagnosticRunner:
                             "result": to_data(diagnostic_result),
                         },
                     )
-                    if metadata_changed:
+                    metadata_changed = reusable_recorded or metadata_changed
+                    if reusable_recorded:
                         audit_details["failure_reuse_recorded"] = True
                         audit_details["reuse_binding"] = reuse_binding.digest
                 elif parsed.outcome == "passed" or fingerprint_changed:
-                    metadata_changed = clear_reusable_failure(
-                        fresh.metadata,
-                        target=diagnostic_target,
+                    metadata_changed = (
+                        clear_reusable_failure(
+                            fresh.metadata,
+                            target=diagnostic_target,
+                        )
+                        or metadata_changed
                     )
                 if metadata_changed:
                     self.ctx.store.save(fresh)

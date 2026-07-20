@@ -19,6 +19,8 @@ class CommandResult:
     stderr: str
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    failed_selectors: tuple[str, ...] = ()
+    output_artifact_reference: str | None = None
 
     @property
     def combined(self) -> str:

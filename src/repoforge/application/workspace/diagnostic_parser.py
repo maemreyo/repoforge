@@ -29,6 +29,8 @@ class ParsedDiagnostic:
     excerpt: str
     output_truncated: bool
     business_tests_ran: bool = False
+    failed_selectors: tuple[str, ...] = ()
+    output_artifact_reference: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +119,8 @@ def _parse_pytest(result: CommandResult) -> ParsedDiagnostic:
         _excerpt(result),
         result.stdout_truncated or result.stderr_truncated,
         business_tests_ran,
+        result.failed_selectors,
+        result.output_artifact_reference,
     )
 
 
@@ -151,6 +155,8 @@ def _parse_release_contract(result: CommandResult) -> ParsedDiagnostic:
         fields,
         _excerpt(result),
         result.stdout_truncated or result.stderr_truncated,
+        failed_selectors=result.failed_selectors,
+        output_artifact_reference=result.output_artifact_reference,
     )
 
 
@@ -161,6 +167,8 @@ def _parse_text(result: CommandResult) -> ParsedDiagnostic:
         {},
         _excerpt(result),
         result.stdout_truncated or result.stderr_truncated,
+        failed_selectors=result.failed_selectors,
+        output_artifact_reference=result.output_artifact_reference,
     )
 
 

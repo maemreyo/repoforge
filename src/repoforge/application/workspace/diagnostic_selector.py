@@ -95,11 +95,11 @@ def _basic_value(value: str, *, allow_leading_dash: bool) -> str:
     if (
         not isinstance(value, str)
         or not value
-        or len(value) > 256
+        or len(value) > 512
         or any(ord(character) < 32 for character in value)
         or any(character in _SHELL_META for character in value)
     ):
-        raise _error("Diagnostic selector is empty, unsafe, or exceeds 256 characters")
+        raise _error("Diagnostic selector is empty, unsafe, or exceeds 512 characters")
     if value.startswith("-") and not allow_leading_dash:
         raise _error("Diagnostic selector cannot start with '-' for this template")
     return value
