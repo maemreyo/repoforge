@@ -2,7 +2,7 @@ import contextlib
 import hashlib
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from ...domain.command_source import dirty_command_source_paths
@@ -55,6 +55,13 @@ _KIND = "workspace_run_profile"
 _PROGRESS_HEARTBEAT_SECONDS = 5.0
 _PROGRESS_HEARTBEAT_JOIN_SECONDS = 1.0
 _ProgressCallback = Callable[[str, int, int, str, str], None]
+#: How often to re-emit "still running" progress for one step while its
+#: command executes. A verification step wraps one opaque subprocess (e.g.
+#: `make test`) that can legitimately run for many minutes with nothing
+#: finer-grained to report; without a heartbeat, progress_message and
+#: updated_at freeze for the whole duration, and a slow command becomes
+#: indistinguishable from a hung one until the profile's own timeout fires.
+_PROGRESS_HEARTBEAT_SECONDS = 30.0
 _REUSABLE_PROFILE_STEP_KINDS = frozenset(
     {
         VerificationStepKind.HYGIENE,
@@ -75,6 +82,42 @@ _NON_REUSABLE_PROFILE_CODES = frozenset(
         ErrorCode.NOT_FOUND,
     }
 )
+
+
+@contextlib.contextmanager
+def _step_progress_heartbeat(
+    on_progress: _ProgressCallback | None,
+    *,
+    step_index: int,
+    total: int,
+    kind: str,
+    interval_seconds: float = _PROGRESS_HEARTBEAT_SECONDS,
+) -> Iterator[None]:
+    """Re-emit "running" progress on a timer while the wrapped command executes."""
+    if on_progress is None:
+        yield
+        return
+    started = time.monotonic()
+    stop = threading.Event()
+
+    def tick() -> None:
+        while not stop.wait(interval_seconds):
+            elapsed = time.monotonic() - started
+            on_progress(
+                "running",
+                step_index,
+                total,
+                "steps",
+                f"running {kind} (step {step_index + 1}/{total}, elapsed {elapsed:.0f}s)",
+            )
+
+    thread = threading.Thread(target=tick, name="run-profile-progress-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=interval_seconds)
 
 
 def _apply_retry_guidance(
@@ -684,7 +727,14 @@ class WorkspaceProfileRunner:
                         )
                         heartbeat_thread.start()
                     try:
-                        receipts.append(session.execute(command))
+                        with _step_progress_heartbeat(
+                            on_progress,
+                            step_index=step_index,
+                            total=len(steps),
+                            kind=verification_step.kind.value,
+                            interval_seconds=_PROGRESS_HEARTBEAT_SECONDS,
+                        ):
+                            receipts.append(session.execute(command))
                     except CommandError as exc:
                         record_command_failure(
                             exc,
