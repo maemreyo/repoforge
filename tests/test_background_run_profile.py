@@ -457,6 +457,65 @@ def test_background_profile_emits_observable_per_step_progress(
     assert progress["unit"] == "steps"
 
 
+def test_long_running_step_keeps_emitting_heartbeat_progress(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single step's command can block for a long time with nothing finer-grained
+    to report; the heartbeat must keep refreshing progress instead of freezing
+    updated_at for the whole duration (otherwise a slow command looks hung)."""
+    monkeypatch.setattr(
+        "repoforge.application.workspace.run_profile._PROGRESS_HEARTBEAT_SECONDS", 0.05
+    )
+    release = tmp_path / "release-heartbeat"
+    _add_progress_profile(forge_env, release)
+    service = _reload_service(forge_env)
+    workspace_id = service.workspace_create("demo", "heartbeat progress")["workspace_id"]
+
+    admission = service.workspace_run_profile(workspace_id, "progress", background=True)
+    operation_id = admission["operation_id"]
+
+    def second_step_running() -> dict[str, object] | None:
+        status = service.operation_status(operation_id)
+        progress = status.get("progress")
+        if not isinstance(progress, dict):
+            return None
+        if status["state"] == "running" and progress.get("current") == 1:
+            return status
+        return None
+
+    first_observed = _poll(second_step_running)
+
+    def heartbeat_advanced() -> dict[str, object] | None:
+        status = service.operation_status(operation_id)
+        progress = status.get("progress")
+        if not isinstance(progress, dict) or status["state"] != "running":
+            return None
+        message = progress.get("message")
+        if (
+            progress.get("current") == 1
+            and isinstance(message, str)
+            and "elapsed" in message
+            and status["updated_at"] != first_observed["updated_at"]
+        ):
+            return status
+        return None
+
+    second_observed = _poll(heartbeat_advanced, timeout=5.0)
+    assert second_observed["progress"]["current"] == 1
+    assert second_observed["progress"]["total"] == 2
+
+    release.write_text("continue\n", encoding="utf-8")
+
+    def terminal() -> dict[str, object] | None:
+        status = service.operation_status(operation_id)
+        return status if status["state"] in {"succeeded", "failed", "cancelled"} else None
+
+    final = _poll(terminal)
+    assert final["state"] == "succeeded"
+
+
 def test_background_submit_raising_releases_lock_and_fails_the_operation(
     forge_env: ForgeEnvironment,
     monkeypatch: pytest.MonkeyPatch,
