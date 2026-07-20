@@ -178,6 +178,53 @@ def test_preview_is_read_only_and_refresh_creates_a_controlled_merge_commit(
     assert pushed["head_sha"] == refreshed["head_sha"]
 
 
+def test_v2_refresh_integrates_trusted_upstream_template_without_resolution(
+    forge_env: ForgeEnvironment,
+) -> None:
+    base_repo = forge_env.service.config.repositories["demo"]
+    guarded_repo = replace(
+        base_repo,
+        denied_paths=(*base_repo.denied_paths, ".env.*", "**/.env.*"),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": guarded_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "trusted denied-path refresh")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    target_sha = _push_upstream_file(
+        forge_env,
+        ".env.example",
+        "APP_MODE=example\n",
+        "add reviewed environment template",
+    )
+    status = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    assert preview["conflicts"] == []
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[],
+    )
+
+    assert applied["result"] == "applied"
+    assert applied["target_base_sha"] == target_sha
+    assert (workspace_path / ".env.example").read_text(encoding="utf-8") == ("APP_MODE=example\n")
+    with pytest.raises(SecurityError, match="Path is denied"):
+        service.workspace_read_file(workspace_id, ".env.example")
+
+
 def test_refresh_preview_becomes_stale_after_workspace_or_remote_base_change(
     forge_env: ForgeEnvironment,
 ) -> None:

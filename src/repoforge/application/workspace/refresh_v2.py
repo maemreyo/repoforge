@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import difflib
 import hashlib
 import json
 import os
@@ -40,6 +41,19 @@ _MAX_CONFLICTS = 100
 _MAX_RESOLUTION_BYTES = 2_000_000
 _MAX_EVIDENCE_BYTES = 60_000
 _JOURNAL_SCHEMA_VERSION = 1
+
+
+def _changed_line_count(before: str, after: str) -> int:
+    matcher = difflib.SequenceMatcher(
+        a=before.splitlines(),
+        b=after.splitlines(),
+        autojunk=False,
+    )
+    return sum(
+        (before_end - before_start) + (after_end - after_start)
+        for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes()
+        if tag != "equal"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +395,6 @@ class WorkspaceRefreshV2:
                             "Refresh resolutions did not resolve every conflict: "
                             + ", ".join(remaining)
                         )
-                    self.ctx.git.enforce_change_budget(workspace, repo)
                     new_head = self.ctx.git.commit_merge(workspace)
                     invalidated = invalidate_workspace_refresh_receipts(record)
                     record.metadata["workspace_base_sha"] = plan.target_base_sha
@@ -667,9 +680,11 @@ class WorkspaceRefreshV2:
     ) -> dict[str, str]:
         expected = {item.path for item in plan.conflicts}
         provided: dict[str, str] = {}
+        resulting_bytes = 0
+        changed_lines = 0
         for resolution in resolutions:
             path = assert_path_allowed(resolution.path, repo)
-            resolve_workspace_path(workspace, path, repo)
+            target = resolve_workspace_path(workspace, path, repo)
             if path in provided:
                 raise WorkspaceError(f"Provide exactly one resolution for conflict path: {path}")
             if "\x00" in resolution.content:
@@ -677,6 +692,18 @@ class WorkspaceRefreshV2:
             encoded = resolution.content.encode("utf-8")
             if len(encoded) > min(repo.max_total_changed_bytes, _MAX_RESOLUTION_BYTES):
                 raise WorkspaceError(f"Refresh resolution exceeds the per-file byte limit: {path}")
+            before = ""
+            if target.exists():
+                if target.is_symlink() or not target.is_file():
+                    raise SecurityError(f"Refresh resolution target must be a regular file: {path}")
+                try:
+                    before = target.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    raise SecurityError(
+                        f"Refresh resolution target must be UTF-8 text: {path}"
+                    ) from exc
+            resulting_bytes += len(encoded)
+            changed_lines += _changed_line_count(before, resolution.content)
             provided[path] = resolution.content
         if set(provided) != expected:
             missing = sorted(expected - set(provided))
@@ -689,6 +716,21 @@ class WorkspaceRefreshV2:
             raise WorkspaceError(
                 "Provide exactly one resolution for every conflict path"
                 + (": " + "; ".join(details) if details else "")
+            )
+        violations: list[str] = []
+        if len(provided) > repo.max_changed_files:
+            violations.append(f"changed files {len(provided)} > {repo.max_changed_files}")
+        if changed_lines > repo.max_diff_lines:
+            violations.append(f"diff lines {changed_lines} > {repo.max_diff_lines}")
+        if resulting_bytes > repo.max_total_changed_bytes:
+            violations.append(
+                f"changed file bytes {resulting_bytes} > {repo.max_total_changed_bytes}"
+            )
+        if violations:
+            raise WorkspaceError(
+                "Change budget exceeded: "
+                + "; ".join(violations)
+                + ". Split the task or raise the explicit repository limits in config."
             )
         return provided
 
