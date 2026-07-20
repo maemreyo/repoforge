@@ -268,7 +268,7 @@ def test_serve_control_handler_covers_health_drain_resume_and_fail_closed(
             captured["closed"] = True
 
     class Service:
-        def repo_list(self) -> dict[str, Any]:
+        def repo_list(self, *, synthetic: bool = False) -> dict[str, Any]:
             return {"repositories": [{"repo_id": "demo"}]}
 
     class MCP:

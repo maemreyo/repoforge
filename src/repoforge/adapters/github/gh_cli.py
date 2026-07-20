@@ -530,19 +530,24 @@ class GhCliGateway:
         return self._remote_comment(payload, "GitHub pull request review reply")
 
     def status(self, cwd: Path, branch: str) -> dict[str, Any]:
-        result = self.executor.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                branch,
-                "--json",
-                "number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
-            ],
-            cwd=cwd,
-            output_limit=10_000_000,
-        )
-        return self._trim_pr(self._object(result, "gh pr view"))
+        try:
+            result = self.executor.run(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    branch,
+                    "--json",
+                    "number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
+                ],
+                cwd=cwd,
+                output_limit=10_000_000,
+            )
+        except CommandError as exc:
+            if "no pull request" in str(exc).lower():
+                return {"exists": False, "branch": branch}
+            raise
+        return self._trim_pr(self._object(result, "gh pr view")) | {"exists": True}
 
     def _pr_head_sha(self, cwd: Path, branch: str) -> str | None:
         result = self.executor.run(

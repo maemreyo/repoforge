@@ -17,12 +17,15 @@ class InProcessOperationGate:
         self._state = GateState.OPEN
         self._active_reads = 0
         self._active_writes = 0
+        #: Reference-counted so a reused/duplicate operation_id can never be
+        #: dropped early; keyed by id, not by call, to answer "who is
+        #: currently holding the gate open" during a stuck drain.
+        self._active_operation_ids: dict[str, int] = {}
         self._reason = ""
         self._correlation_id = ""
 
     @contextmanager
     def operation(self, operation_id: str, *, mutating: bool) -> Iterator[None]:
-        del operation_id
         with self._condition:
             if self._state is GateState.FAIL_CLOSED:
                 raise ConfigError(
@@ -36,6 +39,9 @@ class InProcessOperationGate:
                 self._active_writes += 1
             else:
                 self._active_reads += 1
+            self._active_operation_ids[operation_id] = (
+                self._active_operation_ids.get(operation_id, 0) + 1
+            )
         try:
             yield
         finally:
@@ -44,6 +50,11 @@ class InProcessOperationGate:
                     self._active_writes -= 1
                 else:
                     self._active_reads -= 1
+                remaining = self._active_operation_ids.get(operation_id, 0) - 1
+                if remaining > 0:
+                    self._active_operation_ids[operation_id] = remaining
+                else:
+                    self._active_operation_ids.pop(operation_id, None)
                 self._condition.notify_all()
 
     def begin_drain(self, *, reason: str, correlation_id: str) -> None:
@@ -83,6 +94,7 @@ class InProcessOperationGate:
                 "state": self._state.value,
                 "active_reads": self._active_reads,
                 "active_writes": self._active_writes,
+                "active_operation_ids": sorted(self._active_operation_ids),
                 "reason": self._reason,
                 "correlation_id": self._correlation_id,
             }

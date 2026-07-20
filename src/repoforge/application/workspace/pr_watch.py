@@ -146,6 +146,11 @@ class PrCheckWatchCoordinator:
                         code=ErrorCode.PR_CHECK_WATCH_STALE,
                     )
                 pr = self.ctx.github.status(path, fresh.branch)
+                if pr.get("exists") is False:
+                    raise RepoForgeError(
+                        "No pull request exists yet for this workspace branch",
+                        code=ErrorCode.NOT_FOUND,
+                    )
                 pr_number = self._pr_number(pr)
                 if self._pr_head(pr) != pushed:
                     raise RepoForgeError(
@@ -303,7 +308,11 @@ class PrCheckWatchCoordinator:
                 code=ErrorCode.PR_CHECK_WATCH_STALE,
             )
         pr = self.ctx.github.status(path, watch.branch)
-        if self._pr_number(pr) != watch.pr_number or self._pr_head(pr) != watch.pushed_sha:
+        if (
+            pr.get("exists") is False
+            or self._pr_number(pr) != watch.pr_number
+            or self._pr_head(pr) != watch.pushed_sha
+        ):
             raise RepoForgeError(
                 "Pull-request identity changed during PR check watch",
                 code=ErrorCode.PR_CHECK_WATCH_STALE,

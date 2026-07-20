@@ -139,7 +139,7 @@ def test_repository_snapshot_rejects_oversized_file_and_batch(tmp_path: Path) ->
 
     with pytest.raises(SecurityError, match="max_file_bytes"):
         env.service.repo_read_file("demo", "oversized.txt")
-    with pytest.raises(ValueError, match="max_batch_files"):
+    with pytest.raises(RepoForgeError, match="max_batch_files"):
         env.service.repo_read_files("demo", ["hello.txt", "README.md", "AGENTS.md"])
 
 

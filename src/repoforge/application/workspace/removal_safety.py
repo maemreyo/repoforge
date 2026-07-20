@@ -63,14 +63,13 @@ def _pr_lifecycle_state(
 ) -> PrLifecycleState:
     try:
         status = ctx.github.status(path, record.branch)
-    except Exception as exc:
-        # The common case for a workspace with no pull request yet is a non-zero
-        # `gh pr view` exit with a "no pull request(s) found" message; treat that
-        # as a known, safe "none" rather than an unknown adapter failure. Any
-        # other failure (network, auth, rate limit) degrades to unknown.
-        if "no pull request" in str(exc).lower():
-            return PrLifecycleState.NONE
+    except Exception:
+        # Any adapter failure other than "no PR yet" (network, auth, rate limit)
+        # degrades to unknown; the no-PR-yet case itself is now a normal,
+        # non-exception result -- see the `exists` check below.
         return PrLifecycleState.UNKNOWN
+    if status.get("exists") is False:
+        return PrLifecycleState.NONE
     state = str(status.get("state", "")).upper()
     if state == "MERGED":
         return PrLifecycleState.MERGED
