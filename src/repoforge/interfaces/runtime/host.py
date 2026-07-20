@@ -131,7 +131,9 @@ class McpRuntimeHost:
         if request.command is ControlCommand.HEALTH:
             try:
                 with self.router.acquire() as container:
-                    repositories = container.service.repo_list().get("repositories", [])
+                    repositories = container.service.repo_list(synthetic=True).get(
+                        "repositories", []
+                    )
                     gate = container.gate.snapshot()
                     healthy = gate["state"] == "open"
                     payload = {

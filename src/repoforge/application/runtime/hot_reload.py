@@ -208,7 +208,7 @@ class HotReloadCoordinator:
                         f"Candidate generation mismatch: expected {generation}, "
                         f"built {candidate.generation}"
                     )
-                repositories = candidate.service.repo_list().get("repositories", [])
+                repositories = candidate.service.repo_list(synthetic=True).get("repositories", [])
                 observed_ids = frozenset(
                     str(item["repo_id"])
                     for item in repositories

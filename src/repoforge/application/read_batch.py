@@ -71,20 +71,22 @@ Loader = Callable[[str], LoadedTextFile]
 
 def validate_requests(requests: tuple[FileReadRequest, ...]) -> None:
     if not requests or len(requests) > _MAX_FILES:
-        raise ValueError(f"files must contain between 1 and {_MAX_FILES} entries")
+        raise WorkspaceError(f"files must contain between 1 and {_MAX_FILES} entries")
     seen: set[str] = set()
     for index, request in enumerate(requests):
         if not request.path:
-            raise ValueError(f"files[{index}].path must be non-empty")
+            raise WorkspaceError(f"files[{index}].path must be non-empty")
         if request.path in seen:
-            raise ValueError(f"duplicate path in files: {request.path}")
+            raise WorkspaceError(f"duplicate path in files: {request.path}")
         seen.add(request.path)
         if request.start_line < 1:
-            raise ValueError(f"files[{index}].start_line must be at least 1")
+            raise WorkspaceError(f"files[{index}].start_line must be at least 1")
         if request.end_line < request.start_line:
-            raise ValueError(f"files[{index}].end_line must be >= start_line")
+            raise WorkspaceError(f"files[{index}].end_line must be >= start_line")
         if request.end_line - request.start_line + 1 > _MAX_LINES_PER_REQUEST:
-            raise ValueError(f"files[{index}] requests more than {_MAX_LINES_PER_REQUEST} lines")
+            raise WorkspaceError(
+                f"files[{index}] requests more than {_MAX_LINES_PER_REQUEST} lines"
+            )
 
 
 def _binding(kind: str, scope: str, requests: tuple[FileReadRequest, ...]) -> str:
@@ -234,7 +236,7 @@ def execute_batch_read(
 
     validate_requests(requests)
     if not 1 <= byte_budget <= 120_000:
-        raise ValueError("byte_budget must be between 1 and 120000")
+        raise WorkspaceError("byte_budget must be between 1 and 120000")
     binding = _binding(kind, scope, requests)
     position = _decode_cursor(cursor, binding, len(requests))
     remaining = byte_budget

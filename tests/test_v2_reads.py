@@ -152,12 +152,12 @@ def test_read_rejects_duplicate_paths_and_invalid_ranges(
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "v2 read validation")["workspace_id"]
 
-    with pytest.raises(ValueError, match="duplicate path"):
+    with pytest.raises(WorkspaceError, match="duplicate path"):
         service.workspace_read(
             workspace_id,
             [FileReadRequest("hello.txt"), FileReadRequest("hello.txt", 2, 3)],
         )
-    with pytest.raises(ValueError, match="end_line"):
+    with pytest.raises(WorkspaceError, match="end_line"):
         service.workspace_read(
             workspace_id,
             [FileReadRequest("hello.txt", 3, 2)],
