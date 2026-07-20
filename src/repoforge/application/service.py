@@ -1379,6 +1379,7 @@ class CodingService:
         expectation: str | None = None,
         expected_failure_class: str | None = None,
         force_rerun: bool = False,
+        rerun: str | None = None,
         impact_paths: tuple[str, ...] = (),
         artifact_output_path: str | None = None,
         plan_action: str = "preview",
@@ -1413,6 +1414,7 @@ class CodingService:
                     expectation=expectation,
                     expected_failure_class=expected_failure_class,
                     force_rerun=force_rerun,
+                    rerun=rerun,  # type: ignore[arg-type]
                     impact_paths=impact_paths,
                     artifact_output_path=artifact_output_path,
                 )

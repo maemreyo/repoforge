@@ -57,6 +57,72 @@ def test_run_nonzero_exit_is_command_failed_regardless_of_output_text(tmp_path: 
     assert err.details["stdout_truncated"] is False
 
 
+def test_run_preserves_complete_failed_selectors_before_output_truncation(
+    tmp_path: Path,
+) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "many_failures.py"
+    script.write_text(
+        "import sys\n"
+        "print('FAILED tests/test_alpha.py::test_one')\n"
+        "print('x' * 5000)\n"
+        "print('FAILED tests/test_beta.py::TestCase::test_two[param]')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(
+        ["python3", str(script)],
+        cwd=tmp_path,
+        check=False,
+        output_limit=100,
+    )
+
+    assert result.stdout_truncated is True
+    assert result.failed_selectors == (
+        "tests/test_alpha.py::test_one",
+        "tests/test_beta.py::TestCase::test_two[param]",
+    )
+    assert result.output_artifact_reference is not None
+    prefix = "failure-output:"
+    assert result.output_artifact_reference.startswith(prefix)
+    digest = result.output_artifact_reference.removeprefix(prefix)
+    artifact = tmp_path / "s" / "failure-output-artifacts" / f"{digest}.blob"
+    body = artifact.read_text(encoding="utf-8")
+    assert "tests/test_alpha.py::test_one" in body
+    assert "tests/test_beta.py::TestCase::test_two[param]" in body
+
+
+def test_command_error_carries_complete_failed_selectors_and_artifact_reference(
+    tmp_path: Path,
+) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "failed_nodes.py"
+    script.write_text(
+        "import sys\n"
+        "print('FAILED tests/test_alpha.py::test_one')\n"
+        "print('x' * 5000)\n"
+        "print('FAILED tests/test_beta.py::test_two')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CommandError) as excinfo:
+        executor.run(
+            ["python3", str(script)],
+            cwd=tmp_path,
+            output_limit=100,
+        )
+
+    assert excinfo.value.details["failed_selectors"] == [
+        "tests/test_alpha.py::test_one",
+        "tests/test_beta.py::test_two",
+    ]
+    reference = excinfo.value.details["output_artifact_reference"]
+    assert isinstance(reference, str)
+    assert reference.startswith("failure-output:")
+
+
 def test_run_timeout_is_command_timeout(tmp_path: Path) -> None:
     executor = _executor(tmp_path)
     script = tmp_path / "sleep.py"

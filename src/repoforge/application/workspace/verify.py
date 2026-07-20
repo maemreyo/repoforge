@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ...domain.diagnostics import DiagnosticExpectation, DiagnosticFailureClass
@@ -37,6 +37,7 @@ from .run_profile import (
 )
 
 VerifyMode = Literal["plan", "auto", "diagnostic", "profile", "adhoc"]
+VerifyRerun = Literal["failed"]
 _HIGH_CONFIDENCE = 95
 _MAX_ARTIFACT_BYTES = 120_000
 
@@ -57,6 +58,7 @@ class WorkspaceVerifyCommand:
     expectation: DiagnosticExpectation | str | None = None
     expected_failure_class: DiagnosticFailureClass | str | None = None
     force_rerun: bool = False
+    rerun: VerifyRerun | None = None
     impact_paths: tuple[str, ...] = ()
     artifact_output_path: str | None = None
 
@@ -86,6 +88,11 @@ class WorkspaceVerifyResult:
     head_sha: str
     workspace_fingerprint: str
     execution_evidence: dict[str, object] | None = None
+    failed_selectors: list[str] = field(default_factory=list)
+    output_artifact_reference: str | None = None
+    failure_expectation: str | None = None
+    failure_chain_id: str | None = None
+    rerun_of_selectors: list[str] = field(default_factory=list)
 
 
 def _string_list(value: object) -> list[str]:
@@ -291,6 +298,7 @@ class WorkspaceVerifier:
             "requested_mode": command.mode,
             "background": command.background,
             "force_rerun": command.force_rerun,
+            "rerun": command.rerun,
             "impact_path_count": len(command.impact_paths),
             "artifact_output_requested": command.artifact_output_path is not None,
         }
@@ -304,6 +312,13 @@ class WorkspaceVerifier:
     def _execute(self, command: WorkspaceVerifyCommand) -> WorkspaceVerifyResult:
         if command.mode not in {"plan", "auto", "diagnostic", "profile", "adhoc"}:
             raise ConfigError(f"Unknown workspace_verify mode: {command.mode}")
+        if command.rerun is not None:
+            if command.rerun != "failed":
+                raise ConfigError(f"Unknown workspace_verify rerun mode: {command.rerun}")
+            if command.mode != "diagnostic" or command.diagnostic_id is None:
+                raise ConfigError("rerun=failed requires diagnostic mode and diagnostic_id")
+            if command.selector is not None or command.selector2 is not None:
+                raise ConfigError("rerun=failed restores the exact recorded selectors")
         if command.mode == "plan" and (command.background or command.artifact_output_path):
             raise ConfigError(
                 "workspace_verify plan mode is read-only and cannot run in background or write artifacts"
@@ -393,6 +408,7 @@ class WorkspaceVerifier:
                     expected_failure_class=command.expected_failure_class,
                     selector2=command.selector2,
                     force_rerun=command.force_rerun,
+                    rerun_failed=command.rerun == "failed",
                 )
             )
             result = self._from_diagnostic(
@@ -494,6 +510,11 @@ class WorkspaceVerifier:
             head_sha=delegated.head_sha,
             workspace_fingerprint=delegated.fingerprint_after,
             execution_evidence=delegated.execution_evidence,
+            failed_selectors=delegated.failed_selectors,
+            output_artifact_reference=delegated.output_artifact_reference,
+            failure_expectation=delegated.failure_expectation,
+            failure_chain_id=delegated.failure_chain_id,
+            rerun_of_selectors=delegated.rerun_of_selectors,
         )
 
     def _from_profile(

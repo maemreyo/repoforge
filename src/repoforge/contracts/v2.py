@@ -1014,6 +1014,7 @@ class WorkspaceVerifyInput(StrictModel):
     expectation: VerifyExpectation = VerifyExpectation.NONE
     expected_failure_class: Identifier | None = None
     force_rerun: bool = False
+    rerun: Literal["failed"] | None = None
     impact_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
     artifact_output_path: RelativePath | None = None
     plan_action: VerifyPlanAction = VerifyPlanAction.PREVIEW
@@ -1032,6 +1033,11 @@ class WorkspaceVerifyInput(StrictModel):
             raise ValueError("plan mode is read-only")
         if self.background and self.artifact_output_path is not None:
             raise ValueError("background verification cannot write a synchronous artifact")
+        if self.rerun is not None:
+            if self.mode is not VerifyMode.DIAGNOSTIC or self.diagnostic_id is None:
+                raise ValueError("rerun=failed requires diagnostic mode and diagnostic_id")
+            if self.selector is not None or self.selector2 is not None:
+                raise ValueError("rerun=failed restores the exact recorded selectors")
         if (
             self.expected_failure_class is not None
             and self.expectation is not VerifyExpectation.FAIL
@@ -1082,6 +1088,17 @@ class WorkspaceVerifyOutput(ToolResponse):
     workspace_fingerprint: Sha256
     plan: ExecutionPlanEvidence | None = None
     execution_evidence: ExecutionEvidenceModel | None = None
+    failed_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
+    output_artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+    )
+    failure_expectation: Literal["expected_red", "unexpected"] | None = None
+    failure_chain_id: str | None = Field(
+        default=None,
+        pattern=r"^failure-chain-[a-f0-9]{24}$",
+    )
+    rerun_of_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
 
 
 class ShippingChangeLimits(StrictModel):

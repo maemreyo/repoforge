@@ -115,6 +115,8 @@ Because `workspace_mutate` can delete or restore content, its tool-wide MCP anno
 - `profile` runs a reviewed repository profile;
 - `adhoc` accepts only allowlisted runners under relaxed policy.
 
+Diagnostic failures publish up to 100 complete structured pytest node IDs even when their bounded excerpt truncates. A truncated failed command also returns a content-addressed `failure-output:<sha256>` reference backed by a private 0600 artifact. `rerun = "failed"` is valid only with explicit diagnostic mode and a diagnostic ID; it restores the exact last failure set, forces real execution instead of deterministic failure replay, keeps the same `failure_chain_id`, and refuses with typed stale-workspace evidence when the fingerprint changed. `failure_expectation` distinguishes valid expected TDD RED evidence from unexpected failures in audit and tool output.
+
 Only a successful verification-enabled profile on the exact current fingerprint satisfies the commit gate. A low-confidence or unavailable code-intelligence provider broadens verification; it never narrows a safety gate.
 
 Execution-capable results expose `execution_evidence`. Requested network/filesystem values describe reviewed intent; effective values and the per-control enforcement assessment describe actual backend behavior. The native backend normally reports host-inherited network and host-account filesystem access with advisory enforcement, even when the request is offline or workspace-scoped. Unsupported CPU, memory, disk, subprocess-count, and network-byte controls are never presented as enforced. Treat `execution_evidence` as authoritative over legacy policy labels.

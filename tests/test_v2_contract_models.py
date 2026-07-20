@@ -422,7 +422,80 @@ def test_workspace_verify_contract_exposes_planning_routing_and_evidence_fields(
         "failure_reused",
         "artifact_paths",
         "execution_evidence",
+        "failed_selectors",
+        "output_artifact_reference",
+        "failure_expectation",
+        "failure_chain_id",
+        "rerun_of_selectors",
     } <= output_fields
+
+
+def test_workspace_verify_contract_validates_rerun_failed_evidence() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["workspace_verify"]
+
+    validated = spec.validate_input(
+        {
+            "workspace_id": "demo-workspace",
+            "mode": "diagnostic",
+            "diagnostic_id": "pytest-target",
+            "rerun": "failed",
+        }
+    )
+    assert validated.rerun == "failed"
+
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "workspace_id": "demo-workspace",
+                "mode": "profile",
+                "profile_name": "test",
+                "rerun": "failed",
+            }
+        )
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "workspace_id": "demo-workspace",
+                "mode": "diagnostic",
+                "diagnostic_id": "pytest-target",
+                "selector": "tests/test_one.py::test_one",
+                "rerun": "failed",
+            }
+        )
+
+    output = spec.validate_output(
+        {
+            "summary": "Diagnostic pytest-target failed",
+            "workspace_id": "demo-workspace",
+            "requested_mode": "diagnostic",
+            "selected_mode": "diagnostic",
+            "routing_reason": "Explicit diagnostic mode was requested.",
+            "failure_domain": "test_failure",
+            "outcome": "failed",
+            "satisfies_commit_gate": False,
+            "head_sha": "a" * 40,
+            "workspace_fingerprint": "b" * 64,
+            "failed_selectors": [
+                "tests/test_one.py::test_one",
+                "tests/test_two.py::test_two",
+            ],
+            "output_artifact_reference": "failure-output:" + "c" * 64,
+            "failure_expectation": "unexpected",
+            "failure_chain_id": "failure-chain-" + "d" * 24,
+            "rerun_of_selectors": [
+                "tests/test_one.py::test_one",
+                "tests/test_two.py::test_two",
+            ],
+        }
+    )
+    assert output.failure_expectation == "unexpected"
+    assert output.failed_selectors == (
+        "tests/test_one.py::test_one",
+        "tests/test_two.py::test_two",
+    )
 
 
 def test_execution_capable_outputs_expose_closed_truthful_evidence() -> None:

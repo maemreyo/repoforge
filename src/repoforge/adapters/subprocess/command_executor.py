@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
+import re
 import signal
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,32 @@ from ...domain.redaction import redact_text
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from .process_tree import inspect_descendants, kill_identity, wait_identities_gone
+
+_MAX_FAILED_SELECTORS = 100
+_MAX_FAILURE_OUTPUT_ARTIFACT_BYTES = 10 * 1024 * 1024
+_PYTEST_LEADING_SELECTOR = re.compile(
+    r"^(?:FAILED|ERROR)\s+(?P<selector>[^\s]+(?:\:\:[^\s]+)*)",
+    re.MULTILINE,
+)
+_PYTEST_TRAILING_SELECTOR = re.compile(
+    r"^(?P<selector>[^\s]+\:\:[^\s]+)\s+(?:FAILED|ERROR)\b",
+    re.MULTILINE,
+)
+
+
+def _failed_selectors(output: str) -> tuple[str, ...]:
+    selectors: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_PYTEST_LEADING_SELECTOR, _PYTEST_TRAILING_SELECTOR):
+        for match in pattern.finditer(output):
+            selector = match.group("selector").replace("\\", "/").rstrip(":")
+            if not selector or selector in seen:
+                continue
+            seen.add(selector)
+            selectors.append(selector)
+            if len(selectors) >= _MAX_FAILED_SELECTORS:
+                return tuple(selectors)
+    return tuple(selectors)
 
 
 class SubprocessCommandExecutor:
@@ -45,6 +74,32 @@ class SubprocessCommandExecutor:
             f"{text[:half]}\n\n... <{removed} characters omitted> ...\n\n{text[-half:]}",
             True,
         )
+
+    def _persist_failure_output(self, stdout: str, stderr: str) -> str | None:
+        payload = ("--- stdout ---\n" + stdout + "\n--- stderr ---\n" + stderr).encode(
+            "utf-8", errors="replace"
+        )
+        if not payload or len(payload) > _MAX_FAILURE_OUTPUT_ARTIFACT_BYTES:
+            return None
+        digest = hashlib.sha256(payload).hexdigest()
+        root = self.config.state_root / "failure-output-artifacts"
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(root, 0o700)
+        target = root / f"{digest}.blob"
+        if not target.exists():
+            descriptor, temporary_name = tempfile.mkstemp(prefix=f".{digest}.tmp-", dir=root)
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    os.fchmod(handle.fileno(), 0o600)
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, target)
+                os.chmod(target, 0o600)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return f"failure-output:{digest}"
 
     def _communicate(
         self,
@@ -190,8 +245,14 @@ class SubprocessCommandExecutor:
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise CommandError("Text command returned binary output")
+        selectors = _failed_selectors("\n".join(part for part in (stdout, stderr) if part))
         bounded_stdout, stdout_truncated = self._truncate(stdout, limit)
         bounded_stderr, stderr_truncated = self._truncate(stderr, limit)
+        artifact_reference = (
+            self._persist_failure_output(stdout, stderr)
+            if (process.returncode or 0) != 0 and (stdout_truncated or stderr_truncated)
+            else None
+        )
         result = CommandResult(
             tuple(argv),
             str(cwd),
@@ -200,6 +261,8 @@ class SubprocessCommandExecutor:
             bounded_stderr,
             stdout_truncated,
             stderr_truncated,
+            selectors,
+            artifact_reference,
         )
         if check and result.returncode != 0:
             cancelled = cancel_token is not None and cancel_token.is_cancelled()
@@ -221,6 +284,19 @@ class SubprocessCommandExecutor:
                     "stderr_excerpt": redact_text(stderr_excerpt, limit=2_000),
                     "stdout_truncated": result.stdout_truncated or stdout_excerpt_truncated,
                     "stderr_truncated": result.stderr_truncated or stderr_excerpt_truncated,
+                    **(
+                        {
+                            "failed_selectors": list(result.failed_selectors),
+                            "tests": list(result.failed_selectors),
+                        }
+                        if result.failed_selectors
+                        else {}
+                    ),
+                    **(
+                        {"output_artifact_reference": result.output_artifact_reference}
+                        if result.output_artifact_reference is not None
+                        else {}
+                    ),
                     **({"cancelled": True} if cancelled else {}),
                 },
             )

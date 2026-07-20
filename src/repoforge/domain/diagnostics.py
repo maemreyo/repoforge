@@ -46,8 +46,8 @@ _EXPANSION_MODES = ("repeat", "join")
 #: it would let a joined value be re-split into extra, unreviewed argv tokens
 #: by argv-unaware downstream tooling.
 _ALLOWED_SEPARATORS = (",", "|", ":", ";")
-_MAX_SELECTOR_VALUES = 16
-MAX_ARGV_ELEMENTS = 32
+_MAX_SELECTOR_VALUES = 100
+MAX_ARGV_ELEMENTS = 128
 _MAX_ARGV_ELEMENTS = MAX_ARGV_ELEMENTS
 
 

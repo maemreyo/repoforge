@@ -27,6 +27,7 @@ _FAILURE_ID = re.compile(r"^failure-[a-f0-9]{24}$")
 _OPERATION_ID = re.compile(r"^op-[a-f0-9]{24}$")
 _PLAN_ID = re.compile(r"^plan-[a-f0-9]{24}$")
 _RECEIPT_ID = re.compile(r"^receipt-[a-f0-9]{24}$")
+_FAILURE_OUTPUT_REFERENCE = re.compile(r"^failure-output:(?:[a-f0-9]{24}|[a-f0-9]{64})$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _SHA64 = re.compile(r"^[a-f0-9]{64}$")
 _GIT_SHA = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
@@ -835,6 +836,12 @@ def build_failure_evidence(
     if receipt_id is not None and _RECEIPT_ID.fullmatch(receipt_id) is None:
         _invalid("Failure evidence receipt_id is invalid")
     classification = classify_failure(observation)
+    raw_reference = observation.details.get("output_artifact_reference")
+    excerpt_reference = (
+        raw_reference
+        if isinstance(raw_reference, str) and _FAILURE_OUTPUT_REFERENCE.fullmatch(raw_reference)
+        else f"failure-output:{classification.source_digest[:24]}"
+    )
     scope = FailureScope(
         paths=tuple(
             sorted(
@@ -860,7 +867,7 @@ def build_failure_evidence(
         first_diagnostic=classification.first_diagnostic,
         excerpt=classification.excerpt,
         excerpt_sha256=classification.excerpt_sha256,
-        excerpt_reference=f"failure-output:{classification.source_digest[:24]}",
+        excerpt_reference=excerpt_reference,
         affected_scope=scope,
         reproducibility=classification.reproducibility,
         files_changed=bool(observation.changed_paths)
@@ -904,6 +911,8 @@ def validate_failure_evidence(evidence: FailureEvidence) -> FailureEvidence:
         _invalid("Failure evidence stable error code is invalid")
     _safe_text(evidence.first_diagnostic, "first diagnostic", _MAX_DIAGNOSTIC_CHARS)
     _safe_text(evidence.excerpt, "failure excerpt", _MAX_EXCERPT_CHARS)
+    if _FAILURE_OUTPUT_REFERENCE.fullmatch(evidence.excerpt_reference) is None:
+        _invalid("Failure evidence excerpt reference is invalid")
     if hashlib.sha256(evidence.excerpt.encode("utf-8")).hexdigest() != evidence.excerpt_sha256:
         _invalid("Failure evidence excerpt digest mismatch")
     if _SHA64.fullmatch(evidence.source_digest) is None:
