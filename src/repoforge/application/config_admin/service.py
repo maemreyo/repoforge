@@ -912,9 +912,10 @@ class ConfigAdminService:
         fingerprint_map[repo_id] = proposal.facts_fingerprint
         fingerprints = tuple(sorted(fingerprint_map.items()))
         reason = f"agent policy change for {repo_id}"
+        candidate_generation = self._store.next_generation()
         candidate = render_resolved(
             document,
-            generation=current.generation + 1,
+            generation=candidate_generation,
             source_path=str(self._store.source_path),
             source_sha256=sha256_text(source_text),
             created_at=self._clock.now_iso(),

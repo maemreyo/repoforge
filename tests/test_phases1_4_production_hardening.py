@@ -228,6 +228,45 @@ def test_semantic_noop_does_not_create_generation_but_metadata_does(tmp_path: Pa
     assert metadata.delta is CapabilityDeltaKind.METADATA_ONLY
 
 
+def test_accept_allocates_after_immutable_history_when_accepted_pointer_rolls_back(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    first = _accept(
+        store, _resolved(), proposal="initial", approval=_approval("initial"), expected=0
+    )
+    store.stage_activation(first.generation, expected_active=None)
+    store.activate(first.generation, expected_active=None)
+    second = _accept(
+        store,
+        _resolved(display_name="Second"),
+        proposal=None,
+        approval=None,
+        expected=1,
+        reason="metadata",
+    )
+    store.stage_activation(second.generation, expected_active=1)
+    store.activate(second.generation, expected_active=1)
+
+    rolled_back = store.rollback(first.generation, expected_active=second.generation)
+    assert rolled_back.generation == 1
+    assert store.current() is not None and store.current().generation == 1
+    assert [item.generation for item in store.history()] == [2, 1]
+
+    third = _accept(
+        store,
+        _resolved(display_name="Third"),
+        proposal=None,
+        approval=None,
+        expected=1,
+        reason="metadata after rollback",
+    )
+
+    assert third.generation == 3
+    assert third.previous_generation == 1
+    assert [item.generation for item in store.history()] == [3, 2, 1]
+
+
 def test_semantic_delta_handles_path_sets_budgets_and_profiles() -> None:
     restriction = classify_capability_delta(
         _resolved(),

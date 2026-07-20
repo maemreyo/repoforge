@@ -197,6 +197,12 @@ class ConfigGenerationStore:
                 items.append(self._load(int(path.name)))
         return tuple(items)
 
+    def next_generation(self) -> int:
+        """Return a monotonic generation number across the full immutable history."""
+
+        history = self.history()
+        return history[0].generation + 1 if history else 1
+
     def read_source_text(self) -> str:
         if not self.source_path.is_file():
             raise ConfigError(f"Configuration file not found: {self.source_path}")
@@ -251,8 +257,9 @@ class ConfigGenerationStore:
         with self._locks.lock(
             "config-generation", timeout_seconds=30, metadata={"operation": "accept"}
         ):
-            # Fail closed on any immutable-history corruption before creating side effects.
-            self.history()
+            # Fail closed on immutable-history corruption and never reuse a historical number,
+            # even when the accepted pointer was deliberately rolled back to an older generation.
+            next_generation = self.next_generation()
             current = self.current()
             current_generation = current.generation if current else 0
             if (
@@ -295,7 +302,7 @@ class ConfigGenerationStore:
                 if mutation.approval.proposal_id != mutation.proposal_id:
                     raise ConfigError("Approval event does not match the proposal")
             generation = ConfigGeneration(
-                generation=current_generation + 1,
+                generation=next_generation,
                 source_sha256=sha256_text(mutation.source_text),
                 resolved_sha256=sha256_text(mutation.resolved_text),
                 repository_fingerprints=tuple(sorted(mutation.repository_fingerprints)),
