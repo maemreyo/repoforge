@@ -416,6 +416,62 @@ def test_restriction_drain_timeout_enters_fail_closed_without_interrupting_infli
     assert runtime.record.accepted_generation == 2
 
 
+def test_restriction_forced_stop_failure_preserves_owned_process_identity() -> None:
+    previous = _generation(1, CapabilityDeltaKind.EXPANSION)
+    configs = FakeConfigStore(previous)
+    runtime = FakeRuntimeStore(_record(RuntimePhase.HEALTHY, 1))
+
+    class UnreachableControl(FakeControl):
+        def request(
+            self, request: ControlRequest, *, timeout_seconds: float = 10.0
+        ) -> ControlResponse:
+            del timeout_seconds
+            self.commands.append(request.command)
+            return ControlResponse(1, False, request.correlation_id, "unreachable")
+
+    class UnstoppableLauncher(FakeLauncher):
+        def force_stop(self, record: RuntimeRecord, *, grace_seconds: float = 5.0) -> bool:
+            del record, grace_seconds
+            return False
+
+    class ImmediateActivator(GenerationActivator):
+        def _wait_stopped(self, timeout: float = 20.0) -> bool:
+            del timeout
+            return False
+
+    launcher = UnstoppableLauncher(runtime)
+    launcher.configs = configs
+    mcp = UnreachableControl(runtime)
+    supervisor = UnreachableControl(runtime)
+    activator = ImmediateActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=mcp,
+        supervisor_control=supervisor,
+        launcher=launcher,
+        ids=SequenceIdGenerator(("correlation",)),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        config_path=Path("/config"),
+        health_timeout_seconds=0.1,
+        drain_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(ConfigError, match="RESTRICTION_FORCED_STOP") as error:
+        activator.activate(_generation(2, CapabilityDeltaKind.RESTRICTION), extra_env={})
+
+    assert "could not be confirmed stopped" in str(error.value)
+    assert runtime.record is not None
+    assert runtime.record.phase is RuntimePhase.FAIL_CLOSED
+    assert runtime.record.pid == 100
+    assert runtime.record.process_identity == "a" * 64
+    assert runtime.record.child_pid == 101
+    assert runtime.record.child_process_identity == "b" * 64
+    assert runtime.record.active_generation == 1
+    assert runtime.record.accepted_generation == 2
+    assert runtime.record.last_error is not None
+    assert "could not be confirmed stopped" in runtime.record.last_error
+
+
 def test_async_activation_requires_explicitly_disabling_rollback() -> None:
     previous = _generation(1, CapabilityDeltaKind.EXPANSION)
     configs = FakeConfigStore(previous)
