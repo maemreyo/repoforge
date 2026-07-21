@@ -13,11 +13,14 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
 from ...domain.runtime import ChildProcess, HealthCheck, TunnelProfile
+from ...domain.runtime_events import RuntimeEventV1, encode_runtime_event
 from .state_store import process_identity
 
 _STREAM_BUFFER_LIMIT = 64 * 1024
@@ -71,16 +74,30 @@ class TunnelCliClient:
         os.replace(log_path, log_path.with_suffix(log_path.suffix + ".1"))
         self._fsync_dir(log_path.parent)
 
-    def _append_log(self, log_path: Path, text: str, *, secrets: tuple[str, ...]) -> None:
-        redacted = redact_text(
-            text,
+    def _append_runtime_event(
+        self,
+        log_path: Path,
+        event: RuntimeEventV1,
+        *,
+        secrets: tuple[str, ...],
+    ) -> None:
+        redacted_message = redact_text(
+            event.message,
             secrets=secrets,
             limit=max(64, min(8_000, self.log_max_bytes)),
         )
-        encoded = redacted.encode("utf-8", errors="replace")
+        safe_event = replace(event, message=redacted_message)
+        encoded = (encode_runtime_event(safe_event) + "\n").encode("utf-8", errors="replace")
         if len(encoded) > self.log_max_bytes:
-            marker = f"<runtime log event omitted: {len(encoded)} bytes>\n".encode()
-            encoded = marker[: self.log_max_bytes]
+            omitted = replace(
+                safe_event,
+                level="WARNING",
+                event_kind="oversized_event",
+                message=f"runtime event omitted because it encoded to {len(encoded)} bytes",
+                action=None,
+                duration_ms=None,
+            )
+            encoded = (encode_runtime_event(omitted) + "\n").encode("utf-8", errors="replace")
         with self._log_lock:
             log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(log_path.parent, 0o700)
@@ -163,25 +180,65 @@ class TunnelCliClient:
                 while "\n" in pending:
                     line, pending = pending.split("\n", 1)
                     if len(line) > _STREAM_BUFFER_LIMIT:
-                        self._append_log(
+                        self._append_runtime_event(
                             log_path,
-                            f"<runtime log line omitted: {len(line)} characters>\n",
+                            RuntimeEventV1(
+                                observed_at=datetime.now(timezone.utc).isoformat(),
+                                component="tunnel_client",
+                                stream="stdout",
+                                level="WARNING",
+                                event_kind="oversized_line",
+                                message=f"runtime log line omitted: {len(line)} characters",
+                            ),
                             secrets=secrets,
                         )
                     else:
                         self._observe_log_line(process.pid, line)
-                        self._append_log(log_path, line + "\n", secrets=secrets)
+                        self._append_runtime_event(
+                            log_path,
+                            RuntimeEventV1(
+                                observed_at=datetime.now(timezone.utc).isoformat(),
+                                component="tunnel_client",
+                                stream="stdout",
+                                level="INFO",
+                                event_kind="process_output",
+                                message=line,
+                            ),
+                            secrets=secrets,
+                        )
                 if len(pending) > _STREAM_BUFFER_LIMIT:
-                    self._append_log(
+                    self._append_runtime_event(
                         log_path,
-                        f"<runtime log line omitted: more than {_STREAM_BUFFER_LIMIT} characters>\n",
+                        RuntimeEventV1(
+                            observed_at=datetime.now(timezone.utc).isoformat(),
+                            component="tunnel_client",
+                            stream="stdout",
+                            level="WARNING",
+                            event_kind="oversized_line",
+                            message=(
+                                "runtime log line omitted: more than "
+                                f"{_STREAM_BUFFER_LIMIT} characters"
+                            ),
+                        ),
                         secrets=secrets,
                     )
                     pending = ""
                     discarding_oversized_line = True
             pending += decoder.decode(b"", final=True)
             if pending and not discarding_oversized_line:
-                self._append_log(log_path, pending, secrets=secrets)
+                self._observe_log_line(process.pid, pending)
+                self._append_runtime_event(
+                    log_path,
+                    RuntimeEventV1(
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                        component="tunnel_client",
+                        stream="stdout",
+                        level="INFO",
+                        event_kind="process_output",
+                        message=pending,
+                    ),
+                    secrets=secrets,
+                )
         finally:
             stream.close()
 

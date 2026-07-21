@@ -23,6 +23,7 @@ from repoforge.domain.runtime import (
     RuntimeRecord,
     TunnelProfile,
 )
+from repoforge.domain.runtime_events import RuntimeEventV1
 from repoforge.testing import InMemoryOperationGate
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
@@ -152,7 +153,7 @@ raise SystemExit(2)
     path.chmod(0o755)
 
 
-def test_tunnel_cli_full_lifecycle_and_redaction(tmp_path: Path) -> None:
+def test_tunnel_cli_runtime_jsonl_lifecycle(tmp_path: Path) -> None:
     executable = tmp_path / "tunnel-client"
     _write_fake_tunnel(executable)
     client = TunnelCliClient(str(executable), default_timeout_seconds=5)
@@ -176,14 +177,20 @@ def test_tunnel_cli_full_lifecycle_and_redaction(tmp_path: Path) -> None:
     child = client.start(profile, env=env, log_path=log)
     assert log.with_suffix(".log.1").is_file()
     assert client.is_alive(child)
+    import time
+
+    time.sleep(0.1)
     client.terminate(child, grace_seconds=0.1)
     for _ in range(100):
         if not client.is_alive(child):
             break
-        import time
-
         time.sleep(0.01)
     assert not client.is_alive(child)
+    lines = log.read_text(encoding="utf-8").splitlines()
+    event = json.loads(lines[-1])
+    assert event["schema_version"] == 1
+    assert event["event_kind"] == "process_output"
+    assert event["message"] == "running"
 
     with pytest.raises(ConfigError, match="Tunnel id"):
         client.initialize(profile, env={})
@@ -402,3 +409,28 @@ def test_tunnel_health_uses_advertised_admin_endpoint_and_response_failures(
     )
     recovered = client.health(child, timeout_seconds=0.1)
     assert next(check for check in recovered if check.name == "control_plane_response").ok
+
+
+def test_tunnel_writer_persists_secret_safe_runtime_jsonl(tmp_path: Path) -> None:
+    client = TunnelCliClient("tunnel-client")
+    log_path = tmp_path / "managed-runtime.log"
+
+    client._append_runtime_event(
+        log_path,
+        RuntimeEventV1(
+            observed_at="2026-07-21T12:00:00+00:00",
+            component="tunnel_client",
+            stream="stdout",
+            level="INFO",
+            event_kind="process_output",
+            message="token=secret-value",
+        ),
+        secrets=("secret-value",),
+    )
+
+    payload = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert payload["schema_version"] == 1
+    assert payload["component"] == "tunnel_client"
+    assert payload["event_kind"] == "process_output"
+    assert "secret-value" not in json.dumps(payload)
+    assert payload["message"].startswith("token=<redacted")
