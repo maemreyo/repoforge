@@ -13,7 +13,7 @@ from typing import Any, NoReturn
 
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
-from ...domain.policy import assert_path_allowed, resolve_workspace_path
+from ...domain.policy import assert_path_allowed, normalize_relative_path, resolve_workspace_path
 from ...ports.command import CommandExecutor, CommandResult
 from ...ports.git import (
     GitActorIdentity,
@@ -357,18 +357,36 @@ class GitCliRepository:
         ).stdout.strip()
 
     @staticmethod
-    def _bounded_policy_paths(raw_paths: list[str], repo: RepositoryConfig) -> list[str]:
-        paths: list[str] = []
+    def _partition_policy_paths(
+        raw_paths: list[str], repo: RepositoryConfig
+    ) -> tuple[list[str], list[str]]:
+        allowed: list[str] = []
+        denied: list[str] = []
         for raw in raw_paths:
             if not raw:
                 continue
+            normalized = normalize_relative_path(raw)
             try:
-                normalized = assert_path_allowed(raw, repo)
+                assert_path_allowed(normalized, repo)
             except SecurityError:
+                if normalized not in denied:
+                    denied.append(normalized)
                 continue
-            if normalized not in paths:
-                paths.append(normalized)
-        return sorted(paths)
+            if normalized not in allowed:
+                allowed.append(normalized)
+        return sorted(allowed), sorted(denied)
+
+    @classmethod
+    def _bounded_policy_paths(cls, raw_paths: list[str], repo: RepositoryConfig) -> list[str]:
+        allowed, _ = cls._partition_policy_paths(raw_paths, repo)
+        return allowed
+
+    @staticmethod
+    def _raise_denied_merge_conflicts(denied: list[str]) -> None:
+        if denied:
+            raise SecurityError(
+                "Workspace refresh conflicts touch denied repository paths: " + ", ".join(denied)
+            )
 
     def changed_paths_between(
         self,
@@ -412,7 +430,8 @@ class GitCliRepository:
         if not fields or not fields[0]:
             raise CommandError("Git returned an invalid merge preview")
         raw_paths = [field for field in fields[1:] if field] if result.returncode == 1 else []
-        conflicts = self._bounded_policy_paths(raw_paths, repo)
+        conflicts, denied = self._partition_policy_paths(raw_paths, repo)
+        self._raise_denied_merge_conflicts(denied)
         return GitMergePreview(target_sha, merge_base, tuple(conflicts), False)
 
     def merge_no_ff(self, path: Path, repo: RepositoryConfig, target_sha: str) -> GitMergeResult:
@@ -477,9 +496,8 @@ class GitCliRepository:
             max_bytes=self.server.max_fingerprint_bytes,
         ).decode("utf-8", errors="strict")
         raw_paths = [item for item in raw.split("\x00") if item]
-        conflicts = self._bounded_policy_paths(raw_paths, repo)
-        if raw_paths and not conflicts:
-            raise SecurityError("Workspace refresh conflicts touch only denied repository paths")
+        conflicts, denied = self._partition_policy_paths(raw_paths, repo)
+        self._raise_denied_merge_conflicts(denied)
         return tuple(conflicts)
 
     def stage_paths(

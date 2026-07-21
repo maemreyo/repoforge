@@ -225,6 +225,42 @@ def test_v2_refresh_integrates_trusted_upstream_template_without_resolution(
         service.workspace_read_file(workspace_id, ".env.example")
 
 
+def test_v2_refresh_preview_rejects_policy_blocked_conflict(
+    forge_env: ForgeEnvironment,
+) -> None:
+    base_repo = forge_env.service.config.repositories["demo"]
+    guarded_repo = replace(
+        base_repo,
+        denied_paths=(*base_repo.denied_paths, ".env.*", "**/.env.*"),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": guarded_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "denied conflict preview")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / ".env.example").write_text("WORKSPACE=1\n", encoding="utf-8")
+    git("add", ".env.example", cwd=workspace_path)
+    git("commit", "-m", "workspace environment template", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        ".env.example",
+        "UPSTREAM=1\n",
+        "upstream environment template",
+    )
+    status = service.workspace_status(workspace_id)
+
+    with pytest.raises(SecurityError, match="denied repository paths"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="preview",
+            expected_head_sha=str(status["head_sha"]),
+            expected_fingerprint=str(status["workspace_fingerprint"]),
+        )
+
+
 def test_refresh_preview_becomes_stale_after_workspace_or_remote_base_change(
     forge_env: ForgeEnvironment,
 ) -> None:
