@@ -20,6 +20,7 @@ from mcp.types import Tool as McpTool
 from pydantic import BaseModel
 
 from ... import __version__
+from ...application.audit_context import bind_audit_attribution
 from ...application.config_admin import ConfigAdminService
 from ...application.outcome_context import (
     begin_outcome_capture,
@@ -41,7 +42,7 @@ from ...application.workspace.mutate import (
     WorkspaceMutation,
     WriteMutation,
 )
-from ...config import load_config
+from ...config import RepositoryConfig, load_config
 from ...contracts.registry import (
     V2_TOOL_NAMES,
     V2_TOOL_SPECS,
@@ -57,6 +58,10 @@ from ...domain.errors import (
 from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
+from ...domain.repository_selection import (
+    RepositorySelectionPin,
+    repository_capability_digest,
+)
 from ...domain.runtime import RUNTIME_CONTROL_PROTOCOL_VERSION
 from ...domain.runtime_contract import RuntimeContractIdentity, changed_contract_fields
 from .capabilities import capability_policy_from_context
@@ -66,6 +71,7 @@ FORGE_V2_IDENTITY = "forge_v2"
 FORGE_V2_CONTRACT_VERSION = 2
 _PROCESS_START_IDENTITY = secrets.token_hex(32)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+_REPOSITORY_SELECTION_TTL_SECONDS = 900.0
 
 
 def _compute_server_build_sha(
@@ -115,8 +121,10 @@ _SERVER_BUILD_SHA = _compute_server_build_sha(
 
 SERVER_INSTRUCTIONS = """
 Forge v2 connects ChatGPT to allowlisted local Git repositories through isolated worktrees.
-Begin with repo_list, then use repo_task_context before creating or resuming a workspace. The public
-surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
+Begin with repo_list, then use repo_task_context before creating or resuming a workspace. Exact or
+single-repository selection is pinned to the MCP session; reuse that context for later repo-scoped calls
+and do not poll repo_list again unless stale-selection recovery requires it or the user changes repos. The
+public surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
 composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
 profiles, and workspace_pr for draft-PR lifecycle operations. Review workspace_diff after meaningful
 changes. Run final verification immediately before workspace_commit. Never merge, force-push, modify
@@ -620,12 +628,96 @@ class ForgeV2FastMCP(FastMCP[None]):
         self._contract_identity_provider = contract_identity_provider
         self._initial_contract_identity = contract_identity_provider()
         self._session_contract_identities: dict[int, RuntimeContractIdentity] = {}
+        self._session_repository_selections: dict[int, RepositorySelectionPin] = {}
 
     def _session_key(self) -> int | None:
         try:
             return id(self.get_context().session)
         except (LookupError, AttributeError, ValueError):
             return None
+
+    @staticmethod
+    def _repository_config(service: CodingService, repo_id: str) -> RepositoryConfig | None:
+        return service.config.repositories.get(repo_id)
+
+    def _pin_repository_selection(
+        self,
+        result: dict[str, Any],
+        *,
+        identity: RuntimeContractIdentity,
+        service: CodingService,
+    ) -> RepositorySelectionPin | None:
+        key = self._session_key()
+        selection = result.get("selection")
+        if key is None or not isinstance(selection, dict):
+            return None
+        outcome = selection.get("outcome")
+        repo_id = selection.get("repo_id")
+        if outcome not in {"exact_match", "single_enrolled"} or not isinstance(repo_id, str):
+            self._session_repository_selections.pop(key, None)
+            return None
+        repo = self._repository_config(service, repo_id)
+        if repo is None:
+            self._session_repository_selections.pop(key, None)
+            return None
+        pin = RepositorySelectionPin(
+            repo_selection_id=f"selection:{secrets.token_hex(12)}",
+            repo_id=repo_id,
+            selection_generation=identity.active_generation,
+            capability_digest=repository_capability_digest(repo),
+            expires_at_epoch=time.time() + _REPOSITORY_SELECTION_TTL_SECONDS,
+        )
+        self._session_repository_selections[key] = pin
+        selection.update(pin.as_public_dict())
+        return pin
+
+    def _validate_repository_selection(
+        self,
+        *,
+        tool_name: str,
+        kwargs: Mapping[str, Any],
+        identity: RuntimeContractIdentity,
+        service: CodingService,
+    ) -> RepositorySelectionPin | None:
+        key = self._session_key()
+        if key is None or tool_name == "repo_list":
+            return None
+        pin = self._session_repository_selections.get(key)
+        if pin is None:
+            return None
+        requested_repo = kwargs.get("repo_id")
+        if not isinstance(requested_repo, str):
+            return None
+        reasons: list[str] = []
+        if pin.selection_generation != identity.active_generation:
+            reasons.append("generation")
+        if pin.is_expired(now_epoch=time.time()):
+            reasons.append("expiry")
+        if requested_repo != pin.repo_id:
+            reasons.append("repo_id")
+        repo = self._repository_config(service, pin.repo_id)
+        if repo is None or repository_capability_digest(repo) != pin.capability_digest:
+            reasons.append("capability")
+        if reasons:
+            self._session_repository_selections.pop(key, None)
+            raise ConfigError(
+                "REPOSITORY_SELECTION_STALE: pinned repository context changed: "
+                + ", ".join(reasons),
+                code=ErrorCode.STALE_STATE,
+                retryable=False,
+                safe_next_action=(
+                    "Call repo_list again for the intended repository and continue with the new "
+                    "session-bound selection."
+                ),
+                unchanged_state=("The requested repository operation was not invoked.",),
+            )
+        return pin
+
+    def _audit_session_hash(self) -> str | None:
+        key = self._session_key()
+        if key is None:
+            return None
+        return hashlib.sha256(f"{_PROCESS_START_IDENTITY}:{key}".encode()).hexdigest()[:24]
 
     def _expected_contract_identity(self) -> RuntimeContractIdentity:
         key = self._session_key()
@@ -639,16 +731,29 @@ class ForgeV2FastMCP(FastMCP[None]):
         changed = changed_contract_fields(expected, actual)
         if changed:
             fields = ", ".join(changed)
+            key = self._session_key()
+            selection_invalidated = "active_generation" in changed and key is not None
+            if selection_invalidated and key is not None:
+                self._session_repository_selections.pop(key, None)
+            safe_next_action = (
+                "Rediscover the forge_v2 connector tools, reconnect, and resubmit only after "
+                "reviewing the new contract identity."
+            )
+            if selection_invalidated:
+                safe_next_action += (
+                    " Then call repo_list again for the intended repository because the prior "
+                    "session selection was invalidated."
+                )
             raise ConfigError(
                 f"CLIENT_CONTRACT_STALE: discovery identity changed: {fields}",
                 code=ErrorCode.CLIENT_CONTRACT_STALE,
                 retryable=False,
-                safe_next_action=(
-                    "Rediscover the forge_v2 connector tools, reconnect, and resubmit only after "
-                    "reviewing the new contract identity."
-                ),
+                safe_next_action=safe_next_action,
                 unchanged_state=("The application use case was not invoked.",),
-                details={"changed_fields": list(changed)},
+                details={
+                    "changed_fields": list(changed),
+                    "selection_invalidated": selection_invalidated,
+                },
             )
         return actual
 
@@ -734,7 +839,24 @@ class ForgeV2FastMCP(FastMCP[None]):
         with self._service_boundary.bind_request_service() as service:
             started = time.perf_counter()
             try:
-                raw = self._dispatch(name, _dispatch_kwargs(name, validated_input))
+                dispatch_kwargs = _dispatch_kwargs(name, validated_input)
+                with bind_audit_attribution(
+                    origin="model",
+                    session_hash=self._audit_session_hash(),
+                ):
+                    selection_pin = self._validate_repository_selection(
+                        tool_name=name,
+                        kwargs=dispatch_kwargs,
+                        identity=request_identity,
+                        service=service,
+                    )
+                    raw = self._dispatch(name, dispatch_kwargs)
+                    if name == "repo_list":
+                        selection_pin = self._pin_repository_selection(
+                            raw,
+                            identity=request_identity,
+                            service=service,
+                        )
                 validated_output = spec.validate_success_output(_public_output(name, raw))
                 structured = validated_output.model_dump(mode="json", by_alias=True)
             except _StructuredMcpToolError:
@@ -784,14 +906,17 @@ class ForgeV2FastMCP(FastMCP[None]):
             with suppress(Exception):
                 service.metrics.record_latency(trace)
 
+            response_meta: dict[str, Any] = {
+                "repoforge_trace": trace.as_dict(),
+                "repoforge_contract_identity": request_identity.as_dict(),
+            }
+            if selection_pin is not None:
+                response_meta["repoforge_repository_selection"] = selection_pin.as_public_dict()
             return CallToolResult(
                 content=rendered.content,
                 structuredContent=rendered.structured,
                 isError=False,
-                _meta={
-                    "repoforge_trace": trace.as_dict(),
-                    "repoforge_contract_identity": request_identity.as_dict(),
-                },
+                _meta=response_meta,
             )
 
 

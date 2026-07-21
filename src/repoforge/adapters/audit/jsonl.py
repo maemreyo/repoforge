@@ -15,6 +15,10 @@ from ...ports.clock import Clock
 from ..system import SystemClock
 
 _SEQ_RECOVERY_TAIL_BYTES = 65_536
+_REPO_LIST_COMPACTION_THRESHOLD = 25
+_COMPACTION_VOLATILE_FIELDS = frozenset(
+    {"correlation_id", "correlation_hash", "duration_ms", "result_bytes"}
+)
 
 
 class JsonlAuditSink:
@@ -36,6 +40,7 @@ class JsonlAuditSink:
         self._backup_count = max(1, backup_count)
         self._max_event_bytes = max(1_024, max_event_bytes)
         self._seq = self._recover_last_seq()
+        self._compaction: dict[str, dict[str, Any]] = {}
 
     def _recover_last_seq(self) -> int:
         """Recover the last-assigned monotonic sequence from the tail of an existing log so a
@@ -90,20 +95,80 @@ class JsonlAuditSink:
         os.replace(self.path, self.path.with_suffix(self.path.suffix + ".1"))
         return True
 
+    @staticmethod
+    def _compaction_key(action: str, details: dict[str, Any]) -> str:
+        stable = {
+            key: value for key, value in details.items() if key not in _COMPACTION_VOLATILE_FIELDS
+        }
+        encoded = json.dumps(
+            {"action": action, "details": stable},
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _is_compactable(action: str, *, success: bool, details: dict[str, Any]) -> bool:
+        return (
+            action == "repo_list"
+            and success
+            and details.get("is_mutating") is False
+            and details.get("origin") in {"model", "connector", "internal", "background_worker"}
+        )
+
     def record(self, action: str, *, success: bool, details: dict[str, Any]) -> None:
         try:
             with self._lock:
+                timestamp = self._clock.now_iso()
+                redacted = redact_data(details)
+                safe_details = redacted if isinstance(redacted, dict) else {}
+                payload_details = safe_details
+                if self._is_compactable(action, success=success, details=safe_details):
+                    key = self._compaction_key(action, safe_details)
+                    state = self._compaction.get(key)
+                    if state is None:
+                        if len(self._compaction) >= 1_024:
+                            self._compaction.clear()
+                        self._compaction[key] = {
+                            "first_timestamp": timestamp,
+                            "last_timestamp": timestamp,
+                            "suppressed_count": 0,
+                        }
+                    else:
+                        state["last_timestamp"] = timestamp
+                        state["suppressed_count"] = int(state["suppressed_count"]) + 1
+                        suppressed_count = int(state["suppressed_count"])
+                        if suppressed_count < _REPO_LIST_COMPACTION_THRESHOLD:
+                            return
+                        payload_details = {
+                            "audit_summary": True,
+                            "compacted_action": action,
+                            "first_timestamp": state["first_timestamp"],
+                            "last_timestamp": timestamp,
+                            "suppressed_count": suppressed_count,
+                            "origin": safe_details.get("origin", "internal"),
+                            "session_hash": safe_details.get("session_hash"),
+                            "repo_id": safe_details.get("repo_id"),
+                            "selection_outcome": safe_details.get("selection_outcome"),
+                            "is_mutating": False,
+                        }
+                        state["first_timestamp"] = timestamp
+                        state["last_timestamp"] = timestamp
+                        state["suppressed_count"] = 0
+
                 # Sequence assignment and the append must share one lock scope: two writers
                 # each incrementing under separate acquisitions could still land their writes
                 # out of order, breaking the monotonic-cursor guarantee (#210).
                 self._seq += 1
                 payload = {
-                    "timestamp": self._clock.now_iso(),
+                    "timestamp": timestamp,
                     "pid": os.getpid(),
                     "seq": self._seq,
                     "action": action,
                     "success": success,
-                    "details": redact_data(details),
+                    "details": payload_details,
                 }
                 encoded = (json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n").encode(
                     "utf-8"

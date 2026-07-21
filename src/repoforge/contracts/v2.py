@@ -392,6 +392,10 @@ class RepositorySelection(StrictModel):
     repo_id: RepoId | None = None
     candidates: tuple[RepositorySelectionCandidate, ...] = Field(default=(), max_length=200)
     guidance: ShortText
+    repo_selection_id: Identifier | None = None
+    selection_generation: int | None = Field(default=None, ge=1)
+    capability_digest: Sha256 | None = None
+    expires_at: datetime | None = None
 
 
 class SelectionPrompt(StrictModel):

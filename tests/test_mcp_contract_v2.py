@@ -430,3 +430,216 @@ async def test_stale_discovery_identity_is_rejected_before_mutation_handler() ->
     assert "input_contract_digest" in result.structuredContent["error"]["message"]
     assert "reconnect" in result.structuredContent["error"]["safe_next_action"].lower()
     assert service.calls == 0
+
+
+@pytest.mark.anyio
+async def test_repo_selection_is_pinned_and_reused_within_one_session(
+    forge_env: ForgeEnvironment,
+) -> None:
+    identity = _contract_identity()
+    server = create_server(
+        service=forge_env.service,
+        contract_identity_provider=lambda: identity,
+    )
+
+    async with create_connected_server_and_client_session(server) as session:
+        discovered = await session.list_tools()
+        assert len(discovered.tools) == 28
+
+        selected = await session.call_tool("repo_list", {"requested_repo": "demo"})
+        assert selected.isError is False
+        assert selected.structuredContent is not None
+        selection = selected.structuredContent["selection"]
+        selection_id = selection["repo_selection_id"]
+        assert selection_id.startswith("selection:")
+        assert selection["selection_generation"] == identity.active_generation
+        assert len(selection["capability_digest"]) == 64
+        assert selection["expires_at"]
+
+        reused = await session.call_tool("repo_tree", {"repo_id": "demo"})
+
+    assert reused.isError is False
+    dumped = reused.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert dumped["_meta"]["repoforge_repository_selection"] == {
+        "repo_selection_id": selection_id,
+        "repo_id": "demo",
+        "selection_generation": identity.active_generation,
+        "capability_digest": selection["capability_digest"],
+        "expires_at": selection["expires_at"],
+    }
+
+    audit_events = [
+        json.loads(line)
+        for line in (forge_env.root / "state" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    repo_list_event = next(event for event in audit_events if event["action"] == "repo_list")
+    assert repo_list_event["details"]["origin"] == "model"
+    assert len(repo_list_event["details"]["session_hash"]) == 24
+    assert forge_env.service.metrics is not None
+    calls_by_origin = forge_env.service.metrics.snapshot()["calls_by_origin"]
+    assert calls_by_origin["repo_list"]["model"]["count"] == 1
+    assert calls_by_origin["repo_tree_v2"]["model"]["count"] == 1
+
+
+@pytest.mark.anyio
+async def test_generation_change_invalidates_the_session_repository_selection(
+    forge_env: ForgeEnvironment,
+) -> None:
+    current = [_contract_identity()]
+    server = create_server(
+        service=forge_env.service,
+        contract_identity_provider=lambda: current[0],
+    )
+
+    async with create_connected_server_and_client_session(server) as session:
+        await session.list_tools()
+        selected = await session.call_tool("repo_list", {"requested_repo": "demo"})
+        assert selected.isError is False
+        assert server._session_repository_selections
+
+        current[0] = replace(
+            current[0],
+            active_generation=current[0].active_generation + 1,
+        )
+        stale = await session.call_tool("repo_tree", {"repo_id": "demo"})
+
+    assert stale.isError is True
+    assert stale.structuredContent is not None
+    assert stale.structuredContent["error"]["code"] == "CLIENT_CONTRACT_STALE"
+    assert "repo_list" in stale.structuredContent["error"]["safe_next_action"]
+    assert server._session_repository_selections == {}
+
+
+@pytest.mark.anyio
+async def test_concurrent_sessions_keep_different_repository_selections_isolated(
+    forge_env: ForgeEnvironment,
+) -> None:
+    repositories = forge_env.service.config.repositories
+    original = repositories["demo"]
+    repositories["other"] = replace(
+        original,
+        repo_id="other",
+        display_name="Other Repository",
+    )
+    try:
+        identity = _contract_identity()
+        server = create_server(
+            service=forge_env.service,
+            contract_identity_provider=lambda: identity,
+        )
+        async with (
+            create_connected_server_and_client_session(server) as first_session,
+            create_connected_server_and_client_session(server) as second_session,
+        ):
+            await first_session.list_tools()
+            await second_session.list_tools()
+            first = await first_session.call_tool("repo_list", {"requested_repo": "demo"})
+            second = await second_session.call_tool("repo_list", {"requested_repo": "other"})
+            first_tree = await first_session.call_tool("repo_tree", {"repo_id": "demo"})
+            second_tree = await second_session.call_tool("repo_tree", {"repo_id": "other"})
+    finally:
+        repositories.pop("other", None)
+
+    assert first.isError is False
+    assert second.isError is False
+    assert first.structuredContent is not None
+    assert second.structuredContent is not None
+    first_selection = first.structuredContent["selection"]
+    second_selection = second.structuredContent["selection"]
+    assert first_selection["repo_id"] == "demo"
+    assert second_selection["repo_id"] == "other"
+    assert first_selection["repo_selection_id"] != second_selection["repo_selection_id"]
+    assert first_tree.isError is False
+    assert second_tree.isError is False
+
+
+@pytest.mark.anyio
+async def test_capability_change_invalidates_the_session_repository_selection(
+    forge_env: ForgeEnvironment,
+) -> None:
+    repositories = forge_env.service.config.repositories
+    original = repositories["demo"]
+    identity = _contract_identity()
+    server = create_server(
+        service=forge_env.service,
+        contract_identity_provider=lambda: identity,
+    )
+    try:
+        async with create_connected_server_and_client_session(server) as session:
+            await session.list_tools()
+            selected = await session.call_tool("repo_list", {"requested_repo": "demo"})
+            assert selected.isError is False
+            repositories["demo"] = replace(
+                original,
+                publish_enabled=not original.publish_enabled,
+            )
+            stale = await session.call_tool("repo_tree", {"repo_id": "demo"})
+    finally:
+        repositories["demo"] = original
+
+    assert stale.isError is True
+    assert stale.structuredContent is not None
+    assert stale.structuredContent["error"]["code"] == "STALE_STATE"
+    assert "capability" in stale.structuredContent["error"]["message"]
+    assert "repo_list" in stale.structuredContent["error"]["safe_next_action"]
+    assert server._session_repository_selections == {}
+
+
+@pytest.mark.anyio
+async def test_expired_session_repository_selection_is_rejected_before_dispatch(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _contract_identity()
+    server = create_server(
+        service=forge_env.service,
+        contract_identity_provider=lambda: identity,
+    )
+
+    async with create_connected_server_and_client_session(server) as session:
+        await session.list_tools()
+        selected = await session.call_tool("repo_list", {"requested_repo": "demo"})
+        assert selected.isError is False
+        pin = next(iter(server._session_repository_selections.values()))
+        monkeypatch.setattr(
+            "repoforge.interfaces.mcp.server.time.time",
+            lambda: pin.expires_at_epoch + 1.0,
+        )
+        stale = await session.call_tool("repo_tree", {"repo_id": "demo"})
+
+    assert stale.isError is True
+    assert stale.structuredContent is not None
+    assert stale.structuredContent["error"]["code"] == "STALE_STATE"
+    assert "expiry" in stale.structuredContent["error"]["message"]
+    assert server._session_repository_selections == {}
+
+
+@pytest.mark.anyio
+async def test_unscoped_tool_is_not_blocked_by_an_expired_repository_selection(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _contract_identity()
+    server = create_server(
+        service=forge_env.service,
+        contract_identity_provider=lambda: identity,
+    )
+
+    async with create_connected_server_and_client_session(server) as session:
+        await session.list_tools()
+        selected = await session.call_tool("repo_list", {"requested_repo": "demo"})
+        assert selected.isError is False
+        pin = next(iter(server._session_repository_selections.values()))
+        monkeypatch.setattr(
+            "repoforge.interfaces.mcp.server.time.time",
+            lambda: pin.expires_at_epoch + 1.0,
+        )
+        unscoped = await session.call_tool(
+            "operation",
+            {"action": "list", "limit": 1},
+        )
+
+    assert unscoped.isError is False
+    assert server._session_repository_selections
