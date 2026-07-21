@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 from conftest import create_forge_environment
 
+from repoforge.application.repository.doctor import Doctor, DoctorCommand
 from repoforge.application.service import CodingService
 from repoforge.application.tickets.graph import load_ticket_graph
 from repoforge.config import GitHubTicketGraphConfig, load_config
+from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.tickets import (
     CapabilityCoverage,
@@ -152,18 +154,61 @@ def _audit_events_with_prefix(root: Path, prefix: str) -> list[dict[str, object]
     return [event for event in events if str(event.get("action", "")).startswith(prefix)]
 
 
-def test_v2_repo_issue_reports_graph_unavailable_with_next_action(tmp_path: Path) -> None:
+def test_v2_repo_issue_reports_typed_graph_reason(tmp_path: Path) -> None:
     service, environment = _service(tmp_path, configured=False)
 
     result = service.repo_issue_v2("demo", mode="graph")
 
+    V2_TOOL_SPECS["repo_issue"].validate_output(result)
     assert result["graph_status"] == "graph_unavailable"
+    assert result["graph_unavailable_reason"] == "configuration_unavailable"
     assert result["nodes"] == []
     assert result["selected"] == []
     assert result["next_action"]
     assert "configure" in result["next_action"].lower()
     assert len(_audit_events(environment.root, "repo_issue")) == 1
     assert _audit_events(environment.root, "repo_issue_graph") == []
+
+
+def test_v2_repo_issue_reports_typed_provider_reason(tmp_path: Path) -> None:
+    configured, _environment = _service(tmp_path)
+
+    class UnavailableTicketGraphGateway:
+        def read(
+            self,
+            cwd: Path,
+            source: GitHubTicketGraphConfig,
+            *,
+            max_items: int,
+        ) -> TicketGraphSnapshot:
+            del cwd, source, max_items
+            raise ConfigError("GitHub ticket graph transport is offline")
+
+    service = CodingService(
+        configured.config,
+        ticket_graphs=UnavailableTicketGraphGateway(),
+    )
+    result = service.repo_issue_v2("demo", mode="graph", fresh=True)
+
+    V2_TOOL_SPECS["repo_issue"].validate_output(result)
+    assert result["graph_status"] == "graph_unavailable"
+    assert result["graph_unavailable_reason"] == "provider_unavailable"
+    assert result["nodes"] == []
+    assert "provider" in result["next_action"].lower()
+    assert "configure" not in result["next_action"].lower()
+
+
+def test_doctor_reports_missing_active_graph_projection(tmp_path: Path) -> None:
+    service, _environment = _service(tmp_path)
+    context = replace(service.application.context, ticket_graphs=None)
+
+    result = Doctor(context).execute(DoctorCommand())
+
+    check = next(item for item in result.checks if item["name"] == "ticket_graph_projection:demo")
+    assert check["ok"] is False
+    assert check["severity"] == "error"
+    assert "no runtime adapter" in check["detail"]
+    assert "do not edit" in check["remediation"].lower()
 
 
 def test_v2_repo_issue_graph_exposes_capability_scoped_coverage(tmp_path: Path) -> None:

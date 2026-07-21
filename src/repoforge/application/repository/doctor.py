@@ -114,6 +114,30 @@ class Doctor:
             except Exception as exc:
                 add("gh_auth", False, str(exc), remediation="Run `gh auth login`.")
         for repo_id, repo in self.ctx.config.repositories.items():
+            if repo.ticket_graph is None:
+                add(
+                    f"ticket_graph_projection:{repo_id}",
+                    True,
+                    "ticket graph is intentionally disabled in the active configuration",
+                    severity="info",
+                )
+            elif self.ctx.ticket_graphs is None:
+                add(
+                    f"ticket_graph_projection:{repo_id}",
+                    False,
+                    "active configuration declares a ticket graph but no runtime adapter is projected",
+                    remediation=(
+                        "Reload or restart the managed runtime after restoring the GitHub ticket-graph "
+                        "provider; do not edit the already-declared source graph."
+                    ),
+                )
+            else:
+                add(
+                    f"ticket_graph_projection:{repo_id}",
+                    True,
+                    f"active root issue #{repo.ticket_graph.root_issue}",
+                    severity="info",
+                )
             valid = repo.path.is_dir() and (repo.path / ".git").exists()
             add(
                 f"repository:{repo_id}",

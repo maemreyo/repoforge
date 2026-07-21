@@ -275,6 +275,107 @@ class ConfigAdminService:
             "changed_sections": changed_sections,
         }
 
+    @staticmethod
+    def _projection_digest(value: object) -> str:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _ticket_graph_projection(value: object) -> dict[str, object]:
+        table = value.as_table() if hasattr(value, "as_table") else value
+        if not isinstance(table, dict):
+            return {"enabled": False, "root_issue": None, "repository": None}
+        root_issue = table.get("root_issue")
+        repository = table.get("repository")
+        enabled = (
+            isinstance(root_issue, int) and not isinstance(root_issue, bool) and root_issue > 0
+        )
+        return {
+            "enabled": enabled,
+            "root_issue": root_issue if enabled else None,
+            "repository": repository if isinstance(repository, str) and repository else None,
+        }
+
+    def _repository_projection(
+        self,
+        *,
+        name: str,
+        source_item: SourceRepository,
+        accepted_entry: dict[str, Any],
+        active_entry: dict[str, Any] | None,
+        current: ConfigGeneration,
+        active: ConfigGeneration | None,
+        source_changed: bool,
+        pending_approval: bool,
+    ) -> dict[str, object]:
+        source_graph = self._ticket_graph_projection(source_item.ticket_graph)
+        accepted_graph = self._ticket_graph_projection(accepted_entry.get("ticket_graph"))
+        active_graph = self._ticket_graph_projection(
+            active_entry.get("ticket_graph") if active_entry is not None else None
+        )
+        source_enabled = bool(source_graph["enabled"])
+        accepted_enabled = bool(accepted_graph["enabled"])
+        active_enabled = bool(active_graph["enabled"])
+
+        if pending_approval:
+            drift_reason = "pending_approval"
+            status = "pending"
+            action = "Review and decide the repository's pending configuration approval."
+        elif source_changed:
+            drift_reason = "source_not_refreshed"
+            status = "pending"
+            action = "Review and accept a new configuration generation before activation."
+        elif source_graph != accepted_graph:
+            drift_reason = "projection_loss"
+            status = "unavailable"
+            action = (
+                f"Regenerate the accepted configuration from source so repositories.{name}."
+                "ticket_graph exactly matches the reviewed source declaration before activation."
+            )
+        elif not source_enabled and not accepted_enabled and not active_enabled:
+            drift_reason = "intentionally_disabled"
+            status = "disabled"
+            action = (
+                "No ticket-graph reconciliation is required because it is intentionally disabled."
+            )
+        elif active is None or active.generation != current.generation:
+            drift_reason = "accepted_not_active"
+            status = "pending"
+            action = f"Activate accepted configuration generation {current.generation}."
+        elif accepted_graph != active_graph:
+            drift_reason = "accepted_not_active"
+            status = "pending"
+            action = (
+                f"Reconcile the runtime to accepted configuration generation {current.generation}."
+            )
+        else:
+            drift_reason = "none"
+            status = "active"
+            action = "No ticket-graph reconciliation is required."
+
+        return {
+            "repo_id": name,
+            "source_digest": self._projection_digest(asdict(source_item)),
+            "accepted_resolved_digest": self._projection_digest(accepted_entry),
+            "active_resolved_digest": (
+                self._projection_digest(active_entry) if active_entry is not None else None
+            ),
+            "accepted_generation": current.generation,
+            "active_generation": active.generation if active is not None else None,
+            "source_ticket_graph": source_graph,
+            "accepted_ticket_graph": accepted_graph,
+            "active_ticket_graph": active_graph,
+            "capability_projection_status": status,
+            "drift_reason": drift_reason,
+            "safe_reconciliation_action": action,
+        }
+
     def config_inspect_v2(
         self, repo_id: str | None = None, include_pending: bool = True
     ) -> dict[str, Any]:
@@ -282,6 +383,7 @@ class ConfigAdminService:
         if current is None:
             raise ConfigError("No accepted configuration generation")
         active = self._store.active()
+        source = self._source()
         document = parse_resolved(self._store.read_resolved_text(current.generation))
         repositories = document.get("repositories", {})
         if not isinstance(repositories, dict):
@@ -289,7 +391,26 @@ class ConfigAdminService:
         if repo_id is not None and repo_id not in repositories:
             raise ConfigError(f"Unknown repository id: {repo_id}")
         selected = [repo_id] if repo_id is not None else sorted(str(key) for key in repositories)
+        pending_summaries = self.pending.summaries()[:100]
+        pending_repo_ids = {
+            str(item["repo_id"])
+            for item in pending_summaries
+            if isinstance(item.get("repo_id"), str)
+        }
+        source_by_id = {item.repo_id: item for item in source.repositories}
+        active_document = (
+            parse_resolved(self._store.read_resolved_text(active.generation))
+            if active is not None
+            else {"repositories": {}}
+        )
+        active_repositories_raw = active_document.get("repositories", {})
+        active_repositories = (
+            active_repositories_raw if isinstance(active_repositories_raw, dict) else {}
+        )
+        source_digest = sha256_text(self._store.read_source_text())
+        source_changed = source_digest != current.source_sha256
         facts: list[dict[str, str]] = []
+        repository_projections: list[dict[str, object]] = []
         for name in selected:
             entry = repositories.get(name)
             if not isinstance(entry, dict):
@@ -297,6 +418,23 @@ class ConfigAdminService:
             prefix = "" if repo_id is not None or len(selected) == 1 else f"{name}."
             profiles = entry.get("profiles")
             diagnostics = entry.get("diagnostics")
+            source_item = source_by_id.get(name)
+            if source_item is None:
+                raise ConfigError(f"Source configuration is missing repository id: {name}")
+            active_entry_raw = active_repositories.get(name)
+            active_entry = active_entry_raw if isinstance(active_entry_raw, dict) else None
+            repository_projections.append(
+                self._repository_projection(
+                    name=name,
+                    source_item=source_item,
+                    accepted_entry=entry,
+                    active_entry=active_entry,
+                    current=current,
+                    active=active,
+                    source_changed=source_changed,
+                    pending_approval=name in pending_repo_ids,
+                )
+            )
             values = {
                 "repo_id": name,
                 "read_only": str(bool(entry.get("read_only", False))).lower(),
@@ -312,7 +450,7 @@ class ConfigAdminService:
             )
         pending: list[dict[str, Any]] = []
         if include_pending:
-            for item in self.pending.summaries()[:100]:
+            for item in pending_summaries:
                 expected = item.get("expected_generation")
                 if not isinstance(expected, int) or expected <= 0:
                     continue
@@ -326,7 +464,6 @@ class ConfigAdminService:
                     }
                 )
         restart_required = active is None or active.generation != current.generation
-        source_digest = sha256_text(self._store.read_source_text())
         runtime_status = (
             self._read_runtime_status() if self._read_runtime_status is not None else {}
         )
@@ -367,6 +504,7 @@ class ConfigAdminService:
             "capability_delta": current.delta.value,
             "restart_required": restart_required,
             "repo_facts": facts,
+            "repository_projections": repository_projections,
             "contract_identity": contract_identity,
             "config_projection": {
                 "source_digest": source_digest,

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ...domain.errors import ConfigError
+from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.repository_selection import select_repository
 from ...domain.tickets import TicketNode
 from ..context import ApplicationContext
@@ -262,6 +262,7 @@ class RepositoryIssueV2Result:
     next_cursor: str | None
     mutation: IssueMutationEvidenceV2 | None = None
     capability_coverage: tuple[CapabilityCoverageV2, ...] = ()
+    graph_unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -723,16 +724,36 @@ class RepositoryIssueV2:
                 capability_coverage=_capability_coverage(raw.capability_coverage),
             )
         if command.mode == "graph":
-            raw_graph = self._graph.compute(
-                RepositoryIssueGraphCommand(
-                    command.repo_id,
-                    command.root_issue,
-                    command.status,
-                    command.priority,
-                    command.initiative,
-                    command.fresh,
+            try:
+                raw_graph = self._graph.compute(
+                    RepositoryIssueGraphCommand(
+                        command.repo_id,
+                        command.root_issue,
+                        command.status,
+                        command.priority,
+                        command.initiative,
+                        command.fresh,
+                    )
                 )
-            )
+            except RepoForgeError as exc:
+                if exc.code is not ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE:
+                    raise
+                return RepositoryIssueV2Result(
+                    "ok",
+                    "Ticket graph provider is unavailable",
+                    None,
+                    command.repo_id,
+                    command.mode,
+                    "graph_unavailable",
+                    None,
+                    (),
+                    (),
+                    (),
+                    "Repair or restore the GitHub ticket-graph provider, then retry with fresh=true.",
+                    False,
+                    None,
+                    graph_unavailable_reason="provider_unavailable",
+                )
             if not raw_graph.valid and any(
                 item.get("code") == "GRAPH_NOT_CONFIGURED" for item in raw_graph.diagnostics
             ):
@@ -755,6 +776,7 @@ class RepositoryIssueV2:
                     ),
                     False,
                     None,
+                    graph_unavailable_reason="configuration_unavailable",
                 )
             nodes = tuple(_graph_node(item) for item in raw_graph.nodes)
             page = paginate(
@@ -797,15 +819,36 @@ class RepositoryIssueV2:
                 capability_coverage=_capability_coverage(
                     raw_graph.coverage.get("capabilities", [])
                 ),
+                graph_unavailable_reason=(None if raw_graph.valid else "evidence_incomplete"),
             )
-        raw_next = self._next.compute(
-            RepositoryIssueNextCommand(
+        try:
+            raw_next = self._next.compute(
+                RepositoryIssueNextCommand(
+                    command.repo_id,
+                    command.root_issue,
+                    command.limit,
+                    fresh=command.fresh,
+                )
+            )
+        except RepoForgeError as exc:
+            if exc.code is not ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE:
+                raise
+            return RepositoryIssueV2Result(
+                "ok",
+                "Ticket graph provider is unavailable",
+                None,
                 command.repo_id,
-                command.root_issue,
-                command.limit,
-                fresh=command.fresh,
+                command.mode,
+                "graph_unavailable",
+                None,
+                (),
+                (),
+                (),
+                "Repair or restore the GitHub ticket-graph provider, then retry with fresh=true.",
+                False,
+                None,
+                graph_unavailable_reason="provider_unavailable",
             )
-        )
         if any(item.get("code") == "GRAPH_NOT_CONFIGURED" for item in raw_next.diagnostics):
             return RepositoryIssueV2Result(
                 "ok",
@@ -821,6 +864,7 @@ class RepositoryIssueV2:
                 "Configure the GitHub-native ticket graph root, then retry.",
                 False,
                 None,
+                graph_unavailable_reason="configuration_unavailable",
             )
         selected = tuple(_graph_node(item) for item in raw_next.tickets)
         drift = tuple(
@@ -846,6 +890,7 @@ class RepositoryIssueV2:
             False,
             None,
             capability_coverage=_capability_coverage(raw_next.capability_coverage),
+            graph_unavailable_reason=None if raw_next.valid else "evidence_incomplete",
         )
 
 

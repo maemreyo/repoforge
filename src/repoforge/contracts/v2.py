@@ -334,6 +334,9 @@ class RepoIssueOutput(ToolResponse):
     repo_id: RepoId
     mode: IssueMode
     graph_status: Literal["available", "graph_unavailable", "not_requested"]
+    graph_unavailable_reason: (
+        Literal["configuration_unavailable", "provider_unavailable", "evidence_incomplete"] | None
+    ) = None
     issue: IssueEvidence | None = None
     nodes: tuple[IssueGraphNode, ...] = Field(default=(), max_length=500)
     selected: tuple[IssueGraphNode, ...] = Field(default=(), max_length=100)
@@ -1499,6 +1502,35 @@ class ConfigProjectionView(StrictModel):
     safe_reconciliation_action: str = Field(min_length=1, max_length=500)
 
 
+class TicketGraphProjectionView(StrictModel):
+    enabled: bool
+    root_issue: int | None = Field(default=None, ge=1)
+    repository: str | None = Field(default=None, max_length=300)
+
+
+class RepositoryConfigProjectionView(StrictModel):
+    repo_id: RepoId
+    source_digest: Sha256
+    accepted_resolved_digest: Sha256
+    active_resolved_digest: Sha256 | None = None
+    accepted_generation: int = Field(ge=1)
+    active_generation: int | None = Field(default=None, ge=1)
+    source_ticket_graph: TicketGraphProjectionView
+    accepted_ticket_graph: TicketGraphProjectionView
+    active_ticket_graph: TicketGraphProjectionView
+    capability_projection_status: Literal["active", "pending", "unavailable", "disabled"]
+    drift_reason: Literal[
+        "none",
+        "source_not_refreshed",
+        "pending_approval",
+        "accepted_not_active",
+        "projection_loss",
+        "provider_unavailable",
+        "intentionally_disabled",
+    ]
+    safe_reconciliation_action: str = Field(min_length=1, max_length=500)
+
+
 class ConfigInspectOutput(ToolResponse):
     accepted: ConfigGenerationSummary | None = None
     active: ConfigGenerationSummary | None = None
@@ -1508,6 +1540,9 @@ class ConfigInspectOutput(ToolResponse):
     ) = None
     restart_required: bool
     repo_facts: tuple[KeyValue, ...] = Field(default=(), max_length=500)
+    repository_projections: tuple[RepositoryConfigProjectionView, ...] = Field(
+        default=(), max_length=100
+    )
     contract_identity: RuntimeContractIdentityView | None = None
     config_projection: ConfigProjectionView | None = None
 

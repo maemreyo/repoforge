@@ -18,12 +18,14 @@ from repoforge.application.configuration.document import (
     apply_policy_patch,
     apply_proposal,
     apply_risk_policy,
+    apply_ticket_graph,
     parse_resolved,
     render_resolved,
 )
 from repoforge.application.configuration.source import (
     SourceConfiguration,
     SourceRepository,
+    SourceTicketGraph,
     parse_source,
     render_source,
 )
@@ -434,6 +436,8 @@ def _admin(
     reload_calls: list[int] | None = None,
     runtime_status: dict[str, object] | None = None,
     contract_identity: RuntimeContractIdentity | None = None,
+    ticket_graph: SourceTicketGraph | None = None,
+    preserve_ticket_graph_in_resolved: bool = False,
 ) -> ConfigAdminService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -446,6 +450,7 @@ def _admin(
                 "demo",
                 str(repo_root),
                 decisions=(("dependency_install", "exclude"),),
+                ticket_graph=ticket_graph,
             ),
         ),
     )
@@ -455,6 +460,8 @@ def _admin(
     )
     proposal = _proposal(repo_root)
     document = apply_proposal(parse_resolved(None), proposal)
+    if preserve_ticket_graph_in_resolved:
+        document = apply_ticket_graph(document, "demo", ticket_graph)
     resolved = render_resolved(
         document,
         generation=1,
@@ -470,6 +477,8 @@ def _admin(
     def reload_runtime(generation: int) -> dict[str, Any]:
         if reload_calls is not None:
             reload_calls.append(generation)
+        store.stage_activation(generation)
+        store.activate(generation)
         return {"status": "hot_reloaded", "active_generation": generation}
 
     identity_options: dict[str, Any] = {}
@@ -608,6 +617,10 @@ def test_restriction_is_applied_immediately_with_hot_reload(tmp_path: Path) -> N
     assert inspected_repo["execution_mode"] == "strict"
     assert inspected_repo["adhoc_runners"] == []
     assert inspected_repo["adhoc_timeout_seconds"] == 300
+    projection = admin.config_inspect_v2(repo_id="demo")["repository_projections"][0]
+    assert projection["drift_reason"] == "intentionally_disabled"
+    assert projection["capability_projection_status"] == "disabled"
+    assert projection["active_generation"] == 2
     # The durable source now carries the patch, so a later refresh preserves it.
     persisted = parse_source(admin._store.read_source_text())
     assert persisted.repositories[0].policy_patch.remove_profiles == ("quick",)
@@ -631,6 +644,10 @@ def test_expansion_requires_operator_approval_and_never_applies(tmp_path: Path) 
     assert admin._store.current().generation == 1
     pending = admin.pending.summaries()
     assert [item["change_id"] for item in pending] == [change_id]
+    projection = admin.config_inspect_v2(repo_id="demo")["repository_projections"][0]
+    assert projection["drift_reason"] == "pending_approval"
+    assert projection["capability_projection_status"] == "pending"
+    assert "pending configuration approval" in projection["safe_reconciliation_action"]
     # The unapproved patch is not persisted in the editable source.
     persisted = parse_source(admin._store.read_source_text())
     assert persisted.repositories[0].policy_patch.is_empty()
@@ -831,6 +848,8 @@ def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Pat
     assert result["accepted"]["digest"] == admin._store.current().resolved_sha256
     assert result["active"] is None
     assert result["restart_required"] is True
+    assert result["repository_projections"][0]["drift_reason"] == "intentionally_disabled"
+    assert result["repository_projections"][0]["capability_projection_status"] == "disabled"
     assert {item["key"] for item in result["repo_facts"]} >= {
         "repo_id",
         "read_only",
@@ -839,7 +858,59 @@ def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Pat
     }
 
 
-def test_v2_config_inspect_exposes_contract_identity_and_exact_projection_drift(
+def test_v2_config_inspect_reports_ticket_graph_projection_drift(
+    tmp_path: Path,
+) -> None:
+    admin = _admin(
+        tmp_path,
+        ticket_graph=SourceTicketGraph(root_issue=232, repository="owner/demo"),
+    )
+
+    result = admin.config_inspect_v2(repo_id="demo")
+
+    projection = result["repository_projections"][0]
+    assert projection["repo_id"] == "demo"
+    assert projection["source_ticket_graph"] == {
+        "enabled": True,
+        "root_issue": 232,
+        "repository": "owner/demo",
+    }
+    assert projection["accepted_ticket_graph"]["enabled"] is False
+    assert projection["active_ticket_graph"]["enabled"] is False
+    assert projection["drift_reason"] == "projection_loss"
+    assert projection["capability_projection_status"] == "unavailable"
+    assert projection["safe_reconciliation_action"] == (
+        "Regenerate the accepted configuration from source so repositories.demo.ticket_graph "
+        "exactly matches the reviewed source declaration before activation."
+    )
+
+
+def test_v2_config_inspect_tracks_accepted_and_active_ticket_graph(
+    tmp_path: Path,
+) -> None:
+    graph = SourceTicketGraph(root_issue=232, repository="owner/demo")
+    admin = _admin(
+        tmp_path,
+        ticket_graph=graph,
+        preserve_ticket_graph_in_resolved=True,
+    )
+
+    accepted = admin.config_inspect_v2(repo_id="demo")
+    projection = accepted["repository_projections"][0]
+    assert projection["accepted_ticket_graph"] == projection["source_ticket_graph"]
+    assert projection["drift_reason"] == "accepted_not_active"
+    assert projection["capability_projection_status"] == "pending"
+
+    admin._store.stage_activation(1)
+    admin._store.activate(1)
+    active = admin.config_inspect_v2(repo_id="demo")
+    active_projection = active["repository_projections"][0]
+    assert active_projection["active_ticket_graph"] == active_projection["accepted_ticket_graph"]
+    assert active_projection["drift_reason"] == "none"
+    assert active_projection["capability_projection_status"] == "active"
+
+
+def test_v2_config_inspect_exposes_contract_identity_and_projection_state(
     tmp_path: Path,
 ) -> None:
     from repoforge.contracts.registry import V2_TOOL_SPECS
@@ -876,6 +947,8 @@ def test_v2_config_inspect_exposes_contract_identity_and_exact_projection_drift(
 
     V2_TOOL_SPECS["config_inspect"].validate_output(drifted)
     assert drifted["config_projection"]["drift_state"] == "source_changed"
+    assert drifted["repository_projections"][0]["drift_reason"] == "source_not_refreshed"
+    assert drifted["repository_projections"][0]["capability_projection_status"] == "pending"
     assert (
         drifted["config_projection"]["source_digest"]
         != drifted["config_projection"]["accepted_source_digest"]
