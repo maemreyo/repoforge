@@ -34,6 +34,12 @@ def _durable_result(value: Any) -> dict[str, Any]:
     return cast(dict[str, Any], persisted)
 
 
+def _wrapped_error_details(exc: Exception, **receipt_details: Any) -> dict[str, Any]:
+    preserved = dict(exc.details) if isinstance(exc, RepoForgeError) else {}
+    preserved.update(receipt_details)
+    return preserved
+
+
 def execute_with_outcome_receipt(
     ctx: ApplicationContext,
     action: str,
@@ -225,13 +231,14 @@ def execute_with_outcome_receipt(
                     "Read the authoritative operation result using the returned operation and receipt identifiers."
                 ),
                 correlation_id=correlation,
-                details={
-                    "effect_boundary_crossed": True,
-                    "operation_id": task.operation_id,
-                    "receipt_id": receipt_id,
-                    "result_reference": result_reference,
-                    "original_error_type": type(exc).__name__,
-                },
+                details=_wrapped_error_details(
+                    exc,
+                    effect_boundary_crossed=True,
+                    operation_id=task.operation_id,
+                    receipt_id=receipt_id,
+                    result_reference=result_reference,
+                    original_error_type=type(exc).__name__,
+                ),
             ) from exc
         rolled_back = effect_boundary.rolled_back
         effect_started = receipt.value.effect_boundary_crossed or effect_boundary.started
@@ -284,12 +291,13 @@ def execute_with_outcome_receipt(
                     "Inspect the authoritative receipt and target state; do not retry the operation blindly."
                 ),
                 correlation_id=correlation,
-                details={
-                    "effect_boundary_crossed": True,
-                    "operation_id": task.operation_id,
-                    "receipt_id": receipt_id,
-                    "original_error_type": type(exc).__name__,
-                },
+                details=_wrapped_error_details(
+                    exc,
+                    effect_boundary_crossed=True,
+                    operation_id=task.operation_id,
+                    receipt_id=receipt_id,
+                    original_error_type=type(exc).__name__,
+                ),
             ) from exc
         receipt_store.save(
             transition_effect_receipt(

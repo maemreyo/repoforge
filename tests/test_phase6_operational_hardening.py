@@ -28,7 +28,7 @@ from repoforge.application.diagnostics.bundle import build_diagnostics_bundle
 from repoforge.application.idempotency import IdempotencyEffectBoundary
 from repoforge.application.repository.doctor import Doctor, DoctorCommand
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig, load_config
-from repoforge.domain.errors import ConfigError, ErrorCode
+from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 from repoforge.domain.operations import (
     IdempotencyRecord,
     IdempotencyState,
@@ -541,6 +541,42 @@ def test_idempotency_persists_authoritative_receipt_after_effect_serialization_f
     )
     assert replayed == {"mutated": True}
     assert calls == 1
+
+
+def test_idempotency_preserves_original_error_details_when_effect_outcome_is_unknown(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    effect = IdempotencyEffectBoundary()
+
+    def operation() -> dict[str, Any]:
+        effect.begin()
+        raise RepoForgeError(
+            "provider accepted the effect but returned an ambiguous response",
+            code=ErrorCode.COMMAND_FAILED,
+            details={
+                "provider_status": 502,
+                "provider_request_id": "request-42",
+            },
+        )
+
+    with pytest.raises(ConfigError) as unknown:
+        ctx.idempotent(
+            "workspace_push",
+            "unknown-effect-key-12345678",
+            {"workspace_id": "demo"},
+            operation,
+            effect_boundary=effect,
+        )
+
+    assert unknown.value.code is ErrorCode.EFFECT_OUTCOME_UNKNOWN
+    assert unknown.value.retryable is False
+    assert unknown.value.details["provider_status"] == 502
+    assert unknown.value.details["provider_request_id"] == "request-42"
+    assert unknown.value.details["effect_boundary_crossed"] is True
+    assert str(unknown.value.details["operation_id"]).startswith("op-")
+    assert str(unknown.value.details["receipt_id"]).startswith("receipt-")
+    assert unknown.value.details["original_error_type"] == "RepoForgeError"
 
 
 def test_idempotency_pre_effect_failure_releases_key_for_safe_retry(tmp_path: Path) -> None:

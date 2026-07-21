@@ -700,5 +700,7 @@ def test_workspace_format_changed_detects_unexpected_formatter_mutation(
     assert str(unknown.value.details["operation_id"]).startswith("op-")
     assert str(unknown.value.details["receipt_id"]).startswith("receipt-")
     assert unknown.value.details["original_error_type"] == "SecurityError"
+    assert unknown.value.details["unexpected_path_count"] == 1
+    assert len(str(unknown.value.details["unexpected_paths_digest"])) == 64
     assert forge_env.service.state.load(workspace_id).last_verification is None
     assert Path(created["path"]).joinpath("README.md").read_text() == "unexpected"

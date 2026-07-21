@@ -68,6 +68,12 @@ def _durable_result(value: Any) -> dict[str, Any]:
     return cast(dict[str, Any], persisted)
 
 
+def _wrapped_error_details(exc: Exception, **receipt_details: Any) -> dict[str, Any]:
+    preserved = dict(exc.details) if isinstance(exc, RepoForgeError) else {}
+    preserved.update(receipt_details)
+    return preserved
+
+
 def execute_idempotent(
     ctx: ApplicationContext,
     action: str,
@@ -476,13 +482,14 @@ def execute_idempotent(
                                 "Retry with the same idempotency key to replay the authoritative durable result."
                             ),
                             correlation_id=correlation,
-                            details={
-                                "effect_boundary_crossed": True,
-                                "operation_id": operation_task.operation_id,
-                                "receipt_id": receipt_id,
-                                "result_reference": result_reference,
-                                "original_error_type": type(exc).__name__,
-                            },
+                            details=_wrapped_error_details(
+                                exc,
+                                effect_boundary_crossed=True,
+                                operation_id=operation_task.operation_id,
+                                receipt_id=receipt_id,
+                                result_reference=result_reference,
+                                original_error_type=type(exc).__name__,
+                            ),
                         ) from exc
                     rolled_back = effect_boundary is not None and effect_boundary.rolled_back
                     effect_started = receipt_envelope.value.effect_boundary_crossed or (
@@ -570,12 +577,13 @@ def execute_idempotent(
                                 "The effect outcome is unknown and must be reconciled from authoritative state.",
                             ),
                             correlation_id=correlation,
-                            details={
-                                "effect_boundary_crossed": True,
-                                "operation_id": operation_task.operation_id,
-                                "receipt_id": receipt_id,
-                                "original_error_type": type(exc).__name__,
-                            },
+                            details=_wrapped_error_details(
+                                exc,
+                                effect_boundary_crossed=True,
+                                operation_id=operation_task.operation_id,
+                                receipt_id=receipt_id,
+                                original_error_type=type(exc).__name__,
+                            ),
                         ) from exc
                     raise
 
