@@ -25,6 +25,7 @@ from .common import (
     LongText,
     OperationEvidence,
     OperationState,
+    OutcomeReceiptEvidence,
     ProviderEvidence,
     ReadFileRequest,
     ReadFileResult,
@@ -338,6 +339,7 @@ class RepoIssueOutput(ToolResponse):
     selected: tuple[IssueGraphNode, ...] = Field(default=(), max_length=100)
     drift: tuple[IssueDrift, ...] = Field(default=(), max_length=100)
     mutation: IssueMutationEvidence | None = None
+    outcome: OutcomeReceiptEvidence | None = None
     next_action: ShortText | None = None
     truncated: bool = False
     next_cursor: Cursor | None = None
@@ -510,6 +512,7 @@ class WorkspaceCreateInput(StrictModel):
 
 
 class WorkspaceCreateOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     repo_id: RepoId
     branch: str = Field(min_length=1, max_length=512)
@@ -525,6 +528,7 @@ class WorkspaceRemoveInput(StrictModel):
 
 
 class WorkspaceRemoveOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     removed: bool
     local_branch_deleted: bool
@@ -585,6 +589,7 @@ class WorkspaceRefreshInput(StrictModel):
 
 
 class WorkspaceRefreshOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     action: RefreshAction
     result: Literal["current", "preview", "applied", "conflict"]
@@ -649,6 +654,7 @@ class FormatterEvidence(StrictModel):
 
 
 class WorkspaceFormatChangedOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     formatters: tuple[FormatterEvidence, ...] = Field(default=(), max_length=100)
     changed: bool
@@ -873,6 +879,7 @@ class SyntaxDiagnosticsEvidence(StrictModel):
 
 
 class WorkspaceMutateOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     dry_run: bool
     ready: bool
@@ -1126,6 +1133,7 @@ class WorkspaceCommitInput(StrictModel):
 
 
 class WorkspaceCommitOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     branch: str = Field(min_length=1, max_length=512)
     commit: str = Field(min_length=1, max_length=20_000)
@@ -1145,6 +1153,7 @@ class WorkspacePushInput(StrictModel):
 
 
 class WorkspacePushOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     branch: str = Field(min_length=1, max_length=512)
     head_sha: GitObjectId
@@ -1227,6 +1236,7 @@ class WorkspacePrInput(StrictModel):
 
 
 class WorkspacePrOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     action: WorkspacePrAction
     pull_request: PullRequestEvidence | None = None

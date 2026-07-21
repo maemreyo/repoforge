@@ -149,6 +149,7 @@ class OperationManager:
         *,
         error_code: str,
         error_message: str | None = None,
+        result_reference: str | None = None,
         retryability: OperationRetryability = OperationRetryability.NONE,
         now: str | None = None,
     ) -> OperationTask:
@@ -156,6 +157,7 @@ class OperationManager:
             operation_id,
             OperationState.FAILED,
             now=now,
+            result_reference=result_reference,
             error_code=error_code,
             error_message=error_message,
             retryability=retryability,

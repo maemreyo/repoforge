@@ -37,6 +37,10 @@ class ErrorCode(str, Enum):
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
     IDEMPOTENCY_UNCERTAIN = "IDEMPOTENCY_UNCERTAIN"
+    FAILED_BEFORE_EFFECT = "FAILED_BEFORE_EFFECT"
+    FAILED_AFTER_EFFECT = "FAILED_AFTER_EFFECT"
+    EFFECT_ROLLED_BACK = "EFFECT_ROLLED_BACK"
+    EFFECT_OUTCOME_UNKNOWN = "EFFECT_OUTCOME_UNKNOWN"
     STATE_PERSISTENCE_FAILED = "STATE_PERSISTENCE_FAILED"
     STATE_INVALID = "STATE_INVALID"
     STATE_NOT_FOUND = "STATE_NOT_FOUND"
@@ -163,6 +167,10 @@ _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
     ("IDEMPOTENCY_CONFLICT", ErrorCode.IDEMPOTENCY_CONFLICT, False),
     ("IDEMPOTENCY_IN_PROGRESS", ErrorCode.IDEMPOTENCY_IN_PROGRESS, True),
     ("IDEMPOTENCY_UNCERTAIN", ErrorCode.IDEMPOTENCY_UNCERTAIN, False),
+    ("FAILED_BEFORE_EFFECT", ErrorCode.FAILED_BEFORE_EFFECT, True),
+    ("FAILED_AFTER_EFFECT", ErrorCode.FAILED_AFTER_EFFECT, False),
+    ("EFFECT_ROLLED_BACK", ErrorCode.EFFECT_ROLLED_BACK, True),
+    ("EFFECT_OUTCOME_UNKNOWN", ErrorCode.EFFECT_OUTCOME_UNKNOWN, False),
     ("STATE_PERSISTENCE_FAILED", ErrorCode.STATE_PERSISTENCE_FAILED, True),
     ("COMMAND_TIMEOUT", ErrorCode.COMMAND_TIMEOUT, True),
 )
@@ -303,6 +311,10 @@ def operation_error_from_exception(
         ErrorCode.OPERATION_CORRUPT: "The persisted operation record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.OPERATION_SCHEMA_UNSUPPORTED: "The operation record uses a schema version this RepoForge build cannot safely interpret.",
         ErrorCode.OPERATION_TRANSITION_INVALID: "The requested state transition is not allowed by the durable operation state machine.",
+        ErrorCode.FAILED_BEFORE_EFFECT: "The operation failed before crossing its authoritative effect boundary.",
+        ErrorCode.FAILED_AFTER_EFFECT: "The operation crossed its effect boundary and preserved an authoritative durable result before later finalization failed.",
+        ErrorCode.EFFECT_ROLLED_BACK: "The operation crossed its effect boundary, then verified compensation restored the prior state.",
+        ErrorCode.EFFECT_OUTCOME_UNKNOWN: "The operation crossed its effect boundary without enough authoritative evidence to classify the final state safely.",
         ErrorCode.STALE_ASSESSMENT_SNAPSHOT: "The workspace, configuration, or policy identity changed while evidence was being collected.",
         ErrorCode.ASSESSMENT_COMPONENT_UNAVAILABLE: "A bounded assessment provider could not return trustworthy evidence for the captured snapshot.",
         ErrorCode.ASSESSMENT_INVALID: "The assessment model violates snapshot identity, coverage, ordering, or bound invariants.",

@@ -195,9 +195,13 @@ def test_workspace_pr_comment_reconciles_ambiguous_failure_after_remote_effect(
         "idempotency_key": "shipping-pr-comment-ambiguous-0001",
         "expected_remote_version": created["remote_version"],
     }
-    with pytest.raises(RepoForgeError) as uncertain:
+    with pytest.raises(RepoForgeError) as unknown:
         forge_env.service.workspace_pr(**request)
-    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    assert unknown.value.code is ErrorCode.EFFECT_OUTCOME_UNKNOWN
+    assert unknown.value.retryable is False
+    assert unknown.value.details["effect_boundary_crossed"] is True
+    assert str(unknown.value.details["operation_id"]).startswith("op-")
+    assert str(unknown.value.details["receipt_id"]).startswith("receipt-")
 
     reconciled = forge_env.service.workspace_pr(**request)
     assert reconciled["comment"]["result"] == "reconciled"

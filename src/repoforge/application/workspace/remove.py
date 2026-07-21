@@ -1,7 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from ...domain.errors import WorkspaceError
 from ..context import ApplicationContext
+from ..idempotency import IdempotencyEffectBoundary
+from ..outcome_receipts import execute_with_outcome_receipt
 from .removal_safety import unpushed_commit_count
 
 
@@ -25,6 +27,11 @@ class WorkspaceRemover:
 
     def execute(self, c: WorkspaceRemoveCommand) -> WorkspaceRemoveResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
+        audit_details = {
+            "workspace_id": c.workspace_id,
+            "delete_local_branch": c.delete_local_branch,
+        }
+        boundary = IdempotencyEffectBoundary()
 
         def op() -> WorkspaceRemoveResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -54,17 +61,21 @@ class WorkspaceRemover:
                             "The workspace, its worktree, and the workspace registry were not modified.",
                         ),
                     )
+                boundary.begin()
                 deleted = self.ctx.git.remove_worktree(
                     repo, path, record.branch, c.delete_local_branch
                 )
+                authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, deleted)
+                boundary.record_result(authoritative_result)
                 self.ctx.store.delete(c.workspace_id)
-                return WorkspaceRemoveResult(c.workspace_id, True, deleted)
+                return authoritative_result
 
-        return self.ctx.audited(
+        return execute_with_outcome_receipt(
+            self.ctx,
             "workspace_remove",
-            {
-                "workspace_id": c.workspace_id,
-                "delete_local_branch": c.delete_local_branch,
-            },
+            asdict(c),
             op,
+            details=audit_details,
+            serialize=asdict,
+            effect_boundary=boundary,
         )

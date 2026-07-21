@@ -16,7 +16,12 @@ from conftest import execution_coordinator_for_tests
 from repoforge.adapters.audit import JsonlAuditSink
 from repoforge.adapters.audit.query import read_audit_events
 from repoforge.adapters.observability import JsonMetricsSink
-from repoforge.adapters.persistence import JsonIdempotencyStore
+from repoforge.adapters.persistence import (
+    JsonEffectReceiptStore,
+    JsonIdempotencyStore,
+    JsonOperationResultStore,
+    JsonOperationStore,
+)
 from repoforge.adapters.runtime.tunnel_cli import TunnelCliClient
 from repoforge.application.context import ApplicationContext
 from repoforge.application.diagnostics.bundle import build_diagnostics_bundle
@@ -177,6 +182,9 @@ def _context(tmp_path: Path) -> ApplicationContext:
         execution_coordinator_for_tests(),
         JsonMetricsSink(state_root, locks),
         JsonIdempotencyStore(state_root),
+        operation_store=JsonOperationStore(state_root, locks),
+        operation_result_store=JsonOperationResultStore(state_root, locks),
+        effect_receipts=JsonEffectReceiptStore(state_root, locks),
     )
 
 
@@ -482,7 +490,7 @@ def test_idempotency_replays_completed_result_and_rejects_conflict(tmp_path: Pat
     assert error.value.retryable is False
 
 
-def test_idempotency_preserves_uncertain_state_after_effect_before_receipt(
+def test_idempotency_persists_authoritative_receipt_after_effect_serialization_failure(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -509,27 +517,29 @@ def test_idempotency_preserves_uncertain_state_after_effect_before_receipt(
             serialize=fail_serialization,
             effect_boundary=effect,
         )
-    assert lost_response.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    assert lost_response.value.code.value == "FAILED_AFTER_EFFECT"
     assert lost_response.value.retryable is False
+    assert lost_response.value.details["effect_boundary_crossed"] is True
+    assert lost_response.value.details["receipt_id"].startswith("receipt-")
+    assert lost_response.value.details["operation_id"].startswith("op-")
+    assert lost_response.value.details["result_reference"].startswith("operation-result:op-")
 
     assert ctx.idempotency is not None
     record = ctx.idempotency.load(
         "workspace_write_file", hash_idempotency_key("mutation-key-12345678")
     )
     assert record is not None
-    assert record.state is IdempotencyState.UNCERTAIN
+    assert record.state is IdempotencyState.COMPLETED
+    assert record.result == {"mutated": True}
     assert calls == 1
 
-    with pytest.raises(ConfigError) as uncertain:
-        ctx.idempotent(
-            "workspace_write_file",
-            "mutation-key-12345678",
-            {"workspace_id": "demo", "path": "hello.txt"},
-            operation,
-        )
-    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
-    assert uncertain.value.retryable is False
-    assert "inspect" in uncertain.value.safe_next_action.lower()
+    replayed = ctx.idempotent(
+        "workspace_write_file",
+        "mutation-key-12345678",
+        {"workspace_id": "demo", "path": "hello.txt"},
+        operation,
+    )
+    assert replayed == {"mutated": True}
     assert calls == 1
 
 

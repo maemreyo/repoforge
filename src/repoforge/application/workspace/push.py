@@ -7,6 +7,7 @@ from ...domain.policy import validate_branch
 from ...domain.redaction import redact_text
 from ..context import ApplicationContext
 from ..dto import to_data
+from ..idempotency import IdempotencyEffectBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,7 @@ class WorkspacePusher:
     def execute(self, c: WorkspacePushCommand) -> WorkspacePushResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
         validate_branch(record.branch, repo)
+        boundary = IdempotencyEffectBoundary()
 
         def op() -> WorkspacePushResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -84,6 +86,7 @@ class WorkspacePusher:
                         output="already synchronized with upstream",
                     )
                 try:
+                    boundary.begin()
                     result = self.ctx.git.push(
                         path,
                         fresh.remote,
@@ -138,14 +141,7 @@ class WorkspacePusher:
                             "actual_remote_head": remote_head_after,
                         },
                     )
-                fresh.metadata["last_pushed_sha"] = head
-                try:
-                    self.ctx.store.save(fresh)
-                except Exception as exc:
-                    raise WorkspaceError(
-                        f"Push of {head} succeeded but workspace registry update failed; retry workspace_push to reconcile state"
-                    ) from exc
-                return WorkspacePushResult(
+                authoritative_result = WorkspacePushResult(
                     summary=f"Pushed {head} to {fresh.remote}/{fresh.branch}",
                     workspace_id=c.workspace_id,
                     branch=fresh.branch,
@@ -157,6 +153,15 @@ class WorkspacePusher:
                     retryable_rejection=False,
                     output=redact_text(result.combined),
                 )
+                boundary.record_result(authoritative_result)
+                fresh.metadata["last_pushed_sha"] = head
+                try:
+                    self.ctx.store.save(fresh)
+                except Exception as exc:
+                    raise WorkspaceError(
+                        f"Push of {head} succeeded but workspace registry update failed; retry workspace_push to reconcile state"
+                    ) from exc
+                return authoritative_result
 
         return cast(
             WorkspacePushResult,
@@ -175,5 +180,6 @@ class WorkspacePusher:
                 },
                 serialize=to_data,
                 deserialize=lambda value: WorkspacePushResult(**value),
+                effect_boundary=boundary,
             ),
         )

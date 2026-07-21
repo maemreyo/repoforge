@@ -49,6 +49,11 @@ class ToolErrorDetails(StrictModel):
     expected: str | None = Field(default=None, max_length=1000)
     actual: str | None = Field(default=None, max_length=1000)
     correlation_id: str | None = Field(default=None, max_length=128)
+    operation_id: str | None = Field(default=None, max_length=160)
+    receipt_id: str | None = Field(default=None, max_length=160)
+    result_reference: str | None = Field(default=None, max_length=256)
+    effect_boundary_crossed: bool | None = None
+    original_error_type: str | None = Field(default=None, max_length=160)
 
 
 class ToolError(StrictModel):
@@ -70,6 +75,27 @@ class ToolResponse(StrictModel):
     status: Literal["ok"] = "ok"
     summary: str = Field(min_length=1, max_length=500)
     error: None = None
+
+
+class OutcomeReceiptEvidence(StrictModel):
+    """Authoritative durable outcome identity for one mutating call."""
+
+    operation_id: str = Field(pattern=r"^op-[0-9a-f]{24}$")
+    receipt_id: str = Field(pattern=r"^receipt-[0-9a-f]{24}$")
+    state: Literal[
+        "accepted",
+        "applying",
+        "applied_unvalidated",
+        "applied_validated",
+        "rolled_back",
+        "failed_before_effect",
+        "failed_after_effect",
+        "unknown",
+    ]
+    result_reference: str | None = Field(default=None, max_length=256)
+    effect_boundary_crossed: bool
+    pre_identity: dict[str, str] = Field(default_factory=dict, max_length=20)
+    post_identity: dict[str, str] = Field(default_factory=dict, max_length=20)
 
 
 class ToolFailure(StrictModel):

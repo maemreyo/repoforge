@@ -21,6 +21,7 @@ from ..ports import (
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
+    EffectReceiptStore,
     ExecutableLocator,
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
@@ -249,6 +250,7 @@ class ApplicationContext:
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
     execution_receipts: ExecutionReceiptStore | None = None
+    effect_receipts: EffectReceiptStore | None = None
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
 

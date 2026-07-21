@@ -21,6 +21,11 @@ from pydantic import BaseModel
 
 from ... import __version__
 from ...application.config_admin import ConfigAdminService
+from ...application.outcome_context import (
+    begin_outcome_capture,
+    current_outcome,
+    reset_outcome_capture,
+)
 from ...application.read_batch import FileReadRequest
 from ...application.retrieval import SearchMode as ApplicationSearchMode
 from ...application.runtime.hot_reload import AtomicServiceRouter
@@ -325,6 +330,19 @@ def _raise_structured_error(
             list(envelope.unchanged_state) or ["No unreported state transition was committed."]
         )[:20]
     )
+    public_details: dict[str, object] = {"correlation_id": correlation_id}
+    for field, limit in (
+        ("operation_id", 160),
+        ("receipt_id", 160),
+        ("result_reference", 256),
+        ("original_error_type", 160),
+    ):
+        value = envelope.details.get(field)
+        if isinstance(value, str) and value:
+            public_details[field] = _bounded(value, limit)
+    boundary_crossed = envelope.details.get("effect_boundary_crossed")
+    if isinstance(boundary_crossed, bool):
+        public_details["effect_boundary_crossed"] = boundary_crossed
     # This is the same {status, summary, error: ToolError} shape every one of
     # the 28 tools' own output model inherits from ToolResponse -- a client
     # can validate an error response against the shared base contract, not
@@ -339,7 +357,7 @@ def _raise_structured_error(
             "why": _bounded(envelope.why),
             "retryable": envelope.retryable,
             "safe_next_action": _bounded(envelope.safe_next_action),
-            "details": {"correlation_id": correlation_id},
+            "details": public_details,
             "unchanged_state": unchanged_state,
             "automatic_retry_allowed": automatic_retry_allowed(
                 operation_name,
@@ -397,12 +415,16 @@ class _ServiceErrorBoundary:
 
     def call(self, name: str, **kwargs: Any) -> dict[str, Any]:
         has_idempotency_key = bool(kwargs.get("idempotency_key"))
+        outcome_token = begin_outcome_capture()
         try:
             with self._selected_service() as service:
                 target = getattr(service, name)
                 result = target(**kwargs)
             if not isinstance(result, dict):
                 raise TypeError("MCP service operation must return an object")
+            outcome = current_outcome()
+            if outcome is not None:
+                result["outcome"] = outcome.payload()
             return result
         except Exception as exc:
             _raise_structured_error(
@@ -410,6 +432,8 @@ class _ServiceErrorBoundary:
                 exc,
                 has_idempotency_key=has_idempotency_key,
             )
+        finally:
+            reset_outcome_capture(outcome_token)
 
 
 class _UnavailableConfigAdmin:

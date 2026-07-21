@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ...domain.errors import ErrorCode, RepoForgeError
-from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
+from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState, OperationTask
 from .manager import OperationManager
+
+RunningLivenessProbe = Callable[[OperationTask], bool | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +35,15 @@ def recover_operations(
     *,
     now: str,
     retention_seconds: int = 7 * 24 * 60 * 60,
+    running_stale_seconds: int = 0,
     resumable_kinds: frozenset[str] = frozenset(),
+    running_liveness: RunningLivenessProbe | None = None,
 ) -> OperationRecoveryReport:
     """Expire due work, orphan unrecoverable running work, and prune old terminals."""
     if retention_seconds < 0:
         raise ValueError("retention_seconds must be non-negative")
+    if running_stale_seconds < 0:
+        raise ValueError("running_stale_seconds must be non-negative")
     now_dt = _timestamp(now)
     page = manager.list_records(max_records=2_000)
     orphaned = 0
@@ -44,6 +51,7 @@ def recover_operations(
     deleted = 0
     conflicts = 0
     cutoff = now_dt - timedelta(seconds=retention_seconds)
+    running_cutoff = now_dt - timedelta(seconds=running_stale_seconds)
 
     for task in page.records:
         try:
@@ -57,8 +65,16 @@ def recover_operations(
                 expired += 1
                 continue
             if task.state is OperationState.RUNNING and task.kind not in resumable_kinds:
-                manager.orphan(task.operation_id, now=now)
-                orphaned += 1
+                liveness = running_liveness(task) if running_liveness is not None else None
+                if liveness is True:
+                    continue
+                if (
+                    liveness is False
+                    or running_stale_seconds == 0
+                    or _timestamp(task.updated_at) <= running_cutoff
+                ):
+                    manager.orphan(task.operation_id, now=now)
+                    orphaned += 1
         except RepoForgeError as exc:
             if exc.code is ErrorCode.OPERATION_STALE:
                 conflicts += 1

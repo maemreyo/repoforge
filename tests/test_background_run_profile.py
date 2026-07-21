@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment
 
+import repoforge.application.workspace.run_profile as run_profile_module
 from repoforge.application.service import CodingService
 from repoforge.application.workspace.run_adhoc import (
     _safe_error_message as _safe_adhoc_error_message,
@@ -411,7 +412,9 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
 def test_background_profile_emits_observable_per_step_progress(
     forge_env: ForgeEnvironment,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(run_profile_module, "_PROGRESS_HEARTBEAT_SECONDS", 0.05)
     release = tmp_path / "release-progress-step"
     _add_progress_profile(forge_env, release)
     service = _reload_service(forge_env)
@@ -441,6 +444,16 @@ def test_background_profile_emits_observable_per_step_progress(
 
     observed = _poll(second_step_running)
     assert observed["updated_at"] != observed["created_at"]
+    first_step_update = observed["updated_at"]
+
+    def same_step_heartbeat() -> dict[str, object] | None:
+        status = second_step_running()
+        if status is not None and status["updated_at"] != first_step_update:
+            return status
+        return None
+
+    heartbeat = _poll(same_step_heartbeat)
+    assert heartbeat["progress"] == observed["progress"]
 
     release.write_text("continue\n", encoding="utf-8")
 

@@ -8,6 +8,7 @@ from .clock import Clock
 from .code_intelligence import CodeIntelligenceProvider
 from .command import CommandExecutor, CommandResult
 from .configuration import ConfigurationStore
+from .effect_receipt_store import EffectReceiptStore
 from .execution_environment import (
     ApprovedExecution,
     ArtifactResult,
@@ -100,6 +101,7 @@ __all__ = [
     "CommandResult",
     "ConfigurationStore",
     "DiscoveryRequest",
+    "EffectReceiptStore",
     "EnvironmentInspection",
     "EnvironmentPreflight",
     "ExecutableLocator",

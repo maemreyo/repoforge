@@ -620,6 +620,27 @@ def test_restart_recovery_orphans_running_expires_due_and_prunes_old_terminal(
     assert restarted.operation_status(running.operation_id)["state"] == "orphaned"
 
 
+def test_restart_recovery_uses_direct_liveness_before_stale_age(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    alive = manager.create(kind="workspace_run_profile", phase="running", cancel_supported=True)
+    alive = manager.start(alive.operation_id)
+    dead = manager.create(kind="workspace_run_profile", phase="running", cancel_supported=True)
+    dead = manager.start(dead.operation_id)
+
+    report = recover_operations(
+        manager,
+        now=dead.updated_at,
+        running_stale_seconds=900,
+        running_liveness=lambda task: task.operation_id == alive.operation_id,
+    )
+
+    assert report.orphaned == 1
+    assert manager.status(alive.operation_id).state is OperationState.RUNNING
+    assert manager.status(dead.operation_id).state is OperationState.ORPHANED
+
+
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
     audit_path = root / "state" / "audit.jsonl"
     events = [

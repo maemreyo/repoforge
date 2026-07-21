@@ -1,4 +1,5 @@
 from .json_approval_store import JsonApprovalPayloadStore, JsonApprovalStore
+from .json_effect_receipt_store import JsonEffectReceiptStore
 from .json_execution_plan_store import JsonExecutionPlanAcceptanceStore, JsonExecutionPlanStore
 from .json_execution_receipt_store import JsonExecutionReceiptStore
 from .json_external_mutation_ledger import JsonExternalMutationLedger
@@ -18,6 +19,7 @@ from .json_workspace_store import JsonWorkspaceStore
 __all__ = [
     "JsonApprovalPayloadStore",
     "JsonApprovalStore",
+    "JsonEffectReceiptStore",
     "JsonExecutionPlanAcceptanceStore",
     "JsonExecutionPlanStore",
     "JsonExecutionReceiptStore",

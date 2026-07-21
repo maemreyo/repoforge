@@ -9,6 +9,7 @@ from ...domain.policy import slugify, validate_branch
 from ...domain.workspace import WorkspaceRecord, normalize_issue_ids
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
+from ..idempotency import IdempotencyEffectBoundary
 from .removal_safety import build_stale_workspaces_nudge
 
 
@@ -67,6 +68,7 @@ class WorkspaceCreator:
             if repo.read_only
             else "Inspect files, make changes, run a verification profile, then review the diff."
         )
+        boundary = IdempotencyEffectBoundary()
 
         def reconcile() -> WorkspaceCreateResult | None:
             if key_hash is None:
@@ -116,6 +118,7 @@ class WorkspaceCreator:
                         "The source repository and existing registered workspaces remain unchanged.",
                     ),
                 )
+            boundary.begin()
             head = self.ctx.git.create_worktree(repo, destination, branch, base)
             metadata: dict[str, object] = {
                 "repository_policy_snapshot": repository_policy_snapshot(repo),
@@ -144,6 +147,7 @@ class WorkspaceCreator:
                     raise WorkspaceError(
                         f"Workspace registry save failed and compensation failed: {cleanup_exc}"
                     ) from exc
+                boundary.rollback()
                 raise
             return WorkspaceCreateResult(
                 workspace_id,
@@ -178,6 +182,7 @@ class WorkspaceCreator:
                 },
                 serialize=to_data,
                 deserialize=lambda value: WorkspaceCreateResult(**value),
+                effect_boundary=boundary,
             ),
         )
         # Computed fresh on every call (even an idempotent cache hit) since workspace

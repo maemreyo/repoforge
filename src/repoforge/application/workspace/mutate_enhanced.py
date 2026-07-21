@@ -8,15 +8,17 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.filesystem_transaction import (
     CreateFile,
     DeleteFile,
     MoveFile,
+    SimulatedTransactionCrash,
     TransactionAction,
     TransactionPlan,
+    TransactionRecoveryError,
     WriteFile,
 )
 from ...domain.operations import hash_idempotency_key, request_fingerprint
@@ -34,6 +36,8 @@ from ..context import ApplicationContext
 from ..dto import to_data
 from ..file_transactions import open_file_transaction
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
+from ..idempotency import IdempotencyEffectBoundary
+from ..outcome_receipts import execute_with_outcome_receipt
 from ..syntax_diagnostics import SyntaxDiagnosticAnalyzer
 from . import mutate as baseline_mutate
 
@@ -507,6 +511,14 @@ class WorkspaceMutator:
             "ops": list(op_names),
             "dry_run": command.dry_run,
         }
+        boundary = IdempotencyEffectBoundary()
+        outcome_request = {
+            "workspace_id": command.workspace_id,
+            "operations": to_data(operations),
+            "expected_workspace_fingerprint": command.expected_workspace_fingerprint,
+            "dry_run": command.dry_run,
+            "idempotency_key": command.idempotency_key,
+        }
         key_hash: str | None = None
         request_digest: str | None = None
         receipt_name: str | None = None
@@ -720,17 +732,24 @@ class WorkspaceMutator:
                         ),
                     )
 
-                receipt = engine.commit(
-                    TransactionPlan(actions),
-                    precommit_validator=validate_budget,
-                    commit_receipt_factory=(
-                        commit_receipt_factory
-                        if key_hash is not None
-                        and request_digest is not None
-                        and receipt_name is not None
-                        else None
-                    ),
-                )
+                boundary.begin()
+                try:
+                    receipt = engine.commit(
+                        TransactionPlan(actions),
+                        precommit_validator=validate_budget,
+                        commit_receipt_factory=(
+                            commit_receipt_factory
+                            if key_hash is not None
+                            and request_digest is not None
+                            and receipt_name is not None
+                            else None
+                        ),
+                    )
+                except (SimulatedTransactionCrash, TransactionRecoveryError):
+                    raise
+                except Exception:
+                    boundary.rollback()
+                    raise
                 if committed_result is None:
                     after = prime_fingerprint(
                         self.ctx.fingerprint_cache,
@@ -758,7 +777,21 @@ class WorkspaceMutator:
                 self.ctx.store.save(record)
                 return committed_result
 
-        return self.ctx.audited("workspace_mutate", audit_details, run)
+        if command.dry_run:
+            return self.ctx.audited("workspace_mutate", audit_details, run)
+        return cast(
+            WorkspaceMutateResult,
+            execute_with_outcome_receipt(
+                self.ctx,
+                "workspace_mutate",
+                outcome_request,
+                run,
+                details=audit_details,
+                serialize=to_data,
+                effect_boundary=boundary,
+                deferred_exceptions=(SimulatedTransactionCrash, TransactionRecoveryError),
+            ),
+        )
 
     def _persist_receipt_only(
         self,

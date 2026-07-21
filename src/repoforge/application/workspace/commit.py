@@ -1,5 +1,5 @@
 import contextlib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from ...config import RepositoryConfig
@@ -8,6 +8,8 @@ from ...domain.errors import CommandError, ErrorCode, WorkspaceError
 from ...domain.publishing import validate_commit_message
 from ..context import ApplicationContext
 from ..execution.requests import profile_execution_request
+from ..idempotency import IdempotencyEffectBoundary
+from ..outcome_receipts import execute_with_outcome_receipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +54,7 @@ class WorkspaceCommitter:
             "workspace_id": c.workspace_id,
             "message_length": len(message),
         }
+        boundary = IdempotencyEffectBoundary()
 
         def op() -> WorkspaceCommitResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -162,6 +165,7 @@ class WorkspaceCommitter:
                         head = current_head
                         show = self.ctx.git.commit_summary(path)
                     else:
+                        boundary.begin()
                         head, show = self.ctx.git.commit(path, message)
                 except CommandError as exc:
                     after_paths: list[str] = []
@@ -174,6 +178,8 @@ class WorkspaceCommitter:
                         after_fingerprint is not None
                         and after_fingerprint != before_commit_fingerprint
                     )
+                    if boundary.started and not tree_mutated:
+                        boundary.rollback()
                     verification_invalidated = False
                     if tree_mutated and fresh.last_verification is not None:
                         fresh.last_verification = None
@@ -211,13 +217,9 @@ class WorkspaceCommitter:
                     )
                 fresh.metadata.pop("refresh_commit_sha", None)
                 fresh.last_verification = None
-                try:
-                    self.ctx.store.save(fresh)
-                except Exception as exc:
-                    raise WorkspaceError(
-                        f"Commit {head} succeeded but workspace registry update failed; do not push until state is repaired"
-                    ) from exc
-                return WorkspaceCommitResult(
+                if not boundary.started:
+                    boundary.begin()
+                authoritative_result = WorkspaceCommitResult(
                     summary=(
                         f"Committed workspace changes at {head}"
                         if committed
@@ -234,9 +236,21 @@ class WorkspaceCommitter:
                     change_metrics=metrics,
                     command_source_paths_committed=command_source_paths_committed,
                 )
+                boundary.record_result(authoritative_result)
+                try:
+                    self.ctx.store.save(fresh)
+                except Exception as exc:
+                    raise WorkspaceError(
+                        f"Commit {head} succeeded but workspace registry update failed; do not push until state is repaired"
+                    ) from exc
+                return authoritative_result
 
-        return self.ctx.audited(
+        return execute_with_outcome_receipt(
+            self.ctx,
             "workspace_commit",
-            audit_details,
+            asdict(c),
             op,
+            details=audit_details,
+            serialize=asdict,
+            effect_boundary=boundary,
         )

@@ -32,6 +32,8 @@ from ...domain.workspace import (
 from ..context import ApplicationContext
 from ..file_transactions import open_file_transaction
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
+from ..idempotency import IdempotencyEffectBoundary
+from ..outcome_receipts import execute_with_outcome_receipt
 from .base_status import collect_workspace_base_status
 
 _PLAN_TOKEN = re.compile(
@@ -292,6 +294,13 @@ class WorkspaceRefreshV2:
             / command.workspace_id
             / "manifest.json"
         ).is_file()
+        boundary = IdempotencyEffectBoundary()
+        audit_details = {
+            "workspace_id": command.workspace_id,
+            "action": command.action,
+            "resolution_count": len(command.resolutions),
+            "recovery_pending": recovery_pending,
+        }
 
         def operation() -> WorkspaceRefreshV2Result:
             with self.ctx.locks.lock(command.workspace_id):
@@ -301,6 +310,8 @@ class WorkspaceRefreshV2:
                     workspace,
                     fault_injector=self._fault_injector,
                 )
+                if recovery_pending:
+                    boundary.begin()
                 journal.recover_pending()
                 record = self.ctx.store.load(command.workspace_id)
                 repo = self.ctx.repository_for_workspace(record)
@@ -355,6 +366,7 @@ class WorkspaceRefreshV2:
                 original_record = replace(record, metadata=dict(record.metadata))
                 transaction_id = journal.prepare(record, head, plan.target_base_sha)
                 try:
+                    boundary.begin()
                     merged = self.ctx.git.begin_merge_no_ff(workspace, repo, plan.target_base_sha)
                     journal.checkpoint("after_merge_started")
                     if merged.status == "current":
@@ -454,6 +466,7 @@ class WorkspaceRefreshV2:
                             retryable=False,
                             safe_next_action="Inspect the isolated workspace and private refresh journal.",
                         ) from rollback_exc
+                    boundary.rollback()
                     # Preserve the in-memory object for injected stores that retain references.
                     record.metadata.clear()
                     record.metadata.update(original_record.metadata)
@@ -465,16 +478,16 @@ class WorkspaceRefreshV2:
                         retryable=True,
                     ) from primary
 
-        return self.ctx.audited(
+        if command.action != "apply" and not recovery_pending:
+            return self.ctx.audited("workspace_refresh", audit_details, operation)
+        return execute_with_outcome_receipt(
+            self.ctx,
             "workspace_refresh",
-            {
-                "workspace_id": command.workspace_id,
-                "action": command.action,
-                "resolution_count": len(command.resolutions),
-                "recovery_pending": recovery_pending,
-            },
+            asdict(command),
             operation,
-            mutating=command.action == "apply" or recovery_pending,
+            details=audit_details,
+            serialize=asdict,
+            effect_boundary=boundary,
         )
 
     def _plan(
