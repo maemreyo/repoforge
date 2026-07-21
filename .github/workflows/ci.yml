@@ -13,6 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Full-suite-with-coverage, package build, and wheel-install verification are the
+  # authoritative production-gate.yml workflow's job (across the full Python/OS matrix);
+  # this workflow stays focused on the fastest possible lint/type feedback for a PR so
+  # the two workflows don't both run a full pytest+coverage pass on every push.
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -28,32 +32,3 @@ jobs:
       - run: uv run ruff format --check src tests
       - run: uv run ruff check src tests
       - run: uv run mypy --strict src/repoforge
-
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.10", "3.11", "3.12", "3.13"]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: uv sync --extra dev --locked
-      - run: uv run pytest --cov=repoforge --cov-report=term-missing --cov-report=xml
-
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: uv build

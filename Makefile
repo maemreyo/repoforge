@@ -12,7 +12,8 @@ export
 endif
 
 .PHONY: default start dev-server restart status stop logs doctor
-.PHONY: setup schemas lint typecheck test test-fast v2-gates build check install release
+.PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check
+.PHONY: v2-gates build check install release
 .PHONY: smoke clean
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
 
@@ -28,6 +29,8 @@ help:  # Show available commands without changing local or runtime state
 	  '  make typecheck         Run strict Mypy' \
 	  '  make test              Run tests with coverage' \
 	  '  make test-fast         Run tests in parallel (3 workers), no coverage' \
+	  '  make test-affected     Run only test groups affected by changed paths (fails closed to full suite)' \
+	  '  make test-groups-check Verify every test file is mapped by tests/test-groups.toml' \
 	  '  make v2-gates          Run frozen Forge v2 release corpora' \
 	  '  make check             Run the full dirty-tree production gate' \
 	  '  make production-check  Run the clean-tree production gate' \
@@ -65,6 +68,12 @@ test-fast:  # Run the complete suite in parallel without coverage, for fast loca
 	# fastest and the only worker count that stayed stable (-n 4 crashed a
 	# worker and produced contention-flaky failures in shared-cache tests).
 	uv run --extra dev pytest -n 3
+
+test-affected:  # Run only the module-aware test groups affected by changed paths against REPOFORGE_TEST_AFFECTED_BASE (default: main); escalates to the full suite when any changed path is unmapped
+	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}"
+
+test-groups-check:  # Verify tests/test-groups.toml maps every test file to exactly one group
+	uv run --extra dev python scripts/select_affected_tests.py --check-completeness
 
 v2-gates:  # Execute frozen mutation, patch, bug-routing, read, and provider-recall corpora
 	@set -eu; \
