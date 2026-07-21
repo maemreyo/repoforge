@@ -83,15 +83,21 @@ in-process implementation (via `pygit2`/libgit2, or a batched `git cat-file`/
 - Scope is bounded (5 methods, not 60). New dependency (`pygit2`) is the main
   cost; evaluate against the existing "no heavy deps" stance.
 
-### C. In-operation identity memoization (smaller, safe, partial)
+### C. In-operation identity memoization — INVESTIGATED, REJECTED (unsafe)
 
-Within a single `mutating=False` assessment, `fingerprint`/`head_sha` are
-recomputed 4–6× on the same unchanged path. A request-scoped cache keyed by
-`(path, head_sha)`, valid only for the duration of one read-only operation, is
-correctness-preserving (a read-only op cannot mutate the workspace mid-call) and
-cuts a real fraction of spawns in prod and tests. Risk: cache-invalidation bugs
-feeding a stale identity into a currency/commit-gate decision — must be scoped
-tightly and validated against the full suite. Lower ceiling than B, lower effort.
+Spiked 2026-07-22. The premise was that `fingerprint`/`head_sha`, recomputed
+4–6× per assessment on the same path, are redundant and cacheable. **They are
+not redundant — they are a deliberate drift guard.** `WorkspaceAssessment._assert_current`
+(assessment.py:95) re-reads `head_sha` + `fingerprint` and raises
+`STALE_ASSESSMENT_SNAPSHOT` if they changed; it is called after **every** evidence
+component (`_collect`, plus inline after code-intelligence), specifically to
+detect a workspace that mutates mid-assessment while partial evidence is being
+collected (code-intelligence `STALE` is even re-mapped to `STALE_ASSESSMENT_SNAPSHOT`
+at assessment.py:317). Memoizing the reads makes `_assert_current` compare
+cached==cached — a tautology that silently disables concurrent-mutation
+detection in a path feeding currency/commit-gate decisions. Reducing the
+guard's frequency (once-at-end) is also unsafe: per-component checks validate
+each kept component in the partial-result path. **Do not pursue C.**
 
 ### D. Layered testing (largest, structural)
 
@@ -102,10 +108,20 @@ architecture. Only worth it if B/C prove insufficient.
 
 ## Recommended path
 
-1. **Spike C first** (in-operation identity memoization) — smallest, safest,
-   measurable; if it lands enough of the win, stop there.
-2. If more is needed, **do B** (in-process hot read methods + contract test).
-3. Treat A and D as out of scope unless B+C are proven insufficient.
+Revised after the C spike (2026-07-22): **B is safer than C**, reversing the
+original ordering. C changes control flow in a safety-critical drift guard; B
+leaves all control flow untouched and only swaps the *implementation* of pure
+read methods, guaranteed equivalent by a contract test.
+
+1. **B** (in-process hot read methods behind a contract test) is now the only
+   recommended technical lever. Reimplement just `fingerprint`, `head_sha`,
+   `changed_paths`, `status_porcelain*`, `untracked_paths` in-process (pygit2 or
+   batched git), gated by a contract test asserting byte-equivalence to
+   `GitCliRepository`. Decide the `pygit2` dependency question first.
+2. C is rejected (see above). A and D remain out of scope.
+3. If B's cost/dependency is unacceptable, the practical stance is to **stop**:
+   the inner loop (`test-affected`) is already <1 min for the common case and
+   the full suite (~5:21) is an acceptable pre-push gate.
 
 Each increment must: keep the full suite green, ship its contract/regression
 test, and be independently revertable. No half-built fake left in the tree.
