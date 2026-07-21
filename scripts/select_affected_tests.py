@@ -1,27 +1,47 @@
 #!/usr/bin/env python3
 """Select the pytest files affected by the current change set.
 
-Consumes the checked-in capability-group manifest at ``tests/test-groups.toml``
-to map changed source paths to test groups. Any source path that is not
-mapped by exactly the manifest, or any of a small always-wide set of files
-that affect verification/build itself, forces the selection to escalate to
-the full suite: this tool never silently narrows a run it cannot justify.
+Two selection strategies, in order of precision:
+
+1. Coverage map (``tests/coverage-map.json``, built by ``build_coverage_map.py``
+   / ``make test-map``): maps each ``src/repoforge/**.py`` module to the exact
+   test files that execute its function bodies. A changed module selects only
+   those tests. This is the default when the map is present.
+2. Capability groups (``tests/test-groups.toml``): coarser source-glob -> group
+   mapping, used for non-package paths (docs, data) and as the whole-selector
+   fallback when the coverage map is absent.
+
+Both strategies fail closed: an always-wide path (build/verification config), a
+package module missing from the coverage map (new/uncovered), or any path with
+no mapping at all escalates to the full suite -- this tool never silently
+narrows a run it cannot justify. Safety does not depend on the map being fresh:
+the authoritative gate (production-gate.yml) runs the full suite regardless, so
+a stale map can only make a *local* ``test-affected`` run less precise, never
+let a real failure through. Regenerate with ``make test-map`` after material
+source/test changes.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli as tomllib
 
 DEFAULT_MANIFEST = Path("tests/test-groups.toml")
 DEFAULT_TESTS_DIR = Path("tests")
+DEFAULT_COVERAGE_MAP = Path("tests/coverage-map.json")
+
+# Source paths that are Python modules under the package: a change here should
+# be selectable through the coverage map. One that is NOT in the map is a new or
+# uncovered module whose blast radius is unknown -> fail closed to the full suite.
+_PACKAGE_SRC_PREFIX = "src/repoforge/"
 
 # Changes to these paths affect verification/build/selection itself and can
 # invalidate any group mapping, so they always force a full-suite run rather
@@ -68,6 +88,10 @@ class Manifest:
     groups: tuple[Group, ...]
     safety_bundle: tuple[str, ...]
     conftest_consumers: tuple[str, ...]
+    # src/repoforge/<file>.py -> test files that execute it (from coverage).
+    # Empty when tests/coverage-map.json is absent; selection then falls back
+    # to group source_globs.
+    coverage_map: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def group_by_name(self, name: str) -> Group:
         for group in self.groups:
@@ -144,9 +168,34 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> Manifest:
         )
     safety_bundle = tuple(raw.get("safety_bundle", {}).get("test_files", []))
     conftest_consumers = tuple(raw.get("conftest_consumers", {}).get("test_files", []))
+    coverage_map = _load_coverage_map(path.parent / DEFAULT_COVERAGE_MAP.name)
     return Manifest(
-        groups=tuple(groups), safety_bundle=safety_bundle, conftest_consumers=conftest_consumers
+        groups=tuple(groups),
+        safety_bundle=safety_bundle,
+        conftest_consumers=conftest_consumers,
+        coverage_map=coverage_map,
     )
+
+
+def _load_coverage_map(path: Path) -> dict[str, tuple[str, ...]]:
+    """Load the source->test coverage map, or {} when it is absent/invalid.
+
+    Absent map degrades gracefully to group-based selection, so the selector
+    keeps working before the first `make test-map` and if the file is corrupt.
+    """
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(src): tuple(str(t) for t in tests)
+        for src, tests in raw.items()
+        if isinstance(tests, list)
+    }
 
 
 def _actual_conftest_consumers(tests_dir: Path) -> set[str]:
@@ -210,7 +259,35 @@ def check_completeness(manifest: Manifest, tests_dir: Path = DEFAULT_TESTS_DIR) 
         if test_file not in on_disk:
             violations.append(f"safety bundle references {test_file!r}, which does not exist")
 
+    # Coverage map (when present) must not reference deleted/renamed test files:
+    # a stale entry would silently select nothing for that source file.
+    mapped_tests = {test_file for tests in manifest.coverage_map.values() for test_file in tests}
+    for test_file in sorted(mapped_tests - on_disk):
+        violations.append(
+            f"coverage map references {test_file!r}, which does not exist "
+            "(regenerate with `make test-map`)"
+        )
+
     return violations
+
+
+def _escalated_selection(
+    manifest: Manifest, reasons: Sequence[str], escalation_reason: str
+) -> Selection:
+    """Full-suite fallback used whenever a change's blast radius is unknown."""
+    all_files = sorted(
+        {test_file for group in manifest.groups for test_file in group.test_files}
+        | set(manifest.safety_bundle)
+        | set(manifest.conftest_consumers)
+    )
+    return Selection(
+        selected_groups=tuple(group.name for group in manifest.groups),
+        selected_files=tuple(all_files),
+        omitted_groups=(),
+        reasons=tuple(reasons),
+        escalated_to_wide=True,
+        escalation_reason=escalation_reason,
+    )
 
 
 def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> Selection:
@@ -232,20 +309,81 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
 
     for path in remaining_paths:
         if _matches_any(path, ALWAYS_WIDE_GLOBS):
-            all_files = sorted(
-                {test_file for group in manifest.groups for test_file in group.test_files}
-                | set(manifest.safety_bundle)
-                | set(manifest.conftest_consumers)
-            )
-            return Selection(
-                selected_groups=tuple(group.name for group in manifest.groups),
-                selected_files=tuple(all_files),
-                omitted_groups=(),
+            return _escalated_selection(
+                manifest,
                 reasons=(f"{path!r} matches an always-wide path",),
-                escalated_to_wide=True,
                 escalation_reason=f"changed path {path!r} affects verification/build itself",
             )
 
+    # Prefer the coverage map (precise, per-file blast radius) when it exists;
+    # otherwise fall back to the coarser group source_globs mapping.
+    if manifest.coverage_map:
+        return _select_via_coverage(manifest, remaining_paths, conftest_changed)
+    return _select_via_groups(manifest, remaining_paths, conftest_changed)
+
+
+def _select_via_coverage(
+    manifest: Manifest, remaining_paths: list[str], conftest_changed: bool
+) -> Selection:
+    """Select the exact test files that execute each changed source module.
+
+    A changed test file runs itself. A package module (src/repoforge/**.py) not
+    present in the coverage map is new or uncovered -- its blast radius is
+    unknown, so we fail closed to the full suite. Non-package or non-.py paths
+    (docs, data) fall back to the group source_globs.
+    """
+    selected_files: set[str] = set(manifest.safety_bundle)
+    reasons: list[str] = []
+    unmapped: list[str] = []
+
+    for path in remaining_paths:
+        if path.startswith("tests/") and path.endswith(".py"):
+            selected_files.add(path)
+            reasons.append(f"{path!r} -> itself (changed test)")
+        elif path.startswith(_PACKAGE_SRC_PREFIX) and path.endswith(".py"):
+            covering = manifest.coverage_map.get(path)
+            if covering is None:
+                unmapped.append(path)
+            else:
+                selected_files.update(covering)
+                reasons.append(f"{path!r} -> {len(covering)} covering test file(s)")
+        else:
+            matched = False
+            for group in manifest.groups:
+                if _matches_any(path, group.source_globs):
+                    matched = True
+                    selected_files.update(group.test_files)
+                    reasons.append(f"{path!r} -> {group.name!r}")
+            if not matched:
+                unmapped.append(path)
+
+    if unmapped:
+        return _escalated_selection(
+            manifest,
+            reasons=sorted(reasons),
+            escalation_reason=(
+                "changed paths with no coverage/group mapping (fail-closed): "
+                + ", ".join(sorted(unmapped))
+            ),
+        )
+
+    if conftest_changed:
+        selected_files.update(manifest.conftest_consumers)
+        reasons.append(f"{CONFTEST_PATH!r} -> 'conftest_consumers'")
+
+    return Selection(
+        selected_groups=(),
+        selected_files=tuple(sorted(selected_files)),
+        omitted_groups=(),
+        reasons=tuple(sorted(reasons)),
+        escalated_to_wide=False,
+        escalation_reason=None,
+    )
+
+
+def _select_via_groups(
+    manifest: Manifest, remaining_paths: list[str], conftest_changed: bool
+) -> Selection:
     matched_group_names: set[str] = set()
     reasons: list[str] = []
     unmapped: list[str] = []
@@ -261,17 +399,9 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
     reasons.sort()
 
     if unmapped:
-        all_files = sorted(
-            {test_file for group in manifest.groups for test_file in group.test_files}
-            | set(manifest.safety_bundle)
-            | set(manifest.conftest_consumers)
-        )
-        return Selection(
-            selected_groups=tuple(group.name for group in manifest.groups),
-            selected_files=tuple(all_files),
-            omitted_groups=(),
-            reasons=tuple(reasons),
-            escalated_to_wide=True,
+        return _escalated_selection(
+            manifest,
+            reasons=reasons,
             escalation_reason=(
                 "changed paths with no matching group (fail-closed): " + ", ".join(sorted(unmapped))
             ),
@@ -301,17 +431,9 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
 
 def _all_files_selection(manifest: Manifest) -> Selection:
     """Select every test file, as if every always-wide path had changed."""
-    all_files = sorted(
-        {test_file for group in manifest.groups for test_file in group.test_files}
-        | set(manifest.safety_bundle)
-        | set(manifest.conftest_consumers)
-    )
-    return Selection(
-        selected_groups=tuple(group.name for group in manifest.groups),
-        selected_files=tuple(all_files),
-        omitted_groups=(),
+    return _escalated_selection(
+        manifest,
         reasons=("--full requested",),
-        escalated_to_wide=True,
         escalation_reason="--full requested: running every test file",
     )
 

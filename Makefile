@@ -12,7 +12,7 @@ export
 endif
 
 .PHONY: default start dev-server restart status stop logs doctor
-.PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check
+.PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check test-map
 .PHONY: v2-gates build check install release
 .PHONY: smoke clean
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
@@ -31,6 +31,7 @@ help:  # Show available commands without changing local or runtime state
 	  '  make test-fast         Run tests in parallel (3 workers), no coverage' \
 	  '  make test-affected     Run only test groups affected by changed paths (fails closed to full suite)' \
 	  '  make test-groups-check Verify every test file is mapped by tests/test-groups.toml' \
+	  '  make test-map          Regenerate the coverage map that powers precise test-affected selection' \
 	  '  make v2-gates          Run frozen Forge v2 release corpora' \
 	  '  make check             Run the full dirty-tree production gate' \
 	  '  make production-check  Run the clean-tree production gate' \
@@ -73,11 +74,14 @@ test-fast:  # Run the complete suite in parallel without coverage, for fast loca
 	# failures under load even at -n 3.
 	uv run --extra dev python scripts/select_affected_tests.py --full --run
 
-test-affected:  # Run only the module-aware test groups affected by changed paths against REPOFORGE_TEST_AFFECTED_BASE (default: main); escalates to the full suite when any changed path is unmapped
+test-affected:  # Run only the tests affected by changed paths (coverage-map precise, group fallback) vs REPOFORGE_TEST_AFFECTED_BASE (default: main); fails closed to the full suite when any changed path is unmapped
 	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}"
 
 test-groups-check:  # Verify tests/test-groups.toml maps every test file to exactly one group
 	uv run --extra dev python scripts/select_affected_tests.py --check-completeness
+
+test-map:  # Regenerate tests/coverage-map.json (source-file -> covering-test-file) for precise test-affected selection
+	uv run --extra dev python scripts/build_coverage_map.py
 
 v2-gates:  # Execute frozen mutation, patch, bug-routing, read, and provider-recall corpora
 	@set -eu; \

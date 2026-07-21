@@ -42,9 +42,13 @@ def _manifest(
     groups: tuple[Any, ...],
     safety_bundle: tuple[str, ...] = (),
     conftest_consumers: tuple[str, ...] = (),
+    coverage_map: dict[str, tuple[str, ...]] | None = None,
 ) -> Any:
     return selector.Manifest(
-        groups=groups, safety_bundle=safety_bundle, conftest_consumers=conftest_consumers
+        groups=groups,
+        safety_bundle=safety_bundle,
+        conftest_consumers=conftest_consumers,
+        coverage_map=coverage_map or {},
     )
 
 
@@ -186,3 +190,114 @@ def test_no_changed_paths_runs_only_the_safety_bundle() -> None:
 
     assert selection.selected_files == ("tests/test_safety_smoke.py",)
     assert selection.escalated_to_wide is False
+
+
+def _coverage_manifest() -> Any:
+    return _manifest(
+        groups=(
+            _group(
+                "core",
+                source_globs=("src/repoforge/**", "docs/**"),
+                test_files=("tests/test_a.py", "tests/test_b.py", "tests/test_c.py"),
+            ),
+        ),
+        safety_bundle=("tests/test_smoke.py",),
+        conftest_consumers=("tests/test_a.py", "tests/test_b.py"),
+        coverage_map={
+            "src/repoforge/application/workspace/commit.py": ("tests/test_a.py", "tests/test_b.py"),
+            "src/repoforge/adapters/git/cli.py": ("tests/test_a.py", "tests/test_c.py"),
+        },
+    )
+
+
+def test_coverage_map_selects_only_covering_tests_plus_safety_bundle() -> None:
+    manifest = _coverage_manifest()
+
+    selection = selector.select_affected_tests(
+        manifest, ["src/repoforge/application/workspace/commit.py"]
+    )
+
+    assert selection.escalated_to_wide is False
+    # Exactly the two covering tests + safety bundle -- not the whole group.
+    assert selection.selected_files == ("tests/test_a.py", "tests/test_b.py", "tests/test_smoke.py")
+
+
+def test_coverage_map_unions_covering_tests_across_changed_files() -> None:
+    manifest = _coverage_manifest()
+
+    selection = selector.select_affected_tests(
+        manifest,
+        [
+            "src/repoforge/application/workspace/commit.py",
+            "src/repoforge/adapters/git/cli.py",
+        ],
+    )
+
+    assert selection.escalated_to_wide is False
+    assert selection.selected_files == (
+        "tests/test_a.py",
+        "tests/test_b.py",
+        "tests/test_c.py",
+        "tests/test_smoke.py",
+    )
+
+
+def test_coverage_map_unmapped_package_module_fails_closed() -> None:
+    manifest = _coverage_manifest()
+
+    selection = selector.select_affected_tests(
+        manifest, ["src/repoforge/application/workspace/brand_new.py"]
+    )
+
+    assert selection.escalated_to_wide is True
+    assert "fail-closed" in (selection.escalation_reason or "")
+
+
+def test_coverage_map_changed_test_file_runs_itself() -> None:
+    manifest = _coverage_manifest()
+
+    selection = selector.select_affected_tests(manifest, ["tests/test_c.py"])
+
+    assert selection.escalated_to_wide is False
+    assert selection.selected_files == ("tests/test_c.py", "tests/test_smoke.py")
+
+
+def test_coverage_map_non_package_path_falls_back_to_group_globs() -> None:
+    manifest = _coverage_manifest()
+
+    selection = selector.select_affected_tests(manifest, ["docs/guide.md"])
+
+    assert selection.escalated_to_wide is False
+    # docs/** matches the 'core' group -> its whole test_files list + safety bundle.
+    assert selection.selected_files == (
+        "tests/test_a.py",
+        "tests/test_b.py",
+        "tests/test_c.py",
+        "tests/test_smoke.py",
+    )
+
+
+def test_coverage_map_always_wide_path_still_escalates() -> None:
+    manifest = _coverage_manifest()
+
+    selection = selector.select_affected_tests(manifest, ["pyproject.toml"])
+
+    assert selection.escalated_to_wide is True
+
+
+def test_coverage_map_conftest_change_adds_consumers() -> None:
+    manifest = _coverage_manifest()
+
+    selection = selector.select_affected_tests(
+        manifest,
+        ["tests/conftest.py", "src/repoforge/adapters/git/cli.py"],
+    )
+
+    assert selection.escalated_to_wide is False
+    # cli.py -> test_a, test_c ; conftest -> consumers (test_a, test_b) ; + safety
+    assert selection.selected_files == (
+        "tests/test_a.py",
+        "tests/test_b.py",
+        "tests/test_c.py",
+        "tests/test_smoke.py",
+    )
