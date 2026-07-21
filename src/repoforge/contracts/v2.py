@@ -607,7 +607,12 @@ class WorkspaceRefreshOutput(ToolResponse):
     workspace_fingerprint: Sha256
     prediction_scope: Literal["committed_head"] = "committed_head"
     apply_blockers: tuple[str, ...] = Field(default=(), max_length=20)
-    conflicts: tuple[RefreshConflictEvidence, ...] = Field(default=(), max_length=100)
+    conflicts: tuple[RefreshConflictEvidence, ...] = Field(default=(), max_length=1100)
+    conflict_scope: Literal["none", "semantic", "generated", "mixed"] = "none"
+    semantic_conflict_count: int = Field(default=0, ge=0, le=100)
+    generated_conflict_count: int = Field(default=0, ge=0, le=1000)
+    semantic_conflict_paths: tuple[RelativePath, ...] = Field(default=(), max_length=100)
+    generated_conflict_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
     warnings: tuple[str, ...] = Field(default=(), max_length=100)
     changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
     verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=1000)

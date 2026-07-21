@@ -440,6 +440,11 @@ def test_v2_generated_conflict_is_tagged_and_resolution_warns(
     assert conflict["kind"] == "generated"
     assert conflict["regeneration_command"] == ["python", "scripts/render_hello.py"]
     assert "do not hand-merge" in conflict["next_action"].lower()
+    assert preview["conflict_scope"] == "generated"
+    assert preview["semantic_conflict_count"] == 0
+    assert preview["generated_conflict_count"] == 1
+    assert preview["semantic_conflict_paths"] == []
+    assert preview["generated_conflict_paths"] == ["hello.txt"]
 
     applied = service.workspace_refresh_v2(
         workspace_id,
@@ -455,6 +460,65 @@ def test_v2_generated_conflict_is_tagged_and_resolution_warns(
         "hello.txt is generated; merge source inputs and regenerate with: python scripts/render_hello.py"
     ]
     assert applied["verify_selector"] == ["hello.txt"]
+
+
+def test_v2_preview_separates_semantic_and_generated_conflicts(
+    forge_env: ForgeEnvironment,
+) -> None:
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "mixed generated conflict")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "hello.txt").write_text("changed locally\n", encoding="utf-8")
+    (workspace_path / "README.md").write_text("# Local\n", encoding="utf-8")
+    git("add", "hello.txt", "README.md", cwd=workspace_path)
+    git("commit", "-m", "change generated and semantic inputs locally", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "change generated output upstream",
+    )
+    _push_upstream_file(
+        forge_env,
+        "README.md",
+        "# Remote\n",
+        "change semantic input upstream",
+        publisher_name="publisher-semantic",
+    )
+    status = service.workspace_status(workspace_id)
+
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    assert preview["conflict_scope"] == "mixed"
+    assert preview["semantic_conflict_count"] == 1
+    assert preview["generated_conflict_count"] == 1
+    assert preview["semantic_conflict_paths"] == ["README.md"]
+    assert preview["generated_conflict_paths"] == ["hello.txt"]
+    assert {item["path"]: item["kind"] for item in preview["conflicts"]} == {
+        "README.md": "content",
+        "hello.txt": "generated",
+    }
 
 
 def test_v2_refresh_apply_requires_exact_resolution_set(

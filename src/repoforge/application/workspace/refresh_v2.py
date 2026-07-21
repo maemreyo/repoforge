@@ -39,7 +39,8 @@ from .base_status import collect_workspace_base_status
 _PLAN_TOKEN = re.compile(
     r"^refresh-v2:([0-9a-f]{40}(?:[0-9a-f]{24})?):([0-9a-f]{64}):([0-9a-f]{64})$"
 )
-_MAX_CONFLICTS = 100
+_MAX_SEMANTIC_CONFLICTS = 100
+_MAX_GENERATED_CONFLICTS = 1_000
 _MAX_RESOLUTION_BYTES = 2_000_000
 _MAX_EVIDENCE_BYTES = 60_000
 _JOURNAL_SCHEMA_VERSION = 1
@@ -107,6 +108,28 @@ class WorkspaceRefreshV2Result:
     verify_selector: tuple[str, ...]
     invalidated_receipts: tuple[str, ...]
     transaction_id: str | None
+    conflict_scope: str = "none"
+    semantic_conflict_count: int = 0
+    generated_conflict_count: int = 0
+    semantic_conflict_paths: tuple[str, ...] = ()
+    generated_conflict_paths: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        semantic_paths = tuple(item.path for item in self.conflicts if item.kind != "generated")
+        generated_paths = tuple(item.path for item in self.conflicts if item.kind == "generated")
+        if semantic_paths and generated_paths:
+            scope = "mixed"
+        elif semantic_paths:
+            scope = "semantic"
+        elif generated_paths:
+            scope = "generated"
+        else:
+            scope = "none"
+        object.__setattr__(self, "conflict_scope", scope)
+        object.__setattr__(self, "semantic_conflict_count", len(semantic_paths))
+        object.__setattr__(self, "generated_conflict_count", len(generated_paths))
+        object.__setattr__(self, "semantic_conflict_paths", semantic_paths)
+        object.__setattr__(self, "generated_conflict_paths", generated_paths)
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,8 +545,6 @@ class WorkspaceRefreshV2:
                 safe_next_action="Restore remote connectivity and create a new refresh preview.",
             )
         merge = self.ctx.git.preview_merge(workspace, repo, base.remote_base_sha)
-        if len(merge.conflict_paths) > _MAX_CONFLICTS:
-            raise WorkspaceError(f"Refresh preview exceeds the {_MAX_CONFLICTS}-conflict limit")
         conflicts = self._conflict_evidence(
             workspace,
             repo,
@@ -532,6 +553,16 @@ class WorkspaceRefreshV2:
             base.remote_base_sha,
             merge.conflict_paths,
         )
+        semantic_count = sum(item.kind != "generated" for item in conflicts)
+        generated_count = sum(item.kind == "generated" for item in conflicts)
+        if semantic_count > _MAX_SEMANTIC_CONFLICTS:
+            raise WorkspaceError(
+                f"Refresh preview exceeds the {_MAX_SEMANTIC_CONFLICTS}-semantic-conflict limit"
+            )
+        if generated_count > _MAX_GENERATED_CONFLICTS:
+            raise WorkspaceError(
+                f"Refresh preview exceeds the {_MAX_GENERATED_CONFLICTS}-generated-conflict limit"
+            )
         payload = {
             "configured_base": record.base,
             "workspace_base_sha": base.workspace_base_sha,
