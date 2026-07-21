@@ -2,15 +2,24 @@
 # See scripts/select_affected_tests.py. Every tests/test_*.py file must appear in
 # exactly one group's `test_files` list -- `select_affected_tests.py --check-completeness`
 # enforces this and fails closed (escalates to test-wide) on any gap.
+#
+# parallel = false means the group runs in the SERIAL lane (alone, one process,
+# before the xdist lane) for a CORRECTNESS reason: its tests share global state
+# outside pytest's tmp_path (fixed-path unix sockets/pidfiles, managed-runtime
+# state) and would corrupt each other if run concurrently. It is NOT a knob for
+# "slow" or "git-heavy" tests -- git-subprocess contention is handled by the
+# pytest --timeout budget in pyproject.toml, so those tests stay parallel.
+# Serializing merely-heavy tests is a net time loss (the serial lane is a
+# sequential bottleneck; see the test-fast lane-split commit history).
 
 [groups.contracts]
 description = "MCP schemas, fixed 28-tool roster, serialization, egress, release contracts."
-# parallel = false: several of these tests drive real MCP protocol sessions
-# and workspace_create/git operations through SubprocessCommandExecutor;
-# under xdist contention they've hit pytest's 60s test timeout (see the
-# `conftest_consumers` note and the test-fast commit that added the serial
-# lane). Runs in the serial lane alongside operations/runtime_activation.
-parallel = false
+# parallel = true: a few of these drive real MCP sessions / git through
+# SubprocessCommandExecutor, but they are tmp_path-isolated, so xdist-safe.
+# Their earlier 60s-timeout flakiness under contention was a timeout-layer
+# inversion (pytest --timeout was below the app's own git budget), fixed by
+# raising --timeout to 120 in pyproject.toml -- not a reason to serialize.
+parallel = true
 source_globs = [
   "src/repoforge/contracts/**",
   "src/repoforge/interfaces/mcp/**",
@@ -335,11 +344,12 @@ test_files = [
 
 [groups.platform]
 description = "Cross-cutting agent-facing subsystems that do not map to a single domain above: onboarding, skills, code intelligence, audit/observability, generic CLI/service composition."
-# parallel = false: this catch-all group also owns test_plan_execution.py and
-# test_background_run_profile.py, which run real execute_plan/background
-# process-group git workflows through SubprocessCommandExecutor and hit the
-# same 60s-timeout-under-contention failure as contracts/operations.
-parallel = false
+# parallel = true: this catch-all owns a few git-heavy files
+# (test_plan_execution.py, test_background_run_profile.py) but they are
+# tmp_path-isolated and xdist-safe. Serializing all 38 files to protect 2 is
+# a net time loss; their contention flakiness is addressed by the raised
+# pytest --timeout (see contracts note), not by the serial lane.
+parallel = true
 source_globs = [
   "src/repoforge/application/onboarding/**",
   "src/repoforge/application/skills/**",

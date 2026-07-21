@@ -56,7 +56,13 @@ packages = ["src/repoforge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers --timeout=60"
+# --timeout=120 matches the app's own default git subprocess budget
+# (ServerConfig.default_command_timeout_seconds). A lower pytest ceiling (was
+# 60) inverted the layering: pytest killed git calls that the app itself still
+# considered healthy, producing false "Timeout (>60s)" failures under xdist
+# contention. 120 is time-neutral for passing tests (test git ops are
+# sub-second on the tiny demo repo) and still catches real hangs in ~2 min.
+addopts = "-q --strict-markers --timeout=120"
 asyncio_mode = "auto"
 
 [tool.coverage.run]
