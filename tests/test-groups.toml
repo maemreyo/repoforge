@@ -5,7 +5,12 @@
 
 [groups.contracts]
 description = "MCP schemas, fixed 28-tool roster, serialization, egress, release contracts."
-parallel = true
+# parallel = false: several of these tests drive real MCP protocol sessions
+# and workspace_create/git operations through SubprocessCommandExecutor;
+# under xdist contention they've hit pytest's 60s test timeout (see the
+# `conftest_consumers` note and the test-fast commit that added the serial
+# lane). Runs in the serial lane alongside operations/runtime_activation.
+parallel = false
 source_globs = [
   "src/repoforge/contracts/**",
   "src/repoforge/interfaces/mcp/**",
@@ -330,7 +335,11 @@ test_files = [
 
 [groups.platform]
 description = "Cross-cutting agent-facing subsystems that do not map to a single domain above: onboarding, skills, code intelligence, audit/observability, generic CLI/service composition."
-parallel = true
+# parallel = false: this catch-all group also owns test_plan_execution.py and
+# test_background_run_profile.py, which run real execute_plan/background
+# process-group git workflows through SubprocessCommandExecutor and hit the
+# same 60s-timeout-under-contention failure as contracts/operations.
+parallel = false
 source_globs = [
   "src/repoforge/application/onboarding/**",
   "src/repoforge/application/skills/**",
