@@ -18,6 +18,7 @@ from repoforge.domain.errors import (
     SecurityError,
     WorkspaceError,
 )
+from repoforge.domain.execution_receipt import EffectReceiptState
 from repoforge.domain.issue_writes import IssueWritePolicy
 from repoforge.ports.issue_mutation import RemoteComment, RemoteIssue
 
@@ -1074,6 +1075,62 @@ def test_push_rejection_is_non_retrying_and_preserves_remote_head_evidence(
     assert error.details["remote_head_after"] is None
     assert error.details["retryable_rejection"] is False
     assert "Refresh the workspace" in (error.safe_next_action or "")
+
+
+def test_push_transport_failure_after_remote_update_replays_authoritative_result(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "push response loss")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed before lost push response\n",
+        current["sha256"],
+    )
+    service.workspace_run_profile(workspace_id)
+    service.workspace_commit(workspace_id, "Prepare lost push response")
+    context = service.application.context
+    original_push = context.git.push
+    calls = 0
+
+    def push_then_lose_response(path: Path, remote: str, branch: str, timeout: int):
+        nonlocal calls
+        calls += 1
+        original_push(path, remote, branch, timeout)
+        raise CommandError(
+            "push completed but the transport response was lost",
+            details={"stderr_excerpt": "simulated upstream 502"},
+        )
+
+    monkeypatch.setattr(context.git, "push", push_then_lose_response)
+    with pytest.raises(ConfigError) as failed:
+        service.workspace_push(workspace_id, idempotency_key="push-response-loss-0001")
+
+    assert failed.value.code is ErrorCode.FAILED_AFTER_EFFECT
+    assert failed.value.retryable is False
+    operation_id = str(failed.value.details["operation_id"])
+    receipt_id = str(failed.value.details["receipt_id"])
+    result_reference = str(failed.value.details["result_reference"])
+    assert result_reference == f"operation-result:{operation_id}"
+
+    receipts = context.effect_receipts
+    results = context.operation_result_store
+    assert receipts is not None
+    assert results is not None
+    receipt = receipts.read(receipt_id)
+    assert receipt.value.state is EffectReceiptState.FAILED_AFTER_EFFECT
+    assert receipt.value.result_reference == result_reference
+    durable = results.read(operation_id)
+    assert durable["pushed"] is True
+    assert durable["remote_head_after"] == service.workspace_status(workspace_id)["head_sha"]
+
+    monkeypatch.setattr(context.git, "push", original_push)
+    replay = service.workspace_push(workspace_id, idempotency_key="push-response-loss-0001")
+    assert replay == durable
+    assert calls == 1
 
 
 def test_change_budget_blocks_verification_and_commit(tmp_path: Path) -> None:

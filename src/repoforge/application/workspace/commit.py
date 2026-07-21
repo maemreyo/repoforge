@@ -170,15 +170,19 @@ class WorkspaceCommitter:
                 except CommandError as exc:
                     after_paths: list[str] = []
                     after_fingerprint: str | None = None
+                    after_head: str | None = None
                     with contextlib.suppress(Exception):
                         after_paths = sorted(self.ctx.git.changed_paths(path, repo))
                     with contextlib.suppress(Exception):
                         after_fingerprint = self.ctx.git.fingerprint(path)
+                    with contextlib.suppress(Exception):
+                        after_head = self.ctx.git.head_sha(path)
                     tree_mutated = bool(
                         after_fingerprint is not None
                         and after_fingerprint != before_commit_fingerprint
                     )
-                    if boundary.started and not tree_mutated:
+                    commit_created = after_head is not None and after_head != current_head
+                    if boundary.started and not commit_created:
                         boundary.rollback()
                     verification_invalidated = False
                     if tree_mutated and fresh.last_verification is not None:
@@ -190,6 +194,9 @@ class WorkspaceCommitter:
                         {
                             "changed_paths_after_failure": after_paths,
                             "tree_mutated_during_commit": tree_mutated,
+                            "head_before": current_head,
+                            "head_after": after_head,
+                            "commit_created": commit_created,
                             "verification_invalidated": verification_invalidated,
                         }
                     )
@@ -201,6 +208,7 @@ class WorkspaceCommitter:
                     audit_details.update(
                         {
                             "commit_stage": exc.details.get("commit_stage"),
+                            "commit_created": commit_created,
                             "tree_mutated_during_commit": tree_mutated,
                             "verification_invalidated": verification_invalidated,
                             "changed_path_count_after_failure": len(after_paths),
