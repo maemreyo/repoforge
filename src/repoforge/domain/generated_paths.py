@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _MAX_RULES = 64
@@ -12,6 +16,10 @@ _MAX_GLOB_CHARS = 512
 _MAX_DESCRIPTION_CHARS = 500
 _MAX_COMMAND_ARGS = 64
 _MAX_ARGUMENT_CHARS = 512
+_MAX_RECEIPTS = 64
+_MAX_RECEIPT_PATHS = 1_100
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 
 
 class GeneratedPathError(ValueError):
@@ -129,3 +137,107 @@ def generated_path_rule_for(
     rules: tuple[GeneratedPathRule, ...], path: str
 ) -> GeneratedPathRule | None:
     return next((rule for rule in rules if rule.matches(path)), None)
+
+
+def _receipt_path(value: object) -> str:
+    path = _safe_glob(value, "regeneration receipt path")
+    if any(marker in path for marker in ("*", "?", "[")):
+        raise GeneratedPathError("regeneration receipt path must name one concrete file")
+    return path
+
+
+def generated_paths_identity(root: Path, paths: tuple[str, ...]) -> str | None:
+    """Hash exact generated-file identities without trusting receipt-provided digests."""
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        return None
+    entries: list[dict[str, str]] = []
+    try:
+        normalized_paths = tuple(sorted({_receipt_path(path) for path in paths}))
+    except GeneratedPathError:
+        return None
+    for path in normalized_paths:
+        candidate = resolved_root / path
+        if candidate.is_symlink():
+            return None
+        try:
+            resolved = candidate.resolve(strict=False)
+            resolved.relative_to(resolved_root)
+        except (OSError, ValueError):
+            return None
+        if not resolved.exists():
+            entries.append({"path": path, "state": "missing"})
+            continue
+        if not resolved.is_file():
+            return None
+        try:
+            digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        except OSError:
+            return None
+        entries.append({"path": path, "state": "present", "sha256": digest})
+    payload = {"binding": {}, "paths": entries}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def valid_regenerated_paths(
+    root: Path,
+    rules: tuple[GeneratedPathRule, ...],
+    raw_receipts: object,
+) -> frozenset[str]:
+    """Return only paths covered by well-formed, declaration-matching, current receipts."""
+    if not isinstance(raw_receipts, (list, tuple)) or len(raw_receipts) > _MAX_RECEIPTS:
+        return frozenset()
+    valid: set[str] = set()
+    for raw in raw_receipts:
+        if not isinstance(raw, Mapping) or raw.get("schema_version") != 1:
+            continue
+        if raw.get("deterministic") is not True:
+            continue
+        output_identity = raw.get("output_identity")
+        source_identity = raw.get("source_identity")
+        plan_hash = raw.get("plan_hash")
+        refresh_commit_sha = raw.get("refresh_commit_sha")
+        target_base_sha = raw.get("target_base_sha")
+        if (
+            not isinstance(output_identity, str)
+            or _SHA256.fullmatch(output_identity) is None
+            or not isinstance(source_identity, str)
+            or _SHA256.fullmatch(source_identity) is None
+            or not isinstance(plan_hash, str)
+            or _SHA256.fullmatch(plan_hash) is None
+            or not isinstance(refresh_commit_sha, str)
+            or _GIT_OBJECT_ID.fullmatch(refresh_commit_sha) is None
+            or not isinstance(target_base_sha, str)
+            or _GIT_OBJECT_ID.fullmatch(target_base_sha) is None
+        ):
+            continue
+        raw_paths = raw.get("generated_paths")
+        raw_commands = raw.get("commands")
+        if (
+            not isinstance(raw_paths, (list, tuple))
+            or not 1 <= len(raw_paths) <= _MAX_RECEIPT_PATHS
+            or not isinstance(raw_commands, (list, tuple))
+            or not 1 <= len(raw_commands) <= _MAX_RULES
+        ):
+            continue
+        try:
+            paths = tuple(sorted({_receipt_path(path) for path in raw_paths}))
+            commands = frozenset(
+                _command(command, f"regeneration receipt commands[{index}]")
+                for index, command in enumerate(raw_commands)
+            )
+        except GeneratedPathError:
+            continue
+        if any(
+            (rule := generated_path_rule_for(rules, path)) is None
+            or rule.regeneration_command not in commands
+            for path in paths
+        ):
+            continue
+        if generated_paths_identity(root, paths) != output_identity:
+            continue
+        valid.update(paths)
+    return frozenset(valid)

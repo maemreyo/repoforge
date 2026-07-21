@@ -11,6 +11,11 @@ from repoforge.application.rules.validators import (
     ReviewContext,
     run_review,
 )
+from repoforge.domain.generated_paths import (
+    GeneratedPathRule,
+    generated_paths_identity,
+    valid_regenerated_paths,
+)
 from repoforge.domain.rules_engine import RuleResultState, parse_rule
 
 _KNOWN = tuple(BUILTIN_VALIDATORS)
@@ -154,16 +159,47 @@ def test_generated_no_hand_edit_is_skipped_without_config_and_fails_on_unreceipt
     assert failing.findings[0].state is RuleResultState.FAIL
     assert "make generate" in failing.findings[0].fix_hint
 
+    rules = (GeneratedPathRule("generated.json", ("make", "generate"), "fixture"),)
+    output_identity = generated_paths_identity(tmp_path, ("generated.json",))
+    receipts = [
+        {
+            "schema_version": 1,
+            "commands": [["make", "generate"]],
+            "generated_paths": ["generated.json"],
+            "source_identity": "a" * 64,
+            "output_identity": output_identity,
+            "deterministic": True,
+            "refresh_commit_sha": "b" * 40,
+            "target_base_sha": "c" * 40,
+            "plan_hash": "d" * 64,
+        }
+    ]
+    fresh_paths = valid_regenerated_paths(tmp_path, rules, receipts)
     receipted = run_review(
         (rule,),
         ReviewContext(
             root=tmp_path,
             changed_paths=("generated.json",),
             generated_paths=(spec,),
-            regenerated_paths=frozenset({"generated.json"}),
+            regenerated_paths=fresh_paths,
         ),
     )
     assert receipted.findings == ()
+
+    (tmp_path / "generated.json").write_text('{"manual": true}', encoding="utf-8")
+    stale_paths = valid_regenerated_paths(tmp_path, rules, receipts)
+    stale = run_review(
+        (rule,),
+        ReviewContext(
+            root=tmp_path,
+            changed_paths=("generated.json",),
+            generated_paths=(spec,),
+            regenerated_paths=stale_paths,
+        ),
+    )
+    assert stale_paths == frozenset()
+    assert stale.findings[0].state is RuleResultState.FAIL
+    assert "without a matching regeneration receipt" in stale.findings[0].message
 
 
 def test_run_review_reports_error_for_a_missing_validator(tmp_path: Path) -> None:

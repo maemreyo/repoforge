@@ -11,7 +11,7 @@ from repoforge.adapters.filesystem.transaction import JournaledFileTransaction
 from repoforge.application.service import CodingService
 from repoforge.application.workspace.refresh_v2 import WorkspaceRefreshV2
 from repoforge.domain.errors import SecurityError, WorkspaceError
-from repoforge.domain.generated_paths import GeneratedPathRule
+from repoforge.domain.generated_paths import GeneratedPathRule, valid_regenerated_paths
 
 
 def _clone_publisher(env: ForgeEnvironment, name: str = "publisher") -> Path:
@@ -497,7 +497,26 @@ def test_v2_generated_conflict_is_regenerated_without_hand_resolution(
     assert applied["source_change_metrics"]["changed_files"] == 0
     assert applied["generated_change_metrics"]["changed_files"] == 1
     assert applied["generated_change_metrics"]["binary_files"] == 0
+    durable_receipts = service.state.load(workspace_id).metadata["generated_path_receipts_v1"]
+    assert durable_receipts[-1]["refresh_commit_sha"] == applied["head_sha"]
+    assert durable_receipts[-1]["target_base_sha"] == applied["target_base_sha"]
+    assert durable_receipts[-1]["plan_hash"] == applied["plan_hash"]
+    assert durable_receipts[-1]["output_identity"] == receipt["output_identity"]
+    assert valid_regenerated_paths(
+        workspace_path,
+        generated_repo.generated_paths,
+        durable_receipts,
+    ) == frozenset({"hello.txt"})
     assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "generated from source\n"
+    (workspace_path / "hello.txt").write_text("manual edit\n", encoding="utf-8")
+    assert (
+        valid_regenerated_paths(
+            workspace_path,
+            generated_repo.generated_paths,
+            durable_receipts,
+        )
+        == frozenset()
+    )
 
 
 def test_v2_refresh_resolves_semantic_source_before_regenerating_output(

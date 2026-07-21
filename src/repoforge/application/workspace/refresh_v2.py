@@ -21,7 +21,7 @@ from ...domain.filesystem_transaction import (
     TransactionPlan,
     WriteFile,
 )
-from ...domain.generated_paths import generated_path_rule_for
+from ...domain.generated_paths import generated_path_rule_for, generated_paths_identity
 from ...domain.policy import assert_path_allowed, resolve_workspace_path, validate_branch
 from ...domain.workspace import (
     WORKSPACE_REFRESH_RECEIPTS,
@@ -465,6 +465,13 @@ class WorkspaceRefreshV2:
                     record.metadata["last_refresh_target_sha"] = plan.target_base_sha
                     record.metadata["last_refresh_at"] = self.ctx.clock.now_iso()
                     record.metadata["refresh_commit_sha"] = new_head
+                    self._persist_regeneration_receipts(
+                        record,
+                        regeneration_receipts,
+                        refresh_commit_sha=new_head,
+                        target_base_sha=plan.target_base_sha,
+                        plan_hash=plan.plan_hash,
+                    )
                     self.ctx.store.save(record)
                     changed_paths = tuple(
                         sorted(
@@ -884,14 +891,18 @@ class WorkspaceRefreshV2:
                 regenerated_paths,
                 conflict_paths,
             )
-            first_output_identity = self._path_identity(workspace, repo, regenerated_paths)
+            first_output_identity = generated_paths_identity(workspace, regenerated_paths)
+            if first_output_identity is None:
+                raise SecurityError("Cannot compute regenerated output identity")
             self.ctx.git.stage_paths(workspace, repo, regenerated_paths)
             self._assert_no_unstaged_regeneration_effects(workspace)
 
             run_commands(session)
             second_paths = observed_generated_paths()
             self._validate_regenerated_paths(workspace, repo, second_paths, conflict_paths)
-            second_output_identity = self._path_identity(workspace, repo, second_paths)
+            second_output_identity = generated_paths_identity(workspace, second_paths)
+            if second_output_identity is None:
+                raise SecurityError("Cannot compute regenerated output identity")
             if second_paths != regenerated_paths or second_output_identity != first_output_identity:
                 raise WorkspaceError(
                     "Regeneration is nondeterministic: first output "
@@ -907,6 +918,35 @@ class WorkspaceRefreshV2:
             output_identity=first_output_identity,
         )
         return regenerated_paths, (receipt,)
+
+    @staticmethod
+    def _persist_regeneration_receipts(
+        record: WorkspaceRecord,
+        receipts: tuple[RefreshRegenerationReceipt, ...],
+        *,
+        refresh_commit_sha: str,
+        target_base_sha: str,
+        plan_hash: str,
+    ) -> None:
+        if not receipts:
+            return
+        existing = record.metadata.get("generated_path_receipts_v1", ())
+        retained = list(existing) if isinstance(existing, (list, tuple)) else []
+        for receipt in receipts:
+            retained.append(
+                {
+                    "schema_version": 1,
+                    "commands": [list(command) for command in receipt.commands],
+                    "generated_paths": list(receipt.generated_paths),
+                    "source_identity": receipt.source_identity,
+                    "output_identity": receipt.output_identity,
+                    "deterministic": receipt.deterministic,
+                    "refresh_commit_sha": refresh_commit_sha,
+                    "target_base_sha": target_base_sha,
+                    "plan_hash": plan_hash,
+                }
+            )
+        record.metadata["generated_path_receipts_v1"] = retained[-64:]
 
     def _validate_regenerated_paths(
         self,
