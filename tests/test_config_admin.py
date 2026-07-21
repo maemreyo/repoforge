@@ -837,6 +837,123 @@ def test_runtime_logs_read_bounds_sources_and_filters(tmp_path: Path) -> None:
         admin.runtime_logs_read("audit", limit=0)
 
 
+def test_runtime_logs_read_reports_legacy_and_malformed_without_epoch(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text('plain\n{"broken"\n', encoding="utf-8")
+
+    result = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(result)
+    assert all(entry["timestamp"] is None for entry in result["entries"])
+    assert [entry["parse_state"] for entry in result["entries"]] == [
+        "malformed_json",
+        "legacy_plaintext",
+    ]
+    assert result["malformed_count"] == 1
+    assert result["legacy_count"] == 1
+    assert result["structured_count"] == 0
+    assert "1970-01-01" not in json.dumps(result, sort_keys=True)
+
+
+def test_runtime_logs_read_preserves_structured_provenance_and_correlation(tmp_path: Path) -> None:
+    from repoforge.domain.runtime_events import RuntimeEventV1, encode_runtime_event
+
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        encode_runtime_event(
+            RuntimeEventV1(
+                observed_at="2026-07-21T12:00:00+00:00",
+                component="tunnel_client",
+                stream="stdout",
+                level="ERROR",
+                event_kind="response_failure",
+                message="failed safely",
+                action="workspace_push",
+                duration_ms=12.5,
+                correlation_id="corr-1",
+                operation_id="op-1",
+                receipt_id="receipt-1",
+                trace_id="trace-1",
+                workspace_hash="a" * 64,
+                repository_hash="b" * 64,
+            )
+        )
+        + "\nlegacy without time\n",
+        encoding="utf-8",
+    )
+
+    result = admin.runtime_logs_read_v2(
+        source="runtime",
+        limit=10,
+        only_failed=True,
+        start_time="2026-07-21T00:00:00+00:00",
+    )
+
+    assert result["structured_count"] == 1
+    assert result["legacy_count"] == 0
+    assert len(result["entries"]) == 1
+    entry = result["entries"][0]
+    assert entry["timestamp_state"] == "observed"
+    assert entry["parse_state"] == "structured_v1"
+    assert entry["component"] == "tunnel_client"
+    assert entry["stream"] == "stdout"
+    assert entry["event_kind"] == "response_failure"
+    assert entry["correlation_id"] == "corr-1"
+    assert entry["operation_id"] == "op-1"
+    assert entry["receipt_id"] == "receipt-1"
+    assert entry["trace_id"] == "trace-1"
+    assert entry["workspace_hash"] == "a" * 64
+    assert entry["repository_hash"] == "b" * 64
+
+
+def test_runtime_logs_read_bounds_untrusted_structured_metadata(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "observed_at": "2026-07-21T12:00:00+00:00",
+                "component": "c" * 500,
+                "stream": "s" * 500,
+                "level": "INFO",
+                "event_kind": "e" * 500,
+                "message": "bounded",
+                "action": "a" * 500,
+                "correlation_id": "x" * 500,
+                "operation_id": "o" * 500,
+                "receipt_id": "r" * 500,
+                "trace_id": "t" * 500,
+                "workspace_hash": "not-a-hash",
+                "repository_hash": "also-not-a-hash",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(result)
+    entry = result["entries"][0]
+    assert len(entry["component"]) == 160
+    assert len(entry["stream"]) == 80
+    assert len(entry["event_kind"]) == 160
+    assert len(entry["action"]) == 160
+    assert len(entry["correlation_id"]) == 160
+    assert entry["workspace_hash"] is None
+    assert entry["repository_hash"] is None
+
+
 def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Path) -> None:
     from repoforge.contracts.registry import V2_TOOL_SPECS
 

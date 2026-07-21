@@ -48,6 +48,7 @@ from ...domain.policy_patch import (
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode
 from ...domain.runtime_contract import RuntimeContractIdentity
+from ...domain.runtime_events import parse_runtime_event
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
 from ...ports.ids import IdGenerator
@@ -73,6 +74,7 @@ from ..repository_admin.proposals import RepositoryProposalService
 _AUTO_APPLY_DELTAS = frozenset({CapabilityDeltaKind.METADATA_ONLY, CapabilityDeltaKind.RESTRICTION})
 _MAX_LOG_LIMIT = 200
 _FAILURE_OUTPUT_REFERENCE = re.compile(r"^failure-output:([a-f0-9]{64})$")
+_SAFE_RUNTIME_HASH = re.compile(r"^[a-f0-9]{64}$")
 _HOST_PATH_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9:/])/(?:[^/\s]+/)*[^/\s]+"),
     re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\(?:[^\\\s]+\\)*[^\\\s]+"),
@@ -84,6 +86,14 @@ def _redact_host_paths(value: str) -> str:
     for pattern in _HOST_PATH_PATTERNS:
         redacted = pattern.sub("<redacted:host_path>", redacted)
     return redacted
+
+
+def _bounded_optional(value: str | None, limit: int) -> str | None:
+    return value[:limit] if value is not None else None
+
+
+def _safe_runtime_hash(value: str | None) -> str | None:
+    return value if value is not None and _SAFE_RUNTIME_HASH.fullmatch(value) else None
 
 
 class AuditEventPageView(Protocol):
@@ -554,39 +564,25 @@ class ConfigAdminService:
 
     @staticmethod
     def _runtime_entry(line: str) -> dict[str, Any]:
-        try:
-            raw = json.loads(line)
-        except json.JSONDecodeError:
-            raw = None
-        if isinstance(raw, dict):
-            timestamp = raw.get("timestamp")
-            level = raw.get("level", "INFO")
-            message = raw.get("message", "")
-            action = raw.get("action")
-            duration = raw.get("duration_ms")
-            return {
-                "timestamp": (
-                    timestamp
-                    if isinstance(timestamp, str) and timestamp
-                    else "1970-01-01T00:00:00+00:00"
-                ),
-                "source": "runtime",
-                "action": action if isinstance(action, str) else None,
-                "level": str(level)[:30] or "INFO",
-                "message": _redact_host_paths(str(message)),
-                "duration_ms": (
-                    float(duration)
-                    if isinstance(duration, (int, float)) and duration >= 0
-                    else None
-                ),
-            }
+        parsed = parse_runtime_event(line)
         return {
-            "timestamp": "1970-01-01T00:00:00+00:00",
+            "timestamp": parsed.timestamp,
+            "timestamp_state": parsed.timestamp_state,
+            "parse_state": parsed.parse_state,
             "source": "runtime",
-            "action": None,
-            "level": "INFO",
-            "message": _redact_host_paths(line),
-            "duration_ms": None,
+            "component": _bounded_optional(parsed.component, 160),
+            "stream": _bounded_optional(parsed.stream, 80),
+            "event_kind": _bounded_optional(parsed.event_kind, 160),
+            "action": _bounded_optional(parsed.action, 160),
+            "level": parsed.level,
+            "message": _redact_host_paths(parsed.message),
+            "duration_ms": parsed.duration_ms,
+            "correlation_id": _bounded_optional(parsed.correlation_id, 160),
+            "operation_id": _bounded_optional(parsed.operation_id, 160),
+            "receipt_id": _bounded_optional(parsed.receipt_id, 160),
+            "trace_id": _bounded_optional(parsed.trace_id, 160),
+            "workspace_hash": _safe_runtime_hash(parsed.workspace_hash),
+            "repository_hash": _safe_runtime_hash(parsed.repository_hash),
         }
 
     def _failure_artifact_page(
@@ -798,10 +794,17 @@ class ConfigAdminService:
                 not isinstance(duration, (int, float)) or duration < min_duration_ms
             ):
                 continue
-            timestamp = self._parse_log_time(str(entry["timestamp"]), "runtime timestamp")
-            if start is not None and (timestamp is None or timestamp < start):
+            timestamp_value = entry["timestamp"]
+            timestamp = (
+                self._parse_log_time(timestamp_value, "runtime timestamp")
+                if isinstance(timestamp_value, str)
+                else None
+            )
+            if (start is not None or end is not None) and timestamp is None:
                 continue
-            if end is not None and (timestamp is None or timestamp > end):
+            if start is not None and timestamp is not None and timestamp < start:
+                continue
+            if end is not None and timestamp is not None and timestamp > end:
                 continue
             matched.append(entry)
         selected = matched[offset : offset + limit]
@@ -817,6 +820,17 @@ class ConfigAdminService:
             "error": None,
             "source": "runtime",
             "entries": selected,
+            "malformed_count": sum(
+                1 for entry in selected if entry["parse_state"] == "malformed_json"
+            ),
+            "legacy_count": sum(
+                1
+                for entry in selected
+                if entry["parse_state"] in {"legacy_json", "legacy_plaintext"}
+            ),
+            "structured_count": sum(
+                1 for entry in selected if entry["parse_state"] == "structured_v1"
+            ),
             "truncated": has_more or len(raw_lines) >= 1_000,
             "next_cursor": next_cursor,
         }

@@ -1613,13 +1613,37 @@ class RuntimeLogSource(str, Enum):
     FAILURE_ARTIFACT = "failure_artifact"
 
 
+class RuntimeTimestampState(str, Enum):
+    OBSERVED = "observed"
+    UNAVAILABLE = "unavailable"
+    INVALID = "invalid"
+
+
+class RuntimeLogParseState(str, Enum):
+    STRUCTURED_V1 = "structured_v1"
+    LEGACY_JSON = "legacy_json"
+    LEGACY_PLAINTEXT = "legacy_plaintext"
+    MALFORMED_JSON = "malformed_json"
+
+
 class RuntimeLogEntry(StrictModel):
-    timestamp: str = Field(min_length=1, max_length=80)
+    timestamp: str | None = Field(default=None, max_length=80)
+    timestamp_state: RuntimeTimestampState | None = None
+    parse_state: RuntimeLogParseState | None = None
     source: RuntimeLogSource
+    component: str | None = Field(default=None, max_length=160)
+    stream: str | None = Field(default=None, max_length=80)
+    event_kind: str | None = Field(default=None, max_length=160)
     action: str | None = Field(default=None, max_length=160)
     level: str = Field(min_length=1, max_length=30)
     message: str = Field(max_length=4000)
     duration_ms: float | None = Field(default=None, ge=0)
+    correlation_id: str | None = Field(default=None, max_length=160)
+    operation_id: str | None = Field(default=None, max_length=160)
+    receipt_id: str | None = Field(default=None, max_length=160)
+    trace_id: str | None = Field(default=None, max_length=160)
+    workspace_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    repository_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class RuntimeLogsReadInput(StrictModel):
@@ -1674,6 +1698,9 @@ class RuntimeLogsReadInput(StrictModel):
 class RuntimeLogsReadOutput(ToolResponse):
     source: RuntimeLogSource
     entries: tuple[RuntimeLogEntry, ...] = Field(default=(), max_length=200)
+    malformed_count: int = Field(default=0, ge=0, le=1_000)
+    legacy_count: int = Field(default=0, ge=0, le=1_000)
+    structured_count: int = Field(default=0, ge=0, le=1_000)
     truncated: bool = False
     next_cursor: Cursor | None = None
 
