@@ -67,21 +67,31 @@ fake that silently drifts from real git produces green tests against a fiction.
 Even guarded by a contract test, the contract suite itself would be enormous.
 Rejected.
 
-### B. In-process implementation of the ~5 hot read methods (recommended first increment)
+### B. In-process implementation of the hot read methods — INVESTIGATED, NOT WORTH IT
 
-The 669 spawns collapse to a few methods. Replace **only** `fingerprint`,
-`head_sha`, `changed_paths`, `status_porcelain*`, `untracked_paths` with an
-in-process implementation (via `pygit2`/libgit2, or a batched `git cat-file`/
-`git status` reader), keeping every other method on the existing subprocess path.
+Spiked 2026-07-22 with `pygit2` 1.19.3 / libgit2 1.9.4 (installs cleanly). On
+inspecting the method contracts, the plan collapses:
 
-- Benefits **production too** (fewer spawns on every assessment), so it is a real
-  perf fix, not a test hack.
-- Guarded by a **contract test**: run identical scenarios against the current
-  `GitCliRepository` and the new implementation, assert byte-identical results
-  for these methods. If they diverge, the contract test fails — this is the
-  safety net that makes the change trustworthy.
-- Scope is bounded (5 methods, not 60). New dependency (`pygit2`) is the main
-  cost; evaluate against the existing "no heavy deps" stance.
+- **`fingerprint` (the #1 cost, 138 of the binary git calls) is immovable.** Its
+  value is `sha256(head_sha + raw bytes of "git diff --binary HEAD" + untracked
+  contents)` — a hash of git CLI's **exact diff output**. libgit2's diff bytes
+  are not identical to git CLI's, so a pygit2 fingerprint yields a *different
+  hash*. And `workspace_fingerprint` is a **persisted, cross-cutting identity**:
+  serialized in plan bindings (execution_plan.py:431), compared for currency
+  (:379), and stamped into receipts/task-capsules/operation-tasks. Changing its
+  algorithm invalidates every stored plan and iteration-cache key — a breaking
+  migration, not an optimization. The contract test would (correctly) reject it.
+- **`status_porcelain_v2`** returns git's exact porcelain-v2 `-z` text format;
+  reconstructing it byte-for-byte from pygit2 status flags is error-prone.
+- That leaves `head_sha` (trivially byte-exact via pygit2, but small — many of
+  its calls are *inside* fingerprint, which stays on CLI) and
+  `changed_paths`/`untracked_paths` (output is a path list, so byte-equivalence
+  is achievable, but replicating git's diff + `--exclude-standard` gitignore +
+  the symlink/submodule mode security checks is high-effort and high-risk).
+
+With the dominant method off the table, the residual win (head_sha +
+changed_paths) does not justify adding a C-extension dependency and reimplementing
+git semantics. **B is not worth pursuing.**
 
 ### C. In-operation identity memoization — INVESTIGATED, REJECTED (unsafe)
 
@@ -108,23 +118,25 @@ architecture. Only worth it if B/C prove insufficient.
 
 ## Recommended path
 
-Revised after the C spike (2026-07-22): **B is safer than C**, reversing the
-original ordering. C changes control flow in a safety-critical drift guard; B
-leaves all control flow untouched and only swaps the *implementation* of pure
-read methods, guaranteed equivalent by a contract test.
+Both technical levers were spiked on 2026-07-22 and **both are blocked**:
 
-1. **B** (in-process hot read methods behind a contract test) is now the only
-   recommended technical lever. Reimplement just `fingerprint`, `head_sha`,
-   `changed_paths`, `status_porcelain*`, `untracked_paths` in-process (pygit2 or
-   batched git), gated by a contract test asserting byte-equivalence to
-   `GitCliRepository`. Decide the `pygit2` dependency question first.
-2. C is rejected (see above). A and D remain out of scope.
-3. If B's cost/dependency is unacceptable, the practical stance is to **stop**:
-   the inner loop (`test-affected`) is already <1 min for the common case and
-   the full suite (~5:21) is an acceptable pre-push gate.
+- **C rejected** — memoizing identity disables the `_assert_current` drift guard.
+- **B not worth it** — the dominant method (`fingerprint`) is an immovable
+  persisted identity that hashes git CLI's exact diff bytes; the residual win
+  doesn't justify a C-extension dependency and reimplementing git semantics.
+- **A** (full ~60-method fake) and **D** (layered re-architecture) remain large,
+  high-risk, and out of scope.
 
-Each increment must: keep the full suite green, ship its contract/regression
-test, and be independently revertable. No half-built fake left in the tree.
+**Conclusion: stop.** The shipped optimizations (forge_env template, timeout-layer
+fix, coverage-based `test-affected`) are the practical optimum under the `-n 3`
+machine cap. The inner loop is already <1 min for the common (domain/leaf) case;
+the full suite (~5:21) is an acceptable pre-push gate. Further speedup would
+require changing persisted-identity semantics or the test architecture itself —
+neither justified by the marginal wall-clock saved.
+
+Reopen only if a constraint changes: the machine tolerates more parallelism, the
+fingerprint identity is redesigned for other reasons, or CI wall-clock becomes a
+real bottleneck.
 
 ## Guardrails that make any of this safe
 
