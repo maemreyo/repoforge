@@ -709,6 +709,7 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
             self.starts = 0
             self.health_calls = 0
             self.terminated = 0
+            self.correlations: list[str] = []
 
         def initialize(self, profile, *, env):
             del profile, env
@@ -717,10 +718,11 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
             del profile, env
             return True, "ok"
 
-        def start(self, profile, *, env, log_path):
+        def start(self, profile, *, env, log_path, correlation_id):
             del profile, env, log_path
             self.starts += 1
             self.health_calls = 0
+            self.correlations.append(correlation_id)
             return ChildProcess(200 + self.starts, "f" * 64, "now")
 
         def is_alive(self, child):
@@ -779,3 +781,5 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
     )
     assert tunnel.starts == 2
     assert tunnel.terminated >= 2
+    assert runtime.record is not None
+    assert tunnel.correlations == [runtime.record.correlation_id] * 2

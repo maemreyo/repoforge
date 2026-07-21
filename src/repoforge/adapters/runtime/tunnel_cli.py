@@ -157,6 +157,7 @@ class TunnelCliClient:
         log_path: Path,
         *,
         secrets: tuple[str, ...],
+        correlation_id: str | None,
     ) -> None:
         stream = process.stdout
         if stream is None:
@@ -189,6 +190,7 @@ class TunnelCliClient:
                                 level="WARNING",
                                 event_kind="oversized_line",
                                 message=f"runtime log line omitted: {len(line)} characters",
+                                correlation_id=correlation_id,
                             ),
                             secrets=secrets,
                         )
@@ -203,6 +205,7 @@ class TunnelCliClient:
                                 level="INFO",
                                 event_kind="process_output",
                                 message=line,
+                                correlation_id=correlation_id,
                             ),
                             secrets=secrets,
                         )
@@ -219,6 +222,7 @@ class TunnelCliClient:
                                 "runtime log line omitted: more than "
                                 f"{_STREAM_BUFFER_LIMIT} characters"
                             ),
+                            correlation_id=correlation_id,
                         ),
                         secrets=secrets,
                     )
@@ -236,6 +240,7 @@ class TunnelCliClient:
                         level="INFO",
                         event_kind="process_output",
                         message=pending,
+                        correlation_id=correlation_id,
                     ),
                     secrets=secrets,
                 )
@@ -326,7 +331,14 @@ class TunnelCliClient:
         except ConfigError as exc:
             return False, str(exc)
 
-    def start(self, profile: TunnelProfile, *, env: dict[str, str], log_path: Path) -> ChildProcess:
+    def start(
+        self,
+        profile: TunnelProfile,
+        *,
+        env: dict[str, str],
+        log_path: Path,
+        correlation_id: str | None = None,
+    ) -> ChildProcess:
         log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(log_path.parent, 0o700)
         with self._log_lock:
@@ -353,7 +365,7 @@ class TunnelCliClient:
         thread = threading.Thread(
             target=self._pump_output,
             args=(process, log_path),
-            kwargs={"secrets": secrets},
+            kwargs={"secrets": secrets, "correlation_id": correlation_id},
             name=f"repoforge-tunnel-log-{process.pid}",
             daemon=True,
         )

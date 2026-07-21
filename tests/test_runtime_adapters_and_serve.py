@@ -174,7 +174,7 @@ def test_tunnel_cli_runtime_jsonl_lifecycle(tmp_path: Path) -> None:
 
     log = tmp_path / "runtime.log"
     log.write_bytes(b"x" * 5_000_001)
-    child = client.start(profile, env=env, log_path=log)
+    child = client.start(profile, env=env, log_path=log, correlation_id="runtime-corr")
     assert log.with_suffix(".log.1").is_file()
     assert client.is_alive(child)
     import time
@@ -191,6 +191,7 @@ def test_tunnel_cli_runtime_jsonl_lifecycle(tmp_path: Path) -> None:
     assert event["schema_version"] == 1
     assert event["event_kind"] == "process_output"
     assert event["message"] == "running"
+    assert event["correlation_id"] == "runtime-corr"
 
     with pytest.raises(ConfigError, match="Tunnel id"):
         client.initialize(profile, env={})
