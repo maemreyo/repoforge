@@ -38,6 +38,7 @@ from repoforge.bootstrap import (
     read_audit_event_page,
     read_audit_events,
     read_runtime_log,
+    read_runtime_log_page,
 )
 from repoforge.config import load_config
 from repoforge.domain.config_generation import sha256_text
@@ -499,6 +500,7 @@ def _admin(
         runtime_log_path=tmp_path / "state" / "managed-runtime.log",
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_log_page=read_runtime_log_page,
         read_audit_page=read_audit_event_page,
         reload_runtime=reload_runtime,
         read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
@@ -856,6 +858,9 @@ def test_runtime_logs_read_reports_legacy_and_malformed_without_epoch(tmp_path: 
     assert result["malformed_count"] == 1
     assert result["legacy_count"] == 1
     assert result["structured_count"] == 0
+    assert result["correlated_count"] == 0
+    assert result["timestamp_unavailable_count"] == 2
+    assert result["source_truncated"] is False
     assert "1970-01-01" not in json.dumps(result, sort_keys=True)
 
 
@@ -897,6 +902,9 @@ def test_runtime_logs_read_preserves_structured_provenance_and_correlation(tmp_p
 
     assert result["structured_count"] == 1
     assert result["legacy_count"] == 0
+    assert result["correlated_count"] == 1
+    assert result["timestamp_unavailable_count"] == 0
+    assert result["source_truncated"] is False
     assert len(result["entries"]) == 1
     entry = result["entries"][0]
     assert entry["timestamp_state"] == "observed"
@@ -952,6 +960,28 @@ def test_runtime_logs_read_bounds_untrusted_structured_metadata(tmp_path: Path) 
     assert len(entry["correlation_id"]) == 160
     assert entry["workspace_hash"] is None
     assert entry["repository_hash"] is None
+
+
+def test_runtime_logs_read_reports_bounded_source_truncation(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("".join(f"line-{index}\n" for index in range(1_000)), encoding="utf-8")
+
+    exact = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    assert exact["source_truncated"] is False
+    assert exact["truncated"] is True  # more filtered entries remain for pagination
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("line-1000\n")
+    truncated = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    assert len(truncated["entries"]) == 10
+    assert truncated["source_truncated"] is True
+    assert truncated["truncated"] is True
+    assert truncated["legacy_count"] == 10
+    assert truncated["timestamp_unavailable_count"] == 10
 
 
 def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Path) -> None:

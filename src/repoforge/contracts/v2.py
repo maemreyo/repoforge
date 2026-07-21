@@ -1701,6 +1701,9 @@ class RuntimeLogsReadOutput(ToolResponse):
     malformed_count: int = Field(default=0, ge=0, le=1_000)
     legacy_count: int = Field(default=0, ge=0, le=1_000)
     structured_count: int = Field(default=0, ge=0, le=1_000)
+    correlated_count: int = Field(default=0, ge=0, le=1_000)
+    timestamp_unavailable_count: int = Field(default=0, ge=0, le=1_000)
+    source_truncated: bool | None = None
     truncated: bool = False
     next_cursor: Cursor | None = None
 

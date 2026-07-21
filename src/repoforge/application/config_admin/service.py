@@ -122,6 +122,14 @@ class AuditPageReader(Protocol):
     ) -> AuditEventPageView: ...
 
 
+class RuntimeLogPageView(Protocol):
+    @property
+    def lines(self) -> tuple[str, ...]: ...
+
+    @property
+    def source_truncated(self) -> bool: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ProfileDefinition:
     """One complete profile definition supplied by the connected model."""
@@ -149,6 +157,7 @@ class ConfigAdminService:
         runtime_log_path: Path,
         read_audit: Callable[..., list[dict[str, Any]]],
         read_log: Callable[[Path, int], list[str]],
+        read_log_page: Callable[[Path, int], RuntimeLogPageView] | None = None,
         read_audit_page: AuditPageReader | None = None,
         reload_runtime: Callable[[int], dict[str, Any]] | None = None,
         read_runtime_status: Callable[[], dict[str, object]] | None = None,
@@ -163,6 +172,7 @@ class ConfigAdminService:
         self._runtime_log_path = runtime_log_path
         self._read_audit = read_audit
         self._read_log = read_log
+        self._read_log_page = read_log_page
         self._read_audit_page = read_audit_page
         self._reload_runtime = reload_runtime
         self._read_runtime_status = read_runtime_status
@@ -765,7 +775,13 @@ class ConfigAdminService:
             start_time=start_time,
             end_time=end_time,
         )
-        raw_lines = list(reversed(self._read_log(self._runtime_log_path, 1_000)))
+        if self._read_log_page is not None:
+            log_page = self._read_log_page(self._runtime_log_path, 1_000)
+            raw_lines = list(reversed(log_page.lines))
+            source_truncated: bool | None = log_page.source_truncated
+        else:
+            raw_lines = list(reversed(self._read_log(self._runtime_log_path, 1_000)))
+            source_truncated = None
         snapshot = hashlib.sha256(
             json.dumps(raw_lines, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:24]
@@ -831,7 +847,12 @@ class ConfigAdminService:
             "structured_count": sum(
                 1 for entry in selected if entry["parse_state"] == "structured_v1"
             ),
-            "truncated": has_more or len(raw_lines) >= 1_000,
+            "correlated_count": sum(1 for entry in selected if entry["correlation_id"] is not None),
+            "timestamp_unavailable_count": sum(
+                1 for entry in selected if entry["timestamp"] is None
+            ),
+            "source_truncated": source_truncated,
+            "truncated": has_more or source_truncated,
             "next_cursor": next_cursor,
         }
 

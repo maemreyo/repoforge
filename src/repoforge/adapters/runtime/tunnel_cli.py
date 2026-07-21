@@ -151,6 +151,58 @@ class TunnelCliClient:
                     detail = f"HTTP {status}: {detail}"
                 self._response_failures[pid] = (count + 1, now, detail)
 
+    @staticmethod
+    def _runtime_event_from_line(
+        line: str,
+        *,
+        correlation_id: str | None,
+    ) -> RuntimeEventV1:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = None
+
+        if not isinstance(payload, dict):
+            return RuntimeEventV1(
+                observed_at=datetime.now(timezone.utc).isoformat(),
+                component="tunnel_client",
+                stream="combined",
+                level="INFO",
+                event_kind="process_output",
+                message=line,
+                correlation_id=correlation_id[:160] if correlation_id else None,
+            )
+
+        def bounded_text(key: str, default: str, limit: int) -> str:
+            value = payload.get(key)
+            return value[:limit] if isinstance(value, str) and value else default
+
+        raw_message = payload.get("message")
+        if not isinstance(raw_message, str):
+            raw_message = payload.get("msg")
+        message = raw_message if isinstance(raw_message, str) else line
+        raw_action = payload.get("action")
+        action = raw_action[:160] if isinstance(raw_action, str) and raw_action else None
+        raw_duration = payload.get("duration_ms")
+        duration_ms = (
+            float(raw_duration)
+            if isinstance(raw_duration, (int, float))
+            and not isinstance(raw_duration, bool)
+            and raw_duration >= 0
+            else None
+        )
+        return RuntimeEventV1(
+            observed_at=datetime.now(timezone.utc).isoformat(),
+            component=bounded_text("component", "tunnel_client", 160),
+            stream="combined",
+            level=bounded_text("level", "INFO", 30),
+            event_kind=bounded_text("event_kind", "tunnel_event", 160),
+            message=message,
+            action=action,
+            duration_ms=duration_ms,
+            correlation_id=correlation_id[:160] if correlation_id else None,
+        )
+
     def _pump_output(
         self,
         process: subprocess.Popen[bytes],
@@ -186,7 +238,7 @@ class TunnelCliClient:
                             RuntimeEventV1(
                                 observed_at=datetime.now(timezone.utc).isoformat(),
                                 component="tunnel_client",
-                                stream="stdout",
+                                stream="combined",
                                 level="WARNING",
                                 event_kind="oversized_line",
                                 message=f"runtime log line omitted: {len(line)} characters",
@@ -198,13 +250,8 @@ class TunnelCliClient:
                         self._observe_log_line(process.pid, line)
                         self._append_runtime_event(
                             log_path,
-                            RuntimeEventV1(
-                                observed_at=datetime.now(timezone.utc).isoformat(),
-                                component="tunnel_client",
-                                stream="stdout",
-                                level="INFO",
-                                event_kind="process_output",
-                                message=line,
+                            self._runtime_event_from_line(
+                                line,
                                 correlation_id=correlation_id,
                             ),
                             secrets=secrets,
@@ -215,7 +262,7 @@ class TunnelCliClient:
                         RuntimeEventV1(
                             observed_at=datetime.now(timezone.utc).isoformat(),
                             component="tunnel_client",
-                            stream="stdout",
+                            stream="combined",
                             level="WARNING",
                             event_kind="oversized_line",
                             message=(
@@ -233,13 +280,8 @@ class TunnelCliClient:
                 self._observe_log_line(process.pid, pending)
                 self._append_runtime_event(
                     log_path,
-                    RuntimeEventV1(
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                        component="tunnel_client",
-                        stream="stdout",
-                        level="INFO",
-                        event_kind="process_output",
-                        message=pending,
+                    self._runtime_event_from_line(
+                        pending,
                         correlation_id=correlation_id,
                     ),
                     secrets=secrets,

@@ -190,6 +190,7 @@ def test_tunnel_cli_runtime_jsonl_lifecycle(tmp_path: Path) -> None:
     event = json.loads(lines[-1])
     assert event["schema_version"] == 1
     assert event["event_kind"] == "process_output"
+    assert event["stream"] == "combined"
     assert event["message"] == "running"
     assert event["correlation_id"] == "runtime-corr"
 
@@ -435,3 +436,28 @@ def test_tunnel_writer_persists_secret_safe_runtime_jsonl(tmp_path: Path) -> Non
     assert payload["event_kind"] == "process_output"
     assert "secret-value" not in json.dumps(payload)
     assert payload["message"].startswith("token=<redacted")
+
+
+def test_tunnel_projects_child_json_fields() -> None:
+    client = TunnelCliClient("tunnel-client")
+
+    event = client._runtime_event_from_line(
+        json.dumps(
+            {
+                "level": "ERROR",
+                "msg": "failed safely",
+                "action": "workspace_push",
+                "duration_ms": 12.5,
+            }
+        ),
+        correlation_id="runtime-corr",
+    )
+
+    assert event.component == "tunnel_client"
+    assert event.stream == "combined"
+    assert event.level == "ERROR"
+    assert event.event_kind == "tunnel_event"
+    assert event.message == "failed safely"
+    assert event.action == "workspace_push"
+    assert event.duration_ms == 12.5
+    assert event.correlation_id == "runtime-corr"
