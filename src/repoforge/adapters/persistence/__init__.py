@@ -1,3 +1,4 @@
+from .failure_output_artifact_store import FileFailureOutputArtifactStore
 from .json_approval_store import JsonApprovalPayloadStore, JsonApprovalStore
 from .json_effect_receipt_store import JsonEffectReceiptStore
 from .json_execution_plan_store import JsonExecutionPlanAcceptanceStore, JsonExecutionPlanStore
@@ -17,6 +18,7 @@ from .json_workflow_recording_store import JsonWorkflowRecordingStore
 from .json_workspace_store import JsonWorkspaceStore
 
 __all__ = [
+    "FileFailureOutputArtifactStore",
     "JsonApprovalPayloadStore",
     "JsonApprovalStore",
     "JsonEffectReceiptStore",

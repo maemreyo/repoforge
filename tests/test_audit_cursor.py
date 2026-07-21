@@ -147,8 +147,9 @@ def test_cli_cursor_flag_returns_a_cursor_page(
     assert cli.main(["--config", str(forge_env.config_path), "audit", "--cursor", "0"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
-    assert len(payload["events"]) == 2
-    assert payload["next_cursor"] == 2
+    assert len(payload["events"]) == 1
+    assert payload["events"][0]["action"] == "repo_list"
+    assert payload["next_cursor"] == 1
 
     assert (
         cli.main(

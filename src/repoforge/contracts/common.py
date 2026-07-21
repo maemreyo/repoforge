@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..domain.errors import ErrorCode
 
@@ -77,6 +77,11 @@ class ToolResponse(StrictModel):
     error: None = None
 
 
+class OutcomeIdentityEntry(StrictModel):
+    key: str = Field(min_length=1, max_length=160)
+    value: str = Field(max_length=10_000)
+
+
 class OutcomeReceiptEvidence(StrictModel):
     """Authoritative durable outcome identity for one mutating call."""
 
@@ -94,8 +99,18 @@ class OutcomeReceiptEvidence(StrictModel):
     ]
     result_reference: str | None = Field(default=None, max_length=256)
     effect_boundary_crossed: bool
-    pre_identity: dict[str, str] = Field(default_factory=dict, max_length=20)
-    post_identity: dict[str, str] = Field(default_factory=dict, max_length=20)
+    pre_identity: tuple[OutcomeIdentityEntry, ...] = Field(default=(), max_length=20)
+    post_identity: tuple[OutcomeIdentityEntry, ...] = Field(default=(), max_length=20)
+
+    @field_validator("pre_identity", "post_identity", mode="before")
+    @classmethod
+    def normalize_identity(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return tuple(
+                {"key": str(key), "value": str(item)}
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            )
+        return value
 
 
 class ToolFailure(StrictModel):

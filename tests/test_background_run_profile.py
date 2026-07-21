@@ -610,6 +610,8 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
             "force_rerun",
             "expected_fingerprint",
             "correlation_id",
+            "correlation_hash",
+            "origin",
             "duration_ms",
             "result_bytes",
             "command_source_dirty",

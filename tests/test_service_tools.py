@@ -321,7 +321,7 @@ def test_v2_repo_history_cursor_continues_exact_log_page(
     assert second["next_cursor"] is None
 
 
-def test_v2_repo_issue_comment_replays_and_reconciles_lost_response(
+def test_issue_write_outcome_state(
     forge_env: ForgeEnvironment,
 ) -> None:
     service = forge_env.service
@@ -362,7 +362,7 @@ def test_v2_repo_issue_comment_replays_and_reconciles_lost_response(
             evidence_ref="verification:run-2",
             idempotency_key="repo-issue-comment-0002",
         )
-    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    assert uncertain.value.code is ErrorCode.EFFECT_OUTCOME_UNKNOWN
     reconciled = service.repo_issue_v2(
         "demo",
         mode="comment",
@@ -1162,6 +1162,8 @@ def test_repo_list_produces_exactly_one_bounded_audit_event(forge_env: ForgeEnvi
         "repo_count",
         "selection_outcome",
         "correlation_id",
+        "correlation_hash",
+        "origin",
         "duration_ms",
         "result_bytes",
         "is_mutating",
@@ -1183,6 +1185,8 @@ def test_workspace_list_produces_exactly_one_bounded_audit_event(
     assert set(event["details"]) == {
         "workspace_count",
         "correlation_id",
+        "correlation_hash",
+        "origin",
         "duration_ms",
         "result_bytes",
         "is_mutating",

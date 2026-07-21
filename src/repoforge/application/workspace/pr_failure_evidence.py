@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from ...adapters.persistence.failure_output_artifact_store import persist_failure_output
 from ...domain.ci_evidence import sanitize_ci_text
 from ...domain.errors import CommandError
 from ...domain.failure_artifacts import extract_failure
@@ -175,12 +174,13 @@ class WorkspacePrFailureEvidenceReader:
             artifact_reference: str | None = None
             artifact_status = "not_applicable"
             if is_failure:
-                artifact = persist_failure_output(
-                    self.ctx.config.server.state_root,
-                    complete_evidence,
-                )
-                artifact_reference = artifact.reference
-                artifact_status = artifact.status
+                artifact_store = self.ctx.failure_output_artifacts
+                if artifact_store is None:
+                    artifact_status = "persistence_failed"
+                else:
+                    artifact = artifact_store.persist(complete_evidence)
+                    artifact_reference = artifact.reference
+                    artifact_status = artifact.status
                 if artifact_reference is not None and truncated:
                     artifact_status = "source_truncated"
                 elif artifact_reference is not None and any(

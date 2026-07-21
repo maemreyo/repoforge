@@ -44,6 +44,7 @@ from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
+    FileFailureOutputArtifactStore,
     JsonApprovalPayloadStore,
     JsonApprovalStore,
     JsonEffectReceiptStore,
@@ -159,6 +160,7 @@ from .ports import (
     ExecutionPlanStore,
     ExecutionReceiptStore,
     FailureEvidenceStore,
+    FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
     GitHubCapabilityProbe,
@@ -244,6 +246,7 @@ class AdapterOverrides:
     effect_receipts: EffectReceiptStore | None = None
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
+    failure_output_artifacts: FailureOutputArtifactStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +588,9 @@ def build_application(
     failure_evidence = o.failure_evidence or JsonFailureEvidenceStore(
         config.server.state_root, locks
     )
+    failure_output_artifacts = o.failure_output_artifacts or FileFailureOutputArtifactStore(
+        config.server.state_root
+    )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
@@ -644,6 +650,7 @@ def build_application(
         effect_receipts=effect_receipts,
         iteration_cache=iteration_cache,
         failure_evidence=failure_evidence,
+        failure_output_artifacts=failure_output_artifacts,
     )
     operations = OperationManager(context)
     processes = build_process_inspector()

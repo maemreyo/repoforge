@@ -27,6 +27,7 @@ from ..ports import (
     ExecutionPlanStore,
     ExecutionReceiptStore,
     FailureEvidenceStore,
+    FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
     GitHubCapabilityProbe,
@@ -254,6 +255,7 @@ class ApplicationContext:
     effect_receipts: EffectReceiptStore | None = None
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
+    failure_output_artifacts: FailureOutputArtifactStore | None = None
 
     def now_epoch(self) -> float:
         try:

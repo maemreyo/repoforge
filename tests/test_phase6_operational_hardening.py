@@ -374,7 +374,7 @@ def test_metrics_sink_migrates_v1_file_and_keeps_accumulating(tmp_path: Path) ->
     assert snapshot["buckets"]["2026-07-14"]["workspace_push"]["count"] == 1
 
 
-def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
+def test_metrics_empty_snapshot_state(tmp_path: Path) -> None:
     locks = InMemoryLockManager()
     path = tmp_path / "operation-metrics.json"
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -382,9 +382,10 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
     metrics = JsonMetricsSink(tmp_path, locks, FixedClock())
     empty_snapshot = {
-        "version": 4,
+        "version": 5,
         "operations": {},
         "buckets": {},
+        "calls_by_origin": {},
         "latency": {"tool_classes": {}},
     }
     assert metrics.snapshot() == empty_snapshot

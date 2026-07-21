@@ -353,8 +353,8 @@ class WorkspacePrCoordinator:
             if self.ctx.idempotency is not None
             else None
         )
-        completed_replay = existing is not None and existing.state is IdempotencyState.COMPLETED
-        if not completed_replay:
+        idempotency_replay = existing is not None
+        if not idempotency_replay:
             self._assert_remote_version(command.expected_remote_version, version)
         comment = execute_idempotent(
             self.ctx,
@@ -372,7 +372,7 @@ class WorkspacePrCoordinator:
             effect_boundary=boundary,
             reconcile_uncertain=lambda: reconcile(replay=True),
         )
-        if completed_replay and not comment.idempotent_replay:
+        if idempotency_replay and not comment.idempotent_replay:
             comment = replace(comment, idempotent_replay=True)
         record, _repo, _path, payload, version = self._status(command.workspace_id)
         return WorkspacePrResult(
