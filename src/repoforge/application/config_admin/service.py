@@ -25,7 +25,7 @@ import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -72,6 +72,7 @@ from ..repository_admin.proposals import RepositoryProposalService
 
 _AUTO_APPLY_DELTAS = frozenset({CapabilityDeltaKind.METADATA_ONLY, CapabilityDeltaKind.RESTRICTION})
 _MAX_LOG_LIMIT = 200
+_FAILURE_OUTPUT_REFERENCE = re.compile(r"^failure-output:([a-f0-9]{64})$")
 _HOST_PATH_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9:/])/(?:[^/\s]+/)*[^/\s]+"),
     re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\(?:[^\\\s]+\\)*[^\\\s]+"),
@@ -588,6 +589,78 @@ class ConfigAdminService:
             "duration_ms": None,
         }
 
+    def _failure_artifact_page(
+        self,
+        artifact_reference: str,
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        match = _FAILURE_OUTPUT_REFERENCE.fullmatch(artifact_reference)
+        if match is None:
+            raise ConfigError("runtime_logs_read artifact_reference is invalid")
+        digest = match.group(1)
+        target = self._audit_log_path.parent / "failure-output-artifacts" / f"{digest}.blob"
+        try:
+            payload = target.read_bytes()
+        except FileNotFoundError as exc:
+            raise ConfigError("runtime_logs_read artifact_reference was not found") from exc
+        except OSError as exc:
+            raise ConfigError("runtime_logs_read artifact_reference is unreadable") from exc
+        if len(payload) > 10 * 1024 * 1024:
+            raise ConfigError("runtime_logs_read artifact is larger than the retrieval bound")
+        if hashlib.sha256(payload).hexdigest() != digest:
+            raise ConfigError("runtime_logs_read artifact digest does not match its reference")
+        text = payload.decode("utf-8", errors="replace")
+        messages: list[str] = []
+        for line in text.splitlines():
+            if not line:
+                messages.append("")
+                continue
+            messages.extend(line[index : index + 4_000] for index in range(0, len(line), 4_000))
+        offset = 0
+        if cursor is not None:
+            parts = cursor.split(":", 2)
+            if (
+                len(parts) != 3
+                or parts[0] != "failure-artifact-v1"
+                or parts[1] != digest
+                or not parts[2].isdigit()
+            ):
+                raise ConfigError(
+                    "Failure artifact cursor is invalid or belongs to another artifact"
+                )
+            offset = int(parts[2])
+            if offset > len(messages):
+                raise ConfigError("Failure artifact cursor offset is outside the artifact")
+        selected = messages[offset : offset + limit]
+        has_more = offset + len(selected) < len(messages)
+        next_cursor = (
+            f"failure-artifact-v1:{digest}:{offset + len(selected)}"
+            if selected and has_more
+            else None
+        )
+        timestamp = datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat()
+        return {
+            "status": "ok",
+            "summary": f"Read {len(selected)} bounded failure artifact entries",
+            "error": None,
+            "source": "failure_artifact",
+            "entries": [
+                {
+                    "timestamp": timestamp,
+                    "source": "failure_artifact",
+                    "action": "failure_artifact",
+                    "level": "ERROR",
+                    "message": message,
+                    "duration_ms": None,
+                }
+                for message in selected
+            ],
+            "truncated": has_more,
+            "next_cursor": next_cursor,
+        }
+
     def runtime_logs_read_v2(
         self,
         source: str = "audit",
@@ -599,15 +672,39 @@ class ConfigAdminService:
         start_time: str | None = None,
         end_time: str | None = None,
         cursor: str | None = None,
+        artifact_reference: str | None = None,
     ) -> dict[str, Any]:
-        if source not in {"audit", "runtime"}:
-            raise ConfigError("runtime_logs_read source must be 'audit' or 'runtime'")
+        if source not in {"audit", "runtime", "failure_artifact"}:
+            raise ConfigError(
+                "runtime_logs_read source must be 'audit', 'runtime', or 'failure_artifact'"
+            )
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
             or not 1 <= limit <= _MAX_LOG_LIMIT
         ):
             raise ConfigError(f"runtime_logs_read limit must be between 1 and {_MAX_LOG_LIMIT}")
+        if source == "failure_artifact":
+            if artifact_reference is None:
+                raise ConfigError(
+                    "runtime_logs_read failure_artifact source requires artifact_reference"
+                )
+            if (
+                any(value is not None for value in (action, min_duration_ms, start_time, end_time))
+                or only_failed
+            ):
+                raise ConfigError(
+                    "runtime_logs_read failure_artifact source does not accept log filters"
+                )
+            return self._failure_artifact_page(
+                artifact_reference,
+                limit=limit,
+                cursor=cursor,
+            )
+        if artifact_reference is not None:
+            raise ConfigError(
+                "runtime_logs_read artifact_reference is only valid for failure_artifact source"
+            )
         start = self._parse_log_time(start_time, "start_time")
         end = self._parse_log_time(end_time, "end_time")
         if start is not None and end is not None and start > end:

@@ -12,6 +12,7 @@ from ...domain.diagnostics import (
     DiagnosticProfileConfig,
 )
 from ...domain.errors import ErrorCode, RepoForgeError
+from ...domain.failure_artifacts import FailureLocation
 from ...domain.verification import VerificationIntent
 from ...ports.command import CommandResult
 
@@ -31,6 +32,11 @@ class ParsedDiagnostic:
     business_tests_ran: bool = False
     failed_selectors: tuple[str, ...] = ()
     output_artifact_reference: str | None = None
+    failure_provider: str | None = None
+    selector_coverage: str = "not_applicable"
+    selectors_unavailable_reason: str | None = None
+    failure_locations: tuple[FailureLocation, ...] = ()
+    output_artifact_status: str = "not_applicable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +127,11 @@ def _parse_pytest(result: CommandResult) -> ParsedDiagnostic:
         business_tests_ran,
         result.failed_selectors,
         result.output_artifact_reference,
+        failure_provider=result.failure_provider,
+        selector_coverage=result.selector_coverage,
+        selectors_unavailable_reason=result.selectors_unavailable_reason,
+        failure_locations=result.failure_locations,
+        output_artifact_status=result.output_artifact_status,
     )
 
 
@@ -157,6 +168,11 @@ def _parse_release_contract(result: CommandResult) -> ParsedDiagnostic:
         result.stdout_truncated or result.stderr_truncated,
         failed_selectors=result.failed_selectors,
         output_artifact_reference=result.output_artifact_reference,
+        failure_provider=result.failure_provider,
+        selector_coverage=result.selector_coverage,
+        selectors_unavailable_reason=result.selectors_unavailable_reason,
+        failure_locations=result.failure_locations,
+        output_artifact_status=result.output_artifact_status,
     )
 
 
@@ -169,6 +185,11 @@ def _parse_text(result: CommandResult) -> ParsedDiagnostic:
         result.stdout_truncated or result.stderr_truncated,
         failed_selectors=result.failed_selectors,
         output_artifact_reference=result.output_artifact_reference,
+        failure_provider=result.failure_provider,
+        selector_coverage=result.selector_coverage,
+        selectors_unavailable_reason=result.selectors_unavailable_reason,
+        failure_locations=result.failure_locations,
+        output_artifact_status=result.output_artifact_status,
     )
 
 

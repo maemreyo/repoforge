@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from ...adapters.persistence.failure_output_artifact_store import persist_failure_output
 from ...domain.ci_evidence import sanitize_ci_text
 from ...domain.errors import CommandError
+from ...domain.failure_artifacts import extract_failure
 from ..context import ApplicationContext
 from .pr_check_context import (
     load_workspace_check_context,
@@ -51,6 +53,13 @@ class WorkspacePrFailureEvidenceResult:
     withheld_lines: int
     truncated: bool
     annotation_count: int
+    failure_provider: str | None
+    selector_coverage: str
+    selectors_unavailable_reason: str | None
+    failed_selectors: list[str]
+    failure_locations: list[dict[str, object]]
+    output_artifact_reference: str | None
+    output_artifact_status: str
 
 
 def _annotation_lines(material: RenderedCheckMaterial) -> list[str]:
@@ -123,8 +132,19 @@ class WorkspacePrFailureEvidenceReader:
                 annotations_unavailable = any(
                     error.startswith("annotations_") for error in source_errors
                 )
+                initial_extraction = extract_failure(
+                    (material.failed_step or material.name,),
+                    "\n".join(excerpt_lines),
+                    returncode=1,
+                )
+                actionable_annotation_evidence = bool(
+                    initial_extraction.selectors or initial_extraction.locations
+                )
                 should_read_log = context.check.job_id is not None and (
-                    not material.annotations or annotations_unavailable or not excerpt_lines
+                    not material.annotations
+                    or annotations_unavailable
+                    or not excerpt_lines
+                    or not actionable_annotation_evidence
                 )
                 if should_read_log and context.check.job_id is not None:
                     try:
@@ -145,6 +165,28 @@ class WorkspacePrFailureEvidenceReader:
                         redacted = redacted or rendered_log.redacted
                         withheld_lines += rendered_log.withheld_lines
                         truncated = truncated or rendered_log.truncated or job_log.truncated
+
+            complete_evidence = "\n".join(excerpt_lines)
+            extraction = extract_failure(
+                (material.failed_step or material.name,),
+                complete_evidence,
+                returncode=1 if is_failure else 0,
+            )
+            artifact_reference: str | None = None
+            artifact_status = "not_applicable"
+            if is_failure:
+                artifact = persist_failure_output(
+                    self.ctx.config.server.state_root,
+                    complete_evidence,
+                )
+                artifact_reference = artifact.reference
+                artifact_status = artifact.status
+                if artifact_reference is not None and truncated:
+                    artifact_status = "source_truncated"
+                elif artifact_reference is not None and any(
+                    error.startswith("job_log_") for error in source_errors
+                ):
+                    artifact_status = "source_unavailable"
 
             excerpt_truncated = len(excerpt_lines) > line_limit
             selected_lines = excerpt_lines[:line_limit]
@@ -211,6 +253,21 @@ class WorkspacePrFailureEvidenceReader:
                 withheld_lines=withheld_lines,
                 truncated=truncated,
                 annotation_count=len(material.annotations),
+                failure_provider=extraction.provider,
+                selector_coverage=extraction.selector_coverage,
+                selectors_unavailable_reason=extraction.selectors_unavailable_reason,
+                failed_selectors=list(extraction.selectors),
+                failure_locations=[
+                    {
+                        "path": item.path,
+                        "line": item.line,
+                        "column": item.column,
+                        "code": item.code,
+                    }
+                    for item in extraction.locations
+                ],
+                output_artifact_reference=artifact_reference,
+                output_artifact_status=artifact_status,
             )
 
         return self.ctx.audited(

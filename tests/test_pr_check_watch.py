@@ -375,3 +375,177 @@ async def test_workspace_pr_watch_is_exposed_through_actual_mcp(
         )
         assert result.isError is False
         assert result.structuredContent["operation"]["kind"] == "pr_check_watch"
+
+
+def _seed_failed_ci_check(
+    forge_env: ForgeEnvironment,
+    *,
+    workspace_id: str,
+    check_run_id: int = 501,
+    job_id: int = 900,
+) -> None:
+    ctx = forge_env.service.application.context
+    record = ctx.store.load(workspace_id)
+    workspace = Path(forge_env.service.workspace_status(workspace_id)["path"])
+    head_sha = ctx.git.head_sha(workspace)
+    record.metadata["last_pushed_sha"] = head_sha
+    ctx.store.save(record)
+    state = {
+        "prs": {
+            record.branch: {
+                "number": 42,
+                "title": "Failure evidence",
+                "body": "Failure evidence body",
+                "url": "https://github.com/owner/demo/pull/42",
+                "state": "OPEN",
+                "isDraft": True,
+                "mergeable": "MERGEABLE",
+                "reviewDecision": "",
+                "statusCheckRollup": [],
+                "comments": [],
+                "reviews": [],
+                "updatedAt": "2026-07-21T14:00:00Z",
+                "headRefOid": head_sha,
+            }
+        },
+        "check_runs": {
+            str(check_run_id): {
+                "id": check_run_id,
+                "name": "tests (ubuntu-latest, 3.10)",
+                "head_sha": head_sha,
+                "status": "completed",
+                "conclusion": "failure",
+                "details_url": (f"https://github.com/owner/demo/actions/runs/800/job/{job_id}"),
+                "html_url": f"https://github.com/owner/demo/actions/runs/800/job/{job_id}",
+                "started_at": "2026-07-21T13:07:11Z",
+                "completed_at": "2026-07-21T13:14:06Z",
+                "output": {
+                    "title": "",
+                    "summary": "",
+                    "text": "",
+                    "annotations_count": 1,
+                },
+                "app": {"name": "GitHub Actions"},
+            }
+        },
+        "annotations": {
+            str(check_run_id): [
+                {
+                    "path": ".github",
+                    "start_line": 1014,
+                    "end_line": 1014,
+                    "annotation_level": "failure",
+                    "title": "",
+                    "message": "Process completed with exit code 1.",
+                    "raw_details": "",
+                }
+            ]
+        },
+        "jobs": {
+            str(job_id): {
+                "id": job_id,
+                "run_id": 800,
+                "run_attempt": 1,
+                "name": "tests (ubuntu-latest, 3.10)",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": f"https://github.com/owner/demo/actions/runs/800/job/{job_id}",
+                "steps": [
+                    {
+                        "number": 4,
+                        "name": "Run pytest",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    }
+                ],
+            }
+        },
+        "logs": {
+            str(job_id): (
+                "FAILED tests/test_alpha.py::test_one - AssertionError: expected true\n"
+                "FAILED tests/test_beta.py::test_two - ValueError: broken\n"
+                "tests/test_alpha.py:12: AssertionError\n"
+                "2 failed in 0.42s\n"
+            )
+        },
+    }
+    forge_env.gh_state.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_ci_log_projection(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id = forge_env.service.workspace_create(
+        "demo", "generic annotation job log fallback"
+    )["workspace_id"]
+    _seed_failed_ci_check(forge_env, workspace_id=workspace_id)
+
+    evidence = forge_env.service.workspace_pr_failure_evidence(
+        workspace_id,
+        "check-run:501",
+        max_excerpt_lines=80,
+    )
+
+    assert evidence["failed_step"] == "Run pytest"
+    assert evidence["failure_provider"] == "pytest"
+    assert evidence["selector_coverage"] == "complete"
+    assert evidence["selectors_unavailable_reason"] is None
+    assert evidence["failed_selectors"] == [
+        "tests/test_alpha.py::test_one",
+        "tests/test_beta.py::test_two",
+    ]
+    assert evidence["failure_locations"] == []
+    assert "FAILED tests/test_alpha.py::test_one" in evidence["excerpt"]
+    assert evidence["coverage"] == "complete"
+    assert evidence["output_artifact_status"] == "available"
+    reference = evidence["output_artifact_reference"]
+    assert reference.startswith("failure-output:")
+    digest = reference.removeprefix("failure-output:")
+    artifact = (
+        forge_env.service.config.server.state_root / "failure-output-artifacts" / f"{digest}.blob"
+    )
+    artifact_body = artifact.read_text(encoding="utf-8")
+    assert "FAILED tests/test_alpha.py::test_one" in artifact_body
+    assert "FAILED tests/test_beta.py::test_two" in artifact_body
+
+    public = forge_env.service.workspace_pr_evidence(
+        workspace_id,
+        detail="failure",
+        check_selector="check-run:501",
+        max_excerpt_lines=80,
+    )
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    V2_TOOL_SPECS["workspace_pr_evidence"].validate_output(public)
+    assert public["failure_provider"] == "pytest"
+    assert public["selector_coverage"] == "complete"
+    assert public["failed_selectors"] == evidence["failed_selectors"]
+    assert public["output_artifact_reference"] == reference
+    assert public["output_artifact_status"] == "available"
+
+
+def test_ci_log_source_unavailable_is_explicit(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id = forge_env.service.workspace_create("demo", "ci log source unavailable")[
+        "workspace_id"
+    ]
+    _seed_failed_ci_check(forge_env, workspace_id=workspace_id)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    state["logs_permission_denied"] = True
+    forge_env.gh_state.write_text(json.dumps(state), encoding="utf-8")
+
+    evidence = forge_env.service.workspace_pr_failure_evidence(
+        workspace_id,
+        "check-run:501",
+        max_excerpt_lines=80,
+    )
+
+    assert evidence["coverage"] == "partial"
+    assert evidence["failure_provider"] == "custom"
+    assert evidence["selector_coverage"] == "unavailable"
+    assert evidence["selectors_unavailable_reason"] == "output_unrecognized"
+    assert evidence["failed_selectors"] == []
+    assert evidence["output_artifact_status"] == "source_unavailable"
+    assert evidence["output_artifact_reference"].startswith("failure-output:")
+    assert any(item.startswith("job_log_") for item in evidence["source_errors"])

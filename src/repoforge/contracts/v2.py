@@ -1078,6 +1078,13 @@ class WorkspaceVerifyInput(StrictModel):
         return self
 
 
+class FailureLocationEvidence(StrictModel):
+    path: str = Field(min_length=1, max_length=512)
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+    code: str | None = Field(default=None, min_length=1, max_length=64)
+
+
 class WorkspaceVerifyOutput(ToolResponse):
     workspace_id: Identifier
     requested_mode: VerifyMode
@@ -1107,6 +1114,30 @@ class WorkspaceVerifyOutput(ToolResponse):
         default=None,
         pattern=r"^failure-output:[a-f0-9]{64}$",
     )
+    failure_provider: (
+        Literal["pytest", "unittest", "ruff", "mypy", "build", "schema", "custom"] | None
+    ) = None
+    selector_coverage: Literal["not_applicable", "complete", "partial", "unavailable"] = (
+        "not_applicable"
+    )
+    selectors_unavailable_reason: (
+        Literal[
+            "output_unrecognized",
+            "provider_not_supported",
+            "selectors_truncated",
+            "artifact_unavailable",
+        ]
+        | None
+    ) = None
+    failure_locations: tuple[FailureLocationEvidence, ...] = Field(default=(), max_length=100)
+    output_artifact_status: Literal[
+        "not_applicable",
+        "available",
+        "oversized",
+        "persistence_failed",
+        "source_truncated",
+        "source_unavailable",
+    ] = "not_applicable"
     failure_expectation: Literal["expected_red", "unexpected"] | None = None
     failure_chain_id: str | None = Field(
         default=None,
@@ -1291,6 +1322,35 @@ class WorkspacePrEvidenceOutput(ToolResponse):
     pull_request: PullRequestEvidence
     checks: tuple[CheckEvidence, ...] = Field(default=(), max_length=500)
     failure_excerpt: tuple[str, ...] = Field(default=(), max_length=200)
+    failure_provider: (
+        Literal["pytest", "unittest", "ruff", "mypy", "build", "schema", "custom"] | None
+    ) = None
+    selector_coverage: Literal["not_applicable", "complete", "partial", "unavailable"] = (
+        "not_applicable"
+    )
+    selectors_unavailable_reason: (
+        Literal[
+            "output_unrecognized",
+            "provider_not_supported",
+            "selectors_truncated",
+            "artifact_unavailable",
+        ]
+        | None
+    ) = None
+    failed_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
+    failure_locations: tuple[FailureLocationEvidence, ...] = Field(default=(), max_length=100)
+    output_artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+    )
+    output_artifact_status: Literal[
+        "not_applicable",
+        "available",
+        "oversized",
+        "persistence_failed",
+        "source_truncated",
+        "source_unavailable",
+    ] = "not_applicable"
     remote_version: str = Field(min_length=1, max_length=256)
     delta_token: Cursor
     changed_since: bool
@@ -1550,6 +1610,7 @@ class ConfigInspectOutput(ToolResponse):
 class RuntimeLogSource(str, Enum):
     AUDIT = "audit"
     RUNTIME = "runtime"
+    FAILURE_ARTIFACT = "failure_artifact"
 
 
 class RuntimeLogEntry(StrictModel):
@@ -1570,6 +1631,10 @@ class RuntimeLogsReadInput(StrictModel):
     start_time: str | None = Field(default=None, max_length=80)
     end_time: str | None = Field(default=None, max_length=80)
     cursor: Cursor | None = None
+    artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+    )
 
     @model_validator(mode="after")
     def validate_time_range(self) -> RuntimeLogsReadInput:
@@ -1590,6 +1655,19 @@ class RuntimeLogsReadInput(StrictModel):
             and parsed["start_time"] > parsed["end_time"]
         ):
             raise ValueError("start_time must not be after end_time")
+        if self.source is RuntimeLogSource.FAILURE_ARTIFACT:
+            if self.artifact_reference is None:
+                raise ValueError("failure_artifact source requires artifact_reference")
+            if (
+                self.action is not None
+                or self.only_failed
+                or self.min_duration_ms is not None
+                or self.start_time is not None
+                or self.end_time is not None
+            ):
+                raise ValueError("failure_artifact source does not accept log filters")
+        elif self.artifact_reference is not None:
+            raise ValueError("artifact_reference is only valid for failure_artifact source")
         return self
 
 

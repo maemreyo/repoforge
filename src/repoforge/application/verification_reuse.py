@@ -109,6 +109,25 @@ def diagnostic_target_identity(
     )
 
 
+def diagnostic_rerun_target_identity(
+    profile: DiagnosticProfileConfig,
+    *,
+    intent: str,
+    expectation: str,
+    expected_failure_class: str | None,
+) -> str:
+    """Identity of the reviewed diagnostic contract excluding runtime selector values."""
+
+    return diagnostic_target_identity(
+        profile,
+        argv=profile.argv_template,
+        resolved_values={},
+        intent=intent,
+        expectation=expectation,
+        expected_failure_class=expected_failure_class,
+    )
+
+
 def failure_reuse_binding(
     *,
     fingerprint: str,

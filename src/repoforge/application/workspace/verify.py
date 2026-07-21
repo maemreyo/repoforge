@@ -90,6 +90,11 @@ class WorkspaceVerifyResult:
     execution_evidence: dict[str, object] | None = None
     failed_selectors: list[str] = field(default_factory=list)
     output_artifact_reference: str | None = None
+    failure_provider: str | None = None
+    selector_coverage: str = "not_applicable"
+    selectors_unavailable_reason: str | None = None
+    failure_locations: list[dict[str, object]] = field(default_factory=list)
+    output_artifact_status: str = "not_applicable"
     failure_expectation: str | None = None
     failure_chain_id: str | None = None
     rerun_of_selectors: list[str] = field(default_factory=list)
@@ -512,6 +517,11 @@ class WorkspaceVerifier:
             execution_evidence=delegated.execution_evidence,
             failed_selectors=delegated.failed_selectors,
             output_artifact_reference=delegated.output_artifact_reference,
+            failure_provider=delegated.failure_provider,
+            selector_coverage=delegated.selector_coverage,
+            selectors_unavailable_reason=delegated.selectors_unavailable_reason,
+            failure_locations=delegated.failure_locations,
+            output_artifact_status=delegated.output_artifact_status,
             failure_expectation=delegated.failure_expectation,
             failure_chain_id=delegated.failure_chain_id,
             rerun_of_selectors=delegated.rerun_of_selectors,

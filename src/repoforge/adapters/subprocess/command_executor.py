@@ -3,48 +3,21 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import os
-import re
 import signal
 import subprocess
-import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from ...config import ServerConfig
 from ...domain.errors import CommandError, ErrorCode
+from ...domain.failure_artifacts import extract_failure
 from ...domain.redaction import redact_text
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
+from ..persistence.failure_output_artifact_store import persist_failure_output
 from .process_tree import inspect_descendants, kill_identity, wait_identities_gone
-
-_MAX_FAILED_SELECTORS = 100
-_MAX_FAILURE_OUTPUT_ARTIFACT_BYTES = 10 * 1024 * 1024
-_PYTEST_LEADING_SELECTOR = re.compile(
-    r"^(?:FAILED|ERROR)\s+(?P<selector>[^\s]+(?:\:\:[^\s]+)*)",
-    re.MULTILINE,
-)
-_PYTEST_TRAILING_SELECTOR = re.compile(
-    r"^(?P<selector>[^\s]+\:\:[^\s]+)\s+(?:FAILED|ERROR)\b",
-    re.MULTILINE,
-)
-
-
-def _failed_selectors(output: str) -> tuple[str, ...]:
-    selectors: list[str] = []
-    seen: set[str] = set()
-    for pattern in (_PYTEST_LEADING_SELECTOR, _PYTEST_TRAILING_SELECTOR):
-        for match in pattern.finditer(output):
-            selector = match.group("selector").replace("\\", "/").rstrip(":")
-            if not selector or selector in seen:
-                continue
-            seen.add(selector)
-            selectors.append(selector)
-            if len(selectors) >= _MAX_FAILED_SELECTORS:
-                return tuple(selectors)
-    return tuple(selectors)
 
 
 class SubprocessCommandExecutor:
@@ -75,31 +48,31 @@ class SubprocessCommandExecutor:
             True,
         )
 
-    def _persist_failure_output(self, stdout: str, stderr: str) -> str | None:
-        payload = ("--- stdout ---\n" + stdout + "\n--- stderr ---\n" + stderr).encode(
-            "utf-8", errors="replace"
+    def _persist_failure_output(self, stdout: str, stderr: str) -> tuple[str | None, str]:
+        artifact = persist_failure_output(
+            self.config.state_root,
+            "--- stdout ---\n" + stdout + "\n--- stderr ---\n" + stderr,
         )
-        if not payload or len(payload) > _MAX_FAILURE_OUTPUT_ARTIFACT_BYTES:
-            return None
-        digest = hashlib.sha256(payload).hexdigest()
-        root = self.config.state_root / "failure-output-artifacts"
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(root, 0o700)
-        target = root / f"{digest}.blob"
-        if not target.exists():
-            descriptor, temporary_name = tempfile.mkstemp(prefix=f".{digest}.tmp-", dir=root)
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    os.fchmod(handle.fileno(), 0o600)
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, target)
-                os.chmod(target, 0o600)
-            finally:
-                temporary.unlink(missing_ok=True)
-        return f"failure-output:{digest}"
+        return artifact.reference, artifact.status
+
+    @staticmethod
+    def _unstarted_failure_details(argv: Sequence[str]) -> dict[str, object]:
+        extraction = extract_failure(argv, "", returncode=127)
+        return {
+            "failure_provider": extraction.provider,
+            "selector_coverage": "unavailable",
+            "selectors_unavailable_reason": "artifact_unavailable",
+            "failed_selectors": [],
+            "failure_locations": [],
+            "output_artifact_status": "not_applicable",
+        }
+
+    @staticmethod
+    def _captured_text(value: str | bytes | None, previous: str = "") -> str:
+        if value is None:
+            return previous
+        current = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+        return current if len(current) >= len(previous) else previous
 
     def _communicate(
         self,
@@ -129,12 +102,16 @@ class SubprocessCommandExecutor:
             raise CommandError(
                 f"Executable not found: {argv[0]}",
                 code=ErrorCode.NOT_FOUND,
-                details={"executable": argv[0]},
+                details={
+                    "executable": argv[0],
+                    **self._unstarted_failure_details(argv),
+                },
             ) from exc
         except OSError as exc:
             raise CommandError(
                 f"Cannot execute {' '.join(argv)}: {exc}",
                 code=ErrorCode.COMMAND_FAILED,
+                details=self._unstarted_failure_details(argv),
             ) from exc
         if cancel_token is not None:
             cancel_token.bind(process)
@@ -142,6 +119,8 @@ class SubprocessCommandExecutor:
             try:
                 return (process, process.communicate(input_data, timeout=timeout))
             except subprocess.TimeoutExpired as exc:
+                captured_stdout = self._captured_text(exc.output)
+                captured_stderr = self._captured_text(exc.stderr)
                 # Snapshot descendants before sending any kill signal: a child
                 # that daemonized a grandchild via its own start_new_session/
                 # setsid is still reachable by ppid here as long as it (or
@@ -171,8 +150,12 @@ class SubprocessCommandExecutor:
                 # this bounds the caller's wait either way, but still tries hard
                 # not to leave the child orphaned.
                 try:
-                    process.communicate(timeout=2)
-                except subprocess.TimeoutExpired:
+                    drained_stdout, drained_stderr = process.communicate(timeout=2)
+                    captured_stdout = self._captured_text(drained_stdout, captured_stdout)
+                    captured_stderr = self._captured_text(drained_stderr, captured_stderr)
+                except subprocess.TimeoutExpired as drain_exc:
+                    captured_stdout = self._captured_text(drain_exc.output, captured_stdout)
+                    captured_stderr = self._captured_text(drain_exc.stderr, captured_stderr)
                     with contextlib.suppress(ProcessLookupError, PermissionError):
                         process.kill()
                     with contextlib.suppress(subprocess.TimeoutExpired):
@@ -198,6 +181,15 @@ class SubprocessCommandExecutor:
                     if kill_identity(descendant, signal.SIGKILL)
                 )
                 survivors = wait_identities_gone(signalled_identities)
+                artifact_reference, artifact_status = self._persist_failure_output(
+                    captured_stdout,
+                    captured_stderr,
+                )
+                extraction = extract_failure(
+                    argv,
+                    "\n".join(part for part in (captured_stdout, captured_stderr) if part),
+                    returncode=124,
+                )
                 raise CommandError(
                     f"Command timed out after {timeout}s: {' '.join(argv)}",
                     code=ErrorCode.COMMAND_TIMEOUT,
@@ -212,6 +204,25 @@ class SubprocessCommandExecutor:
                         "descendant_snapshot_count": len(descendants),
                         "descendant_signal_count": len(signalled_identities),
                         "descendant_survivor_count": len(survivors),
+                        "failed_selectors": list(extraction.selectors),
+                        "failure_provider": extraction.provider,
+                        "selector_coverage": extraction.selector_coverage,
+                        "selectors_unavailable_reason": (extraction.selectors_unavailable_reason),
+                        "failure_locations": [
+                            {
+                                "path": item.path,
+                                "line": item.line,
+                                "column": item.column,
+                                "code": item.code,
+                            }
+                            for item in extraction.locations
+                        ],
+                        "output_artifact_status": artifact_status,
+                        **(
+                            {"output_artifact_reference": artifact_reference}
+                            if artifact_reference is not None
+                            else {}
+                        ),
                     },
                 ) from exc
         finally:
@@ -245,24 +256,30 @@ class SubprocessCommandExecutor:
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise CommandError("Text command returned binary output")
-        selectors = _failed_selectors("\n".join(part for part in (stdout, stderr) if part))
+        returncode = process.returncode or 0
+        full_output = "\n".join(part for part in (stdout, stderr) if part)
+        extraction = extract_failure(argv, full_output, returncode=returncode)
         bounded_stdout, stdout_truncated = self._truncate(stdout, limit)
         bounded_stderr, stderr_truncated = self._truncate(stderr, limit)
-        artifact_reference = (
-            self._persist_failure_output(stdout, stderr)
-            if (process.returncode or 0) != 0 and (stdout_truncated or stderr_truncated)
-            else None
-        )
+        artifact_reference: str | None = None
+        artifact_status = "not_applicable"
+        if returncode != 0:
+            artifact_reference, artifact_status = self._persist_failure_output(stdout, stderr)
         result = CommandResult(
-            tuple(argv),
-            str(cwd),
-            process.returncode or 0,
-            bounded_stdout,
-            bounded_stderr,
-            stdout_truncated,
-            stderr_truncated,
-            selectors,
-            artifact_reference,
+            argv=tuple(argv),
+            cwd=str(cwd),
+            returncode=returncode,
+            stdout=bounded_stdout,
+            stderr=bounded_stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+            failed_selectors=extraction.selectors,
+            output_artifact_reference=artifact_reference,
+            failure_provider=extraction.provider,
+            selector_coverage=extraction.selector_coverage,
+            selectors_unavailable_reason=extraction.selectors_unavailable_reason,
+            failure_locations=extraction.locations,
+            output_artifact_status=artifact_status,
         )
         if check and result.returncode != 0:
             cancelled = cancel_token is not None and cancel_token.is_cancelled()
@@ -292,6 +309,19 @@ class SubprocessCommandExecutor:
                         if result.failed_selectors
                         else {}
                     ),
+                    "failure_provider": result.failure_provider,
+                    "selector_coverage": result.selector_coverage,
+                    "selectors_unavailable_reason": result.selectors_unavailable_reason,
+                    "failure_locations": [
+                        {
+                            "path": item.path,
+                            "line": item.line,
+                            "column": item.column,
+                            "code": item.code,
+                        }
+                        for item in result.failure_locations
+                    ],
+                    "output_artifact_status": result.output_artifact_status,
                     **(
                         {"output_artifact_reference": result.output_artifact_reference}
                         if result.output_artifact_reference is not None

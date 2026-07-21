@@ -13,6 +13,9 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from repoforge.adapters.configuration import ConfigGenerationStore
 from repoforge.adapters.locking import FcntlLockManager
+from repoforge.adapters.persistence.failure_output_artifact_store import (
+    persist_failure_output,
+)
 from repoforge.application.config_admin import ConfigAdminService
 from repoforge.application.configuration.document import (
     apply_policy_patch,
@@ -1025,6 +1028,59 @@ def test_v2_runtime_logs_support_time_range_cursor_and_no_host_paths(tmp_path: P
     assert all("<redacted:host_path>" in message for message in messages)
     assert str(tmp_path) not in json.dumps(runtime, sort_keys=True)
     assert all("C:\\Users\\alice" not in message for message in messages)
+
+
+def test_v2_runtime_logs_third_source_page(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    artifact = persist_failure_output(
+        tmp_path / "state",
+        "first failure line\nsecond failure line\nthird failure line\n",
+    )
+    assert artifact.reference is not None
+
+    first = admin.runtime_logs_read_v2(
+        source="failure_artifact",
+        artifact_reference=artifact.reference,
+        limit=2,
+    )
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(first)
+    assert first["source"] == "failure_artifact"
+    assert [item["message"] for item in first["entries"]] == [
+        "first failure line",
+        "second failure line",
+    ]
+    assert first["truncated"] is True
+    assert first["next_cursor"] is not None
+
+    second = admin.runtime_logs_read_v2(
+        source="failure_artifact",
+        artifact_reference=artifact.reference,
+        limit=2,
+        cursor=first["next_cursor"],
+    )
+    assert [item["message"] for item in second["entries"]] == ["third failure line"]
+    assert second["truncated"] is False
+    assert second["next_cursor"] is None
+
+    with pytest.raises(ConfigError, match="artifact_reference"):
+        admin.runtime_logs_read_v2(source="failure_artifact")
+
+
+def test_existing_artifact_identity(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    original = persist_failure_output(state_root, "immutable failure evidence\n")
+    assert original.reference is not None
+    digest = original.reference.removeprefix("failure-output:")
+    target = state_root / "failure-output-artifacts" / f"{digest}.blob"
+    target.write_text("tampered\n", encoding="utf-8")
+
+    repeated = persist_failure_output(state_root, "immutable failure evidence\n")
+
+    assert repeated.reference is None
+    assert repeated.status == "persistence_failed"
+    assert target.read_text(encoding="utf-8") == "tampered\n"
 
 
 def test_v2_runtime_log_cursor_fails_closed_when_audit_snapshot_changes(tmp_path: Path) -> None:
