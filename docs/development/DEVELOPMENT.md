@@ -24,6 +24,9 @@ The supported Make targets are:
 make lint
 make typecheck
 make test
+make test-fast
+make test-affected
+make test-groups-check
 make build
 make check
 make production-check
@@ -44,15 +47,41 @@ Run the complete project gate with:
 ./scripts/test-all.sh
 ```
 
-`make check` is the fast agent gate: release contracts, Ruff, strict mypy, and test files changed on the branch or working tree (falling back to the MCP contract test). Set `REPOFORGE_BASE_REF` when the base is not `origin/main`. `make production-check` retains full coverage shards, package build, and isolated wheel verification for releases.
-The production authority is `scripts/verify-production.sh`; use `--allow-dirty` only while iterating.
-Its ordered guarantees are documented in [INTEGRITY_POLICY.md](INTEGRITY_POLICY.md), while issue
-metadata and tracking rules are documented in [TICKET_GOVERNANCE.md](TICKET_GOVERNANCE.md).
+`make check` and `make production-check` both run the same authoritative gate,
+`scripts/verify-production.sh` (dirty vs. clean tree); there is no separate lightweight
+variant. The production authority is `scripts/verify-production.sh`; use `--allow-dirty`
+only while iterating. Its ordered guarantees are documented in
+[INTEGRITY_POLICY.md](INTEGRITY_POLICY.md), while issue metadata and tracking rules are
+documented in [TICKET_GOVERNANCE.md](TICKET_GOVERNANCE.md).
 
 A change is not complete until ticket and release contracts, linting, strict typing, tests with the
 configured branch-coverage threshold, clean package builds, and installed-wheel smoke all pass.
-The production gate runs deterministic size-balanced test shards and combines their coverage data;
-set `REPOFORGE_TEST_SHARDS` to a positive integer to tune local parallelism without changing scope.
+The production gate runs deterministic capability-group-aware test shards (a dedicated serial lane
+for stateful groups, plus timing-aware balancing for the rest) and combines their coverage data; set
+`REPOFORGE_TEST_SHARDS` to a positive integer to tune local parallelism without changing scope.
+
+### Module-aware test selection
+
+`tests/test-groups.toml` is a checked-in manifest that maps every `tests/test_*.py` file to one
+capability group (contracts, workspace core, operations, runtime/activation,
+policy/configuration, GitHub provider, verification/diagnostics, ticket-graph/release-e2e, or the
+cross-cutting `platform` catch-all), plus a small always-on safety bundle. `make test-groups-check`
+(`scripts/select_affected_tests.py --check-completeness`) fails if any test file is unmapped, mapped
+to more than one group, or stale; this runs as part of the normal test suite too
+(`tests/test_select_affected_tests.py`).
+
+`make test-affected` (`scripts/select_affected_tests.py --run`) maps the paths changed since
+`REPOFORGE_TEST_AFFECTED_BASE` (default `main`), plus the current working tree, to test groups and
+runs only the selected groups' tests plus the safety bundle. It **fails closed**: any changed path
+that does not match a group's `source_globs` (or matches a small always-wide list such as
+`pyproject.toml`, `Makefile`, `config.repoforge.toml`, or `.github/workflows/**`) escalates the run
+to the full suite rather than silently skipping something it cannot map.
+
+Do not run `make test` immediately before `make check` / `make production-check` / the `full`
+verification profile on the same tree: `full` already runs the complete suite via
+`scripts/verify-production.sh`, so running `test` first only duplicates that work. Use `quick` for
+lint/type feedback, `test-affected` for a fast targeted pass, and `full` as the single authoritative
+run before a PR is ready.
 
 ## Local MCP debugging
 
