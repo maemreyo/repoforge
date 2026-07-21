@@ -586,6 +586,22 @@ class RefreshConflictEvidence(StrictModel):
     regeneration_command: tuple[str, ...] = Field(default=(), max_length=64)
 
 
+class RefreshRegenerationReceipt(StrictModel):
+    commands: tuple[tuple[str, ...], ...] = Field(max_length=64)
+    generated_paths: tuple[RelativePath, ...] = Field(max_length=1100)
+    source_identity: Sha256
+    output_identity: Sha256
+    deterministic: Literal[True] = True
+
+
+class RefreshChangeMetrics(StrictModel):
+    changed_files: int = Field(default=0, ge=0, le=1100)
+    added_lines: int = Field(default=0, ge=0)
+    deleted_lines: int = Field(default=0, ge=0)
+    binary_files: int = Field(default=0, ge=0, le=1100)
+    total_current_bytes: int = Field(default=0, ge=0)
+
+
 class WorkspaceRefreshInput(StrictModel):
     workspace_id: Identifier
     action: RefreshAction
@@ -613,9 +629,12 @@ class WorkspaceRefreshOutput(ToolResponse):
     generated_conflict_count: int = Field(default=0, ge=0, le=1000)
     semantic_conflict_paths: tuple[RelativePath, ...] = Field(default=(), max_length=100)
     generated_conflict_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    regeneration_receipts: tuple[RefreshRegenerationReceipt, ...] = Field(default=(), max_length=64)
+    source_change_metrics: RefreshChangeMetrics = Field(default_factory=RefreshChangeMetrics)
+    generated_change_metrics: RefreshChangeMetrics = Field(default_factory=RefreshChangeMetrics)
     warnings: tuple[str, ...] = Field(default=(), max_length=100)
-    changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
-    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1100)
+    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=1100)
     invalidated_receipts: tuple[str, ...] = Field(default=(), max_length=100)
     transaction_id: Identifier | None = None
 

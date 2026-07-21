@@ -79,6 +79,24 @@ class RefreshConflictEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class RefreshRegenerationReceipt:
+    commands: tuple[tuple[str, ...], ...]
+    generated_paths: tuple[str, ...]
+    source_identity: str
+    output_identity: str
+    deterministic: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshChangeMetrics:
+    changed_files: int = 0
+    added_lines: int = 0
+    deleted_lines: int = 0
+    binary_files: int = 0
+    total_current_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceRefreshV2Command:
     workspace_id: str
     action: str
@@ -114,6 +132,9 @@ class WorkspaceRefreshV2Result:
     generated_conflict_count: int = 0
     semantic_conflict_paths: tuple[str, ...] = ()
     generated_conflict_paths: tuple[str, ...] = ()
+    regeneration_receipts: tuple[RefreshRegenerationReceipt, ...] = ()
+    source_change_metrics: RefreshChangeMetrics = RefreshChangeMetrics()
+    generated_change_metrics: RefreshChangeMetrics = RefreshChangeMetrics()
 
     def __post_init__(self) -> None:
         semantic_paths = tuple(item.path for item in self.conflicts if item.kind != "generated")
@@ -425,11 +446,13 @@ class WorkspaceRefreshV2:
                                 actions.append(CreateFile(relative_path, data, 0o644))
                         file_engine.commit(TransactionPlan(tuple(actions)))
                         self.ctx.git.stage_paths(workspace, repo, resolution_paths)
-                    regenerated_paths = self._regenerate_generated_conflicts(
+                    journal.checkpoint("after_semantic_resolutions")
+                    regenerated_paths, regeneration_receipts = self._regenerate_generated_conflicts(
                         plan,
                         repo,
                         workspace,
                     )
+                    journal.checkpoint("after_regeneration_verified")
                     remaining = self.ctx.git.unmerged_paths(workspace, repo)
                     if remaining:
                         raise WorkspaceError(
@@ -454,6 +477,13 @@ class WorkspaceRefreshV2:
                                 )
                             ).union(resolution_paths, regenerated_paths)
                         )
+                    )
+                    source_change_metrics, generated_change_metrics = self._change_metrics(
+                        workspace,
+                        repo,
+                        head,
+                        new_head,
+                        changed_paths,
                     )
                     warnings: tuple[str, ...] = ()
                     final_fingerprint = prime_fingerprint(
@@ -484,6 +514,9 @@ class WorkspaceRefreshV2:
                         changed_paths,
                         tuple(invalidated),
                         transaction_id,
+                        regeneration_receipts=regeneration_receipts,
+                        source_change_metrics=source_change_metrics,
+                        generated_change_metrics=generated_change_metrics,
                     )
                 except Exception as primary:
                     try:
@@ -789,13 +822,34 @@ class WorkspaceRefreshV2:
         plan: _RefreshPlan,
         repo: Any,
         workspace: Path,
-    ) -> tuple[str, ...]:
+    ) -> tuple[tuple[str, ...], tuple[RefreshRegenerationReceipt, ...]]:
         generated_conflicts = tuple(item for item in plan.conflicts if item.kind == "generated")
         if not generated_conflicts:
-            return ()
+            return (), ()
         commands = tuple(sorted({item.regeneration_command for item in generated_conflicts}))
         if any(not command for command in commands):
             raise WorkspaceError("Generated refresh conflict has no reviewed regeneration command")
+        command_set = set(commands)
+        generated_rules = tuple(
+            rule for rule in repo.generated_paths if rule.regeneration_command in command_set
+        )
+        source_paths = tuple(
+            sorted(
+                path
+                for path in self.ctx.git.changed_paths(workspace, repo)
+                if generated_path_rule_for(repo.generated_paths, path) is None
+            )
+        )
+        source_identity = self._path_identity(
+            workspace,
+            repo,
+            source_paths,
+            binding={
+                "workspace_id": plan.workspace_id,
+                "head_sha": plan.head_sha,
+                "target_base_sha": plan.target_base_sha,
+            },
+        )
         request = profile_execution_request(
             workspace_id=plan.workspace_id,
             workspace_root=workspace,
@@ -805,23 +859,62 @@ class WorkspaceRefreshV2:
             timeout_seconds=repo.adhoc_timeout_seconds,
             output_limit=self.ctx.config.server.max_tool_output_chars,
         )
-        with self.ctx.execution.prepare(request) as session:
+
+        def run_commands(session: Any) -> None:
             for command in commands:
                 session.execute(command)
 
-        command_set = set(commands)
-        generated_rules = tuple(
-            rule for rule in repo.generated_paths if rule.regeneration_command in command_set
-        )
-        changed_paths = self.ctx.git.changed_paths(workspace, repo)
-        regenerated_paths = tuple(
-            sorted(
-                path
-                for path in changed_paths
-                if any(rule.matches(path) for rule in generated_rules)
+        def observed_generated_paths() -> tuple[str, ...]:
+            changed_paths = self.ctx.git.changed_paths(workspace, repo)
+            return tuple(
+                sorted(
+                    path
+                    for path in changed_paths
+                    if any(rule.matches(path) for rule in generated_rules)
+                )
             )
-        )
+
         conflict_paths = {item.path for item in generated_conflicts}
+        with self.ctx.execution.prepare(request) as session:
+            run_commands(session)
+            regenerated_paths = observed_generated_paths()
+            self._validate_regenerated_paths(
+                workspace,
+                repo,
+                regenerated_paths,
+                conflict_paths,
+            )
+            first_output_identity = self._path_identity(workspace, repo, regenerated_paths)
+            self.ctx.git.stage_paths(workspace, repo, regenerated_paths)
+            self._assert_no_unstaged_regeneration_effects(workspace)
+
+            run_commands(session)
+            second_paths = observed_generated_paths()
+            self._validate_regenerated_paths(workspace, repo, second_paths, conflict_paths)
+            second_output_identity = self._path_identity(workspace, repo, second_paths)
+            if second_paths != regenerated_paths or second_output_identity != first_output_identity:
+                raise WorkspaceError(
+                    "Regeneration is nondeterministic: first output "
+                    f"{first_output_identity}, second output {second_output_identity}"
+                )
+            self.ctx.git.stage_paths(workspace, repo, second_paths)
+            self._assert_no_unstaged_regeneration_effects(workspace)
+
+        receipt = RefreshRegenerationReceipt(
+            commands=commands,
+            generated_paths=regenerated_paths,
+            source_identity=source_identity,
+            output_identity=first_output_identity,
+        )
+        return regenerated_paths, (receipt,)
+
+    def _validate_regenerated_paths(
+        self,
+        workspace: Path,
+        repo: Any,
+        regenerated_paths: tuple[str, ...],
+        conflict_paths: set[str],
+    ) -> None:
         if not conflict_paths.issubset(regenerated_paths):
             missing = sorted(conflict_paths - set(regenerated_paths))
             raise WorkspaceError(
@@ -831,13 +924,123 @@ class WorkspaceRefreshV2:
             target = resolve_workspace_path(workspace, path, repo)
             if target.is_symlink() or not target.is_file():
                 raise SecurityError(f"Regenerated output must be a regular file: {path}")
-        self.ctx.git.stage_paths(workspace, repo, regenerated_paths)
+
+    def _assert_no_unstaged_regeneration_effects(self, workspace: Path) -> None:
         unstaged = self._unstaged_paths(self.ctx.git.status_porcelain(workspace))
         if unstaged:
             raise SecurityError(
                 "Regeneration command left undeclared or unstaged changes: " + ", ".join(unstaged)
             )
-        return regenerated_paths
+
+    @staticmethod
+    def _path_identity(
+        workspace: Path,
+        repo: Any,
+        paths: tuple[str, ...],
+        *,
+        binding: dict[str, str] | None = None,
+    ) -> str:
+        entries: list[dict[str, str]] = []
+        for path in paths:
+            target = resolve_workspace_path(workspace, path, repo)
+            if target.is_symlink():
+                raise SecurityError(f"Identity path must not be a symlink: {path}")
+            if not target.exists():
+                entries.append({"path": path, "state": "missing"})
+                continue
+            if not target.is_file():
+                raise SecurityError(f"Identity path must be a regular file: {path}")
+            entries.append(
+                {
+                    "path": path,
+                    "state": "present",
+                    "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                }
+            )
+        payload = {"binding": binding or {}, "paths": entries}
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _change_metrics(
+        self,
+        workspace: Path,
+        repo: Any,
+        old_head: str,
+        new_head: str,
+        changed_paths: tuple[str, ...],
+    ) -> tuple[RefreshChangeMetrics, RefreshChangeMetrics]:
+        buckets: dict[str, dict[str, int]] = {
+            "source": {
+                "changed_files": 0,
+                "added_lines": 0,
+                "deleted_lines": 0,
+                "binary_files": 0,
+                "total_current_bytes": 0,
+            },
+            "generated": {
+                "changed_files": 0,
+                "added_lines": 0,
+                "deleted_lines": 0,
+                "binary_files": 0,
+                "total_current_bytes": 0,
+            },
+        }
+        for path in changed_paths:
+            bucket_name = (
+                "generated"
+                if generated_path_rule_for(repo.generated_paths, path) is not None
+                else "source"
+            )
+            bucket = buckets[bucket_name]
+            before = self._snapshot_bytes(workspace, repo, old_head, path)
+            after = self._snapshot_bytes(workspace, repo, new_head, path)
+            bucket["changed_files"] += 1
+            bucket["total_current_bytes"] += len(after or b"")
+            line_metrics = self._line_metrics(before, after)
+            if line_metrics is None:
+                bucket["binary_files"] += 1
+            else:
+                added, deleted = line_metrics
+                bucket["added_lines"] += added
+                bucket["deleted_lines"] += deleted
+        return RefreshChangeMetrics(**buckets["source"]), RefreshChangeMetrics(
+            **buckets["generated"]
+        )
+
+    def _snapshot_bytes(
+        self,
+        workspace: Path,
+        repo: Any,
+        snapshot: str,
+        path: str,
+    ) -> bytes | None:
+        try:
+            return self.ctx.git.read_snapshot_blob(workspace, repo, snapshot, path).data
+        except RepoForgeError as exc:
+            if exc.code is ErrorCode.NOT_FOUND:
+                return None
+            raise
+
+    @staticmethod
+    def _line_metrics(before: bytes | None, after: bytes | None) -> tuple[int, int] | None:
+        values = (before or b"", after or b"")
+        if any(b"\x00" in value for value in values):
+            return None
+        try:
+            before_lines = values[0].decode("utf-8").splitlines()
+            after_lines = values[1].decode("utf-8").splitlines()
+        except UnicodeDecodeError:
+            return None
+        added = 0
+        deleted = 0
+        matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+        for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes():
+            if tag in {"replace", "delete"}:
+                deleted += before_end - before_start
+            if tag in {"replace", "insert"}:
+                added += after_end - after_start
+        return added, deleted
 
     @staticmethod
     def _unstaged_paths(status: str) -> tuple[str, ...]:
