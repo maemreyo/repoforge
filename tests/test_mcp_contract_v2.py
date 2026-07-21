@@ -19,7 +19,7 @@ from repoforge.contracts.registry import (
     render_v2_schema_bundle,
     validate_generated_contract_artifact,
 )
-from repoforge.domain.errors import ConfigError
+from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 from repoforge.domain.runtime_contract import RuntimeContractIdentity, changed_contract_fields
 from repoforge.interfaces.mcp.grace import (
     FORGE_V1_IDENTITY,
@@ -188,6 +188,56 @@ async def test_protocol_error_is_one_redacted_typed_envelope(
     assert result.structuredContent == envelope
     validated = V2_TOOL_SPECS["repo_read"].validate_output(envelope)
     assert validated.status == "failed"
+
+
+@pytest.mark.anyio
+async def test_protocol_pr_remote_version_stale_preserves_current_token() -> None:
+    expected = "prv2:" + "a" * 64
+    actual = "prv2:" + "b" * 64
+
+    class StalePrService:
+        config: Any = None
+        metrics: Any = None
+
+        def workspace_pr(self, **_: object) -> dict[str, object]:
+            raise RepoForgeError(
+                "PR_REMOTE_VERSION_STALE: pull request changed since review",
+                code=ErrorCode.PR_REMOTE_VERSION_STALE,
+                retryable=False,
+                safe_next_action="Read workspace_pr_evidence overview and retry with its remote_version.",
+                unchanged_state=("No pull-request write was attempted.",),
+                details={
+                    "field": "expected_remote_version",
+                    "expected": expected,
+                    "actual": actual,
+                    "result_reference": "workspace_pr_evidence:overview",
+                },
+            )
+
+    server = create_server(service=StalePrService())  # type: ignore[arg-type]
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "workspace_pr",
+            {
+                "workspace_id": "workspace-1",
+                "action": "update",
+                "title": "Reviewed update",
+                "idempotency_key": "stale-pr-version-0001",
+                "expected_remote_version": expected,
+            },
+        )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = result.structuredContent["error"]
+    assert error["code"] == "PR_REMOTE_VERSION_STALE"
+    assert error["retryable"] is False
+    assert error["automatic_retry_allowed"] is False
+    assert error["details"]["field"] == "expected_remote_version"
+    assert error["details"]["expected"] == expected
+    assert error["details"]["actual"] == actual
+    assert error["details"]["result_reference"] == "workspace_pr_evidence:overview"
+    V2_TOOL_SPECS["workspace_pr"].validate_output(result.structuredContent)
 
 
 @pytest.mark.anyio

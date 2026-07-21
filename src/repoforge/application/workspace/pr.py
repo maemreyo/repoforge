@@ -12,6 +12,7 @@ from ...config import RepositoryConfig
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.operations import IdempotencyState, hash_idempotency_key
 from ...domain.pr_check_watch import TERMINAL_PR_CHECK_WATCH_OUTCOMES
+from ...domain.pr_remote_version import build_pr_remote_version
 from ...domain.redaction import redact_text
 from ...domain.workspace import WorkspaceRecord
 from ..context import ApplicationContext
@@ -63,22 +64,8 @@ class WorkspacePrResult:
     terminal_reason: str | None
 
 
-def _remote_version(payload: dict[str, Any]) -> str:
-    reviewed = {
-        "number": payload.get("number"),
-        "title": payload.get("title"),
-        "state": payload.get("state"),
-        "isDraft": payload.get("isDraft"),
-        "headRefOid": payload.get("headRefOid"),
-        "reviewDecision": payload.get("reviewDecision"),
-        "mergeable": payload.get("mergeable"),
-    }
-    return (
-        "prv1:"
-        + hashlib.sha256(
-            json.dumps(reviewed, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-    )
+def _remote_version(payload: dict[str, Any], *, repo_id: str) -> str:
+    return build_pr_remote_version(payload, repo_id=repo_id).token
 
 
 def _pull_request(payload: dict[str, Any], *, base_ref: str) -> dict[str, object]:
@@ -191,17 +178,26 @@ class WorkspacePrCoordinator:
                 "No pull request exists yet for this workspace branch",
                 code=ErrorCode.NOT_FOUND,
             )
-        return record, repo, path, payload, _remote_version(payload)
+        return record, repo, path, payload, _remote_version(payload, repo_id=record.repo_id)
 
     @staticmethod
     def _assert_remote_version(expected: str | None, actual: str) -> None:
         if expected is not None and expected != actual:
             raise RepoForgeError(
-                "STALE_STATE: pull request changed since it was reviewed",
-                code=ErrorCode.STALE_STATE,
-                retryable=True,
-                safe_next_action="Read workspace_pr_evidence again and retry against its current remote version.",
-                details={"expected_remote_version": expected, "actual_remote_version": actual},
+                "PR_REMOTE_VERSION_STALE: pull request changed since it was reviewed",
+                code=ErrorCode.PR_REMOTE_VERSION_STALE,
+                retryable=False,
+                safe_next_action=(
+                    "Read workspace_pr_evidence overview, copy its remote_version unchanged, "
+                    "review the remote delta, and submit a new idempotent write."
+                ),
+                unchanged_state=("No pull-request write was attempted.",),
+                details={
+                    "field": "expected_remote_version",
+                    "expected": expected,
+                    "actual": actual,
+                    "result_reference": "workspace_pr_evidence:overview",
+                },
             )
 
     def _execute(self, command: WorkspacePrCommand) -> WorkspacePrResult:
@@ -237,7 +233,17 @@ class WorkspacePrCoordinator:
             if command.expected_remote_version is None:
                 raise ConfigError("workspace_pr update requires expected_remote_version")
             _record, _repo, _path, _before, before_version = self._status(command.workspace_id)
-            self._assert_remote_version(command.expected_remote_version, before_version)
+            update_key_hash = hash_idempotency_key(command.idempotency_key)
+            update_existing = (
+                self.ctx.idempotency.load("workspace_update_draft_pr", update_key_hash)
+                if self.ctx.idempotency is not None
+                else None
+            )
+            update_replay = (
+                update_existing is not None and update_existing.state is IdempotencyState.COMPLETED
+            )
+            if not update_replay:
+                self._assert_remote_version(command.expected_remote_version, before_version)
             self.updater.execute(
                 WorkspaceUpdateDraftPrCommand(
                     command.workspace_id,
@@ -282,7 +288,6 @@ class WorkspacePrCoordinator:
                 "workspace_pr comment requires body, evidence_ref, idempotency_key, and expected_remote_version"
             )
         record, repo, path, payload, version = self._status(command.workspace_id)
-        self._assert_remote_version(command.expected_remote_version, version)
         if repo.read_only or not repo.publish_enabled:
             raise ConfigError("Repository policy does not allow pull-request comments")
         body = redact_text(command.body.strip(), limit=16_000)
@@ -349,6 +354,8 @@ class WorkspacePrCoordinator:
             else None
         )
         completed_replay = existing is not None and existing.state is IdempotencyState.COMPLETED
+        if not completed_replay:
+            self._assert_remote_version(command.expected_remote_version, version)
         comment = execute_idempotent(
             self.ctx,
             "workspace_pr_comment",
@@ -367,6 +374,7 @@ class WorkspacePrCoordinator:
         )
         if completed_replay and not comment.idempotent_replay:
             comment = replace(comment, idempotent_replay=True)
+        record, _repo, _path, payload, version = self._status(command.workspace_id)
         return WorkspacePrResult(
             summary="Posted or reconciled a bounded pull-request comment",
             workspace_id=command.workspace_id,
@@ -381,12 +389,15 @@ class WorkspacePrCoordinator:
 
     def _watch(self, command: WorkspacePrCommand) -> WorkspacePrResult:
         if command.event_cursor is None:
+            if command.expected_remote_version is None:
+                raise ConfigError("workspace_pr watch requires expected_remote_version")
             started = self.watch.start(
                 WorkspacePrWatchCommand(
                     command.workspace_id,
                     command.until,
                     command.timeout_seconds,
                     True,
+                    command.expected_remote_version,
                 )
             )
             operation_id = started.operation.operation_id
@@ -398,6 +409,8 @@ class WorkspacePrCoordinator:
                 "PR check watch cursor does not belong to this workspace",
                 code=ErrorCode.OPERATION_NOT_FOUND,
             )
+        if command.event_cursor is not None:
+            self.watch.assert_current_identity(watch)
         terminal = watch.outcome in TERMINAL_PR_CHECK_WATCH_OUTCOMES
         cursor = _event_cursor(operation_id, watch.updated_at, watch.outcome.value)
         return WorkspacePrResult(
@@ -414,7 +427,7 @@ class WorkspacePrCoordinator:
                 self.watch.operations.status(operation_id),
                 poll_after_seconds=float(watch.next_delay_seconds),
             ),
-            remote_version=None,
+            remote_version=watch.remote_version,
             event_cursor=cursor,
             terminal_reason=watch.outcome.value if terminal else None,
         )

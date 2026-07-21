@@ -131,6 +131,9 @@ if args[:2] == ["pr", "create"]:
         "mergeable": "MERGEABLE",
         "reviewDecision": "",
         "statusCheckRollup": [],
+        "comments": [],
+        "reviews": [],
+        "updatedAt": "2026-07-21T14:00:00Z",
         "headRefOid": head_sha(),
     }}
     data.setdefault("prs", {{}})[head] = pr
@@ -149,6 +152,7 @@ if args[:2] == ["pr", "edit"]:
         pr["title"] = title
     if "--body-file" in args:
         pr["body"] = sys.stdin.read()
+    pr["updatedAt"] = "2026-07-21T14:01:00Z"
     save(data)
     raise SystemExit(0)
 if args[:2] == ["pr", "checks"]:
@@ -190,7 +194,12 @@ if args[:2] == ["pr", "view"]:
     if "--jq" in args and ".headRefOid" in args:
         print(pr.get("headRefOid", head_sha()))
     else:
-        print(json.dumps(pr))
+        view = dict(pr)
+        view["comments"] = list(pr.get("comments", [])) + list(data.get("pr_comments", []))
+        view["reviews"] = list(pr.get("reviews", [])) + list(data.get("pr_review_comments", []))
+        if data.get("checks") is not None:
+            view["statusCheckRollup"] = data["checks"]
+        print(json.dumps(view))
     raise SystemExit(0)
 
 if args and args[0] == "api":

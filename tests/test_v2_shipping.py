@@ -135,6 +135,14 @@ def test_workspace_pr_create_update_comment_and_comment_replay(
     )
     assert updated["pull_request"]["title"] == "Updated V2 shipping fixture"
     assert updated["remote_version"] != remote_version
+    replayed_update = forge_env.service.workspace_pr(
+        workspace_id,
+        action="update",
+        title="Updated V2 shipping fixture",
+        idempotency_key="shipping-pr-update-0001",
+        expected_remote_version=remote_version,
+    )
+    assert replayed_update["remote_version"] == updated["remote_version"]
 
     commented = forge_env.service.workspace_pr(
         workspace_id,
@@ -161,7 +169,7 @@ def test_workspace_pr_create_update_comment_and_comment_replay(
         evidence_ref="commit:" + forge_env.service.workspace_status(workspace_id)["head_sha"],
         review_comment_id=777,
         idempotency_key="shipping-pr-review-reply-0001",
-        expected_remote_version=updated["remote_version"],
+        expected_remote_version=replayed["remote_version"],
     )
     assert replied["comment"]["review_comment_id"] == 777
     state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
@@ -210,20 +218,34 @@ def test_workspace_pr_comment_reconciles_ambiguous_failure_after_remote_effect(
     assert len(state["pr_comments"]) == 1
 
 
-def test_workspace_pr_watch_returns_durable_cursor(
+def test_workspace_pr_watch_returns_version_bound_durable_cursor(
     forge_env: ForgeEnvironment,
 ) -> None:
-    workspace_id, _ = _prepare_pr(forge_env)
+    workspace_id, created = _prepare_pr(forge_env)
     watched = forge_env.service.workspace_pr(
         workspace_id,
         action="watch",
+        expected_remote_version=created["remote_version"],
         until="all_completed",
         timeout_seconds=30,
     )
     V2_TOOL_SPECS["workspace_pr"].validate_output(watched)
     assert watched["operation"]["kind"] == "pr_check_watch"
     assert watched["event_cursor"].startswith("pr-watch:")
+    assert watched["remote_version"] == created["remote_version"]
     assert watched["terminal_reason"] is None
+
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["title"] = "Concurrent metadata drift"
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(RepoForgeError) as stale:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="watch",
+            event_cursor=watched["event_cursor"],
+        )
+    assert stale.value.code is ErrorCode.PR_CHECK_WATCH_STALE
 
 
 def test_workspace_pr_evidence_supports_delta_and_detail_zoom(
@@ -309,3 +331,93 @@ def test_workspace_pr_evidence_supports_delta_and_detail_zoom(
     )
     assert failure["failure_excerpt"]
     assert all("super-secret" not in line for line in failure["failure_excerpt"])
+
+
+def test_workspace_pr_evidence_remote_version_round_trips_to_update(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, created = _prepare_pr(forge_env)
+
+    evidence = forge_env.service.workspace_pr_evidence(workspace_id)
+
+    assert evidence["remote_version"] == created["remote_version"]
+    assert evidence["remote_version"].startswith("prv2:")
+    updated = forge_env.service.workspace_pr(
+        workspace_id,
+        action="update",
+        title="Updated from evidence token",
+        idempotency_key="shipping-pr-evidence-update-0001",
+        expected_remote_version=evidence["remote_version"],
+    )
+    assert updated["pull_request"]["title"] == "Updated from evidence token"
+
+
+def test_workspace_pr_stale_version_returns_typed_current_token(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, _created = _prepare_pr(forge_env)
+    reviewed = forge_env.service.workspace_pr_evidence(workspace_id)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["title"] = "Concurrent remote title"
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(RepoForgeError) as stale:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="update",
+            title="Must not overwrite concurrent state",
+            idempotency_key="shipping-pr-stale-update-0001",
+            expected_remote_version=reviewed["remote_version"],
+        )
+
+    current = forge_env.service.workspace_pr_evidence(workspace_id)
+    assert stale.value.code is ErrorCode.PR_REMOTE_VERSION_STALE
+    assert stale.value.retryable is False
+    assert stale.value.details["field"] == "expected_remote_version"
+    assert stale.value.details["expected"] == reviewed["remote_version"]
+    assert stale.value.details["actual"] == current["remote_version"]
+    assert stale.value.details["result_reference"] == "workspace_pr_evidence:overview"
+    assert "workspace_pr_evidence" in str(stale.value.safe_next_action)
+    assert current["pull_request"]["title"] == "Concurrent remote title"
+
+
+def test_workspace_pr_remote_version_tracks_comments_and_checks(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, _created = _prepare_pr(forge_env)
+    initial = forge_env.service.workspace_pr_evidence(workspace_id)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["comments"] = [{"id": 9001, "updatedAt": "2026-07-21T15:01:00Z"}]
+    state["prs"][branch]["statusCheckRollup"] = [
+        {"name": "unit", "status": "COMPLETED", "conclusion": "SUCCESS"}
+    ]
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    changed = forge_env.service.workspace_pr_evidence(workspace_id)
+
+    assert changed["remote_version"].startswith("prv2:")
+    assert changed["remote_version"] != initial["remote_version"]
+
+
+def test_workspace_pr_remote_version_refuses_incomplete_provider_coverage(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id, _created = _prepare_pr(forge_env)
+    context = forge_env.service.application.context
+    original = context.github.status
+
+    def incomplete_status(path: Any, branch: str) -> dict[str, Any]:
+        payload = dict(original(path, branch))
+        payload.pop("updatedAt", None)
+        return payload
+
+    monkeypatch.setattr(context.github, "status", incomplete_status)
+    with pytest.raises(RepoForgeError) as incomplete:
+        forge_env.service.workspace_pr_evidence(workspace_id)
+
+    assert incomplete.value.code is ErrorCode.PR_REMOTE_VERSION_INCOMPLETE
+    assert incomplete.value.retryable is False
+    assert "updatedAt" in incomplete.value.details["missing_coverage"]

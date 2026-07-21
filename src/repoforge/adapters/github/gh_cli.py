@@ -379,6 +379,7 @@ class GhCliGateway:
             "commits": 100,
             "statusCheckRollup": 100,
             "reviews": 50,
+            "comments": 100,
         }.items():
             value = payload.get(key)
             if isinstance(value, list) and len(value) > limit:
@@ -538,7 +539,7 @@ class GhCliGateway:
                     "view",
                     branch,
                     "--json",
-                    "number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
+                    "number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid,updatedAt,comments,reviews",
                 ],
                 cwd=cwd,
                 output_limit=10_000_000,

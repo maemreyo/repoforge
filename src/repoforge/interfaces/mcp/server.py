@@ -340,6 +340,9 @@ def _raise_structured_error(
     )
     public_details: dict[str, object] = {"correlation_id": correlation_id}
     for field, limit in (
+        ("field", 160),
+        ("expected", 1_000),
+        ("actual", 1_000),
         ("operation_id", 160),
         ("receipt_id", 160),
         ("result_reference", 256),

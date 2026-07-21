@@ -42,6 +42,8 @@ def _record() -> PrCheckWatch:
         pr_number=42,
         pushed_sha="a" * 40,
         workspace_fingerprint="b" * 64,
+        remote_version="prv2:" + "c" * 64,
+        stability_version="prm2:" + "d" * 64,
         until=PrCheckWatchUntil.ALL_COMPLETED,
         include_failure_evidence=True,
         timeout_seconds=300,
@@ -115,7 +117,7 @@ def _coordinator(
 
 def test_watch_domain_is_bounded_deterministic_and_monotonic() -> None:
     watch = _record()
-    assert watch.schema_version == PR_CHECK_WATCH_SCHEMA_VERSION == 1
+    assert watch.schema_version == PR_CHECK_WATCH_SCHEMA_VERSION == 2
     assert watch.until is PrCheckWatchUntil.ALL_COMPLETED
     updated = _updated(watch)
     assert updated.selectors == ("check-run:101", "check-run:102")
@@ -130,6 +132,8 @@ def test_watch_domain_is_bounded_deterministic_and_monotonic() -> None:
             pr_number=watch.pr_number,
             pushed_sha=watch.pushed_sha,
             workspace_fingerprint=watch.workspace_fingerprint,
+            remote_version=watch.remote_version,
+            stability_version=watch.stability_version,
             until=watch.until,
             include_failure_evidence=True,
             timeout_seconds=4,
@@ -180,7 +184,7 @@ def test_json_watch_store_is_private_atomic_cas_and_strict(tmp_path: Path) -> No
         store.read(watch.operation_id)
     assert future.value.code is ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT
 
-    payload["schema_version"] = 1
+    payload["schema_version"] = PR_CHECK_WATCH_SCHEMA_VERSION
     payload["stdout"] = "secret"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RepoForgeError):
@@ -274,6 +278,7 @@ def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_even
     assert details["until"] == "all_completed"
     assert details["timeout_seconds"] == 300
     assert details["include_failure_evidence"] is True
+    assert details["expected_remote_version"] is False
     assert details["operation_id"] == result.operation.operation_id
     # Bounded: a PR number is an identifier, never the PR title/body or check output.
     assert set(details) == {
@@ -281,6 +286,7 @@ def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_even
         "until",
         "timeout_seconds",
         "include_failure_evidence",
+        "expected_remote_version",
         "operation_id",
         "pr_number",
         "deadline_at",
@@ -288,6 +294,8 @@ def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_even
         "duration_ms",
         "result_bytes",
         "is_mutating",
+        "origin",
+        "correlation_hash",
         "repo_id",
     }
     assert "Watch checks" not in json.dumps(details)
@@ -349,11 +357,18 @@ async def test_workspace_pr_watch_is_exposed_through_actual_mcp(
         assert tool.annotations.readOnlyHint is False
         assert tool.annotations.destructiveHint is False
         assert tool.annotations.openWorldHint is True
+        evidence = await session.call_tool(
+            "workspace_pr_evidence",
+            {"workspace_id": workspace_id},
+        )
+        assert evidence.isError is False
+        assert evidence.structuredContent is not None
         result = await session.call_tool(
             "workspace_pr",
             {
                 "workspace_id": workspace_id,
                 "action": "watch",
+                "expected_remote_version": evidence.structuredContent["remote_version"],
                 "until": "all_completed",
                 "timeout_seconds": 300,
             },

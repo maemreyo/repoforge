@@ -1224,16 +1224,15 @@ class WorkspacePrInput(StrictModel):
             self.evidence_ref is not None or self.review_comment_id is not None
         ):
             raise ValueError("comment fields are only valid for workspace_pr comment")
-        if self.action is WorkspacePrAction.WATCH and any(
-            value is not None
-            for value in (
-                self.title,
-                self.body,
-                self.idempotency_key,
-                self.expected_remote_version,
-            )
-        ):
-            raise ValueError("workspace_pr watch does not accept write fields")
+        if self.action is WorkspacePrAction.WATCH:
+            if any(value is not None for value in (self.title, self.body, self.idempotency_key)):
+                raise ValueError("workspace_pr watch does not accept write fields")
+            if self.event_cursor is None and self.expected_remote_version is None:
+                raise ValueError(
+                    "workspace_pr watch requires expected_remote_version when starting"
+                )
+            if self.event_cursor is not None and self.expected_remote_version is not None:
+                raise ValueError("workspace_pr watch resume uses the version bound to event_cursor")
         if self.action is not WorkspacePrAction.WATCH and self.event_cursor is not None:
             raise ValueError("event_cursor is only valid for workspace_pr watch")
         return self
@@ -1289,6 +1288,7 @@ class WorkspacePrEvidenceOutput(ToolResponse):
     pull_request: PullRequestEvidence
     checks: tuple[CheckEvidence, ...] = Field(default=(), max_length=500)
     failure_excerpt: tuple[str, ...] = Field(default=(), max_length=200)
+    remote_version: str = Field(min_length=1, max_length=256)
     delta_token: Cursor
     changed_since: bool
     truncated: bool = False
