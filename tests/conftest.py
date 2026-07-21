@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,15 @@ from repoforge.testing import ScriptedCommandExecutor
 
 
 def git(*args: str, cwd: Path) -> str:
-    completed = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
     return completed.stdout.strip()
 
 

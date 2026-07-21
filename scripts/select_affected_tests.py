@@ -26,17 +26,31 @@ DEFAULT_TESTS_DIR = Path("tests")
 # Changes to these paths affect verification/build/selection itself and can
 # invalidate any group mapping, so they always force a full-suite run rather
 # than trusting the (possibly stale) manifest to select narrowly.
+#
+# tests/conftest.py is deliberately NOT here: its blast radius is precisely
+# the checked-in `conftest_consumers` list (see CONFTEST_PATH below), not the
+# whole suite, because everything conftest.py exports feeds into one thing
+# (the forge_env git fixture). --check-completeness re-derives that list from
+# source and fails closed if a test starts using conftest.py without being
+# added to the manifest.
 ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
     "pyproject.toml",
     "uv.lock",
     "Makefile",
     "config.repoforge.toml",
     "tests/test-groups.toml",
-    "tests/conftest.py",
     "scripts/select_affected_tests.py",
     "scripts/run_test_shards.py",
     "scripts/verify-production.sh",
     ".github/workflows/**",
+)
+
+CONFTEST_PATH = "tests/conftest.py"
+
+# Any export from tests/conftest.py that a test file might reference. Kept in
+# sync with the checked-in `conftest_consumers` list by --check-completeness.
+_CONFTEST_SYMBOL_RE = re.compile(
+    r"\b(forge_env|create_forge_environment|ForgeEnvironment|execution_coordinator_for_tests)\b"
 )
 
 
@@ -53,12 +67,28 @@ class Group:
 class Manifest:
     groups: tuple[Group, ...]
     safety_bundle: tuple[str, ...]
+    conftest_consumers: tuple[str, ...]
 
     def group_by_name(self, name: str) -> Group:
         for group in self.groups:
             if group.name == name:
                 return group
         raise KeyError(name)
+
+    def serial_files(self) -> frozenset[str]:
+        """Test files owned by a `parallel = false` group.
+
+        These carry a known worker-contention risk under xdist (see the
+        `run_test_shards.py` serial-lane comment) and must run outside any
+        `-n` invocation, never mixed into the same pytest process as the
+        parallel lane.
+        """
+        return frozenset(
+            test_file
+            for group in self.groups
+            if not group.parallel
+            for test_file in group.test_files
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +143,23 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> Manifest:
             )
         )
     safety_bundle = tuple(raw.get("safety_bundle", {}).get("test_files", []))
-    return Manifest(groups=tuple(groups), safety_bundle=safety_bundle)
+    conftest_consumers = tuple(raw.get("conftest_consumers", {}).get("test_files", []))
+    return Manifest(
+        groups=tuple(groups), safety_bundle=safety_bundle, conftest_consumers=conftest_consumers
+    )
+
+
+def _actual_conftest_consumers(tests_dir: Path) -> set[str]:
+    """Re-derive, from source, every test file that references a conftest.py export."""
+    consumers: set[str] = set()
+    for path in tests_dir.glob("test_*.py"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if _CONFTEST_SYMBOL_RE.search(text):
+            consumers.add(f"tests/{path.name}")
+    return consumers
 
 
 def check_completeness(manifest: Manifest, tests_dir: Path = DEFAULT_TESTS_DIR) -> list[str]:
@@ -123,6 +169,21 @@ def check_completeness(manifest: Manifest, tests_dir: Path = DEFAULT_TESTS_DIR) 
     on_disk = {
         f"tests/{path.name}" for path in tests_dir.glob("test_*.py") if path.name != "conftest.py"
     }
+
+    actual_conftest_consumers = _actual_conftest_consumers(tests_dir)
+    manifest_conftest_consumers = set(manifest.conftest_consumers)
+    for test_file in sorted(actual_conftest_consumers - manifest_conftest_consumers):
+        violations.append(
+            f"test file {test_file!r} references tests/conftest.py's forge_env machinery "
+            "but is not listed under [conftest_consumers] in tests/test-groups.toml"
+        )
+    for test_file in sorted(manifest_conftest_consumers - actual_conftest_consumers):
+        violations.append(
+            f"[conftest_consumers] lists {test_file!r}, which no longer references "
+            "tests/conftest.py's forge_env machinery (stale entry)"
+        )
+    for test_file in sorted(manifest_conftest_consumers - on_disk):
+        violations.append(f"[conftest_consumers] references {test_file!r}, which does not exist")
 
     ownership: dict[str, list[str]] = {}
     for group in manifest.groups:
@@ -164,11 +225,17 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
             escalation_reason=None,
         )
 
-    for path in changed_paths:
+    # tests/conftest.py is handled separately from ALWAYS_WIDE_GLOBS: its blast
+    # radius is the checked-in conftest_consumers list, not the full suite.
+    conftest_changed = CONFTEST_PATH in changed_paths
+    remaining_paths = [path for path in changed_paths if path != CONFTEST_PATH]
+
+    for path in remaining_paths:
         if _matches_any(path, ALWAYS_WIDE_GLOBS):
             all_files = sorted(
                 {test_file for group in manifest.groups for test_file in group.test_files}
                 | set(manifest.safety_bundle)
+                | set(manifest.conftest_consumers)
             )
             return Selection(
                 selected_groups=tuple(group.name for group in manifest.groups),
@@ -182,7 +249,7 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
     matched_group_names: set[str] = set()
     reasons: list[str] = []
     unmapped: list[str] = []
-    for path in changed_paths:
+    for path in remaining_paths:
         matched_any = False
         for group in manifest.groups:
             if _matches_any(path, group.source_globs):
@@ -197,6 +264,7 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
         all_files = sorted(
             {test_file for group in manifest.groups for test_file in group.test_files}
             | set(manifest.safety_bundle)
+            | set(manifest.conftest_consumers)
         )
         return Selection(
             selected_groups=tuple(group.name for group in manifest.groups),
@@ -214,6 +282,12 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
     selected_files = set(manifest.safety_bundle)
     for name in selected_groups:
         selected_files.update(manifest.group_by_name(name).test_files)
+
+    if conftest_changed:
+        selected_files.update(manifest.conftest_consumers)
+        reasons = sorted([*reasons, f"{CONFTEST_PATH!r} -> 'conftest_consumers'"])
+        selected_groups = [*selected_groups, "conftest_consumers"]
+
     omitted = tuple(group.name for group in manifest.groups if group.name not in selected_groups)
     return Selection(
         selected_groups=tuple(selected_groups),
@@ -223,6 +297,51 @@ def select_affected_tests(manifest: Manifest, changed_paths: Sequence[str]) -> S
         escalated_to_wide=False,
         escalation_reason=None,
     )
+
+
+def _all_files_selection(manifest: Manifest) -> Selection:
+    """Select every test file, as if every always-wide path had changed."""
+    all_files = sorted(
+        {test_file for group in manifest.groups for test_file in group.test_files}
+        | set(manifest.safety_bundle)
+        | set(manifest.conftest_consumers)
+    )
+    return Selection(
+        selected_groups=tuple(group.name for group in manifest.groups),
+        selected_files=tuple(all_files),
+        omitted_groups=(),
+        reasons=("--full requested",),
+        escalated_to_wide=True,
+        escalation_reason="--full requested: running every test file",
+    )
+
+
+def _run_in_lanes(root: Path, files: Sequence[str], manifest: Manifest) -> int:
+    """Run `files` split into a serial lane and an xdist lane.
+
+    Files owned by a `parallel = false` group carry a known worker-contention
+    risk under xdist (see Group.serial_files) and must never share a pytest
+    process with `-n`. They run first, alone; the rest run under `-n 3`.
+    Mirrors the split `run_test_shards.py` already does for `make check`.
+    """
+    serial_files = manifest.serial_files()
+    serial = sorted(f for f in files if f in serial_files)
+    parallel = sorted(f for f in files if f not in serial_files)
+
+    returncode = 0
+    if serial:
+        print(f"[select-affected-tests] serial lane: {len(serial)} test files")
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", *serial], cwd=root, check=False
+        )
+        returncode = returncode or completed.returncode
+    if parallel:
+        print(f"[select-affected-tests] xdist lane: {len(parallel)} test files")
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-n", "3", "-q", *parallel], cwd=root, check=False
+        )
+        returncode = returncode or completed.returncode
+    return returncode
 
 
 def changed_paths_from_git(root: Path, base_ref: str) -> list[str]:
@@ -284,6 +403,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Execute pytest against the selection (or the full suite if escalated)",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Select every test file, bypassing git diff (for fast full-suite runs)",
+    )
     args = parser.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
@@ -300,23 +424,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     root = Path.cwd()
-    changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
-    selection = select_affected_tests(manifest, changed)
+    if args.full:
+        selection = _all_files_selection(manifest)
+    else:
+        changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
+        selection = select_affected_tests(manifest, changed)
     _print_report(selection)
 
     if args.run:
-        if selection.escalated_to_wide:
-            command = [
-                sys.executable,
-                "-m",
-                "pytest",
-                "--cov=repoforge",
-                "--cov-report=term-missing",
-            ]
-        else:
-            command = [sys.executable, "-m", "pytest", "-q", *selection.selected_files]
-        completed = subprocess.run(command, cwd=root, check=False)
-        return completed.returncode
+        # Coverage-gated authoritative runs belong to `make test`; this tool's
+        # job is fast affected-test feedback, split into a serial lane (files
+        # from `parallel = false` groups) and an xdist lane, same split
+        # `run_test_shards.py` already uses for `make check`.
+        return _run_in_lanes(root, selection.selected_files, manifest)
     return 0
 
 

@@ -37,8 +37,15 @@ def _group(
     )
 
 
-def _manifest(*, groups: tuple[Any, ...], safety_bundle: tuple[str, ...] = ()) -> Any:
-    return selector.Manifest(groups=groups, safety_bundle=safety_bundle)
+def _manifest(
+    *,
+    groups: tuple[Any, ...],
+    safety_bundle: tuple[str, ...] = (),
+    conftest_consumers: tuple[str, ...] = (),
+) -> Any:
+    return selector.Manifest(
+        groups=groups, safety_bundle=safety_bundle, conftest_consumers=conftest_consumers
+    )
 
 
 def test_the_shipped_manifest_is_complete_against_the_real_tests_directory() -> None:

@@ -67,7 +67,11 @@ test-fast:  # Run the complete suite in parallel without coverage, for fast loca
 	# -n 3 was measured against -n 2 and -n 4 on this repo: -n 3 is both the
 	# fastest and the only worker count that stayed stable (-n 4 crashed a
 	# worker and produced contention-flaky failures in shared-cache tests).
-	uv run --extra dev pytest -n 3
+	# Runs test-groups.toml's serial lane (parallel = false groups) alone
+	# first, then the rest under -n 3 -- mixing subprocess/git-heavy serial-lane
+	# tests into the same xdist run is what produced 60s pytest-timeout
+	# failures under load even at -n 3.
+	uv run --extra dev python scripts/select_affected_tests.py --full --run
 
 test-affected:  # Run only the module-aware test groups affected by changed paths against REPOFORGE_TEST_AFFECTED_BASE (default: main); escalates to the full suite when any changed path is unmapped
 	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}"

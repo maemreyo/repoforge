@@ -409,3 +409,58 @@ test_files = [
   "tests/test_source_integrity_policy.py",
 ]
 
+# Test files that reference tests/conftest.py's shared git/workspace fixture
+# machinery (the `forge_env` fixture, `ForgeEnvironment`, `create_forge_environment`,
+# or `execution_coordinator_for_tests`). A change to tests/conftest.py is scoped to
+# exactly this list (deduplicated with safety_bundle) instead of the full suite.
+# `select_affected_tests.py --check-completeness` re-derives this set from source
+# and fails closed if it has drifted, so it stays trustworthy as tests are added.
+[conftest_consumers]
+test_files = [
+  "tests/test_adoption_nudges.py",
+  "tests/test_audit_cursor.py",
+  "tests/test_background_run_profile.py",
+  "tests/test_ci_failure_evidence.py",
+  "tests/test_code_intelligence_integration.py",
+  "tests/test_command_source_integrity.py",
+  "tests/test_doctor_github_capabilities.py",
+  "tests/test_execution_plans.py",
+  "tests/test_failure_intelligence.py",
+  "tests/test_fingerprint_cache.py",
+  "tests/test_github_read_cache.py",
+  "tests/test_mcp_contract.py",
+  "tests/test_mcp_contract_v2.py",
+  "tests/test_mcp_payload_v2.py",
+  "tests/test_mutation_idempotency.py",
+  "tests/test_operation_tasks.py",
+  "tests/test_optimistic_lock_tokens.py",
+  "tests/test_phase5_failure_harness.py",
+  "tests/test_phase6_operational_hardening.py",
+  "tests/test_phase7_atomic_hot_reload.py",
+  "tests/test_phases1_4_production_hardening.py",
+  "tests/test_plan_execution.py",
+  "tests/test_pr_check_watch.py",
+  "tests/test_repo_issue_graph_tools.py",
+  "tests/test_repo_list_selection_v2.py",
+  "tests/test_repo_task_context.py",
+  "tests/test_repository_commit_evidence.py",
+  "tests/test_repository_snapshot.py",
+  "tests/test_retry_guidance.py",
+  "tests/test_service_tools.py",
+  "tests/test_skills_scaffold.py",
+  "tests/test_v2_reads.py",
+  "tests/test_v2_retrieval.py",
+  "tests/test_v2_shipping.py",
+  "tests/test_verification_dag_cache.py",
+  "tests/test_workflow_recording.py",
+  "tests/test_workspace_adhoc.py",
+  "tests/test_workspace_assessment.py",
+  "tests/test_workspace_diagnostics.py",
+  "tests/test_workspace_edit.py",
+  "tests/test_workspace_hygiene.py",
+  "tests/test_workspace_issue_links.py",
+  "tests/test_workspace_mutate.py",
+  "tests/test_workspace_refresh.py",
+  "tests/test_workspace_stale_cleanup.py",
+]
+
