@@ -20,6 +20,11 @@ from repoforge.adapters.runtime.local_runtime import (
     write_runtime_state,
 )
 from repoforge.domain.errors import ConfigError
+from repoforge.domain.runtime_events import (
+    RuntimeEventV1,
+    encode_runtime_event,
+    parse_runtime_event,
+)
 
 
 def test_runtime_state_records_the_current_process_and_generation(tmp_path: Path) -> None:
@@ -178,3 +183,41 @@ def test_runtime_log_merges_rotations_in_chronological_order(tmp_path: Path) -> 
     log_path.write_text("current-1\ncurrent-2\n", encoding="utf-8")
 
     assert read_runtime_log(log_path, 4) == ["older", "previous", "current-1", "current-2"]
+
+
+def test_runtime_event_parser_never_fabricates_timestamp() -> None:
+    parsed = parse_runtime_event("legacy plaintext")
+
+    assert parsed.timestamp is None
+    assert parsed.timestamp_state == "unavailable"
+    assert parsed.parse_state == "legacy_plaintext"
+    assert parsed.message == "legacy plaintext"
+
+
+def test_runtime_event_v1_round_trip_preserves_observed_fields() -> None:
+    event = RuntimeEventV1(
+        observed_at="2026-07-21T12:00:00+00:00",
+        component="tunnel_client",
+        stream="stdout",
+        level="INFO",
+        event_kind="process_output",
+        message="ready",
+        correlation_id="corr-1",
+        operation_id="op-1",
+        receipt_id=None,
+        trace_id=None,
+        workspace_hash=None,
+        repository_hash=None,
+    )
+
+    parsed = parse_runtime_event(encode_runtime_event(event))
+
+    assert parsed.parse_state == "structured_v1"
+    assert parsed.timestamp == event.observed_at
+    assert parsed.timestamp_state == "observed"
+    assert parsed.component == "tunnel_client"
+    assert parsed.stream == "stdout"
+    assert parsed.event_kind == "process_output"
+    assert parsed.message == "ready"
+    assert parsed.correlation_id == "corr-1"
+    assert parsed.operation_id == "op-1"
