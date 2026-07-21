@@ -30,6 +30,7 @@ from ...domain.workspace import (
     invalidate_workspace_refresh_receipts,
 )
 from ..context import ApplicationContext
+from ..execution.requests import profile_execution_request
 from ..file_transactions import open_file_transaction
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..idempotency import IdempotencyEffectBoundary
@@ -424,6 +425,11 @@ class WorkspaceRefreshV2:
                                 actions.append(CreateFile(relative_path, data, 0o644))
                         file_engine.commit(TransactionPlan(tuple(actions)))
                         self.ctx.git.stage_paths(workspace, repo, resolution_paths)
+                    regenerated_paths = self._regenerate_generated_conflicts(
+                        plan,
+                        repo,
+                        workspace,
+                    )
                     remaining = self.ctx.git.unmerged_paths(workspace, repo)
                     if remaining:
                         raise WorkspaceError(
@@ -446,10 +452,10 @@ class WorkspaceRefreshV2:
                                     head,
                                     new_head,
                                 )
-                            ).union(resolution_paths)
+                            ).union(resolution_paths, regenerated_paths)
                         )
                     )
-                    warnings = self._generated_warnings(plan, resolution_paths)
+                    warnings: tuple[str, ...] = ()
                     final_fingerprint = prime_fingerprint(
                         self.ctx.fingerprint_cache,
                         command.workspace_id,
@@ -722,7 +728,7 @@ class WorkspaceRefreshV2:
         repo: Any,
         workspace: Path,
     ) -> dict[str, str]:
-        expected = {item.path for item in plan.conflicts}
+        expected = {item.path for item in plan.conflicts if item.kind != "generated"}
         provided: dict[str, str] = {}
         resulting_bytes = 0
         changed_lines = 0
@@ -778,18 +784,68 @@ class WorkspaceRefreshV2:
             )
         return provided
 
-    @staticmethod
-    def _generated_warnings(
+    def _regenerate_generated_conflicts(
+        self,
         plan: _RefreshPlan,
-        resolution_paths: tuple[str, ...],
+        repo: Any,
+        workspace: Path,
     ) -> tuple[str, ...]:
-        resolved = set(resolution_paths)
-        return tuple(
-            f"{item.path} is generated; merge source inputs and regenerate with: "
-            + " ".join(item.regeneration_command)
-            for item in plan.conflicts
-            if item.path in resolved and item.kind == "generated"
+        generated_conflicts = tuple(item for item in plan.conflicts if item.kind == "generated")
+        if not generated_conflicts:
+            return ()
+        commands = tuple(sorted({item.regeneration_command for item in generated_conflicts}))
+        if any(not command for command in commands):
+            raise WorkspaceError("Generated refresh conflict has no reviewed regeneration command")
+        request = profile_execution_request(
+            workspace_id=plan.workspace_id,
+            workspace_root=workspace,
+            command_cwd=workspace,
+            commands=commands,
+            working_directory_policy=".",
+            timeout_seconds=repo.adhoc_timeout_seconds,
+            output_limit=self.ctx.config.server.max_tool_output_chars,
         )
+        with self.ctx.execution.prepare(request) as session:
+            for command in commands:
+                session.execute(command)
+
+        command_set = set(commands)
+        generated_rules = tuple(
+            rule for rule in repo.generated_paths if rule.regeneration_command in command_set
+        )
+        changed_paths = self.ctx.git.changed_paths(workspace, repo)
+        regenerated_paths = tuple(
+            sorted(
+                path
+                for path in changed_paths
+                if any(rule.matches(path) for rule in generated_rules)
+            )
+        )
+        conflict_paths = {item.path for item in generated_conflicts}
+        if not conflict_paths.issubset(regenerated_paths):
+            missing = sorted(conflict_paths - set(regenerated_paths))
+            raise WorkspaceError(
+                "Regeneration did not produce every generated conflict path: " + ", ".join(missing)
+            )
+        for path in regenerated_paths:
+            target = resolve_workspace_path(workspace, path, repo)
+            if target.is_symlink() or not target.is_file():
+                raise SecurityError(f"Regenerated output must be a regular file: {path}")
+        self.ctx.git.stage_paths(workspace, repo, regenerated_paths)
+        unstaged = self._unstaged_paths(self.ctx.git.status_porcelain(workspace))
+        if unstaged:
+            raise SecurityError(
+                "Regeneration command left undeclared or unstaged changes: " + ", ".join(unstaged)
+            )
+        return regenerated_paths
+
+    @staticmethod
+    def _unstaged_paths(status: str) -> tuple[str, ...]:
+        paths: list[str] = []
+        for line in status.splitlines():
+            if line.startswith("?? ") or (len(line) >= 4 and line[1] != " "):
+                paths.append(line[3:])
+        return tuple(sorted(set(paths)))
 
     @staticmethod
     def _preview_result(
