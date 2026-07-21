@@ -369,6 +369,7 @@ def execute_idempotent(
                             error_code=ErrorCode.FAILED_AFTER_EFFECT.value,
                             error_message=type(serialization_error).__name__,
                             result_reference=result_reference,
+                            receipt_id=receipt_id,
                             retryability=OperationRetryability.NONE,
                             now=ctx.clock.now_iso(),
                         )
@@ -420,6 +421,7 @@ def execute_idempotent(
                     operations.succeed(
                         operation_task.operation_id,
                         result_reference=result_reference,
+                        receipt_id=receipt_id,
                         now=ctx.clock.now_iso(),
                     )
                     publish_outcome(receipt_envelope.value)
@@ -461,6 +463,7 @@ def execute_idempotent(
                             error_code=ErrorCode.FAILED_AFTER_EFFECT.value,
                             error_message=type(exc).__name__,
                             result_reference=result_reference,
+                            receipt_id=receipt_id,
                             retryability=OperationRetryability.NONE,
                             now=ctx.clock.now_iso(),
                         )
@@ -512,6 +515,7 @@ def execute_idempotent(
                                 operation_task.operation_id,
                                 error_code=ErrorCode.EFFECT_ROLLED_BACK.value,
                                 error_message=type(exc).__name__,
+                                receipt_id=receipt_id,
                                 retryability=OperationRetryability.AUTOMATIC,
                                 now=ctx.clock.now_iso(),
                             )
@@ -532,6 +536,7 @@ def execute_idempotent(
                                 operation_task.operation_id,
                                 error_code=ErrorCode.EFFECT_OUTCOME_UNKNOWN.value,
                                 error_message=type(exc).__name__,
+                                receipt_id=receipt_id,
                                 retryability=OperationRetryability.MANUAL,
                                 now=ctx.clock.now_iso(),
                             )
@@ -559,6 +564,7 @@ def execute_idempotent(
                                 operation_task.operation_id,
                                 error_code=ErrorCode.FAILED_BEFORE_EFFECT.value,
                                 error_message=type(exc).__name__,
+                                receipt_id=receipt_id,
                                 retryability=OperationRetryability.AUTOMATIC,
                                 now=ctx.clock.now_iso(),
                             )

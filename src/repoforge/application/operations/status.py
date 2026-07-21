@@ -24,7 +24,19 @@ class OperationStatusReader:
             result_store = self.operations.ctx.operation_result_store
             if result_store is not None:
                 result = result_store.read(command.operation_id)
-            return operation_status_view(task, result)
+            receipt_store = self.operations.ctx.effect_receipts
+            receipt_available = (
+                task.receipt_id is not None
+                and receipt_store is not None
+                and receipt_store.read(task.receipt_id) is not None
+            )
+            return operation_status_view(
+                task,
+                result,
+                result_checked=result_store is not None,
+                receipt_checked=receipt_store is not None,
+                receipt_available=receipt_available,
+            )
 
         return self.operations.ctx.audited(
             "operation_status",

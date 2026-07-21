@@ -183,6 +183,37 @@ def test_response_failure_replays_authoritative_outcome_after_service_restart(
     assert result_store.read(matched[0].value.operation_id)["path"] == "restart.txt"
 
 
+def test_operation_record_binds_to_authoritative_effect_receipt(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "operation-receipt-binding")["workspace_id"]
+
+    service.workspace_write_file(
+        workspace_id,
+        "receipt-binding.txt",
+        "bound\n",
+        "<new>",
+        idempotency_key="operation-receipt-binding-0001",
+    )
+
+    key_hash = hash_idempotency_key("operation-receipt-binding-0001")
+    receipts = service.application.context.effect_receipts
+    assert receipts is not None
+    matched = receipts.list_for_idempotency("workspace_write_file", key_hash).records
+    assert len(matched) == 1
+    receipt = matched[0].value
+    task = service.operations.status(receipt.operation_id)
+    assert task.receipt_id == receipt.receipt_id
+    assert task.result_reference == receipt.result_reference
+
+    public = service.operation(action="get", operation_id=receipt.operation_id)
+    assert public["operation"]["receipt_id"] == receipt.receipt_id
+    assert public["operation"]["receipt_status"] == "available"
+    assert public["operation"]["result_reference_status"] == "available"
+    assert public["operation"]["record_consistency"] == "consistent"
+
+
 def test_startup_reconciler_classifies_all_nonterminal_receipts(
     forge_env: ForgeEnvironment,
 ) -> None:

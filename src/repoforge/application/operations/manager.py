@@ -92,6 +92,7 @@ class OperationManager:
         *,
         now: str | None = None,
         result_reference: str | None = None,
+        receipt_id: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
         retryability: OperationRetryability = OperationRetryability.NONE,
@@ -102,6 +103,7 @@ class OperationManager:
             new_state,
             now=self._now(now),
             result_reference=result_reference,
+            receipt_id=receipt_id,
             error_code=error_code,
             error_message=error_message,
             retryability=retryability,
@@ -134,6 +136,7 @@ class OperationManager:
         operation_id: str,
         *,
         result_reference: str,
+        receipt_id: str | None = None,
         now: str | None = None,
     ) -> OperationTask:
         return self._save_transition(
@@ -141,6 +144,7 @@ class OperationManager:
             OperationState.SUCCEEDED,
             now=now,
             result_reference=result_reference,
+            receipt_id=receipt_id,
         )
 
     def fail(
@@ -150,6 +154,7 @@ class OperationManager:
         error_code: str,
         error_message: str | None = None,
         result_reference: str | None = None,
+        receipt_id: str | None = None,
         retryability: OperationRetryability = OperationRetryability.NONE,
         now: str | None = None,
     ) -> OperationTask:
@@ -158,6 +163,7 @@ class OperationManager:
             OperationState.FAILED,
             now=now,
             result_reference=result_reference,
+            receipt_id=receipt_id,
             error_code=error_code,
             error_message=error_message,
             retryability=retryability,

@@ -9,11 +9,13 @@ from typing import Any
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import (
+    LEGACY_OPERATION_SCHEMA_VERSION,
     OPERATION_SCHEMA_VERSION,
     OperationRetryability,
     OperationSnapshotBinding,
     OperationState,
     OperationTask,
+    normalize_loaded_operation,
     validate_operation_id,
     validate_operation_task,
 )
@@ -127,14 +129,14 @@ class JsonOperationStore:
         if (
             not isinstance(version, int)
             or isinstance(version, bool)
-            or version != OPERATION_SCHEMA_VERSION
+            or version not in {LEGACY_OPERATION_SCHEMA_VERSION, OPERATION_SCHEMA_VERSION}
         ):
             raise JsonOperationStore._error(
                 f"Unsupported operation schema version: {version!r}",
                 code=ErrorCode.OPERATION_SCHEMA_UNSUPPORTED,
             )
         JsonOperationStore._assert_safe(raw)
-        expected_fields = {
+        legacy_fields = {
             "operation_id",
             "kind",
             "state",
@@ -157,9 +159,18 @@ class JsonOperationStore:
             "expires_at",
             "schema_version",
         }
+        current_fields = legacy_fields | {
+            "receipt_id",
+            "record_provenance",
+            "record_consistency",
+            "record_diagnostics",
+        }
+        expected_fields = (
+            legacy_fields if version == LEGACY_OPERATION_SCHEMA_VERSION else current_fields
+        )
         if set(raw) != expected_fields:
             raise JsonOperationStore._error(
-                "Operation record fields do not match schema version 1",
+                f"Operation record fields do not match schema version {version}",
                 code=ErrorCode.OPERATION_CORRUPT,
             )
         if raw.get("operation_id") != expected_operation_id:
@@ -197,9 +208,23 @@ class JsonOperationStore:
                 created_at=str(raw["created_at"]),
                 updated_at=str(raw["updated_at"]),
                 expires_at=raw["expires_at"],
-                schema_version=raw["schema_version"],
+                receipt_id=(raw["receipt_id"] if version == OPERATION_SCHEMA_VERSION else None),
+                record_provenance=(
+                    str(raw["record_provenance"])
+                    if version == OPERATION_SCHEMA_VERSION
+                    else "legacy_migrated"
+                ),
+                record_consistency=(
+                    str(raw["record_consistency"])
+                    if version == OPERATION_SCHEMA_VERSION
+                    else "consistent"
+                ),
+                record_diagnostics=(
+                    tuple(raw["record_diagnostics"]) if version == OPERATION_SCHEMA_VERSION else ()
+                ),
+                schema_version=OPERATION_SCHEMA_VERSION,
             )
-            return validate_operation_task(task)
+            return normalize_loaded_operation(task, source_schema_version=version)
         except (KeyError, TypeError, ValueError, RepoForgeError) as exc:
             if (
                 isinstance(exc, RepoForgeError)

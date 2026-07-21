@@ -35,6 +35,9 @@ class OperationSummary:
     workspace_id: str | None
     snapshot_binding: OperationSnapshotView | None
     result_reference: str | None
+    result_reference_status: str
+    receipt_id: str | None
+    receipt_status: str
     error_code: str | None
     error_message: str | None
     retryability: str
@@ -43,6 +46,10 @@ class OperationSummary:
     created_at: str
     updated_at: str
     expires_at: str | None
+    schema_version: int
+    record_provenance: str
+    record_consistency: str
+    record_diagnostics: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +63,9 @@ class OperationStatusView:
     workspace_id: str | None
     snapshot_binding: OperationSnapshotView | None
     result_reference: str | None
+    result_reference_status: str
+    receipt_id: str | None
+    receipt_status: str
     result: dict[str, Any] | None
     error_code: str | None
     error_message: str | None
@@ -65,6 +75,10 @@ class OperationStatusView:
     created_at: str
     updated_at: str
     expires_at: str | None
+    schema_version: int
+    record_provenance: str
+    record_consistency: str
+    record_diagnostics: tuple[str, ...]
 
 
 def operation_summary(task: OperationTask) -> OperationSummary:
@@ -92,6 +106,11 @@ def operation_summary(task: OperationTask) -> OperationSummary:
             else None
         ),
         result_reference=task.result_reference,
+        result_reference_status=(
+            "not_applicable" if task.result_reference is None else "not_checked"
+        ),
+        receipt_id=task.receipt_id,
+        receipt_status="not_applicable" if task.receipt_id is None else "not_checked",
         error_code=task.error_code,
         error_message=task.error_message,
         retryability=task.retryability.value,
@@ -100,14 +119,48 @@ def operation_summary(task: OperationTask) -> OperationSummary:
         created_at=task.created_at,
         updated_at=task.updated_at,
         expires_at=task.expires_at,
+        schema_version=task.schema_version,
+        record_provenance=task.record_provenance,
+        record_consistency=task.record_consistency,
+        record_diagnostics=task.record_diagnostics,
     )
 
 
 def operation_status_view(
     task: OperationTask,
     result: dict[str, Any] | None,
+    *,
+    result_checked: bool = True,
+    receipt_checked: bool = True,
+    receipt_available: bool = False,
 ) -> OperationStatusView:
     summary = operation_summary(task)
+    result_reference_status = (
+        "not_applicable"
+        if summary.result_reference is None
+        else "not_checked"
+        if not result_checked
+        else "available"
+        if result is not None
+        else "missing"
+    )
+    receipt_status = (
+        "not_applicable"
+        if summary.receipt_id is None
+        else "not_checked"
+        if not receipt_checked
+        else "available"
+        if receipt_available
+        else "missing"
+    )
+    diagnostics = summary.record_diagnostics
+    consistency = summary.record_consistency
+    if result_reference_status == "missing":
+        diagnostics = tuple(sorted(set(diagnostics) | {"missing_result_reference_payload"}))
+        consistency = "record_inconsistent"
+    if receipt_status == "missing":
+        diagnostics = tuple(sorted(set(diagnostics) | {"missing_receipt_reference"}))
+        consistency = "record_inconsistent"
     return OperationStatusView(
         operation_id=summary.operation_id,
         kind=summary.kind,
@@ -118,6 +171,9 @@ def operation_status_view(
         workspace_id=summary.workspace_id,
         snapshot_binding=summary.snapshot_binding,
         result_reference=summary.result_reference,
+        result_reference_status=result_reference_status,
+        receipt_id=summary.receipt_id,
+        receipt_status=receipt_status,
         result=result,
         error_code=summary.error_code,
         error_message=summary.error_message,
@@ -127,4 +183,8 @@ def operation_status_view(
         created_at=summary.created_at,
         updated_at=summary.updated_at,
         expires_at=summary.expires_at,
+        schema_version=summary.schema_version,
+        record_provenance=summary.record_provenance,
+        record_consistency=consistency,
+        record_diagnostics=diagnostics,
     )

@@ -138,6 +138,7 @@ def execute_with_outcome_receipt(
                 error_code=ErrorCode.FAILED_AFTER_EFFECT.value,
                 error_message=type(exc).__name__,
                 result_reference=result_reference,
+                receipt_id=receipt_id,
                 retryability=OperationRetryability.NONE,
                 now=ctx.clock.now_iso(),
             )
@@ -169,6 +170,7 @@ def execute_with_outcome_receipt(
         manager.succeed(
             task.operation_id,
             result_reference=result_reference,
+            receipt_id=receipt_id,
             now=ctx.clock.now_iso(),
         )
         publish_outcome(receipt.value)
@@ -220,6 +222,7 @@ def execute_with_outcome_receipt(
                 error_code=ErrorCode.FAILED_AFTER_EFFECT.value,
                 error_message=type(exc).__name__,
                 result_reference=result_reference,
+                receipt_id=receipt_id,
                 retryability=OperationRetryability.NONE,
                 now=ctx.clock.now_iso(),
             )
@@ -259,6 +262,7 @@ def execute_with_outcome_receipt(
                 task.operation_id,
                 error_code=ErrorCode.EFFECT_ROLLED_BACK.value,
                 error_message=type(exc).__name__,
+                receipt_id=receipt_id,
                 retryability=OperationRetryability.AUTOMATIC,
                 now=ctx.clock.now_iso(),
             )
@@ -280,6 +284,7 @@ def execute_with_outcome_receipt(
                 task.operation_id,
                 error_code=ErrorCode.EFFECT_OUTCOME_UNKNOWN.value,
                 error_message=type(exc).__name__,
+                receipt_id=receipt_id,
                 retryability=OperationRetryability.MANUAL,
                 now=ctx.clock.now_iso(),
             )
@@ -313,6 +318,7 @@ def execute_with_outcome_receipt(
             task.operation_id,
             error_code=ErrorCode.FAILED_BEFORE_EFFECT.value,
             error_message=type(exc).__name__,
+            receipt_id=receipt_id,
             retryability=OperationRetryability.AUTOMATIC,
             now=ctx.clock.now_iso(),
         )

@@ -284,6 +284,13 @@ class OperationEvidence(StrictModel):
     progress_message: str | None = Field(default=None, max_length=2_000)
     workspace_id: Identifier | None = None
     result_reference: str | None = Field(default=None, max_length=256)
+    result_reference_status: Literal["not_applicable", "not_checked", "available", "missing"] = (
+        "not_applicable"
+    )
+    receipt_id: str | None = Field(default=None, pattern=r"^receipt-[a-f0-9]{24}$")
+    receipt_status: Literal["not_applicable", "not_checked", "available", "missing"] = (
+        "not_applicable"
+    )
     error_code: str | None = Field(default=None, max_length=128)
     retryability: Literal["none", "manual", "automatic"] = "none"
     terminal: bool = False
@@ -292,6 +299,10 @@ class OperationEvidence(StrictModel):
     suggested_poll_after_s: float | None = Field(default=1.0, ge=0.1, le=60.0)
     eta_seconds: float | None = Field(default=None, ge=0.0, le=31_536_000.0)
     updated_at: str | None = Field(default=None, max_length=80)
+    schema_version: int = Field(default=2, ge=1)
+    record_provenance: Literal["current", "legacy_migrated", "recovered_inconsistent"] = "current"
+    record_consistency: Literal["consistent", "record_inconsistent"] = "consistent"
+    record_diagnostics: tuple[str, ...] = Field(default=(), max_length=20)
 
 
 class KeyValue(StrictModel):

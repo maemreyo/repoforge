@@ -129,6 +129,9 @@ def operation_evidence(view: OperationSummary | OperationStatusView) -> dict[str
         "progress_message": view.progress.message,
         "workspace_id": view.workspace_id,
         "result_reference": view.result_reference,
+        "result_reference_status": view.result_reference_status,
+        "receipt_id": view.receipt_id,
+        "receipt_status": view.receipt_status,
         "error_code": view.error_code,
         "retryability": view.retryability,
         "terminal": terminal,
@@ -137,6 +140,10 @@ def operation_evidence(view: OperationSummary | OperationStatusView) -> dict[str
         "suggested_poll_after_s": _poll_after(view),
         "eta_seconds": _eta_seconds(view),
         "updated_at": view.updated_at,
+        "schema_version": view.schema_version,
+        "record_provenance": view.record_provenance,
+        "record_consistency": view.record_consistency,
+        "record_diagnostics": view.record_diagnostics,
     }
 
 
@@ -193,6 +200,12 @@ class OperationCoordinator:
                 terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
                 changed_since = current.updated_at != baseline
             timed_out = not terminal and not changed_since
+            self.status.operations.ctx.record_metric(
+                "operation_wait_empty_delta" if timed_out else "operation_wait_delta",
+                success=True,
+                duration_ms=0.0,
+                error_code=None,
+            )
             return OperationResult(
                 summary=(
                     f"Operation {command.operation_id} reached terminal state"
@@ -204,7 +217,7 @@ class OperationCoordinator:
                     )
                 ),
                 action="wait",
-                operation=operation_evidence(current),
+                operation=(operation_evidence(current) if terminal or changed_since else None),
                 operations=[],
                 cancellation_requested=False,
                 truncated=False,

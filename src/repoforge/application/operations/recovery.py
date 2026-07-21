@@ -20,6 +20,11 @@ class OperationRecoveryReport:
     expired: int
     deleted: int
     conflicts: int
+    missing_result_references: int
+    missing_receipt_references: int
+    retained_for_receipt: int
+    operation_record_inconsistencies: int
+    legacy_operation_records: int
     scan_truncated: bool
 
 
@@ -50,13 +55,44 @@ def recover_operations(
     expired = 0
     deleted = 0
     conflicts = 0
+    missing_result_references = 0
+    missing_receipt_references = 0
+    retained_for_receipt = 0
+    operation_record_inconsistencies = 0
+    legacy_operation_records = 0
     cutoff = now_dt - timedelta(seconds=retention_seconds)
     running_cutoff = now_dt - timedelta(seconds=running_stale_seconds)
 
     for task in page.records:
+        if task.record_consistency == "record_inconsistent":
+            operation_record_inconsistencies += 1
+        if task.record_provenance == "legacy_migrated":
+            legacy_operation_records += 1
         try:
             if task.state in TERMINAL_OPERATION_STATES:
+                if (
+                    task.result_reference is not None
+                    and manager.ctx.operation_result_store is not None
+                    and manager.ctx.operation_result_store.read(task.operation_id) is None
+                ):
+                    missing_result_references += 1
+                if (
+                    task.receipt_id is not None
+                    and manager.ctx.effect_receipts is not None
+                    and manager.ctx.effect_receipts.read(task.receipt_id) is None
+                ):
+                    missing_receipt_references += 1
                 if _timestamp(task.updated_at) < cutoff:
+                    receipt_exists = (
+                        task.receipt_id is not None
+                        and manager.ctx.effect_receipts is not None
+                        and manager.ctx.effect_receipts.read(task.receipt_id) is not None
+                    )
+                    if receipt_exists:
+                        retained_for_receipt += 1
+                        continue
+                    if manager.ctx.operation_result_store is not None:
+                        manager.ctx.operation_result_store.delete(task.operation_id)
                     manager.delete(task.operation_id)
                     deleted += 1
                 continue
@@ -87,5 +123,10 @@ def recover_operations(
         expired=expired,
         deleted=deleted,
         conflicts=conflicts,
+        missing_result_references=missing_result_references,
+        missing_receipt_references=missing_receipt_references,
+        retained_for_receipt=retained_for_receipt,
+        operation_record_inconsistencies=operation_record_inconsistencies,
+        legacy_operation_records=legacy_operation_records,
         scan_truncated=page.scan_truncated,
     )

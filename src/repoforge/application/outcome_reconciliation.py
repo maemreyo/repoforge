@@ -104,6 +104,7 @@ class OutcomeReceiptReconciler:
                     manager.succeed(
                         receipt.operation_id,
                         result_reference=f"operation-result:{receipt.operation_id}",
+                        receipt_id=receipt.receipt_id,
                         now=now,
                     )
                 validated += 1
@@ -126,6 +127,7 @@ class OutcomeReceiptReconciler:
                         receipt.operation_id,
                         error_code=ErrorCode.FAILED_BEFORE_EFFECT.value,
                         error_message="process_restarted_before_effect",
+                        receipt_id=receipt.receipt_id,
                         retryability=OperationRetryability.AUTOMATIC,
                         now=now,
                     )
@@ -153,6 +155,7 @@ class OutcomeReceiptReconciler:
                         receipt.operation_id,
                         error_code=ErrorCode.EFFECT_OUTCOME_UNKNOWN.value,
                         error_message="process_restarted_without_result_evidence",
+                        receipt_id=receipt.receipt_id,
                         retryability=OperationRetryability.MANUAL,
                         now=now,
                     )
