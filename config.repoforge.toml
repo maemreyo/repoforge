@@ -63,7 +63,11 @@ low_max = 24
 medium_max = 49
 high_max = 74
 final_profile = "full"
-ordered_profiles = ["quick", "test", "full"]
+# "full" already runs the complete authoritative suite (scripts/verify-production.sh),
+# so this chain never runs "test" (make test: full suite + coverage, unsharded) right
+# before "full" runs the full suite again. "test-affected" gives medium-risk changes a
+# fast, module-aware narrow run instead of a second full-suite pass.
+ordered_profiles = ["quick", "test-affected", "full"]
 narrow_diagnostics = ["pytest-target", "release-contract-diff"]
 critical_globs = [
   ".github/workflows/**",
@@ -119,6 +123,12 @@ description = "Run the RepoForge test suite with branch coverage enforcement"
 verification = true
 timeout_seconds = 900
 commands = [["make", "test"]]
+
+[repo.policy_patch.profiles.test-affected]
+description = "Run only the module-aware test groups affected by changed paths, plus the always-on safety bundle; falls back to the full suite when a changed path is not mapped by tests/test-groups.toml"
+verification = true
+timeout_seconds = 600
+commands = [["make", "test-affected"]]
 
 [repo.policy_patch.profiles.build]
 description = "Build the RepoForge wheel and source distribution"

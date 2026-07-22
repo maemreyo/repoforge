@@ -26,6 +26,11 @@ jobs:
       - run: uv run ruff format --check src tests scripts
       - run: uv run ruff check src tests scripts
       - run: uv run mypy --strict src/repoforge
+      # Manifest completeness + coverage-map staleness (map must not reference
+      # deleted/renamed test files). The full suite still runs below, so this is
+      # a fast correctness guard on the test-selection metadata, not a gate on
+      # the map being perfectly fresh.
+      - run: uv run python scripts/select_affected_tests.py --check-completeness
       - name: Record exact HEAD and require tracked cleanliness
         run: |
           git rev-parse HEAD

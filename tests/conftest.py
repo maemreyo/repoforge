@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import shutil
 import subprocess
+import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +23,15 @@ from repoforge.testing import ScriptedCommandExecutor
 
 
 def git(*args: str, cwd: Path) -> str:
-    completed = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
     return completed.stdout.strip()
 
 
@@ -37,6 +50,74 @@ def execution_coordinator_for_tests() -> ExecutionCoordinator:
     """Provide required deterministic execution wiring to non-execution unit fixtures."""
 
     return ExecutionCoordinator(NativeReviewedAdapter(ScriptedCommandExecutor()))
+
+
+_TEMPLATE_LOCK = threading.Lock()
+_TEMPLATE_ROOT: Path | None = None
+
+
+def _build_template_repo() -> Path:
+    """Build the base remote+source git repos exactly once per process.
+
+    create_forge_environment() previously ran ~10 git subprocesses per call
+    (init/clone/config/add/commit/branch/push) -- ~257ms x ~574 tests. The repo
+    content is identical across every test (task-specific state is layered on
+    later through the service), so we build it once here and copy it per test.
+    """
+    root = Path(tempfile.mkdtemp(prefix="forge-template-"))
+    remote = root / "remote.git"
+    git("init", "--bare", str(remote), cwd=root)
+    source = root / "source"
+    git("clone", str(remote), str(source), cwd=root)
+    git("config", "user.name", "Test User", cwd=source)
+    git("config", "user.email", "test@example.com", cwd=source)
+    (source / "hello.txt").write_text("hello\n", encoding="utf-8")
+    (source / "README.md").write_text("# Demo\n\nRepository instructions.\n", encoding="utf-8")
+    (source / "AGENTS.md").write_text("Always test changes.\n", encoding="utf-8")
+    (source / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "demo",
+                "packageManager": "pnpm@10.20.0",
+                "engines": {"node": "22.23.1"},
+                "scripts": {"test": "echo test", "check": "echo check"},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    git("add", ".", cwd=source)
+    git("commit", "-m", "initial", cwd=source)
+    git("branch", "-M", "main", cwd=source)
+    git("push", "-u", "origin", "main", cwd=source)
+    return root
+
+
+def _template_root() -> Path:
+    global _TEMPLATE_ROOT
+    with _TEMPLATE_LOCK:
+        if _TEMPLATE_ROOT is None:
+            _TEMPLATE_ROOT = _build_template_repo()
+            atexit.register(shutil.rmtree, _TEMPLATE_ROOT, ignore_errors=True)
+        return _TEMPLATE_ROOT
+
+
+def _clone_template_repo(tmp_path: Path) -> tuple[Path, Path]:
+    """Copy the prebuilt template into this test's tmp_path and re-point origin.
+
+    A filesystem copy (~10ms) replaces the ~10 git subprocesses the original
+    inline setup ran; only `remote set-url` stays as a single git call so the
+    copied source pushes/fetches against the copied remote, not the shared
+    template.
+    """
+    template = _template_root()
+    remote = tmp_path / "remote.git"
+    source = tmp_path / "source"
+    shutil.copytree(template / "remote.git", remote)
+    shutil.copytree(template / "source", source)
+    git("remote", "set-url", "origin", str(remote), cwd=source)
+    return remote, source
 
 
 def _write_fake_gh(fake_bin: Path, state_path: Path) -> None:
@@ -294,33 +375,7 @@ def create_forge_environment(
     adhoc_runners: tuple[str, ...] = (),
     allowed_mutation_ops: tuple[str, ...] = MUTATION_OPS,
 ) -> ForgeEnvironment:
-    remote = tmp_path / "remote.git"
-    git("init", "--bare", str(remote), cwd=tmp_path)
-
-    source = tmp_path / "source"
-    git("clone", str(remote), str(source), cwd=tmp_path)
-    git("config", "user.name", "Test User", cwd=source)
-    git("config", "user.email", "test@example.com", cwd=source)
-    (source / "hello.txt").write_text("hello\n", encoding="utf-8")
-    (source / "README.md").write_text("# Demo\n\nRepository instructions.\n", encoding="utf-8")
-    (source / "AGENTS.md").write_text("Always test changes.\n", encoding="utf-8")
-    (source / "package.json").write_text(
-        json.dumps(
-            {
-                "name": "demo",
-                "packageManager": "pnpm@10.20.0",
-                "engines": {"node": "22.23.1"},
-                "scripts": {"test": "echo test", "check": "echo check"},
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    git("add", ".", cwd=source)
-    git("commit", "-m", "initial", cwd=source)
-    git("branch", "-M", "main", cwd=source)
-    git("push", "-u", "origin", "main", cwd=source)
+    remote, source = _clone_template_repo(tmp_path)
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
