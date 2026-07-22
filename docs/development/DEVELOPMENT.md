@@ -74,7 +74,7 @@ to more than one group, or stale; this runs as part of the normal test suite too
 `REPOFORGE_TEST_AFFECTED_BASE` (default `main`), plus the current working tree, to test groups and
 runs only the selected groups' tests plus the safety bundle. It **fails closed**: any changed path
 that does not match a group's `source_globs` (or matches a small always-wide list such as
-`pyproject.toml`, `Makefile`, `config.repoforge.toml`, or `.github/workflows/**`) escalates the run
+`pyproject.toml`, `Makefile`, or `.github/workflows/**`) escalates the run
 to the full suite rather than silently skipping something it cannot map.
 
 Do not run `make test` immediately before `make check` / `make production-check` / the `full`

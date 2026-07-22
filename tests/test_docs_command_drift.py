@@ -7,13 +7,11 @@ from pathlib import Path
 
 import tomli
 
-from repoforge.application.configuration.source import parse_source
 from repoforge.interfaces.cli.main import build_parser
 
 ROOT = Path(__file__).parents[1]
 _COMMAND = re.compile(r"^(?:uv run )?(?:rf|repoforge)(?:\s|$)")
 _SHELL_META = ("\\", "<", ">", "$", "{", "}", "|", "&&", ";")
-_MAKE_TARGET = re.compile(r"^([A-Za-z0-9_.-]+)\s*:", re.MULTILINE)
 
 
 def _surface(
@@ -111,22 +109,6 @@ def test_example_config_matches_current_source_schema() -> None:
     assert "repositories.example-repository.issue_writes" in text
     assert "repo_policy" in text
     assert "repo_policy_apply" not in text
-
-
-def test_repository_profiles_reference_existing_make_targets() -> None:
-    config = tomli.loads((ROOT / "config.repoforge.toml").read_text(encoding="utf-8"))
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    targets = set(_MAKE_TARGET.findall(makefile))
-    profile_tables = config["repo"][0]["policy_patch"]["profiles"]
-
-    referenced = {
-        command[1]
-        for profile in profile_tables.values()
-        for command in profile["commands"]
-        if command[:1] == ["make"] and len(command) == 2
-    }
-
-    assert referenced <= targets, f"missing Make targets: {sorted(referenced - targets)}"
 
 
 def test_make_default_is_read_only_and_verification_targets_remain_available() -> None:
@@ -242,10 +224,7 @@ def test_operator_docs_match_the_static_forge_v2_cutover() -> None:
     plugin_cases = (ROOT / "docs/testing/PLUGIN_TEST_CASES.md").read_text(encoding="utf-8")
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
     contracts = (ROOT / "docs/contracts/README.md").read_text(encoding="utf-8")
-    examples = "\n".join(
-        (ROOT / name).read_text(encoding="utf-8")
-        for name in ("config.example.toml", "config.repoforge.toml")
-    )
+    examples = (ROOT / "config.example.toml").read_text(encoding="utf-8")
 
     assert "exactly 28" in reference
     assert "forge_v2" in reference
@@ -269,18 +248,3 @@ def test_operator_docs_match_the_static_forge_v2_cutover() -> None:
     assert "release-contract-v2.json" in contracts
     assert "release-contract-v1.json" not in contracts
     assert "repo_policy" in examples and "repo_policy_apply" not in examples
-
-
-def test_repoforge_source_config_enables_reviewed_relaxed_execution() -> None:
-    source = parse_source((ROOT / "config.repoforge.toml").read_text(encoding="utf-8"))
-    repository = source.repositories[0]
-
-    assert dict(repository.decisions)["risky_commands"] == "exclude"
-    assert repository.policy_patch.execution_mode == "relaxed"
-    # `git` is allowlisted for the reviewed exec escape hatch; its argv is content-
-    # guarded (see repoforge.domain.adhoc.classify_adhoc_command). `gh` stays out
-    # because it is unguarded and can run destructive GitHub operations.
-    assert repository.policy_patch.adhoc_runners == ("uv", "python3", "make", "git")
-    assert "gh" not in repository.policy_patch.adhoc_runners
-    assert repository.policy_patch.adhoc_timeout_seconds == 600
-    assert "ticket-graph" in repository.policy_patch.remove_profiles

@@ -217,6 +217,27 @@ When changing configuration:
 
 Never silently broaden repository, path, command, environment, or GitHub permissions.
 
+### Runtime configuration lives outside this repo
+
+The RepoForge runtime reads the **operator's own config**, not any file in this repo. Find it
+with `rf config path` (default `~/.config/repoforge/config.toml`); resolved immutable generations
+live under the state root (default `~/.local/state/repoforge`). `config.example.toml` here is only a
+generic example — editing it does **not** change any running RepoForge, and there is intentionally
+no repo-local live config to edit.
+
+To change how a RepoForge instance behaves (including this repo's own enrollment), work on the
+operator's config through the CLI, then activate:
+
+1. `rf config edit` (or `rf config set repositories.<id>.<field> <value>` for the few scalar fields);
+2. `rf repo refresh <id> --accept` — re-resolves and creates a new immutable generation;
+3. `rf runtime reload` — activates it;
+4. verify with `rf show-config`, `rf config history` (rollback available), and `rf doctor`.
+
+Capability-expanding changes (adding `adhoc_runners`, relaxing `execution_mode`, broadening
+`issue_writes`, removing denied paths) require operator approval — surface them via
+`rf config pending` / `rf config approve <change_id>`; never apply them on your own authority.
+Never hand-edit the resolved generations under the state root.
+
 ## Documentation rules
 
 Update documentation in the same patch when changing:
