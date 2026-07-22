@@ -128,6 +128,8 @@ def operation_evidence(view: OperationSummary | OperationStatusView) -> dict[str
         "progress_unit": view.progress.unit,
         "progress_message": view.progress.message,
         "workspace_id": view.workspace_id,
+        "owner_id": view.owner_id,
+        "lease_expires_at": view.lease_expires_at,
         "result_reference": view.result_reference,
         "result_reference_status": view.result_reference_status,
         "receipt_id": view.receipt_id,

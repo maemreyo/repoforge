@@ -100,6 +100,18 @@ def recover_operations(
                 manager.expire(task.operation_id, now=now)
                 expired += 1
                 continue
+            if (
+                task.state is OperationState.RUNNING
+                and task.lease_expires_at is not None
+                and _timestamp(task.lease_expires_at) <= now_dt
+            ):
+                manager.orphan(
+                    task.operation_id,
+                    error_code="OPERATION_OWNERSHIP_EXPIRED",
+                    now=now,
+                )
+                orphaned += 1
+                continue
             if task.state is OperationState.RUNNING and task.kind not in resumable_kinds:
                 liveness = running_liveness(task) if running_liveness is not None else None
                 if liveness is True:

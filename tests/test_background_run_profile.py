@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from conftest import ForgeEnvironment
+from conftest import ForgeEnvironment, create_forge_environment
 
 import repoforge.application.workspace.run_profile as run_profile_module
 from repoforge.application.service import CodingService
@@ -350,6 +350,35 @@ def test_background_reused_failure_keeps_operation_reference(
     assert events[-1]["details"]["failure_reused"] is True
 
 
+def test_background_adhoc_claims_and_releases_operation_ownership(tmp_path: Path) -> None:
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+    )
+    service, runner = _manual_service(env)
+    workspace_id = service.workspace_create("demo", "background adhoc lease")["workspace_id"]
+
+    admission = service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "print('background adhoc')"],
+        background=True,
+    )
+    operation_id = admission["operation_id"]
+    running = service.operation_status(operation_id)
+    assert running["state"] == "running"
+    assert isinstance(running["owner_id"], str)
+    assert running["owner_id"].startswith("worker-")
+    assert isinstance(running["lease_expires_at"], str)
+
+    runner.run(operation_id)
+
+    terminal = service.operation_status(operation_id)
+    assert terminal["state"] == "succeeded"
+    assert terminal["owner_id"] is None
+    assert terminal["lease_expires_at"] is None
+
+
 def test_background_admission_returns_fast_and_holds_the_workspace_lock(
     forge_env: ForgeEnvironment,
 ) -> None:
@@ -372,6 +401,9 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
     assert status["state"] == "running"
     assert status["workspace_id"] == workspace_id
     assert status["cancel_supported"] is True
+    assert isinstance(status["owner_id"], str)
+    assert status["owner_id"].startswith("worker-")
+    assert isinstance(status["lease_expires_at"], str)
 
     # The workspace lock is held for the whole background run.
     locks = service.application.context.locks
@@ -387,6 +419,8 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
 
     final = service.operation_status(operation_id)
     assert final["state"] == "succeeded"
+    assert final["owner_id"] is None
+    assert final["lease_expires_at"] is None
     assert final["result_reference"] == f"workspace_run_profile:{operation_id}"
     result_payload = final["result"]
     assert result_payload["workspace_id"] == workspace_id

@@ -313,6 +313,8 @@ class OperationEvidence(StrictModel):
     progress_unit: str | None = Field(default=None, max_length=64)
     progress_message: str | None = Field(default=None, max_length=2_000)
     workspace_id: Identifier | None = None
+    owner_id: Identifier | None = None
+    lease_expires_at: str | None = Field(default=None, max_length=80)
     result_reference: str | None = Field(default=None, max_length=256)
     result_reference_status: Literal["not_applicable", "not_checked", "available", "missing"] = (
         "not_applicable"

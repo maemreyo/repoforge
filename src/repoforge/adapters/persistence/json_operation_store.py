@@ -159,16 +159,19 @@ class JsonOperationStore:
             "expires_at",
             "schema_version",
         }
-        current_fields = legacy_fields | {
+        previous_current_fields = legacy_fields | {
             "receipt_id",
             "record_provenance",
             "record_consistency",
             "record_diagnostics",
         }
-        expected_fields = (
-            legacy_fields if version == LEGACY_OPERATION_SCHEMA_VERSION else current_fields
+        current_fields = previous_current_fields | {"owner_id", "lease_expires_at"}
+        expected_field_sets = (
+            (legacy_fields,)
+            if version == LEGACY_OPERATION_SCHEMA_VERSION
+            else (previous_current_fields, current_fields)
         )
-        if set(raw) != expected_fields:
+        if set(raw) not in expected_field_sets:
             raise JsonOperationStore._error(
                 f"Operation record fields do not match schema version {version}",
                 code=ErrorCode.OPERATION_CORRUPT,
@@ -187,6 +190,7 @@ class JsonOperationStore:
                 if binding_raw is None
                 else (_ for _ in ()).throw(TypeError("snapshot_binding must be an object or null"))
             )
+            has_ownership_fields = "owner_id" in raw and "lease_expires_at" in raw
             task = OperationTask(
                 operation_id=str(raw["operation_id"]),
                 kind=str(raw["kind"]),
@@ -208,10 +212,12 @@ class JsonOperationStore:
                 created_at=str(raw["created_at"]),
                 updated_at=str(raw["updated_at"]),
                 expires_at=raw["expires_at"],
+                owner_id=raw.get("owner_id"),
+                lease_expires_at=raw.get("lease_expires_at"),
                 receipt_id=(raw["receipt_id"] if version == OPERATION_SCHEMA_VERSION else None),
                 record_provenance=(
                     str(raw["record_provenance"])
-                    if version == OPERATION_SCHEMA_VERSION
+                    if version == OPERATION_SCHEMA_VERSION and has_ownership_fields
                     else "legacy_migrated"
                 ),
                 record_consistency=(

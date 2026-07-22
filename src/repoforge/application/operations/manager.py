@@ -11,8 +11,11 @@ from ...domain.operation_task import (
     OperationSnapshotBinding,
     OperationState,
     OperationTask,
+    claim_operation_ownership,
     new_operation_task,
+    renew_operation_ownership,
     request_operation_cancellation,
+    require_operation_owner,
     transition_operation,
     update_operation_progress,
 )
@@ -96,18 +99,44 @@ class OperationManager:
         error_code: str | None = None,
         error_message: str | None = None,
         retryability: OperationRetryability = OperationRetryability.NONE,
+        owner_id: str | None = None,
+        lease_expires_at: str | None = None,
+        bypass_ownership: bool = False,
     ) -> OperationTask:
         current = self.status(operation_id)
+        transition_now = self._now(now)
+        if new_state is not OperationState.RUNNING:
+            if lease_expires_at is not None:
+                raise RepoForgeError(
+                    "lease_expires_at is valid only when starting an operation",
+                    code=ErrorCode.OPERATION_INVALID,
+                )
+            if not bypass_ownership:
+                require_operation_owner(current, owner_id)
         updated = transition_operation(
             current,
             new_state,
-            now=self._now(now),
+            now=transition_now,
             result_reference=result_reference,
             receipt_id=receipt_id,
             error_code=error_code,
             error_message=error_message,
             retryability=retryability,
         )
+        if new_state is OperationState.RUNNING and (
+            owner_id is not None or lease_expires_at is not None
+        ):
+            if owner_id is None or lease_expires_at is None:
+                raise RepoForgeError(
+                    "owner_id and lease_expires_at must be provided together",
+                    code=ErrorCode.OPERATION_INVALID,
+                )
+            updated = claim_operation_ownership(
+                updated,
+                owner_id=owner_id,
+                lease_expires_at=lease_expires_at,
+                now=transition_now,
+            )
         if updated == current:
             return current
         return self.ctx.audited(
@@ -128,8 +157,21 @@ class OperationManager:
             mutating=True,
         )
 
-    def start(self, operation_id: str, *, now: str | None = None) -> OperationTask:
-        return self._save_transition(operation_id, OperationState.RUNNING, now=now)
+    def start(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str | None = None,
+        lease_expires_at: str | None = None,
+        now: str | None = None,
+    ) -> OperationTask:
+        return self._save_transition(
+            operation_id,
+            OperationState.RUNNING,
+            now=now,
+            owner_id=owner_id,
+            lease_expires_at=lease_expires_at,
+        )
 
     def succeed(
         self,
@@ -137,6 +179,7 @@ class OperationManager:
         *,
         result_reference: str,
         receipt_id: str | None = None,
+        owner_id: str | None = None,
         now: str | None = None,
     ) -> OperationTask:
         return self._save_transition(
@@ -145,6 +188,7 @@ class OperationManager:
             now=now,
             result_reference=result_reference,
             receipt_id=receipt_id,
+            owner_id=owner_id,
         )
 
     def fail(
@@ -156,6 +200,7 @@ class OperationManager:
         result_reference: str | None = None,
         receipt_id: str | None = None,
         retryability: OperationRetryability = OperationRetryability.NONE,
+        owner_id: str | None = None,
         now: str | None = None,
     ) -> OperationTask:
         return self._save_transition(
@@ -167,10 +212,22 @@ class OperationManager:
             error_code=error_code,
             error_message=error_message,
             retryability=retryability,
+            owner_id=owner_id,
         )
 
-    def cancelled(self, operation_id: str, *, now: str | None = None) -> OperationTask:
-        return self._save_transition(operation_id, OperationState.CANCELLED, now=now)
+    def cancelled(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str | None = None,
+        now: str | None = None,
+    ) -> OperationTask:
+        return self._save_transition(
+            operation_id,
+            OperationState.CANCELLED,
+            now=now,
+            owner_id=owner_id,
+        )
 
     def expire(self, operation_id: str, *, now: str | None = None) -> OperationTask:
         return self._save_transition(
@@ -178,6 +235,7 @@ class OperationManager:
             OperationState.EXPIRED,
             now=now,
             error_code="OPERATION_EXPIRED",
+            bypass_ownership=True,
         )
 
     def orphan(
@@ -193,6 +251,7 @@ class OperationManager:
             now=now,
             error_code=error_code,
             retryability=OperationRetryability.MANUAL,
+            bypass_ownership=True,
         )
 
     def progress(
@@ -204,9 +263,13 @@ class OperationManager:
         total: int | None = None,
         unit: str | None = None,
         message: str | None = None,
+        owner_id: str | None = None,
+        lease_expires_at: str | None = None,
         now: str | None = None,
     ) -> OperationTask:
         existing = self.status(operation_id)
+        require_operation_owner(existing, owner_id)
+        progress_now = self._now(now)
         updated = update_operation_progress(
             existing,
             phase=phase,
@@ -214,8 +277,20 @@ class OperationManager:
             total=total,
             unit=unit,
             message=message,
-            now=self._now(now),
+            now=progress_now,
         )
+        if lease_expires_at is not None:
+            if owner_id is None:
+                raise RepoForgeError(
+                    "lease renewal requires owner_id",
+                    code=ErrorCode.OPERATION_INVALID,
+                )
+            updated = renew_operation_ownership(
+                updated,
+                owner_id=owner_id,
+                lease_expires_at=lease_expires_at,
+                now=progress_now,
+            )
         return self.ctx.audited(
             "operation_progress",
             {
@@ -231,6 +306,34 @@ class OperationManager:
                 updated,
                 expected_updated_at=existing.updated_at,
             ),
+            mutating=True,
+        )
+
+    def renew_ownership(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: str,
+        now: str | None = None,
+    ) -> OperationTask:
+        existing = self.status(operation_id)
+        updated = renew_operation_ownership(
+            existing,
+            owner_id=owner_id,
+            lease_expires_at=lease_expires_at,
+            now=self._now(now),
+        )
+        return self.ctx.audited(
+            "operation_ownership_renew",
+            {
+                "operation_id": operation_id,
+                "kind": existing.kind,
+                "owner_id": updated.owner_id,
+                "lease_expires_at": updated.lease_expires_at,
+                "updated_at": updated.updated_at,
+            },
+            lambda: self.store.save(updated, expected_updated_at=existing.updated_at),
             mutating=True,
         )
 

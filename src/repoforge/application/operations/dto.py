@@ -46,6 +46,8 @@ class OperationSummary:
     created_at: str
     updated_at: str
     expires_at: str | None
+    owner_id: str | None
+    lease_expires_at: str | None
     schema_version: int
     record_provenance: str
     record_consistency: str
@@ -75,6 +77,8 @@ class OperationStatusView:
     created_at: str
     updated_at: str
     expires_at: str | None
+    owner_id: str | None
+    lease_expires_at: str | None
     schema_version: int
     record_provenance: str
     record_consistency: str
@@ -119,6 +123,8 @@ def operation_summary(task: OperationTask) -> OperationSummary:
         created_at=task.created_at,
         updated_at=task.updated_at,
         expires_at=task.expires_at,
+        owner_id=task.owner_id,
+        lease_expires_at=task.lease_expires_at,
         schema_version=task.schema_version,
         record_provenance=task.record_provenance,
         record_consistency=task.record_consistency,
@@ -183,6 +189,8 @@ def operation_status_view(
         created_at=summary.created_at,
         updated_at=summary.updated_at,
         expires_at=summary.expires_at,
+        owner_id=summary.owner_id,
+        lease_expires_at=summary.lease_expires_at,
         schema_version=summary.schema_version,
         record_provenance=summary.record_provenance,
         record_consistency=consistency,

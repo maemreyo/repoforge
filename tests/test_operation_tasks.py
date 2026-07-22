@@ -13,6 +13,7 @@ import pytest
 from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 
+import repoforge.domain.operation_task as operation_task_module
 from repoforge.adapters.persistence.json_operation_result_store import JsonOperationResultStore
 from repoforge.adapters.persistence.json_operation_store import JsonOperationStore
 from repoforge.application.operations.dto import operation_summary
@@ -1289,3 +1290,122 @@ def test_recovery_reports_legacy_and_inconsistent_record_metrics(
     assert report.legacy_operation_records == 1
     assert report.operation_record_inconsistencies == 1
     assert report.missing_result_references == 1
+
+
+def test_operation_ownership_lease_rejects_competing_worker_and_clears_on_terminal() -> None:
+    pending = _task()
+    running = operation_task_module.claim_operation_ownership(
+        transition_operation(
+            pending,
+            OperationState.RUNNING,
+            now="2026-07-14T00:00:01+00:00",
+        ),
+        owner_id="worker-primary",
+        lease_expires_at="2026-07-14T00:01:01+00:00",
+        now="2026-07-14T00:00:01+00:00",
+    )
+
+    with pytest.raises(RepoForgeError) as competing:
+        operation_task_module.renew_operation_ownership(
+            running,
+            owner_id="worker-competing",
+            lease_expires_at="2026-07-14T00:02:01+00:00",
+            now="2026-07-14T00:00:31+00:00",
+        )
+
+    assert competing.value.code is ErrorCode.OPERATION_STALE
+
+    terminal = transition_operation(
+        running,
+        OperationState.SUCCEEDED,
+        result_reference="result-owned",
+        now="2026-07-14T00:00:45+00:00",
+    )
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+
+
+def test_leased_operation_progress_requires_the_current_owner(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    pending = manager.create(kind="verification", phase="queued", cancel_supported=True)
+    started_at = pending.updated_at
+    lease_expires_at = (datetime.fromisoformat(started_at) + timedelta(minutes=5)).isoformat()
+    running = manager.start(
+        pending.operation_id,
+        owner_id="worker-primary",
+        lease_expires_at=lease_expires_at,
+        now=started_at,
+    )
+
+    with pytest.raises(RepoForgeError) as stale:
+        manager.progress(
+            running.operation_id,
+            phase="running",
+            current=1,
+            total=2,
+            owner_id="worker-competing",
+        )
+
+    assert stale.value.code is ErrorCode.OPERATION_STALE
+    progressed = manager.progress(
+        running.operation_id,
+        phase="running",
+        current=1,
+        total=2,
+        owner_id="worker-primary",
+    )
+    assert progressed.progress_current == 1
+    assert progressed.owner_id == "worker-primary"
+
+    public = forge_env.service.operation(action="get", operation_id=running.operation_id)
+    assert public["operation"]["owner_id"] == "worker-primary"
+    assert public["operation"]["lease_expires_at"] == lease_expires_at
+
+    with pytest.raises(RepoForgeError) as terminal_stale:
+        manager.succeed(
+            running.operation_id,
+            result_reference="verification:complete",
+            owner_id="worker-competing",
+        )
+    assert terminal_stale.value.code is ErrorCode.OPERATION_STALE
+
+    succeeded = manager.succeed(
+        running.operation_id,
+        result_reference="verification:complete",
+        owner_id="worker-primary",
+    )
+    assert succeeded.state is OperationState.SUCCEEDED
+    assert succeeded.owner_id is None
+    assert succeeded.lease_expires_at is None
+
+
+def test_recovery_orphans_an_expired_operation_ownership_lease(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    pending = manager.create(kind="verification", phase="queued", cancel_supported=True)
+    started_at = pending.updated_at
+    lease_expires_at = (datetime.fromisoformat(started_at) + timedelta(seconds=10)).isoformat()
+    recovery_at = (datetime.fromisoformat(started_at) + timedelta(seconds=11)).isoformat()
+    running = manager.start(
+        pending.operation_id,
+        owner_id="worker-primary",
+        lease_expires_at=lease_expires_at,
+        now=started_at,
+    )
+
+    report = recover_operations(
+        manager,
+        now=recovery_at,
+        running_stale_seconds=3600,
+        running_liveness=lambda _task: True,
+    )
+
+    recovered = manager.status(running.operation_id)
+    assert report.orphaned == 1
+    assert recovered.state is OperationState.ORPHANED
+    assert recovered.error_code == "OPERATION_OWNERSHIP_EXPIRED"
+    assert recovered.owner_id is None
+    assert recovered.lease_expires_at is None

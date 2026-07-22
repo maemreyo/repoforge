@@ -106,6 +106,8 @@ class OperationTask:
     created_at: str
     updated_at: str
     expires_at: str | None
+    owner_id: str | None = None
+    lease_expires_at: str | None = None
     receipt_id: str | None = None
     record_provenance: str = "current"
     record_consistency: str = "consistent"
@@ -266,6 +268,10 @@ def operation_record_inconsistencies(task: OperationTask) -> tuple[str, ...]:
             diagnostics.append("terminal_error_missing")
     elif task.error_code is not None or task.error_message is not None:
         diagnostics.append("unexpected_error_evidence")
+    if (task.owner_id is None) != (task.lease_expires_at is None):
+        diagnostics.append("ownership_lease_partial")
+    if task.owner_id is not None and task.state is not OperationState.RUNNING:
+        diagnostics.append("ownership_on_nonrunning")
     return tuple(sorted(set(diagnostics)))
 
 
@@ -328,6 +334,11 @@ def validate_operation_task(task: OperationTask) -> OperationTask:
         raise _error("updated_at cannot precede created_at")
     if task.expires_at is not None:
         _parse_timestamp(task.expires_at, "expires_at")
+    _bounded(task.owner_id, "owner_id", limit=128, pattern=_SAFE_ID)
+    if task.lease_expires_at is not None:
+        _parse_timestamp(task.lease_expires_at, "lease_expires_at")
+    if (task.owner_id is None) != (task.lease_expires_at is None):
+        raise _error("owner_id and lease_expires_at must be provided together")
     if task.cancellation_requested_at is not None:
         _parse_timestamp(task.cancellation_requested_at, "cancellation_requested_at")
     _bounded(task.receipt_id, "receipt_id", limit=32, pattern=_RECEIPT_ID)
@@ -393,6 +404,8 @@ def new_operation_task(
         created_at=now,
         updated_at=now,
         expires_at=expires_at,
+        owner_id=None,
+        lease_expires_at=None,
     )
     return validate_operation_task(task)
 
@@ -462,6 +475,8 @@ def transition_operation(
         error_code=_bounded(resolved_error_code, "error_code", limit=128, pattern=_SAFE_ID),
         error_message=_bounded_multiline(safe_error, "error_message", limit=2_000),
         retryability=retryability,
+        owner_id=None if terminal else task.owner_id,
+        lease_expires_at=None if terminal else task.lease_expires_at,
         record_consistency="consistent",
         record_diagnostics=(),
         updated_at=next_operation_timestamp(task.updated_at, now),
@@ -474,6 +489,79 @@ def transition_operation(
             record_diagnostics=diagnostics,
         )
     return validate_operation_task(updated)
+
+
+def claim_operation_ownership(
+    task: OperationTask,
+    *,
+    owner_id: str,
+    lease_expires_at: str,
+    now: str,
+) -> OperationTask:
+    """Acquire or take over an expired lease for one running operation."""
+    validate_operation_task(task)
+    if task.state is not OperationState.RUNNING:
+        raise _error(
+            "Operation ownership may be claimed only while running",
+            code=ErrorCode.OPERATION_TRANSITION_INVALID,
+        )
+    safe_owner = str(_bounded(owner_id, "owner_id", limit=128, pattern=_SAFE_ID))
+    now_dt = _parse_timestamp(now, "now")
+    lease_dt = _parse_timestamp(lease_expires_at, "lease_expires_at")
+    if lease_dt <= now_dt:
+        raise _error("lease_expires_at must be later than now")
+    if (
+        task.owner_id is not None
+        and task.owner_id != safe_owner
+        and task.lease_expires_at is not None
+        and _parse_timestamp(task.lease_expires_at, "lease_expires_at") > now_dt
+    ):
+        raise _error(
+            "Operation ownership lease is held by another worker",
+            code=ErrorCode.OPERATION_STALE,
+        )
+    updated = replace(
+        task,
+        owner_id=safe_owner,
+        lease_expires_at=lease_dt.isoformat(),
+        updated_at=next_operation_timestamp(task.updated_at, now),
+    )
+    return validate_operation_task(updated)
+
+
+def renew_operation_ownership(
+    task: OperationTask,
+    *,
+    owner_id: str,
+    lease_expires_at: str,
+    now: str,
+) -> OperationTask:
+    """Renew one running operation lease only for its current owner."""
+    validate_operation_task(task)
+    safe_owner = str(_bounded(owner_id, "owner_id", limit=128, pattern=_SAFE_ID))
+    if task.state is not OperationState.RUNNING or task.owner_id != safe_owner:
+        raise _error(
+            "Operation ownership changed; refresh the operation before updating it",
+            code=ErrorCode.OPERATION_STALE,
+        )
+    return claim_operation_ownership(
+        task,
+        owner_id=safe_owner,
+        lease_expires_at=lease_expires_at,
+        now=now,
+    )
+
+
+def require_operation_owner(task: OperationTask, owner_id: str | None) -> None:
+    """Reject writes from a stale or unidentified worker when a lease is active."""
+    validate_operation_task(task)
+    if task.owner_id is None:
+        return
+    if owner_id != task.owner_id:
+        raise _error(
+            "Operation ownership changed; refresh the operation before updating it",
+            code=ErrorCode.OPERATION_STALE,
+        )
 
 
 def update_operation_progress(

@@ -510,7 +510,10 @@ def _background_operation_liveness(
 ) -> bool | None:
     """Return direct worker liveness when the operation owns a workspace lock."""
 
-    if task.kind != "workspace_run_profile" or task.workspace_id is None:
+    if (
+        task.kind not in {"workspace_run_profile", "workspace_run_adhoc"}
+        or task.workspace_id is None
+    ):
         return None
 
     owner_pid: int | None = None
