@@ -87,7 +87,14 @@ docs_globs = ["*.md", "docs/**"]
 # Makefile/pytest candidates, which are removed to keep one authoritative set.
 [repo.policy_patch]
 execution_mode = "relaxed"
-adhoc_runners = ["uv", "python3", "make"]
+# `git` is allowlisted for the reviewed exec escape hatch (merge/rebase/status/log/
+# diff and lock-guarded mutations). Its argv is content-inspected by
+# repoforge.domain.adhoc.classify_adhoc_command: force/mirror/delete pushes and
+# history rewrites are blocked fail-closed, and only exact
+# --force-with-lease=<ref>:<sha> is allowed. `gh` is deliberately NOT allowlisted:
+# it is unguarded and can run destructive GitHub operations with host auth; reviewed
+# remote operations belong to the typed tools (workspace_push, workspace_pr).
+adhoc_runners = ["uv", "python3", "make", "git"]
 adhoc_timeout_seconds = 600
 remove_profiles = ["make-check", "make-test", "python-test", "ticket-graph"]
 

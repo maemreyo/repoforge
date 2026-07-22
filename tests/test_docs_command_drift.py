@@ -277,6 +277,10 @@ def test_repoforge_source_config_enables_reviewed_relaxed_execution() -> None:
 
     assert dict(repository.decisions)["risky_commands"] == "exclude"
     assert repository.policy_patch.execution_mode == "relaxed"
-    assert repository.policy_patch.adhoc_runners == ("uv", "python3", "make")
+    # `git` is allowlisted for the reviewed exec escape hatch; its argv is content-
+    # guarded (see repoforge.domain.adhoc.classify_adhoc_command). `gh` stays out
+    # because it is unguarded and can run destructive GitHub operations.
+    assert repository.policy_patch.adhoc_runners == ("uv", "python3", "make", "git")
+    assert "gh" not in repository.policy_patch.adhoc_runners
     assert repository.policy_patch.adhoc_timeout_seconds == 600
     assert "ticket-graph" in repository.policy_patch.remove_profiles
