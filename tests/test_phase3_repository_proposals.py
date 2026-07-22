@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from repoforge.adapters.repository import LocalRepositoryProbe
 from repoforge.adapters.subprocess import SubprocessCommandExecutor
 from repoforge.config import ServerConfig
@@ -113,6 +115,32 @@ def test_read_only_true_override_still_forces_read_only() -> None:
     assert proposal.policy.mode is EnrollmentMode.READ_ONLY
     assert proposal.policy.profiles == ()
     assert proposal.policy.publish_enabled is False
+
+
+def test_denied_paths_remove_lifts_the_workflows_default_deny() -> None:
+    proposal = build_repository_proposal(
+        _facts(), overrides={"denied_paths_remove": ".github/workflows/**"}
+    )
+    assert ".github/workflows/**" not in proposal.policy.denied_paths
+    assert ".git" in proposal.policy.denied_paths
+
+
+def test_denied_paths_remove_rejects_protected_default_denies() -> None:
+    for protected in (".git", ".env", "**/*secret*", "**/*credential*"):
+        with pytest.raises(ValueError, match="protected denied path"):
+            build_repository_proposal(_facts(), overrides={"denied_paths_remove": protected})
+
+
+def test_denied_paths_add_and_remove_compose() -> None:
+    proposal = build_repository_proposal(
+        _facts(),
+        overrides={
+            "denied_paths_add": "docs/private/**",
+            "denied_paths_remove": ".github/workflows/**",
+        },
+    )
+    assert "docs/private/**" in proposal.policy.denied_paths
+    assert ".github/workflows/**" not in proposal.policy.denied_paths
 
 
 def test_local_probe_collects_facts_without_running_discovered_scripts(tmp_path: Path) -> None:

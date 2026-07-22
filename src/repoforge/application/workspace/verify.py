@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ...domain.diagnostics import DiagnosticExpectation, DiagnosticFailureClass
-from ...domain.errors import ConfigError, SecurityError, WorkspaceError
+from ...domain.errors import ConfigError, ErrorCode, SecurityError, WorkspaceError
 from ...domain.filesystem_transaction import CreateFile, TransactionPlan, WriteFile
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ...domain.redaction import sanitize_persisted_data
@@ -53,6 +53,8 @@ class WorkspaceVerifyCommand:
     argv: tuple[str, ...] | None = None
     working_directory: str | None = None
     expected_fingerprint: str | None = None
+    expected_head_sha: str | None = None
+    mutability: str = "read_only"
     background: bool = False
     intent: VerificationIntent | str | None = None
     expectation: DiagnosticExpectation | str | None = None
@@ -342,6 +344,20 @@ class WorkspaceVerifier:
             raise WorkspaceError(
                 "Workspace changed since the requested verification snapshot was reviewed"
             )
+        if (
+            command.expected_head_sha is not None
+            and command.expected_head_sha != assessment.snapshot.head_sha
+        ):
+            raise WorkspaceError(
+                "STALE_STATE: workspace HEAD changed since the requested verification snapshot "
+                "was reviewed",
+                code=ErrorCode.STALE_STATE,
+                retryable=True,
+                details={
+                    "expected_head_sha": command.expected_head_sha,
+                    "actual_head_sha": assessment.snapshot.head_sha,
+                },
+            )
         assessment_projection, impact_evidence = _assessment_projection(assessment)
         recommendations = _recommendations(assessment)
         warning = _staleness_warning(assessment)
@@ -454,9 +470,11 @@ class WorkspaceVerifier:
                 WorkspaceRunAdhocCommand(
                     command.workspace_id,
                     command.argv,
-                    command.working_directory,
-                    command.background,
-                    assessment.snapshot.workspace_fingerprint,
+                    working_directory=command.working_directory,
+                    background=command.background,
+                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
+                    expected_head_sha=assessment.snapshot.head_sha,
+                    mutability=command.mutability,
                 )
             )
             result = self._from_adhoc(

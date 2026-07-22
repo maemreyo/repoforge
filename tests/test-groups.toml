@@ -213,6 +213,7 @@ source_globs = [
   "docs/development/INTEGRITY_POLICY.md",
 ]
 test_files = [
+  "tests/test_adhoc_command_guard.py",
   "tests/test_cli_command_bodies.py",
   "tests/test_cli_surface_coverage.py",
   "tests/test_command_source_integrity.py",

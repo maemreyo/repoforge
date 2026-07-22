@@ -19,7 +19,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ...domain.adhoc import ExecutionMode, validate_adhoc_argv
+from ...domain.adhoc import (
+    CommandClass,
+    ExecutionMode,
+    classify_adhoc_command,
+    validate_adhoc_argv,
+)
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
 from ...domain.operation_task import OperationRetryability, OperationState
@@ -46,6 +51,8 @@ class WorkspaceRunAdhocCommand:
     working_directory: str | None = None
     background: bool = False
     expected_fingerprint: str | None = None
+    expected_head_sha: str | None = None
+    mutability: str = "read_only"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +73,10 @@ class WorkspaceRunAdhocResult:
     changed_paths: list[str]
     changed_paths_truncated: bool
     head_sha: str
+    head_sha_before: str
+    mutability: str
+    command_class: str | None
+    read_only_violation: bool
     network_policy: str
     evidence_only: bool
     satisfies_commit_gate: bool
@@ -188,7 +199,40 @@ class WorkspaceAdhocRunner:
         _, repo, path = self.ctx.workspace(c.workspace_id)
         if repo.execution_mode is not ExecutionMode.RELAXED:
             raise _strict_mode_error(repo.repo_id)
+        if c.mutability not in {"read_only", "workspace"}:
+            raise _adhoc_error(
+                f"Ad-hoc mutability must be 'read_only' or 'workspace'; got {c.mutability!r}",
+                ErrorCode.ADHOC_ARGV_INVALID,
+            )
         argv = validate_adhoc_argv(c.argv, repo.adhoc_runners)
+        # Content-inspect the exact argv: blocks irreversible/history-rewriting git forms
+        # (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers whether a
+        # git command is read-only or mutating. Non-git runners return None (opaque).
+        command_class = classify_adhoc_command(argv)
+        declared_mutating = c.mutability == "workspace"
+        effective_mutating = declared_mutating or command_class is CommandClass.MUTATING
+        if command_class is CommandClass.MUTATING and not declared_mutating:
+            raise _adhoc_error(
+                f"{argv[0]} {argv[1] if len(argv) > 1 else ''}".strip()
+                + " changes workspace or history state; call with mutability='workspace' and both "
+                "expected_head_sha and expected_fingerprint so the run is bound to reviewed state",
+                ErrorCode.ADHOC_ARGV_INVALID,
+            )
+        if effective_mutating:
+            missing = [
+                name
+                for name, value in (
+                    ("expected_head_sha", c.expected_head_sha),
+                    ("expected_fingerprint", c.expected_fingerprint),
+                )
+                if value is None
+            ]
+            if missing:
+                raise _adhoc_error(
+                    "Mutating ad-hoc runs require an exact-state lock; missing: "
+                    + ", ".join(missing),
+                    ErrorCode.ADHOC_ARGV_INVALID,
+                )
         command_cwd = _resolve_working_directory(path, c.working_directory)
         working_directory_display = str(command_cwd.relative_to(path.resolve(strict=True)) or ".")
 
@@ -198,6 +242,9 @@ class WorkspaceAdhocRunner:
             "argv_length": len(argv),
             "network_policy": _NETWORK_POLICY_LABEL,
             "expected_fingerprint": c.expected_fingerprint,
+            "expected_head_sha": c.expected_head_sha,
+            "mutability": c.mutability,
+            "command_class": command_class.value if command_class is not None else None,
         }
 
         def record_command_failure(exc: CommandError) -> None:
@@ -213,6 +260,7 @@ class WorkspaceAdhocRunner:
                     self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, locked_workspace
                 )
                 before_fingerprint = before.fingerprint
+                head_before = self.ctx.git.head_sha(locked_workspace)
                 if (
                     c.expected_fingerprint is not None
                     and c.expected_fingerprint != before_fingerprint
@@ -220,7 +268,25 @@ class WorkspaceAdhocRunner:
                     raise WorkspaceError(
                         "Workspace changed since the verification plan was reviewed"
                     )
+                if c.expected_head_sha is not None and c.expected_head_sha != head_before:
+                    raise WorkspaceError(
+                        "STALE_STATE: workspace HEAD changed since the ad-hoc run was reviewed",
+                        code=ErrorCode.STALE_STATE,
+                        retryable=True,
+                        details={
+                            "expected_head_sha": c.expected_head_sha,
+                            "actual_head_sha": head_before,
+                        },
+                        unchanged_state=(
+                            "No command was started; the workspace and remote state were not modified.",
+                        ),
+                        safe_next_action=(
+                            "Read workspace_status for the current HEAD and fingerprint, then reissue "
+                            "the ad-hoc run bound to the reviewed values."
+                        ),
+                    )
                 audit_details["fingerprint_source"] = before.source
+                audit_details["head_sha_before"] = head_before
 
                 started = time.monotonic()
                 result: CommandResult | None = None
@@ -260,6 +326,14 @@ class WorkspaceAdhocRunner:
                 after_fingerprint = after.fingerprint
                 fingerprint_changed = after_fingerprint != before_fingerprint
                 audit_details["fingerprint_changed"] = fingerprint_changed
+                # A git command RepoForge classified read-only that nonetheless changed the
+                # working tree is a contract violation worth surfacing loudly (defense in depth
+                # against misclassification); the verification invalidation below still protects
+                # the commit gate.
+                read_only_violation = (
+                    command_class is CommandClass.READ_ONLY and fingerprint_changed
+                )
+                audit_details["read_only_violation"] = read_only_violation
 
                 verification_invalidated = False
                 if fingerprint_changed and fresh.last_verification is not None:
@@ -291,7 +365,18 @@ class WorkspaceAdhocRunner:
                         )
 
                 next_actions: list[dict[str, object]] = []
-                if fingerprint_changed:
+                if read_only_violation:
+                    next_actions.append(
+                        {
+                            "action": "workspace_status",
+                            "reason": (
+                                "A command declared read-only changed the workspace tree; review the "
+                                "unexpected mutation and restore paths if it was unintended."
+                            ),
+                            "required": True,
+                        }
+                    )
+                elif fingerprint_changed:
                     next_actions.append(
                         {
                             "action": "workspace_status",
@@ -325,6 +410,10 @@ class WorkspaceAdhocRunner:
                     changed_paths=changed_paths,
                     changed_paths_truncated=len(combined_paths) > _MAX_CHANGED_PATHS_REPORTED,
                     head_sha=self.ctx.git.head_sha(locked_workspace),
+                    head_sha_before=head_before,
+                    mutability=c.mutability,
+                    command_class=command_class.value if command_class is not None else None,
+                    read_only_violation=read_only_violation,
                     network_policy=_NETWORK_POLICY_LABEL,
                     evidence_only=True,
                     satisfies_commit_gate=False,

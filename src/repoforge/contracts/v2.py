@@ -1047,6 +1047,8 @@ class WorkspaceVerifyInput(StrictModel):
     argv: tuple[_SelectorItem, ...] | None = Field(default=None, max_length=100)
     working_directory: RelativePath | None = None
     expected_fingerprint: Sha256 | None = None
+    expected_head_sha: GitObjectId | None = None
+    mutability: Literal["read_only", "workspace"] = "read_only"
     background: bool = False
     intent: VerifyIntent = VerifyIntent.FINAL
     expectation: VerifyExpectation = VerifyExpectation.NONE
@@ -1067,6 +1069,14 @@ class WorkspaceVerifyInput(StrictModel):
             raise ValueError("diagnostic mode requires diagnostic_id")
         if self.mode is VerifyMode.ADHOC and not self.argv:
             raise ValueError("adhoc mode requires argv")
+        if self.mutability == "workspace":
+            if self.mode is not VerifyMode.ADHOC:
+                raise ValueError("mutability='workspace' is only valid for mode=adhoc")
+            if self.expected_head_sha is None or self.expected_fingerprint is None:
+                raise ValueError(
+                    "mutability='workspace' requires both expected_head_sha and "
+                    "expected_fingerprint to bind the run to reviewed state"
+                )
         if self.mode is VerifyMode.PLAN and (self.background or self.artifact_output_path):
             raise ValueError("plan mode is read-only")
         if self.background and self.artifact_output_path is not None:

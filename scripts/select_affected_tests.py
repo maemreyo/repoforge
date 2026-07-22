@@ -57,7 +57,6 @@ ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
     "pyproject.toml",
     "uv.lock",
     "Makefile",
-    "config.repoforge.toml",
     "tests/test-groups.toml",
     "scripts/select_affected_tests.py",
     "scripts/run_test_shards.py",

@@ -26,6 +26,205 @@ class ExecutionMode(str, Enum):
     RELAXED = "relaxed"
 
 
+class CommandClass(str, Enum):
+    """How an ad-hoc command relates to the workspace tree/history.
+
+    Inferred by content inspection for ``git`` only; other runners are opaque and
+    return ``None`` from :func:`classify_adhoc_command` so the caller's declared
+    mutability governs the exact-state lock.
+    """
+
+    READ_ONLY = "read_only"
+    MUTATING = "mutating"
+
+
+# git subcommands that never change the working tree, index, or current-branch HEAD.
+# ``fetch`` only updates remote-tracking refs, so the workspace fingerprint and HEAD
+# are unaffected; it is read-only for lock purposes even though it touches the network.
+_GIT_READ_ONLY_SUBCOMMANDS = frozenset(
+    {
+        "status",
+        "log",
+        "diff",
+        "show",
+        "rev-parse",
+        "rev-list",
+        "describe",
+        "cat-file",
+        "ls-files",
+        "ls-tree",
+        "ls-remote",
+        "blame",
+        "shortlog",
+        "whatchanged",
+        "grep",
+        "name-rev",
+        "for-each-ref",
+        "show-ref",
+        "merge-base",
+        "diff-tree",
+        "count-objects",
+        "verify-commit",
+        "fsck",
+        "var",
+        "version",
+        "help",
+        "fetch",
+    }
+)
+
+# Subcommands whose plain (listing/reading) form is read-only but that mutate when a
+# specific token is present. Read-only unless one of the listed tokens appears.
+_GIT_MUTATING_TOKENS: dict[str, frozenset[str]] = {
+    "branch": frozenset(
+        {
+            "-d",
+            "-D",
+            "-m",
+            "-M",
+            "-c",
+            "-C",
+            "--delete",
+            "--move",
+            "--copy",
+            "--edit-description",
+            "--set-upstream-to",
+            "--unset-upstream",
+            "-f",
+            "--force",
+        }
+    ),
+    "remote": frozenset(
+        {"add", "remove", "rm", "rename", "set-url", "set-head", "prune", "update"}
+    ),
+    "symbolic-ref": frozenset({"-d", "--delete"}),
+    "config": frozenset(
+        {"--unset", "--unset-all", "--add", "--replace-all", "--edit", "-e", "--set"}
+    ),
+}
+
+# git subcommands that rewrite history or delete refs/objects irreversibly. These are
+# never runnable through the reviewed ad-hoc runner; reviewed remote/history operations
+# belong to the typed tools (workspace_push, workspace_refresh).
+_GIT_BLOCKED_SUBCOMMANDS = frozenset({"filter-branch", "filter-repo"})
+
+# git global options that consume the following argv element as their value, so the
+# subcommand scanner must skip that value when looking for the subcommand token.
+_GIT_GLOBAL_VALUE_OPTIONS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--exec-path"}
+)
+
+_FORCE_WITH_LEASE_EXACT = re.compile(r"^--force-with-lease=[^:\s]+:[0-9a-fA-F]{7,64}$")
+
+
+def _git_subcommand(git_args: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
+    """Return ``(subcommand, remaining_args)`` from the tokens after ``git``.
+
+    Skips leading git global options (including the value of value-taking options in
+    separate-argument form) so ``git -C sub -c a.b=c status`` resolves to ``status``.
+    """
+    index = 0
+    while index < len(git_args):
+        token = git_args[index]
+        if not token.startswith("-"):
+            return token, git_args[index + 1 :]
+        if token in _GIT_GLOBAL_VALUE_OPTIONS:
+            # Separate-argument form consumes the next element (unless it used `opt=value`).
+            index += 2
+            continue
+        index += 1
+    return None, ()
+
+
+def _has_short_flag(args: tuple[str, ...], letter: str) -> bool:
+    """True if any clustered short-flag token (e.g. ``-fd``) contains ``letter``."""
+    return any(
+        token.startswith("-") and not token.startswith("--") and letter in token[1:]
+        for token in args
+    )
+
+
+def _assert_git_command_allowed(subcommand: str, rest: tuple[str, ...]) -> CommandClass:
+    """Block irreversible/history-rewriting git forms and classify the rest.
+
+    Raises :class:`RepoForgeError` (``ADHOC_COMMAND_FORBIDDEN``) on a blocked form.
+    """
+
+    def blocked(reason: str) -> RepoForgeError:
+        return _adhoc_error(
+            f"git {subcommand}: {reason}",
+            ErrorCode.ADHOC_COMMAND_FORBIDDEN,
+            safe_next_action=(
+                "This irreversible or history-rewriting form is blocked. Use the reviewed typed "
+                "tools (workspace_push for pushing, workspace_refresh for base integration) or ask "
+                "the operator to perform it directly."
+            ),
+        )
+
+    if subcommand in _GIT_BLOCKED_SUBCOMMANDS:
+        raise blocked("history rewriting is not permitted through the ad-hoc runner")
+    # Arbitrary command execution via --exec/-x (rebase, push receive-pack, etc.).
+    if any(token == "--exec" or token.startswith("--exec=") for token in rest):
+        raise blocked("--exec runs arbitrary commands and is not permitted")
+    if subcommand == "rebase" and "-x" in rest:
+        raise blocked("rebase -x runs arbitrary commands and is not permitted")
+    if subcommand == "push":
+        if any(
+            token in {"--force", "-f", "--force-if-includes", "--mirror", "--delete", "-d"}
+            for token in rest
+        ):
+            raise blocked(
+                "force, mirror, and delete pushes are not permitted; only "
+                "--force-with-lease=<ref>:<sha> is allowed"
+            )
+        for token in rest:
+            if token == "--force-with-lease":
+                raise blocked(
+                    "bare --force-with-lease is not exact-state bound; use "
+                    "--force-with-lease=<ref>:<sha>"
+                )
+            if token.startswith("--force-with-lease=") and not _FORCE_WITH_LEASE_EXACT.match(token):
+                raise blocked(
+                    "--force-with-lease must be the exact --force-with-lease=<ref>:<sha> form"
+                )
+    if subcommand == "reflog" and any(token in {"expire", "delete"} for token in rest):
+        raise blocked("reflog expire/delete destroys recovery history and is not permitted")
+    if subcommand == "update-ref" and any(token in {"-d", "--delete"} for token in rest):
+        raise blocked("update-ref delete removes refs directly and is not permitted")
+    if subcommand == "clean" and ("--force" in rest or _has_short_flag(rest, "f")):
+        raise blocked("git clean --force irreversibly deletes untracked files")
+
+    if subcommand in _GIT_READ_ONLY_SUBCOMMANDS:
+        return CommandClass.READ_ONLY
+    mutating_tokens = _GIT_MUTATING_TOKENS.get(subcommand)
+    if mutating_tokens is not None:
+        if subcommand == "config":
+            reads = any(token.startswith("--get") or token in {"--list", "-l"} for token in rest)
+            is_read = reads and not any(token in mutating_tokens for token in rest)
+            return CommandClass.READ_ONLY if is_read else CommandClass.MUTATING
+        return (
+            CommandClass.MUTATING
+            if any(token in mutating_tokens for token in rest)
+            else CommandClass.READ_ONLY
+        )
+    return CommandClass.MUTATING
+
+
+def classify_adhoc_command(argv: tuple[str, ...]) -> CommandClass | None:
+    """Content-inspect one validated ad-hoc argv, blocking irreversible git forms.
+
+    Returns the inferred :class:`CommandClass` for ``git`` commands (raising on a
+    blocked form), or ``None`` for other runners whose content RepoForge does not
+    inspect (their mutability is governed by the caller's declared intent).
+    """
+    if not argv or argv[0] != "git":
+        return None
+    subcommand, rest = _git_subcommand(tuple(argv[1:]))
+    if subcommand is None:
+        return None
+    return _assert_git_command_allowed(subcommand, rest)
+
+
 def validate_adhoc_runners(runners: tuple[str, ...], repo_id: str) -> tuple[str, ...]:
     """Validate a repository's ``adhoc_runners`` allowlist at config-load time."""
     if len(runners) > MAX_ADHOC_RUNNERS:
@@ -110,7 +309,9 @@ __all__ = [
     "MAX_ADHOC_ARGV_ELEMENTS",
     "MAX_ADHOC_ARGV_ELEMENT_LENGTH",
     "MAX_ADHOC_RUNNERS",
+    "CommandClass",
     "ExecutionMode",
+    "classify_adhoc_command",
     "validate_adhoc_argv",
     "validate_adhoc_runners",
 ]

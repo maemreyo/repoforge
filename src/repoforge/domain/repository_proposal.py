@@ -98,6 +98,12 @@ SAFE_DENIED_PATHS = (
     ".github/workflows/**",
 )
 
+# Default denies that an operator may explicitly lift via the
+# `denied_paths_remove` policy override. Every other default deny (`.git`,
+# secrets, credentials, ...) is never removable through this override, no
+# matter what value is supplied.
+REMOVABLE_DEFAULT_DENIES = frozenset({".github/workflows/**"})
+
 _LOCK_MANAGERS = {
     "pnpm-lock.yaml": "pnpm",
     "package-lock.json": "npm",
@@ -408,6 +414,7 @@ def build_repository_proposal(
     known_overrides = {
         "allowed_paths",
         "denied_paths_add",
+        "denied_paths_remove",
         "max_changed_files",
         "max_diff_lines",
         "max_total_changed_bytes",
@@ -829,6 +836,16 @@ def build_repository_proposal(
     denied_paths: list[str] = list(SAFE_DENIED_PATHS)
     if "denied_paths_add" in overrides:
         denied_paths.extend(_path_list(overrides["denied_paths_add"], key="denied_paths_add"))
+    if "denied_paths_remove" in overrides:
+        to_remove = _path_list(overrides["denied_paths_remove"], key="denied_paths_remove")
+        not_removable = sorted(set(to_remove) - REMOVABLE_DEFAULT_DENIES)
+        if not_removable:
+            raise ValueError(
+                "Cannot remove protected denied path(s): "
+                f"{not_removable}. Only {sorted(REMOVABLE_DEFAULT_DENIES)} may be lifted via "
+                "denied_paths_remove."
+            )
+        denied_paths = [path for path in denied_paths if path not in to_remove]
     strict = template is EnrollmentMode.STRICT
     policy = RepositoryPolicyProposal(
         mode=mode,
