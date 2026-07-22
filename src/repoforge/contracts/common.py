@@ -57,6 +57,15 @@ class ToolErrorDetails(StrictModel):
     correlation_id: str | None = Field(default=None, max_length=128)
     operation_id: str | None = Field(default=None, max_length=160)
     receipt_id: str | None = Field(default=None, max_length=160)
+    config_generation: int | None = Field(default=None, ge=1)
+    server_build_sha: Sha256 | None = None
+    server_version: str | None = Field(default=None, max_length=160)
+    tool_surface_hash: Sha256 | None = None
+    input_contract_digest: Sha256 | None = None
+    output_contract_digest: Sha256 | None = None
+    process_start_identity: Sha256 | None = None
+    runtime_protocol_version: int | None = Field(default=None, ge=1)
+    rediscovery_action: str | None = Field(default=None, max_length=160)
     result_reference: str | None = Field(default=None, max_length=256)
     effect_boundary_crossed: bool | None = None
     original_error_type: str | None = Field(default=None, max_length=160)

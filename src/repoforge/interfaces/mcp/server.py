@@ -349,6 +349,13 @@ def _raise_structured_error(
         ("recovery_action", 160),
         ("operation_id", 160),
         ("receipt_id", 160),
+        ("server_build_sha", 64),
+        ("server_version", 160),
+        ("tool_surface_hash", 64),
+        ("input_contract_digest", 64),
+        ("output_contract_digest", 64),
+        ("process_start_identity", 64),
+        ("rediscovery_action", 160),
         ("result_reference", 256),
         ("original_error_type", 160),
     ):
@@ -364,6 +371,10 @@ def _raise_structured_error(
             bounded = [_bounded(str(item), item_limit) for item in value[:item_count] if str(item)]
             if bounded:
                 public_details[field] = bounded
+    for field in ("config_generation", "runtime_protocol_version"):
+        value = envelope.details.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            public_details[field] = value
     boundary_crossed = envelope.details.get("effect_boundary_crossed")
     if isinstance(boundary_crossed, bool):
         public_details["effect_boundary_crossed"] = boundary_crossed

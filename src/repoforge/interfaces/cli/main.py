@@ -1540,6 +1540,7 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
         commit_activation=lambda generation, expected: store.activate(
             generation, expected_active=expected
         ),
+        contract_identity_provider=build_runtime_contract_identity,
     )
     _, _, mcp_socket = _runtime_paths(store)
     runtime_state_path = store.root / "runtime.json"

@@ -311,14 +311,18 @@ class GenerationActivator:
             self._configs.stage_activation(generation.generation, expected_active=expected_active)
             if attempt is not None and self._activation_journal is not None:
                 attempt = self._activation_journal.mark_effect(attempt.receipt.value.receipt_id)
+            reload_payload: dict[str, object] = {
+                "generation": generation.generation,
+                "expected_active": expected_active or 0,
+            }
+            if attempt is not None:
+                reload_payload["activation_operation_id"] = attempt.operation.operation_id
+                reload_payload["activation_receipt_id"] = attempt.receipt.value.receipt_id
             response = self._request_response(
                 self._mcp_control,
                 ControlCommand.RELOAD,
                 correlation_id,
-                {
-                    "generation": generation.generation,
-                    "expected_active": expected_active or 0,
-                },
+                reload_payload,
             )
             committed = self._configs.active()
             response_generation = (

@@ -13,6 +13,7 @@ from conftest import execution_coordinator_for_tests
 
 from repoforge.adapters.locking import FcntlLockManager
 from repoforge.adapters.persistence import JsonOperationStore, JsonRuntimeActivationStore
+from repoforge.adapters.runtime.operation_gate import InProcessOperationGate
 from repoforge.application.context import (
     ApplicationContext,
     repository_policy_snapshot,
@@ -42,6 +43,7 @@ from repoforge.domain.runtime_activation import (
     RuntimeActivationClassification,
     RuntimeActivationIdentity,
 )
+from repoforge.domain.runtime_contract import RuntimeContractIdentity
 from repoforge.domain.workspace import WorkspaceRecord
 from repoforge.testing import FixedClock, SequenceIdGenerator
 
@@ -295,6 +297,58 @@ def test_failed_activation_commit_disposes_candidate_and_keeps_active_container(
         coordinator.reload(2, expected_active=1, correlation_id="reload")
 
     assert router.active_generation == 1
+    assert disposed == [2]
+
+
+def test_failed_activation_commit_reopens_reconnect_gate() -> None:
+    old_gate = InProcessOperationGate()
+    disposed: list[int] = []
+    router = AtomicServiceRouter(
+        GenerationServiceContainer(
+            generation=1,
+            service=Service("old"),
+            gate=old_gate,
+            repository_ids=frozenset({"old"}),
+            dispose=lambda: disposed.append(1),
+        )
+    )
+    coordinator = HotReloadCoordinator(
+        router=router,
+        build_candidate=lambda generation: GenerationServiceContainer(
+            generation=generation,
+            service=Service("new"),
+            gate=InProcessOperationGate(),
+            repository_ids=frozenset({"new"}),
+            dispose=lambda: disposed.append(generation),
+        ),
+        commit_activation=lambda generation, expected: (_ for _ in ()).throw(
+            ConfigError(f"stale active {expected}")
+        ),
+        contract_identity_provider=lambda generation: RuntimeContractIdentity(
+            server_build_sha="1" * 64,
+            server_version="test",
+            active_generation=generation,
+            tool_surface_hash="2" * 64,
+            input_contract_digest="3" * 64,
+            output_contract_digest="4" * 64,
+            runtime_protocol_version=1,
+            process_start_identity="5" * 64,
+        ),
+    )
+
+    with pytest.raises(ConfigError, match="HOT_RELOAD_COMMIT_FAILED"):
+        coordinator.reload(
+            2,
+            expected_active=1,
+            correlation_id="reload",
+            activation_operation_id="op-" + "a" * 24,
+            activation_receipt_id="receipt-" + "b" * 24,
+        )
+
+    assert router.active_generation == 1
+    assert old_gate.snapshot()["state"] == "open"
+    with old_gate.operation("retry-after-failure", mutating=False):
+        pass
     assert disposed == [2]
 
 
@@ -1012,6 +1066,140 @@ def test_mcp_boundary_pins_each_tool_call_to_one_router_generation() -> None:
         assert boundary.call("read") == {"value": "new"}
 
 
+def test_operation_gate_returns_typed_reconnect_evidence_during_drain() -> None:
+    gate = InProcessOperationGate()
+    details = {
+        "operation_id": "op-" + "a" * 24,
+        "receipt_id": "receipt-" + "b" * 24,
+        "config_generation": 2,
+        "tool_surface_hash": "c" * 64,
+        "input_contract_digest": "d" * 64,
+        "output_contract_digest": "e" * 64,
+        "process_start_identity": "f" * 64,
+        "runtime_protocol_version": 1,
+        "rediscovery_action": "reconnect_and_rediscover",
+    }
+
+    gate.begin_drain(
+        reason="runtime generation activation",
+        correlation_id="corr-reload",
+        reconnect_details=details,
+    )
+
+    with (
+        pytest.raises(RepoForgeError) as rejected,
+        gate.operation("new-request", mutating=False),
+    ):
+        pass
+
+    assert rejected.value.code is ErrorCode.RECONNECT_REQUIRED
+    assert rejected.value.retryable is False
+    assert rejected.value.details == details
+    gate.reopen()
+    with gate.operation("after-reconnect", mutating=False):
+        pass
+
+
+def test_hot_reload_drains_old_generation_and_rejects_mid_handoff_admission() -> None:
+    old_gate = InProcessOperationGate()
+    new_gate = InProcessOperationGate()
+    disposed: list[int] = []
+    router = AtomicServiceRouter(
+        GenerationServiceContainer(
+            generation=1,
+            service=Service("old"),
+            gate=old_gate,
+            repository_ids=frozenset({"old"}),
+            dispose=lambda: disposed.append(1),
+        )
+    )
+
+    def contract_identity(generation: int) -> RuntimeContractIdentity:
+        return RuntimeContractIdentity(
+            server_build_sha="1" * 64,
+            server_version="test",
+            active_generation=generation,
+            tool_surface_hash="2" * 64,
+            input_contract_digest="3" * 64,
+            output_contract_digest="4" * 64,
+            runtime_protocol_version=1,
+            process_start_identity="5" * 64,
+        )
+
+    coordinator = HotReloadCoordinator(
+        router=router,
+        build_candidate=lambda generation: GenerationServiceContainer(
+            generation=generation,
+            service=Service("new"),
+            gate=new_gate,
+            repository_ids=frozenset({"new"}),
+            dispose=lambda: disposed.append(generation),
+        ),
+        commit_activation=lambda generation, expected: (generation, expected),
+        contract_identity_provider=contract_identity,
+        drain_timeout_seconds=1.0,
+    )
+    admitted = threading.Event()
+    release = threading.Event()
+    old_observed: list[str] = []
+    reload_results: list[object] = []
+    reload_errors: list[BaseException] = []
+
+    def old_request() -> None:
+        with (
+            router.acquire() as selected,
+            selected.gate.operation("old-request", mutating=False),
+        ):
+            admitted.set()
+            release.wait(1)
+            old_observed.append(selected.service.read()["value"])
+
+    def reload() -> None:
+        try:
+            reload_results.append(
+                coordinator.reload(
+                    2,
+                    expected_active=1,
+                    correlation_id="corr-reload",
+                    activation_operation_id="op-" + "a" * 24,
+                    activation_receipt_id="receipt-" + "b" * 24,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            reload_errors.append(exc)
+
+    old_thread = threading.Thread(target=old_request)
+    old_thread.start()
+    assert admitted.wait(1)
+    reload_thread = threading.Thread(target=reload)
+    reload_thread.start()
+    deadline = time.monotonic() + 1.0
+    while old_gate.snapshot()["state"] != "draining" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert old_gate.snapshot()["state"] == "draining"
+
+    with (
+        pytest.raises(RepoForgeError) as rejected,
+        old_gate.operation("mid-handoff", mutating=False),
+    ):
+        pass
+    assert rejected.value.code is ErrorCode.RECONNECT_REQUIRED
+    assert rejected.value.details["config_generation"] == 2
+    assert rejected.value.details["operation_id"] == "op-" + "a" * 24
+    assert rejected.value.details["receipt_id"] == "receipt-" + "b" * 24
+
+    release.set()
+    old_thread.join(1)
+    reload_thread.join(1)
+
+    assert reload_errors == []
+    assert len(reload_results) == 1
+    assert old_observed == ["old"]
+    assert router.active_generation == 2
+    with router.acquire() as selected:
+        assert selected.service.read() == {"value": "new"}
+
+
 def test_runtime_host_reload_control_swaps_candidate_without_restarting_process() -> None:
     from repoforge.interfaces.runtime.host import McpRuntimeHost
 
@@ -1035,7 +1223,12 @@ def test_runtime_host_reload_control_swaps_candidate_without_restarting_process(
             1,
             ControlCommand.RELOAD,
             "reload",
-            (("expected_active", 1), ("generation", 2)),
+            (
+                ("activation_operation_id", "op-" + "a" * 24),
+                ("activation_receipt_id", "receipt-" + "b" * 24),
+                ("expected_active", 1),
+                ("generation", 2),
+            ),
         )
     )
 

@@ -294,6 +294,61 @@ async def test_protocol_pr_remote_version_incomplete_preserves_missing_coverage(
 
 
 @pytest.mark.anyio
+async def test_protocol_reconnect_required_preserves_runtime_handoff_identity() -> None:
+    class ReconnectService:
+        config: Any = None
+        metrics: Any = None
+
+        def repo_list_v2(self, **_: object) -> dict[str, object]:
+            raise RepoForgeError(
+                "RECONNECT_REQUIRED: runtime generation changed",
+                code=ErrorCode.RECONNECT_REQUIRED,
+                retryable=False,
+                safe_next_action=(
+                    "Reconnect, rediscover the active contract, then resume the durable operation."
+                ),
+                unchanged_state=("The rejected request was not admitted to either generation.",),
+                details={
+                    "operation_id": "op-" + "a" * 24,
+                    "receipt_id": "receipt-" + "b" * 24,
+                    "config_generation": 2,
+                    "server_build_sha": "1" * 64,
+                    "tool_surface_hash": "2" * 64,
+                    "input_contract_digest": "3" * 64,
+                    "output_contract_digest": "4" * 64,
+                    "process_start_identity": "5" * 64,
+                    "runtime_protocol_version": 1,
+                    "rediscovery_action": "reconnect_and_rediscover",
+                },
+            )
+
+    server = create_server(service=ReconnectService())  # type: ignore[arg-type]
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool("repo_list", {})
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = result.structuredContent["error"]
+    assert error["code"] == "RECONNECT_REQUIRED"
+    assert error["retryable"] is False
+    assert error["automatic_retry_allowed"] is False
+    assert error["details"] == {
+        "correlation_id": error["details"]["correlation_id"],
+        "operation_id": "op-" + "a" * 24,
+        "receipt_id": "receipt-" + "b" * 24,
+        "config_generation": 2,
+        "server_build_sha": "1" * 64,
+        "tool_surface_hash": "2" * 64,
+        "input_contract_digest": "3" * 64,
+        "output_contract_digest": "4" * 64,
+        "process_start_identity": "5" * 64,
+        "runtime_protocol_version": 1,
+        "rediscovery_action": "reconnect_and_rediscover",
+    }
+    V2_TOOL_SPECS["repo_list"].validate_output(result.structuredContent)
+
+
+@pytest.mark.anyio
 async def test_protocol_operation_wait_returns_typed_terminal_evidence(
     forge_env: ForgeEnvironment,
 ) -> None:
