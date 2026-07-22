@@ -630,6 +630,28 @@ def test_expansion_requires_operator_approval_and_never_applies(tmp_path: Path) 
     assert persisted.repositories[0].policy_patch.is_empty()
 
 
+def test_denied_paths_remove_workflow_is_gated_as_expansion(tmp_path: Path) -> None:
+    reload_calls: list[int] = []
+    admin = _admin(tmp_path, reload_calls=reload_calls)
+    result = admin.repo_policy_apply(
+        "demo", policy_overrides={"denied_paths_remove": ".github/workflows/**"}
+    )
+    assert result["status"] == "pending_approval"
+    assert result["capability_delta"] == "expansion"
+    change_id = result["change_id"]
+    assert f"rf config approve {change_id}" in result["safe_next_action"]
+    assert reload_calls == []
+    assert admin._store.current().generation == 1
+    inspected = admin.config_inspect("demo")["repositories"]["demo"]
+    assert ".github/workflows/**" in inspected["denied_paths"]
+
+
+def test_denied_paths_remove_refuses_protected_default_denies(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    with pytest.raises(ConfigError, match="protected denied path"):
+        admin.repo_policy_apply("demo", policy_overrides={"denied_paths_remove": ".git/**"})
+
+
 def test_repo_policy_preview_token_binds_exact_apply_request(tmp_path: Path) -> None:
     reload_calls: list[int] = []
     admin = _admin(tmp_path, reload_calls=reload_calls)

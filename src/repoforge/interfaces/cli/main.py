@@ -255,9 +255,10 @@ def _source_for_display(store: ConfigurationStore) -> SourceConfiguration:
 
 # Fields exposed through `rf config get/set`: a deliberately narrow slice of the
 # known `--policy-override` keys that map 1:1 onto a scalar RepositoryConfig
-# attribute. `allowed_paths`, `denied_paths_add`, and `working_directory` are
-# excluded because they have additive or non-repository-level semantics that
-# do not fit a plain get/set of one resolved value.
+# attribute. `allowed_paths`, `denied_paths_add`, `denied_paths_remove`, and
+# `working_directory` are excluded because they have additive, subtractive, or
+# non-repository-level semantics that do not fit a plain get/set of one
+# resolved value.
 _CONFIG_SCALAR_KEYS: dict[str, type] = {
     "max_changed_files": int,
     "max_diff_lines": int,
