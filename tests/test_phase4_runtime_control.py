@@ -534,8 +534,8 @@ def test_supervisor_commits_active_generation_only_after_health(tmp_path: Path) 
             del profile, env
             return (True, "ok")
 
-        def start(self, profile, *, env, log_path):
-            del profile, env, log_path
+        def start(self, profile, *, env, log_path, correlation_id):
+            del profile, env, log_path, correlation_id
             return ChildProcess(222, "f" * 64, "now")
 
         def terminate(self, child, *, grace_seconds):

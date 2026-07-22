@@ -291,3 +291,10 @@ def test_startup_reconciler_classifies_all_nonterminal_receipts(
     assert operations.read(accepted_operation).state is OperationState.FAILED
     assert operations.read(applying_operation).state is OperationState.FAILED
     assert operations.read(unvalidated_operation).state is OperationState.SUCCEEDED
+
+    repeated = OutcomeReceiptReconciler(ctx).reconcile(stale_after_seconds=0)
+
+    assert repeated.validated == 0
+    assert repeated.failed_before_effect == 0
+    assert repeated.unknown == 0
+    assert repeated.unchanged_terminal == 3

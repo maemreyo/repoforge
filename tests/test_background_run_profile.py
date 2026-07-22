@@ -453,7 +453,16 @@ def test_background_profile_emits_observable_per_step_progress(
         return None
 
     heartbeat = _poll(same_step_heartbeat)
-    assert heartbeat["progress"] == observed["progress"]
+    observed_progress = observed["progress"]
+    heartbeat_progress = heartbeat["progress"]
+    assert isinstance(observed_progress, dict)
+    assert isinstance(heartbeat_progress, dict)
+    for key in ("current", "total", "unit"):
+        assert heartbeat_progress[key] == observed_progress[key]
+    heartbeat_message = heartbeat_progress["message"]
+    assert isinstance(heartbeat_message, str)
+    assert heartbeat_message.startswith("running business_tests (step 2/2, elapsed ")
+    assert heartbeat_message.endswith("s)")
 
     release.write_text("continue\n", encoding="utf-8")
 

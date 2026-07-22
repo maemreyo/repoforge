@@ -21,6 +21,7 @@ from ...domain.runtime_activation import (
     RuntimeActivationReceipt,
     new_runtime_activation_receipt,
     transition_runtime_activation_receipt,
+    validate_runtime_activation_continuation_reference,
 )
 from ...ports.clock import Clock
 from ...ports.ids import IdGenerator
@@ -57,6 +58,9 @@ class RuntimeActivationJournal:
         previous: RuntimeActivationIdentity | None,
         continuation_reference: str | None = None,
     ) -> RuntimeActivationAttempt:
+        continuation_reference = validate_runtime_activation_continuation_reference(
+            continuation_reference
+        )
         now = self._clock.now_iso()
         operation_id = f"op-{self._ids.new_hex(24)}"
         receipt_id = f"receipt-{self._ids.new_hex(24)}"

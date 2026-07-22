@@ -971,7 +971,7 @@ def _activate(
         clock=system_clock(),
         config_path=config_path,
         validate_contract_artifacts=validate_generated_contract_identity,
-        activation_journal=build_runtime_activation_journal(default_state_root()),
+        activation_journal=build_runtime_activation_journal(store.root),
     )
     return asdict(
         activator.activate(
@@ -1450,7 +1450,7 @@ def _runtime_command(args: argparse.Namespace) -> int:
             clock=system_clock(),
             config_path=config_path,
             validate_contract_artifacts=validate_generated_contract_identity,
-            activation_journal=build_runtime_activation_journal(default_state_root()),
+            activation_journal=build_runtime_activation_journal(store.root),
         )
         _json(asdict(activator.activate(target, extra_env=_runtime_environment(args))))
         return 0

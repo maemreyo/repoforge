@@ -52,7 +52,6 @@ from ..verification_reuse import (
 from .hygiene_status import WorkspaceHygieneStatusCommand, WorkspaceHygieneStatusReader
 
 _KIND = "workspace_run_profile"
-_PROGRESS_HEARTBEAT_SECONDS = 5.0
 _PROGRESS_HEARTBEAT_JOIN_SECONDS = 1.0
 _ProgressCallback = Callable[[str, int, int, str, str], None]
 #: How often to re-emit "still running" progress for one step while its
@@ -702,30 +701,6 @@ class WorkspaceProfileRunner:
                     if on_before_command is not None:
                         on_before_command()
                     stage_started = time.monotonic()
-                    heartbeat_stop: threading.Event | None = None
-                    heartbeat_thread: threading.Thread | None = None
-                    if on_progress is not None:
-                        heartbeat_event = threading.Event()
-                        heartbeat_stop = heartbeat_event
-
-                        def emit_heartbeat(
-                            stop: threading.Event = heartbeat_event,
-                            active_step_index: int = step_index,
-                            active_step: VerificationStep = verification_step,
-                        ) -> None:
-                            while not stop.wait(_PROGRESS_HEARTBEAT_SECONDS):
-                                emit_step_progress(
-                                    active_step_index,
-                                    active_step,
-                                    completed=False,
-                                )
-
-                        heartbeat_thread = threading.Thread(
-                            target=emit_heartbeat,
-                            name=f"repoforge-progress-{step_index + 1}",
-                            daemon=True,
-                        )
-                        heartbeat_thread.start()
                     try:
                         with _step_progress_heartbeat(
                             on_progress,
@@ -743,11 +718,6 @@ class WorkspaceProfileRunner:
                             (time.monotonic() - stage_started) * 1_000,
                         )
                         raise
-                    finally:
-                        if heartbeat_stop is not None:
-                            heartbeat_stop.set()
-                        if heartbeat_thread is not None:
-                            heartbeat_thread.join(timeout=_PROGRESS_HEARTBEAT_JOIN_SECONDS)
                     stage_duration_ms = (time.monotonic() - stage_started) * 1_000
                     stage_telemetry.append(
                         (

@@ -100,6 +100,7 @@ class GenerationActivator:
         generation: ConfigGeneration,
         previous: ConfigGeneration | None,
         running: RuntimeRecord | None,
+        continuation_reference: str | None,
     ) -> RuntimeActivationAttempt | None:
         if self._activation_journal is None:
             return None
@@ -108,6 +109,7 @@ class GenerationActivator:
             previous=(
                 self._activation_identity(previous, running) if previous is not None else None
             ),
+            continuation_reference=continuation_reference,
         )
 
     def _fail_attempt(
@@ -276,6 +278,7 @@ class GenerationActivator:
         extra_env: dict[str, str],
         wait_for_health: bool = True,
         rollback_on_failure: bool = True,
+        continuation_reference: str | None = None,
     ) -> ActivationResult:
         if not wait_for_health and rollback_on_failure:
             raise ValueError(
@@ -284,7 +287,12 @@ class GenerationActivator:
             )
         previous = self._configs.active()
         running = self._runtime.read()
-        attempt = self._begin_attempt(generation, previous, running)
+        attempt = self._begin_attempt(
+            generation,
+            previous,
+            running,
+            continuation_reference,
+        )
         correlation_id = (
             attempt.receipt.value.correlation_id if attempt is not None else self._ids.new_hex(24)
         )

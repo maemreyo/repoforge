@@ -116,6 +116,12 @@ def _optional_id(value: str | None, field: str) -> str | None:
     return value
 
 
+def validate_runtime_activation_continuation_reference(value: str | None) -> str | None:
+    """Validate an opaque bounded continuation identifier without interpreting it."""
+
+    return _optional_id(value, "continuation reference")
+
+
 def validate_runtime_activation_identity(
     identity: RuntimeActivationIdentity,
 ) -> RuntimeActivationIdentity:
@@ -172,7 +178,7 @@ def validate_runtime_activation_receipt(
     )
     if receipt.target_generation != accepted.config_generation:
         raise _error("Runtime activation target does not match the accepted identity")
-    _optional_id(receipt.continuation_reference, "continuation reference")
+    validate_runtime_activation_continuation_reference(receipt.continuation_reference)
     if _SAFE_ID.fullmatch(receipt.correlation_id) is None:
         raise _error("Runtime activation correlation id is invalid")
     accepted_at = _timestamp(receipt.accepted_at, "accepted_at")
@@ -241,7 +247,9 @@ def new_runtime_activation_receipt(
         accepted_identity=accepted_identity,
         previous_identity=previous_identity,
         active_identity=None,
-        continuation_reference=_optional_id(continuation_reference, "continuation reference"),
+        continuation_reference=validate_runtime_activation_continuation_reference(
+            continuation_reference
+        ),
         correlation_id=correlation_id,
         effect_boundary_crossed=False,
         accepted_at=accepted_at,
@@ -421,6 +429,7 @@ __all__ = [
     "runtime_activation_receipt_from_payload",
     "runtime_activation_receipt_payload",
     "transition_runtime_activation_receipt",
+    "validate_runtime_activation_continuation_reference",
     "validate_runtime_activation_identity",
     "validate_runtime_activation_receipt",
 ]

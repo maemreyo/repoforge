@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from conftest import execution_coordinator_for_tests
 
+import repoforge.application.outcome_reconciliation as outcome_reconciliation
 from repoforge.adapters.locking import FcntlLockManager
 from repoforge.adapters.persistence import JsonOperationStore, JsonRuntimeActivationStore
 from repoforge.adapters.runtime.operation_gate import InProcessOperationGate
@@ -32,6 +33,11 @@ from repoforge.contracts.registry import (
 )
 from repoforge.domain.config_generation import CapabilityDeltaKind, ConfigGeneration
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError
+from repoforge.domain.operation_task import (
+    OperationRetryability,
+    OperationState,
+    new_operation_task,
+)
 from repoforge.domain.runtime import (
     ControlCommand,
     ControlRequest,
@@ -42,6 +48,7 @@ from repoforge.domain.runtime import (
 from repoforge.domain.runtime_activation import (
     RuntimeActivationClassification,
     RuntimeActivationIdentity,
+    transition_runtime_activation_receipt,
 )
 from repoforge.domain.runtime_contract import RuntimeContractIdentity
 from repoforge.domain.workspace import WorkspaceRecord
@@ -107,6 +114,25 @@ def _activation_identity(
     )
 
 
+def _active_runtime(generation: int) -> RuntimeRecord:
+    return RuntimeRecord(
+        protocol_version=1,
+        phase=RuntimePhase.HEALTHY,
+        pid=101,
+        process_identity="e" * 64,
+        active_generation=generation,
+        accepted_generation=generation,
+        tunnel_profile="repoforge",
+        tunnel_profile_fingerprint="f" * 64,
+        tool_surface_hash="d" * 64,
+        started_at="2026-07-22T00:00:00+00:00",
+        updated_at="2026-07-22T00:00:00+00:00",
+        correlation_id="runtime-startup",
+        child_pid=102,
+        child_process_identity="1" * 64,
+    )
+
+
 def test_activation_journal_persists_operation_and_receipt_before_candidate(
     tmp_path: Path,
 ) -> None:
@@ -133,6 +159,239 @@ def test_activation_journal_persists_operation_and_receipt_before_candidate(
     assert attempt.receipt.value.continuation_reference == "issue-publication:42"
     assert operations.read(attempt.operation.operation_id) == attempt.operation
     assert receipts.read(attempt.receipt.value.receipt_id) == attempt.receipt
+
+
+@pytest.mark.parametrize(
+    "continuation_reference",
+    (
+        "https://example.test/resume",
+        "../operations/op-" + "a" * 24,
+        "op-" + "a" * 24 + " ",
+        '{"operation_id":"op-' + "a" * 24 + '"}',
+        "op-" + "a" * 12 + "\n" + "a" * 12,
+        "x" * 257,
+    ),
+)
+def test_activation_journal_rejects_invalid_continuation_before_operation_creation(
+    tmp_path: Path,
+    continuation_reference: str,
+) -> None:
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("a" * 24, "b" * 24, "c" * 24)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+    )
+
+    with pytest.raises(RepoForgeError) as invalid:
+        journal.begin(
+            target=_activation_identity(2, runtime_active_generation=None),
+            previous=_activation_identity(1, runtime_active_generation=1),
+            continuation_reference=continuation_reference,
+        )
+
+    assert invalid.value.code is ErrorCode.STATE_INVALID
+    assert operations.list_records(max_records=10).records == ()
+    assert receipts.list_all(max_records=10).records == ()
+
+
+def test_activation_startup_reconciliation_terminalizes_target_active_and_resumes_durable_reference(
+    tmp_path: Path,
+) -> None:
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    clock = FixedClock("2026-07-22T00:00:00+00:00")
+    continuation_id = "op-" + "f" * 24
+    operations.create(
+        new_operation_task(
+            operation_id=continuation_id,
+            kind="issue_publication",
+            phase="accepted",
+            now=clock.now_iso(),
+            cancel_supported=False,
+        )
+    )
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("a" * 24, "b" * 24, "c" * 24)),
+        clock=clock,
+    )
+    attempt = journal.begin(
+        target=_activation_identity(2, runtime_active_generation=None),
+        previous=_activation_identity(1, runtime_active_generation=1),
+        continuation_reference=continuation_id,
+    )
+    journal.mark_building(attempt.receipt.value.receipt_id)
+    journal.mark_effect(attempt.receipt.value.receipt_id)
+
+    report = outcome_reconciliation.RuntimeActivationReconciler(
+        journal=journal,
+        receipts=receipts,
+        operations=operations,
+    ).reconcile(active_runtime=_active_runtime(2))
+
+    terminal = receipts.read(attempt.receipt.value.receipt_id)
+    activation_operation = operations.read(attempt.operation.operation_id)
+    assert terminal is not None
+    assert activation_operation is not None
+    assert report.scanned == 1
+    assert report.activated == 1
+    assert report.continuation_resumable == 1
+    assert terminal.value.classification is RuntimeActivationClassification.ACTIVE_BUT_CLIENT_STALE
+    assert terminal.value.continuation_reference == continuation_id
+    assert activation_operation.state is OperationState.SUCCEEDED
+
+
+def test_activation_startup_reconciliation_repairs_terminal_receipt_operation_gap(
+    tmp_path: Path,
+) -> None:
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    clock = FixedClock("2026-07-22T00:00:00+00:00")
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("a" * 24, "b" * 24, "c" * 24)),
+        clock=clock,
+    )
+    attempt = journal.begin(
+        target=_activation_identity(2, runtime_active_generation=None),
+        previous=_activation_identity(1, runtime_active_generation=1),
+    )
+    building = journal.mark_building(attempt.receipt.value.receipt_id)
+    effected = journal.mark_effect(building.receipt.value.receipt_id)
+    receipts.save(
+        transition_runtime_activation_receipt(
+            effected.receipt.value,
+            RuntimeActivationClassification.ACTIVE_BUT_CLIENT_STALE,
+            now=clock.now_iso(),
+            active_identity=_activation_identity(2, runtime_active_generation=2),
+            effect_boundary_crossed=True,
+        ),
+        expected_revision=effected.receipt.revision,
+    )
+    running = operations.read(attempt.operation.operation_id)
+    assert running is not None
+    assert running.state is OperationState.RUNNING
+
+    report = outcome_reconciliation.RuntimeActivationReconciler(
+        journal=journal,
+        receipts=receipts,
+        operations=operations,
+    ).reconcile(active_runtime=_active_runtime(2))
+
+    repaired = operations.read(attempt.operation.operation_id)
+    assert repaired is not None
+    assert report.unchanged_terminal == 1
+    assert repaired.state is OperationState.SUCCEEDED
+    assert repaired.receipt_id == attempt.receipt.value.receipt_id
+
+
+def test_activation_startup_reconciliation_repairs_terminal_failure_operation_gap(
+    tmp_path: Path,
+) -> None:
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    clock = FixedClock("2026-07-22T00:00:00+00:00")
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("a" * 24, "b" * 24, "c" * 24)),
+        clock=clock,
+    )
+    attempt = journal.begin(
+        target=_activation_identity(2, runtime_active_generation=None),
+        previous=_activation_identity(1, runtime_active_generation=1),
+    )
+    receipts.save(
+        transition_runtime_activation_receipt(
+            attempt.receipt.value,
+            RuntimeActivationClassification.RELOAD_FAILED,
+            now=clock.now_iso(),
+            effect_boundary_crossed=False,
+            error_code=ErrorCode.FAILED_BEFORE_EFFECT.value,
+            error_message="process_restarted_before_activation_effect",
+        ),
+        expected_revision=attempt.receipt.revision,
+    )
+    pending = operations.read(attempt.operation.operation_id)
+    assert pending is not None
+    assert pending.state is OperationState.PENDING
+
+    report = outcome_reconciliation.RuntimeActivationReconciler(
+        journal=journal,
+        receipts=receipts,
+        operations=operations,
+    ).reconcile(active_runtime=_active_runtime(1))
+
+    repaired = operations.read(attempt.operation.operation_id)
+    assert repaired is not None
+    assert report.unchanged_terminal == 1
+    assert repaired.state is OperationState.FAILED
+    assert repaired.retryability is OperationRetryability.AUTOMATIC
+    assert repaired.error_code == ErrorCode.FAILED_BEFORE_EFFECT.value
+
+
+def test_activation_startup_reconciliation_distinguishes_failed_before_effect_from_unknown(
+    tmp_path: Path,
+) -> None:
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    clock = FixedClock("2026-07-22T00:00:00+00:00")
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(
+            (
+                "1" * 24,
+                "2" * 24,
+                "3" * 24,
+                "4" * 24,
+                "5" * 24,
+                "6" * 24,
+            )
+        ),
+        clock=clock,
+    )
+    failed_before = journal.begin(
+        target=_activation_identity(2, runtime_active_generation=None),
+        previous=_activation_identity(1, runtime_active_generation=1),
+    )
+    unknown = journal.begin(
+        target=_activation_identity(3, runtime_active_generation=None),
+        previous=_activation_identity(1, runtime_active_generation=1),
+    )
+    journal.mark_building(unknown.receipt.value.receipt_id)
+    journal.mark_effect(unknown.receipt.value.receipt_id)
+
+    report = outcome_reconciliation.RuntimeActivationReconciler(
+        journal=journal,
+        receipts=receipts,
+        operations=operations,
+    ).reconcile(active_runtime=_active_runtime(1))
+
+    failed_receipt = receipts.read(failed_before.receipt.value.receipt_id)
+    unknown_receipt = receipts.read(unknown.receipt.value.receipt_id)
+    failed_operation = operations.read(failed_before.operation.operation_id)
+    unknown_operation = operations.read(unknown.operation.operation_id)
+    assert failed_receipt is not None
+    assert unknown_receipt is not None
+    assert failed_operation is not None
+    assert unknown_operation is not None
+    assert report.failed_before_effect == 1
+    assert report.unknown == 1
+    assert failed_receipt.value.error_code == ErrorCode.FAILED_BEFORE_EFFECT.value
+    assert unknown_receipt.value.error_code == ErrorCode.EFFECT_OUTCOME_UNKNOWN.value
+    assert failed_operation.state is OperationState.FAILED
+    assert unknown_operation.state is OperationState.FAILED
 
 
 def test_activation_journal_completes_with_bound_operation_receipt(
@@ -635,17 +894,24 @@ def test_generation_activator_reconciles_lost_hot_reload_response(
         activation_journal=journal,
     )
 
-    result = activator.activate(_generation(2, CapabilityDeltaKind.EXPANSION), extra_env={})
+    continuation_reference = "op-" + "f" * 24
+    result = activator.activate(
+        _generation(2, CapabilityDeltaKind.EXPANSION),
+        extra_env={},
+        continuation_reference=continuation_reference,
+    )
 
     assert result.status == "active_but_client_stale"
     assert result.classification == "active_but_client_stale"
     assert result.operation_id == "op-" + "7" * 24
     assert result.activation_receipt_id == "receipt-" + "8" * 24
+    assert result.continuation_reference == continuation_reference
     receipt = receipts.read(result.activation_receipt_id)
     assert receipt is not None
     assert receipt.value.classification is RuntimeActivationClassification.ACTIVE_BUT_CLIENT_STALE
     assert receipt.value.active_identity is not None
     assert receipt.value.active_identity.runtime_active_generation == 2
+    assert receipt.value.continuation_reference == continuation_reference
     operation = operations.read(result.operation_id)
     assert operation is not None
     assert operation.state.value == "succeeded"
@@ -1520,8 +1786,8 @@ def test_supervisor_restarts_latest_hot_reloaded_generation_after_child_crash(
             del profile, env
             return True, "ok"
 
-        def start(self, profile, *, env, log_path):
-            del profile, env, log_path
+        def start(self, profile, *, env, log_path, correlation_id):
+            del profile, env, log_path, correlation_id
             self.starts += 1
             return ChildProcess(200 + self.starts, "f" * 64, "now")
 

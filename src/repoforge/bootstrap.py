@@ -132,7 +132,10 @@ from .application.onboarding.discover import OnboardingDiscoveryService
 from .application.onboarding.planner import OnboardingPlanner
 from .application.onboarding.preflight import OnboardingPreflightService
 from .application.operations import OperationManager, recover_operations
-from .application.outcome_reconciliation import OutcomeReceiptReconciler
+from .application.outcome_reconciliation import (
+    OutcomeReceiptReconciler,
+    RuntimeActivationReconciler,
+)
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.activation_journal import RuntimeActivationJournal
@@ -687,19 +690,38 @@ def build_application(
     )
     operations = OperationManager(context)
     processes = build_process_inspector()
+    runtime_activation_store = build_runtime_activation_store(
+        config.server.state_root,
+        locks=locks,
+    )
+    runtime_activation_journal = RuntimeActivationJournal(
+        operations=operation_store,
+        receipts=runtime_activation_store,
+        ids=ids,
+        clock=clock,
+    )
+    RuntimeActivationReconciler(
+        journal=runtime_activation_journal,
+        receipts=runtime_activation_store,
+        operations=operation_store,
+    ).reconcile(
+        active_runtime=build_runtime_store(
+            config.server.state_root / "managed-runtime-v3.json"
+        ).read()
+    )
+    OutcomeReceiptReconciler(context).reconcile(
+        stale_after_seconds=config.server.idempotency_stale_seconds
+    )
     recover_operations(
         operations,
         now=clock.now_iso(),
         running_stale_seconds=config.server.idempotency_stale_seconds,
-        resumable_kinds=frozenset({"pr_check_watch"}),
+        resumable_kinds=frozenset({"pr_check_watch", "runtime_activation"}),
         running_liveness=lambda task: _background_operation_liveness(
             task,
             locks=locks,
             processes=processes,
         ),
-    )
-    OutcomeReceiptReconciler(context).reconcile(
-        stale_after_seconds=config.server.idempotency_stale_seconds
     )
     pr_check_watches = PrCheckWatchCoordinator(
         context,
