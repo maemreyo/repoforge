@@ -48,6 +48,12 @@ class ToolErrorDetails(StrictModel):
     operation_index: int | None = Field(default=None, ge=0, le=99)
     expected: str | None = Field(default=None, max_length=1000)
     actual: str | None = Field(default=None, max_length=1000)
+    current_remote_version: str | None = Field(default=None, max_length=256)
+    current_head_sha: GitObjectId | None = None
+    current_updated_at: str | None = Field(default=None, max_length=80)
+    remote_delta: tuple[ShortText, ...] = Field(default=(), max_length=20)
+    recovery_action: str | None = Field(default=None, max_length=160)
+    missing_coverage: tuple[str, ...] = Field(default=(), max_length=20)
     correlation_id: str | None = Field(default=None, max_length=128)
     operation_id: str | None = Field(default=None, max_length=160)
     receipt_id: str | None = Field(default=None, max_length=160)

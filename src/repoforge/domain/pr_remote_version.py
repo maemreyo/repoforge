@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import ErrorCode, RepoForgeError
+from .redaction import redact_text
 
 PR_REMOTE_VERSION_SCHEMA_VERSION = 2
 _TOKEN_PREFIX = f"prv{PR_REMOTE_VERSION_SCHEMA_VERSION}:"
@@ -142,8 +143,47 @@ def build_pr_remote_version(payload: dict[str, Any], *, repo_id: str) -> PrRemot
     )
 
 
+def pr_remote_version_recovery_details(
+    expected: str,
+    current: PrRemoteVersion,
+    payload: dict[str, Any],
+) -> dict[str, object]:
+    """Return bounded authoritative evidence for one rejected stale PR write."""
+
+    def scalar(field: str) -> str:
+        value = str(payload.get(field, ""))
+        return " ".join(redact_text(value, limit=160).split())
+
+    def count(field: str) -> int:
+        value = payload.get(field)
+        return len(value) if isinstance(value, list) else 0
+
+    remote_delta = (
+        f"current_title={scalar('title')}",
+        f"current_state={scalar('state')}",
+        f"current_draft={str(payload.get('isDraft')).lower()}",
+        f"current_review_decision={scalar('reviewDecision')}",
+        f"current_mergeable={scalar('mergeable')}",
+        f"comments={count('comments')}",
+        f"reviews={count('reviews')}",
+        f"checks={count('statusCheckRollup')}",
+    )
+    return {
+        "field": "expected_remote_version",
+        "expected": expected,
+        "actual": current.token,
+        "current_remote_version": current.token,
+        "current_head_sha": current.head_sha,
+        "current_updated_at": current.updated_at,
+        "remote_delta": remote_delta,
+        "recovery_action": "reread_pr_overview",
+        "result_reference": "workspace_pr_evidence:overview",
+    }
+
+
 __all__ = [
     "PR_REMOTE_VERSION_SCHEMA_VERSION",
     "PrRemoteVersion",
     "build_pr_remote_version",
+    "pr_remote_version_recovery_details",
 ]

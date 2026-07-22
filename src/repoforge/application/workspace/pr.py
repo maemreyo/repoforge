@@ -12,7 +12,11 @@ from ...config import RepositoryConfig
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.operations import IdempotencyState, hash_idempotency_key
 from ...domain.pr_check_watch import TERMINAL_PR_CHECK_WATCH_OUTCOMES
-from ...domain.pr_remote_version import build_pr_remote_version
+from ...domain.pr_remote_version import (
+    PrRemoteVersion,
+    build_pr_remote_version,
+    pr_remote_version_recovery_details,
+)
 from ...domain.redaction import redact_text
 from ...domain.workspace import WorkspaceRecord
 from ..context import ApplicationContext
@@ -170,7 +174,7 @@ class WorkspacePrCoordinator:
 
     def _status(
         self, workspace_id: str
-    ) -> tuple[WorkspaceRecord, RepositoryConfig, Path, dict[str, Any], str]:
+    ) -> tuple[WorkspaceRecord, RepositoryConfig, Path, dict[str, Any], PrRemoteVersion]:
         record, repo, path = self.ctx.workspace(workspace_id)
         payload = self.ctx.github.status(path, record.branch)
         if payload.get("exists") is False:
@@ -178,11 +182,16 @@ class WorkspacePrCoordinator:
                 "No pull request exists yet for this workspace branch",
                 code=ErrorCode.NOT_FOUND,
             )
-        return record, repo, path, payload, _remote_version(payload, repo_id=record.repo_id)
+        version = build_pr_remote_version(payload, repo_id=record.repo_id)
+        return record, repo, path, payload, version
 
     @staticmethod
-    def _assert_remote_version(expected: str | None, actual: str) -> None:
-        if expected is not None and expected != actual:
+    def _assert_remote_version(
+        expected: str | None,
+        current: PrRemoteVersion,
+        payload: dict[str, Any],
+    ) -> None:
+        if expected is not None and expected != current.token:
             raise RepoForgeError(
                 "PR_REMOTE_VERSION_STALE: pull request changed since it was reviewed",
                 code=ErrorCode.PR_REMOTE_VERSION_STALE,
@@ -192,12 +201,7 @@ class WorkspacePrCoordinator:
                     "review the remote delta, and submit a new idempotent write."
                 ),
                 unchanged_state=("No pull-request write was attempted.",),
-                details={
-                    "field": "expected_remote_version",
-                    "expected": expected,
-                    "actual": actual,
-                    "result_reference": "workspace_pr_evidence:overview",
-                },
+                details=pr_remote_version_recovery_details(expected, current, payload),
             )
 
     def _execute(self, command: WorkspacePrCommand) -> WorkspacePrResult:
@@ -222,7 +226,7 @@ class WorkspacePrCoordinator:
                 pull_request=_pull_request(payload, base_ref=record.base),
                 comment=None,
                 operation=None,
-                remote_version=version,
+                remote_version=version.token,
                 event_cursor=None,
                 terminal_reason=None,
             )
@@ -232,7 +236,7 @@ class WorkspacePrCoordinator:
                 raise ConfigError("workspace_pr update requires title or body and idempotency_key")
             if command.expected_remote_version is None:
                 raise ConfigError("workspace_pr update requires expected_remote_version")
-            _record, _repo, _path, _before, before_version = self._status(command.workspace_id)
+            _record, _repo, _path, before, before_version = self._status(command.workspace_id)
             update_key_hash = hash_idempotency_key(command.idempotency_key)
             update_existing = (
                 self.ctx.idempotency.load("workspace_update_draft_pr", update_key_hash)
@@ -243,7 +247,11 @@ class WorkspacePrCoordinator:
                 update_existing is not None and update_existing.state is IdempotencyState.COMPLETED
             )
             if not update_replay:
-                self._assert_remote_version(command.expected_remote_version, before_version)
+                self._assert_remote_version(
+                    command.expected_remote_version,
+                    before_version,
+                    before,
+                )
             self.updater.execute(
                 WorkspaceUpdateDraftPrCommand(
                     command.workspace_id,
@@ -260,7 +268,7 @@ class WorkspacePrCoordinator:
                 pull_request=_pull_request(payload, base_ref=record.base),
                 comment=None,
                 operation=None,
-                remote_version=version,
+                remote_version=version.token,
                 event_cursor=None,
                 terminal_reason=None,
             )
@@ -355,7 +363,7 @@ class WorkspacePrCoordinator:
         )
         idempotency_replay = existing is not None
         if not idempotency_replay:
-            self._assert_remote_version(command.expected_remote_version, version)
+            self._assert_remote_version(command.expected_remote_version, version, payload)
         comment = execute_idempotent(
             self.ctx,
             "workspace_pr_comment",
@@ -382,7 +390,7 @@ class WorkspacePrCoordinator:
             pull_request=_pull_request(payload, base_ref=record.base),
             comment=asdict(comment),
             operation=None,
-            remote_version=version,
+            remote_version=version.token,
             event_cursor=None,
             terminal_reason=None,
         )

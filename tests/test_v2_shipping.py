@@ -248,6 +248,30 @@ def test_workspace_pr_watch_returns_version_bound_durable_cursor(
     assert stale.value.code is ErrorCode.PR_CHECK_WATCH_STALE
 
 
+def test_workspace_pr_watch_rejects_stale_version_before_creation(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, created = _prepare_pr(forge_env)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["title"] = "Concurrent watch metadata"
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(RepoForgeError) as stale:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="watch",
+            expected_remote_version=created["remote_version"],
+            until="all_completed",
+            timeout_seconds=30,
+        )
+
+    assert stale.value.code is ErrorCode.PR_REMOTE_VERSION_STALE
+    assert stale.value.details["current_remote_version"] != created["remote_version"]
+    assert stale.value.details["recovery_action"] == "reread_pr_overview"
+    assert "current_title=Concurrent watch metadata" in stale.value.details["remote_delta"]
+
+
 def test_workspace_pr_evidence_supports_delta_and_detail_zoom(
     forge_env: ForgeEnvironment,
 ) -> None:
@@ -377,9 +401,38 @@ def test_workspace_pr_stale_version_returns_typed_current_token(
     assert stale.value.details["field"] == "expected_remote_version"
     assert stale.value.details["expected"] == reviewed["remote_version"]
     assert stale.value.details["actual"] == current["remote_version"]
+    assert stale.value.details["current_remote_version"] == current["remote_version"]
+    assert stale.value.details["current_head_sha"] == current["pull_request"]["head_sha"]
+    assert stale.value.details["current_updated_at"] == "2026-07-21T14:00:00Z"
+    assert stale.value.details["recovery_action"] == "reread_pr_overview"
+    assert "current_title=Concurrent remote title" in stale.value.details["remote_delta"]
     assert stale.value.details["result_reference"] == "workspace_pr_evidence:overview"
     assert "workspace_pr_evidence" in str(stale.value.safe_next_action)
     assert current["pull_request"]["title"] == "Concurrent remote title"
+
+
+def test_workspace_pr_stale_recovery_redacts_remote_metadata(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, _created = _prepare_pr(forge_env)
+    reviewed = forge_env.service.workspace_pr_evidence(workspace_id)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["title"] = "Concurrent token=super-secret"
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(RepoForgeError) as stale:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="update",
+            title="Reviewed title",
+            idempotency_key="shipping-pr-redacted-drift-0001",
+            expected_remote_version=reviewed["remote_version"],
+        )
+
+    rendered = "\n".join(stale.value.details["remote_delta"])
+    assert "super-secret" not in rendered
+    assert "<redacted" in rendered
 
 
 def test_workspace_pr_remote_version_tracks_comments_and_checks(
@@ -399,6 +452,54 @@ def test_workspace_pr_remote_version_tracks_comments_and_checks(
 
     assert changed["remote_version"].startswith("prv2:")
     assert changed["remote_version"] != initial["remote_version"]
+
+
+def test_workspace_pr_conversation_drift_rejects_stale_write(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, _created = _prepare_pr(forge_env)
+    reviewed = forge_env.service.workspace_pr_evidence(workspace_id)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["comments"] = [{"id": 9001, "updatedAt": "2026-07-21T15:01:00Z"}]
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(RepoForgeError) as stale:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="update",
+            title="Must not overwrite a new conversation",
+            idempotency_key="shipping-pr-comment-drift-0001",
+            expected_remote_version=reviewed["remote_version"],
+        )
+
+    assert stale.value.code is ErrorCode.PR_REMOTE_VERSION_STALE
+    assert "comments=1" in stale.value.details["remote_delta"]
+    assert stale.value.details["current_remote_version"] != reviewed["remote_version"]
+
+
+def test_workspace_pr_head_drift_rejects_stale_write(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, _created = _prepare_pr(forge_env)
+    reviewed = forge_env.service.workspace_pr_evidence(workspace_id)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["headRefOid"] = "f" * 40
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(RepoForgeError) as stale:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="update",
+            title="Must not overwrite a new head",
+            idempotency_key="shipping-pr-head-drift-0001",
+            expected_remote_version=reviewed["remote_version"],
+        )
+
+    assert stale.value.code is ErrorCode.PR_REMOTE_VERSION_STALE
+    assert stale.value.details["current_head_sha"] == "f" * 40
+    assert stale.value.details["current_remote_version"] != reviewed["remote_version"]
 
 
 def test_workspace_pr_remote_version_refuses_incomplete_provider_coverage(
@@ -421,3 +522,21 @@ def test_workspace_pr_remote_version_refuses_incomplete_provider_coverage(
     assert incomplete.value.code is ErrorCode.PR_REMOTE_VERSION_INCOMPLETE
     assert incomplete.value.retryable is False
     assert "updatedAt" in incomplete.value.details["missing_coverage"]
+
+
+def test_workspace_pr_remote_version_refuses_truncated_provider_collections(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, _created = _prepare_pr(forge_env)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch]["comments"] = [
+        {"id": index, "updatedAt": "2026-07-21T15:01:00Z"} for index in range(101)
+    ]
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(RepoForgeError) as incomplete:
+        forge_env.service.workspace_pr_evidence(workspace_id)
+
+    assert incomplete.value.code is ErrorCode.PR_REMOTE_VERSION_INCOMPLETE
+    assert "comments:truncated" in incomplete.value.details["missing_coverage"]

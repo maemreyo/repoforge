@@ -210,6 +210,14 @@ async def test_protocol_pr_remote_version_stale_preserves_current_token() -> Non
                     "field": "expected_remote_version",
                     "expected": expected,
                     "actual": actual,
+                    "current_remote_version": actual,
+                    "current_head_sha": "c" * 40,
+                    "current_updated_at": "2026-07-21T14:00:00Z",
+                    "remote_delta": [
+                        "current_title=Concurrent title",
+                        "comments=1",
+                    ],
+                    "recovery_action": "reread_pr_overview",
                     "result_reference": "workspace_pr_evidence:overview",
                 },
             )
@@ -236,8 +244,53 @@ async def test_protocol_pr_remote_version_stale_preserves_current_token() -> Non
     assert error["details"]["field"] == "expected_remote_version"
     assert error["details"]["expected"] == expected
     assert error["details"]["actual"] == actual
+    assert error["details"]["current_remote_version"] == actual
+    assert error["details"]["current_head_sha"] == "c" * 40
+    assert error["details"]["current_updated_at"] == "2026-07-21T14:00:00Z"
+    assert error["details"]["remote_delta"] == [
+        "current_title=Concurrent title",
+        "comments=1",
+    ]
+    assert error["details"]["recovery_action"] == "reread_pr_overview"
     assert error["details"]["result_reference"] == "workspace_pr_evidence:overview"
     V2_TOOL_SPECS["workspace_pr"].validate_output(result.structuredContent)
+
+
+@pytest.mark.anyio
+async def test_protocol_pr_remote_version_incomplete_preserves_missing_coverage() -> None:
+    class IncompletePrService:
+        config: Any = None
+        metrics: Any = None
+
+        def workspace_pr_evidence(self, **_: object) -> dict[str, object]:
+            raise RepoForgeError(
+                "PR_REMOTE_VERSION_INCOMPLETE: provider snapshot was truncated",
+                code=ErrorCode.PR_REMOTE_VERSION_INCOMPLETE,
+                retryable=False,
+                details={
+                    "field": "remote_version",
+                    "actual": "comments:truncated,reviews:truncated",
+                    "missing_coverage": ["comments:truncated", "reviews:truncated"],
+                    "result_reference": "workspace_pr_evidence:overview",
+                },
+            )
+
+    server = create_server(service=IncompletePrService())  # type: ignore[arg-type]
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "workspace_pr_evidence",
+            {"workspace_id": "workspace-1", "detail": "overview"},
+        )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = result.structuredContent["error"]
+    assert error["code"] == "PR_REMOTE_VERSION_INCOMPLETE"
+    assert error["details"]["missing_coverage"] == [
+        "comments:truncated",
+        "reviews:truncated",
+    ]
+    V2_TOOL_SPECS["workspace_pr_evidence"].validate_output(result.structuredContent)
 
 
 @pytest.mark.anyio

@@ -21,7 +21,10 @@ from ...domain.pr_check_watch import (
     new_pr_check_watch,
     update_pr_check_watch,
 )
-from ...domain.pr_remote_version import build_pr_remote_version
+from ...domain.pr_remote_version import (
+    build_pr_remote_version,
+    pr_remote_version_recovery_details,
+)
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.pr_check_watch_store import PrCheckWatchStore
 from ...ports.sleeper import Sleeper
@@ -174,12 +177,11 @@ class PrCheckWatchCoordinator:
                             "remote_version."
                         ),
                         unchanged_state=("No PR check watch was created.",),
-                        details={
-                            "field": "expected_remote_version",
-                            "expected": command.expected_remote_version,
-                            "actual": version.token,
-                            "result_reference": "workspace_pr_evidence:overview",
-                        },
+                        details=pr_remote_version_recovery_details(
+                            command.expected_remote_version,
+                            version,
+                            pr,
+                        ),
                     )
                 now = self.ctx.clock.now_iso()
                 deadline = self._deadline(now, timeout)

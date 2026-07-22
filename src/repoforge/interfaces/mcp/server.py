@@ -343,6 +343,10 @@ def _raise_structured_error(
         ("field", 160),
         ("expected", 1_000),
         ("actual", 1_000),
+        ("current_remote_version", 256),
+        ("current_head_sha", 64),
+        ("current_updated_at", 80),
+        ("recovery_action", 160),
         ("operation_id", 160),
         ("receipt_id", 160),
         ("result_reference", 256),
@@ -351,6 +355,15 @@ def _raise_structured_error(
         value = envelope.details.get(field)
         if isinstance(value, str) and value:
             public_details[field] = _bounded(value, limit)
+    for field, item_limit, item_count in (
+        ("remote_delta", 500, 20),
+        ("missing_coverage", 160, 20),
+    ):
+        value = envelope.details.get(field)
+        if isinstance(value, (list, tuple)):
+            bounded = [_bounded(str(item), item_limit) for item in value[:item_count] if str(item)]
+            if bounded:
+                public_details[field] = bounded
     boundary_crossed = envelope.details.get("effect_boundary_crossed")
     if isinstance(boundary_crossed, bool):
         public_details["effect_boundary_crossed"] = boundary_crossed
