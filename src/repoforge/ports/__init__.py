@@ -65,6 +65,7 @@ from .process import ProcessInspector
 from .provider_registry import ProviderRegistry
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
+from .runtime_activation_store import RuntimeActivationStore
 from .runtime_control import (
     RuntimeControlClient,
     RuntimeControlServer,
@@ -158,6 +159,7 @@ __all__ = [
     "RepositoryDiscovery",
     "RepositoryProbe",
     "ResolvedRepositoryRef",
+    "RuntimeActivationStore",
     "RuntimeControlClient",
     "RuntimeControlServer",
     "RuntimeLauncher",

@@ -61,6 +61,7 @@ from .adapters.persistence import (
     JsonOperationResultStore,
     JsonOperationStore,
     JsonPrCheckWatchStore,
+    JsonRuntimeActivationStore,
     JsonTaskStore,
     JsonWorkflowRecordingStore,
 )
@@ -134,6 +135,7 @@ from .application.operations import OperationManager, recover_operations
 from .application.outcome_reconciliation import OutcomeReceiptReconciler
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
+from .application.runtime.activation_journal import RuntimeActivationJournal
 from .application.runtime.supervisor import RuntimeSupervisor
 from .application.tasks import TaskCapsuleService
 from .application.workflow import (
@@ -401,6 +403,30 @@ def build_task_service(
 
 def build_runtime_store(path: Path) -> RuntimeStore:
     return JsonRuntimeStore(path)
+
+
+def build_runtime_activation_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> JsonRuntimeActivationStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonRuntimeActivationStore(root, locks or build_lock_manager(root))
+
+
+def build_runtime_activation_journal(
+    state_root: Path | None = None,
+    *,
+    locks: LockManager | None = None,
+    ids: IdGenerator | None = None,
+    clock: Clock | None = None,
+) -> RuntimeActivationJournal:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    selected_locks = locks or build_lock_manager(root)
+    return RuntimeActivationJournal(
+        operations=JsonOperationStore(root, selected_locks),
+        receipts=build_runtime_activation_store(root, locks=selected_locks),
+        ids=ids or id_generator(),
+        clock=clock or system_clock(),
+    )
 
 
 def build_tunnel_profile_store(path: Path) -> TunnelProfileStore:
