@@ -435,12 +435,97 @@ class ReloadControl:
         return ControlResponse(1, True, request.correlation_id, "ok")
 
 
+class LostReloadResponseControl(ReloadControl):
+    def request(self, request: ControlRequest, *, timeout_seconds: float = 10.0) -> ControlResponse:
+        del timeout_seconds
+        self.commands.append(request.command)
+        if request.command is ControlCommand.RELOAD:
+            generation = int(dict(request.payload)["generation"])
+            self.configs.activate(generation, expected_active=1)
+            raise ConfigError("RUNTIME_IPC_RESPONSE_LOST: reload response was lost")
+        return ControlResponse(1, True, request.correlation_id, "ok")
+
+
 class NoLaunch:
     def start(self, config_path: Path, *, foreground: bool, extra_env: dict[str, str]) -> int:
         raise AssertionError("hot reload must not launch a new supervisor")
 
     def force_stop(self, record: RuntimeRecord, *, grace_seconds: float = 5.0) -> bool:
         raise AssertionError("hot reload must not stop the healthy supervisor")
+
+
+class RestartControl:
+    def __init__(self, runtime: Runtime) -> None:
+        self.runtime = runtime
+        self.commands: list[ControlCommand] = []
+
+    def request(self, request: ControlRequest, *, timeout_seconds: float = 10.0) -> ControlResponse:
+        del timeout_seconds
+        self.commands.append(request.command)
+        if request.command is ControlCommand.SHUTDOWN:
+            current = self.runtime.record
+            assert current is not None
+            self.runtime.record = replace(
+                current,
+                phase=RuntimePhase.STOPPED,
+                pid=None,
+                process_identity=None,
+                child_pid=None,
+                child_process_identity=None,
+                active_generation=None,
+            )
+        return ControlResponse(1, True, request.correlation_id, "ok")
+
+
+class RestartLauncher:
+    def __init__(self, configs: Configs, runtime: Runtime) -> None:
+        self.configs = configs
+        self.runtime = runtime
+        self.starts = 0
+
+    def start(self, config_path: Path, *, foreground: bool, extra_env: dict[str, str]) -> int:
+        del config_path, foreground, extra_env
+        target = self.configs.activation_target()
+        assert target is not None
+        activated = self.configs.activate(target.generation, expected_active=1)
+        current = self.runtime.record
+        assert current is not None
+        self.runtime.record = replace(
+            current,
+            phase=RuntimePhase.HEALTHY,
+            pid=200,
+            process_identity="e" * 64,
+            child_pid=201,
+            child_process_identity="f" * 64,
+            active_generation=activated.generation,
+            accepted_generation=activated.generation,
+            tool_surface_hash="d" * 64,
+        )
+        self.starts += 1
+        return 200
+
+    def force_stop(self, record: RuntimeRecord, *, grace_seconds: float = 5.0) -> bool:
+        del record, grace_seconds
+        return True
+
+
+class FailThenRollbackLauncher(RestartLauncher):
+    def start(self, config_path: Path, *, foreground: bool, extra_env: dict[str, str]) -> int:
+        if self.starts == 0:
+            self.starts += 1
+            raise ConfigError("RUNTIME_START_FAILED: candidate failed")
+        return super().start(config_path, foreground=foreground, extra_env=extra_env)
+
+
+class FailClosedDrainControl(RestartControl):
+    def request(self, request: ControlRequest, *, timeout_seconds: float = 10.0) -> ControlResponse:
+        del timeout_seconds
+        self.commands.append(request.command)
+        if request.command is ControlCommand.DRAIN:
+            return ControlResponse(1, False, request.correlation_id, "drain_timeout")
+        if request.command is ControlCommand.FAIL_CLOSED:
+            return ControlResponse(1, True, request.correlation_id, "fail_closed")
+        return ControlResponse(1, True, request.correlation_id, "ok")
 
 
 def test_generation_activator_prefers_atomic_hot_reload_for_compatible_generation() -> None:
@@ -467,6 +552,226 @@ def test_generation_activator_prefers_atomic_hot_reload_for_compatible_generatio
     assert runtime.record.phase is RuntimePhase.HEALTHY
     assert runtime.record.active_generation == 2
     assert runtime.record.accepted_generation == 2
+
+
+def test_generation_activator_reconciles_lost_hot_reload_response(
+    tmp_path: Path,
+) -> None:
+    configs = Configs()
+    runtime = Runtime()
+    control = LostReloadResponseControl(configs)
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("7" * 24, "8" * 24, "9" * 24)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+    )
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=NoLaunch(),
+        ids=SequenceIdGenerator(("unused",)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+        config_path=Path("/config"),
+        activation_journal=journal,
+    )
+
+    result = activator.activate(_generation(2, CapabilityDeltaKind.EXPANSION), extra_env={})
+
+    assert result.status == "active_but_client_stale"
+    assert result.classification == "active_but_client_stale"
+    assert result.operation_id == "op-" + "7" * 24
+    assert result.activation_receipt_id == "receipt-" + "8" * 24
+    receipt = receipts.read(result.activation_receipt_id)
+    assert receipt is not None
+    assert receipt.value.classification is RuntimeActivationClassification.ACTIVE_BUT_CLIENT_STALE
+    assert receipt.value.active_identity is not None
+    assert receipt.value.active_identity.runtime_active_generation == 2
+    operation = operations.read(result.operation_id)
+    assert operation is not None
+    assert operation.state.value == "succeeded"
+    assert configs.active_item.generation == 2
+    assert control.commands == [ControlCommand.RELOAD]
+
+
+def test_generation_activator_classifies_restart_fallback(
+    tmp_path: Path,
+) -> None:
+    configs = Configs()
+    runtime = Runtime()
+    control = RestartControl(runtime)
+    launcher = RestartLauncher(configs, runtime)
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("a" * 24, "b" * 24, "c" * 24)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+    )
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=launcher,
+        ids=SequenceIdGenerator(("unused",)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+        config_path=Path("/config"),
+        activation_journal=journal,
+    )
+
+    result = activator.activate(_generation(2, CapabilityDeltaKind.INCOMPATIBLE), extra_env={})
+
+    assert result.status == "active"
+    assert result.classification == "restart_fallback"
+    assert result.operation_id == "op-" + "a" * 24
+    assert result.activation_receipt_id == "receipt-" + "b" * 24
+    receipt = receipts.read(result.activation_receipt_id)
+    assert receipt is not None
+    assert receipt.value.classification is RuntimeActivationClassification.RESTART_FALLBACK
+    assert receipt.value.active_identity is not None
+    assert receipt.value.active_identity.runtime_active_generation == 2
+    operation = operations.read(result.operation_id)
+    assert operation is not None and operation.state.value == "succeeded"
+    assert control.commands == [ControlCommand.DRAIN, ControlCommand.SHUTDOWN]
+    assert launcher.starts == 1
+
+
+def test_generation_activator_async_start_returns_durable_continuation(
+    tmp_path: Path,
+) -> None:
+    configs = Configs()
+    runtime = Runtime()
+    control = RestartControl(runtime)
+    launcher = RestartLauncher(configs, runtime)
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("4" * 24, "5" * 24, "6" * 24)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+    )
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=launcher,
+        ids=SequenceIdGenerator(("unused",)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+        config_path=Path("/config"),
+        activation_journal=journal,
+    )
+
+    result = activator.activate(
+        _generation(2, CapabilityDeltaKind.INCOMPATIBLE),
+        extra_env={},
+        wait_for_health=False,
+        rollback_on_failure=False,
+    )
+
+    assert result.status == "starting"
+    assert result.operation_id == "op-" + "4" * 24
+    assert result.activation_receipt_id == "receipt-" + "5" * 24
+    assert result.classification == "building"
+    receipt = receipts.read(result.activation_receipt_id)
+    assert receipt is not None
+    assert receipt.value.classification is RuntimeActivationClassification.BUILDING
+    assert receipt.value.effect_boundary_crossed is True
+    operation = operations.read(result.operation_id)
+    assert operation is not None and operation.state.value == "running"
+
+
+def test_generation_activator_completes_rolled_back_receipt(
+    tmp_path: Path,
+) -> None:
+    configs = Configs()
+    runtime = Runtime()
+    control = RestartControl(runtime)
+    launcher = FailThenRollbackLauncher(configs, runtime)
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("d" * 24, "e" * 24, "f" * 24)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+    )
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=launcher,
+        ids=SequenceIdGenerator(("unused",)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+        config_path=Path("/config"),
+        activation_journal=journal,
+    )
+
+    result = activator.activate(_generation(2, CapabilityDeltaKind.INCOMPATIBLE), extra_env={})
+
+    assert result.status == "rolled_back"
+    assert result.classification == "rolled_back"
+    assert result.operation_id == "op-" + "d" * 24
+    assert result.activation_receipt_id == "receipt-" + "e" * 24
+    receipt = receipts.read(result.activation_receipt_id)
+    assert receipt is not None
+    assert receipt.value.classification is RuntimeActivationClassification.ROLLED_BACK
+    assert receipt.value.active_identity is not None
+    assert receipt.value.active_identity.runtime_active_generation == 1
+    operation = operations.read(result.operation_id)
+    assert operation is not None and operation.state.value == "succeeded"
+
+
+def test_generation_activator_terminalizes_fail_closed_receipt(
+    tmp_path: Path,
+) -> None:
+    configs = Configs()
+    runtime = Runtime()
+    control = FailClosedDrainControl(runtime)
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("1" * 24, "2" * 24, "3" * 24)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+    )
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=NoLaunch(),
+        ids=SequenceIdGenerator(("unused",)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+        config_path=Path("/config"),
+        activation_journal=journal,
+    )
+
+    with pytest.raises(ConfigError, match="RUNTIME_DRAIN_TIMEOUT"):
+        activator.activate(_generation(2, CapabilityDeltaKind.RESTRICTION), extra_env={})
+
+    page = receipts.list_all()
+    assert len(page.records) == 1
+    receipt = page.records[0].value
+    assert receipt.classification is RuntimeActivationClassification.RELOAD_FAILED
+    assert receipt.effect_boundary_crossed is True
+    assert receipt.error_code == "RUNTIME_DRAIN_TIMEOUT"
+    operation = operations.read(receipt.operation_id)
+    assert operation is not None and operation.state.value == "failed"
 
 
 def test_generation_activator_rejects_tampered_contract_before_any_runtime_effect(
@@ -498,6 +803,53 @@ def test_generation_activator_rejects_tampered_contract_before_any_runtime_effec
     assert control.commands == []
     assert runtime.record is not None
     assert runtime.record.active_generation == 1
+
+
+def test_generation_activator_persists_failed_receipt_before_contract_probe(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "tool-schemas-v2.json"
+    tampered = render_v2_schema_bundle()
+    tampered["tool_count"] = 27
+    artifact.write_text(json.dumps(tampered), encoding="utf-8")
+    configs = Configs()
+    runtime = Runtime()
+    control = ReloadControl(configs)
+    locks = FcntlLockManager(tmp_path / "locks")
+    operations = JsonOperationStore(tmp_path, locks)
+    receipts = JsonRuntimeActivationStore(tmp_path, locks)
+    journal = RuntimeActivationJournal(
+        operations=operations,
+        receipts=receipts,
+        ids=SequenceIdGenerator(("a" * 24, "b" * 24, "c" * 24)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+    )
+    activator = GenerationActivator(
+        configs=configs,
+        runtime=runtime,
+        mcp_control=control,
+        supervisor_control=control,
+        launcher=NoLaunch(),
+        ids=SequenceIdGenerator(("unused",)),
+        clock=FixedClock("2026-07-22T00:00:00+00:00"),
+        config_path=Path("/config"),
+        validate_contract_artifacts=lambda: validate_generated_contract_artifact(artifact),
+        activation_journal=journal,
+    )
+
+    with pytest.raises(ConfigError, match="CONTRACT_ARTIFACT_MISMATCH"):
+        activator.activate(_generation(2, CapabilityDeltaKind.EXPANSION), extra_env={})
+
+    page = receipts.list_all()
+    assert len(page.records) == 1
+    receipt = page.records[0].value
+    assert receipt.classification is RuntimeActivationClassification.RELOAD_FAILED
+    assert receipt.effect_boundary_crossed is False
+    operation = operations.read(receipt.operation_id)
+    assert operation is not None
+    assert operation.state.value == "failed"
+    assert configs.staged == []
+    assert control.commands == []
 
 
 class Files:

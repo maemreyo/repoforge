@@ -331,6 +331,10 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
             clock=system_clock(),
             config_path=config_path,
             validate_contract_artifacts=validate_generated_contract_identity,
+            activation_journal=build_runtime_activation_journal(
+                root,
+                locks=locks,
+            ),
         ),
     )
     return OnboardingCoordinator(
