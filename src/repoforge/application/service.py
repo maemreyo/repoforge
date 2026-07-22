@@ -1314,14 +1314,20 @@ class CodingService:
         argv: list[str],
         working_directory: str | None = None,
         background: bool = False,
+        expected_fingerprint: str | None = None,
+        expected_head_sha: str | None = None,
+        mutability: str = "read_only",
     ) -> dict[str, Any]:
         return _result(
             self._adhoc.execute(
                 WorkspaceRunAdhocCommand(
                     workspace_id,
                     tuple(argv) if isinstance(argv, list) else argv,
-                    working_directory,
-                    background,
+                    working_directory=working_directory,
+                    background=background,
+                    expected_fingerprint=expected_fingerprint,
+                    expected_head_sha=expected_head_sha,
+                    mutability=mutability,
                 )
             )
         )
@@ -1378,6 +1384,8 @@ class CodingService:
         argv: tuple[str, ...] | None = None,
         working_directory: str | None = None,
         expected_fingerprint: str | None = None,
+        expected_head_sha: str | None = None,
+        mutability: str = "read_only",
         background: bool = False,
         intent: str | None = None,
         expectation: str | None = None,
@@ -1413,6 +1421,8 @@ class CodingService:
                     argv=argv,
                     working_directory=working_directory,
                     expected_fingerprint=expected_fingerprint,
+                    expected_head_sha=expected_head_sha,
+                    mutability=mutability,
                     background=background,
                     intent=intent,
                     expectation=expectation,

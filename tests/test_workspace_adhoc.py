@@ -242,6 +242,92 @@ def test_adhoc_run_invalidates_stale_verification_receipt(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Reviewed exec escape hatch: git guards, exact-state lock, mutability modes
+# ---------------------------------------------------------------------------
+
+
+def test_read_only_git_command_runs_and_is_classified(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "git status")["workspace_id"]
+    result = env.service.workspace_run_adhoc(workspace_id, ["git", "status", "--porcelain=v2"])
+    assert result["returncode"] == 0
+    assert result["command_class"] == "read_only"
+    assert result["mutability"] == "read_only"
+    assert result["fingerprint_changed"] is False
+    assert result["read_only_violation"] is False
+
+
+def test_blocked_git_form_fails_before_execution(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "force push blocked")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(workspace_id, ["git", "push", "--force", "origin", "main"])
+    assert exc.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+    # No audit event is written because the guard rejects before the audited body runs.
+    assert _audit_events(env.root, "workspace_run_adhoc") == []
+
+
+def test_mutating_git_command_under_read_only_is_rejected(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "merge needs lock")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(workspace_id, ["git", "merge", "origin/main"])
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
+    assert "mutability='workspace'" in str(exc.value)
+
+
+def test_workspace_mutability_requires_exact_state_lock(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "missing lock")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(
+            workspace_id, ["git", "merge", "origin/main"], mutability="workspace"
+        )
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
+    assert "exact-state lock" in str(exc.value)
+
+
+def test_stale_expected_head_sha_fails_closed(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "stale head")["workspace_id"]
+    status = env.service.workspace_status(workspace_id)
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(
+            workspace_id,
+            ["git", "checkout", "-b", "ai/x"],
+            mutability="workspace",
+            expected_head_sha="0" * 40,
+            expected_fingerprint=status["workspace_fingerprint"],
+        )
+    assert exc.value.code is ErrorCode.STALE_STATE
+
+
+def test_mutating_git_command_runs_with_correct_lock(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",), require_verification=False)
+    workspace_id = env.service.workspace_create("demo", "locked mutation")["workspace_id"]
+    status = env.service.workspace_status(workspace_id)
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["git", "checkout", "-b", "ai/scratch"],
+        mutability="workspace",
+        expected_head_sha=status["head_sha"],
+        expected_fingerprint=status["workspace_fingerprint"],
+    )
+    assert result["returncode"] == 0
+    assert result["command_class"] == "mutating"
+    assert result["mutability"] == "workspace"
+    assert result["head_sha_before"] == status["head_sha"]
+
+
+def test_invalid_mutability_value_is_rejected(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "bad mutability")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(workspace_id, ["git", "status"], mutability="destroy")
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
+
+
+# ---------------------------------------------------------------------------
 # Audit and enrollment nudge
 # ---------------------------------------------------------------------------
 
