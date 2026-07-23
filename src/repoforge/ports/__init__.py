@@ -60,6 +60,7 @@ from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
+from .process_reaper import ProcessReaper, ReapOutcome
 from .provider_registry import ProviderRegistry
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
@@ -75,6 +76,7 @@ from .task_store import TaskStore
 from .ticket_graph import TicketGraphGateway
 from .ticket_project import TicketProjectGateway
 from .tunnel import TunnelClient, TunnelProfileStore
+from .worker_binding_store import WorkerBindingStore
 from .workflow_recording_store import (
     WorkflowRecordingPage,
     WorkflowRecordingStore,
@@ -148,8 +150,10 @@ __all__ = [
     "PrCheckWatchStore",
     "PreparedEnvironmentSession",
     "ProcessInspector",
+    "ProcessReaper",
     "ProviderRegistry",
     "PullRequestGateway",
+    "ReapOutcome",
     "RepositoryDiscovery",
     "RepositoryProbe",
     "ResolvedRepositoryRef",
@@ -164,6 +168,7 @@ __all__ = [
     "TicketProjectGateway",
     "TunnelClient",
     "TunnelProfileStore",
+    "WorkerBindingStore",
     "WorkflowRecordingPage",
     "WorkflowRecordingStore",
     "WorkflowReplayAdapter",

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -28,6 +29,7 @@ from ...domain.adhoc import (
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
 from ...domain.operation_task import OperationRetryability, OperationState
+from ...domain.operation_worker import OperationWorkerBinding
 from ...domain.policy import normalize_relative_path
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
@@ -443,12 +445,61 @@ class WorkspaceAdhocRunner:
         with self._cancel_tokens_lock:
             self._cancel_tokens.pop(operation_id, None)
 
+    def _persist_worker_binding(self, operation_id: str, child_pid: int) -> None:
+        """Durably record the spawned child so a later process can reap/cancel it.
+
+        A background command's subprocess uses ``start_new_session=True`` so its
+        pgid equals its own pid. Runs on the executor thread the moment the child
+        is bound; any failure here must never disturb the run itself.
+        """
+        bindings = self.ctx.worker_bindings
+        if bindings is None or child_pid <= 0:
+            return
+        reaper = self.ctx.reaper
+        child_token = reaper.read_start_token(child_pid) if reaper is not None else None
+        server_pid = os.getpid()
+        server_token = reaper.read_start_token(server_pid) if reaper is not None else None
+        with contextlib.suppress(Exception):
+            bindings.put(
+                OperationWorkerBinding(
+                    operation_id=operation_id,
+                    child_pid=child_pid,
+                    child_pgid=child_pid,
+                    child_start_token=child_token,
+                    server_pid=server_pid,
+                    server_start_token=server_token,
+                    created_at=self.ctx.clock.now_iso(),
+                )
+            )
+
+    def _delete_worker_binding(self, operation_id: str) -> None:
+        bindings = self.ctx.worker_bindings
+        if bindings is None:
+            return
+        with contextlib.suppress(Exception):
+            bindings.delete(operation_id)
+
     def request_live_cancel(self, operation_id: str) -> bool:
         with self._cancel_tokens_lock:
             token = self._cancel_tokens.get(operation_id)
-        if token is None:
+        if token is not None:
+            token.cancel()
+            return True
+        # Cross-process fallback: the in-memory token lives only in the process
+        # that launched the run. After a restart a cancel request lands in a
+        # different process, so signal the durably bound child group directly.
+        bindings = self.ctx.worker_bindings
+        reaper = self.ctx.reaper
+        if bindings is None or reaper is None:
             return False
-        token.cancel()
+        binding = None
+        with contextlib.suppress(Exception):
+            binding = bindings.get(operation_id)
+        if binding is None:
+            return False
+        with contextlib.suppress(Exception):
+            reaper.reap(binding)
+        self._delete_worker_binding(operation_id)
         return True
 
     def _start_background(
@@ -522,7 +573,9 @@ class WorkspaceAdhocRunner:
             raise
 
         operation_id = task.operation_id
-        cancel_token = CancellationToken()
+        cancel_token = CancellationToken(
+            on_bind=lambda child_pid: self._persist_worker_binding(operation_id, child_pid)
+        )
         self._register_cancel_token(operation_id, cancel_token)
 
         def finish_terminal(exc: Exception | None, result: WorkspaceRunAdhocResult | None) -> None:
@@ -597,6 +650,7 @@ class WorkspaceAdhocRunner:
                 self._unregister_cancel_token(operation_id)
                 lock_cm.__exit__(None, None, None)
             finish_terminal(failure, result)
+            self._delete_worker_binding(operation_id)
 
         scheduled = background_tasks.submit(operation_id, run)
         if not scheduled:

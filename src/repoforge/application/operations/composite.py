@@ -9,6 +9,7 @@ from datetime import datetime
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
+from ...ports.progress_reporter import NullProgressReporter, ProgressReporter
 from ..workspace.failure_intelligence import FailureEvidenceReadCommand, FailureIntelligenceService
 from .cancel import OperationCancelCommand, OperationCancellationRequester
 from .dto import OperationStatusView, OperationSummary, operation_summary
@@ -156,7 +157,23 @@ class OperationCoordinator:
         self.failure_evidence = failure_evidence
         self.request_live_cancel = request_live_cancel
 
-    def execute(self, command: OperationCommand) -> OperationResult:
+    @staticmethod
+    def _emit_progress(
+        reporter: ProgressReporter,
+        view: OperationSummary | OperationStatusView,
+    ) -> None:
+        reporter.report(
+            current=view.progress.current,
+            total=view.progress.total,
+            message=view.progress.message or view.phase,
+        )
+
+    def execute(
+        self,
+        command: OperationCommand,
+        *,
+        progress_reporter: ProgressReporter | None = None,
+    ) -> OperationResult:
         if command.action not in _ACTIONS:
             raise _invalid(f"Unknown operation action {command.action!r}")
         if command.action == "failure_evidence":
@@ -179,10 +196,15 @@ class OperationCoordinator:
             timeout_seconds = command.timeout_seconds if command.timeout_seconds is not None else 30
             if not 1 <= timeout_seconds <= 60:
                 raise _invalid("operation wait timeout_seconds must be between 1 and 60")
+            reporter: ProgressReporter = progress_reporter or NullProgressReporter()
             current = operation_summary(self.status.operations.status(command.operation_id))
             baseline = command.since_updated_at or current.updated_at
             terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
             changed_since = command.since_updated_at is not None and current.updated_at != baseline
+            last_reported_at = ""
+            if reporter.enabled:
+                self._emit_progress(reporter, current)
+                last_reported_at = current.updated_at
             deadline = time.monotonic() + timeout_seconds
             while not terminal and not changed_since:
                 remaining = deadline - time.monotonic()
@@ -192,6 +214,12 @@ class OperationCoordinator:
                 current = operation_summary(self.status.operations.status(command.operation_id))
                 terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
                 changed_since = current.updated_at != baseline
+                # Heartbeat the open request so a progress-capable client learns
+                # of forward motion without issuing another poll, and the
+                # connector's idle timeout is reset while work continues.
+                if reporter.enabled and current.updated_at != last_reported_at:
+                    self._emit_progress(reporter, current)
+                    last_reported_at = current.updated_at
             timed_out = not terminal and not changed_since
             return OperationResult(
                 summary=(
