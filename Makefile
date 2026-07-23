@@ -32,7 +32,7 @@ help:  # Show available commands without changing local or runtime state
 	  '  make test-affected     Run only test groups affected by changed paths (fails closed to full suite)' \
 	  '  make test-groups-check Verify every test file is mapped by tests/test-groups.toml' \
 	  '  make test-map          Regenerate the coverage map that powers precise test-affected selection' \
-	  '  make v2-gates          Run frozen Forge v2 release corpora' \
+	  '  make v2-gates          Run corpora and control-plane fault gates' \
 	  '  make check             Run the full dirty-tree production gate' \
 	  '  make production-check  Run the clean-tree production gate' \
 	  '  make tickets           Run deterministic ticket-governance tests' \
@@ -83,12 +83,15 @@ test-groups-check:  # Verify tests/test-groups.toml maps every test file to exac
 test-map:  # Regenerate tests/coverage-map.json (source-file -> covering-test-file) for precise test-affected selection
 	uv run --extra dev python scripts/build_coverage_map.py
 
-v2-gates:  # Execute frozen mutation, patch, bug-routing, read, and provider-recall corpora
+v2-gates:  # Execute frozen corpora and production-composition control-plane fault gates
 	@set -eu; \
 		report_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/repoforge-v2-gates.XXXXXX"); \
 		trap 'rm -rf "$$report_dir"' EXIT INT TERM; \
 		uv run --extra dev python scripts/run_v2_release_gates.py \
 			--executor v2_release_reference:execute_case \
+			--report-dir "$$report_dir"; \
+		uv run --extra dev python scripts/run_control_plane_gates.py \
+			--manifest tests/fixtures/v2_corpora/control_plane_faults.json \
 			--report-dir "$$report_dir"
 
 check:  # Authoritative full verification gate for dirty development workspaces
