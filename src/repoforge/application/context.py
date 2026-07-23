@@ -41,10 +41,12 @@ from ..ports import (
     OperationGate,
     OperationResultStore,
     OperationStore,
+    ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
     TicketGraphGateway,
     TicketProjectGateway,
+    WorkerBindingStore,
     WorkspaceStore,
 )
 from .dto import to_data
@@ -251,6 +253,8 @@ class ApplicationContext:
     execution_receipts: ExecutionReceiptStore | None = None
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
+    worker_bindings: WorkerBindingStore | None = None
+    reaper: ProcessReaper | None = None
 
     def now_epoch(self) -> float:
         try:

@@ -59,6 +59,7 @@ from .adapters.persistence import (
     JsonOperationStore,
     JsonPrCheckWatchStore,
     JsonTaskStore,
+    JsonWorkerBindingStore,
     JsonWorkflowRecordingStore,
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
@@ -108,6 +109,7 @@ from .adapters.runtime.local_runtime import (
 from .adapters.runtime.local_runtime import (
     write_runtime_state as write_runtime_state,
 )
+from .adapters.subprocess import OsProcessReaper as OsProcessReaper
 from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandExecutor
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
@@ -172,6 +174,7 @@ from .ports import (
     OperationStore,
     PrCheckWatchStore,
     ProcessInspector,
+    ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
     RepositoryDiscovery,
@@ -186,6 +189,7 @@ from .ports import (
     TicketProjectGateway,
     TunnelClient,
     TunnelProfileStore,
+    WorkerBindingStore,
     WorkflowRecordingStore,
     WorkspaceStore,
 )
@@ -237,6 +241,8 @@ class AdapterOverrides:
     execution_receipts: ExecutionReceiptStore | None = None
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
+    worker_bindings: WorkerBindingStore | None = None
+    reaper: ProcessReaper | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,6 +538,8 @@ def build_application(
         config.server.state_root, locks
     )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    worker_bindings = o.worker_bindings or JsonWorkerBindingStore(config.server.state_root, locks)
+    reaper = o.reaper or OsProcessReaper()
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
         locks,
@@ -589,12 +597,16 @@ def build_application(
         execution_receipts=execution_receipts,
         iteration_cache=iteration_cache,
         failure_evidence=failure_evidence,
+        worker_bindings=worker_bindings,
+        reaper=reaper,
     )
     operations = OperationManager(context)
     recover_operations(
         operations,
         now=clock.now_iso(),
         resumable_kinds=frozenset({"pr_check_watch"}),
+        worker_bindings=worker_bindings,
+        reaper=reaper,
     )
     pr_check_watches = PrCheckWatchCoordinator(
         context,
