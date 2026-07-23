@@ -124,6 +124,20 @@ class RepoSearchOutput(ToolResponse):
     source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
+    truncation_reason: (
+        Literal[
+            "search_deadline_exceeded",
+            "result_count_limit",
+            "result_transport_budget",
+            "source_limit",
+        ]
+        | None
+    ) = None
+    scanned_path_count: int = Field(default=0, ge=0)
+    candidate_path_count: int = Field(default=0, ge=0)
+    remaining_path_count: int = Field(default=0, ge=0)
+    completed_providers: tuple[str, ...] = Field(default=(), max_length=10)
+    recommended_scope: ShortText | None = None
 
 
 class RepoTreeInput(StrictModel):
@@ -874,6 +888,20 @@ class WorkspaceSearchOutput(ToolResponse):
     source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
+    truncation_reason: (
+        Literal[
+            "search_deadline_exceeded",
+            "result_count_limit",
+            "result_transport_budget",
+            "source_limit",
+        ]
+        | None
+    ) = None
+    scanned_path_count: int = Field(default=0, ge=0)
+    candidate_path_count: int = Field(default=0, ge=0)
+    remaining_path_count: int = Field(default=0, ge=0)
+    completed_providers: tuple[str, ...] = Field(default=(), max_length=10)
+    recommended_scope: ShortText | None = None
 
 
 class WorkspaceTreeInput(StrictModel):
