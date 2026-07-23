@@ -123,6 +123,7 @@ class WorkspaceCreator:
             metadata: dict[str, object] = {
                 "repository_policy_snapshot": repository_policy_snapshot(repo),
                 "workspace_base_sha": head,
+                "task_slug": c.task_slug,
             }
             if issue_ids:
                 metadata["issue_ids"] = list(issue_ids)

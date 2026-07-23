@@ -225,10 +225,15 @@ class WorkspaceAssessmentReader:
             status_result: Any | None = None
             try:
                 status_result = self._status.execute(WorkspaceStatusCommand(command.workspace_id))
+                stored_selector = tuple(
+                    str(item)
+                    for item in record.metadata.get("last_recreate_verify_selector", ())
+                    if isinstance(item, str)
+                )
                 selected_paths = (
                     command.impact_paths
                     if command.impact_paths
-                    else tuple(status_result.changed_paths)
+                    else tuple(status_result.changed_paths) or stored_selector
                 )
                 allowed_paths = [
                     assert_path_allowed(item, repo) for item in sorted(set(selected_paths))

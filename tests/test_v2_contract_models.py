@@ -185,7 +185,7 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
             "manage",
         },
         "repo_policy": {"preview", "apply"},
-        "workspace_refresh": {"preview", "apply"},
+        "workspace_refresh": {"preview", "apply", "recreate_from_latest_base"},
         "workspace_verify": {"plan", "auto", "diagnostic", "profile", "adhoc"},
         "workspace_pr": {"create_draft", "update", "comment", "watch", "reconcile"},
         "operation": {"get", "wait", "list", "cancel", "failure_evidence"},

@@ -9,7 +9,9 @@ from conftest import ForgeEnvironment, create_forge_environment, git
 
 from repoforge.adapters.filesystem.transaction import JournaledFileTransaction
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.mutate import CreateMutation
 from repoforge.application.workspace.refresh_v2 import WorkspaceRefreshV2
+from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import SecurityError, WorkspaceError
 from repoforge.domain.generated_paths import GeneratedPathRule, valid_regenerated_paths
 
@@ -150,6 +152,349 @@ def test_base_status_reports_remote_outage_without_losing_last_known_state(
     assert unavailable["remote_available"] is False
     assert unavailable["remote_base_sha"] == initial["remote_base_sha"]
     assert unavailable["remote_error_code"] == "REMOTE_BASE_UNAVAILABLE"
+
+
+def test_stale_base_preflight_is_visible_before_mutation_and_full_verification(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "freshness preflight",
+        idempotency_key="freshness-preflight-create-0001",
+    )
+    workspace_id = str(created["workspace_id"])
+    _push_upstream_file(
+        forge_env,
+        "upstream.txt",
+        "upstream change\n",
+        "advance base before mutation",
+    )
+    before = service.workspace_status(workspace_id)
+
+    mutation = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="planned.txt", content="planned\n")],
+        expected_workspace_fingerprint=str(before["workspace_fingerprint"]),
+        dry_run=True,
+    )
+
+    preflight = mutation["freshness_preflight"]
+    assert preflight["staleness"] == "remote_base_stale"
+    assert preflight["behind_base"] == 1
+    assert preflight["upstream_changed_paths"] == ["upstream.txt"]
+    assert preflight["overlap_paths"] == []
+    assert preflight["generated_overlap_paths"] == []
+    assert preflight["expected_evidence_invalidation"] == [
+        "last_verification",
+        "code_intelligence",
+        "diagnostic_receipts",
+        "failure_evidence",
+    ]
+    assert preflight["recommended_action"] == "recreate_from_latest_base"
+    assert preflight["verify_selector"] == ["upstream.txt"]
+    assert "before mutation" in preflight["warning"]
+
+    planned = service.workspace_verify(workspace_id, mode="plan")
+    base = planned["assessment"]["base_freshness"]["value"]
+    assert base["recommended_action"] == "recreate_from_latest_base"
+    assert base["expected_evidence_invalidation"] == preflight["expected_evidence_invalidation"]
+    assert "last_verification" in planned["staleness_warning"]
+    assert "recreate_from_latest_base" in planned["staleness_warning"]
+
+
+def test_freshness_preflight_classifies_generated_path_overlap(
+    forge_env: ForgeEnvironment,
+) -> None:
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    workspace_id = str(service.workspace_create("demo", "generated overlap")["workspace_id"])
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "local generated edit\n",
+        str(current["sha256"]),
+    )
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "upstream generated edit\n",
+        "change generated output upstream",
+    )
+
+    status = service.workspace_base_status(workspace_id)
+
+    assert status["overlap_paths"] == ["hello.txt"]
+    assert status["generated_overlap_paths"] == ["hello.txt"]
+    assert status["recommended_action"] == "refresh_preview"
+    assert "generated-path overlap" in status["preflight_warning"]
+
+
+def test_clean_unpublished_workspace_recreates_from_latest_base_and_replays(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "recreate clean workspace",
+        idempotency_key="recreate-clean-workspace-0001",
+        issue_ids=("239",),
+    )
+    workspace_id = str(created["workspace_id"])
+    original_path = str(created["path"])
+    original_branch = str(created["branch"])
+    before = service.workspace_status(workspace_id)
+    target_sha = _push_upstream_file(
+        forge_env,
+        "latest.txt",
+        "latest base\n",
+        "advance base for recreate",
+    )
+    preflight = service.workspace_base_status(workspace_id)
+    assert preflight["recreate_eligible"] is True
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    V2_TOOL_SPECS["workspace_refresh"].validate_success_output(preview)
+    assert preview["recreate_eligible"] is True
+    assert preview["recreate_blockers"] == []
+    recreated = service.workspace_refresh_v2(
+        workspace_id,
+        action="recreate_from_latest_base",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+    )
+
+    V2_TOOL_SPECS["workspace_refresh"].validate_success_output(recreated)
+    assert recreated["result"] == "recreated"
+    assert recreated["workspace_id"] == workspace_id
+    assert recreated["target_base_sha"] == target_sha
+    assert recreated["head_sha"] == target_sha
+    assert recreated["changed_paths"] == ["latest.txt"]
+    assert recreated["verify_selector"] == ["latest.txt"]
+    assert recreated["invalidated_receipts"] == [
+        "verification",
+        "assessment",
+        "architecture",
+        "execution_plan",
+    ]
+    assert recreated["transaction_id"]
+    after = service.workspace_status(workspace_id)
+    assert after["path"] == original_path
+    assert after["branch"] == original_branch
+    assert after["head_sha"] == target_sha
+    assert Path(original_path, "latest.txt").read_text(encoding="utf-8") == "latest base\n"
+    record = service.state.load(workspace_id)
+    assert record.metadata["workspace_base_sha"] == target_sha
+    assert record.metadata["last_recreate_target_sha"] == target_sha
+    planned = service.workspace_verify(workspace_id, mode="plan")
+    assert planned["assessment"]["changed_paths"] == ["latest.txt"]
+
+    replayed = service.workspace_refresh_v2(
+        workspace_id,
+        action="recreate_from_latest_base",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+    )
+    assert replayed["result"] == "recreated"
+    assert replayed["transaction_id"] == recreated["transaction_id"]
+    assert service.workspace_status(workspace_id)["head_sha"] == target_sha
+
+
+def test_recreate_resumes_after_crash_once_worktree_is_removed(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "recreate crash recovery",
+        idempotency_key="recreate-crash-recovery-0001",
+    )
+    workspace_id = str(created["workspace_id"])
+    before = service.workspace_status(workspace_id)
+    target_sha = _push_upstream_file(
+        forge_env,
+        "recovered.txt",
+        "recovered\n",
+        "advance base before recreate crash",
+    )
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_recreate_worktree_removed":
+            raise KeyboardInterrupt("simulated recreate process death")
+
+    service._refresh_v2 = WorkspaceRefreshV2(
+        service.application.context,
+        recreate_fault_injector=crash,
+    )
+    with pytest.raises(KeyboardInterrupt, match="recreate process death"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="recreate_from_latest_base",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+        )
+
+    journal = forge_env.root / "state" / "workspace-recreate-transactions" / workspace_id
+    assert journal.exists()
+    service._refresh_v2 = WorkspaceRefreshV2(service.application.context)
+    recovered = service.workspace_refresh_v2(
+        workspace_id,
+        action="recreate_from_latest_base",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+    )
+
+    assert recovered["result"] == "recreated"
+    assert recovered["head_sha"] == target_sha
+    assert not journal.exists()
+
+
+def test_recreate_refuses_dirty_workspace_without_changing_state(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "recreate dirty refusal",
+        idempotency_key="recreate-dirty-refusal-0001",
+    )
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "scratch.txt").write_text("must survive\n", encoding="utf-8")
+    before = service.workspace_status(workspace_id)
+    _push_upstream_file(
+        forge_env,
+        "latest.txt",
+        "latest\n",
+        "advance base before dirty refusal",
+    )
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+    assert preview["recreate_eligible"] is False
+    assert "working_tree_not_clean" in preview["recreate_blockers"]
+
+    with pytest.raises(WorkspaceError) as blocked:
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="recreate_from_latest_base",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+        )
+
+    assert blocked.value.unchanged_state == (
+        "The workspace worktree, local branch, registry record, remote branch, and pull request were not modified.",
+    )
+    assert workspace_path.joinpath("scratch.txt").read_text(encoding="utf-8") == "must survive\n"
+    assert service.workspace_status(workspace_id)["head_sha"] == before["head_sha"]
+
+
+def test_recreate_eligibility_matrix_refuses_preserved_or_external_state(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_ids: dict[str, str] = {}
+    for name in ("unique", "published", "pr", "external"):
+        created = service.workspace_create(
+            "demo",
+            f"recreate matrix {name}",
+            idempotency_key=f"recreate-matrix-{name}-0001",
+        )
+        workspace_ids[name] = str(created["workspace_id"])
+    unbound = service.workspace_create("demo", "recreate matrix unbound")
+    workspace_ids["unbound"] = str(unbound["workspace_id"])
+
+    _commit_workspace_hello(
+        forge_env,
+        workspace_ids["unique"],
+        "changed unique local commit\n",
+    )
+    published = service.state.load(workspace_ids["published"])
+    published.metadata["last_pushed_sha"] = service.workspace_status(workspace_ids["published"])[
+        "head_sha"
+    ]
+    service.state.save(published)
+    pr_bound = service.state.load(workspace_ids["pr"])
+    pr_bound.metadata["pr_number"] = 239
+    service.state.save(pr_bound)
+    external = service.state.load(workspace_ids["external"])
+    external.metadata["external_write_count"] = 1
+    service.state.save(external)
+
+    _push_upstream_file(
+        forge_env,
+        "matrix-upstream.txt",
+        "upstream\n",
+        "advance base for recreate eligibility matrix",
+    )
+    expected = {
+        "unique": "unique_commits_present",
+        "published": "published_branch",
+        "pr": "pull_request_bound",
+        "external": "external_writes_recorded",
+        "unbound": "task_binding_unavailable",
+    }
+
+    for name, blocker in expected.items():
+        workspace_id = workspace_ids[name]
+        before = service.workspace_status(workspace_id)
+        base = service.workspace_base_status(workspace_id)
+        assert base["recreate_eligible"] is False
+        assert blocker in base["recreate_blockers"]
+        preview = service.workspace_refresh_v2(
+            workspace_id,
+            action="preview",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+        )
+        assert preview["recreate_eligible"] is False
+        assert blocker in preview["recreate_blockers"]
+        with pytest.raises(WorkspaceError) as refused:
+            service.workspace_refresh_v2(
+                workspace_id,
+                action="recreate_from_latest_base",
+                expected_head_sha=str(before["head_sha"]),
+                expected_fingerprint=str(before["workspace_fingerprint"]),
+                plan_token=str(preview["plan_token"]),
+            )
+        assert blocker in refused.value.details["recreate_blockers"]
+        after = service.workspace_status(workspace_id)
+        assert after["head_sha"] == before["head_sha"]
+        assert after["workspace_fingerprint"] == before["workspace_fingerprint"]
 
 
 def test_preview_is_read_only_and_refresh_creates_a_controlled_merge_commit(

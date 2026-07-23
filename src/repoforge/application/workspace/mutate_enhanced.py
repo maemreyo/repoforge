@@ -40,11 +40,12 @@ from ..idempotency import IdempotencyEffectBoundary
 from ..outcome_receipts import execute_with_outcome_receipt
 from ..syntax_diagnostics import SyntaxDiagnosticAnalyzer
 from . import mutate as baseline_mutate
+from .base_status import collect_workspace_base_status, freshness_preflight_payload
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_OPERATIONS = 100
 _MAX_REPLACEMENTS = 20
-_RECEIPT_SCHEMA_VERSION = 2
+_RECEIPT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +150,7 @@ class WorkspaceMutateResult:
     change_metrics: dict[str, object]
     syntax_diagnostics: SyntaxDiagnostics
     transaction_id: str | None
+    freshness_preflight: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,6 +573,25 @@ class WorkspaceMutator:
                         "Workspace changed since it was inspected; refresh status before mutating"
                     )
                 head_sha = self.ctx.git.head_sha(workspace)
+                freshness_preflight = freshness_preflight_payload(
+                    collect_workspace_base_status(
+                        self.ctx,
+                        record,
+                        repo,
+                        workspace,
+                        fetch_remote=True,
+                    )
+                )
+                audit_details["freshness_recommended_action"] = freshness_preflight[
+                    "recommended_action"
+                ]
+                if freshness_preflight["refresh_required"]:
+                    self.ctx.record_metric(
+                        "workspace_mutate.preflight_refresh_warning",
+                        success=True,
+                        duration_ms=0.0,
+                        error_code=None,
+                    )
                 planner = _MutationPlanner(self.ctx, workspace, repo, head_sha)
                 diagnostics: list[MutationDiagnostic] = []
                 for index, operation in enumerate(operations):
@@ -652,6 +673,7 @@ class WorkspaceMutator:
                         self.ctx.git.change_metrics(workspace, repo),
                         syntax_diagnostics,
                         None,
+                        freshness_preflight,
                     )
                     self._persist_receipt_only(
                         engine,
@@ -677,6 +699,7 @@ class WorkspaceMutator:
                         self.ctx.git.change_metrics(workspace, repo),
                         syntax_diagnostics,
                         None,
+                        freshness_preflight,
                     )
                     self._persist_receipt_only(
                         engine,
@@ -722,6 +745,7 @@ class WorkspaceMutator:
                         self.ctx.git.change_metrics(workspace, repo),
                         syntax_diagnostics,
                         transaction_id,
+                        freshness_preflight,
                     )
                     return (
                         receipt_name,
@@ -772,6 +796,7 @@ class WorkspaceMutator:
                         self.ctx.git.change_metrics(workspace, repo),
                         syntax_diagnostics,
                         receipt.transaction_id,
+                        freshness_preflight,
                     )
                 record.last_verification = None
                 self.ctx.store.save(record)
@@ -867,7 +892,7 @@ class WorkspaceMutator:
         }:
             raise WorkspaceMutator._corrupt_receipt("receipt fields do not match schema version 1")
         schema_version = raw.get("schema_version")
-        if schema_version not in (1, _RECEIPT_SCHEMA_VERSION):
+        if schema_version not in (1, 2, _RECEIPT_SCHEMA_VERSION):
             raise WorkspaceMutator._corrupt_receipt("receipt schema version is unsupported")
         if raw.get("action") != "workspace_mutate" or raw.get("key_hash") != key_hash:
             raise WorkspaceMutator._corrupt_receipt("receipt identity does not match its key")
@@ -896,8 +921,10 @@ class WorkspaceMutator:
             "change_metrics",
             "transaction_id",
         }
-        if schema_version == _RECEIPT_SCHEMA_VERSION:
+        if schema_version >= 2:
             expected_fields.add("syntax_diagnostics")
+        if schema_version >= 3:
+            expected_fields.add("freshness_preflight")
         if not isinstance(result, dict) or set(result) != expected_fields:
             raise WorkspaceMutator._corrupt_receipt("receipt result fields are invalid")
         if result.get("workspace_id") != workspace_id:
@@ -990,7 +1017,7 @@ class WorkspaceMutator:
             )
             syntax_diagnostics = (
                 WorkspaceMutator._decode_syntax_diagnostics(result["syntax_diagnostics"])
-                if schema_version == _RECEIPT_SCHEMA_VERSION
+                if schema_version >= 2
                 else SyntaxDiagnostics(
                     state=SyntaxDiagnosticState.UNKNOWN,
                     parse_ok=None,
@@ -1012,6 +1039,11 @@ class WorkspaceMutator:
                 change_metrics=dict(raw_metrics),
                 syntax_diagnostics=syntax_diagnostics,
                 transaction_id=transaction_id,
+                freshness_preflight=(
+                    dict(result["freshness_preflight"])
+                    if schema_version >= 3 and isinstance(result.get("freshness_preflight"), dict)
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise WorkspaceMutator._corrupt_receipt(

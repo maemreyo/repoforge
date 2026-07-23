@@ -142,6 +142,13 @@ def _assessment_projection(assessment: Any) -> tuple[dict[str, object], dict[str
         "uncertainties": list(assessment.uncertainties),
         "refresh_required": refresh_required,
         "behind_base": behind_base,
+        "base_freshness": {
+            "status": assessment.base_freshness.status.value,
+            "coverage": assessment.base_freshness.coverage.value,
+            "value": dict(base),
+            "error_code": assessment.base_freshness.error_code,
+            "safe_fallback": assessment.base_freshness.safe_fallback,
+        },
         "provider": impact_evidence,
         "final_profile": recommendation.final_profile,
         "manual_review_required": recommendation.manual_review_required,
@@ -174,6 +181,16 @@ def _staleness_warning(assessment: Any) -> str | None:
     value = assessment.base_freshness.value
     if not bool(value.get("refresh_required", False)):
         return None
+    warning = value.get("preflight_warning")
+    recommended = value.get("recommended_action")
+    invalidated = value.get("expected_evidence_invalidation")
+    if isinstance(warning, str):
+        suffix = ""
+        if isinstance(recommended, str):
+            suffix += f" Recommended action: {recommended}."
+        if isinstance(invalidated, list) and invalidated:
+            suffix += " Expected invalidation: " + ", ".join(map(str, invalidated)) + "."
+        return warning + suffix
     behind = value.get("behind_base", 0)
     if isinstance(behind, int) and not isinstance(behind, bool) and behind > 0:
         return (
@@ -491,6 +508,11 @@ class WorkspaceVerifier:
 
         if command.artifact_output_path is not None:
             return self._persist_artifact(result, command.artifact_output_path)
+        if result.outcome == "passed" and command.mode in {"auto", "profile"}:
+            record = self.ctx.store.load(command.workspace_id)
+            if "last_recreate_verify_selector" in record.metadata:
+                record.metadata.pop("last_recreate_verify_selector", None)
+                self.ctx.store.save(record)
         return result
 
     def _from_diagnostic(

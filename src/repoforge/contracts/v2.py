@@ -718,6 +718,7 @@ class WorkspaceListOutput(ToolResponse):
 class RefreshAction(str, Enum):
     PREVIEW = "preview"
     APPLY = "apply"
+    RECREATE_FROM_LATEST_BASE = "recreate_from_latest_base"
 
 
 class RefreshResolution(StrictModel):
@@ -772,13 +773,13 @@ class WorkspaceRefreshOutput(ToolResponse):
     outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     action: RefreshAction
-    result: Literal["current", "preview", "applied", "conflict"]
+    result: Literal["current", "preview", "applied", "conflict", "recreated"]
     plan_hash: Sha256
     plan_token: str | None = Field(default=None, max_length=2048)
     target_base_sha: GitObjectId
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
-    prediction_scope: Literal["committed_head"] = "committed_head"
+    prediction_scope: Literal["committed_head", "latest_base_recreate"] = "committed_head"
     apply_blockers: tuple[str, ...] = Field(default=(), max_length=20)
     conflicts: tuple[RefreshConflictEvidence, ...] = Field(default=(), max_length=1100)
     conflict_scope: Literal["none", "semantic", "generated", "mixed"] = "none"
@@ -794,6 +795,15 @@ class WorkspaceRefreshOutput(ToolResponse):
     verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=1100)
     invalidated_receipts: tuple[str, ...] = Field(default=(), max_length=100)
     transaction_id: Identifier | None = None
+    recreate_eligible: bool = False
+    recreate_blockers: tuple[str, ...] = Field(default=(), max_length=20)
+    recommended_action: Literal[
+        "continue",
+        "restore_remote_connectivity",
+        "recreate_from_latest_base",
+        "refresh_preview",
+    ] = "refresh_preview"
+    previous_head_sha: GitObjectId | None = None
 
 
 class WorkspaceStatusSection(str, Enum):
@@ -1080,6 +1090,39 @@ class SyntaxDiagnosticsEvidence(StrictModel):
         return self
 
 
+class WorkspaceFreshnessPreflightEvidence(StrictModel):
+    staleness: Literal[
+        "current",
+        "unavailable_remote",
+        "local_base_stale",
+        "remote_base_stale",
+        "diverged",
+    ]
+    refresh_required: bool
+    workspace_base_sha: GitObjectId
+    latest_base_sha: GitObjectId
+    head_sha: GitObjectId
+    ahead_base: int = Field(ge=0)
+    behind_base: int = Field(ge=0)
+    upstream_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    workspace_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    generated_overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    expected_evidence_invalidation: tuple[ShortText, ...] = Field(default=(), max_length=20)
+    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    recommended_action: Literal[
+        "continue",
+        "restore_remote_connectivity",
+        "recreate_from_latest_base",
+        "refresh_preview",
+    ]
+    warning: ShortText | None = None
+    recreate_eligible: bool
+    recreate_blockers: tuple[ShortText, ...] = Field(default=(), max_length=20)
+    remote_available: bool
+    remote_error_code: str | None = Field(default=None, max_length=160)
+
+
 class WorkspaceMutateOutput(ToolResponse):
     outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
@@ -1096,6 +1139,7 @@ class WorkspaceMutateOutput(ToolResponse):
     change_metrics: ChangeMetrics
     syntax_diagnostics: SyntaxDiagnosticsEvidence
     transaction_id: Identifier | None = None
+    freshness_preflight: WorkspaceFreshnessPreflightEvidence | None = None
 
 
 class VerifyMode(str, Enum):

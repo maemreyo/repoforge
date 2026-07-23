@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.policy import assert_path_allowed, normalize_relative_path, resolve_workspace_path
+from ...domain.workspace import is_commit_sha
 from ...ports.command import CommandExecutor, CommandResult
 from ...ports.git import (
     GitActorIdentity,
@@ -1702,9 +1703,14 @@ class GitCliRepository:
     def create_worktree(
         self, repo: RepositoryConfig, destination: Path, branch: str, base: str
     ) -> str:
-        if repo.fetch_before_workspace:
+        exact_commit = is_commit_sha(base)
+        if repo.fetch_before_workspace and not exact_commit:
             self._executor.run(["git", "fetch", "--prune", repo.remote, base], cwd=repo.path)
-        base_ref = base if (repo.read_only or not repo.publish_enabled) else f"{repo.remote}/{base}"
+        base_ref = (
+            base
+            if exact_commit or repo.read_only or not repo.publish_enabled
+            else f"{repo.remote}/{base}"
+        )
         self._executor.run(
             [
                 "git",
@@ -1731,6 +1737,21 @@ class GitCliRepository:
         if delete_branch:
             self._executor.run(["git", "branch", "-D", branch], cwd=repo.path)
         return delete_branch
+
+    def local_branch_exists(self, repo: RepositoryConfig, branch: str) -> bool:
+        result = self._executor.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=repo.path,
+            check=False,
+            output_limit=256,
+        )
+        return result.returncode == 0
+
+    def delete_local_branch(self, repo: RepositoryConfig, branch: str) -> bool:
+        if not self.local_branch_exists(repo, branch):
+            return False
+        self._executor.run(["git", "branch", "-D", branch], cwd=repo.path)
+        return True
 
     def commit(self, path: Path, message: str) -> tuple[str, str]:
         try:
