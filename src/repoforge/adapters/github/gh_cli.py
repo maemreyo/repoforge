@@ -22,6 +22,8 @@ _ACTIONS_JOB_URL = re.compile(
     r"([1-9][0-9]*)(?:/attempts/([1-9][0-9]*))?/job/([1-9][0-9]*)(?:[/?#].*)?$"
 )
 _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+_GITHUB_API_VERSION = "2022-11-28"
+_GITHUB_MEDIA_TYPE = "application/vnd.github+json"
 
 
 class GhCliGateway:
@@ -79,7 +81,17 @@ class GhCliGateway:
         output_limit: int,
         check: bool = True,
     ) -> CommandResult:
-        argv = ["gh", "api", "--method", method, endpoint]
+        argv = [
+            "gh",
+            "api",
+            "--method",
+            method,
+            "-H",
+            f"Accept: {_GITHUB_MEDIA_TYPE}",
+            "-H",
+            f"X-GitHub-Api-Version: {_GITHUB_API_VERSION}",
+            endpoint,
+        ]
         for key, field_value in fields:
             argv.extend(["-f", f"{key}={field_value}"])
         for key, typed_value in typed_fields:
@@ -288,6 +300,29 @@ class GhCliGateway:
         )
         return self._remote_issue(payload, "GitHub issue creation")
 
+    def update_issue(
+        self,
+        cwd: Path,
+        issue_number: int,
+        *,
+        title: str,
+        body: str,
+    ) -> RemoteIssue:
+        if issue_number <= 0 or not title or len(title) > 1_000 or not body or len(body) > 20_000:
+            raise ValueError("issue update exceeds the reviewed bounds")
+        slug = self._slug(cwd)
+        payload = self._object(
+            self._api_result(
+                cwd,
+                f"repos/{slug}/issues/{issue_number}",
+                method="PATCH",
+                fields=(("title", title), ("body", body)),
+                output_limit=200_000,
+            ),
+            "GitHub issue update",
+        )
+        return self._remote_issue(payload, "GitHub issue update")
+
     def _relationship_issues(
         self,
         cwd: Path,
@@ -340,12 +375,57 @@ class GhCliGateway:
         context: str,
     ) -> RemoteIssue:
         slug = self._slug(cwd)
+        try:
+            payload = self._object(
+                self._api_result(
+                    cwd,
+                    f"repos/{slug}/issues/{issue_number}/{suffix}",
+                    method="POST",
+                    typed_fields=((field_name, related_issue_id),),
+                    output_limit=200_000,
+                ),
+                context,
+            )
+            return self._remote_issue(payload, context)
+        except CommandError as exc:
+            message = str(exc)
+            if "422" not in message or "Target issue has already been taken" not in message:
+                raise
+            linked, truncated = self._relationship_issues(
+                cwd,
+                issue_number,
+                suffix,
+                max_issues=100,
+                context=f"{context} reconciliation",
+            )
+            confirmed = next(
+                (item for item in linked if item.database_id == related_issue_id),
+                None,
+            )
+            if confirmed is None:
+                if truncated:
+                    raise CommandError(
+                        f"{context} reconciliation is incomplete after duplicate-edge 422"
+                    ) from exc
+                raise
+            return confirmed
+
+    def _remove_relationship(
+        self,
+        cwd: Path,
+        issue_number: int,
+        endpoint_suffix: str,
+        *,
+        typed_fields: tuple[tuple[str, int], ...] = (),
+        context: str,
+    ) -> RemoteIssue:
+        slug = self._slug(cwd)
         payload = self._object(
             self._api_result(
                 cwd,
-                f"repos/{slug}/issues/{issue_number}/{suffix}",
-                method="POST",
-                typed_fields=((field_name, related_issue_id),),
+                f"repos/{slug}/issues/{issue_number}/{endpoint_suffix}",
+                method="DELETE",
+                typed_fields=typed_fields,
                 output_limit=200_000,
             ),
             context,
@@ -370,6 +450,33 @@ class GhCliGateway:
             "issue_id",
             blocker_issue_id,
             context="GitHub add blocked-by relationship",
+        )
+
+    def remove_sub_issue(
+        self,
+        cwd: Path,
+        issue_number: int,
+        sub_issue_id: int,
+    ) -> RemoteIssue:
+        return self._remove_relationship(
+            cwd,
+            issue_number,
+            "sub_issue",
+            typed_fields=(("sub_issue_id", sub_issue_id),),
+            context="GitHub remove sub-issue",
+        )
+
+    def remove_blocked_by(
+        self,
+        cwd: Path,
+        issue_number: int,
+        blocker_issue_id: int,
+    ) -> RemoteIssue:
+        return self._remove_relationship(
+            cwd,
+            issue_number,
+            f"dependencies/blocked_by/{blocker_issue_id}",
+            context="GitHub remove blocked-by relationship",
         )
 
     def _trim_pr(self, payload: dict[str, Any]) -> dict[str, Any]:

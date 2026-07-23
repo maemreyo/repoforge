@@ -161,6 +161,7 @@ class OperationManager:
         self,
         operation_id: str,
         *,
+        receipt_id: str | None = None,
         owner_id: str | None = None,
         lease_expires_at: str | None = None,
         now: str | None = None,
@@ -169,6 +170,7 @@ class OperationManager:
             operation_id,
             OperationState.RUNNING,
             now=now,
+            receipt_id=receipt_id,
             owner_id=owner_id,
             lease_expires_at=lease_expires_at,
         )
