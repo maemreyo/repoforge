@@ -19,6 +19,7 @@ from .issue_graph import (
     RepositoryIssueGraphReader,
     node_payload,
 )
+from .issue_graph_workflow import IssueGraphWorkflowResult, IssueGraphWorkflowService
 from .issue_mutation_v2 import (
     RepositoryIssueMutationCommand,
     RepositoryIssueMutatorV2,
@@ -229,6 +230,8 @@ class RepositoryIssueV2Command:
     link_type: str | None = None
     idempotency_key: str | None = None
     approval_request_id: str | None = None
+    manage: dict[str, object] | None = None
+    runtime_identity: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +264,7 @@ class RepositoryIssueV2Result:
     truncated: bool
     next_cursor: str | None
     mutation: IssueMutationEvidenceV2 | None = None
+    workflow: IssueGraphWorkflowResult | None = None
     capability_coverage: tuple[CapabilityCoverageV2, ...] = ()
     graph_unavailable_reason: str | None = None
 
@@ -608,19 +612,54 @@ class RepositoryPrReadV2:
 class RepositoryIssueV2:
     _READ_MODES = frozenset({"read", "spec", "graph", "next"})
     _WRITE_MODES = frozenset({"comment", "close", "reopen", "link", "create"})
-    _MODES = _READ_MODES | _WRITE_MODES
+    _MODES = _READ_MODES | _WRITE_MODES | {"manage"}
 
-    def __init__(self, ctx: ApplicationContext) -> None:
+    def __init__(self, ctx: ApplicationContext, workflow: IssueGraphWorkflowService) -> None:
         self.ctx = ctx
         self._spec = RepositoryIssueSpecReader(ctx)
         self._graph = RepositoryIssueGraphReader(ctx)
         self._next = RepositoryIssueNextReader(ctx)
         self._mutator = RepositoryIssueMutatorV2(ctx)
+        self._workflow = workflow
 
     def execute(self, command: RepositoryIssueV2Command) -> RepositoryIssueV2Result:
         if command.mode not in self._MODES:
             raise ValueError(
-                "mode must be one of: read, spec, graph, next, comment, close, reopen, link, create"
+                "mode must be one of: read, spec, graph, next, comment, close, reopen, link, create, manage"
+            )
+        if command.mode == "manage":
+            if command.manage is None:
+                raise ValueError("repo_issue manage requires a manage payload")
+            manage_action = str(command.manage.get("action", ""))
+            workflow = self.ctx.audited(
+                "repo_issue_manage",
+                {
+                    "repo_id": command.repo_id,
+                    "action": manage_action,
+                },
+                lambda: self._workflow.execute(
+                    command.repo_id,
+                    command.manage or {},
+                    command.runtime_identity,
+                ),
+                mutating=manage_action != "status",
+            )
+            return RepositoryIssueV2Result(
+                "ok",
+                f"Issue graph workflow {workflow.action}: {workflow.state}",
+                None,
+                command.repo_id,
+                command.mode,
+                "not_requested",
+                None,
+                (),
+                (),
+                (),
+                workflow.recovery_action,
+                False,
+                None,
+                None,
+                workflow,
             )
         if command.mode in self._WRITE_MODES:
             mutation = self._mutator.execute(
@@ -895,14 +934,21 @@ class RepositoryIssueV2:
 
 
 class RepositoryTaskContextV2:
-    _SECTIONS = frozenset({"repository", "status", "ticket", "workspace", "recent_commits"})
+    _SECTIONS = frozenset(
+        {"repository", "status", "ticket", "ticket_workflow", "workspace", "recent_commits"}
+    )
 
-    def __init__(self, ctx: ApplicationContext) -> None:
+    def __init__(
+        self,
+        ctx: ApplicationContext,
+        issue_graph_workflow: IssueGraphWorkflowService | None = None,
+    ) -> None:
         self.ctx = ctx
         self._status = RepositoryStatusReader(ctx)
         self._spec = RepositoryIssueSpecReader(ctx)
         self._workspace = WorkspaceStatusReader(ctx)
         self._recent = RecentCommitsReader(ctx)
+        self._issue_graph_workflow = issue_graph_workflow
 
     def execute(
         self,
@@ -990,6 +1036,43 @@ class RepositoryTaskContextV2:
                                 "drift_codes",
                                 _json_value([item.get("code") for item in spec.drift]),
                             ),
+                        ),
+                    )
+                )
+            elif name == "ticket_workflow":
+                if self._issue_graph_workflow is None:
+                    sections.append(ContextSectionV2(name, "unavailable", False, False, ()))
+                    continue
+                workflow = self._issue_graph_workflow.latest_facts(command.repo_id)
+                fact_keys = (
+                    "action",
+                    "state",
+                    "proposal_id",
+                    "proposal_hash",
+                    "plan_id",
+                    "effect_plan_hash",
+                    "approval_request_id",
+                    "approval_status",
+                    "publication_id",
+                    "publication_state",
+                    "operation_id",
+                    "receipt_id",
+                    "result_reference",
+                    "retry_at",
+                    "complete",
+                    "external_writes",
+                    "recovery_action",
+                )
+                sections.append(
+                    ContextSectionV2(
+                        name,
+                        "local",
+                        workflow.get("_evidence_complete") is True,
+                        workflow.get("_evidence_truncated") is True,
+                        tuple(
+                            Fact(key, _json_value(workflow[key]))
+                            for key in fact_keys
+                            if workflow.get(key) is not None
                         ),
                     )
                 )

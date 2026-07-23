@@ -8,6 +8,8 @@ from .json_failure_evidence_store import JsonFailureEvidenceStore
 from .json_github_read_cache import JsonGitHubReadCache
 from .json_hygiene_cache import JsonHygieneBaselineCache
 from .json_idempotency_store import JsonIdempotencyStore
+from .json_issue_graph_proposal_store import JsonIssueGraphProposalStore
+from .json_issue_graph_publication_store import JsonIssueGraphPublicationStore
 from .json_iteration_cache import JsonIterationCache
 from .json_onboarding_store import JsonOnboardingStore
 from .json_operation_result_store import JsonOperationResultStore
@@ -31,6 +33,8 @@ __all__ = [
     "JsonGitHubReadCache",
     "JsonHygieneBaselineCache",
     "JsonIdempotencyStore",
+    "JsonIssueGraphProposalStore",
+    "JsonIssueGraphPublicationStore",
     "JsonIterationCache",
     "JsonOnboardingStore",
     "JsonOperationResultStore",

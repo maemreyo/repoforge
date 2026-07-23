@@ -6,7 +6,7 @@ import hashlib
 import re
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 from ...domain.durable_state import StateEnvelope
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
@@ -17,6 +17,7 @@ from ...domain.execution_receipt import (
 )
 from ...domain.issue_graph_proposal import IssueGraphIdentity, managed_marker
 from ...domain.issue_graph_publication import (
+    ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION,
     IssueGraphPublication,
     IssueGraphPublicationPlan,
     IssueGraphPublicationStep,
@@ -26,10 +27,16 @@ from ...domain.issue_graph_publication import (
     PublicationStepKind,
     PublicationStepState,
     build_issue_graph_publication_plan,
+    is_issue_graph_bootstrap_body,
+    materialize_issue_graph_body,
     require_current_publication_identity,
     update_publication_step,
 )
-from ...domain.operation_task import OperationRetryability
+from ...domain.operation_task import (
+    TERMINAL_OPERATION_STATES,
+    OperationRetryability,
+    OperationState,
+)
 from ...domain.operations import hash_idempotency_key
 from ...ports.issue_graph_proposal_store import IssueGraphProposalStore
 from ...ports.issue_graph_publication_store import IssueGraphPublicationStore
@@ -81,6 +88,7 @@ class StepEffectResult:
     receipt_id: str
     result_reference: str
     external_writes: int
+    writes_this_call: int
     provider_identity: PublicationProviderIdentity
 
     def __post_init__(self) -> None:
@@ -93,6 +101,8 @@ class StepEffectResult:
             raise ValueError("publication step result issue number is invalid")
         if self.external_writes < 0 or self.external_writes > 20:
             raise ValueError("publication step result external writes are invalid")
+        if self.writes_this_call < 0 or self.writes_this_call > self.external_writes:
+            raise ValueError("publication step per-call writes are invalid")
 
 
 class PublicationStepExecutor(Protocol):
@@ -119,9 +129,8 @@ class _StepMutationOutcome:
 
 
 _MANAGED_MARKER = re.compile(r"<!-- repoforge-issue:([A-Za-z0-9][A-Za-z0-9._-]{0,79}) -->")
-_NODE_EFFECTS = frozenset(
+_UPDATE_EFFECTS = frozenset(
     {
-        PublicationStepKind.CREATE_NODE,
         PublicationStepKind.UPDATE_NODE,
         PublicationStepKind.ADOPT_NODE,
         PublicationStepKind.UPDATE_EPIC,
@@ -135,6 +144,35 @@ _RELATIONSHIP_EFFECTS = frozenset(
         PublicationStepKind.REMOVE_DEPENDENCY,
     }
 )
+_TERMINAL_EFFECT_RECEIPT_STATES = frozenset(
+    {
+        EffectReceiptState.APPLIED_VALIDATED,
+        EffectReceiptState.ROLLED_BACK,
+        EffectReceiptState.FAILED_BEFORE_EFFECT,
+        EffectReceiptState.FAILED_AFTER_EFFECT,
+        EffectReceiptState.UNKNOWN,
+    }
+)
+_EFFECT_EVIDENCE_STEP_STATES = frozenset(
+    {
+        PublicationStepState.APPLIED,
+        PublicationStepState.RECONCILED_EXISTING,
+        PublicationStepState.FAILED_AFTER_EFFECT,
+    }
+)
+
+
+def _publication_policy_operation(kind: PublicationStepKind) -> str:
+    if kind is PublicationStepKind.CREATE_NODE:
+        return "create"
+    if kind in _UPDATE_EFFECTS:
+        return "update"
+    if kind in _RELATIONSHIP_EFFECTS:
+        return "link"
+    raise RepoForgeError(
+        f"Unsupported issue graph publication step: {kind.value}",
+        code=ErrorCode.PROPOSAL_BLOCKED,
+    )
 
 
 class RepositoryIssueGraphStepExecutor:
@@ -209,24 +247,25 @@ class RepositoryIssueGraphStepExecutor:
         return _StepMutationOutcome(issue_number, external_writes, reconciled)
 
     def _policy_operation(self, step: IssueGraphPublicationStep) -> str:
-        if step.kind in _NODE_EFFECTS:
-            return "create"
-        if step.kind in _RELATIONSHIP_EFFECTS:
-            return "link"
-        raise RepoForgeError(
-            f"Unsupported issue graph publication step: {step.kind.value}",
-            code=ErrorCode.PROPOSAL_BLOCKED,
-        )
+        return _publication_policy_operation(step.kind)
 
     def _require_policy(self, step: IssueGraphPublicationStep) -> None:
         repo = self.ctx.repo(self.repo_id)
         if repo.read_only or not repo.publish_enabled:
             raise ConfigError("Repository policy does not allow issue graph publication")
         operation = self._policy_operation(step)
-        if not repo.issue_writes.allows(operation):
+        if not repo.issue_writes.allows_effect(operation):
             raise ConfigError(f"Issue graph publication requires repo_issue {operation} capability")
 
     def _request(
+        self,
+        step: IssueGraphPublicationStep,
+        mapping: dict[str, int],
+    ) -> dict[str, object]:
+        step = self._materialized_step(step, mapping)
+        return self._request_materialized(step, mapping)
+
+    def _request_materialized(
         self,
         step: IssueGraphPublicationStep,
         mapping: dict[str, int],
@@ -244,6 +283,27 @@ class RepositoryIssueGraphStepExecutor:
             "body": step.body,
             "provider_capability_hash": self.provider_identity().capability_hash,
         }
+
+    @staticmethod
+    def _materialized_step(
+        step: IssueGraphPublicationStep,
+        mapping: dict[str, int],
+    ) -> IssueGraphPublicationStep:
+        if step.kind is PublicationStepKind.CREATE_NODE:
+            if step.body is None or not is_issue_graph_bootstrap_body(step.body):
+                raise RepoForgeError(
+                    "V2 create-node step lacks the exact bootstrap-body invariant",
+                    code=ErrorCode.PROPOSAL_BLOCKED,
+                    details={"step_id": step.step_id, "client_ref": step.source_ref},
+                    safe_next_action="Create and approve a fresh issue graph publication plan.",
+                )
+            return step
+        if step.body is None:
+            return step
+        return replace(
+            step,
+            body=materialize_issue_graph_body(step.body, mapping, step_id=step.step_id),
+        )
 
     @staticmethod
     def _marker_refs(body: str) -> tuple[str, ...]:
@@ -420,6 +480,8 @@ class RepositoryIssueGraphStepExecutor:
         action: str,
         key: str,
         outcome: _StepMutationOutcome,
+        *,
+        writes_this_call: int,
     ) -> StepEffectResult:
         store = self.ctx.idempotency
         if store is None:
@@ -438,6 +500,7 @@ class RepositoryIssueGraphStepExecutor:
             receipt_id=record.receipt_id,
             result_reference=f"operation-result:{record.operation_id}",
             external_writes=outcome.external_writes,
+            writes_this_call=writes_this_call,
             provider_identity=self.provider_identity(),
         )
 
@@ -504,14 +567,15 @@ class RepositoryIssueGraphStepExecutor:
         mapping: dict[str, int],
     ) -> StepEffectResult:
         boundary = IdempotencyEffectBoundary()
-        request = self._request(step, mapping)
         try:
+            materialized_step = self._materialized_step(step, mapping)
+            request = self._request_materialized(materialized_step, mapping)
             outcome = execute_idempotent(
                 self.ctx,
                 "issue_graph_step",
                 step.step_id,
                 request,
-                lambda: self._mutate(step, mapping, boundary),
+                lambda: self._mutate(materialized_step, mapping, boundary),
                 details={
                     "repo_id": self.repo_id,
                     "issue_number": request.get("source_issue"),
@@ -521,7 +585,7 @@ class RepositoryIssueGraphStepExecutor:
                 serialize=asdict,
                 deserialize=self._deserialize_outcome,
                 effect_boundary=boundary,
-                reconcile_uncertain=lambda: self._authoritative_outcome(step, mapping),
+                reconcile_uncertain=lambda: self._authoritative_outcome(materialized_step, mapping),
             )
         except RepoForgeError as exc:
             failure = self._failure(
@@ -538,14 +602,20 @@ class RepositoryIssueGraphStepExecutor:
                     result_reference=failure.result_reference,
                 ) from exc
             raise failure from exc
-        return self._durable_result("issue_graph_step", step.step_id, outcome)
+        return self._durable_result(
+            "issue_graph_step",
+            step.step_id,
+            outcome,
+            writes_this_call=(0 if boundary.replayed else outcome.external_writes),
+        )
 
     def reconcile(
         self,
         step: IssueGraphPublicationStep,
         mapping: dict[str, int],
     ) -> StepEffectResult | None:
-        proof = self._authoritative_outcome(step, mapping)
+        materialized_step = self._materialized_step(step, mapping)
+        proof = self._authoritative_outcome(materialized_step, mapping)
         if proof is None:
             return None
         key = f"{step.step_id}:reconcile"
@@ -553,7 +623,7 @@ class RepositoryIssueGraphStepExecutor:
             self.ctx,
             "issue_graph_step_reconcile",
             key,
-            {**self._request(step, mapping), "reconciliation": True},
+            {**self._request_materialized(materialized_step, mapping), "reconciliation": True},
             lambda: replace(proof, reconciled=True, external_writes=0),
             details={
                 "repo_id": self.repo_id,
@@ -563,7 +633,12 @@ class RepositoryIssueGraphStepExecutor:
             serialize=asdict,
             deserialize=self._deserialize_outcome,
         )
-        return self._durable_result("issue_graph_step_reconcile", key, outcome)
+        return self._durable_result(
+            "issue_graph_step_reconcile",
+            key,
+            outcome,
+            writes_this_call=0,
+        )
 
 
 class IssueGraphPublicationCoordinator:
@@ -587,6 +662,25 @@ class IssueGraphPublicationCoordinator:
             f"Issue graph {kind} was not found: {identity}",
             code=ErrorCode.NOT_FOUND,
         )
+
+    def _require_plan_policy(self, plan: IssueGraphPublicationPlan) -> None:
+        policy = self.ctx.repo(plan.identity.repo_id).issue_writes
+        denied = tuple(
+            sorted(
+                {
+                    operation
+                    for operation in (
+                        _publication_policy_operation(step.kind) for step in plan.steps
+                    )
+                    if not policy.allows_effect(operation)
+                }
+            )
+        )
+        if denied:
+            raise ConfigError(
+                "Issue graph publication requires repo_issue " + ", ".join(denied) + " capability",
+                details={"denied_operations": list(denied)},
+            )
 
     def prepare(
         self,
@@ -655,6 +749,7 @@ class IssueGraphPublicationCoordinator:
                 code=ErrorCode.CONFIG_STALE,
                 safe_next_action="Create and approve a fresh publication plan.",
             )
+        self._require_plan_policy(plan)
         receipt_store = self.ctx.effect_receipts
         if receipt_store is None:
             raise RepoForgeError(
@@ -715,6 +810,7 @@ class IssueGraphPublicationCoordinator:
             created_at=accepted_at,
             updated_at=accepted_at,
             expires_at=plan.expires_at,
+            plan_format_version=plan.plan_format_version,
         )
         return self.publications.create_publication(publication).value
 
@@ -777,6 +873,165 @@ class IssueGraphPublicationCoordinator:
             provider_identity=result.provider_identity,
         )
 
+    def _reject_legacy_publication(
+        self,
+        envelope: StateEnvelope[IssueGraphPublication],
+        *,
+        now: str,
+    ) -> NoReturn:
+        publication = envelope.value
+        message = "Legacy issue graph publication replay is unsafe under plan format v2"
+        recovery = (
+            "Create and approve a fresh issue graph publication plan; "
+            "the legacy approved effect identity cannot be migrated safely."
+        )
+        receipt_store = self.ctx.effect_receipts
+        if receipt_store is None:
+            raise RepoForgeError(
+                "Durable publication receipt storage is not configured",
+                code=ErrorCode.CONFIG_INVALID,
+            )
+        receipt = receipt_store.read(publication.receipt_id)
+        if receipt is None:
+            raise RepoForgeError(
+                "Issue graph publication acceptance receipt is missing",
+                code=ErrorCode.STATE_CORRUPT,
+            )
+        effect_step = next(
+            (
+                step
+                for step in publication.steps
+                if step.state in _EFFECT_EVIDENCE_STEP_STATES or step.external_writes > 0
+            ),
+            None,
+        )
+        effect_evidence = (
+            publication.external_writes > 0
+            or effect_step is not None
+            or receipt.value.effect_boundary_crossed
+            or receipt.value.state
+            in {
+                EffectReceiptState.APPLIED_UNVALIDATED,
+                EffectReceiptState.APPLIED_VALIDATED,
+                EffectReceiptState.ROLLED_BACK,
+                EffectReceiptState.FAILED_AFTER_EFFECT,
+            }
+        )
+        result_reference = next(
+            (
+                value
+                for value in (
+                    effect_step.result_reference if effect_step is not None else None,
+                    publication.result_reference,
+                    receipt.value.result_reference,
+                )
+                if value is not None
+            ),
+            None,
+        )
+        terminal_receipt = receipt.value
+        if receipt.value.state not in _TERMINAL_EFFECT_RECEIPT_STATES:
+            target_state = EffectReceiptState.FAILED_BEFORE_EFFECT
+            target_result_reference = None
+            if effect_evidence:
+                target_state = (
+                    EffectReceiptState.FAILED_AFTER_EFFECT
+                    if receipt.value.state
+                    in {EffectReceiptState.APPLYING, EffectReceiptState.APPLIED_UNVALIDATED}
+                    and result_reference is not None
+                    else EffectReceiptState.UNKNOWN
+                )
+                target_result_reference = result_reference
+            terminal_receipt = transition_effect_receipt(
+                receipt.value,
+                target_state,
+                now=now,
+                result_reference=target_result_reference,
+                error_code=ErrorCode.WORKFLOW_REPLAY_UNSAFE.value,
+                error_message=message,
+                effect_boundary_crossed=effect_evidence,
+            )
+            receipt_store.save(terminal_receipt, expected_revision=receipt.revision)
+        manual_recovery = effect_evidence or terminal_receipt.state in {
+            EffectReceiptState.APPLIED_VALIDATED,
+            EffectReceiptState.ROLLED_BACK,
+            EffectReceiptState.FAILED_AFTER_EFFECT,
+            EffectReceiptState.UNKNOWN,
+        }
+        operation = self.operations.status(publication.operation_id)
+        if operation.state in TERMINAL_OPERATION_STATES:
+            recovery = (
+                "Inspect the preserved terminal operation and receipt evidence, then create and "
+                "approve a fresh issue graph publication plan."
+            )
+        else:
+            self.operations.fail(
+                publication.operation_id,
+                error_code=ErrorCode.WORKFLOW_REPLAY_UNSAFE.value,
+                error_message=message,
+                receipt_id=terminal_receipt.receipt_id,
+                retryability=(
+                    OperationRetryability.MANUAL if manual_recovery else OperationRetryability.NONE
+                ),
+                now=now,
+            )
+        terminal = replace(
+            publication,
+            state=PublicationState.MANUAL_RECOVERY_REQUIRED,
+            retry_at=None,
+            updated_at=now,
+        )
+        self.publications.save_publication(terminal, expected_revision=envelope.revision)
+        raise RepoForgeError(
+            message,
+            code=ErrorCode.WORKFLOW_REPLAY_UNSAFE,
+            retryable=False,
+            details={
+                "publication_id": publication.publication_id,
+                "plan_format_version": publication.plan_format_version,
+            },
+            safe_next_action=recovery,
+        )
+
+    def _reject_conflicting_success_evidence(
+        self,
+        envelope: StateEnvelope[IssueGraphPublication],
+        *,
+        message: str,
+        now: str,
+    ) -> NoReturn:
+        publication = envelope.value
+        operation = self.operations.status(publication.operation_id)
+        if operation.state not in TERMINAL_OPERATION_STATES:
+            self.operations.fail(
+                publication.operation_id,
+                error_code=ErrorCode.WORKFLOW_REPLAY_UNSAFE.value,
+                error_message=message,
+                receipt_id=publication.receipt_id,
+                retryability=OperationRetryability.MANUAL,
+                now=now,
+            )
+        manual = replace(
+            publication,
+            state=PublicationState.MANUAL_RECOVERY_REQUIRED,
+            retry_at=None,
+            updated_at=now,
+        )
+        self.publications.save_publication(manual, expected_revision=envelope.revision)
+        raise RepoForgeError(
+            message,
+            code=ErrorCode.WORKFLOW_REPLAY_UNSAFE,
+            retryable=False,
+            details={
+                "publication_id": publication.publication_id,
+                "operation_state": operation.state.value,
+            },
+            safe_next_action=(
+                "Inspect the preserved operation, receipt, and publication evidence; do not "
+                "rewrite terminal truth or retry with a new identity."
+            ),
+        )
+
     def resume(
         self,
         publication_id: str,
@@ -788,12 +1043,17 @@ class IssueGraphPublicationCoordinator:
         if envelope is None:
             raise self._not_found("publication", publication_id)
         publication = envelope.value
-        require_current_publication_identity(publication.identity, actual_identity)
         if publication.state in {
             PublicationState.SUCCEEDED,
             PublicationState.MANUAL_RECOVERY_REQUIRED,
         }:
             return publication
+        if publication.plan_format_version < ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION:
+            self._reject_legacy_publication(
+                envelope,
+                now=self._now(publication, now, self.ctx.clock.now_iso()),
+            )
+        require_current_publication_identity(publication.identity, actual_identity)
         if self.executor.provider_identity() != publication.provider_identity:
             raise RepoForgeError(
                 "Issue graph publication provider identity changed during execution",
@@ -815,6 +1075,8 @@ class IssueGraphPublicationCoordinator:
                 expected_revision=envelope.revision,
             )
         mapping = dict(envelope.value.node_mapping)
+        policy = self.ctx.repo(publication.identity.repo_id).issue_writes
+        writes_this_call = 0
         for index, step in enumerate(envelope.value.steps):
             if self._completed(step):
                 continue
@@ -870,6 +1132,10 @@ class IssueGraphPublicationCoordinator:
                             retryability=OperationRetryability.MANUAL,
                             now=current_time,
                         )
+                        return envelope.value
+                elif writes_this_call >= policy.max_writes_per_call:
+                    result = self.executor.reconcile(step, mapping)
+                    if result is None:
                         return envelope.value
                 else:
                     result = self.executor.apply(step, mapping)
@@ -928,6 +1194,7 @@ class IssueGraphPublicationCoordinator:
                 retry_at=None,
                 now=current_time,
             )
+            writes_this_call += result.writes_this_call
             completed = sum(1 for item in envelope.value.steps if self._completed(item))
             self.operations.progress(
                 envelope.value.operation_id,
@@ -974,37 +1241,78 @@ class IssueGraphPublicationCoordinator:
                 "Issue graph publication acceptance receipt is missing",
                 code=ErrorCode.STATE_CORRUPT,
             )
-        unvalidated = receipt_store.save(
-            transition_effect_receipt(
-                receipt.value,
-                EffectReceiptState.APPLIED_UNVALIDATED,
+        if receipt.value.state is EffectReceiptState.APPLYING:
+            receipt = receipt_store.save(
+                transition_effect_receipt(
+                    receipt.value,
+                    EffectReceiptState.APPLIED_UNVALIDATED,
+                    now=current_time,
+                    result_reference=result_reference,
+                    effect_boundary_crossed=publication.external_writes > 0,
+                    post_identity={
+                        "repo_id": publication.identity.repo_id,
+                        "publication_id": publication.publication_id,
+                        "provider_capability_hash": publication.provider_identity.capability_hash,
+                    },
+                ),
+                expected_revision=receipt.revision,
+            )
+        elif receipt.value.state not in {
+            EffectReceiptState.APPLIED_UNVALIDATED,
+            EffectReceiptState.APPLIED_VALIDATED,
+        }:
+            self._reject_conflicting_success_evidence(
+                envelope,
+                message=(
+                    "Issue graph publication success conflicts with terminal receipt state "
+                    f"{receipt.value.state.value}"
+                ),
                 now=current_time,
-                result_reference=result_reference,
-                effect_boundary_crossed=publication.external_writes > 0,
-                post_identity={
-                    "repo_id": publication.identity.repo_id,
-                    "publication_id": publication.publication_id,
-                    "provider_capability_hash": publication.provider_identity.capability_hash,
-                },
-            ),
-            expected_revision=receipt.revision,
-        )
-        validated = receipt_store.save(
-            transition_effect_receipt(
-                unvalidated.value,
-                EffectReceiptState.APPLIED_VALIDATED,
+            )
+        if receipt.value.result_reference != result_reference:
+            self._reject_conflicting_success_evidence(
+                envelope,
+                message="Issue graph publication receipt result identity conflicts with success",
                 now=current_time,
+            )
+        if receipt.value.state is EffectReceiptState.APPLIED_UNVALIDATED:
+            receipt = receipt_store.save(
+                transition_effect_receipt(
+                    receipt.value,
+                    EffectReceiptState.APPLIED_VALIDATED,
+                    now=current_time,
+                    result_reference=result_reference,
+                    effect_boundary_crossed=publication.external_writes > 0,
+                ),
+                expected_revision=receipt.revision,
+            )
+        operation = self.operations.status(publication.operation_id)
+        if operation.state is OperationState.SUCCEEDED:
+            if (
+                operation.result_reference != result_reference
+                or operation.receipt_id != receipt.value.receipt_id
+            ):
+                self._reject_conflicting_success_evidence(
+                    envelope,
+                    message="Issue graph publication operation success identity conflicts",
+                    now=current_time,
+                )
+        elif operation.state in TERMINAL_OPERATION_STATES:
+            self._reject_conflicting_success_evidence(
+                envelope,
+                message=(
+                    "Issue graph publication success conflicts with terminal operation state "
+                    f"{operation.state.value}"
+                ),
+                now=current_time,
+            )
+        else:
+            self.operations.succeed(
+                publication.operation_id,
                 result_reference=result_reference,
-                effect_boundary_crossed=publication.external_writes > 0,
-            ),
-            expected_revision=unvalidated.revision,
-        )
-        self.operations.succeed(
-            publication.operation_id,
-            result_reference=result_reference,
-            receipt_id=validated.value.receipt_id,
-            now=current_time,
-        )
+                receipt_id=receipt.value.receipt_id,
+                now=current_time,
+            )
         completed_publication = replace(
             publication,
             state=PublicationState.SUCCEEDED,

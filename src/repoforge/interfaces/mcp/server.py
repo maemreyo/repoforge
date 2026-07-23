@@ -17,7 +17,7 @@ from typing import Any, NoReturn, cast
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp.types import Tool as McpTool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ... import __version__
 from ...application.audit_context import bind_audit_attribution
@@ -49,6 +49,7 @@ from ...contracts.registry import (
     ToolContractSpec,
     contract_schema_digests,
 )
+from ...domain.client_capabilities import ClientFeature
 from ...domain.errors import (
     ConfigError,
     ErrorCode,
@@ -72,6 +73,12 @@ FORGE_V2_CONTRACT_VERSION = 2
 _PROCESS_START_IDENTITY = secrets.token_hex(32)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 _REPOSITORY_SELECTION_TTL_SECONDS = 900.0
+
+
+class _IssueGraphApprovalForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approve: bool
 
 
 def _compute_server_build_sha(
@@ -127,9 +134,12 @@ and do not poll repo_list again unless stale-selection recovery requires it or t
 public surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
 composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
 profiles, and workspace_pr for draft-PR lifecycle operations. Review workspace_diff after meaningful
-changes. Run final verification immediately before workspace_commit. Never merge, force-push, modify
-protected branches, request secrets, or bypass policy. Use config_inspect and runtime_logs_read for
-bounded operational evidence, and repo_policy for reviewed policy preview/apply flows.
+changes. Run final verification immediately before workspace_commit. For desired GitHub issue graphs,
+use repo_issue mode=manage with plan/apply/status/reconcile; never substitute raw GitHub mutation.
+Resume a disconnected or new session from repo_task_context section ticket_workflow. After apply, use
+operation get/wait or repo_issue manage status and reconcile; never blind-retry external writes. Never
+merge, force-push, modify protected branches, request secrets, or bypass policy. Use config_inspect and
+runtime_logs_read for bounded operational evidence, and repo_policy for reviewed policy preview/apply flows.
 """.strip()
 
 READ_ONLY = ToolAnnotations(
@@ -218,7 +228,7 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "repo_search": "Run bounded literal, regex, or filename search in one immutable repository snapshot.",
     "repo_tree": "List a bounded repository subtree with resumable cursor evidence.",
     "repo_history": "Read a commit, recent history, or a bounded comparison between two refs.",
-    "repo_issue": "Read, plan, graph, create, link, comment on, close, or reopen a GitHub issue through one typed tool.",
+    "repo_issue": "Read or mutate GitHub issues, or plan, approve, publish, inspect, and reconcile one governed issue graph through the existing typed tool.",
     "repo_pr_read": "Read bounded overview, files, checks, reviews, comments, or failure evidence for one pull request.",
     "repo_list": (
         "List configured repositories and optionally include reviewed capability detail. Pass "
@@ -578,7 +588,12 @@ def _mutation_operations(raw: list[dict[str, Any]]) -> list[WorkspaceMutation]:
     return operations
 
 
-def _dispatch_kwargs(tool_name: str, model: BaseModel) -> dict[str, Any]:
+def _dispatch_kwargs(
+    tool_name: str,
+    model: BaseModel,
+    *,
+    runtime_identity: RuntimeContractIdentity | None = None,
+) -> dict[str, Any]:
     kwargs = model.model_dump(mode="json")
     if tool_name in {"repo_read", "workspace_read"}:
         kwargs["files"] = _read_requests(kwargs["files"])
@@ -592,6 +607,10 @@ def _dispatch_kwargs(tool_name: str, model: BaseModel) -> dict[str, Any]:
         kwargs["issue_ids"] = tuple(kwargs["issue_ids"])
     if tool_name == "workspace_mutate":
         kwargs["operations"] = _mutation_operations(kwargs["operations"])
+    if tool_name == "repo_issue" and kwargs.get("mode") == "manage":
+        if runtime_identity is None:
+            raise ConfigError("Current runtime contract identity is unavailable")
+        kwargs["runtime_identity"] = runtime_identity.as_dict()
     return kwargs
 
 
@@ -803,6 +822,59 @@ class ForgeV2FastMCP(FastMCP[None]):
             for name in V2_TOOL_NAMES
         ]
 
+    async def _maybe_elicit_issue_graph_approval(
+        self,
+        tool_name: str,
+        result: dict[str, Any],
+    ) -> None:
+        if tool_name != "repo_issue":
+            return
+        workflow = result.get("workflow")
+        if (
+            not isinstance(workflow, dict)
+            or workflow.get("state") != "pending_approval"
+            or workflow.get("approval_status") != "pending"
+        ):
+            return
+        policy = capability_policy_from_context(self.get_context())
+        if not policy.may_emit(ClientFeature.ELICITATION_FORM):
+            return
+        approval_request_id = workflow.get("approval_request_id")
+        proposal_hash = workflow.get("proposal_hash")
+        effect_plan_hash = workflow.get("effect_plan_hash")
+        if not all(
+            isinstance(item, str) and item
+            for item in (
+                approval_request_id,
+                proposal_hash,
+                effect_plan_hash,
+            )
+        ):
+            raise ConfigError("Pending issue graph approval evidence is incomplete")
+        elicited = await self.get_context().elicit(
+            (
+                f"Approve exact RepoForge issue graph publication request {approval_request_id}? "
+                f"proposal_hash={proposal_hash}; effect_plan_hash={effect_plan_hash}. "
+                "This approval permits the separately-invoked apply action to write GitHub issues "
+                "and relationships; it does not apply changes in this call."
+            ),
+            _IssueGraphApprovalForm,
+        )
+        if elicited.action != "accept" or elicited.data is None or not elicited.data.approve:
+            return
+        self._service_boundary.call(
+            "repo_issue_manage_approval",
+            approval_request_id=approval_request_id,
+            actor="mcp-elicitation",
+            reason="Operator accepted the exact issue graph publication request via MCP Elicitation.",
+        )
+        workflow["approval_status"] = "accepted"
+        workflow["state"] = "planned"
+        workflow["recovery_action"] = (
+            "Call repo_issue manage apply with the exact returned proposal, plan, hashes, and "
+            "approval_request_id."
+        )
+
     def _dispatch(self, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         if tool_name in _ADMIN_METHODS:
             return self._admin_boundary.call(_ADMIN_METHODS[tool_name], **kwargs)
@@ -866,7 +938,11 @@ class ForgeV2FastMCP(FastMCP[None]):
         with self._service_boundary.bind_request_service() as service:
             started = time.perf_counter()
             try:
-                dispatch_kwargs = _dispatch_kwargs(name, validated_input)
+                dispatch_kwargs = _dispatch_kwargs(
+                    name,
+                    validated_input,
+                    runtime_identity=request_identity,
+                )
                 with bind_audit_attribution(
                     origin="model",
                     session_hash=self._audit_session_hash(),
@@ -878,6 +954,7 @@ class ForgeV2FastMCP(FastMCP[None]):
                         service=service,
                     )
                     raw = self._dispatch(name, dispatch_kwargs)
+                    await self._maybe_elicit_issue_graph_approval(name, raw)
                     if name == "repo_list":
                         selection_pin = self._pin_repository_selection(
                             raw,

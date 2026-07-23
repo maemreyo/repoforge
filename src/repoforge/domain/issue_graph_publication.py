@@ -15,10 +15,13 @@ from .issue_graph_proposal import (
     IssueEdgeKind,
     IssueGraphIdentity,
     IssueGraphProposal,
+    managed_marker,
     proposal_stale_fields,
 )
 
 ISSUE_GRAPH_PUBLICATION_SCHEMA_VERSION = 1
+ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION = 2
+_BOOTSTRAP_SENTINEL = "<!-- repoforge-publication-bootstrap:v2 -->"
 _SAFE_HASH = re.compile(r"^[a-f0-9]{64}$")
 _PLAN_ID = re.compile(r"^igplan-[a-f0-9]{24}$")
 _PUBLICATION_ID = re.compile(r"^igpub-[a-f0-9]{24}$")
@@ -26,6 +29,10 @@ _STEP_ID = re.compile(r"^igstep-[a-f0-9]{24}$")
 _OPERATION_ID = re.compile(r"^op-[a-f0-9]{24}$")
 _RECEIPT_ID = re.compile(r"^receipt-[a-f0-9]{24}$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_GRAPH_INTENT_HEADING = "## RepoForge graph intent"
+_MANAGED_REFERENCE = re.compile(r"`([A-Za-z0-9][A-Za-z0-9._-]{0,79})`")
+_MANAGED_REFERENCE_LINE = re.compile(r"^(Parent|Blocked by|Relates|Supersedes): ")
+_CHECKLIST_REFERENCE = re.compile(r"^(- \[ \] )([A-Za-z0-9][A-Za-z0-9._-]{0,79})( — .*)$")
 
 
 def _canonical_json(value: object) -> str:
@@ -52,6 +59,72 @@ def next_publication_timestamp(previous: str, candidate: str) -> str:
     if candidate_dt <= previous_dt:
         return (previous_dt + timedelta(microseconds=1)).isoformat()
     return candidate_dt.isoformat()
+
+
+def materialize_issue_graph_body(
+    body: str,
+    mapping: dict[str, int],
+    *,
+    step_id: str | None = None,
+) -> str:
+    """Render symbolic refs in RepoForge-owned body sections to GitHub numbers."""
+    lines = body.splitlines(keepends=True)
+    managed_from = max(
+        (index for index, line in enumerate(lines) if line.rstrip("\r\n") == _GRAPH_INTENT_HEADING),
+        default=len(lines),
+    )
+    unresolved: set[str] = set()
+    rendered: list[str] = []
+
+    def number(ref: str) -> str:
+        value = mapping.get(ref)
+        if value is None or isinstance(value, bool) or value <= 0:
+            unresolved.add(ref)
+            return ref
+        return f"#{value}"
+
+    for index, line in enumerate(lines):
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        if index < managed_from:
+            rendered.append(line)
+            continue
+        if _MANAGED_REFERENCE_LINE.match(content):
+            content = _MANAGED_REFERENCE.sub(lambda match: number(match.group(1)), content)
+        else:
+            checklist = _CHECKLIST_REFERENCE.match(content)
+            if checklist is not None:
+                content = checklist.group(1) + number(checklist.group(2)) + checklist.group(3)
+        rendered.append(content + ending)
+
+    if unresolved:
+        details: dict[str, object] = {"unresolved_refs": sorted(unresolved)}
+        if step_id is not None:
+            details["step_id"] = step_id
+        raise RepoForgeError(
+            "Issue graph body contains unresolved publication references",
+            code=ErrorCode.PROPOSAL_BLOCKED,
+            details=details,
+            safe_next_action="Resume publication after the referenced issues have durable number mappings.",
+        )
+    return "".join(rendered)
+
+
+def issue_graph_bootstrap_body(client_ref: str, user_body: str) -> str:
+    """Build a v2 create body that contains no managed graph references."""
+    return (
+        managed_marker(client_ref)
+        + "\n\n"
+        + user_body.rstrip()
+        + "\n\n"
+        + _BOOTSTRAP_SENTINEL
+        + "\n"
+    )
+
+
+def is_issue_graph_bootstrap_body(body: str) -> bool:
+    """Return whether a create body carries the exact terminal v2 sentinel."""
+    return body.rstrip().endswith(_BOOTSTRAP_SENTINEL)
 
 
 class PublicationStepKind(str, Enum):
@@ -205,6 +278,7 @@ class IssueGraphPublicationPlan:
     created_at: str
     expires_at: str
     schema_version: int = ISSUE_GRAPH_PUBLICATION_SCHEMA_VERSION
+    plan_format_version: int = ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION
 
     def __post_init__(self) -> None:
         if _PLAN_ID.fullmatch(self.plan_id) is None:
@@ -219,6 +293,8 @@ class IssueGraphPublicationPlan:
             raise ValueError("publication plan expiry must follow creation")
         if self.schema_version != ISSUE_GRAPH_PUBLICATION_SCHEMA_VERSION:
             raise ValueError("publication plan schema is unsupported")
+        if self.plan_format_version not in {1, ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION}:
+            raise ValueError("publication plan format is unsupported")
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +318,7 @@ class IssueGraphPublication:
     updated_at: str
     expires_at: str
     schema_version: int = ISSUE_GRAPH_PUBLICATION_SCHEMA_VERSION
+    plan_format_version: int = ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION
 
     def __post_init__(self) -> None:
         if _PUBLICATION_ID.fullmatch(self.publication_id) is None:
@@ -265,6 +342,8 @@ class IssueGraphPublication:
             raise ValueError("publication updated_at precedes creation")
         if self.schema_version != ISSUE_GRAPH_PUBLICATION_SCHEMA_VERSION:
             raise ValueError("publication schema is unsupported")
+        if self.plan_format_version not in {1, ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION}:
+            raise ValueError("publication plan format is unsupported")
 
 
 def _step_payload(step: IssueGraphPublicationStep, *, include_result: bool) -> dict[str, object]:
@@ -428,6 +507,10 @@ def build_issue_graph_publication_plan(
         item.split(":", 1)[1] for item in proposal.publication_order if item.startswith("node:")
     )
     initial_mapping: list[tuple[str, int]] = []
+
+    # Phase A establishes every missing provider identity without publishing
+    # symbolic graph metadata. The complete managed bodies are applied only
+    # after every client_ref has a durable GitHub number mapping.
     for ref in node_order:
         node = by_ref[ref]
         mapped_live = live_by_ref.get(ref)
@@ -436,19 +519,31 @@ def build_issue_graph_publication_plan(
                 PublicationStepKind.CREATE_NODE,
                 ref,
                 title=node.title,
-                body=rendered[ref],
+                body=issue_graph_bootstrap_body(ref, node.body),
             )
             continue
         initial_mapping.append((ref, mapped_live.issue_number))
+
+    # Phase B publishes full, materializable bodies for non-root nodes. The
+    # root remains last so its delivery checklist observes all final mappings.
+    for ref in node_order:
+        if ref == proposal.draft.root_ref:
+            continue
+        node = by_ref[ref]
+        mapped_live = live_by_ref.get(ref)
         add(
-            PublicationStepKind.UPDATE_NODE
-            if mapped_live.managed
-            else PublicationStepKind.ADOPT_NODE,
+            (
+                PublicationStepKind.ADOPT_NODE
+                if mapped_live is not None and not mapped_live.managed
+                else PublicationStepKind.UPDATE_NODE
+            ),
             ref,
             title=node.title,
             body=rendered[ref],
-            expected_issue_number=mapped_live.issue_number,
+            expected_issue_number=(mapped_live.issue_number if mapped_live is not None else None),
         )
+
+    root_live = live_by_ref.get(proposal.draft.root_ref)
 
     current_parents = live_graph.parent_map()
     for node in sorted(proposal.draft.nodes, key=lambda item: item.client_ref):
@@ -489,15 +584,19 @@ def build_issue_graph_publication_plan(
                 target_ref=target_ref,
             )
 
-    root_live = live_by_ref.get(proposal.draft.root_ref)
     add(
-        PublicationStepKind.UPDATE_EPIC,
+        (
+            PublicationStepKind.ADOPT_NODE
+            if root_live is not None and not root_live.managed
+            else PublicationStepKind.UPDATE_EPIC
+        ),
         proposal.draft.root_ref,
         title=by_ref[proposal.draft.root_ref].title,
         body=rendered[proposal.draft.root_ref],
         expected_issue_number=(root_live.issue_number if root_live is not None else None),
     )
     effect_payload = {
+        "plan_format_version": ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION,
         "proposal_id": proposal.proposal_id,
         "proposal_hash": proposal.proposal_hash,
         "identity": actual_identity.payload(),
@@ -539,6 +638,7 @@ def publication_plan_payload(plan: IssueGraphPublicationPlan) -> dict[str, objec
         "created_at": plan.created_at,
         "expires_at": plan.expires_at,
         "schema_version": plan.schema_version,
+        "plan_format_version": plan.plan_format_version,
     }
 
 
@@ -563,6 +663,7 @@ def publication_payload(publication: IssueGraphPublication) -> dict[str, object]
         "updated_at": publication.updated_at,
         "expires_at": publication.expires_at,
         "schema_version": publication.schema_version,
+        "plan_format_version": publication.plan_format_version,
     }
 
 
@@ -636,6 +737,7 @@ def publication_plan_from_payload(payload: dict[str, Any]) -> IssueGraphPublicat
         created_at=str(payload["created_at"]),
         expires_at=str(payload["expires_at"]),
         schema_version=int(payload["schema_version"]),
+        plan_format_version=int(payload.get("plan_format_version", 1)),
     )
 
 
@@ -664,6 +766,7 @@ def publication_from_payload(payload: dict[str, Any]) -> IssueGraphPublication:
         updated_at=str(payload["updated_at"]),
         expires_at=str(payload["expires_at"]),
         schema_version=int(payload["schema_version"]),
+        plan_format_version=int(payload.get("plan_format_version", 1)),
     )
 
 
@@ -692,6 +795,7 @@ def update_publication_step(
 
 
 __all__ = [
+    "ISSUE_GRAPH_PUBLICATION_PLAN_FORMAT_VERSION",
     "ISSUE_GRAPH_PUBLICATION_SCHEMA_VERSION",
     "IssueGraphPublication",
     "IssueGraphPublicationPlan",
@@ -703,6 +807,9 @@ __all__ = [
     "PublicationStepKind",
     "PublicationStepState",
     "build_issue_graph_publication_plan",
+    "is_issue_graph_bootstrap_body",
+    "issue_graph_bootstrap_body",
+    "materialize_issue_graph_body",
     "publication_from_payload",
     "publication_payload",
     "publication_plan_from_payload",

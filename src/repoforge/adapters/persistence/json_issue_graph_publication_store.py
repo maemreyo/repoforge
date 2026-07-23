@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ...domain.durable_state import Revision, SchemaVersion, StateCodec, StateEnvelope
+from ...domain.durable_state import Revision, SchemaVersion, StateCodec, StateEnvelope, StatePage
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.issue_graph_publication import (
     ISSUE_GRAPH_PUBLICATION_SCHEMA_VERSION,
@@ -87,28 +87,34 @@ class JsonIssueGraphPublicationStore(IssueGraphPublicationStore):
     def create_plan(
         self, plan: IssueGraphPublicationPlan
     ) -> StateEnvelope[IssueGraphPublicationPlan]:
-        existing = self._plans.read(plan.plan_id)
-        if existing is not None:
-            if existing.value == plan:
-                return existing
-            raise self._immutable_collision("publication plan")
-        return self._plans.create(plan.plan_id, plan)
+        try:
+            return self._plans.create_or_read_equal(plan.plan_id, plan)
+        except RepoForgeError as exc:
+            if exc.code is ErrorCode.ALREADY_EXISTS:
+                raise self._immutable_collision("publication plan") from exc
+            raise
 
     def read_plan(self, plan_id: str) -> StateEnvelope[IssueGraphPublicationPlan] | None:
         return self._plans.read(plan_id)
 
+    def list_plans(self, *, max_records: int = 200) -> StatePage[IssueGraphPublicationPlan]:
+        return self._plans.list_records(max_records=max_records)
+
     def create_publication(
         self, publication: IssueGraphPublication
     ) -> StateEnvelope[IssueGraphPublication]:
-        existing = self._publications.read(publication.publication_id)
-        if existing is not None:
-            if existing.value == publication:
-                return existing
-            raise self._immutable_collision("publication")
-        return self._publications.create(publication.publication_id, publication)
+        try:
+            return self._publications.create_or_read_equal(publication.publication_id, publication)
+        except RepoForgeError as exc:
+            if exc.code is ErrorCode.ALREADY_EXISTS:
+                raise self._immutable_collision("publication") from exc
+            raise
 
     def read_publication(self, publication_id: str) -> StateEnvelope[IssueGraphPublication] | None:
         return self._publications.read(publication_id)
+
+    def list_publications(self, *, max_records: int = 200) -> StatePage[IssueGraphPublication]:
+        return self._publications.list_records(max_records=max_records)
 
     def save_publication(
         self,

@@ -18,6 +18,7 @@ from repoforge.domain.issue_graph_publication import (
     IssueGraphPublicationStep,
     PublicationStepKind,
     PublicationStepState,
+    issue_graph_bootstrap_body,
 )
 from repoforge.domain.issue_writes import IssueWritePolicy
 from repoforge.domain.operation_task import OperationState
@@ -168,7 +169,7 @@ def _executor(
     repo = replace(
         original.config.repositories["demo"],
         issue_writes=IssueWritePolicy(
-            enabled_ops=("link", "create"),
+            enabled_ops=("link", "create", "update"),
             max_writes_per_call=2,
             max_writes_per_window=20,
             window_seconds=60,
@@ -195,9 +196,37 @@ def _create_step() -> IssueGraphPublicationStep:
         source_ref=ref,
         target_ref=None,
         title="Task 300",
-        body=f"{managed_marker(ref)}\n\n## Objective\n\nCreate it.\n",
+        body=issue_graph_bootstrap_body(ref, "## Objective\n\nCreate it.\n"),
         expected_issue_number=None,
     )
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_operation"),
+    (
+        (PublicationStepKind.CREATE_NODE, "create"),
+        (PublicationStepKind.UPDATE_NODE, "update"),
+        (PublicationStepKind.ADOPT_NODE, "update"),
+        (PublicationStepKind.UPDATE_EPIC, "update"),
+        (PublicationStepKind.ADD_SUB_ISSUE, "link"),
+        (PublicationStepKind.REMOVE_SUB_ISSUE, "link"),
+        (PublicationStepKind.ADD_DEPENDENCY, "link"),
+        (PublicationStepKind.REMOVE_DEPENDENCY, "link"),
+    ),
+)
+def test_publication_step_kind_maps_to_exact_policy_operation(
+    forge_env: ForgeEnvironment,
+    kind: PublicationStepKind,
+    expected_operation: str,
+) -> None:
+    executor = _executor(forge_env, MemoryIssueGateway())
+    step = replace(
+        _create_step(),
+        kind=kind,
+        target_ref="target" if kind.value.startswith(("add_", "remove_")) else None,
+    )
+
+    assert executor._policy_operation(step) == expected_operation
 
 
 def test_production_step_executor_is_idempotent_and_returns_durable_receipt(
@@ -210,7 +239,9 @@ def test_production_step_executor_is_idempotent_and_returns_durable_receipt(
     first = executor.apply(step, {})
     replay = executor.apply(step, {})
 
-    assert first == replay
+    assert first.external_writes == replay.external_writes == 1
+    assert first.writes_this_call == 1
+    assert replay.writes_this_call == 0
     assert first.state is PublicationStepState.APPLIED
     assert gateway.create_calls == 1
     context = executor.ctx
@@ -339,7 +370,10 @@ def test_relationship_steps_are_idempotent_and_remove_authoritatively(
     replay = executor.apply(add, mapping)
     removed = executor.apply(remove, mapping)
 
-    assert first == replay
+    assert first.external_writes == replay.external_writes == 1
+    assert first.writes_this_call == 1
+    assert replay.writes_this_call == 0
+    assert replace(first, writes_this_call=0) == replay
     assert first.issue_number == 10
     assert removed.issue_number == 10
     assert gateway.relationship_writes == 2

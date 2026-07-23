@@ -47,6 +47,7 @@ class ContextSectionName(str, Enum):
     REPOSITORY = "repository"
     STATUS = "status"
     TICKET = "ticket"
+    TICKET_WORKFLOW = "ticket_workflow"
     WORKSPACE = "workspace"
     RECENT_COMMITS = "recent_commits"
 
@@ -201,6 +202,70 @@ class IssueMode(str, Enum):
     REOPEN = "reopen"
     LINK = "link"
     CREATE = "create"
+    MANAGE = "manage"
+
+
+IssueGraphClientRef = Annotated[
+    str,
+    Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"),
+]
+IssueGraphProposalId = Annotated[str, Field(pattern=r"^igp-[a-f0-9]{24}$")]
+IssueGraphPlanId = Annotated[str, Field(pattern=r"^igplan-[a-f0-9]{24}$")]
+IssueGraphPublicationId = Annotated[str, Field(pattern=r"^igpub-[a-f0-9]{24}$")]
+ApprovalRequestId = Annotated[str, Field(pattern=r"^apr-[a-f0-9]{24}$")]
+
+
+class IssueGraphNodeInput(StrictModel):
+    client_ref: IssueGraphClientRef
+    title: str = Field(min_length=1, max_length=1_000)
+    ticket_type: Literal["program", "epic", "task"]
+    priority: Literal["p0", "p1", "p2", "p3"]
+    status: Literal["planned", "ready", "in_progress", "blocked", "done"]
+    parent_ref: IssueGraphClientRef | None = None
+    body: str = Field(min_length=1, max_length=20_000)
+
+
+class IssueGraphEdgeInput(StrictModel):
+    source_ref: IssueGraphClientRef
+    target_ref: IssueGraphClientRef
+    kind: Literal["blocked_by", "relates", "supersedes"]
+
+
+class IssueGraphManagePlanInput(StrictModel):
+    action: Literal["plan"]
+    root_ref: IssueGraphClientRef
+    nodes: tuple[IssueGraphNodeInput, ...] = Field(min_length=1, max_length=100)
+    edges: tuple[IssueGraphEdgeInput, ...] = Field(default=(), max_length=500)
+    adopt_refs: tuple[IssueGraphClientRef, ...] = Field(default=(), max_length=100)
+    expires_in_seconds: int = Field(default=3_600, ge=60, le=86_400)
+
+
+class IssueGraphManageApplyInput(StrictModel):
+    action: Literal["apply"]
+    proposal_id: IssueGraphProposalId
+    proposal_hash: Sha256
+    plan_id: IssueGraphPlanId
+    effect_plan_hash: Sha256
+    approval_request_id: ApprovalRequestId
+
+
+class IssueGraphManageStatusInput(StrictModel):
+    action: Literal["status"]
+    publication_id: IssueGraphPublicationId
+
+
+class IssueGraphManageReconcileInput(StrictModel):
+    action: Literal["reconcile"]
+    publication_id: IssueGraphPublicationId
+
+
+IssueGraphManageInput = Annotated[
+    IssueGraphManagePlanInput
+    | IssueGraphManageApplyInput
+    | IssueGraphManageStatusInput
+    | IssueGraphManageReconcileInput,
+    Field(discriminator="action"),
+]
 
 
 class IssueLinkType(str, Enum):
@@ -275,6 +340,7 @@ class RepoIssueInput(StrictModel):
     link_type: IssueLinkType | None = None
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
     approval_request_id: str | None = Field(default=None, min_length=1, max_length=160)
+    manage: IssueGraphManageInput | None = None
 
     @model_validator(mode="after")
     def validate_mode_fields(self) -> RepoIssueInput:
@@ -286,6 +352,34 @@ class RepoIssueInput(StrictModel):
             IssueMode.CREATE,
         }
         issue_modes = write_modes - {IssueMode.CREATE}
+        if self.mode is IssueMode.MANAGE:
+            if self.manage is None:
+                raise ValueError("repo_issue manage requires manage")
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.issue_number,
+                        self.root_issue,
+                        self.status,
+                        self.priority,
+                        self.initiative,
+                        self.cursor,
+                        self.body,
+                        self.title,
+                        self.evidence_ref,
+                        self.target_issue,
+                        self.link_type,
+                        self.idempotency_key,
+                        self.approval_request_id,
+                    )
+                )
+                or self.fresh
+                or self.limit != 10
+            ):
+                raise ValueError("repo_issue manage does not accept read or write branch fields")
+        elif self.manage is not None:
+            raise ValueError("manage is only valid for repo_issue manage")
         if self.mode in {IssueMode.READ, IssueMode.SPEC} and self.issue_number is None:
             raise ValueError(f"repo_issue {self.mode.value} requires issue_number")
         if self.mode in issue_modes and self.issue_number is None:
@@ -330,6 +424,53 @@ class IssueMutationEvidence(StrictModel):
     url: str | None = Field(default=None, max_length=2_000)
 
 
+class IssueGraphWorkflowEvidence(StrictModel):
+    action: Literal["plan", "apply", "status", "reconcile"]
+    state: Literal[
+        "planned",
+        "pending_approval",
+        "publishing",
+        "paused",
+        "partial_failed",
+        "manual_recovery_required",
+        "succeeded",
+        "stale",
+    ]
+    proposal_id: IssueGraphProposalId | None = None
+    proposal_hash: Sha256 | None = None
+    plan_id: IssueGraphPlanId | None = None
+    effect_plan_hash: Sha256 | None = None
+    approval_request_id: ApprovalRequestId | None = None
+    approval_status: (
+        Literal[
+            "pending",
+            "accepted",
+            "declined",
+            "cancelled",
+            "expired",
+            "invalidated",
+        ]
+        | None
+    ) = None
+    publication_id: IssueGraphPublicationId | None = None
+    publication_state: (
+        Literal[
+            "running",
+            "paused",
+            "manual_recovery_required",
+            "succeeded",
+        ]
+        | None
+    ) = None
+    operation_id: Identifier | None = None
+    receipt_id: Identifier | None = None
+    result_reference: str | None = Field(default=None, max_length=256)
+    retry_at: str | None = Field(default=None, max_length=80)
+    complete: bool
+    external_writes: int = Field(default=0, ge=0, le=1_000)
+    recovery_action: ShortText | None = None
+
+
 class RepoIssueOutput(ToolResponse):
     repo_id: RepoId
     mode: IssueMode
@@ -342,6 +483,7 @@ class RepoIssueOutput(ToolResponse):
     selected: tuple[IssueGraphNode, ...] = Field(default=(), max_length=100)
     drift: tuple[IssueDrift, ...] = Field(default=(), max_length=100)
     mutation: IssueMutationEvidence | None = None
+    workflow: IssueGraphWorkflowEvidence | None = None
     outcome: OutcomeReceiptEvidence | None = None
     next_action: ShortText | None = None
     truncated: bool = False
@@ -446,12 +588,13 @@ class GeneratedPathDeclaration(StrictModel):
 
 
 class IssueWritePolicyDeclaration(StrictModel):
-    enabled_ops: tuple[Literal["comment", "close", "reopen", "link", "create"], ...] = Field(
-        default=("comment",), max_length=5
+    enabled_ops: tuple[Literal["comment", "close", "reopen", "link", "create", "update"], ...] = (
+        Field(default=("comment",), max_length=6)
     )
-    approval_required_ops: tuple[Literal["comment", "close", "reopen", "link", "create"], ...] = (
-        Field(default=(), max_length=5)
-    )
+    approval_required_ops: tuple[
+        Literal["comment", "close", "reopen", "link", "create", "update"], ...
+    ] = Field(default=(), max_length=6)
+    operation_semantics_version: Literal[1, 2] = 1
     max_writes_per_call: int = Field(default=2, ge=1, le=20)
     max_writes_per_window: int = Field(default=20, ge=1, le=10_000)
     window_seconds: int = Field(default=3_600, ge=60, le=604_800)

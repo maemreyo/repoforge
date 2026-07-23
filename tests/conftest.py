@@ -285,7 +285,19 @@ if args[:2] == ["pr", "view"]:
 
 if args and args[0] == "api":
     data = load()
-    endpoint = next((arg for arg in args[1:] if not arg.startswith("-") and arg not in {{"GET", "POST", "PATCH", "per_page=100", "filter=latest"}}), "")
+    endpoint = ""
+    skip_next = False
+    for arg in args[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ("--method", "-H", "--header", "-f", "--raw-field", "-F", "--field", "--input", "--jq", "-q"):
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        endpoint = arg
+        break
     method = arg_value(args, "--method", "GET")
     body_field = next((arg.split("=", 1)[1] for arg in args if arg.startswith("body=")), "")
     endpoint_path = endpoint.split("?", 1)[0]

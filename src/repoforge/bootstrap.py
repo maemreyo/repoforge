@@ -56,6 +56,8 @@ from .adapters.persistence import (
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
+    JsonIssueGraphProposalStore,
+    JsonIssueGraphPublicationStore,
     JsonIterationCache,
     JsonOnboardingStore,
     JsonOperationResultStore,
@@ -209,6 +211,8 @@ from .ports.external_mutation_ledger import ExternalMutationLedger
 from .ports.filesystem_transaction import (
     FileTransactionFactory as ReceiptFileTransactionFactory,
 )
+from .ports.issue_graph_proposal_store import IssueGraphProposalStore
+from .ports.issue_graph_publication_store import IssueGraphPublicationStore
 from .ports.issue_mutation import IssueMutationGateway
 
 
@@ -255,6 +259,8 @@ class AdapterOverrides:
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
     failure_output_artifacts: FailureOutputArtifactStore | None = None
+    issue_graph_proposals: IssueGraphProposalStore | None = None
+    issue_graph_publications: IssueGraphPublicationStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +271,8 @@ class Application:
     workflow_recorder: WorkflowRecorder
     workflow_replay: WorkflowReplayEngine
     background_tasks: BackgroundTaskRunner
+    issue_graph_proposals: IssueGraphProposalStore
+    issue_graph_publications: IssueGraphPublicationStore
 
 
 def default_state_root() -> Path:
@@ -647,6 +655,14 @@ def build_application(
         config.server.state_root,
         locks,
     )
+    issue_graph_proposals = o.issue_graph_proposals or JsonIssueGraphProposalStore(
+        config.server.state_root,
+        locks,
+    )
+    issue_graph_publications = o.issue_graph_publications or JsonIssueGraphPublicationStore(
+        config.server.state_root,
+        locks,
+    )
     background_tasks = o.background_tasks or ThreadBackgroundTaskRunner()
     sleeper = o.sleeper or SystemSleeper()
     context = ExtendedApplicationContext(
@@ -713,13 +729,16 @@ def build_application(
         ).read()
     )
     OutcomeReceiptReconciler(context).reconcile(
-        stale_after_seconds=config.server.idempotency_stale_seconds
+        stale_after_seconds=config.server.idempotency_stale_seconds,
+        resumable_actions=frozenset({"issue_graph_publication"}),
     )
     recover_operations(
         operations,
         now=clock.now_iso(),
         running_stale_seconds=config.server.idempotency_stale_seconds,
-        resumable_kinds=frozenset({"pr_check_watch", "runtime_activation"}),
+        resumable_kinds=frozenset(
+            {"pr_check_watch", "runtime_activation", "issue_graph_publication"}
+        ),
         running_liveness=lambda task: _background_operation_liveness(
             task,
             locks=locks,
@@ -743,6 +762,8 @@ def build_application(
         workflow_recorder,
         workflow_replay,
         background_tasks,
+        issue_graph_proposals,
+        issue_graph_publications,
     )
 
 

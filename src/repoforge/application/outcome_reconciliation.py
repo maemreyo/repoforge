@@ -210,6 +210,7 @@ class OutcomeReceiptReconciler:
         *,
         max_records: int = 2_000,
         stale_after_seconds: int | None = None,
+        resumable_actions: frozenset[str] = frozenset(),
     ) -> OutcomeReconciliationReport:
         receipts = self.ctx.effect_receipts
         results = self.ctx.operation_result_store
@@ -240,6 +241,14 @@ class OutcomeReceiptReconciler:
                 terminal += 1
                 continue
             task = operations.read(receipt.operation_id)
+            if (
+                receipt.state is EffectReceiptState.APPLYING
+                and receipt.action in resumable_actions
+                and task is not None
+                and task.state in {OperationState.PENDING, OperationState.RUNNING}
+            ):
+                deferred += 1
+                continue
             if (
                 task is not None
                 and task.state in {OperationState.PENDING, OperationState.RUNNING}

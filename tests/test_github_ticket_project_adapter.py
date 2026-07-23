@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from pathlib import Path
 
 from repoforge.adapters.github.gh_cli import GhCliGateway
@@ -449,6 +450,10 @@ def test_issue_comment_posts_bounded_body_with_exact_rest_command(tmp_path: Path
         "api",
         "--method",
         "POST",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "X-GitHub-Api-Version: 2022-11-28",
         "repos/acme/demo/issues/7/comments",
         "-f",
         "body=evidence\n<!-- marker -->",
@@ -474,6 +479,10 @@ def test_issue_native_relationship_commands_use_database_ids(tmp_path: Path) -> 
         "api",
         "--method",
         "POST",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "X-GitHub-Api-Version: 2022-11-28",
         "repos/acme/demo/issues/7/sub_issues",
         "-F",
         "sub_issue_id=501",
@@ -483,6 +492,10 @@ def test_issue_native_relationship_commands_use_database_ids(tmp_path: Path) -> 
         "api",
         "--method",
         "POST",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "X-GitHub-Api-Version: 2022-11-28",
         "repos/acme/demo/issues/7/dependencies/blocked_by",
         "-F",
         "issue_id=501",
@@ -526,5 +539,12 @@ def test_issue_reconciliation_reads_are_capped_and_filter_pull_requests(tmp_path
     assert comments_truncated is True
     assert [item.issue_number for item in issues] == [10]
     assert issues_truncated is True
-    assert "per_page=2" in executor.calls[1][4]
-    assert "per_page=2" in executor.calls[3][4]
+    assert "repos/acme/demo/issues/7/comments?per_page=2" in executor.calls[1]
+    assert (
+        "repos/acme/demo/issues?state=all&sort=created&direction=desc&per_page=2"
+        in executor.calls[3]
+    )
+    for call in (executor.calls[1], executor.calls[3]):
+        header_pairs = set(pairwise(call))
+        assert ("-H", "Accept: application/vnd.github+json") in header_pairs
+        assert ("-H", "X-GitHub-Api-Version: 2022-11-28") in header_pairs

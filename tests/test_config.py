@@ -4,6 +4,7 @@ import pytest
 
 from repoforge.config import DEFAULT_DENIED_PATHS, load_config
 from repoforge.domain.errors import ConfigError
+from repoforge.domain.issue_writes import IssueWritePolicy
 from repoforge.domain.verification_steps import no_regression_receipt
 
 
@@ -72,6 +73,39 @@ create_body_template = "## Objective\\n{{body}}\\n\\n## Evidence\\n{{evidence_re
     assert policy.max_writes_per_window == 12
     assert policy.window_seconds == 900
     assert policy.create_title_prefix == "[FOLLOWUP]"
+
+
+def test_issue_write_policy_versions_update_authority_without_breaking_legacy_configs() -> None:
+    legacy = IssueWritePolicy.from_table(
+        {"enabled_ops": ["create"], "approval_required_ops": ["create"]},
+        context="repositories.demo.issue_writes",
+    )
+    current = IssueWritePolicy.from_table(
+        {
+            "operation_semantics_version": 2,
+            "enabled_ops": ["create"],
+            "approval_required_ops": ["create"],
+        },
+        context="repositories.demo.issue_writes",
+    )
+    current_with_update = IssueWritePolicy.from_table(
+        {
+            "operation_semantics_version": 2,
+            "enabled_ops": ["update"],
+            "approval_required_ops": ["update"],
+        },
+        context="repositories.demo.issue_writes",
+    )
+
+    assert legacy.operation_semantics_version == 1
+    assert legacy.allows_effect("update") is True
+    assert legacy.requires_effect_approval("update") is True
+    assert current.operation_semantics_version == 2
+    assert current.allows_effect("update") is False
+    assert current.requires_effect_approval("update") is False
+    assert current_with_update.allows_effect("update") is True
+    assert current_with_update.requires_effect_approval("update") is True
+    assert current_with_update.as_table()["operation_semantics_version"] == 2
 
 
 def test_issue_write_approval_ops_must_be_enabled(tmp_path: Path) -> None:

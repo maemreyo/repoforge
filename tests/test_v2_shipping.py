@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import CommandError, ErrorCode, RepoForgeError
+from repoforge.interfaces.mcp.server import SERVER_INSTRUCTIONS
 
 
 def _prepare_commit(env: ForgeEnvironment) -> tuple[str, dict[str, Any]]:
@@ -37,6 +38,14 @@ def _prepare_pr(env: ForgeEnvironment) -> tuple[str, dict[str, Any]]:
         idempotency_key="shipping-pr-create-0001",
     )
     return workspace_id, created
+
+
+def test_server_instructions_route_governed_issue_graph_workflows() -> None:
+    assert "repo_issue mode=manage" in SERVER_INSTRUCTIONS
+    assert "ticket_workflow" in SERVER_INSTRUCTIONS
+    assert "operation get/wait" in SERVER_INSTRUCTIONS
+    assert "raw GitHub mutation" in SERVER_INSTRUCTIONS
+    assert "blind-retry" in SERVER_INSTRUCTIONS
 
 
 def test_shipping_contracts_publish_action_specific_validation() -> None:

@@ -50,6 +50,7 @@ from .repository.family_v2 import (
 from .repository.file_read import RepositoryFileReadCommand, RepositoryFileReader
 from .repository.files_read import RepositoryFilesReadCommand, RepositoryFilesReader
 from .repository.issue_graph import RepositoryIssueGraphCommand, RepositoryIssueGraphReader
+from .repository.issue_graph_workflow import IssueGraphWorkflowService
 from .repository.issue_next import RepositoryIssueNextCommand, RepositoryIssueNextReader
 from .repository.issue_read import IssueReadCommand, IssueReader
 from .repository.issue_spec import RepositoryIssueSpecCommand, RepositoryIssueSpecReader
@@ -334,9 +335,16 @@ class CodingService:
         self._repo_compare = RepositoryComparer(ctx)
         self._repo_history_v2 = RepositoryHistoryV2(ctx)
         self._repo_list_v2 = RepositoryListV2(ctx)
-        self._repo_issue_v2 = RepositoryIssueV2(ctx)
+        self._issue_graph_workflow = IssueGraphWorkflowService(
+            ctx,
+            self.operations,
+            self.application.issue_graph_proposals,
+            self.application.issue_graph_publications,
+            self.application.background_tasks,
+        )
+        self._repo_issue_v2 = RepositoryIssueV2(ctx, self._issue_graph_workflow)
         self._repo_pr_v2 = RepositoryPrReadV2(ctx)
-        self._task_context_v2 = RepositoryTaskContextV2(ctx)
+        self._task_context_v2 = RepositoryTaskContextV2(ctx, self._issue_graph_workflow)
         self._repo_tree = RepositoryTreeReader(ctx)
         self._repo_read = RepositoryFileReader(ctx)
         self._repo_reads = RepositoryFilesReader(ctx)
@@ -793,6 +801,8 @@ class CodingService:
         link_type: str | None = None,
         idempotency_key: str | None = None,
         approval_request_id: str | None = None,
+        manage: dict[str, object] | None = None,
+        runtime_identity: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._repo_issue_v2.execute(
@@ -814,9 +824,28 @@ class CodingService:
                     link_type=link_type,
                     idempotency_key=idempotency_key,
                     approval_request_id=approval_request_id,
+                    manage=manage,
+                    runtime_identity=runtime_identity,
                 )
             )
         )
+
+    def repo_issue_manage_approval(
+        self,
+        approval_request_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        request = self._issue_graph_workflow.accept_exact_approval(
+            approval_request_id,
+            actor=actor,
+            reason=reason,
+        )
+        return {
+            "summary": f"Accepted issue graph approval {request.request_id}",
+            "approval": request.summary(),
+        }
 
     def repo_pr_read(self, repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
         return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number, fresh)))

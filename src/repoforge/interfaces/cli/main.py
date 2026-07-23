@@ -19,6 +19,7 @@ from typing import Any
 
 from repoforge import __version__
 
+from ...adapters.persistence import JsonApprovalPayloadStore, JsonApprovalStore
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
     apply_policy_patch,
@@ -84,6 +85,7 @@ from ...bootstrap import (
 )
 from ...config import DEFAULT_CONFIG_PATH, load_config
 from ...contracts.registry import validate_generated_contract_identity
+from ...domain.approval import ApprovalStatus, decide_approval
 from ...domain.config_generation import (
     ApprovalEvent,
     CapabilityDeltaKind,
@@ -356,6 +358,95 @@ def _config_set(config_path: Path, args: argparse.Namespace) -> int:
 def _pending_store(config_path: Path) -> PendingPolicyChangeStore:
     store = _ensure_generation(config_path)
     return build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root))
+
+
+def _approval_stores(
+    config_path: Path,
+) -> tuple[JsonApprovalStore, JsonApprovalPayloadStore]:
+    store = _ensure_generation(config_path)
+    generation = store.active() or store.current()
+    resolved_path = (
+        store.resolved_path(generation.generation) if generation is not None else config_path
+    )
+    runtime_state_root = load_config(resolved_path).server.state_root
+    locks = build_lock_manager(runtime_state_root)
+    return (
+        JsonApprovalStore(runtime_state_root, locks),
+        JsonApprovalPayloadStore(runtime_state_root, locks),
+    )
+
+
+def _approval_list(config_path: Path, status: str | None) -> int:
+    approvals, _ = _approval_stores(config_path)
+    selected_status = ApprovalStatus(status) if status is not None else None
+    page = approvals.list_records(max_records=200)
+    records = sorted(
+        (
+            envelope.value
+            for envelope in page.records
+            if selected_status is None or envelope.value.status is selected_status
+        ),
+        key=lambda request: (request.created_at, request.request_id),
+    )
+    _json(
+        {
+            "status": "ok",
+            "approvals": [request.summary() for request in records],
+            "truncated": page.scan_truncated,
+            "safe_next_action": (
+                "Review an exact request, then run `rf approval approve <request_id>` or "
+                "`rf approval reject <request_id>`."
+                if records
+                else "No matching approval requests were found."
+            ),
+        }
+    )
+    return 0
+
+
+def _approval_decide(
+    config_path: Path,
+    request_id: str,
+    status: ApprovalStatus,
+    *,
+    actor: str | None,
+    reason: str | None,
+) -> int:
+    approvals, payloads = _approval_stores(config_path)
+    envelope = approvals.read(request_id)
+    if envelope is None:
+        raise ConfigError(f"Unknown approval request: {request_id}")
+    request = envelope.value
+    payload = payloads.read(request_id)
+    if payload is None or payloads.digest(payload) != request.binding.payload_digest:
+        raise ConfigError("Approval payload is missing or does not match the exact request binding")
+    operator = actor or os.environ.get("USER", "local-operator")
+    decision_reason = reason or (
+        "Operator approved the exact bound request."
+        if status is ApprovalStatus.ACCEPTED
+        else "Operator rejected the exact bound request."
+    )
+    decided = decide_approval(
+        request,
+        status,
+        actor=operator,
+        decided_at=system_clock().now_iso(),
+        reason=decision_reason,
+    )
+    saved = approvals.save(decided, expected_revision=envelope.revision)
+    _json(
+        {
+            "status": "ok",
+            "approval": saved.value.summary(),
+            "payload_retained": True,
+            "safe_next_action": (
+                "Retry the exact bound operation with this approval_request_id."
+                if status is ApprovalStatus.ACCEPTED
+                else "Create a new proposal if the rejected operation is still required."
+            ),
+        }
+    )
+    return 0
 
 
 def _config_pending(config_path: Path) -> int:
@@ -1774,6 +1865,18 @@ def build_parser() -> argparse.ArgumentParser:
     restart_command.add_argument("--profile")
     logs = runtime_sub.add_parser("logs")
     logs.add_argument("--tail", type=int, default=100)
+    approval = commands.add_parser("approval", help="Review exact-bound operator approvals")
+    approval_sub = approval.add_subparsers(dest="approval_command", required=True)
+    approval_list = approval_sub.add_parser("list")
+    approval_list.add_argument(
+        "--status",
+        choices=[item.value for item in ApprovalStatus],
+    )
+    for decision in ("approve", "reject"):
+        item = approval_sub.add_parser(decision)
+        item.add_argument("request_id")
+        item.add_argument("--actor")
+        item.add_argument("--reason")
     config = commands.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("path")
@@ -1918,6 +2021,20 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
         if args.command == "runtime":
             return _runtime_command(args)
+        if args.command == "approval":
+            if args.approval_command == "list":
+                return _approval_list(config_path, args.status)
+            return _approval_decide(
+                config_path,
+                args.request_id,
+                (
+                    ApprovalStatus.ACCEPTED
+                    if args.approval_command == "approve"
+                    else ApprovalStatus.DECLINED
+                ),
+                actor=args.actor,
+                reason=args.reason,
+            )
         if args.command == "config":
             if args.config_command == "path":
                 _json(_resolved_paths(config_path))

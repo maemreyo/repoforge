@@ -24,7 +24,7 @@ from repoforge.interfaces.mcp.contract import build_release_contract
 assert repoforge.__version__ == "2.2.0"
 parser = build_parser()
 commands = parser._subparsers._group_actions[0].choices
-for required in ("repo", "runtime", "config", "diagnostics", "start", "serve"):
+for required in ("repo", "runtime", "config", "approval", "diagnostics", "start", "serve"):
     assert required in commands, required
 contract = asyncio.run(build_release_contract())
 assert contract["package_version"] == repoforge.__version__

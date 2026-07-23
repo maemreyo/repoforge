@@ -43,6 +43,8 @@ class IdempotencyEffectBoundary:
     started: bool = False
     rolled_back: bool = False
     authoritative_result: Any | None = None
+    replayed: bool = False
+    reconciled: bool = False
 
     def begin(self) -> None:
         self.started = True
@@ -57,6 +59,10 @@ class IdempotencyEffectBoundary:
         if not self.started:
             raise ConfigError("Cannot record an authoritative result before the effect boundary")
         self.authoritative_result = result
+
+    def record_replay(self, *, reconciled: bool) -> None:
+        self.replayed = True
+        self.reconciled = reconciled
 
 
 def _durable_result(value: Any) -> dict[str, Any]:
@@ -153,6 +159,8 @@ def execute_idempotent(
             },
         )
         ctx.record_metric(action, success=True, duration_ms=0.0, error_code=None)
+        if effect_boundary is not None:
+            effect_boundary.record_replay(reconciled=True)
         return safe_result
 
     try:
@@ -188,6 +196,8 @@ def execute_idempotent(
                     },
                 )
                 ctx.record_metric(action, success=True, duration_ms=0.0, error_code=None)
+                if effect_boundary is not None:
+                    effect_boundary.record_replay(reconciled=False)
                 return replayed
             if existing is not None and existing.state is IdempotencyState.UNCERTAIN:
                 if reconcile_uncertain is not None:
