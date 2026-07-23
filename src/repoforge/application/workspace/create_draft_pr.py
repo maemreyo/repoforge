@@ -58,13 +58,6 @@ class DraftPullRequestCreator:
                     )
                 if self.ctx.git.ahead_of_base(path, fresh.remote, fresh.base) <= 0:
                     raise WorkspaceError("Branch has no commits ahead of the base branch")
-                existing = self.ctx.github.find_pr(path, fresh.branch)
-                if existing is not None:
-                    existing["already_existed"] = True
-                    fresh.metadata["pr_url"] = existing.get("url")
-                    fresh.metadata["pr_number"] = existing.get("number")
-                    self.ctx.store.save(fresh)
-                    return WorkspaceCreateDraftPrResult(payload=existing, already_existed=True)
                 final = render_pr_body(
                     body,
                     branch=fresh.branch,
@@ -72,6 +65,27 @@ class DraftPullRequestCreator:
                     verification_profile=fresh.metadata.get("verification_profile"),
                     verification_completed_at=fresh.metadata.get("verification_completed_at"),
                 )
+                existing = self.ctx.github.find_pr(path, fresh.branch)
+                if existing is not None:
+                    if existing.get("title") != title or existing.get("body") != final:
+                        boundary.begin()
+                        existing = self.ctx.github.update(
+                            path,
+                            fresh.branch,
+                            title=title,
+                            body=final,
+                        )
+                    existing["already_existed"] = True
+                    fresh.metadata["pr_url"] = existing.get("url")
+                    fresh.metadata["pr_number"] = existing.get("number")
+                    authoritative_result = WorkspaceCreateDraftPrResult(
+                        payload=existing,
+                        already_existed=True,
+                    )
+                    if boundary.started:
+                        boundary.record_result(authoritative_result)
+                    self.ctx.store.save(fresh)
+                    return authoritative_result
                 boundary.begin()
                 url = self.ctx.github.create_draft(
                     path,

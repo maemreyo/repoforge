@@ -1385,6 +1385,55 @@ class WorkspacePrAction(str, Enum):
     UPDATE = "update"
     COMMENT = "comment"
     WATCH = "watch"
+    RECONCILE = "reconcile"
+
+
+class PrIssueDisposition(str, Enum):
+    CLOSES = "closes"
+    ADVANCES = "advances"
+    SUPERSEDES = "supersedes"
+    RELATES = "relates"
+
+
+class PrIssueDispositionInput(StrictModel):
+    issue_number: int = Field(ge=1)
+    disposition: PrIssueDisposition
+    acceptance_evidence_ref: str = Field(min_length=1, max_length=1_000)
+
+
+class PrIssueSnapshotEvidence(StrictModel):
+    issue_number: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=1_000)
+    state: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=2_000)
+    acceptance_evidence_ref: str = Field(min_length=1, max_length=1_000)
+
+
+class PrIssueCompletionEvidence(StrictModel):
+    intent_complete: bool
+    closes: tuple[int, ...] = Field(default=(), max_length=100)
+    advances: tuple[int, ...] = Field(default=(), max_length=100)
+    supersedes: tuple[int, ...] = Field(default=(), max_length=100)
+    relates: tuple[int, ...] = Field(default=(), max_length=100)
+    snapshots: tuple[PrIssueSnapshotEvidence, ...] = Field(default=(), max_length=100)
+
+
+class PrIssueClosureResult(StrictModel):
+    issue_number: int = Field(ge=1)
+    result: str = Field(min_length=1, max_length=80)
+    external_writes: int = Field(ge=0, le=20)
+    marker: str = Field(min_length=1, max_length=200)
+    approval_request_id: str | None = Field(default=None, max_length=160)
+
+
+class PrIssueReconciliationEvidence(StrictModel):
+    merge_status: Literal["merged", "not_merged"]
+    closed_correctly: tuple[int, ...] = Field(default=(), max_length=100)
+    implemented_still_open: tuple[int, ...] = Field(default=(), max_length=100)
+    intentionally_advanced: tuple[int, ...] = Field(default=(), max_length=100)
+    superseded: tuple[int, ...] = Field(default=(), max_length=100)
+    acceptance_review_required: tuple[int, ...] = Field(default=(), max_length=100)
+    closure_results: tuple[PrIssueClosureResult, ...] = Field(default=(), max_length=100)
 
 
 class PrCommentEvidence(StrictModel):
@@ -1407,6 +1456,8 @@ class WorkspacePrInput(StrictModel):
     until: Literal["all_completed", "first_failure"] = "all_completed"
     timeout_seconds: int = Field(default=900, ge=5, le=7200)
     event_cursor: Cursor | None = None
+    issue_dispositions: tuple[PrIssueDispositionInput, ...] = Field(default=(), max_length=100)
+    apply_closures: bool = False
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> WorkspacePrInput:
@@ -1417,15 +1468,23 @@ class WorkspacePrInput(StrictModel):
         }
         if self.action in write_actions and self.idempotency_key is None:
             raise ValueError(f"workspace_pr {self.action.value} requires idempotency_key")
+        if (
+            self.action is WorkspacePrAction.RECONCILE
+            and self.apply_closures
+            and (self.idempotency_key is None)
+        ):
+            raise ValueError("workspace_pr reconcile apply_closures requires idempotency_key")
         if self.action is WorkspacePrAction.CREATE_DRAFT and (
             self.title is None or self.body is None
         ):
             raise ValueError("workspace_pr create_draft requires title and body")
         if self.action is WorkspacePrAction.UPDATE and self.title is None and self.body is None:
             raise ValueError("workspace_pr update requires title or body")
-        if self.action in {WorkspacePrAction.UPDATE, WorkspacePrAction.COMMENT} and (
-            self.expected_remote_version is None
-        ):
+        if self.action in {
+            WorkspacePrAction.UPDATE,
+            WorkspacePrAction.COMMENT,
+            WorkspacePrAction.RECONCILE,
+        } and (self.expected_remote_version is None):
             raise ValueError(f"workspace_pr {self.action.value} requires expected_remote_version")
         if self.action is WorkspacePrAction.COMMENT and (
             self.body is None or self.evidence_ref is None
@@ -1446,6 +1505,20 @@ class WorkspacePrInput(StrictModel):
                 raise ValueError("workspace_pr watch resume uses the version bound to event_cursor")
         if self.action is not WorkspacePrAction.WATCH and self.event_cursor is not None:
             raise ValueError("event_cursor is only valid for workspace_pr watch")
+        if self.action not in {WorkspacePrAction.CREATE_DRAFT, WorkspacePrAction.UPDATE} and (
+            self.issue_dispositions
+        ):
+            raise ValueError("issue_dispositions are only valid for PR create or update")
+        issue_numbers = [item.issue_number for item in self.issue_dispositions]
+        if len(issue_numbers) != len(set(issue_numbers)):
+            raise ValueError("issue_dispositions must contain each issue exactly once")
+        if self.action is WorkspacePrAction.RECONCILE and any(
+            value is not None
+            for value in (self.title, self.body, self.evidence_ref, self.review_comment_id)
+        ):
+            raise ValueError("workspace_pr reconcile does not accept PR content fields")
+        if self.action is not WorkspacePrAction.RECONCILE and self.apply_closures:
+            raise ValueError("apply_closures is only valid for workspace_pr reconcile")
         return self
 
 
@@ -1459,6 +1532,8 @@ class WorkspacePrOutput(ToolResponse):
     remote_version: str | None = Field(default=None, max_length=256)
     event_cursor: Cursor | None = None
     terminal_reason: str | None = Field(default=None, max_length=500)
+    issue_completion: PrIssueCompletionEvidence | None = None
+    reconciliation: PrIssueReconciliationEvidence | None = None
 
 
 class PrEvidenceDetail(str, Enum):

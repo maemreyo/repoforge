@@ -1580,6 +1580,8 @@ class CodingService:
         until: str = "all_completed",
         timeout_seconds: int = 900,
         event_cursor: str | None = None,
+        issue_dispositions: tuple[dict[str, object], ...] = (),
+        apply_closures: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._pr.execute(
@@ -1595,6 +1597,8 @@ class CodingService:
                     until=until,
                     timeout_seconds=timeout_seconds,
                     event_cursor=event_cursor,
+                    issue_dispositions=issue_dispositions,
+                    apply_closures=apply_closures,
                 )
             )
         )

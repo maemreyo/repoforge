@@ -40,6 +40,26 @@ def _prepare_pr(env: ForgeEnvironment) -> tuple[str, dict[str, Any]]:
     return workspace_id, created
 
 
+def _prepare_issue_linked_pr_workspace(env: ForgeEnvironment) -> tuple[str, str]:
+    created = env.service.workspace_create(
+        "demo",
+        "issue completion intent",
+        issue_ids=("180", "181"),
+    )
+    workspace_id = created["workspace_id"]
+    current = env.service.workspace_read_file(workspace_id, "hello.txt")
+    env.service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed for issue completion intent\n",
+        current["sha256"],
+    )
+    env.service.workspace_run_profile(workspace_id, "full")
+    committed = env.service.workspace_commit(workspace_id, "feat: bind issue completion intent")
+    env.service.workspace_push(workspace_id, "shipping-issue-intent-push-0001")
+    return workspace_id, "commit:" + committed["head_sha"]
+
+
 def test_server_instructions_route_governed_issue_graph_workflows() -> None:
     assert "repo_issue mode=manage" in SERVER_INSTRUCTIONS
     assert "ticket_workflow" in SERVER_INSTRUCTIONS
@@ -58,8 +78,10 @@ def test_shipping_contracts_publish_action_specific_validation() -> None:
     assert "expected_fingerprint" in commit.input_model.model_fields
     assert "expected_remote_head" in push.input_model.model_fields
     assert "comment" in pr.input_model.model_json_schema()["$defs"]["WorkspacePrAction"]["enum"]
+    assert "reconcile" in pr.input_model.model_json_schema()["$defs"]["WorkspacePrAction"]["enum"]
     assert "expected_remote_version" in pr.input_model.model_fields
     assert "review_comment_id" in pr.input_model.model_fields
+    assert "issue_dispositions" in pr.input_model.model_fields
 
     with pytest.raises(ValidationError):
         pr.validate_input({"workspace_id": "ws", "action": "create_draft"})
@@ -76,6 +98,186 @@ def test_shipping_contracts_publish_action_specific_validation() -> None:
         )
     with pytest.raises(ValidationError):
         evidence.validate_input({"workspace_id": "ws", "detail": "failure"})
+
+
+def test_workspace_pr_requires_complete_issue_dispositions_and_preserves_managed_intent(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, evidence_ref = _prepare_issue_linked_pr_workspace(forge_env)
+
+    with pytest.raises(RepoForgeError, match="explicit disposition") as incomplete:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="create_draft",
+            title="Issue completion intent",
+            body="Implement the linked tickets.",
+            issue_dispositions=(
+                {
+                    "issue_number": 180,
+                    "disposition": "closes",
+                    "acceptance_evidence_ref": evidence_ref,
+                },
+            ),
+            idempotency_key="shipping-issue-intent-create-incomplete",
+        )
+    assert incomplete.value.details["missing_issue_numbers"] == [181]
+
+    created = forge_env.service.workspace_pr(
+        workspace_id,
+        action="create_draft",
+        title="Issue completion intent",
+        body="Implement the linked tickets.",
+        issue_dispositions=(
+            {
+                "issue_number": 180,
+                "disposition": "closes",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+            {
+                "issue_number": 181,
+                "disposition": "advances",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+        ),
+        idempotency_key="shipping-issue-intent-create-0001",
+    )
+    V2_TOOL_SPECS["workspace_pr"].validate_output(created)
+    assert created["issue_completion"]["intent_complete"] is True
+    assert created["issue_completion"]["closes"] == [180]
+    assert created["issue_completion"]["advances"] == [181]
+
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    body = state["prs"][branch]["body"]
+    assert "<!-- repoforge-pr-issue-dispositions:v1 -->" in body
+    assert "Closes #180" in body
+    assert "Advances #181" in body
+    assert "Closes #181" not in body
+
+    updated = forge_env.service.workspace_pr(
+        workspace_id,
+        action="update",
+        body="Updated implementation summary.",
+        idempotency_key="shipping-issue-intent-update-0001",
+        expected_remote_version=created["remote_version"],
+    )
+    assert updated["issue_completion"] == created["issue_completion"]
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    updated_body = state["prs"][branch]["body"]
+    assert updated_body.startswith("Updated implementation summary.")
+    assert "Closes #180" in updated_body
+    assert "Advances #181" in updated_body
+
+
+def test_workspace_pr_create_reconciles_existing_pr_after_lost_create_response(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, evidence_ref = _prepare_issue_linked_pr_workspace(forge_env)
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state: dict[str, Any] = {}
+    state.setdefault("prs", {})[branch] = {
+        "number": 42,
+        "title": "Incomplete recovered PR",
+        "body": "PR created before the caller lost the response.",
+        "url": "https://github.com/owner/demo/pull/42",
+        "state": "OPEN",
+        "isDraft": True,
+        "mergeable": "MERGEABLE",
+        "reviewDecision": "",
+        "statusCheckRollup": [],
+        "comments": [],
+        "reviews": [],
+        "updatedAt": "2026-07-21T14:00:00Z",
+        "headRefOid": forge_env.service.workspace_status(workspace_id)["head_sha"],
+    }
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    recovered = forge_env.service.workspace_pr(
+        workspace_id,
+        action="create_draft",
+        title="Recovered issue completion intent",
+        body="Reconcile the authoritative existing PR.",
+        issue_dispositions=(
+            {
+                "issue_number": 180,
+                "disposition": "closes",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+            {
+                "issue_number": 181,
+                "disposition": "advances",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+        ),
+        idempotency_key="shipping-issue-intent-recover-create-0001",
+    )
+
+    assert recovered["pull_request"]["number"] == 42
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    pr = state["prs"][branch]
+    assert pr["title"] == "Recovered issue completion intent"
+    assert "Reconcile the authoritative existing PR." in pr["body"]
+    assert "Closes #180" in pr["body"]
+    assert "Advances #181" in pr["body"]
+
+
+def test_workspace_pr_reconciles_merged_completion_intent_without_closing_advances(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id, evidence_ref = _prepare_issue_linked_pr_workspace(forge_env)
+    forge_env.service.workspace_pr(
+        workspace_id,
+        action="create_draft",
+        title="Merged issue completion intent",
+        body="Implement and advance the linked tickets.",
+        issue_dispositions=(
+            {
+                "issue_number": 180,
+                "disposition": "closes",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+            {
+                "issue_number": 181,
+                "disposition": "advances",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+        ),
+        idempotency_key="shipping-issue-reconcile-create-0001",
+    )
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch].update(
+        {
+            "state": "MERGED",
+            "baseRefName": "main",
+            "mergedAt": "2026-07-23T15:00:00Z",
+            "updatedAt": "2026-07-23T15:00:00Z",
+        }
+    )
+    state["issues"] = {
+        "180": {"state": "CLOSED"},
+        "181": {"state": "OPEN"},
+    }
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    evidence = forge_env.service.workspace_pr_evidence(workspace_id)
+
+    reconciled = forge_env.service.workspace_pr(
+        workspace_id,
+        action="reconcile",
+        expected_remote_version=evidence["remote_version"],
+    )
+    V2_TOOL_SPECS["workspace_pr"].validate_output(reconciled)
+    assert reconciled["reconciliation"] == {
+        "merge_status": "merged",
+        "closed_correctly": [180],
+        "implemented_still_open": [],
+        "intentionally_advanced": [181],
+        "superseded": [],
+        "acceptance_review_required": [],
+        "closure_results": [],
+    }
+    final_state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    assert final_state["issues"]["181"]["state"] == "OPEN"
 
 
 def test_workspace_commit_and_push_return_typed_exact_state_evidence(

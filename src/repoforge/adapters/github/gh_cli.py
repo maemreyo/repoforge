@@ -514,7 +514,14 @@ class GhCliGateway:
 
     def find_pr(self, cwd: Path, branch: str) -> dict[str, Any] | None:
         result = self.executor.run(
-            ["gh", "pr", "view", branch, "--json", "number,url,isDraft,state"],
+            [
+                "gh",
+                "pr",
+                "view",
+                branch,
+                "--json",
+                "number,title,body,url,isDraft,state",
+            ],
             cwd=cwd,
             check=False,
         )
@@ -646,7 +653,7 @@ class GhCliGateway:
                     "view",
                     branch,
                     "--json",
-                    "number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid,updatedAt,comments,reviews",
+                    "number,title,body,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid,baseRefName,mergedAt,updatedAt,comments,reviews",
                 ],
                 cwd=cwd,
                 output_limit=10_000_000,

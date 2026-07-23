@@ -12,6 +12,16 @@ from ...config import RepositoryConfig
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.operations import IdempotencyState, hash_idempotency_key
 from ...domain.pr_check_watch import TERMINAL_PR_CHECK_WATCH_OUTCOMES
+from ...domain.pr_completion import (
+    PrIssueIntent,
+    completion_evidence,
+    intent_from_payload,
+    intent_payload,
+    normalize_disposition_requests,
+    render_pr_issue_intent,
+    require_complete_dispositions,
+    workspace_issue_numbers,
+)
 from ...domain.pr_remote_version import (
     PrRemoteVersion,
     build_pr_remote_version,
@@ -23,11 +33,15 @@ from ..context import ApplicationContext
 from ..dto import to_data
 from ..extended_context import external_mutation_ledger
 from ..idempotency import IdempotencyEffectBoundary, execute_idempotent
+from ..repository.issue_mutation_v2 import (
+    RepositoryIssueMutationCommand,
+    RepositoryIssueMutatorV2,
+)
 from .create_draft_pr import DraftPullRequestCreator, WorkspaceCreateDraftPrCommand
 from .pr_watch import PrCheckWatchCoordinator, WorkspacePrWatchCommand
 from .update_draft_pr import DraftPullRequestUpdater, WorkspaceUpdateDraftPrCommand
 
-_ACTIONS = frozenset({"create_draft", "update", "comment", "watch"})
+_ACTIONS = frozenset({"create_draft", "update", "comment", "watch", "reconcile"})
 _MAX_RECONCILIATION_COMMENTS = 100
 
 
@@ -44,6 +58,8 @@ class WorkspacePrCommand:
     until: str = "all_completed"
     timeout_seconds: int = 900
     event_cursor: str | None = None
+    issue_dispositions: tuple[dict[str, object], ...] = ()
+    apply_closures: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +82,8 @@ class WorkspacePrResult:
     remote_version: str | None
     event_cursor: str | None
     terminal_reason: str | None
+    issue_completion: dict[str, object] | None = None
+    reconciliation: dict[str, object] | None = None
 
 
 def _remote_version(payload: dict[str, Any], *, repo_id: str) -> str:
@@ -156,6 +174,80 @@ class WorkspacePrCoordinator:
         self.updater = updater
         self.watch = watch
 
+    def _stored_issue_intents(self, record: WorkspaceRecord) -> tuple[PrIssueIntent, ...]:
+        raw = record.metadata.get("pr_issue_intents")
+        if raw is None:
+            return ()
+        if not isinstance(raw, list):
+            return (intent_from_payload(raw),)
+        return tuple(intent_from_payload(item) for item in raw)
+
+    def _issue_intents(
+        self,
+        record: WorkspaceRecord,
+        path: Path,
+        raw_dispositions: tuple[dict[str, object], ...],
+    ) -> tuple[PrIssueIntent, ...]:
+        workspace_numbers = workspace_issue_numbers(record.metadata.get("issue_ids"))
+        requests = normalize_disposition_requests(raw_dispositions)
+        if not workspace_numbers:
+            if requests:
+                require_complete_dispositions((), requests)
+            return ()
+        if not requests:
+            stored = self._stored_issue_intents(record)
+            stored_requests = normalize_disposition_requests(
+                tuple(
+                    {
+                        "issue_number": item.issue_number,
+                        "disposition": item.disposition,
+                        "acceptance_evidence_ref": item.acceptance_evidence_ref,
+                    }
+                    for item in stored
+                )
+            )
+            require_complete_dispositions(workspace_numbers, stored_requests)
+            return stored
+
+        require_complete_dispositions(workspace_numbers, requests)
+        intents: list[PrIssueIntent] = []
+        for request in requests:
+            snapshot = self.ctx.github.issue_read(path, request.issue_number)
+            title = snapshot.get("title")
+            state = snapshot.get("state")
+            url = snapshot.get("url")
+            if not isinstance(title, str) or not isinstance(state, str) or not isinstance(url, str):
+                raise RepoForgeError(
+                    "GitHub returned an incomplete issue snapshot for PR completion intent",
+                    code=ErrorCode.STATE_INVALID,
+                    details={"issue_number": request.issue_number},
+                )
+            intents.append(
+                PrIssueIntent(
+                    issue_number=request.issue_number,
+                    disposition=request.disposition,
+                    acceptance_evidence_ref=request.acceptance_evidence_ref,
+                    snapshot_title=title,
+                    snapshot_state=state.lower(),
+                    snapshot_url=url,
+                )
+            )
+        record.metadata["pr_issue_intents"] = [intent_payload(item) for item in intents]
+        record.metadata["pr_issue_intent_state"] = "accepted"
+        self.ctx.store.save(record)
+        return tuple(intents)
+
+    def _mark_issue_intent_applied(
+        self,
+        workspace_id: str,
+        intents: tuple[PrIssueIntent, ...],
+    ) -> None:
+        if not intents:
+            return
+        record = self.ctx.store.load(workspace_id)
+        record.metadata["pr_issue_intent_state"] = "applied"
+        self.ctx.store.save(record)
+
     def execute(self, command: WorkspacePrCommand) -> WorkspacePrResult:
         if command.action not in _ACTIONS:
             raise ConfigError(f"Unknown workspace_pr action {command.action!r}")
@@ -210,14 +302,22 @@ class WorkspacePrCoordinator:
                 raise ConfigError(
                     "workspace_pr create_draft requires title, body, and idempotency_key"
                 )
+            draft_record, _repo, draft_path = self.ctx.workspace(command.workspace_id)
+            intents = self._issue_intents(
+                draft_record,
+                draft_path,
+                command.issue_dispositions,
+            )
+            managed_body = render_pr_issue_intent(command.body, intents)
             self.creator.execute(
                 WorkspaceCreateDraftPrCommand(
                     command.workspace_id,
                     command.title,
-                    command.body,
+                    managed_body,
                     command.idempotency_key,
                 )
             )
+            self._mark_issue_intent_applied(command.workspace_id, intents)
             record, _repo, _path, payload, version = self._status(command.workspace_id)
             return WorkspacePrResult(
                 summary="Created or reconciled the workspace draft pull request",
@@ -229,6 +329,7 @@ class WorkspacePrCoordinator:
                 remote_version=version.token,
                 event_cursor=None,
                 terminal_reason=None,
+                issue_completion=completion_evidence(intents),
             )
 
         if command.action == "update":
@@ -236,7 +337,9 @@ class WorkspacePrCoordinator:
                 raise ConfigError("workspace_pr update requires title or body and idempotency_key")
             if command.expected_remote_version is None:
                 raise ConfigError("workspace_pr update requires expected_remote_version")
-            _record, _repo, _path, before, before_version = self._status(command.workspace_id)
+            before_record, _repo, before_path, before, before_version = self._status(
+                command.workspace_id
+            )
             update_key_hash = hash_idempotency_key(command.idempotency_key)
             update_existing = (
                 self.ctx.idempotency.load("workspace_update_draft_pr", update_key_hash)
@@ -252,14 +355,31 @@ class WorkspacePrCoordinator:
                     before_version,
                     before,
                 )
+            intents = self._issue_intents(
+                before_record,
+                before_path,
+                command.issue_dispositions,
+            )
+            update_body = command.body
+            if update_body is not None:
+                update_body = render_pr_issue_intent(update_body, intents)
+            elif command.issue_dispositions:
+                current_body = before.get("body")
+                if not isinstance(current_body, str):
+                    raise RepoForgeError(
+                        "GitHub returned no PR body for completion-intent reconciliation",
+                        code=ErrorCode.STATE_INVALID,
+                    )
+                update_body = render_pr_issue_intent(current_body, intents)
             self.updater.execute(
                 WorkspaceUpdateDraftPrCommand(
                     command.workspace_id,
                     command.title,
-                    command.body,
+                    update_body,
                     command.idempotency_key,
                 )
             )
+            self._mark_issue_intent_applied(command.workspace_id, intents)
             record, _repo, _path, payload, version = self._status(command.workspace_id)
             return WorkspacePrResult(
                 summary="Updated the workspace draft pull request",
@@ -271,12 +391,111 @@ class WorkspacePrCoordinator:
                 remote_version=version.token,
                 event_cursor=None,
                 terminal_reason=None,
+                issue_completion=completion_evidence(intents),
             )
 
         if command.action == "comment":
             return self._comment(command)
 
+        if command.action == "reconcile":
+            return self._reconcile(command)
+
         return self._watch(command)
+
+    def _reconcile(self, command: WorkspacePrCommand) -> WorkspacePrResult:
+        if command.expected_remote_version is None:
+            raise ConfigError("workspace_pr reconcile requires expected_remote_version")
+        if command.apply_closures and command.idempotency_key is None:
+            raise ConfigError("workspace_pr reconcile apply_closures requires idempotency_key")
+        record, _repo, path, payload, version = self._status(command.workspace_id)
+        self._assert_remote_version(command.expected_remote_version, version, payload)
+        intents = self._issue_intents(record, path, ())
+        merged = (
+            str(payload.get("state", "")).lower() == "merged"
+            and payload.get("baseRefName") == record.base
+        )
+        closed_correctly: list[int] = []
+        implemented_still_open: list[int] = []
+        intentionally_advanced: list[int] = []
+        superseded: list[int] = []
+        acceptance_review_required: list[int] = []
+
+        if not merged:
+            acceptance_review_required.extend(item.issue_number for item in intents)
+        else:
+            for intent in intents:
+                live = self.ctx.github.issue_read(path, intent.issue_number)
+                live_state = str(live.get("state", "")).lower()
+                if intent.disposition == "closes":
+                    target = closed_correctly if live_state == "closed" else implemented_still_open
+                    target.append(intent.issue_number)
+                elif intent.disposition == "advances":
+                    intentionally_advanced.append(intent.issue_number)
+                elif intent.disposition == "supersedes":
+                    superseded.append(intent.issue_number)
+                else:
+                    acceptance_review_required.append(intent.issue_number)
+
+        closure_results: list[dict[str, object]] = []
+        if command.apply_closures:
+            if not merged:
+                raise RepoForgeError(
+                    "PR completion closures require a merged PR on the configured base branch",
+                    code=ErrorCode.PROPOSAL_BLOCKED,
+                    unchanged_state=("No issue mutation was attempted.",),
+                )
+            mutator = RepositoryIssueMutatorV2(self.ctx)
+            by_number = {item.issue_number: item for item in intents}
+            for issue_number in tuple(implemented_still_open):
+                intent = by_number[issue_number]
+                digest = hashlib.sha256(
+                    f"{command.idempotency_key}:{issue_number}".encode()
+                ).hexdigest()[:24]
+                applied = mutator.execute(
+                    RepositoryIssueMutationCommand(
+                        repo_id=record.repo_id,
+                        mode="close",
+                        issue_number=issue_number,
+                        evidence_ref=intent.acceptance_evidence_ref,
+                        idempotency_key=f"pr-reconcile-close-{issue_number}-{digest}",
+                    )
+                )
+                closure_results.append(
+                    {
+                        "issue_number": issue_number,
+                        "result": applied.result,
+                        "external_writes": applied.external_writes,
+                        "marker": applied.marker,
+                        "approval_request_id": applied.approval_request_id,
+                    }
+                )
+                live = self.ctx.github.issue_read(path, issue_number)
+                if str(live.get("state", "")).lower() == "closed":
+                    implemented_still_open.remove(issue_number)
+                    closed_correctly.append(issue_number)
+
+        reconciliation: dict[str, object] = {
+            "merge_status": "merged" if merged else "not_merged",
+            "closed_correctly": sorted(closed_correctly),
+            "implemented_still_open": sorted(implemented_still_open),
+            "intentionally_advanced": sorted(intentionally_advanced),
+            "superseded": sorted(superseded),
+            "acceptance_review_required": sorted(acceptance_review_required),
+            "closure_results": closure_results,
+        }
+        return WorkspacePrResult(
+            summary="Reconciled merged PR completion intent against live issue state",
+            workspace_id=command.workspace_id,
+            action=command.action,
+            pull_request=_pull_request(payload, base_ref=record.base),
+            comment=None,
+            operation=None,
+            remote_version=version.token,
+            event_cursor=None,
+            terminal_reason=None,
+            issue_completion=completion_evidence(intents),
+            reconciliation=reconciliation,
+        )
 
     @staticmethod
     def _comment_marker(request: dict[str, object]) -> str:
