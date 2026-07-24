@@ -501,4 +501,3 @@ test_files = [
   "tests/test_workspace_refresh.py",
   "tests/test_workspace_stale_cleanup.py",
 ]
-

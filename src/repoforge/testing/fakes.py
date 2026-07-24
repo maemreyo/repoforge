@@ -15,11 +15,16 @@ from pathlib import Path
 
 from ..domain.errors import ErrorCode, RepoForgeError
 from ..domain.operation_task import OperationTask
+from ..domain.operation_worker import (
+    OperationWorkerBinding,
+    validate_operation_worker_binding,
+)
 from ..domain.workspace import WorkspaceRecord
 from ..ports.cancellation import CancellationToken
 from ..ports.command import CommandResult
 from ..ports.operation_gate import GateState
 from ..ports.operation_store import OperationRecordPage
+from ..ports.process_reaper import ReapOutcome
 
 
 class FixedClock:
@@ -401,3 +406,46 @@ class CleanupTracker:
         active = {key: value for key, value in leaks.items() if value}
         if active:
             raise AssertionError(f"Harness resource leak: {active}")
+
+
+class InMemoryWorkerBindingStore:
+    """Deterministic in-process WorkerBindingStore for tests."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, OperationWorkerBinding] = {}
+
+    def put(self, binding: OperationWorkerBinding) -> None:
+        validate_operation_worker_binding(binding)
+        self._records[binding.operation_id] = binding
+
+    def get(self, operation_id: str) -> OperationWorkerBinding | None:
+        return self._records.get(operation_id)
+
+    def delete(self, operation_id: str) -> None:
+        self._records.pop(operation_id, None)
+
+    def list_all(self, *, max_records: int = 2_000) -> tuple[OperationWorkerBinding, ...]:
+        return tuple(list(self._records.values())[:max_records])
+
+
+class RecordingProcessReaper:
+    """ProcessReaper fake recording reap calls and returning a scripted outcome."""
+
+    def __init__(
+        self,
+        *,
+        outcome: ReapOutcome | None = None,
+        start_tokens: dict[int, str] | None = None,
+    ) -> None:
+        self._outcome = outcome or ReapOutcome(
+            attempted=True, reaped=True, still_alive=False, detail="reaped (fake)"
+        )
+        self._start_tokens = dict(start_tokens or {})
+        self.reaped: list[OperationWorkerBinding] = []
+
+    def reap(self, binding: OperationWorkerBinding) -> ReapOutcome:
+        self.reaped.append(binding)
+        return self._outcome
+
+    def read_start_token(self, pid: int) -> str | None:
+        return self._start_tokens.get(pid)

@@ -14,6 +14,7 @@ import contextlib
 import os
 import signal
 import threading
+from collections.abc import Callable
 from typing import Protocol
 
 
@@ -25,20 +26,27 @@ class _KillableProcess(Protocol):
 class CancellationToken:
     """Thread-safe handoff letting one external thread terminate a bound process group."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_bind: Callable[[int], None] | None = None) -> None:
         self._lock = threading.Lock()
         self._process: _KillableProcess | None = None
         self._cancelled = threading.Event()
+        self._on_bind = on_bind
 
     def bind(self, process: _KillableProcess) -> None:
         """Register the live process this token can terminate.
 
         If cancellation was already requested before the process started, the
-        process is signalled immediately.
+        process is signalled immediately. An ``on_bind`` observer (if any) is
+        notified with the process pid so a caller can durably record the worker
+        it just spawned; observer failures never disturb execution.
         """
         with self._lock:
             self._process = process
             already_requested = self._cancelled.is_set()
+            observer = self._on_bind
+        if observer is not None:
+            with contextlib.suppress(Exception):
+                observer(process.pid)
         if already_requested:
             self._terminate(process)
 
