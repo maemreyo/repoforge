@@ -145,7 +145,7 @@ start: install  # Build, install, stop the managed old process, and start this r
 		flags=''; \
 		if [ -n "$(BG)$(WATCH)" ]; then flags='--background'; fi; \
 		printf '\n\033[36m══> Starting %s %s\033[0m\n' "$$(rf --version)" "$$flags"; \
-		CONTROL_PLANE_API_KEY="$${CONTROL_PLANE_API_KEY:-}" rf start $$flags; \
+		rf start $$flags; \
 		if [ -n "$$flags" ]; then \
 			sleep 2; \
 			rf runtime status; \
