@@ -17,6 +17,7 @@ from .json_operation_store import JsonOperationStore
 from .json_pr_check_watch_store import JsonPrCheckWatchStore
 from .json_runtime_activation_store import JsonRuntimeActivationStore
 from .json_task_store import JsonTaskStore
+from .json_worker_binding_store import JsonWorkerBindingStore
 from .json_workflow_recording_store import JsonWorkflowRecordingStore
 from .json_workspace_store import JsonWorkspaceStore
 
@@ -42,6 +43,7 @@ __all__ = [
     "JsonPrCheckWatchStore",
     "JsonRuntimeActivationStore",
     "JsonTaskStore",
+    "JsonWorkerBindingStore",
     "JsonWorkflowRecordingStore",
     "JsonWorkspaceStore",
 ]

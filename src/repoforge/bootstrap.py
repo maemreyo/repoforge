@@ -65,6 +65,7 @@ from .adapters.persistence import (
     JsonPrCheckWatchStore,
     JsonRuntimeActivationStore,
     JsonTaskStore,
+    JsonWorkerBindingStore,
     JsonWorkflowRecordingStore,
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
@@ -117,6 +118,7 @@ from .adapters.runtime.local_runtime import (
 from .adapters.runtime.local_runtime import (
     write_runtime_state as write_runtime_state,
 )
+from .adapters.subprocess import OsProcessReaper as OsProcessReaper
 from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandExecutor
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
@@ -190,6 +192,7 @@ from .ports import (
     OperationStore,
     PrCheckWatchStore,
     ProcessInspector,
+    ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
     RepositoryDiscovery,
@@ -204,6 +207,7 @@ from .ports import (
     TicketProjectGateway,
     TunnelClient,
     TunnelProfileStore,
+    WorkerBindingStore,
     WorkflowRecordingStore,
     WorkspaceStore,
 )
@@ -259,6 +263,8 @@ class AdapterOverrides:
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
     failure_output_artifacts: FailureOutputArtifactStore | None = None
+    worker_bindings: WorkerBindingStore | None = None
+    reaper: ProcessReaper | None = None
     issue_graph_proposals: IssueGraphProposalStore | None = None
     issue_graph_publications: IssueGraphPublicationStore | None = None
 
@@ -639,6 +645,8 @@ def build_application(
         config.server.state_root
     )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    worker_bindings = o.worker_bindings or JsonWorkerBindingStore(config.server.state_root, locks)
+    reaper = o.reaper or OsProcessReaper()
     operation_result_store = o.operation_results or JsonOperationResultStore(
         config.server.state_root,
         locks,
@@ -706,6 +714,8 @@ def build_application(
         iteration_cache=iteration_cache,
         failure_evidence=failure_evidence,
         failure_output_artifacts=failure_output_artifacts,
+        worker_bindings=worker_bindings,
+        reaper=reaper,
     )
     operations = OperationManager(context)
     processes = build_process_inspector()
@@ -744,6 +754,8 @@ def build_application(
             locks=locks,
             processes=processes,
         ),
+        worker_bindings=worker_bindings,
+        reaper=reaper,
     )
     pr_check_watches = PrCheckWatchCoordinator(
         context,

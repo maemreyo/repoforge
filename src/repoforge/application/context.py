@@ -43,10 +43,12 @@ from ..ports import (
     OperationGate,
     OperationResultStore,
     OperationStore,
+    ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
     TicketGraphGateway,
     TicketProjectGateway,
+    WorkerBindingStore,
     WorkspaceStore,
 )
 from .audit_context import current_audit_attribution
@@ -256,6 +258,8 @@ class ApplicationContext:
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
     failure_output_artifacts: FailureOutputArtifactStore | None = None
+    worker_bindings: WorkerBindingStore | None = None
+    reaper: ProcessReaper | None = None
 
     def now_epoch(self) -> float:
         try:

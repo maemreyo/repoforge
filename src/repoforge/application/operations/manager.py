@@ -231,12 +231,22 @@ class OperationManager:
             owner_id=owner_id,
         )
 
-    def expire(self, operation_id: str, *, now: str | None = None) -> OperationTask:
+    def expire(
+        self,
+        operation_id: str,
+        *,
+        error_message: str | None = None,
+        now: str | None = None,
+    ) -> OperationTask:
         return self._save_transition(
             operation_id,
             OperationState.EXPIRED,
             now=now,
             error_code="OPERATION_EXPIRED",
+            error_message=(
+                error_message
+                or "Operation expired: its deadline elapsed before it reached a terminal state."
+            ),
             bypass_ownership=True,
         )
 
@@ -245,6 +255,7 @@ class OperationManager:
         operation_id: str,
         *,
         error_code: str = "OPERATION_WORKER_LOST",
+        error_message: str | None = None,
         now: str | None = None,
     ) -> OperationTask:
         return self._save_transition(
@@ -252,6 +263,10 @@ class OperationManager:
             OperationState.ORPHANED,
             now=now,
             error_code=error_code,
+            error_message=(
+                error_message
+                or "Operation worker was lost (the runtime process that owned it is gone)."
+            ),
             retryability=OperationRetryability.MANUAL,
             bypass_ownership=True,
         )

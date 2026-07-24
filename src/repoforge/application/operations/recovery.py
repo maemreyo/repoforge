@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState, OperationTask
+from ...domain.operation_worker import OperationWorkerBinding
+from ...ports.process_reaper import ProcessReaper
+from ...ports.worker_binding_store import WorkerBindingStore
 from .manager import OperationManager
 
 RunningLivenessProbe = Callable[[OperationTask], bool | None]
@@ -20,6 +24,8 @@ class OperationRecoveryReport:
     expired: int
     deleted: int
     conflicts: int
+    reaped: int
+    bindings_pruned: int
     missing_result_references: int
     missing_receipt_references: int
     retained_for_receipt: int
@@ -35,6 +41,58 @@ def _timestamp(value: str) -> datetime:
     return parsed
 
 
+def _reap_and_describe(
+    operation_id: str,
+    *,
+    worker_bindings: WorkerBindingStore | None,
+    reaper: ProcessReaper | None,
+) -> tuple[str, bool]:
+    """Reap a detached child bound to an operation without blocking recovery."""
+    base = "the runtime process that owned it is gone"
+    if worker_bindings is None:
+        return base, False
+    binding = None
+    with contextlib.suppress(RepoForgeError):
+        binding = worker_bindings.get(operation_id)
+    if binding is None:
+        return f"{base}; no live worker binding was recorded", False
+    if reaper is None:
+        detail = f"{base}; child worker pgid={binding.child_pgid} not reaped (no reaper configured)"
+        return detail, False
+    reaped = False
+    outcome_detail = "reap skipped"
+    with contextlib.suppress(Exception):
+        outcome = reaper.reap(binding)
+        reaped = outcome.reaped and outcome.attempted
+        outcome_detail = outcome.detail
+    with contextlib.suppress(RepoForgeError):
+        worker_bindings.delete(operation_id)
+    return f"{base}; child worker pgid={binding.child_pgid} reap: {outcome_detail}", reaped
+
+
+def _prune_bindings(
+    manager: OperationManager,
+    worker_bindings: WorkerBindingStore | None,
+) -> int:
+    """Drop bindings whose operation is missing or already terminal."""
+    if worker_bindings is None:
+        return 0
+    pruned = 0
+    bindings: tuple[OperationWorkerBinding, ...] = ()
+    with contextlib.suppress(RepoForgeError):
+        bindings = worker_bindings.list_all()
+    for binding in bindings:
+        stale = True
+        with contextlib.suppress(RepoForgeError):
+            record = manager.status(binding.operation_id)
+            stale = record.state in TERMINAL_OPERATION_STATES
+        if stale:
+            with contextlib.suppress(RepoForgeError):
+                worker_bindings.delete(binding.operation_id)
+                pruned += 1
+    return pruned
+
+
 def recover_operations(
     manager: OperationManager,
     *,
@@ -43,6 +101,8 @@ def recover_operations(
     running_stale_seconds: int = 0,
     resumable_kinds: frozenset[str] = frozenset(),
     running_liveness: RunningLivenessProbe | None = None,
+    worker_bindings: WorkerBindingStore | None = None,
+    reaper: ProcessReaper | None = None,
 ) -> OperationRecoveryReport:
     """Expire due work, orphan unrecoverable running work, and prune old terminals."""
     if retention_seconds < 0:
@@ -55,6 +115,7 @@ def recover_operations(
     expired = 0
     deleted = 0
     conflicts = 0
+    reaped = 0
     missing_result_references = 0
     missing_receipt_references = 0
     retained_for_receipt = 0
@@ -105,9 +166,17 @@ def recover_operations(
                 and task.lease_expires_at is not None
                 and _timestamp(task.lease_expires_at) <= now_dt
             ):
+                reason, did_reap = _reap_and_describe(
+                    task.operation_id,
+                    worker_bindings=worker_bindings,
+                    reaper=reaper,
+                )
+                if did_reap:
+                    reaped += 1
                 manager.orphan(
                     task.operation_id,
                     error_code="OPERATION_OWNERSHIP_EXPIRED",
+                    error_message=f"OPERATION_OWNERSHIP_EXPIRED: {reason}.",
                     now=now,
                 )
                 orphaned += 1
@@ -121,7 +190,18 @@ def recover_operations(
                     or running_stale_seconds == 0
                     or _timestamp(task.updated_at) <= running_cutoff
                 ):
-                    manager.orphan(task.operation_id, now=now)
+                    reason, did_reap = _reap_and_describe(
+                        task.operation_id,
+                        worker_bindings=worker_bindings,
+                        reaper=reaper,
+                    )
+                    if did_reap:
+                        reaped += 1
+                    manager.orphan(
+                        task.operation_id,
+                        error_message=f"OPERATION_WORKER_LOST: {reason}.",
+                        now=now,
+                    )
                     orphaned += 1
         except RepoForgeError as exc:
             if exc.code is ErrorCode.OPERATION_STALE:
@@ -129,12 +209,16 @@ def recover_operations(
                 continue
             raise
 
+    bindings_pruned = _prune_bindings(manager, worker_bindings)
+
     return OperationRecoveryReport(
         scanned=len(page.records),
         orphaned=orphaned,
         expired=expired,
         deleted=deleted,
         conflicts=conflicts,
+        reaped=reaped,
+        bindings_pruned=bindings_pruned,
         missing_result_references=missing_result_references,
         missing_receipt_references=missing_receipt_references,
         retained_for_receipt=retained_for_receipt,
