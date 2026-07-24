@@ -371,6 +371,24 @@ class WorkspaceStatusV2:
                                     json.dumps(base.upstream_changed_paths),
                                 ),
                                 StatusFact("overlap_paths", json.dumps(base.overlap_paths)),
+                                StatusFact(
+                                    "generated_overlap_paths",
+                                    json.dumps(base.generated_overlap_paths),
+                                ),
+                                StatusFact(
+                                    "expected_evidence_invalidation",
+                                    json.dumps(base.expected_evidence_invalidation),
+                                ),
+                                StatusFact("verify_selector", json.dumps(base.verify_selector)),
+                                StatusFact("recommended_action", base.recommended_action),
+                                StatusFact(
+                                    "recreate_eligible",
+                                    str(base.recreate_eligible).lower(),
+                                ),
+                                StatusFact(
+                                    "recreate_blockers",
+                                    json.dumps(base.recreate_blockers),
+                                ),
                             ),
                             base_violations,
                         )

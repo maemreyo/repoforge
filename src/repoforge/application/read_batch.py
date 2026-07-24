@@ -182,10 +182,17 @@ def _render(data: bytes, request: FileReadRequest) -> tuple[str, int, list[tuple
     return "".join(segments), len(lines), spans
 
 
-def _prefix_within_utf8_budget(text: str, budget: int) -> str:
+def _serialized_content_bytes(text: str) -> int:
+    """Measure the JSON-escaped bytes emitted for a string value, excluding its quotes."""
+
+    encoded = json.dumps(text, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return max(0, len(encoded) - 2)
+
+
+def _prefix_within_transport_budget(text: str, budget: int) -> str:
     if not text or budget <= 0:
         return ""
-    if len(text.encode("utf-8")) <= budget:
+    if _serialized_content_bytes(text) <= budget:
         return text
     low = 1
     high = len(text)
@@ -193,12 +200,12 @@ def _prefix_within_utf8_budget(text: str, budget: int) -> str:
     while low <= high:
         middle = (low + high) // 2
         candidate = text[:middle]
-        if len(candidate.encode("utf-8")) <= budget:
+        if _serialized_content_bytes(candidate) <= budget:
             best = candidate
             low = middle + 1
         else:
             high = middle - 1
-    return best or text[:1]
+    return best
 
 
 def _line_bounds(
@@ -264,7 +271,25 @@ def execute_batch_read(
         if char_offset > len(rendered):
             raise WorkspaceError("Read cursor points beyond the requested content")
         pending = rendered[char_offset:]
-        chunk = _prefix_within_utf8_budget(pending, remaining)
+        chunk = _prefix_within_transport_budget(pending, remaining)
+        if pending and not chunk:
+            required_bytes = _serialized_content_bytes(pending[:1])
+            raise RepoForgeError(
+                "RESULT_TRANSPORT_BUDGET_EXCEEDED: one source character cannot fit the "
+                "remaining serialized page budget",
+                code=ErrorCode.RESULT_TRANSPORT_BUDGET_EXCEEDED,
+                retryable=False,
+                details={
+                    "byte_budget": byte_budget,
+                    "remaining_bytes": remaining,
+                    "required_bytes": required_bytes,
+                    "path": request.path,
+                },
+                safe_next_action=(
+                    "Retry the same exact read with a larger byte_budget; no result page was emitted."
+                ),
+                unchanged_state=("Repository and workspace content were not modified.",),
+            )
         end_offset = char_offset + len(chunk)
         truncated_file = end_offset < len(rendered)
         if truncated_file:
@@ -294,7 +319,7 @@ def execute_batch_read(
                 next_cursor=next_cursor if truncated_file else None,
             )
         )
-        remaining -= len(chunk.encode("utf-8"))
+        remaining -= _serialized_content_bytes(chunk)
         if truncated_file or remaining <= 0:
             break
         index += 1

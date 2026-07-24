@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "thresholds": {
+    "max_actionable_failure_call": 3.0,
+    "max_calls_per_completed_task": 6.0,
+    "max_duplicate_read_rate": 0.05,
+    "max_full_profile_reruns": 0.0,
+    "max_hidden_retries": 0.0,
+    "max_opaque_failure_count": 0.0,
+    "max_synthetic_timestamp_count": 0.0,
+    "max_temporary_diagnostic_mutations": 0.0,
+    "max_unknown_effect_outcomes": 0.0
+  },
+  "scenarios": [
+    {
+      "id": "before-effect-retry",
+      "selector": "tests/test_issue_graph_publication.py::test_failed_before_effect_retries_the_same_step",
+      "boundary": "before_effect",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "repo_issue", "kind": "mutate", "resource": "publication:before-effect", "state_version": "v1", "cursor": null, "outcome": "failed_before_effect", "effect_key": "publication-step-1", "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "commit-rollback",
+      "selector": "tests/test_workspace_mutate.py::test_change_budget_failure_rolls_back_the_entire_transaction",
+      "boundary": "commit",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "workspace_mutate", "kind": "mutate", "resource": "workspace:budget", "state_version": "fingerprint:before", "cursor": null, "outcome": "rolled_back", "effect_key": "workspace-transaction-1", "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "after-effect-reconciliation",
+      "selector": "tests/test_issue_graph_publication.py::test_failed_after_effect_reconciles_without_duplicate_write",
+      "boundary": "after_effect",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "repo_issue", "kind": "mutate", "resource": "publication:after-effect", "state_version": "v1", "cursor": null, "outcome": "effect_outcome_unknown", "effect_key": "publication-step-2", "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"},
+        {"call": 2, "tool": "operation", "kind": "control", "resource": "publication:after-effect", "state_version": "v2", "cursor": null, "outcome": "reconciled", "effect_key": "publication-step-2", "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "serialization-replay",
+      "selector": "tests/test_mutation_idempotency.py::test_lost_write_response_replays_authoritative_receipt_without_reapplying",
+      "boundary": "serialization",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "workspace_mutate", "kind": "mutate", "resource": "file:lost.txt", "state_version": "receipt:v1", "cursor": null, "outcome": "effect_outcome_unknown", "effect_key": "write-lost-response", "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"},
+        {"call": 2, "tool": "workspace_mutate", "kind": "control", "resource": "file:lost.txt", "state_version": "receipt:v2", "cursor": null, "outcome": "replayed", "effect_key": "write-lost-response", "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "result-persistence-replay",
+      "selector": "tests/test_phase6_operational_hardening.py::test_idempotency_persists_authoritative_receipt_after_effect_serialization_failure",
+      "boundary": "result_persistence",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "operation", "kind": "mutate", "resource": "operation-result:write", "state_version": "receipt:v1", "cursor": null, "outcome": "effect_outcome_unknown", "effect_key": "operation-result-1", "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"},
+        {"call": 2, "tool": "operation", "kind": "control", "resource": "operation-result:write", "state_version": "receipt:v2", "cursor": null, "outcome": "replayed", "effect_key": "operation-result-1", "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "caller-disconnect-handoff",
+      "selector": "tests/test_phase7_atomic_hot_reload.py::test_operation_gate_returns_typed_reconnect_evidence_during_drain",
+      "boundary": "caller_disconnect",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "operation", "kind": "control", "resource": "runtime:generation-2", "state_version": "generation:2", "cursor": null, "outcome": "reconnect_required", "effect_key": null, "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "stale-contract-rejection",
+      "selector": "tests/test_mcp_contract_v2.py::test_protocol_reconnect_required_preserves_runtime_handoff_identity",
+      "boundary": "stale_identity",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "repo_list", "kind": "control", "resource": "runtime:contract", "state_version": "generation:2", "cursor": null, "outcome": "typed_rejection", "effect_key": null, "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "runtime-log-provenance",
+      "selector": "tests/test_config_admin.py::test_runtime_logs_read_reports_legacy_and_malformed_without_epoch",
+      "boundary": "logs",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "runtime_logs_read", "kind": "read", "resource": "runtime-log:snapshot", "state_version": "sha256:log", "cursor": "start", "outcome": "structured_unavailable", "effect_key": null, "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "unavailable"}
+      ]
+    },
+    {
+      "id": "bounded-failure-artifact",
+      "selector": "tests/test_config_admin.py::test_v2_runtime_logs_third_source_page",
+      "boundary": "bounded_retrieval",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "runtime_logs_read", "kind": "read", "resource": "failure-artifact:fixture", "state_version": "sha256:artifact", "cursor": "start", "outcome": "partial", "effect_key": null, "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "unavailable"},
+        {"call": 2, "tool": "runtime_logs_read", "kind": "read", "resource": "failure-artifact:fixture", "state_version": "sha256:artifact", "cursor": "page:2", "outcome": "resumed", "effect_key": null, "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "unavailable"}
+      ]
+    },
+    {
+      "id": "pr-version-drift",
+      "selector": "tests/test_v2_shipping.py::test_workspace_pr_stale_version_returns_typed_current_token",
+      "boundary": "pr_drift",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "workspace_pr", "kind": "control", "resource": "pr:42", "state_version": "prv2:current", "cursor": null, "outcome": "typed_rejection", "effect_key": null, "actionable_failure": true, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "ticket-graph-projection",
+      "selector": "tests/test_repo_issue_graph_tools.py::test_v2_repo_issue_graph_exposes_capability_scoped_coverage",
+      "boundary": "graph_projection",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "repo_issue", "kind": "read", "resource": "ticket-graph:demo", "state_version": "projection:v2", "cursor": "start", "outcome": "completed", "effect_key": null, "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"}
+      ]
+    },
+    {
+      "id": "generated-path-refresh",
+      "selector": "tests/test_workspace_refresh.py::test_v2_generated_conflict_is_regenerated_without_hand_resolution",
+      "boundary": "generated_refresh",
+      "completed": true,
+      "trace": [
+        {"call": 1, "tool": "workspace_refresh", "kind": "mutate", "resource": "generated:hello.txt", "state_version": "plan:v1", "cursor": null, "outcome": "applied", "effect_key": "refresh-generated-1", "actionable_failure": false, "temporary_mutation": false, "profile": null, "rerun": false, "timestamp_state": "observed"},
+        {"call": 2, "tool": "workspace_verify", "kind": "verify", "resource": "generated:hello.txt", "state_version": "receipt:v1", "cursor": null, "outcome": "completed", "effect_key": "refresh-generated-1", "actionable_failure": false, "temporary_mutation": false, "profile": "focused", "rerun": false, "timestamp_state": "observed"}
+      ]
+    }
+  ]
+}

@@ -41,6 +41,7 @@ from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..verification_reuse import (
     command_source_identity,
     config_identity,
+    diagnostic_rerun_target_identity,
     diagnostic_target_identity,
     failure_reuse_binding,
 )
@@ -115,6 +116,11 @@ class WorkspaceRunDiagnosticResult:
     execution_evidence: dict[str, object] = field(default_factory=dict)
     failed_selectors: list[str] = field(default_factory=list)
     output_artifact_reference: str | None = None
+    failure_provider: str | None = None
+    selector_coverage: str = "not_applicable"
+    selectors_unavailable_reason: str | None = None
+    failure_locations: list[dict[str, object]] = field(default_factory=list)
+    output_artifact_status: str = "not_applicable"
     failure_expectation: str | None = None
     failure_chain_id: str | None = None
     rerun_of_selectors: list[str] = field(default_factory=list)
@@ -333,6 +339,7 @@ class WorkspaceDiagnosticRunner:
                     ).identity.identity_hash
                 except Exception:
                     audit_details["failure_reuse_unavailable"] = "environment_identity"
+                config_identity_value = config_identity(self.ctx.config.source_path)
                 reuse_binding = failure_reuse_binding(
                     fingerprint=before_fingerprint,
                     target_identity=target_identity_value,
@@ -340,9 +347,37 @@ class WorkspaceDiagnosticRunner:
                         locked_workspace,
                         derive_command_source_paths((resolved.argv,)),
                     ),
-                    config_identity_value=config_identity(self.ctx.config.source_path),
+                    config_identity_value=config_identity_value,
                     environment_identity=environment_identity_value,
                 )
+                rerun_binding = failure_reuse_binding(
+                    fingerprint=before_fingerprint,
+                    target_identity=diagnostic_rerun_target_identity(
+                        locked_profile,
+                        intent=intent.value,
+                        expectation=expectation.value,
+                        expected_failure_class=expected_failure_value,
+                    ),
+                    command_source_identity_value=command_source_identity(
+                        locked_workspace,
+                        derive_command_source_paths((locked_profile.argv_template,)),
+                    ),
+                    config_identity_value=config_identity_value,
+                    environment_identity=environment_identity_value,
+                )
+                if rerun_record is not None:
+                    if rerun_record.binding is None:
+                        raise _diagnostic_error(
+                            "The failed-selector record predates exact compatibility binding",
+                            ErrorCode.DIAGNOSTIC_STALE_WORKSPACE,
+                            retryable=True,
+                        )
+                    if rerun_binding is None or rerun_record.binding != rerun_binding:
+                        raise _diagnostic_error(
+                            "Failed-selector compatibility binding changed since the original failure",
+                            ErrorCode.DIAGNOSTIC_STALE_WORKSPACE,
+                            retryable=True,
+                        )
                 if (
                     not command.force_rerun
                     and not command.rerun_failed
@@ -525,12 +560,14 @@ class WorkspaceDiagnosticRunner:
                     parsed.outcome == "failed"
                     and parsed.failed_selectors
                     and not fingerprint_changed
+                    and rerun_binding is not None
                 ):
                     selector_record = record_failed_selectors(
                         fresh.metadata,
                         target=diagnostic_target,
                         fingerprint=before_fingerprint,
                         selectors=parsed.failed_selectors,
+                        binding=rerun_binding,
                         chain_id=rerun_record.chain_id if rerun_record is not None else None,
                     )
                     selector_metadata_changed = selector_record is not None
@@ -594,6 +631,19 @@ class WorkspaceDiagnosticRunner:
                     execution_evidence=execution_evidence_data,
                     failed_selectors=list(parsed.failed_selectors),
                     output_artifact_reference=parsed.output_artifact_reference,
+                    failure_provider=parsed.failure_provider,
+                    selector_coverage=parsed.selector_coverage,
+                    selectors_unavailable_reason=parsed.selectors_unavailable_reason,
+                    failure_locations=[
+                        {
+                            "path": item.path,
+                            "line": item.line,
+                            "column": item.column,
+                            "code": item.code,
+                        }
+                        for item in parsed.failure_locations
+                    ],
+                    output_artifact_status=parsed.output_artifact_status,
                     failure_expectation=failure_expectation,
                     failure_chain_id=evidence_chain_id,
                     rerun_of_selectors=(

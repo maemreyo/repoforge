@@ -9,9 +9,11 @@ from conftest import ForgeEnvironment, create_forge_environment, git
 
 from repoforge.adapters.filesystem.transaction import JournaledFileTransaction
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.mutate import CreateMutation
 from repoforge.application.workspace.refresh_v2 import WorkspaceRefreshV2
+from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import SecurityError, WorkspaceError
-from repoforge.domain.generated_paths import GeneratedPathRule
+from repoforge.domain.generated_paths import GeneratedPathRule, valid_regenerated_paths
 
 
 def _clone_publisher(env: ForgeEnvironment, name: str = "publisher") -> Path:
@@ -50,6 +52,36 @@ def _commit_workspace_hello(env: ForgeEnvironment, workspace_id: str, content: s
     )
     env.service.workspace_run_profile(workspace_id)
     return str(env.service.workspace_commit(workspace_id, "change workspace hello")["head_sha"])
+
+
+def _install_hello_generator(
+    env: ForgeEnvironment,
+    *,
+    side_effect: bool = False,
+    nondeterministic: bool = False,
+    source_content: str = "generated from source\n",
+) -> None:
+    scripts = env.source / "scripts"
+    scripts.mkdir(exist_ok=True)
+    (env.source / "hello.source").write_text(source_content, encoding="utf-8")
+    if nondeterministic:
+        script = (
+            "from pathlib import Path\n"
+            "from time import time_ns\n"
+            "Path('hello.txt').write_text(str(time_ns()) + '\\n', encoding='utf-8')\n"
+        )
+    else:
+        script = (
+            "from pathlib import Path\n"
+            "Path('hello.txt').write_text(Path('hello.source').read_text(encoding='utf-8'), "
+            "encoding='utf-8')\n"
+        )
+    if side_effect:
+        script += "Path('README.md').write_text('unexpected side effect\\n', encoding='utf-8')\n"
+    (scripts / "render_hello.py").write_text(script, encoding="utf-8")
+    git("add", "hello.source", "scripts/render_hello.py", cwd=env.source)
+    git("commit", "-m", "add reviewed hello generator", cwd=env.source)
+    git("push", "origin", "main", cwd=env.source)
 
 
 def test_base_status_distinguishes_current_remote_local_and_diverged_states(
@@ -122,6 +154,349 @@ def test_base_status_reports_remote_outage_without_losing_last_known_state(
     assert unavailable["remote_error_code"] == "REMOTE_BASE_UNAVAILABLE"
 
 
+def test_stale_base_preflight_is_visible_before_mutation_and_full_verification(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "freshness preflight",
+        idempotency_key="freshness-preflight-create-0001",
+    )
+    workspace_id = str(created["workspace_id"])
+    _push_upstream_file(
+        forge_env,
+        "upstream.txt",
+        "upstream change\n",
+        "advance base before mutation",
+    )
+    before = service.workspace_status(workspace_id)
+
+    mutation = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="planned.txt", content="planned\n")],
+        expected_workspace_fingerprint=str(before["workspace_fingerprint"]),
+        dry_run=True,
+    )
+
+    preflight = mutation["freshness_preflight"]
+    assert preflight["staleness"] == "remote_base_stale"
+    assert preflight["behind_base"] == 1
+    assert preflight["upstream_changed_paths"] == ["upstream.txt"]
+    assert preflight["overlap_paths"] == []
+    assert preflight["generated_overlap_paths"] == []
+    assert preflight["expected_evidence_invalidation"] == [
+        "last_verification",
+        "code_intelligence",
+        "diagnostic_receipts",
+        "failure_evidence",
+    ]
+    assert preflight["recommended_action"] == "recreate_from_latest_base"
+    assert preflight["verify_selector"] == ["upstream.txt"]
+    assert "before mutation" in preflight["warning"]
+
+    planned = service.workspace_verify(workspace_id, mode="plan")
+    base = planned["assessment"]["base_freshness"]["value"]
+    assert base["recommended_action"] == "recreate_from_latest_base"
+    assert base["expected_evidence_invalidation"] == preflight["expected_evidence_invalidation"]
+    assert "last_verification" in planned["staleness_warning"]
+    assert "recreate_from_latest_base" in planned["staleness_warning"]
+
+
+def test_freshness_preflight_classifies_generated_path_overlap(
+    forge_env: ForgeEnvironment,
+) -> None:
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    workspace_id = str(service.workspace_create("demo", "generated overlap")["workspace_id"])
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "local generated edit\n",
+        str(current["sha256"]),
+    )
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "upstream generated edit\n",
+        "change generated output upstream",
+    )
+
+    status = service.workspace_base_status(workspace_id)
+
+    assert status["overlap_paths"] == ["hello.txt"]
+    assert status["generated_overlap_paths"] == ["hello.txt"]
+    assert status["recommended_action"] == "refresh_preview"
+    assert "generated-path overlap" in status["preflight_warning"]
+
+
+def test_clean_unpublished_workspace_recreates_from_latest_base_and_replays(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "recreate clean workspace",
+        idempotency_key="recreate-clean-workspace-0001",
+        issue_ids=("239",),
+    )
+    workspace_id = str(created["workspace_id"])
+    original_path = str(created["path"])
+    original_branch = str(created["branch"])
+    before = service.workspace_status(workspace_id)
+    target_sha = _push_upstream_file(
+        forge_env,
+        "latest.txt",
+        "latest base\n",
+        "advance base for recreate",
+    )
+    preflight = service.workspace_base_status(workspace_id)
+    assert preflight["recreate_eligible"] is True
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    V2_TOOL_SPECS["workspace_refresh"].validate_success_output(preview)
+    assert preview["recreate_eligible"] is True
+    assert preview["recreate_blockers"] == []
+    recreated = service.workspace_refresh_v2(
+        workspace_id,
+        action="recreate_from_latest_base",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+    )
+
+    V2_TOOL_SPECS["workspace_refresh"].validate_success_output(recreated)
+    assert recreated["result"] == "recreated"
+    assert recreated["workspace_id"] == workspace_id
+    assert recreated["target_base_sha"] == target_sha
+    assert recreated["head_sha"] == target_sha
+    assert recreated["changed_paths"] == ["latest.txt"]
+    assert recreated["verify_selector"] == ["latest.txt"]
+    assert recreated["invalidated_receipts"] == [
+        "verification",
+        "assessment",
+        "architecture",
+        "execution_plan",
+    ]
+    assert recreated["transaction_id"]
+    after = service.workspace_status(workspace_id)
+    assert after["path"] == original_path
+    assert after["branch"] == original_branch
+    assert after["head_sha"] == target_sha
+    assert Path(original_path, "latest.txt").read_text(encoding="utf-8") == "latest base\n"
+    record = service.state.load(workspace_id)
+    assert record.metadata["workspace_base_sha"] == target_sha
+    assert record.metadata["last_recreate_target_sha"] == target_sha
+    planned = service.workspace_verify(workspace_id, mode="plan")
+    assert planned["assessment"]["changed_paths"] == ["latest.txt"]
+
+    replayed = service.workspace_refresh_v2(
+        workspace_id,
+        action="recreate_from_latest_base",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+    )
+    assert replayed["result"] == "recreated"
+    assert replayed["transaction_id"] == recreated["transaction_id"]
+    assert service.workspace_status(workspace_id)["head_sha"] == target_sha
+
+
+def test_recreate_resumes_after_crash_once_worktree_is_removed(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "recreate crash recovery",
+        idempotency_key="recreate-crash-recovery-0001",
+    )
+    workspace_id = str(created["workspace_id"])
+    before = service.workspace_status(workspace_id)
+    target_sha = _push_upstream_file(
+        forge_env,
+        "recovered.txt",
+        "recovered\n",
+        "advance base before recreate crash",
+    )
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_recreate_worktree_removed":
+            raise KeyboardInterrupt("simulated recreate process death")
+
+    service._refresh_v2 = WorkspaceRefreshV2(
+        service.application.context,
+        recreate_fault_injector=crash,
+    )
+    with pytest.raises(KeyboardInterrupt, match="recreate process death"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="recreate_from_latest_base",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+        )
+
+    journal = forge_env.root / "state" / "workspace-recreate-transactions" / workspace_id
+    assert journal.exists()
+    service._refresh_v2 = WorkspaceRefreshV2(service.application.context)
+    recovered = service.workspace_refresh_v2(
+        workspace_id,
+        action="recreate_from_latest_base",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+    )
+
+    assert recovered["result"] == "recreated"
+    assert recovered["head_sha"] == target_sha
+    assert not journal.exists()
+
+
+def test_recreate_refuses_dirty_workspace_without_changing_state(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    created = service.workspace_create(
+        "demo",
+        "recreate dirty refusal",
+        idempotency_key="recreate-dirty-refusal-0001",
+    )
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "scratch.txt").write_text("must survive\n", encoding="utf-8")
+    before = service.workspace_status(workspace_id)
+    _push_upstream_file(
+        forge_env,
+        "latest.txt",
+        "latest\n",
+        "advance base before dirty refusal",
+    )
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+    assert preview["recreate_eligible"] is False
+    assert "working_tree_not_clean" in preview["recreate_blockers"]
+
+    with pytest.raises(WorkspaceError) as blocked:
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="recreate_from_latest_base",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+        )
+
+    assert blocked.value.unchanged_state == (
+        "The workspace worktree, local branch, registry record, remote branch, and pull request were not modified.",
+    )
+    assert workspace_path.joinpath("scratch.txt").read_text(encoding="utf-8") == "must survive\n"
+    assert service.workspace_status(workspace_id)["head_sha"] == before["head_sha"]
+
+
+def test_recreate_eligibility_matrix_refuses_preserved_or_external_state(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_ids: dict[str, str] = {}
+    for name in ("unique", "published", "pr", "external"):
+        created = service.workspace_create(
+            "demo",
+            f"recreate matrix {name}",
+            idempotency_key=f"recreate-matrix-{name}-0001",
+        )
+        workspace_ids[name] = str(created["workspace_id"])
+    unbound = service.workspace_create("demo", "recreate matrix unbound")
+    workspace_ids["unbound"] = str(unbound["workspace_id"])
+
+    _commit_workspace_hello(
+        forge_env,
+        workspace_ids["unique"],
+        "changed unique local commit\n",
+    )
+    published = service.state.load(workspace_ids["published"])
+    published.metadata["last_pushed_sha"] = service.workspace_status(workspace_ids["published"])[
+        "head_sha"
+    ]
+    service.state.save(published)
+    pr_bound = service.state.load(workspace_ids["pr"])
+    pr_bound.metadata["pr_number"] = 239
+    service.state.save(pr_bound)
+    external = service.state.load(workspace_ids["external"])
+    external.metadata["external_write_count"] = 1
+    service.state.save(external)
+
+    _push_upstream_file(
+        forge_env,
+        "matrix-upstream.txt",
+        "upstream\n",
+        "advance base for recreate eligibility matrix",
+    )
+    expected = {
+        "unique": "unique_commits_present",
+        "published": "published_branch",
+        "pr": "pull_request_bound",
+        "external": "external_writes_recorded",
+        "unbound": "task_binding_unavailable",
+    }
+
+    for name, blocker in expected.items():
+        workspace_id = workspace_ids[name]
+        before = service.workspace_status(workspace_id)
+        base = service.workspace_base_status(workspace_id)
+        assert base["recreate_eligible"] is False
+        assert blocker in base["recreate_blockers"]
+        preview = service.workspace_refresh_v2(
+            workspace_id,
+            action="preview",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+        )
+        assert preview["recreate_eligible"] is False
+        assert blocker in preview["recreate_blockers"]
+        with pytest.raises(WorkspaceError) as refused:
+            service.workspace_refresh_v2(
+                workspace_id,
+                action="recreate_from_latest_base",
+                expected_head_sha=str(before["head_sha"]),
+                expected_fingerprint=str(before["workspace_fingerprint"]),
+                plan_token=str(preview["plan_token"]),
+            )
+        assert blocker in refused.value.details["recreate_blockers"]
+        after = service.workspace_status(workspace_id)
+        assert after["head_sha"] == before["head_sha"]
+        assert after["workspace_fingerprint"] == before["workspace_fingerprint"]
+
+
 def test_preview_is_read_only_and_refresh_creates_a_controlled_merge_commit(
     forge_env: ForgeEnvironment,
 ) -> None:
@@ -176,6 +551,89 @@ def test_preview_is_read_only_and_refresh_creates_a_controlled_merge_commit(
     assert adopted["head_sha"] == refreshed["head_sha"]
     pushed = service.workspace_push(workspace_id)
     assert pushed["head_sha"] == refreshed["head_sha"]
+
+
+def test_v2_refresh_integrates_trusted_upstream_template_without_resolution(
+    forge_env: ForgeEnvironment,
+) -> None:
+    base_repo = forge_env.service.config.repositories["demo"]
+    guarded_repo = replace(
+        base_repo,
+        denied_paths=(*base_repo.denied_paths, ".env.*", "**/.env.*"),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": guarded_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "trusted denied-path refresh")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    target_sha = _push_upstream_file(
+        forge_env,
+        ".env.example",
+        "APP_MODE=example\n",
+        "add reviewed environment template",
+    )
+    status = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    assert preview["conflicts"] == []
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[],
+    )
+
+    assert applied["result"] == "applied"
+    assert applied["target_base_sha"] == target_sha
+    assert (workspace_path / ".env.example").read_text(encoding="utf-8") == ("APP_MODE=example\n")
+    with pytest.raises(SecurityError, match="Path is denied"):
+        service.workspace_read_file(workspace_id, ".env.example")
+
+
+def test_v2_refresh_preview_rejects_policy_blocked_conflict(
+    forge_env: ForgeEnvironment,
+) -> None:
+    base_repo = forge_env.service.config.repositories["demo"]
+    guarded_repo = replace(
+        base_repo,
+        denied_paths=(*base_repo.denied_paths, ".env.*", "**/.env.*"),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": guarded_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "denied conflict preview")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / ".env.example").write_text("WORKSPACE=1\n", encoding="utf-8")
+    git("add", ".env.example", cwd=workspace_path)
+    git("commit", "-m", "workspace environment template", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        ".env.example",
+        "UPSTREAM=1\n",
+        "upstream environment template",
+    )
+    status = service.workspace_status(workspace_id)
+
+    with pytest.raises(SecurityError, match="denied repository paths"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="preview",
+            expected_head_sha=str(status["head_sha"]),
+            expected_fingerprint=str(status["workspace_fingerprint"]),
+        )
 
 
 def test_refresh_preview_becomes_stale_after_workspace_or_remote_base_change(
@@ -310,16 +768,17 @@ def test_v2_preview_returns_typed_three_way_conflict_evidence(
     ]
 
 
-def test_v2_generated_conflict_is_tagged_and_resolution_warns(
+def test_v2_generated_conflict_is_regenerated_without_hand_resolution(
     forge_env: ForgeEnvironment,
 ) -> None:
+    _install_hello_generator(forge_env)
     configured = forge_env.service.config.repositories["demo"]
     generated_repo = replace(
         configured,
         generated_paths=(
             GeneratedPathRule(
                 "hello.txt",
-                ("python", "scripts/render_hello.py"),
+                ("python3", "scripts/render_hello.py"),
                 "Generated hello fixture",
             ),
         ),
@@ -329,7 +788,8 @@ def test_v2_generated_conflict_is_tagged_and_resolution_warns(
         repositories={**forge_env.service.config.repositories, "demo": generated_repo},
     )
     service = CodingService(config)
-    workspace_id = str(service.workspace_create("demo", "generated conflict")["workspace_id"])
+    created = service.workspace_create("demo", "generated conflict")
+    workspace_id = str(created["workspace_id"])
     current = service.workspace_read_file(workspace_id, "hello.txt")
     service.workspace_write_file(
         workspace_id,
@@ -355,8 +815,10 @@ def test_v2_generated_conflict_is_tagged_and_resolution_warns(
 
     conflict = preview["conflicts"][0]
     assert conflict["kind"] == "generated"
-    assert conflict["regeneration_command"] == ["python", "scripts/render_hello.py"]
-    assert "do not hand-merge" in conflict["next_action"].lower()
+    assert conflict["regeneration_command"] == ["python3", "scripts/render_hello.py"]
+    assert preview["conflict_scope"] == "generated"
+    assert preview["semantic_conflict_count"] == 0
+    assert preview["generated_conflict_count"] == 1
 
     applied = service.workspace_refresh_v2(
         workspace_id,
@@ -364,14 +826,365 @@ def test_v2_generated_conflict_is_tagged_and_resolution_warns(
         expected_head_sha=str(status["head_sha"]),
         expected_fingerprint=str(status["workspace_fingerprint"]),
         plan_token=str(preview["plan_token"]),
-        resolutions=[{"path": "hello.txt", "content": "reviewed generated resolution\n"}],
+        resolutions=[],
+    )
+
+    workspace_path = Path(str(created["path"]))
+    assert applied["result"] == "applied"
+    assert applied["warnings"] == []
+    assert applied["verify_selector"] == ["hello.txt"]
+    receipt = applied["regeneration_receipts"][0]
+    assert receipt["commands"] == [["python3", "scripts/render_hello.py"]]
+    assert receipt["generated_paths"] == ["hello.txt"]
+    assert receipt["deterministic"] is True
+    assert len(receipt["source_identity"]) == 64
+    assert len(receipt["output_identity"]) == 64
+    assert applied["source_change_metrics"]["changed_files"] == 0
+    assert applied["generated_change_metrics"]["changed_files"] == 1
+    assert applied["generated_change_metrics"]["binary_files"] == 0
+    durable_receipts = service.state.load(workspace_id).metadata["generated_path_receipts_v1"]
+    assert durable_receipts[-1]["refresh_commit_sha"] == applied["head_sha"]
+    assert durable_receipts[-1]["target_base_sha"] == applied["target_base_sha"]
+    assert durable_receipts[-1]["plan_hash"] == applied["plan_hash"]
+    assert durable_receipts[-1]["output_identity"] == receipt["output_identity"]
+    assert valid_regenerated_paths(
+        workspace_path,
+        generated_repo.generated_paths,
+        durable_receipts,
+    ) == frozenset({"hello.txt"})
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "generated from source\n"
+    (workspace_path / "hello.txt").write_text("manual edit\n", encoding="utf-8")
+    assert (
+        valid_regenerated_paths(
+            workspace_path,
+            generated_repo.generated_paths,
+            durable_receipts,
+        )
+        == frozenset()
+    )
+
+
+def test_v2_refresh_resolves_semantic_source_before_regenerating_output(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _install_hello_generator(forge_env)
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "mixed generated conflict")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "hello.txt").write_text("changed locally\n", encoding="utf-8")
+    (workspace_path / "hello.source").write_text("local source\n", encoding="utf-8")
+    git("add", "hello.txt", "hello.source", cwd=workspace_path)
+    git("commit", "-m", "change generated output and source locally", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "change generated output upstream",
+    )
+    _push_upstream_file(
+        forge_env,
+        "hello.source",
+        "remote source\n",
+        "change source input upstream",
+        publisher_name="publisher-source",
+    )
+    status = service.workspace_status(workspace_id)
+
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    assert preview["conflict_scope"] == "mixed"
+    assert preview["semantic_conflict_paths"] == ["hello.source"]
+    assert preview["generated_conflict_paths"] == ["hello.txt"]
+
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[{"path": "hello.source", "content": "resolved source\n"}],
     )
 
     assert applied["result"] == "applied"
-    assert applied["warnings"] == [
-        "hello.txt is generated; merge source inputs and regenerate with: python scripts/render_hello.py"
-    ]
-    assert applied["verify_selector"] == ["hello.txt"]
+    assert applied["warnings"] == []
+    assert applied["verify_selector"] == ["hello.source", "hello.txt"]
+    assert applied["source_change_metrics"]["changed_files"] == 1
+    assert applied["generated_change_metrics"]["changed_files"] == 1
+    assert (workspace_path / "hello.source").read_text(encoding="utf-8") == "resolved source\n"
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "resolved source\n"
+
+
+def test_v2_refresh_recovers_crash_before_regeneration(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _install_hello_generator(forge_env)
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "crash before regeneration")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "hello.txt").write_text("changed locally\n", encoding="utf-8")
+    (workspace_path / "hello.source").write_text("local source\n", encoding="utf-8")
+    git("add", "hello.txt", "hello.source", cwd=workspace_path)
+    git("commit", "-m", "change generated output and source locally", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "change generated output upstream",
+    )
+    _push_upstream_file(
+        forge_env,
+        "hello.source",
+        "remote source\n",
+        "change source input upstream",
+        publisher_name="publisher-crash-source",
+    )
+    before = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_semantic_resolutions":
+            raise KeyboardInterrupt("simulated crash before regeneration")
+
+    service._refresh_v2 = WorkspaceRefreshV2(
+        service.application.context,
+        fault_injector=crash,
+    )
+    with pytest.raises(KeyboardInterrupt, match="before regeneration"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.source", "content": "resolved source\n"}],
+        )
+
+    service._refresh_v2 = WorkspaceRefreshV2(service.application.context)
+    recovered = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+    restored = service.workspace_status(workspace_id)
+    assert recovered["plan_hash"] == preview["plan_hash"]
+    assert restored["head_sha"] == before["head_sha"]
+    assert restored["workspace_fingerprint"] == before["workspace_fingerprint"]
+    assert restored["clean"] is True
+    assert (workspace_path / "hello.source").read_text(encoding="utf-8") == "local source\n"
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "changed locally\n"
+
+
+def test_v2_generated_output_does_not_consume_source_budget(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _install_hello_generator(forge_env, source_content="x" * 4096 + "\n")
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        max_total_changed_bytes=32,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "large generated output")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "hello.txt").write_text("changed locally\n", encoding="utf-8")
+    git("add", "hello.txt", cwd=workspace_path)
+    git("commit", "-m", "change generated output locally", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "change generated output upstream",
+    )
+    status = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[],
+    )
+
+    assert applied["source_change_metrics"]["total_current_bytes"] == 0
+    assert applied["generated_change_metrics"]["total_current_bytes"] > 32
+    assert (workspace_path / "hello.txt").stat().st_size > 32
+
+
+def test_v2_refresh_rejects_generator_side_effects_and_rolls_back(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _install_hello_generator(forge_env, side_effect=True)
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "generator side effect")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "hello.txt").write_text("changed locally\n", encoding="utf-8")
+    git("add", "hello.txt", cwd=workspace_path)
+    git("commit", "-m", "change generated output locally", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "change generated output upstream",
+    )
+    before = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    with pytest.raises(SecurityError, match="undeclared or unstaged changes"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[],
+        )
+
+    restored = service.workspace_status(workspace_id)
+    assert restored["head_sha"] == before["head_sha"]
+    assert restored["workspace_fingerprint"] == before["workspace_fingerprint"]
+    assert restored["clean"] is True
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "changed locally\n"
+    assert (workspace_path / "README.md").read_text(encoding="utf-8").startswith("# Demo")
+
+
+def test_v2_refresh_rejects_nondeterministic_regeneration_and_rolls_back(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _install_hello_generator(forge_env, nondeterministic=True)
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    config = replace(
+        forge_env.service.config,
+        repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+    )
+    service = CodingService(config)
+    created = service.workspace_create("demo", "nondeterministic generator")
+    workspace_id = str(created["workspace_id"])
+    workspace_path = Path(str(created["path"]))
+    (workspace_path / "hello.txt").write_text("changed locally\n", encoding="utf-8")
+    git("add", "hello.txt", cwd=workspace_path)
+    git("commit", "-m", "change generated output locally", cwd=workspace_path)
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed remotely\n",
+        "change generated output upstream",
+    )
+    before = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(before["head_sha"]),
+        expected_fingerprint=str(before["workspace_fingerprint"]),
+    )
+
+    with pytest.raises(WorkspaceError, match="nondeterministic"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(before["head_sha"]),
+            expected_fingerprint=str(before["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[],
+        )
+
+    restored = service.workspace_status(workspace_id)
+    assert restored["head_sha"] == before["head_sha"]
+    assert restored["workspace_fingerprint"] == before["workspace_fingerprint"]
+    assert restored["clean"] is True
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "changed locally\n"
 
 
 def test_v2_refresh_apply_requires_exact_resolution_set(

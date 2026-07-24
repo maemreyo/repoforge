@@ -1,6 +1,6 @@
 """Crash-safe bounded aggregate operation metrics.
 
-Persists three views of recorded calls in one private, atomic, lock-guarded
+Persists four views of recorded calls in one private, atomic, lock-guarded
 JSON file:
 
 - ``operations``: lifetime totals per action, unbounded in time (unchanged
@@ -8,11 +8,13 @@ JSON file:
 - ``buckets``: per-day totals per action, bounded to a fixed retention
   window (pruned on every write) so a before/after comparison across a
   shipped fix is possible without unbounded growth.
+- ``calls_by_origin``: bounded lifetime call/failure totals split by action and
+  attributed origin without persisting raw session identifiers.
 - ``latency``: bounded histograms and approximate p95 values for engine,
   connector, client round-trip, and emitted payload bytes. Raw trace IDs are
   never persisted.
 
-Files from schema versions 1-3 load without error; lifetime totals keep
+Files from schema versions 1-4 load without error; lifetime totals keep
 accumulating while missing or malformed newer views restart empty.
 
 Each per-action stat also carries ``result_bytes_total``/``result_bytes_max``,
@@ -44,8 +46,9 @@ from ...ports.clock import Clock
 from ...ports.locking import LockManager
 from ..system import SystemClock
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 DEFAULT_RETENTION_DAYS = 30
+_VALID_ORIGINS = frozenset({"model", "connector", "internal", "background_worker"})
 
 
 def _empty_stat() -> dict[str, Any]:
@@ -143,6 +146,7 @@ class JsonMetricsSink:
             "version": _SCHEMA_VERSION,
             "operations": {},
             "buckets": {},
+            "calls_by_origin": {},
             "latency": _empty_latency(),
         }
 
@@ -156,6 +160,7 @@ class JsonMetricsSink:
         if not isinstance(raw, dict) or not isinstance(raw.get("operations"), dict):
             return self._empty()
         buckets = raw.get("buckets")
+        calls_by_origin = raw.get("calls_by_origin")
         latency = raw.get("latency")
         if not isinstance(latency, dict) or not isinstance(latency.get("tool_classes"), dict):
             latency = _empty_latency()
@@ -163,6 +168,7 @@ class JsonMetricsSink:
             "version": _SCHEMA_VERSION,
             "operations": raw["operations"],
             "buckets": buckets if isinstance(buckets, dict) else {},
+            "calls_by_origin": calls_by_origin if isinstance(calls_by_origin, dict) else {},
             "latency": latency,
         }
 
@@ -217,6 +223,21 @@ class JsonMetricsSink:
             categories = current["failure_categories"]
             categories[category] = int(categories.get(category, 0)) + 1
 
+    @staticmethod
+    def _record_origin(
+        payload: dict[str, Any],
+        action: str,
+        *,
+        origin: str,
+        success: bool,
+    ) -> None:
+        normalized = origin if origin in _VALID_ORIGINS else "internal"
+        by_action = payload.setdefault("calls_by_origin", {}).setdefault(action, {})
+        current = by_action.setdefault(normalized, {"count": 0, "failures": 0})
+        current["count"] = int(current.get("count", 0)) + 1
+        if not success:
+            current["failures"] = int(current.get("failures", 0)) + 1
+
     def _prune_buckets(self, buckets: dict[str, Any], today: date) -> None:
         cutoff = today - timedelta(days=self._retention_days - 1)
         stale = []
@@ -239,6 +260,7 @@ class JsonMetricsSink:
         duration_ms: float,
         error_code: str | None,
         result_bytes: int | None = None,
+        origin: str = "internal",
     ) -> None:
         normalized_bytes = (
             int(result_bytes)
@@ -256,6 +278,7 @@ class JsonMetricsSink:
                 error_code=error_code,
                 result_bytes=normalized_bytes,
             )
+            self._record_origin(payload, action, origin=origin, success=success)
             today_text = self._clock.now_iso()[:10]
             try:
                 today = date.fromisoformat(today_text)

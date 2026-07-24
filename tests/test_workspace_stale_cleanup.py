@@ -17,7 +17,8 @@ from conftest import ForgeEnvironment, create_forge_environment
 from repoforge.application.service import CodingService
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
-from repoforge.domain.errors import RepoForgeError
+from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.execution_receipt import EffectReceiptState
 from repoforge.domain.workspace_removal import (
     PrLifecycleState,
     classify_removal_safety,
@@ -271,6 +272,64 @@ def test_workspace_remove_succeeds_for_a_genuinely_clean_pushed_workspace(
     workspace_id = created["workspace_id"]
     result = forge_env.service.workspace_remove(workspace_id)
     assert result["removed"] is True
+    receipts = forge_env.service.application.context.effect_receipts
+    assert receipts is not None
+    matches = [
+        envelope.value
+        for envelope in receipts.list_all().records
+        if envelope.value.action == "workspace_remove"
+        and dict(envelope.value.pre_identity).get("workspace_id") == workspace_id
+    ]
+    assert len(matches) == 1
+    assert matches[0].state is EffectReceiptState.APPLIED_VALIDATED
+    assert matches[0].effect_boundary_crossed is True
+    assert matches[0].result_reference == f"operation-result:{matches[0].operation_id}"
+
+
+def test_workspace_remove_registry_failure_preserves_authoritative_result(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = forge_env.service.workspace_create("demo", "remove registry failure")
+    workspace_id = created["workspace_id"]
+    workspace_path = Path(created["path"])
+
+    def fail_registry_delete(candidate_workspace_id: str) -> None:
+        assert candidate_workspace_id == workspace_id
+        raise RuntimeError("simulated registry finalization failure")
+
+    monkeypatch.setattr(forge_env.service.state, "delete", fail_registry_delete)
+
+    with pytest.raises(RepoForgeError) as failed:
+        forge_env.service.workspace_remove(workspace_id)
+
+    assert failed.value.code is ErrorCode.FAILED_AFTER_EFFECT
+    assert failed.value.retryable is False
+    assert failed.value.details["effect_boundary_crossed"] is True
+    operation_id = str(failed.value.details["operation_id"])
+    receipt_id = str(failed.value.details["receipt_id"])
+    result_reference = str(failed.value.details["result_reference"])
+    assert operation_id.startswith("op-")
+    assert receipt_id.startswith("receipt-")
+    assert result_reference == f"operation-result:{operation_id}"
+
+    assert not workspace_path.exists()
+    assert forge_env.service.state.load(workspace_id).workspace_id == workspace_id
+    receipts = forge_env.service.application.context.effect_receipts
+    results = forge_env.service.application.context.operation_result_store
+    assert receipts is not None
+    assert results is not None
+    receipt = receipts.read(receipt_id)
+    assert receipt is not None
+    assert receipt.value.state is EffectReceiptState.FAILED_AFTER_EFFECT
+    assert receipt.value.operation_id == operation_id
+    assert receipt.value.result_reference == result_reference
+    assert results.read(operation_id) == {
+        "local_branch_deleted": False,
+        "remote_branch_untouched": True,
+        "removed": True,
+        "workspace_id": workspace_id,
+    }
 
 
 # ---------------------------------------------------------------------------

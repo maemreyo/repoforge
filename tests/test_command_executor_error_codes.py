@@ -126,13 +126,19 @@ def test_command_error_carries_complete_failed_selectors_and_artifact_reference(
 def test_run_timeout_is_command_timeout(tmp_path: Path) -> None:
     executor = _executor(tmp_path)
     script = tmp_path / "sleep.py"
-    script.write_text("import time\ntime.sleep(5)\n")
+    script.write_text("import time\nprint('before timeout', flush=True)\ntime.sleep(5)\n")
     with pytest.raises(CommandError) as excinfo:
         executor.run(["python3", str(script)], cwd=tmp_path, timeout=1)
     err = excinfo.value
     assert err.code is ErrorCode.COMMAND_TIMEOUT
     assert err.retryable is True
     assert err.details["timeout_seconds"] == 1
+    assert err.details["output_artifact_status"] == "available"
+    reference = err.details["output_artifact_reference"]
+    assert isinstance(reference, str)
+    digest = reference.removeprefix("failure-output:")
+    artifact = tmp_path / "s" / "failure-output-artifacts" / f"{digest}.blob"
+    assert "before timeout" in artifact.read_text(encoding="utf-8")
 
 
 def test_timeout_cleanup_does_not_hang_when_killpg_reports_permission_error(
@@ -445,6 +451,9 @@ def test_run_missing_executable_is_not_found_even_with_not_found_in_message(
     err = excinfo.value
     assert err.code is ErrorCode.NOT_FOUND
     assert err.retryable is False
+    assert err.details["selector_coverage"] == "unavailable"
+    assert err.details["selectors_unavailable_reason"] == "artifact_unavailable"
+    assert err.details["output_artifact_status"] == "not_applicable"
 
 
 def test_run_output_containing_not_found_does_not_misclassify(tmp_path: Path) -> None:
@@ -522,6 +531,92 @@ def test_cancel_token_is_released_after_the_process_exits(tmp_path: Path) -> Non
     # release() already ran; calling cancel() now must not raise or affect anything.
     token.cancel()
     assert token.is_cancelled() is True
+
+
+def test_run_extracts_ruff_failure_location_and_exact_path_selector(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "ruff_failure.py"
+    script.write_text(
+        "import sys\nprint('src/demo.py:12:5: F821 Undefined name `missing`')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(
+        ["python3", str(script)],
+        cwd=tmp_path,
+        check=False,
+        output_limit=40,
+    )
+
+    assert result.failure_provider == "ruff"
+    assert result.selector_coverage == "complete"
+    assert result.selectors_unavailable_reason is None
+    assert result.failed_selectors == ("src/demo.py",)
+    assert len(result.failure_locations) == 1
+    location = result.failure_locations[0]
+    assert location.path == "src/demo.py"
+    assert location.line == 12
+    assert location.column == 5
+    assert location.code == "F821"
+
+
+def test_run_persists_every_failure_as_secret_safe_artifact(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    secret = "ghp_" + "a" * 36
+    script = tmp_path / "secret_failure.py"
+    script.write_text(
+        f"import sys\nprint('token={secret}')\nprint('ordinary diagnostic context')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, check=False)
+
+    assert result.output_artifact_reference is not None
+    assert result.output_artifact_status == "available"
+    digest = result.output_artifact_reference.removeprefix("failure-output:")
+    artifact = tmp_path / "s" / "failure-output-artifacts" / f"{digest}.blob"
+    body = artifact.read_text(encoding="utf-8")
+    assert secret not in body
+    assert "<redacted>" in body
+    assert "ordinary diagnostic context" in body
+
+
+def test_run_reports_typed_selector_unavailability_for_unrecognized_output(
+    tmp_path: Path,
+) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "custom_failure.py"
+    script.write_text(
+        "import sys\nprint('custom build exploded without a location')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, check=False)
+
+    assert result.failure_provider == "custom"
+    assert result.selector_coverage == "unavailable"
+    assert result.selectors_unavailable_reason == "output_unrecognized"
+    assert result.failed_selectors == ()
+    assert result.failure_locations == ()
+
+
+def test_bounded_selector_coverage(
+    tmp_path: Path,
+) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "many_failures.py"
+    script.write_text(
+        "import sys\n"
+        "[print(f'FAILED tests/test_many.py::test_{index}') for index in range(101)]\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, check=False)
+
+    assert len(result.failed_selectors) == 100
+    assert result.selector_coverage == "partial"
+    assert result.selectors_unavailable_reason == "selectors_truncated"
 
 
 def test_uncancelled_token_does_not_change_success_behavior(tmp_path: Path) -> None:

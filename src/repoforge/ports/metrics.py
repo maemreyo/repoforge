@@ -20,6 +20,7 @@ class MetricsSink(Protocol):
         duration_ms: float,
         error_code: str | None,
         result_bytes: int | None = None,
+        origin: str = "internal",
     ) -> None: ...
 
     def record_latency(self, trace: LatencyTrace) -> None: ...

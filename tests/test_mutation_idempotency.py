@@ -164,7 +164,7 @@ def test_corrupt_completed_write_receipt_fails_before_mutation(
     assert first["sha256"]
 
 
-def test_lost_write_response_marks_key_uncertain_without_reapplying(
+def test_lost_write_response_replays_authoritative_receipt_without_reapplying(
     forge_env: ForgeEnvironment,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,19 +185,22 @@ def test_lost_write_response_marks_key_uncertain_without_reapplying(
             "<new>",
             idempotency_key="lost-write-key-0001",
         )
-    assert lost.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    assert lost.value.code is ErrorCode.FAILED_AFTER_EFFECT
     assert lost.value.retryable is False
+    assert lost.value.details["effect_boundary_crossed"] is True
+    assert lost.value.details["receipt_id"].startswith("receipt-")
+    assert lost.value.details["result_reference"].startswith("operation-result:op-")
 
     monkeypatch.setattr(file_write_module, "to_data", original_to_data)
     workspace = Path(service.workspace_status(workspace_id)["path"])
     assert (workspace / "lost.txt").read_text(encoding="utf-8") == "written once\n"
-    with pytest.raises(ConfigError) as replay:
-        service.workspace_write_file(
-            workspace_id,
-            "lost.txt",
-            "written once\n",
-            "<new>",
-            idempotency_key="lost-write-key-0001",
-        )
-    assert replay.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    replay = service.workspace_write_file(
+        workspace_id,
+        "lost.txt",
+        "written once\n",
+        "<new>",
+        idempotency_key="lost-write-key-0001",
+    )
+    assert replay["sha256"]
+    assert replay["path"] == "lost.txt"
     assert (workspace / "lost.txt").read_text(encoding="utf-8") == "written once\n"

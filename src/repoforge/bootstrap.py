@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -43,8 +44,10 @@ from .adapters.locking import FcntlLockManager as FcntlLockManager
 from .adapters.observability import JsonMetricsSink
 from .adapters.onboarding_environment import SystemOnboardingEnvironment
 from .adapters.persistence import (
+    FileFailureOutputArtifactStore,
     JsonApprovalPayloadStore,
     JsonApprovalStore,
+    JsonEffectReceiptStore,
     JsonExecutionPlanAcceptanceStore,
     JsonExecutionPlanStore,
     JsonExecutionReceiptStore,
@@ -53,11 +56,14 @@ from .adapters.persistence import (
     JsonGitHubReadCache,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
+    JsonIssueGraphProposalStore,
+    JsonIssueGraphPublicationStore,
     JsonIterationCache,
     JsonOnboardingStore,
     JsonOperationResultStore,
     JsonOperationStore,
     JsonPrCheckWatchStore,
+    JsonRuntimeActivationStore,
     JsonTaskStore,
     JsonWorkerBindingStore,
     JsonWorkflowRecordingStore,
@@ -95,6 +101,9 @@ from .adapters.runtime.local_runtime import (
     read_runtime_log as read_runtime_log,
 )
 from .adapters.runtime.local_runtime import (
+    read_runtime_log_page as read_runtime_log_page,
+)
+from .adapters.runtime.local_runtime import (
     read_runtime_state as read_runtime_state,
 )
 from .adapters.runtime.local_runtime import (
@@ -127,8 +136,13 @@ from .application.onboarding.discover import OnboardingDiscoveryService
 from .application.onboarding.planner import OnboardingPlanner
 from .application.onboarding.preflight import OnboardingPreflightService
 from .application.operations import OperationManager, recover_operations
+from .application.outcome_reconciliation import (
+    OutcomeReceiptReconciler,
+    RuntimeActivationReconciler,
+)
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.runtime.activation import GenerationActivator
+from .application.runtime.activation_journal import RuntimeActivationJournal
 from .application.runtime.supervisor import RuntimeSupervisor
 from .application.tasks import TaskCapsuleService
 from .application.workflow import (
@@ -138,7 +152,9 @@ from .application.workflow import (
 )
 from .application.workspace.pr_watch import PrCheckWatchCoordinator
 from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
-from .domain.errors import ConfigError
+from .contracts.registry import validate_generated_contract_identity
+from .domain.errors import ConfigError, ErrorCode, RepoForgeError
+from .domain.operation_task import OperationTask
 from .domain.runtime import TunnelProfile
 from .ports import (
     ApprovalPayloadStore,
@@ -149,12 +165,14 @@ from .ports import (
     CodeIntelligenceProvider,
     CommandExecutor,
     ConfigurationStore,
+    EffectReceiptStore,
     ExecutableLocator,
     ExecutionEnvironmentPort,
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
     ExecutionReceiptStore,
     FailureEvidenceStore,
+    FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
     GitHubCapabilityProbe,
@@ -197,6 +215,8 @@ from .ports.external_mutation_ledger import ExternalMutationLedger
 from .ports.filesystem_transaction import (
     FileTransactionFactory as ReceiptFileTransactionFactory,
 )
+from .ports.issue_graph_proposal_store import IssueGraphProposalStore
+from .ports.issue_graph_publication_store import IssueGraphPublicationStore
 from .ports.issue_mutation import IssueMutationGateway
 
 
@@ -239,10 +259,14 @@ class AdapterOverrides:
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
     execution_receipts: ExecutionReceiptStore | None = None
+    effect_receipts: EffectReceiptStore | None = None
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
+    failure_output_artifacts: FailureOutputArtifactStore | None = None
     worker_bindings: WorkerBindingStore | None = None
     reaper: ProcessReaper | None = None
+    issue_graph_proposals: IssueGraphProposalStore | None = None
+    issue_graph_publications: IssueGraphPublicationStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +277,8 @@ class Application:
     workflow_recorder: WorkflowRecorder
     workflow_replay: WorkflowReplayEngine
     background_tasks: BackgroundTaskRunner
+    issue_graph_proposals: IssueGraphProposalStore
+    issue_graph_publications: IssueGraphPublicationStore
 
 
 def default_state_root() -> Path:
@@ -321,6 +347,11 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
             ids=id_generator(),
             clock=system_clock(),
             config_path=config_path,
+            validate_contract_artifacts=validate_generated_contract_identity,
+            activation_journal=build_runtime_activation_journal(
+                root,
+                locks=locks,
+            ),
         ),
     )
     return OnboardingCoordinator(
@@ -395,6 +426,30 @@ def build_runtime_store(path: Path) -> RuntimeStore:
     return JsonRuntimeStore(path)
 
 
+def build_runtime_activation_store(
+    state_root: Path | None = None, *, locks: LockManager | None = None
+) -> JsonRuntimeActivationStore:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    return JsonRuntimeActivationStore(root, locks or build_lock_manager(root))
+
+
+def build_runtime_activation_journal(
+    state_root: Path | None = None,
+    *,
+    locks: LockManager | None = None,
+    ids: IdGenerator | None = None,
+    clock: Clock | None = None,
+) -> RuntimeActivationJournal:
+    root = (state_root or default_state_root()).expanduser().resolve()
+    selected_locks = locks or build_lock_manager(root)
+    return RuntimeActivationJournal(
+        operations=JsonOperationStore(root, selected_locks),
+        receipts=build_runtime_activation_store(root, locks=selected_locks),
+        ids=ids or id_generator(),
+        clock=clock or system_clock(),
+    )
+
+
 def build_tunnel_profile_store(path: Path) -> TunnelProfileStore:
     return JsonTunnelProfileStore(path, LocalFileSystem())
 
@@ -452,6 +507,54 @@ def build_operation_result_store(
     locks: LockManager | None = None,
 ) -> OperationResultStore:
     return JsonOperationResultStore(state_root, locks or build_lock_manager(state_root))
+
+
+def build_effect_receipt_store(
+    state_root: Path,
+    locks: LockManager | None = None,
+) -> EffectReceiptStore:
+    return JsonEffectReceiptStore(state_root, locks or build_lock_manager(state_root))
+
+
+def _background_operation_liveness(
+    task: OperationTask,
+    *,
+    locks: LockManager,
+    processes: ProcessInspector,
+) -> bool | None:
+    """Return direct worker liveness when the operation owns a workspace lock."""
+
+    if (
+        task.kind not in {"workspace_run_profile", "workspace_run_adhoc"}
+        or task.workspace_id is None
+    ):
+        return None
+
+    owner_pid: int | None = None
+    lock_path = locks.path_for(task.workspace_id)
+    try:
+        raw = json.loads(lock_path.read_text(encoding="utf-8"))
+        candidate = raw.get("pid") if isinstance(raw, dict) else None
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+            owner_pid = candidate
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    try:
+        with locks.lock(
+            task.workspace_id,
+            timeout_seconds=0,
+            metadata={"purpose": "startup_operation_liveness_probe"},
+        ):
+            pass
+    except RepoForgeError as exc:
+        if exc.code is ErrorCode.LOCK_TIMEOUT:
+            return True
+        raise
+
+    if owner_pid is None:
+        return None
+    return processes.identity(owner_pid) is not None
 
 
 def build_github_read_cache(
@@ -533,9 +636,13 @@ def build_application(
     execution_receipts = o.execution_receipts or JsonExecutionReceiptStore(
         config.server.state_root, locks
     )
+    effect_receipts = o.effect_receipts or JsonEffectReceiptStore(config.server.state_root, locks)
     iteration_cache = o.iteration_cache or JsonIterationCache(config.server.state_root, locks)
     failure_evidence = o.failure_evidence or JsonFailureEvidenceStore(
         config.server.state_root, locks
+    )
+    failure_output_artifacts = o.failure_output_artifacts or FileFailureOutputArtifactStore(
+        config.server.state_root
     )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
     worker_bindings = o.worker_bindings or JsonWorkerBindingStore(config.server.state_root, locks)
@@ -553,6 +660,14 @@ def build_application(
         locks,
     )
     workflow_recording_store = o.workflow_recordings or JsonWorkflowRecordingStore(
+        config.server.state_root,
+        locks,
+    )
+    issue_graph_proposals = o.issue_graph_proposals or JsonIssueGraphProposalStore(
+        config.server.state_root,
+        locks,
+    )
+    issue_graph_publications = o.issue_graph_publications or JsonIssueGraphPublicationStore(
         config.server.state_root,
         locks,
     )
@@ -595,16 +710,50 @@ def build_application(
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
         execution_receipts=execution_receipts,
+        effect_receipts=effect_receipts,
         iteration_cache=iteration_cache,
         failure_evidence=failure_evidence,
+        failure_output_artifacts=failure_output_artifacts,
         worker_bindings=worker_bindings,
         reaper=reaper,
     )
     operations = OperationManager(context)
+    processes = build_process_inspector()
+    runtime_activation_store = build_runtime_activation_store(
+        config.server.state_root,
+        locks=locks,
+    )
+    runtime_activation_journal = RuntimeActivationJournal(
+        operations=operation_store,
+        receipts=runtime_activation_store,
+        ids=ids,
+        clock=clock,
+    )
+    RuntimeActivationReconciler(
+        journal=runtime_activation_journal,
+        receipts=runtime_activation_store,
+        operations=operation_store,
+    ).reconcile(
+        active_runtime=build_runtime_store(
+            config.server.state_root / "managed-runtime-v3.json"
+        ).read()
+    )
+    OutcomeReceiptReconciler(context).reconcile(
+        stale_after_seconds=config.server.idempotency_stale_seconds,
+        resumable_actions=frozenset({"issue_graph_publication"}),
+    )
     recover_operations(
         operations,
         now=clock.now_iso(),
-        resumable_kinds=frozenset({"pr_check_watch"}),
+        running_stale_seconds=config.server.idempotency_stale_seconds,
+        resumable_kinds=frozenset(
+            {"pr_check_watch", "runtime_activation", "issue_graph_publication"}
+        ),
+        running_liveness=lambda task: _background_operation_liveness(
+            task,
+            locks=locks,
+            processes=processes,
+        ),
         worker_bindings=worker_bindings,
         reaper=reaper,
     )
@@ -625,6 +774,8 @@ def build_application(
         workflow_recorder,
         workflow_replay,
         background_tasks,
+        issue_graph_proposals,
+        issue_graph_publications,
     )
 
 

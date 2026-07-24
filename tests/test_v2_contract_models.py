@@ -182,11 +182,12 @@ def test_discriminated_modes_are_real_enums_not_free_form_strings() -> None:
             "reopen",
             "link",
             "create",
+            "manage",
         },
         "repo_policy": {"preview", "apply"},
-        "workspace_refresh": {"preview", "apply"},
+        "workspace_refresh": {"preview", "apply", "recreate_from_latest_base"},
         "workspace_verify": {"plan", "auto", "diagnostic", "profile", "adhoc"},
-        "workspace_pr": {"create_draft", "update", "comment", "watch"},
+        "workspace_pr": {"create_draft", "update", "comment", "watch", "reconcile"},
         "operation": {"get", "wait", "list", "cancel", "failure_evidence"},
     }
 
@@ -366,6 +367,7 @@ def test_repo_issue_contract_exposes_governed_write_modes() -> None:
         "reopen",
         "link",
         "create",
+        "manage",
     }
     output = spec.validate_output(
         {
@@ -385,6 +387,129 @@ def test_repo_issue_contract_exposes_governed_write_modes() -> None:
     )
     assert output.mutation is not None
     assert output.mutation.external_writes == 1
+
+
+def test_repo_issue_contract_exposes_closed_issue_graph_manage_branch() -> None:
+    from pydantic import ValidationError
+
+    _, registry = _contracts()
+    spec = registry.V2_TOOL_SPECS["repo_issue"]
+    plan = spec.validate_input(
+        {
+            "repo_id": "demo",
+            "mode": "manage",
+            "manage": {
+                "action": "plan",
+                "root_ref": "epic-232",
+                "nodes": [
+                    {
+                        "client_ref": "epic-232",
+                        "title": "Control-plane truth hardening",
+                        "ticket_type": "epic",
+                        "priority": "p0",
+                        "status": "in_progress",
+                        "body": "## Objective\n\nShip it.\n\n## Acceptance criteria\n\n- [ ] Done.\n",
+                    }
+                ],
+                "edges": [],
+                "adopt_refs": [],
+                "expires_in_seconds": 3600,
+            },
+        }
+    )
+    assert plan.mode.value == "manage"
+    assert plan.manage.action == "plan"
+
+    apply = spec.validate_input(
+        {
+            "repo_id": "demo",
+            "mode": "manage",
+            "manage": {
+                "action": "apply",
+                "proposal_id": "igp-" + "a" * 24,
+                "proposal_hash": "b" * 64,
+                "plan_id": "igplan-" + "c" * 24,
+                "effect_plan_hash": "d" * 64,
+                "approval_request_id": "apr-" + "e" * 24,
+            },
+        }
+    )
+    assert apply.manage.action == "apply"
+
+    for action in ("status", "reconcile"):
+        validated = spec.validate_input(
+            {
+                "repo_id": "demo",
+                "mode": "manage",
+                "manage": {
+                    "action": action,
+                    "publication_id": "igpub-" + "f" * 24,
+                },
+            }
+        )
+        assert validated.manage.action == action
+
+    with pytest.raises(ValidationError):
+        spec.validate_input({"repo_id": "demo", "mode": "manage"})
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "repo_id": "demo",
+                "mode": "read",
+                "issue_number": 7,
+                "manage": {"action": "status", "publication_id": "igpub-" + "f" * 24},
+            }
+        )
+    with pytest.raises(ValidationError):
+        spec.validate_input(
+            {
+                "repo_id": "demo",
+                "mode": "manage",
+                "manage": {
+                    "action": "status",
+                    "publication_id": "igpub-" + "f" * 24,
+                    "proposal_hash": "b" * 64,
+                },
+            }
+        )
+
+    schema = spec.input_model.model_json_schema()
+    assert "manage" in schema["properties"]
+    assert set(schema["$defs"]["IssueMode"]["enum"]) == {
+        "read",
+        "spec",
+        "graph",
+        "next",
+        "comment",
+        "close",
+        "reopen",
+        "link",
+        "create",
+        "manage",
+    }
+    output = spec.validate_output(
+        {
+            "summary": "Issue graph publication is pending operator approval",
+            "repo_id": "demo",
+            "mode": "manage",
+            "graph_status": "not_requested",
+            "workflow": {
+                "action": "plan",
+                "state": "pending_approval",
+                "proposal_id": "igp-" + "a" * 24,
+                "proposal_hash": "b" * 64,
+                "plan_id": "igplan-" + "c" * 24,
+                "effect_plan_hash": "d" * 64,
+                "approval_request_id": "apr-" + "e" * 24,
+                "approval_status": "pending",
+                "complete": False,
+                "external_writes": 0,
+                "recovery_action": "Approve the exact request, then retry apply.",
+            },
+        }
+    )
+    assert output.workflow is not None
+    assert output.workflow.complete is False
 
 
 def test_workspace_verify_contract_exposes_planning_routing_and_evidence_fields() -> None:

@@ -237,3 +237,33 @@ recorded as **Not run**, not inferred from unit tests.
 Live-client follow-up remains required before a production rollout: reconnect a fresh `forge_v2`
 client and execute the direct, indirect, and negative prompts from `PLUGIN_TEST_CASES.md`, recording
 the exact selected tools, bounded arguments, and confirmation behavior in a copied release record.
+
+## Control-plane fault-gate baseline — 2026-07-23
+
+`make v2-gates` runs both the frozen Forge v2 corpora and the committed production-composition
+fault matrix at `tests/fixtures/v2_corpora/control_plane_faults.json`. Every scenario is an exact
+pytest selector and the runner executes each selector once. A retry is recorded as a retry and
+fails the default release threshold; it is never counted as fresh proof.
+
+The machine report `control-plane-fault-gates.json` records the exact Git HEAD and dirty state,
+Python/package version, contract identity, 28-tool count, tool-surface hash, schema-bundle digest,
+per-scenario selector, attempt count, duration and bounded output excerpt.
+
+| Metric | Blocking threshold | 2026-07-23 focused baseline |
+|---|---:|---:|
+| Unknown authoritative effect outcomes | `0` | `0` |
+| Synthetic timestamps | `0` | `0` |
+| Opaque failure-only outcomes | `0` | `0` |
+| Calls per completed task | `<= 6.0` | `1.417` |
+| Duplicate read rate | `<= 5%` | `0%` |
+| Temporary diagnostic mutations | `0` | `0` |
+| Full-profile reruns | `0` | `0` |
+| First actionable failure call | `<= 3` | `1` |
+| Hidden retries | `0` | `0` |
+
+The focused baseline covered before-effect failure, transactional rollback, after-effect
+reconciliation, serialization/result-persistence loss, reconnect handoff, stale contract identity,
+malformed and legacy runtime logs, resumable failure artifacts, PR version drift, GitHub-native
+ticket-graph projection and generated-path refresh. All 12 selectors passed with exactly one
+attempt. This baseline was captured on a dirty development tree; the final production record must
+be regenerated after the release commit so its identity reports `dirty = false`.

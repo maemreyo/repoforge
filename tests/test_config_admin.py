@@ -13,17 +13,22 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from repoforge.adapters.configuration import ConfigGenerationStore
 from repoforge.adapters.locking import FcntlLockManager
+from repoforge.adapters.persistence.failure_output_artifact_store import (
+    persist_failure_output,
+)
 from repoforge.application.config_admin import ConfigAdminService
 from repoforge.application.configuration.document import (
     apply_policy_patch,
     apply_proposal,
     apply_risk_policy,
+    apply_ticket_graph,
     parse_resolved,
     render_resolved,
 )
 from repoforge.application.configuration.source import (
     SourceConfiguration,
     SourceRepository,
+    SourceTicketGraph,
     parse_source,
     render_source,
 )
@@ -33,6 +38,7 @@ from repoforge.bootstrap import (
     read_audit_event_page,
     read_audit_events,
     read_runtime_log,
+    read_runtime_log_page,
 )
 from repoforge.config import load_config
 from repoforge.domain.config_generation import sha256_text
@@ -44,6 +50,7 @@ from repoforge.domain.policy_patch import (
 )
 from repoforge.domain.repository_detection import ManifestFact, RemoteFact, RepositoryFacts
 from repoforge.domain.repository_proposal import EnrollmentMode
+from repoforge.domain.runtime_contract import RuntimeContractIdentity
 from repoforge.domain.verification_steps import (
     HygieneBaselinePolicy,
     VerificationStep,
@@ -432,6 +439,9 @@ def _admin(
     *,
     reload_calls: list[int] | None = None,
     runtime_status: dict[str, object] | None = None,
+    contract_identity: RuntimeContractIdentity | None = None,
+    ticket_graph: SourceTicketGraph | None = None,
+    preserve_ticket_graph_in_resolved: bool = False,
 ) -> ConfigAdminService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -444,6 +454,7 @@ def _admin(
                 "demo",
                 str(repo_root),
                 decisions=(("dependency_install", "exclude"),),
+                ticket_graph=ticket_graph,
             ),
         ),
     )
@@ -453,6 +464,8 @@ def _admin(
     )
     proposal = _proposal(repo_root)
     document = apply_proposal(parse_resolved(None), proposal)
+    if preserve_ticket_graph_in_resolved:
+        document = apply_ticket_graph(document, "demo", ticket_graph)
     resolved = render_resolved(
         document,
         generation=1,
@@ -468,8 +481,13 @@ def _admin(
     def reload_runtime(generation: int) -> dict[str, Any]:
         if reload_calls is not None:
             reload_calls.append(generation)
+        store.stage_activation(generation)
+        store.activate(generation)
         return {"status": "hot_reloaded", "active_generation": generation}
 
+    identity_options: dict[str, Any] = {}
+    if contract_identity is not None:
+        identity_options["contract_identity_provider"] = lambda: contract_identity
     return ConfigAdminService(
         store=store,
         proposals=RepositoryProposalService(_FakeProbe(repo_root)),
@@ -482,9 +500,11 @@ def _admin(
         runtime_log_path=tmp_path / "state" / "managed-runtime.log",
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_log_page=read_runtime_log_page,
         read_audit_page=read_audit_event_page,
         reload_runtime=reload_runtime,
         read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
+        **identity_options,
     )
 
 
@@ -602,6 +622,10 @@ def test_restriction_is_applied_immediately_with_hot_reload(tmp_path: Path) -> N
     assert inspected_repo["execution_mode"] == "strict"
     assert inspected_repo["adhoc_runners"] == []
     assert inspected_repo["adhoc_timeout_seconds"] == 300
+    projection = admin.config_inspect_v2(repo_id="demo")["repository_projections"][0]
+    assert projection["drift_reason"] == "intentionally_disabled"
+    assert projection["capability_projection_status"] == "disabled"
+    assert projection["active_generation"] == 2
     # The durable source now carries the patch, so a later refresh preserves it.
     persisted = parse_source(admin._store.read_source_text())
     assert persisted.repositories[0].policy_patch.remove_profiles == ("quick",)
@@ -625,6 +649,10 @@ def test_expansion_requires_operator_approval_and_never_applies(tmp_path: Path) 
     assert admin._store.current().generation == 1
     pending = admin.pending.summaries()
     assert [item["change_id"] for item in pending] == [change_id]
+    projection = admin.config_inspect_v2(repo_id="demo")["repository_projections"][0]
+    assert projection["drift_reason"] == "pending_approval"
+    assert projection["capability_projection_status"] == "pending"
+    assert "pending configuration approval" in projection["safe_reconciliation_action"]
     # The unapproved patch is not persisted in the editable source.
     persisted = parse_source(admin._store.read_source_text())
     assert persisted.repositories[0].policy_patch.is_empty()
@@ -833,6 +861,151 @@ def test_runtime_logs_read_bounds_sources_and_filters(tmp_path: Path) -> None:
         admin.runtime_logs_read("audit", limit=0)
 
 
+def test_runtime_logs_read_reports_legacy_and_malformed_without_epoch(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text('plain\n{"broken"\n', encoding="utf-8")
+
+    result = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(result)
+    assert all(entry["timestamp"] is None for entry in result["entries"])
+    assert [entry["parse_state"] for entry in result["entries"]] == [
+        "malformed_json",
+        "legacy_plaintext",
+    ]
+    assert result["malformed_count"] == 1
+    assert result["legacy_count"] == 1
+    assert result["structured_count"] == 0
+    assert result["correlated_count"] == 0
+    assert result["timestamp_unavailable_count"] == 2
+    assert result["source_truncated"] is False
+    assert "1970-01-01" not in json.dumps(result, sort_keys=True)
+
+
+def test_runtime_logs_read_preserves_structured_provenance_and_correlation(tmp_path: Path) -> None:
+    from repoforge.domain.runtime_events import RuntimeEventV1, encode_runtime_event
+
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        encode_runtime_event(
+            RuntimeEventV1(
+                observed_at="2026-07-21T12:00:00+00:00",
+                component="tunnel_client",
+                stream="stdout",
+                level="ERROR",
+                event_kind="response_failure",
+                message="failed safely",
+                action="workspace_push",
+                duration_ms=12.5,
+                correlation_id="corr-1",
+                operation_id="op-1",
+                receipt_id="receipt-1",
+                trace_id="trace-1",
+                workspace_hash="a" * 64,
+                repository_hash="b" * 64,
+            )
+        )
+        + "\nlegacy without time\n",
+        encoding="utf-8",
+    )
+
+    result = admin.runtime_logs_read_v2(
+        source="runtime",
+        limit=10,
+        only_failed=True,
+        start_time="2026-07-21T00:00:00+00:00",
+    )
+
+    assert result["structured_count"] == 1
+    assert result["legacy_count"] == 0
+    assert result["correlated_count"] == 1
+    assert result["timestamp_unavailable_count"] == 0
+    assert result["source_truncated"] is False
+    assert len(result["entries"]) == 1
+    entry = result["entries"][0]
+    assert entry["timestamp_state"] == "observed"
+    assert entry["parse_state"] == "structured_v1"
+    assert entry["component"] == "tunnel_client"
+    assert entry["stream"] == "stdout"
+    assert entry["event_kind"] == "response_failure"
+    assert entry["correlation_id"] == "corr-1"
+    assert entry["operation_id"] == "op-1"
+    assert entry["receipt_id"] == "receipt-1"
+    assert entry["trace_id"] == "trace-1"
+    assert entry["workspace_hash"] == "a" * 64
+    assert entry["repository_hash"] == "b" * 64
+
+
+def test_runtime_logs_read_bounds_untrusted_structured_metadata(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "observed_at": "2026-07-21T12:00:00+00:00",
+                "component": "c" * 500,
+                "stream": "s" * 500,
+                "level": "INFO",
+                "event_kind": "e" * 500,
+                "message": "bounded",
+                "action": "a" * 500,
+                "correlation_id": "x" * 500,
+                "operation_id": "o" * 500,
+                "receipt_id": "r" * 500,
+                "trace_id": "t" * 500,
+                "workspace_hash": "not-a-hash",
+                "repository_hash": "also-not-a-hash",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(result)
+    entry = result["entries"][0]
+    assert len(entry["component"]) == 160
+    assert len(entry["stream"]) == 80
+    assert len(entry["event_kind"]) == 160
+    assert len(entry["action"]) == 160
+    assert len(entry["correlation_id"]) == 160
+    assert entry["workspace_hash"] is None
+    assert entry["repository_hash"] is None
+
+
+def test_runtime_logs_read_reports_bounded_source_truncation(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+    log_path = tmp_path / "state" / "managed-runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("".join(f"line-{index}\n" for index in range(1_000)), encoding="utf-8")
+
+    exact = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    assert exact["source_truncated"] is False
+    assert exact["truncated"] is True  # more filtered entries remain for pagination
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("line-1000\n")
+    truncated = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    assert len(truncated["entries"]) == 10
+    assert truncated["source_truncated"] is True
+    assert truncated["truncated"] is True
+    assert truncated["legacy_count"] == 10
+    assert truncated["timestamp_unavailable_count"] == 10
+
+
 def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Path) -> None:
     from repoforge.contracts.registry import V2_TOOL_SPECS
 
@@ -847,12 +1020,115 @@ def test_v2_config_inspect_is_compact_typed_and_redacts_host_paths(tmp_path: Pat
     assert result["accepted"]["digest"] == admin._store.current().resolved_sha256
     assert result["active"] is None
     assert result["restart_required"] is True
+    assert result["repository_projections"][0]["drift_reason"] == "intentionally_disabled"
+    assert result["repository_projections"][0]["capability_projection_status"] == "disabled"
     assert {item["key"] for item in result["repo_facts"]} >= {
         "repo_id",
         "read_only",
         "publish_enabled",
         "profile_count",
     }
+
+
+def test_v2_config_inspect_reports_ticket_graph_projection_drift(
+    tmp_path: Path,
+) -> None:
+    admin = _admin(
+        tmp_path,
+        ticket_graph=SourceTicketGraph(root_issue=232, repository="owner/demo"),
+    )
+
+    result = admin.config_inspect_v2(repo_id="demo")
+
+    projection = result["repository_projections"][0]
+    assert projection["repo_id"] == "demo"
+    assert projection["source_ticket_graph"] == {
+        "enabled": True,
+        "root_issue": 232,
+        "repository": "owner/demo",
+    }
+    assert projection["accepted_ticket_graph"]["enabled"] is False
+    assert projection["active_ticket_graph"]["enabled"] is False
+    assert projection["drift_reason"] == "projection_loss"
+    assert projection["capability_projection_status"] == "unavailable"
+    assert projection["safe_reconciliation_action"] == (
+        "Regenerate the accepted configuration from source so repositories.demo.ticket_graph "
+        "exactly matches the reviewed source declaration before activation."
+    )
+
+
+def test_v2_config_inspect_tracks_accepted_and_active_ticket_graph(
+    tmp_path: Path,
+) -> None:
+    graph = SourceTicketGraph(root_issue=232, repository="owner/demo")
+    admin = _admin(
+        tmp_path,
+        ticket_graph=graph,
+        preserve_ticket_graph_in_resolved=True,
+    )
+
+    accepted = admin.config_inspect_v2(repo_id="demo")
+    projection = accepted["repository_projections"][0]
+    assert projection["accepted_ticket_graph"] == projection["source_ticket_graph"]
+    assert projection["drift_reason"] == "accepted_not_active"
+    assert projection["capability_projection_status"] == "pending"
+
+    admin._store.stage_activation(1)
+    admin._store.activate(1)
+    active = admin.config_inspect_v2(repo_id="demo")
+    active_projection = active["repository_projections"][0]
+    assert active_projection["active_ticket_graph"] == active_projection["accepted_ticket_graph"]
+    assert active_projection["drift_reason"] == "none"
+    assert active_projection["capability_projection_status"] == "active"
+
+
+def test_v2_config_inspect_exposes_contract_identity_and_projection_state(
+    tmp_path: Path,
+) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    identity = RuntimeContractIdentity(
+        server_build_sha="a" * 64,
+        server_version="2.2.0",
+        active_generation=1,
+        tool_surface_hash="b" * 64,
+        input_contract_digest="c" * 64,
+        output_contract_digest="d" * 64,
+        runtime_protocol_version=1,
+        process_start_identity="e" * 64,
+    )
+    admin = _admin(tmp_path, contract_identity=identity)
+
+    initial = admin.config_inspect_v2(repo_id="demo")
+    V2_TOOL_SPECS["config_inspect"].validate_output(initial)
+    assert initial["contract_identity"] == identity.as_dict()
+    assert (
+        initial["config_projection"]["source_digest"]
+        == initial["config_projection"]["accepted_source_digest"]
+    )
+    assert initial["config_projection"]["drift_state"] == "activation_required"
+    assert initial["config_projection"]["safe_reconciliation_action"] == (
+        "Activate accepted configuration generation 1."
+    )
+
+    admin._store.source_path.write_text(
+        admin._store.read_source_text() + "\n# operator edit after acceptance\n",
+        encoding="utf-8",
+    )
+    drifted = admin.config_inspect_v2(repo_id="demo")
+
+    V2_TOOL_SPECS["config_inspect"].validate_output(drifted)
+    assert drifted["config_projection"]["drift_state"] == "source_changed"
+    assert drifted["repository_projections"][0]["drift_reason"] == "source_not_refreshed"
+    assert drifted["repository_projections"][0]["capability_projection_status"] == "pending"
+    assert (
+        drifted["config_projection"]["source_digest"]
+        != drifted["config_projection"]["accepted_source_digest"]
+    )
+    assert drifted["config_projection"]["safe_reconciliation_action"] == (
+        "Review and accept a new configuration generation before activation."
+    )
+    assert str(tmp_path) not in json.dumps(drifted, sort_keys=True)
 
 
 def test_v2_runtime_logs_support_time_range_cursor_and_no_host_paths(tmp_path: Path) -> None:
@@ -921,6 +1197,59 @@ def test_v2_runtime_logs_support_time_range_cursor_and_no_host_paths(tmp_path: P
     assert all("<redacted:host_path>" in message for message in messages)
     assert str(tmp_path) not in json.dumps(runtime, sort_keys=True)
     assert all("C:\\Users\\alice" not in message for message in messages)
+
+
+def test_v2_runtime_logs_third_source_page(tmp_path: Path) -> None:
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    artifact = persist_failure_output(
+        tmp_path / "state",
+        "first failure line\nsecond failure line\nthird failure line\n",
+    )
+    assert artifact.reference is not None
+
+    first = admin.runtime_logs_read_v2(
+        source="failure_artifact",
+        artifact_reference=artifact.reference,
+        limit=2,
+    )
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(first)
+    assert first["source"] == "failure_artifact"
+    assert [item["message"] for item in first["entries"]] == [
+        "first failure line",
+        "second failure line",
+    ]
+    assert first["truncated"] is True
+    assert first["next_cursor"] is not None
+
+    second = admin.runtime_logs_read_v2(
+        source="failure_artifact",
+        artifact_reference=artifact.reference,
+        limit=2,
+        cursor=first["next_cursor"],
+    )
+    assert [item["message"] for item in second["entries"]] == ["third failure line"]
+    assert second["truncated"] is False
+    assert second["next_cursor"] is None
+
+    with pytest.raises(ConfigError, match="artifact_reference"):
+        admin.runtime_logs_read_v2(source="failure_artifact")
+
+
+def test_existing_artifact_identity(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    original = persist_failure_output(state_root, "immutable failure evidence\n")
+    assert original.reference is not None
+    digest = original.reference.removeprefix("failure-output:")
+    target = state_root / "failure-output-artifacts" / f"{digest}.blob"
+    target.write_text("tampered\n", encoding="utf-8")
+
+    repeated = persist_failure_output(state_root, "immutable failure evidence\n")
+
+    assert repeated.reference is None
+    assert repeated.status == "persistence_failed"
+    assert target.read_text(encoding="utf-8") == "tampered\n"
 
 
 def test_v2_runtime_log_cursor_fails_closed_when_audit_snapshot_changes(tmp_path: Path) -> None:

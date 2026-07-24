@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..domain.errors import ErrorCode
 
@@ -48,7 +48,27 @@ class ToolErrorDetails(StrictModel):
     operation_index: int | None = Field(default=None, ge=0, le=99)
     expected: str | None = Field(default=None, max_length=1000)
     actual: str | None = Field(default=None, max_length=1000)
+    current_remote_version: str | None = Field(default=None, max_length=256)
+    current_head_sha: GitObjectId | None = None
+    current_updated_at: str | None = Field(default=None, max_length=80)
+    remote_delta: tuple[ShortText, ...] = Field(default=(), max_length=20)
+    recovery_action: str | None = Field(default=None, max_length=160)
+    missing_coverage: tuple[str, ...] = Field(default=(), max_length=20)
     correlation_id: str | None = Field(default=None, max_length=128)
+    operation_id: str | None = Field(default=None, max_length=160)
+    receipt_id: str | None = Field(default=None, max_length=160)
+    config_generation: int | None = Field(default=None, ge=1)
+    server_build_sha: Sha256 | None = None
+    server_version: str | None = Field(default=None, max_length=160)
+    tool_surface_hash: Sha256 | None = None
+    input_contract_digest: Sha256 | None = None
+    output_contract_digest: Sha256 | None = None
+    process_start_identity: Sha256 | None = None
+    runtime_protocol_version: int | None = Field(default=None, ge=1)
+    rediscovery_action: str | None = Field(default=None, max_length=160)
+    result_reference: str | None = Field(default=None, max_length=256)
+    effect_boundary_crossed: bool | None = None
+    original_error_type: str | None = Field(default=None, max_length=160)
 
 
 class ToolError(StrictModel):
@@ -70,6 +90,42 @@ class ToolResponse(StrictModel):
     status: Literal["ok"] = "ok"
     summary: str = Field(min_length=1, max_length=500)
     error: None = None
+
+
+class OutcomeIdentityEntry(StrictModel):
+    key: str = Field(min_length=1, max_length=160)
+    value: str = Field(max_length=10_000)
+
+
+class OutcomeReceiptEvidence(StrictModel):
+    """Authoritative durable outcome identity for one mutating call."""
+
+    operation_id: str = Field(pattern=r"^op-[0-9a-f]{24}$")
+    receipt_id: str = Field(pattern=r"^receipt-[0-9a-f]{24}$")
+    state: Literal[
+        "accepted",
+        "applying",
+        "applied_unvalidated",
+        "applied_validated",
+        "rolled_back",
+        "failed_before_effect",
+        "failed_after_effect",
+        "unknown",
+    ]
+    result_reference: str | None = Field(default=None, max_length=256)
+    effect_boundary_crossed: bool
+    pre_identity: tuple[OutcomeIdentityEntry, ...] = Field(default=(), max_length=20)
+    post_identity: tuple[OutcomeIdentityEntry, ...] = Field(default=(), max_length=20)
+
+    @field_validator("pre_identity", "post_identity", mode="before")
+    @classmethod
+    def normalize_identity(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return tuple(
+                {"key": str(key), "value": str(item)}
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            )
+        return value
 
 
 class ToolFailure(StrictModel):
@@ -257,7 +313,16 @@ class OperationEvidence(StrictModel):
     progress_unit: str | None = Field(default=None, max_length=64)
     progress_message: str | None = Field(default=None, max_length=2_000)
     workspace_id: Identifier | None = None
+    owner_id: Identifier | None = None
+    lease_expires_at: str | None = Field(default=None, max_length=80)
     result_reference: str | None = Field(default=None, max_length=256)
+    result_reference_status: Literal["not_applicable", "not_checked", "available", "missing"] = (
+        "not_applicable"
+    )
+    receipt_id: str | None = Field(default=None, pattern=r"^receipt-[a-f0-9]{24}$")
+    receipt_status: Literal["not_applicable", "not_checked", "available", "missing"] = (
+        "not_applicable"
+    )
     error_code: str | None = Field(default=None, max_length=128)
     retryability: Literal["none", "manual", "automatic"] = "none"
     terminal: bool = False
@@ -266,6 +331,10 @@ class OperationEvidence(StrictModel):
     suggested_poll_after_s: float | None = Field(default=1.0, ge=0.1, le=60.0)
     eta_seconds: float | None = Field(default=None, ge=0.0, le=31_536_000.0)
     updated_at: str | None = Field(default=None, max_length=80)
+    schema_version: int = Field(default=2, ge=1)
+    record_provenance: Literal["current", "legacy_migrated", "recovered_inconsistent"] = "current"
+    record_consistency: Literal["consistent", "record_inconsistent"] = "consistent"
+    record_diagnostics: tuple[str, ...] = Field(default=(), max_length=20)
 
 
 class KeyValue(StrictModel):

@@ -92,6 +92,11 @@ class WorkspaceVerifyResult:
     execution_evidence: dict[str, object] | None = None
     failed_selectors: list[str] = field(default_factory=list)
     output_artifact_reference: str | None = None
+    failure_provider: str | None = None
+    selector_coverage: str = "not_applicable"
+    selectors_unavailable_reason: str | None = None
+    failure_locations: list[dict[str, object]] = field(default_factory=list)
+    output_artifact_status: str = "not_applicable"
     failure_expectation: str | None = None
     failure_chain_id: str | None = None
     rerun_of_selectors: list[str] = field(default_factory=list)
@@ -137,6 +142,13 @@ def _assessment_projection(assessment: Any) -> tuple[dict[str, object], dict[str
         "uncertainties": list(assessment.uncertainties),
         "refresh_required": refresh_required,
         "behind_base": behind_base,
+        "base_freshness": {
+            "status": assessment.base_freshness.status.value,
+            "coverage": assessment.base_freshness.coverage.value,
+            "value": dict(base) if base else None,
+            "error_code": assessment.base_freshness.error_code,
+            "safe_fallback": assessment.base_freshness.safe_fallback,
+        },
         "provider": impact_evidence,
         "final_profile": recommendation.final_profile,
         "manual_review_required": recommendation.manual_review_required,
@@ -169,6 +181,16 @@ def _staleness_warning(assessment: Any) -> str | None:
     value = assessment.base_freshness.value
     if not bool(value.get("refresh_required", False)):
         return None
+    warning = value.get("preflight_warning")
+    recommended = value.get("recommended_action")
+    invalidated = value.get("expected_evidence_invalidation")
+    if isinstance(warning, str):
+        suffix = ""
+        if isinstance(recommended, str):
+            suffix += f" Recommended action: {recommended}."
+        if isinstance(invalidated, list) and invalidated:
+            suffix += " Expected invalidation: " + ", ".join(map(str, invalidated)) + "."
+        return warning + suffix
     behind = value.get("behind_base", 0)
     if isinstance(behind, int) and not isinstance(behind, bool) and behind > 0:
         return (
@@ -486,6 +508,11 @@ class WorkspaceVerifier:
 
         if command.artifact_output_path is not None:
             return self._persist_artifact(result, command.artifact_output_path)
+        if result.outcome == "passed" and command.mode in {"auto", "profile"}:
+            record = self.ctx.store.load(command.workspace_id)
+            if "last_recreate_verify_selector" in record.metadata:
+                record.metadata.pop("last_recreate_verify_selector", None)
+                self.ctx.store.save(record)
         return result
 
     def _from_diagnostic(
@@ -530,6 +557,11 @@ class WorkspaceVerifier:
             execution_evidence=delegated.execution_evidence,
             failed_selectors=delegated.failed_selectors,
             output_artifact_reference=delegated.output_artifact_reference,
+            failure_provider=delegated.failure_provider,
+            selector_coverage=delegated.selector_coverage,
+            selectors_unavailable_reason=delegated.selectors_unavailable_reason,
+            failure_locations=delegated.failure_locations,
+            output_artifact_status=delegated.output_artifact_status,
             failure_expectation=delegated.failure_expectation,
             failure_chain_id=delegated.failure_chain_id,
             rerun_of_selectors=delegated.rerun_of_selectors,

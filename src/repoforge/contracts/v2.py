@@ -25,6 +25,7 @@ from .common import (
     LongText,
     OperationEvidence,
     OperationState,
+    OutcomeReceiptEvidence,
     ProviderEvidence,
     ReadFileRequest,
     ReadFileResult,
@@ -46,6 +47,7 @@ class ContextSectionName(str, Enum):
     REPOSITORY = "repository"
     STATUS = "status"
     TICKET = "ticket"
+    TICKET_WORKFLOW = "ticket_workflow"
     WORKSPACE = "workspace"
     RECENT_COMMITS = "recent_commits"
 
@@ -122,6 +124,20 @@ class RepoSearchOutput(ToolResponse):
     source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
+    truncation_reason: (
+        Literal[
+            "search_deadline_exceeded",
+            "result_count_limit",
+            "result_transport_budget",
+            "source_limit",
+        ]
+        | None
+    ) = None
+    scanned_path_count: int = Field(default=0, ge=0)
+    candidate_path_count: int = Field(default=0, ge=0)
+    remaining_path_count: int = Field(default=0, ge=0)
+    completed_providers: tuple[str, ...] = Field(default=(), max_length=10)
+    recommended_scope: ShortText | None = None
 
 
 class RepoTreeInput(StrictModel):
@@ -200,6 +216,70 @@ class IssueMode(str, Enum):
     REOPEN = "reopen"
     LINK = "link"
     CREATE = "create"
+    MANAGE = "manage"
+
+
+IssueGraphClientRef = Annotated[
+    str,
+    Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"),
+]
+IssueGraphProposalId = Annotated[str, Field(pattern=r"^igp-[a-f0-9]{24}$")]
+IssueGraphPlanId = Annotated[str, Field(pattern=r"^igplan-[a-f0-9]{24}$")]
+IssueGraphPublicationId = Annotated[str, Field(pattern=r"^igpub-[a-f0-9]{24}$")]
+ApprovalRequestId = Annotated[str, Field(pattern=r"^apr-[a-f0-9]{24}$")]
+
+
+class IssueGraphNodeInput(StrictModel):
+    client_ref: IssueGraphClientRef
+    title: str = Field(min_length=1, max_length=1_000)
+    ticket_type: Literal["program", "epic", "task"]
+    priority: Literal["p0", "p1", "p2", "p3"]
+    status: Literal["planned", "ready", "in_progress", "blocked", "done"]
+    parent_ref: IssueGraphClientRef | None = None
+    body: str = Field(min_length=1, max_length=20_000)
+
+
+class IssueGraphEdgeInput(StrictModel):
+    source_ref: IssueGraphClientRef
+    target_ref: IssueGraphClientRef
+    kind: Literal["blocked_by", "relates", "supersedes"]
+
+
+class IssueGraphManagePlanInput(StrictModel):
+    action: Literal["plan"]
+    root_ref: IssueGraphClientRef
+    nodes: tuple[IssueGraphNodeInput, ...] = Field(min_length=1, max_length=100)
+    edges: tuple[IssueGraphEdgeInput, ...] = Field(default=(), max_length=500)
+    adopt_refs: tuple[IssueGraphClientRef, ...] = Field(default=(), max_length=100)
+    expires_in_seconds: int = Field(default=3_600, ge=60, le=86_400)
+
+
+class IssueGraphManageApplyInput(StrictModel):
+    action: Literal["apply"]
+    proposal_id: IssueGraphProposalId
+    proposal_hash: Sha256
+    plan_id: IssueGraphPlanId
+    effect_plan_hash: Sha256
+    approval_request_id: ApprovalRequestId
+
+
+class IssueGraphManageStatusInput(StrictModel):
+    action: Literal["status"]
+    publication_id: IssueGraphPublicationId
+
+
+class IssueGraphManageReconcileInput(StrictModel):
+    action: Literal["reconcile"]
+    publication_id: IssueGraphPublicationId
+
+
+IssueGraphManageInput = Annotated[
+    IssueGraphManagePlanInput
+    | IssueGraphManageApplyInput
+    | IssueGraphManageStatusInput
+    | IssueGraphManageReconcileInput,
+    Field(discriminator="action"),
+]
 
 
 class IssueLinkType(str, Enum):
@@ -274,6 +354,7 @@ class RepoIssueInput(StrictModel):
     link_type: IssueLinkType | None = None
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
     approval_request_id: str | None = Field(default=None, min_length=1, max_length=160)
+    manage: IssueGraphManageInput | None = None
 
     @model_validator(mode="after")
     def validate_mode_fields(self) -> RepoIssueInput:
@@ -285,6 +366,34 @@ class RepoIssueInput(StrictModel):
             IssueMode.CREATE,
         }
         issue_modes = write_modes - {IssueMode.CREATE}
+        if self.mode is IssueMode.MANAGE:
+            if self.manage is None:
+                raise ValueError("repo_issue manage requires manage")
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.issue_number,
+                        self.root_issue,
+                        self.status,
+                        self.priority,
+                        self.initiative,
+                        self.cursor,
+                        self.body,
+                        self.title,
+                        self.evidence_ref,
+                        self.target_issue,
+                        self.link_type,
+                        self.idempotency_key,
+                        self.approval_request_id,
+                    )
+                )
+                or self.fresh
+                or self.limit != 10
+            ):
+                raise ValueError("repo_issue manage does not accept read or write branch fields")
+        elif self.manage is not None:
+            raise ValueError("manage is only valid for repo_issue manage")
         if self.mode in {IssueMode.READ, IssueMode.SPEC} and self.issue_number is None:
             raise ValueError(f"repo_issue {self.mode.value} requires issue_number")
         if self.mode in issue_modes and self.issue_number is None:
@@ -329,15 +438,67 @@ class IssueMutationEvidence(StrictModel):
     url: str | None = Field(default=None, max_length=2_000)
 
 
+class IssueGraphWorkflowEvidence(StrictModel):
+    action: Literal["plan", "apply", "status", "reconcile"]
+    state: Literal[
+        "planned",
+        "pending_approval",
+        "publishing",
+        "paused",
+        "partial_failed",
+        "manual_recovery_required",
+        "succeeded",
+        "stale",
+    ]
+    proposal_id: IssueGraphProposalId | None = None
+    proposal_hash: Sha256 | None = None
+    plan_id: IssueGraphPlanId | None = None
+    effect_plan_hash: Sha256 | None = None
+    approval_request_id: ApprovalRequestId | None = None
+    approval_status: (
+        Literal[
+            "pending",
+            "accepted",
+            "declined",
+            "cancelled",
+            "expired",
+            "invalidated",
+        ]
+        | None
+    ) = None
+    publication_id: IssueGraphPublicationId | None = None
+    publication_state: (
+        Literal[
+            "running",
+            "paused",
+            "manual_recovery_required",
+            "succeeded",
+        ]
+        | None
+    ) = None
+    operation_id: Identifier | None = None
+    receipt_id: Identifier | None = None
+    result_reference: str | None = Field(default=None, max_length=256)
+    retry_at: str | None = Field(default=None, max_length=80)
+    complete: bool
+    external_writes: int = Field(default=0, ge=0, le=1_000)
+    recovery_action: ShortText | None = None
+
+
 class RepoIssueOutput(ToolResponse):
     repo_id: RepoId
     mode: IssueMode
     graph_status: Literal["available", "graph_unavailable", "not_requested"]
+    graph_unavailable_reason: (
+        Literal["configuration_unavailable", "provider_unavailable", "evidence_incomplete"] | None
+    ) = None
     issue: IssueEvidence | None = None
     nodes: tuple[IssueGraphNode, ...] = Field(default=(), max_length=500)
     selected: tuple[IssueGraphNode, ...] = Field(default=(), max_length=100)
     drift: tuple[IssueDrift, ...] = Field(default=(), max_length=100)
     mutation: IssueMutationEvidence | None = None
+    workflow: IssueGraphWorkflowEvidence | None = None
+    outcome: OutcomeReceiptEvidence | None = None
     next_action: ShortText | None = None
     truncated: bool = False
     next_cursor: Cursor | None = None
@@ -390,6 +551,10 @@ class RepositorySelection(StrictModel):
     repo_id: RepoId | None = None
     candidates: tuple[RepositorySelectionCandidate, ...] = Field(default=(), max_length=200)
     guidance: ShortText
+    repo_selection_id: Identifier | None = None
+    selection_generation: int | None = Field(default=None, ge=1)
+    capability_digest: Sha256 | None = None
+    expires_at: datetime | None = None
 
 
 class SelectionPrompt(StrictModel):
@@ -437,12 +602,13 @@ class GeneratedPathDeclaration(StrictModel):
 
 
 class IssueWritePolicyDeclaration(StrictModel):
-    enabled_ops: tuple[Literal["comment", "close", "reopen", "link", "create"], ...] = Field(
-        default=("comment",), max_length=5
+    enabled_ops: tuple[Literal["comment", "close", "reopen", "link", "create", "update"], ...] = (
+        Field(default=("comment",), max_length=6)
     )
-    approval_required_ops: tuple[Literal["comment", "close", "reopen", "link", "create"], ...] = (
-        Field(default=(), max_length=5)
-    )
+    approval_required_ops: tuple[
+        Literal["comment", "close", "reopen", "link", "create", "update"], ...
+    ] = Field(default=(), max_length=6)
+    operation_semantics_version: Literal[1, 2] = 1
     max_writes_per_call: int = Field(default=2, ge=1, le=20)
     max_writes_per_window: int = Field(default=20, ge=1, le=10_000)
     window_seconds: int = Field(default=3_600, ge=60, le=604_800)
@@ -510,6 +676,7 @@ class WorkspaceCreateInput(StrictModel):
 
 
 class WorkspaceCreateOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     repo_id: RepoId
     branch: str = Field(min_length=1, max_length=512)
@@ -525,6 +692,7 @@ class WorkspaceRemoveInput(StrictModel):
 
 
 class WorkspaceRemoveOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     removed: bool
     local_branch_deleted: bool
@@ -550,6 +718,7 @@ class WorkspaceListOutput(ToolResponse):
 class RefreshAction(str, Enum):
     PREVIEW = "preview"
     APPLY = "apply"
+    RECREATE_FROM_LATEST_BASE = "recreate_from_latest_base"
 
 
 class RefreshResolution(StrictModel):
@@ -575,6 +744,22 @@ class RefreshConflictEvidence(StrictModel):
     regeneration_command: tuple[str, ...] = Field(default=(), max_length=64)
 
 
+class RefreshRegenerationReceipt(StrictModel):
+    commands: tuple[tuple[str, ...], ...] = Field(max_length=64)
+    generated_paths: tuple[RelativePath, ...] = Field(max_length=1100)
+    source_identity: Sha256
+    output_identity: Sha256
+    deterministic: Literal[True] = True
+
+
+class RefreshChangeMetrics(StrictModel):
+    changed_files: int = Field(default=0, ge=0, le=1100)
+    added_lines: int = Field(default=0, ge=0)
+    deleted_lines: int = Field(default=0, ge=0)
+    binary_files: int = Field(default=0, ge=0, le=1100)
+    total_current_bytes: int = Field(default=0, ge=0)
+
+
 class WorkspaceRefreshInput(StrictModel):
     workspace_id: Identifier
     action: RefreshAction
@@ -585,22 +770,40 @@ class WorkspaceRefreshInput(StrictModel):
 
 
 class WorkspaceRefreshOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     action: RefreshAction
-    result: Literal["current", "preview", "applied", "conflict"]
+    result: Literal["current", "preview", "applied", "conflict", "recreated"]
     plan_hash: Sha256
     plan_token: str | None = Field(default=None, max_length=2048)
     target_base_sha: GitObjectId
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
-    prediction_scope: Literal["committed_head"] = "committed_head"
+    prediction_scope: Literal["committed_head", "latest_base_recreate"] = "committed_head"
     apply_blockers: tuple[str, ...] = Field(default=(), max_length=20)
-    conflicts: tuple[RefreshConflictEvidence, ...] = Field(default=(), max_length=100)
+    conflicts: tuple[RefreshConflictEvidence, ...] = Field(default=(), max_length=1100)
+    conflict_scope: Literal["none", "semantic", "generated", "mixed"] = "none"
+    semantic_conflict_count: int = Field(default=0, ge=0, le=100)
+    generated_conflict_count: int = Field(default=0, ge=0, le=1000)
+    semantic_conflict_paths: tuple[RelativePath, ...] = Field(default=(), max_length=100)
+    generated_conflict_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    regeneration_receipts: tuple[RefreshRegenerationReceipt, ...] = Field(default=(), max_length=64)
+    source_change_metrics: RefreshChangeMetrics = Field(default_factory=RefreshChangeMetrics)
+    generated_change_metrics: RefreshChangeMetrics = Field(default_factory=RefreshChangeMetrics)
     warnings: tuple[str, ...] = Field(default=(), max_length=100)
-    changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
-    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=1000)
+    changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=1100)
+    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=1100)
     invalidated_receipts: tuple[str, ...] = Field(default=(), max_length=100)
     transaction_id: Identifier | None = None
+    recreate_eligible: bool = False
+    recreate_blockers: tuple[str, ...] = Field(default=(), max_length=20)
+    recommended_action: Literal[
+        "continue",
+        "restore_remote_connectivity",
+        "recreate_from_latest_base",
+        "refresh_preview",
+    ] = "refresh_preview"
+    previous_head_sha: GitObjectId | None = None
 
 
 class WorkspaceStatusSection(str, Enum):
@@ -649,6 +852,7 @@ class FormatterEvidence(StrictModel):
 
 
 class WorkspaceFormatChangedOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     formatters: tuple[FormatterEvidence, ...] = Field(default=(), max_length=100)
     changed: bool
@@ -694,6 +898,20 @@ class WorkspaceSearchOutput(ToolResponse):
     source_truncated: bool = False
     truncated: bool = False
     next_cursor: Cursor | None = None
+    truncation_reason: (
+        Literal[
+            "search_deadline_exceeded",
+            "result_count_limit",
+            "result_transport_budget",
+            "source_limit",
+        ]
+        | None
+    ) = None
+    scanned_path_count: int = Field(default=0, ge=0)
+    candidate_path_count: int = Field(default=0, ge=0)
+    remaining_path_count: int = Field(default=0, ge=0)
+    completed_providers: tuple[str, ...] = Field(default=(), max_length=10)
+    recommended_scope: ShortText | None = None
 
 
 class WorkspaceTreeInput(StrictModel):
@@ -872,7 +1090,41 @@ class SyntaxDiagnosticsEvidence(StrictModel):
         return self
 
 
+class WorkspaceFreshnessPreflightEvidence(StrictModel):
+    staleness: Literal[
+        "current",
+        "unavailable_remote",
+        "local_base_stale",
+        "remote_base_stale",
+        "diverged",
+    ]
+    refresh_required: bool
+    workspace_base_sha: GitObjectId
+    latest_base_sha: GitObjectId
+    head_sha: GitObjectId
+    ahead_base: int = Field(ge=0)
+    behind_base: int = Field(ge=0)
+    upstream_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    workspace_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    generated_overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    expected_evidence_invalidation: tuple[ShortText, ...] = Field(default=(), max_length=20)
+    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    recommended_action: Literal[
+        "continue",
+        "restore_remote_connectivity",
+        "recreate_from_latest_base",
+        "refresh_preview",
+    ]
+    warning: ShortText | None = None
+    recreate_eligible: bool
+    recreate_blockers: tuple[ShortText, ...] = Field(default=(), max_length=20)
+    remote_available: bool
+    remote_error_code: str | None = Field(default=None, max_length=160)
+
+
 class WorkspaceMutateOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     dry_run: bool
     ready: bool
@@ -887,6 +1139,7 @@ class WorkspaceMutateOutput(ToolResponse):
     change_metrics: ChangeMetrics
     syntax_diagnostics: SyntaxDiagnosticsEvidence
     transaction_id: Identifier | None = None
+    freshness_preflight: WorkspaceFreshnessPreflightEvidence | None = None
 
 
 class VerifyMode(str, Enum):
@@ -979,6 +1232,47 @@ class VerifyStepEvidence(StrictModel):
     failure_domain: str | None = Field(default=None, max_length=160)
 
 
+class WorkspaceFreshnessPreflightValue(StrictModel):
+    staleness: Literal[
+        "current",
+        "unavailable_remote",
+        "local_base_stale",
+        "remote_base_stale",
+        "diverged",
+    ]
+    refresh_required: bool
+    workspace_base_sha: GitObjectId
+    latest_base_sha: GitObjectId
+    head_sha: GitObjectId
+    ahead_base: int = Field(ge=0)
+    behind_base: int = Field(ge=0)
+    upstream_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    workspace_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    generated_overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    expected_evidence_invalidation: tuple[Identifier, ...] = Field(default=(), max_length=32)
+    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    recommended_action: Literal[
+        "continue",
+        "restore_remote_connectivity",
+        "recreate_from_latest_base",
+        "refresh_preview",
+    ]
+    warning: str | None = Field(default=None, max_length=2000)
+    recreate_eligible: bool
+    recreate_blockers: tuple[Identifier, ...] = Field(default=(), max_length=32)
+    remote_available: bool
+    remote_error_code: str | None = Field(default=None, max_length=128)
+
+
+class WorkspaceFreshnessEvidence(StrictModel):
+    status: Literal["current", "partial", "unavailable", "not_applicable"]
+    coverage: Literal["complete", "partial", "none"]
+    value: WorkspaceFreshnessPreflightValue | None = None
+    error_code: str | None = Field(default=None, max_length=128)
+    safe_fallback: str | None = Field(default=None, max_length=1000)
+
+
 class WorkspaceVerifyAssessment(StrictModel):
     snapshot_id: Sha256
     current: bool
@@ -988,6 +1282,7 @@ class WorkspaceVerifyAssessment(StrictModel):
     uncertainties: tuple[str, ...] = Field(default=(), max_length=64)
     refresh_required: bool
     behind_base: int = Field(ge=0)
+    base_freshness: WorkspaceFreshnessEvidence
     provider: ProviderEvidence | None = None
     final_profile: Identifier
     manual_review_required: bool
@@ -1074,6 +1369,13 @@ class WorkspaceVerifyInput(StrictModel):
         return self
 
 
+class FailureLocationEvidence(StrictModel):
+    path: str = Field(min_length=1, max_length=512)
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+    code: str | None = Field(default=None, min_length=1, max_length=64)
+
+
 class WorkspaceVerifyOutput(ToolResponse):
     workspace_id: Identifier
     requested_mode: VerifyMode
@@ -1103,6 +1405,30 @@ class WorkspaceVerifyOutput(ToolResponse):
         default=None,
         pattern=r"^failure-output:[a-f0-9]{64}$",
     )
+    failure_provider: (
+        Literal["pytest", "unittest", "ruff", "mypy", "build", "schema", "custom"] | None
+    ) = None
+    selector_coverage: Literal["not_applicable", "complete", "partial", "unavailable"] = (
+        "not_applicable"
+    )
+    selectors_unavailable_reason: (
+        Literal[
+            "output_unrecognized",
+            "provider_not_supported",
+            "selectors_truncated",
+            "artifact_unavailable",
+        ]
+        | None
+    ) = None
+    failure_locations: tuple[FailureLocationEvidence, ...] = Field(default=(), max_length=100)
+    output_artifact_status: Literal[
+        "not_applicable",
+        "available",
+        "oversized",
+        "persistence_failed",
+        "source_truncated",
+        "source_unavailable",
+    ] = "not_applicable"
     failure_expectation: Literal["expected_red", "unexpected"] | None = None
     failure_chain_id: str | None = Field(
         default=None,
@@ -1136,6 +1462,7 @@ class WorkspaceCommitInput(StrictModel):
 
 
 class WorkspaceCommitOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     branch: str = Field(min_length=1, max_length=512)
     commit: str = Field(min_length=1, max_length=20_000)
@@ -1155,6 +1482,7 @@ class WorkspacePushInput(StrictModel):
 
 
 class WorkspacePushOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     branch: str = Field(min_length=1, max_length=512)
     head_sha: GitObjectId
@@ -1171,6 +1499,55 @@ class WorkspacePrAction(str, Enum):
     UPDATE = "update"
     COMMENT = "comment"
     WATCH = "watch"
+    RECONCILE = "reconcile"
+
+
+class PrIssueDisposition(str, Enum):
+    CLOSES = "closes"
+    ADVANCES = "advances"
+    SUPERSEDES = "supersedes"
+    RELATES = "relates"
+
+
+class PrIssueDispositionInput(StrictModel):
+    issue_number: int = Field(ge=1)
+    disposition: PrIssueDisposition
+    acceptance_evidence_ref: str = Field(min_length=1, max_length=1_000)
+
+
+class PrIssueSnapshotEvidence(StrictModel):
+    issue_number: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=1_000)
+    state: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=2_000)
+    acceptance_evidence_ref: str = Field(min_length=1, max_length=1_000)
+
+
+class PrIssueCompletionEvidence(StrictModel):
+    intent_complete: bool
+    closes: tuple[int, ...] = Field(default=(), max_length=100)
+    advances: tuple[int, ...] = Field(default=(), max_length=100)
+    supersedes: tuple[int, ...] = Field(default=(), max_length=100)
+    relates: tuple[int, ...] = Field(default=(), max_length=100)
+    snapshots: tuple[PrIssueSnapshotEvidence, ...] = Field(default=(), max_length=100)
+
+
+class PrIssueClosureResult(StrictModel):
+    issue_number: int = Field(ge=1)
+    result: str = Field(min_length=1, max_length=80)
+    external_writes: int = Field(ge=0, le=20)
+    marker: str = Field(min_length=1, max_length=200)
+    approval_request_id: str | None = Field(default=None, max_length=160)
+
+
+class PrIssueReconciliationEvidence(StrictModel):
+    merge_status: Literal["merged", "not_merged"]
+    closed_correctly: tuple[int, ...] = Field(default=(), max_length=100)
+    implemented_still_open: tuple[int, ...] = Field(default=(), max_length=100)
+    intentionally_advanced: tuple[int, ...] = Field(default=(), max_length=100)
+    superseded: tuple[int, ...] = Field(default=(), max_length=100)
+    acceptance_review_required: tuple[int, ...] = Field(default=(), max_length=100)
+    closure_results: tuple[PrIssueClosureResult, ...] = Field(default=(), max_length=100)
 
 
 class PrCommentEvidence(StrictModel):
@@ -1193,6 +1570,8 @@ class WorkspacePrInput(StrictModel):
     until: Literal["all_completed", "first_failure"] = "all_completed"
     timeout_seconds: int = Field(default=900, ge=5, le=7200)
     event_cursor: Cursor | None = None
+    issue_dispositions: tuple[PrIssueDispositionInput, ...] = Field(default=(), max_length=100)
+    apply_closures: bool = False
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> WorkspacePrInput:
@@ -1203,15 +1582,23 @@ class WorkspacePrInput(StrictModel):
         }
         if self.action in write_actions and self.idempotency_key is None:
             raise ValueError(f"workspace_pr {self.action.value} requires idempotency_key")
+        if (
+            self.action is WorkspacePrAction.RECONCILE
+            and self.apply_closures
+            and (self.idempotency_key is None)
+        ):
+            raise ValueError("workspace_pr reconcile apply_closures requires idempotency_key")
         if self.action is WorkspacePrAction.CREATE_DRAFT and (
             self.title is None or self.body is None
         ):
             raise ValueError("workspace_pr create_draft requires title and body")
         if self.action is WorkspacePrAction.UPDATE and self.title is None and self.body is None:
             raise ValueError("workspace_pr update requires title or body")
-        if self.action in {WorkspacePrAction.UPDATE, WorkspacePrAction.COMMENT} and (
-            self.expected_remote_version is None
-        ):
+        if self.action in {
+            WorkspacePrAction.UPDATE,
+            WorkspacePrAction.COMMENT,
+            WorkspacePrAction.RECONCILE,
+        } and (self.expected_remote_version is None):
             raise ValueError(f"workspace_pr {self.action.value} requires expected_remote_version")
         if self.action is WorkspacePrAction.COMMENT and (
             self.body is None or self.evidence_ref is None
@@ -1221,22 +1608,36 @@ class WorkspacePrInput(StrictModel):
             self.evidence_ref is not None or self.review_comment_id is not None
         ):
             raise ValueError("comment fields are only valid for workspace_pr comment")
-        if self.action is WorkspacePrAction.WATCH and any(
-            value is not None
-            for value in (
-                self.title,
-                self.body,
-                self.idempotency_key,
-                self.expected_remote_version,
-            )
-        ):
-            raise ValueError("workspace_pr watch does not accept write fields")
+        if self.action is WorkspacePrAction.WATCH:
+            if any(value is not None for value in (self.title, self.body, self.idempotency_key)):
+                raise ValueError("workspace_pr watch does not accept write fields")
+            if self.event_cursor is None and self.expected_remote_version is None:
+                raise ValueError(
+                    "workspace_pr watch requires expected_remote_version when starting"
+                )
+            if self.event_cursor is not None and self.expected_remote_version is not None:
+                raise ValueError("workspace_pr watch resume uses the version bound to event_cursor")
         if self.action is not WorkspacePrAction.WATCH and self.event_cursor is not None:
             raise ValueError("event_cursor is only valid for workspace_pr watch")
+        if self.action not in {WorkspacePrAction.CREATE_DRAFT, WorkspacePrAction.UPDATE} and (
+            self.issue_dispositions
+        ):
+            raise ValueError("issue_dispositions are only valid for PR create or update")
+        issue_numbers = [item.issue_number for item in self.issue_dispositions]
+        if len(issue_numbers) != len(set(issue_numbers)):
+            raise ValueError("issue_dispositions must contain each issue exactly once")
+        if self.action is WorkspacePrAction.RECONCILE and any(
+            value is not None
+            for value in (self.title, self.body, self.evidence_ref, self.review_comment_id)
+        ):
+            raise ValueError("workspace_pr reconcile does not accept PR content fields")
+        if self.action is not WorkspacePrAction.RECONCILE and self.apply_closures:
+            raise ValueError("apply_closures is only valid for workspace_pr reconcile")
         return self
 
 
 class WorkspacePrOutput(ToolResponse):
+    outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
     action: WorkspacePrAction
     pull_request: PullRequestEvidence | None = None
@@ -1245,6 +1646,8 @@ class WorkspacePrOutput(ToolResponse):
     remote_version: str | None = Field(default=None, max_length=256)
     event_cursor: Cursor | None = None
     terminal_reason: str | None = Field(default=None, max_length=500)
+    issue_completion: PrIssueCompletionEvidence | None = None
+    reconciliation: PrIssueReconciliationEvidence | None = None
 
 
 class PrEvidenceDetail(str, Enum):
@@ -1285,6 +1688,36 @@ class WorkspacePrEvidenceOutput(ToolResponse):
     pull_request: PullRequestEvidence
     checks: tuple[CheckEvidence, ...] = Field(default=(), max_length=500)
     failure_excerpt: tuple[str, ...] = Field(default=(), max_length=200)
+    failure_provider: (
+        Literal["pytest", "unittest", "ruff", "mypy", "build", "schema", "custom"] | None
+    ) = None
+    selector_coverage: Literal["not_applicable", "complete", "partial", "unavailable"] = (
+        "not_applicable"
+    )
+    selectors_unavailable_reason: (
+        Literal[
+            "output_unrecognized",
+            "provider_not_supported",
+            "selectors_truncated",
+            "artifact_unavailable",
+        ]
+        | None
+    ) = None
+    failed_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
+    failure_locations: tuple[FailureLocationEvidence, ...] = Field(default=(), max_length=100)
+    output_artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+    )
+    output_artifact_status: Literal[
+        "not_applicable",
+        "available",
+        "oversized",
+        "persistence_failed",
+        "source_truncated",
+        "source_unavailable",
+    ] = "not_applicable"
+    remote_version: str = Field(min_length=1, max_length=256)
     delta_token: Cursor
     changed_since: bool
     truncated: bool = False
@@ -1474,6 +1907,56 @@ class ConfigGenerationSummary(StrictModel):
     changed_sections: tuple[str, ...] = Field(default=(), max_length=100)
 
 
+class RuntimeContractIdentityView(StrictModel):
+    server_build_sha: Sha256
+    server_version: str = Field(min_length=1, max_length=160)
+    active_generation: int = Field(ge=1)
+    tool_surface_hash: Sha256
+    input_contract_digest: Sha256
+    output_contract_digest: Sha256
+    runtime_protocol_version: int = Field(ge=1)
+    process_start_identity: Sha256
+
+
+class ConfigProjectionView(StrictModel):
+    source_digest: Sha256
+    accepted_source_digest: Sha256
+    accepted_resolved_digest: Sha256
+    active_resolved_digest: Sha256 | None = None
+    runtime_generation: int | None = Field(default=None, ge=1)
+    drift_state: Literal["none", "source_changed", "activation_required", "runtime_mismatch"]
+    safe_reconciliation_action: str = Field(min_length=1, max_length=500)
+
+
+class TicketGraphProjectionView(StrictModel):
+    enabled: bool
+    root_issue: int | None = Field(default=None, ge=1)
+    repository: str | None = Field(default=None, max_length=300)
+
+
+class RepositoryConfigProjectionView(StrictModel):
+    repo_id: RepoId
+    source_digest: Sha256
+    accepted_resolved_digest: Sha256
+    active_resolved_digest: Sha256 | None = None
+    accepted_generation: int = Field(ge=1)
+    active_generation: int | None = Field(default=None, ge=1)
+    source_ticket_graph: TicketGraphProjectionView
+    accepted_ticket_graph: TicketGraphProjectionView
+    active_ticket_graph: TicketGraphProjectionView
+    capability_projection_status: Literal["active", "pending", "unavailable", "disabled"]
+    drift_reason: Literal[
+        "none",
+        "source_not_refreshed",
+        "pending_approval",
+        "accepted_not_active",
+        "projection_loss",
+        "provider_unavailable",
+        "intentionally_disabled",
+    ]
+    safe_reconciliation_action: str = Field(min_length=1, max_length=500)
+
+
 class ConfigInspectOutput(ToolResponse):
     accepted: ConfigGenerationSummary | None = None
     active: ConfigGenerationSummary | None = None
@@ -1483,20 +1966,50 @@ class ConfigInspectOutput(ToolResponse):
     ) = None
     restart_required: bool
     repo_facts: tuple[KeyValue, ...] = Field(default=(), max_length=500)
+    repository_projections: tuple[RepositoryConfigProjectionView, ...] = Field(
+        default=(), max_length=100
+    )
+    contract_identity: RuntimeContractIdentityView | None = None
+    config_projection: ConfigProjectionView | None = None
 
 
 class RuntimeLogSource(str, Enum):
     AUDIT = "audit"
     RUNTIME = "runtime"
+    FAILURE_ARTIFACT = "failure_artifact"
+
+
+class RuntimeTimestampState(str, Enum):
+    OBSERVED = "observed"
+    UNAVAILABLE = "unavailable"
+    INVALID = "invalid"
+
+
+class RuntimeLogParseState(str, Enum):
+    STRUCTURED_V1 = "structured_v1"
+    LEGACY_JSON = "legacy_json"
+    LEGACY_PLAINTEXT = "legacy_plaintext"
+    MALFORMED_JSON = "malformed_json"
 
 
 class RuntimeLogEntry(StrictModel):
-    timestamp: str = Field(min_length=1, max_length=80)
+    timestamp: str | None = Field(default=None, max_length=80)
+    timestamp_state: RuntimeTimestampState | None = None
+    parse_state: RuntimeLogParseState | None = None
     source: RuntimeLogSource
+    component: str | None = Field(default=None, max_length=160)
+    stream: str | None = Field(default=None, max_length=80)
+    event_kind: str | None = Field(default=None, max_length=160)
     action: str | None = Field(default=None, max_length=160)
     level: str = Field(min_length=1, max_length=30)
     message: str = Field(max_length=4000)
     duration_ms: float | None = Field(default=None, ge=0)
+    correlation_id: str | None = Field(default=None, max_length=160)
+    operation_id: str | None = Field(default=None, max_length=160)
+    receipt_id: str | None = Field(default=None, max_length=160)
+    trace_id: str | None = Field(default=None, max_length=160)
+    workspace_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    repository_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class RuntimeLogsReadInput(StrictModel):
@@ -1508,6 +2021,10 @@ class RuntimeLogsReadInput(StrictModel):
     start_time: str | None = Field(default=None, max_length=80)
     end_time: str | None = Field(default=None, max_length=80)
     cursor: Cursor | None = None
+    artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+    )
 
     @model_validator(mode="after")
     def validate_time_range(self) -> RuntimeLogsReadInput:
@@ -1528,12 +2045,31 @@ class RuntimeLogsReadInput(StrictModel):
             and parsed["start_time"] > parsed["end_time"]
         ):
             raise ValueError("start_time must not be after end_time")
+        if self.source is RuntimeLogSource.FAILURE_ARTIFACT:
+            if self.artifact_reference is None:
+                raise ValueError("failure_artifact source requires artifact_reference")
+            if (
+                self.action is not None
+                or self.only_failed
+                or self.min_duration_ms is not None
+                or self.start_time is not None
+                or self.end_time is not None
+            ):
+                raise ValueError("failure_artifact source does not accept log filters")
+        elif self.artifact_reference is not None:
+            raise ValueError("artifact_reference is only valid for failure_artifact source")
         return self
 
 
 class RuntimeLogsReadOutput(ToolResponse):
     source: RuntimeLogSource
     entries: tuple[RuntimeLogEntry, ...] = Field(default=(), max_length=200)
+    malformed_count: int = Field(default=0, ge=0, le=1_000)
+    legacy_count: int = Field(default=0, ge=0, le=1_000)
+    structured_count: int = Field(default=0, ge=0, le=1_000)
+    correlated_count: int = Field(default=0, ge=0, le=1_000)
+    timestamp_unavailable_count: int = Field(default=0, ge=0, le=1_000)
+    source_truncated: bool | None = None
     truncated: bool = False
     next_cursor: Cursor | None = None
 

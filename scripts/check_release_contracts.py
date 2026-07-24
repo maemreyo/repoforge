@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import difflib
+import hashlib
 import json
 import os
 import sys
@@ -16,6 +16,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from repoforge.contracts.artifacts import write_generated_artifacts  # noqa: E402
 from repoforge.contracts.registry import render_v2_schema_bundle  # noqa: E402
 from repoforge.interfaces.cli.contract import build_cli_release_contract  # noqa: E402
 from repoforge.interfaces.mcp.contract import build_release_contract  # noqa: E402
@@ -41,8 +42,33 @@ def _compact_encoded(payload: object) -> str:
     )
 
 
+def _digest(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _relative(path: Path) -> str:
+    return path.resolve().relative_to(ROOT.resolve()).as_posix()
+
+
+def _drift_report(path: Path, expected: str, actual: str) -> str:
+    return json.dumps(
+        {
+            "generator": "release-contract-v2",
+            "status": "drift",
+            "artifacts": [
+                {
+                    "path": _relative(path),
+                    "expected_sha256": _digest(expected),
+                    "actual_sha256": _digest(actual),
+                }
+            ],
+        },
+        sort_keys=True,
+    )
+
+
 def _emit_github_error(message: str) -> None:
-    """Expose a bounded contract diff to check annotations used by RepoForge evidence."""
+    """Expose a bounded contract mismatch to check annotations used by RepoForge evidence."""
 
     if os.environ.get("GITHUB_ACTIONS") != "true":
         return
@@ -67,13 +93,21 @@ def main() -> int:
     actual["cli"] = build_cli_release_contract()
     rendered = _encoded(actual)
     if args.write:
-        CONTRACT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONTRACT_PATH.write_text(rendered, encoding="utf-8")
-        print(f"updated {CONTRACT_PATH.relative_to(ROOT)}")
+        report = write_generated_artifacts(ROOT, {_relative(CONTRACT_PATH): rendered})
+        print(
+            json.dumps(
+                {
+                    "generator": "release-contract-v2",
+                    "status": "written",
+                    **report,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
 
     if not CONTRACT_PATH.is_file():
-        print(f"missing release contract: {CONTRACT_PATH.relative_to(ROOT)}", file=sys.stderr)
+        print(f"missing release contract: {_relative(CONTRACT_PATH)}", file=sys.stderr)
         return 1
     expected_text = CONTRACT_PATH.read_text(encoding="utf-8")
     try:
@@ -82,17 +116,9 @@ def main() -> int:
         print(f"invalid release contract JSON: {exc}", file=sys.stderr)
         return 1
     if actual != expected:
-        diff = difflib.unified_diff(
-            expected_text.splitlines(),
-            rendered.splitlines(),
-            fromfile=str(CONTRACT_PATH.relative_to(ROOT)),
-            tofile="generated release contract",
-            lineterm="",
-        )
-        diff_text = "\n".join(diff)
-        print("public release contract drift detected:", file=sys.stderr)
-        print(diff_text, file=sys.stderr)
-        _emit_github_error(diff_text)
+        drift = _drift_report(CONTRACT_PATH, expected_text, rendered)
+        print(drift, file=sys.stderr)
+        _emit_github_error(drift)
         print(
             "Review compatibility and run `uv run python scripts/check_release_contracts.py --write` "
             "only when the contract change is intentional.",
@@ -102,22 +128,17 @@ def main() -> int:
 
     tool_schema_rendered = _compact_encoded(render_v2_schema_bundle())
     if not TOOL_SCHEMA_PATH.is_file():
-        print(f"missing tool schema golden: {TOOL_SCHEMA_PATH.relative_to(ROOT)}", file=sys.stderr)
+        print(f"missing tool schema golden: {_relative(TOOL_SCHEMA_PATH)}", file=sys.stderr)
         return 1
     tool_schema_expected = TOOL_SCHEMA_PATH.read_text(encoding="utf-8")
     if tool_schema_expected != tool_schema_rendered:
-        diff = difflib.unified_diff(
-            tool_schema_expected.splitlines(),
-            tool_schema_rendered.splitlines(),
-            fromfile=str(TOOL_SCHEMA_PATH.relative_to(ROOT)),
-            tofile="generated Forge v2 tool schemas",
-            lineterm="",
+        print(
+            _drift_report(TOOL_SCHEMA_PATH, tool_schema_expected, tool_schema_rendered),
+            file=sys.stderr,
         )
-        print("Forge v2 tool schema drift detected:", file=sys.stderr)
-        print("\n".join(diff), file=sys.stderr)
         print(
             "Review compatibility and run `uv run python scripts/generate_tool_schemas.py --write` "
-            "only when the contract change is intentional.",
+            "only when the public contract change is intentional.",
             file=sys.stderr,
         )
         return 1

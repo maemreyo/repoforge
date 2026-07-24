@@ -382,7 +382,10 @@ class RuntimeSupervisor:
                     )
                     try:
                         child = self._tunnel.start(
-                            profile, env=environment, log_path=self._log_path
+                            profile,
+                            env=environment,
+                            log_path=self._log_path,
+                            correlation_id=correlation_id,
                         )
                     except Exception as exc:
                         restart_count += 1

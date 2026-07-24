@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ...domain.adhoc import (
@@ -44,6 +45,7 @@ _KIND = "workspace_run_adhoc"
 _NETWORK_POLICY_LABEL = "advisory_local_only"
 _ARGV_RECURRENCE_THRESHOLD = 3
 _MAX_CHANGED_PATHS_REPORTED = 200
+_OPERATION_LEASE_GRACE_SECONDS = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,8 +256,16 @@ class WorkspaceAdhocRunner:
             if exc.details.get("cancelled"):
                 audit_details["cancelled"] = True
 
-        def run_body(cancel_token: CancellationToken | None) -> WorkspaceRunAdhocResult:
-            with self.ctx.locks.lock(c.workspace_id):
+        def run_body(
+            cancel_token: CancellationToken | None,
+            workspace_lock_held: bool = False,
+        ) -> WorkspaceRunAdhocResult:
+            lock_scope = (
+                contextlib.nullcontext()
+                if workspace_lock_held
+                else self.ctx.locks.lock(c.workspace_id)
+            )
+            with lock_scope:
                 fresh, locked_repo, locked_workspace = self.ctx.workspace(c.workspace_id)
                 before_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
                 before = read_fingerprint(
@@ -427,7 +437,7 @@ class WorkspaceAdhocRunner:
                 )
 
         if not c.background:
-            return self.ctx.audited(_KIND, audit_details, lambda: run_body(None))
+            return self.ctx.audited(_KIND, audit_details, lambda: run_body(None, False))
 
         return self._start_background(c, run_body, audit_details)
 
@@ -505,7 +515,7 @@ class WorkspaceAdhocRunner:
     def _start_background(
         self,
         c: WorkspaceRunAdhocCommand,
-        run_body: Callable[[CancellationToken | None], WorkspaceRunAdhocResult],
+        run_body: Callable[[CancellationToken | None, bool], WorkspaceRunAdhocResult],
         audit_details: dict[str, object],
     ) -> WorkspaceRunAdhocBackgroundResult:
         operations = self.operations
@@ -526,6 +536,12 @@ class WorkspaceAdhocRunner:
         lock_cm.__enter__()
 
         now = self.ctx.clock.now_iso()
+        _record, repo, _workspace = self.ctx.workspace(c.workspace_id)
+        owner_id = f"worker-{self.ctx.ids.new_hex(24)}"
+        lease_expires_at = (
+            datetime.fromisoformat(now)
+            + timedelta(seconds=repo.adhoc_timeout_seconds + _OPERATION_LEASE_GRACE_SECONDS)
+        ).isoformat()
         try:
             with self.ctx.locks.lock(
                 "background-adhoc-admission",
@@ -559,7 +575,12 @@ class WorkspaceAdhocRunner:
                     now=now,
                 )
                 try:
-                    task = operations.start(task.operation_id, now=now)
+                    task = operations.start(
+                        task.operation_id,
+                        owner_id=owner_id,
+                        lease_expires_at=lease_expires_at,
+                        now=now,
+                    )
                 except Exception:
                     with contextlib.suppress(Exception):
                         operations.fail(
@@ -590,6 +611,7 @@ class WorkspaceAdhocRunner:
                     operations.succeed(
                         operation_id,
                         result_reference=f"{_KIND}:{operation_id}",
+                        owner_id=owner_id,
                         now=finish_now,
                     )
                 except Exception as persist_exc:
@@ -601,6 +623,7 @@ class WorkspaceAdhocRunner:
                             error_code=ErrorCode.STATE_PERSISTENCE_FAILED.value,
                             error_message=_safe_error_message(str(persist_exc)),
                             retryability=OperationRetryability.MANUAL,
+                            owner_id=owner_id,
                             now=finish_now,
                         )
                 return
@@ -608,7 +631,11 @@ class WorkspaceAdhocRunner:
                 result_store.delete(operation_id)
             if cancel_token.is_cancelled():
                 with contextlib.suppress(RepoForgeError):
-                    operations.cancelled(operation_id, now=finish_now)
+                    operations.cancelled(
+                        operation_id,
+                        owner_id=owner_id,
+                        now=finish_now,
+                    )
                 return
             failure = exc or RepoForgeError(
                 "Background ad-hoc run completed without a result", code=ErrorCode.INTERNAL_ERROR
@@ -635,6 +662,7 @@ class WorkspaceAdhocRunner:
                         if retryable
                         else OperationRetryability.MANUAL
                     ),
+                    owner_id=owner_id,
                     now=finish_now,
                 )
 
@@ -643,7 +671,11 @@ class WorkspaceAdhocRunner:
             result: WorkspaceRunAdhocResult | None = None
             try:
                 try:
-                    result = self.ctx.audited(_KIND, audit_details, lambda: run_body(cancel_token))
+                    result = self.ctx.audited(
+                        _KIND,
+                        audit_details,
+                        lambda: run_body(cancel_token, True),
+                    )
                 except Exception as exc:
                     failure = exc
             finally:
@@ -660,6 +692,7 @@ class WorkspaceAdhocRunner:
                 operation_id,
                 error_code=ErrorCode.INTERNAL_ERROR.value,
                 error_message="Background task runner could not accept the ad-hoc run",
+                owner_id=owner_id,
             )
             raise RepoForgeError(
                 "Background task runner rejected the ad-hoc run", code=ErrorCode.INTERNAL_ERROR

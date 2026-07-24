@@ -11,8 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from conftest import ForgeEnvironment
+from conftest import ForgeEnvironment, create_forge_environment
 
+import repoforge.application.workspace.run_profile as run_profile_module
 from repoforge.application.service import CodingService
 from repoforge.application.workspace.run_adhoc import (
     _safe_error_message as _safe_adhoc_error_message,
@@ -349,6 +350,35 @@ def test_background_reused_failure_keeps_operation_reference(
     assert events[-1]["details"]["failure_reused"] is True
 
 
+def test_background_adhoc_claims_and_releases_operation_ownership(tmp_path: Path) -> None:
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+    )
+    service, runner = _manual_service(env)
+    workspace_id = service.workspace_create("demo", "background adhoc lease")["workspace_id"]
+
+    admission = service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "print('background adhoc')"],
+        background=True,
+    )
+    operation_id = admission["operation_id"]
+    running = service.operation_status(operation_id)
+    assert running["state"] == "running"
+    assert isinstance(running["owner_id"], str)
+    assert running["owner_id"].startswith("worker-")
+    assert isinstance(running["lease_expires_at"], str)
+
+    runner.run(operation_id)
+
+    terminal = service.operation_status(operation_id)
+    assert terminal["state"] == "succeeded"
+    assert terminal["owner_id"] is None
+    assert terminal["lease_expires_at"] is None
+
+
 def test_background_admission_returns_fast_and_holds_the_workspace_lock(
     forge_env: ForgeEnvironment,
 ) -> None:
@@ -371,6 +401,9 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
     assert status["state"] == "running"
     assert status["workspace_id"] == workspace_id
     assert status["cancel_supported"] is True
+    assert isinstance(status["owner_id"], str)
+    assert status["owner_id"].startswith("worker-")
+    assert isinstance(status["lease_expires_at"], str)
 
     # The workspace lock is held for the whole background run.
     locks = service.application.context.locks
@@ -386,6 +419,8 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
 
     final = service.operation_status(operation_id)
     assert final["state"] == "succeeded"
+    assert final["owner_id"] is None
+    assert final["lease_expires_at"] is None
     assert final["result_reference"] == f"workspace_run_profile:{operation_id}"
     result_payload = final["result"]
     assert result_payload["workspace_id"] == workspace_id
@@ -411,7 +446,9 @@ def test_background_admission_returns_fast_and_holds_the_workspace_lock(
 def test_background_profile_emits_observable_per_step_progress(
     forge_env: ForgeEnvironment,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(run_profile_module, "_PROGRESS_HEARTBEAT_SECONDS", 0.05)
     release = tmp_path / "release-progress-step"
     _add_progress_profile(forge_env, release)
     service = _reload_service(forge_env)
@@ -441,6 +478,25 @@ def test_background_profile_emits_observable_per_step_progress(
 
     observed = _poll(second_step_running)
     assert observed["updated_at"] != observed["created_at"]
+    first_step_update = observed["updated_at"]
+
+    def same_step_heartbeat() -> dict[str, object] | None:
+        status = second_step_running()
+        if status is not None and status["updated_at"] != first_step_update:
+            return status
+        return None
+
+    heartbeat = _poll(same_step_heartbeat)
+    observed_progress = observed["progress"]
+    heartbeat_progress = heartbeat["progress"]
+    assert isinstance(observed_progress, dict)
+    assert isinstance(heartbeat_progress, dict)
+    for key in ("current", "total", "unit"):
+        assert heartbeat_progress[key] == observed_progress[key]
+    heartbeat_message = heartbeat_progress["message"]
+    assert isinstance(heartbeat_message, str)
+    assert heartbeat_message.startswith("running business_tests (step 2/2, elapsed ")
+    assert heartbeat_message.endswith("s)")
 
     release.write_text("continue\n", encoding="utf-8")
 
@@ -597,6 +653,8 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
             "force_rerun",
             "expected_fingerprint",
             "correlation_id",
+            "correlation_hash",
+            "origin",
             "duration_ms",
             "result_bytes",
             "command_source_dirty",

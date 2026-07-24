@@ -23,6 +23,7 @@ from repoforge.domain.runtime import (
     RuntimeRecord,
     TunnelProfile,
 )
+from repoforge.domain.runtime_events import RuntimeEventV1
 from repoforge.testing import InMemoryOperationGate
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
@@ -152,7 +153,7 @@ raise SystemExit(2)
     path.chmod(0o755)
 
 
-def test_tunnel_cli_full_lifecycle_and_redaction(tmp_path: Path) -> None:
+def test_tunnel_cli_runtime_jsonl_lifecycle(tmp_path: Path) -> None:
     executable = tmp_path / "tunnel-client"
     _write_fake_tunnel(executable)
     client = TunnelCliClient(str(executable), default_timeout_seconds=5)
@@ -173,17 +174,25 @@ def test_tunnel_cli_full_lifecycle_and_redaction(tmp_path: Path) -> None:
 
     log = tmp_path / "runtime.log"
     log.write_bytes(b"x" * 5_000_001)
-    child = client.start(profile, env=env, log_path=log)
+    child = client.start(profile, env=env, log_path=log, correlation_id="runtime-corr")
     assert log.with_suffix(".log.1").is_file()
     assert client.is_alive(child)
+    import time
+
+    time.sleep(0.1)
     client.terminate(child, grace_seconds=0.1)
     for _ in range(100):
         if not client.is_alive(child):
             break
-        import time
-
         time.sleep(0.01)
     assert not client.is_alive(child)
+    lines = log.read_text(encoding="utf-8").splitlines()
+    event = json.loads(lines[-1])
+    assert event["schema_version"] == 1
+    assert event["event_kind"] == "process_output"
+    assert event["stream"] == "combined"
+    assert event["message"] == "running"
+    assert event["correlation_id"] == "runtime-corr"
 
     with pytest.raises(ConfigError, match="Tunnel id"):
         client.initialize(profile, env={})
@@ -310,11 +319,25 @@ def test_serve_control_handler_covers_health_drain_resume_and_fail_closed(
         lambda path, generation, surface: SimpleNamespace(pid=55),
     )
     monkeypatch.setattr(cli, "clear_runtime_state", lambda path, pid: captured.update(cleared=pid))
-    monkeypatch.setattr(mcp_module, "tool_surface_hash", lambda: "surface")
-    monkeypatch.setattr(mcp_module, "create_server", lambda *, router, admin=None: MCP())
+    monkeypatch.setattr(mcp_module, "tool_surface_hash", lambda: "a" * 64)
+
+    def create_server(
+        *,
+        router: object,
+        admin: object | None = None,
+        contract_identity_provider: Any,
+    ) -> MCP:
+        del router, admin
+        identity = contract_identity_provider()
+        assert identity.active_generation == 7
+        captured["contract_identity"] = identity.as_dict()
+        return MCP()
+
+    monkeypatch.setattr(mcp_module, "create_server", create_server)
 
     assert cli._serve(tmp_path / "config.toml") == 0
     assert captured["closed"] is True and captured["cleared"] == 55
+    assert captured["contract_identity"]["active_generation"] == 7
 
 
 def test_serve_health_failure_and_missing_generation(
@@ -388,3 +411,53 @@ def test_tunnel_health_uses_advertised_admin_endpoint_and_response_failures(
     )
     recovered = client.health(child, timeout_seconds=0.1)
     assert next(check for check in recovered if check.name == "control_plane_response").ok
+
+
+def test_tunnel_writer_persists_secret_safe_runtime_jsonl(tmp_path: Path) -> None:
+    client = TunnelCliClient("tunnel-client")
+    log_path = tmp_path / "managed-runtime.log"
+
+    client._append_runtime_event(
+        log_path,
+        RuntimeEventV1(
+            observed_at="2026-07-21T12:00:00+00:00",
+            component="tunnel_client",
+            stream="stdout",
+            level="INFO",
+            event_kind="process_output",
+            message="token=secret-value",
+        ),
+        secrets=("secret-value",),
+    )
+
+    payload = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert payload["schema_version"] == 1
+    assert payload["component"] == "tunnel_client"
+    assert payload["event_kind"] == "process_output"
+    assert "secret-value" not in json.dumps(payload)
+    assert payload["message"].startswith("token=<redacted")
+
+
+def test_tunnel_projects_child_json_fields() -> None:
+    client = TunnelCliClient("tunnel-client")
+
+    event = client._runtime_event_from_line(
+        json.dumps(
+            {
+                "level": "ERROR",
+                "msg": "failed safely",
+                "action": "workspace_push",
+                "duration_ms": 12.5,
+            }
+        ),
+        correlation_id="runtime-corr",
+    )
+
+    assert event.component == "tunnel_client"
+    assert event.stream == "combined"
+    assert event.level == "ERROR"
+    assert event.event_kind == "tunnel_event"
+    assert event.message == "failed safely"
+    assert event.action == "workspace_push"
+    assert event.duration_ms == 12.5
+    assert event.correlation_id == "runtime-corr"

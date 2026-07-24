@@ -15,11 +15,13 @@ from enum import Enum
 from pathlib import PurePosixPath
 from typing import Any, TypeVar, cast
 
-from ..domain.errors import SecurityError
+from ..domain.errors import ErrorCode, RepoForgeError, SecurityError
 from ..ports.git import GitSearchLocation
 
 T = TypeVar("T")
+_monotonic = time.monotonic
 _MAX_CURSOR_CHARS = 4096
+_SEARCH_CURSOR_PREFIX = "search-v1:"
 _UNSAFE_REGEX = (
     re.compile(r"\\[1-9]"),
     re.compile(r"\(\?<"),
@@ -86,6 +88,31 @@ class Page:
     next_cursor: str | None
     omitted_count: int
     truncated: bool
+    truncation_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SearchPage:
+    matches: tuple[StructuredSearchMatch, ...]
+    next_cursor: str | None
+    omitted_count: int
+    source_truncated: bool
+    truncation_reason: str | None
+    scanned_path_count: int
+    candidate_path_count: int
+    remaining_path_count: int
+    completed_providers: tuple[str, ...]
+    recommended_scope: str | None
+
+    @property
+    def truncated(self) -> bool:
+        return self.next_cursor is not None or self.source_truncated
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchCursorState:
+    path_index: int
+    match_index: int
 
 
 def _request_binding(kind: str, scope: str, request: object) -> str:
@@ -138,6 +165,99 @@ def _decode_cursor(cursor: str | None, binding: str, total: int) -> int:
     return index
 
 
+def _encode_search_cursor(binding: str, state: _SearchCursorState) -> str:
+    raw = json.dumps(
+        {
+            "v": 1,
+            "binding": binding,
+            "path_index": state.path_index,
+            "match_index": state.match_index,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    envelope = json.dumps(
+        {
+            "payload": base64.urlsafe_b64encode(raw).decode().rstrip("="),
+            "checksum": hashlib.sha256(raw).hexdigest()[:24],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return _SEARCH_CURSOR_PREFIX + base64.urlsafe_b64encode(envelope).decode().rstrip("=")
+
+
+def _decode_search_cursor(
+    cursor: str | None,
+    binding: str,
+    total_paths: int,
+) -> _SearchCursorState:
+    if cursor is None:
+        return _SearchCursorState(0, 0)
+    if not cursor.startswith(_SEARCH_CURSOR_PREFIX) or len(cursor) > _MAX_CURSOR_CHARS:
+        raise ValueError("cursor is malformed")
+    token = cursor.removeprefix(_SEARCH_CURSOR_PREFIX)
+    try:
+        outer = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+        envelope = json.loads(outer)
+        payload_token = envelope["payload"]
+        raw = base64.urlsafe_b64decode(payload_token + "=" * (-len(payload_token) % 4))
+        if envelope["checksum"] != hashlib.sha256(raw).hexdigest()[:24]:
+            raise ValueError("checksum")
+        payload = json.loads(raw)
+        if payload["v"] != 1 or payload["binding"] != binding:
+            raise ValueError("cursor does not match the exact request or scope")
+        state = _SearchCursorState(
+            path_index=int(payload["path_index"]),
+            match_index=int(payload["match_index"]),
+        )
+    except (KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("cursor is malformed") from exc
+    if not 0 <= state.path_index <= total_paths or state.match_index < 0:
+        raise ValueError("cursor contains an invalid position")
+    if state.path_index == total_paths and state.match_index != 0:
+        raise ValueError("cursor contains an invalid position")
+    return state
+
+
+def is_search_scan_cursor(cursor: str | None) -> bool:
+    """Return whether a cursor belongs to the resumable builtin search scanner."""
+
+    return isinstance(cursor, str) and cursor.startswith(_SEARCH_CURSOR_PREFIX)
+
+
+def _result_item_bytes(item: object) -> int:
+    payload = asdict(cast(Any, item)) if hasattr(item, "__dataclass_fields__") else item
+    return len(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+
+def _transport_budget_error(
+    *,
+    byte_budget: int,
+    required_bytes: int,
+    item_index: int,
+    path: str | None = None,
+) -> RepoForgeError:
+    details: dict[str, object] = {
+        "byte_budget": byte_budget,
+        "required_bytes": required_bytes,
+        "item_index": item_index,
+    }
+    if path is not None:
+        details["path"] = path
+    return RepoForgeError(
+        "RESULT_TRANSPORT_BUDGET_EXCEEDED: one result item exceeds the advertised byte budget",
+        code=ErrorCode.RESULT_TRANSPORT_BUDGET_EXCEEDED,
+        retryable=False,
+        details=details,
+        safe_next_action=(
+            "Increase byte_budget within the reviewed bound or narrow the path/query/context so one "
+            "result item fits without truncating its meaning."
+        ),
+        unchanged_state=("No oversized result page was emitted.",),
+    )
+
+
 def paginate(
     items: Sequence[T],
     *,
@@ -157,26 +277,227 @@ def paginate(
     selected: list[T] = []
     used = 0
     index = start
-    while index < len(items) and len(selected) < max_items:
+    truncation_reason: str | None = None
+    while index < len(items):
+        if len(selected) >= max_items:
+            truncation_reason = "result_count_limit"
+            break
         item = items[index]
-        payload = asdict(cast(Any, item)) if hasattr(item, "__dataclass_fields__") else item
-        item_bytes = len(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        item_bytes = _result_item_bytes(item)
+        if not selected and item_bytes > byte_budget:
+            path = getattr(item, "path", None)
+            raise _transport_budget_error(
+                byte_budget=byte_budget,
+                required_bytes=item_bytes,
+                item_index=index,
+                path=path if isinstance(path, str) else None,
+            )
         if selected and used + item_bytes > byte_budget:
+            truncation_reason = "result_transport_budget"
             break
         selected.append(item)
         used += item_bytes
         index += 1
         if used >= byte_budget:
             break
-    if not selected and start < len(items):
-        selected.append(items[start])
-        index = start + 1
     next_cursor = _encode_cursor(binding, index) if index < len(items) else None
     return Page(
         items=tuple(selected),
         next_cursor=next_cursor,
         omitted_count=max(0, len(items) - index),
         truncated=next_cursor is not None,
+        truncation_reason=truncation_reason if next_cursor is not None else None,
+    )
+
+
+def _search_path_matches(
+    path: str,
+    *,
+    load_text: Callable[[str], str | None],
+    query: str,
+    mode: SearchMode,
+    context_lines: int,
+    matcher: re.Pattern[str] | None,
+) -> tuple[StructuredSearchMatch, ...]:
+    if mode is SearchMode.FILE_NAME:
+        if query.casefold() not in path.casefold():
+            return ()
+        return (StructuredSearchMatch(path, None, None, path, (), (), 1.0, "builtin_file_name"),)
+    text = load_text(path)
+    if text is None:
+        return ()
+    lines = text.splitlines()
+    matches: list[StructuredSearchMatch] = []
+    for line_index, line in enumerate(lines):
+        if matcher is None:
+            starts: list[tuple[int, str]] = []
+            offset = 0
+            while True:
+                found = line.find(query, offset)
+                if found < 0:
+                    break
+                starts.append((found, query))
+                offset = found + max(1, len(query))
+        else:
+            starts = [(match.start(), match.group(0)) for match in matcher.finditer(line)]
+        for column, matched in starts:
+            if not matched:
+                continue
+            matches.append(
+                StructuredSearchMatch(
+                    path=path,
+                    line=line_index + 1,
+                    column=column + 1,
+                    match=matched[:4000],
+                    context_before=tuple(
+                        value[:4000]
+                        for value in lines[max(0, line_index - context_lines) : line_index]
+                    ),
+                    context_after=tuple(
+                        value[:4000]
+                        for value in lines[
+                            line_index + 1 : min(len(lines), line_index + 1 + context_lines)
+                        ]
+                    ),
+                    score=1.0 if matcher is None else 0.9,
+                    provider="builtin_literal" if matcher is None else "builtin_regex",
+                )
+            )
+    return tuple(matches)
+
+
+def search_page(
+    paths: Iterable[str],
+    *,
+    load_text: Callable[[str], str | None],
+    query: str,
+    mode: SearchMode,
+    path_glob: str | None,
+    context_lines: int,
+    kind: str,
+    scope: str,
+    max_results: int,
+    byte_budget: int,
+    cursor: str | None,
+    source_truncated: bool = False,
+    deadline_ms: float = 500.0,
+) -> SearchPage:
+    """Scan until a page or deadline boundary and return exact resumable evidence."""
+
+    if not query or "\x00" in query:
+        raise ValueError("query must be non-empty and cannot contain NUL")
+    if not 0 <= context_lines <= 5:
+        raise ValueError("context_lines must be between 0 and 5")
+    if not 1 <= max_results <= 200:
+        raise ValueError("max_results must be between 1 and 200")
+    if not 1 <= byte_budget <= 120_000:
+        raise ValueError("byte_budget must be between 1 and 120000")
+    validate_path_glob(path_glob)
+    if mode is SearchMode.REGEX:
+        validate_regex(query)
+    matcher = re.compile(query) if mode is SearchMode.REGEX else None
+    candidates = tuple(
+        path
+        for path in sorted(set(paths))
+        if path_glob is None or PurePosixPath(path).match(path_glob)
+    )
+    request = {
+        "query": query,
+        "mode": mode.value,
+        "path_glob": path_glob,
+        "context_lines": context_lines,
+    }
+    binding = _request_binding(kind, scope, request)
+    state = _decode_search_cursor(cursor, binding, len(candidates))
+    deadline = _monotonic() + deadline_ms / 1000
+    selected: list[StructuredSearchMatch] = []
+    used = 0
+    path_index = state.path_index
+    match_index = state.match_index
+    scanned_path_count = path_index
+    completed_providers: set[str] = set()
+    next_state: _SearchCursorState | None = None
+    truncation_reason: str | None = None
+    omitted_count = 0
+
+    while path_index < len(candidates):
+        if _monotonic() > deadline:
+            next_state = _SearchCursorState(path_index, match_index)
+            truncation_reason = "search_deadline_exceeded"
+            break
+        path = candidates[path_index]
+        path_matches = _search_path_matches(
+            path,
+            load_text=load_text,
+            query=query,
+            mode=mode,
+            context_lines=context_lines,
+            matcher=matcher,
+        )
+        completed_providers.add(
+            "builtin_file_name"
+            if mode is SearchMode.FILE_NAME
+            else "builtin_regex"
+            if mode is SearchMode.REGEX
+            else "builtin_literal"
+        )
+        scanned_path_count = max(scanned_path_count, path_index + 1)
+        while match_index < len(path_matches):
+            item = path_matches[match_index]
+            item_bytes = _result_item_bytes(item)
+            if not selected and item_bytes > byte_budget:
+                raise _transport_budget_error(
+                    byte_budget=byte_budget,
+                    required_bytes=item_bytes,
+                    item_index=match_index,
+                    path=path,
+                )
+            if len(selected) >= max_results:
+                next_state = _SearchCursorState(path_index, match_index)
+                truncation_reason = "result_count_limit"
+                omitted_count = len(path_matches) - match_index
+                break
+            if selected and used + item_bytes > byte_budget:
+                next_state = _SearchCursorState(path_index, match_index)
+                truncation_reason = "result_transport_budget"
+                omitted_count = len(path_matches) - match_index
+                break
+            selected.append(item)
+            used += item_bytes
+            match_index += 1
+        if next_state is not None:
+            break
+        path_index += 1
+        match_index = 0
+
+    if next_state is None and source_truncated:
+        truncation_reason = "source_limit"
+    next_cursor = _encode_search_cursor(binding, next_state) if next_state is not None else None
+    remaining_path_count = (
+        max(0, len(candidates) - next_state.path_index) if next_state is not None else 0
+    )
+    effective_source_truncated = source_truncated or truncation_reason == "search_deadline_exceeded"
+    recommended_scope = None
+    if truncation_reason == "search_deadline_exceeded":
+        recommended_scope = (
+            "Resume with next_cursor; for faster completion, narrow path_glob without changing the "
+            "query or search mode."
+        )
+    elif truncation_reason == "source_limit":
+        recommended_scope = "Narrow path_glob because the source path listing reached its bound."
+    elif truncation_reason in {"result_count_limit", "result_transport_budget"}:
+        recommended_scope = "Resume with next_cursor to continue the exact bound search."
+    return SearchPage(
+        matches=tuple(selected),
+        next_cursor=next_cursor,
+        omitted_count=omitted_count,
+        source_truncated=effective_source_truncated,
+        truncation_reason=truncation_reason,
+        scanned_path_count=scanned_path_count,
+        candidate_path_count=len(candidates),
+        remaining_path_count=remaining_path_count,
+        completed_providers=tuple(sorted(completed_providers)),
+        recommended_scope=recommended_scope,
     )
 
 
@@ -219,13 +540,20 @@ def search_files(
     if mode is SearchMode.REGEX:
         validate_regex(query)
     matcher = re.compile(query) if mode is SearchMode.REGEX else None
-    deadline = time.monotonic() + deadline_ms / 1000
+    deadline = _monotonic() + deadline_ms / 1000
     matches: list[StructuredSearchMatch] = []
     for path in sorted(paths):
         if path_glob is not None and not PurePosixPath(path).match(path_glob):
             continue
-        if time.monotonic() > deadline:
-            raise SecurityError("regex/search timeout exceeded the reviewed deadline")
+        if _monotonic() > deadline:
+            raise RepoForgeError(
+                "SEARCH_DEADLINE_EXCEEDED: search exceeded the reviewed deadline",
+                code=ErrorCode.SEARCH_DEADLINE_EXCEEDED,
+                retryable=True,
+                details={"scanned_path_count": len({item.path for item in matches})},
+                safe_next_action="Use the resumable v2 search page or narrow path_glob.",
+                unchanged_state=("Repository and workspace content were not modified.",),
+            )
         if mode is SearchMode.FILE_NAME:
             if query.casefold() in path.casefold():
                 matches.append(

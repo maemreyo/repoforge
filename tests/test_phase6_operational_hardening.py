@@ -16,14 +16,19 @@ from conftest import execution_coordinator_for_tests
 from repoforge.adapters.audit import JsonlAuditSink
 from repoforge.adapters.audit.query import read_audit_events
 from repoforge.adapters.observability import JsonMetricsSink
-from repoforge.adapters.persistence import JsonIdempotencyStore
+from repoforge.adapters.persistence import (
+    JsonEffectReceiptStore,
+    JsonIdempotencyStore,
+    JsonOperationResultStore,
+    JsonOperationStore,
+)
 from repoforge.adapters.runtime.tunnel_cli import TunnelCliClient
 from repoforge.application.context import ApplicationContext
 from repoforge.application.diagnostics.bundle import build_diagnostics_bundle
 from repoforge.application.idempotency import IdempotencyEffectBoundary
 from repoforge.application.repository.doctor import Doctor, DoctorCommand
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig, load_config
-from repoforge.domain.errors import ConfigError, ErrorCode
+from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 from repoforge.domain.operations import (
     IdempotencyRecord,
     IdempotencyState,
@@ -177,6 +182,9 @@ def _context(tmp_path: Path) -> ApplicationContext:
         execution_coordinator_for_tests(),
         JsonMetricsSink(state_root, locks),
         JsonIdempotencyStore(state_root),
+        operation_store=JsonOperationStore(state_root, locks),
+        operation_result_store=JsonOperationResultStore(state_root, locks),
+        effect_receipts=JsonEffectReceiptStore(state_root, locks),
     )
 
 
@@ -366,7 +374,7 @@ def test_metrics_sink_migrates_v1_file_and_keeps_accumulating(tmp_path: Path) ->
     assert snapshot["buckets"]["2026-07-14"]["workspace_push"]["count"] == 1
 
 
-def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
+def test_metrics_empty_snapshot_state(tmp_path: Path) -> None:
     locks = InMemoryLockManager()
     path = tmp_path / "operation-metrics.json"
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -374,9 +382,10 @@ def test_metrics_sink_snapshot_resets_on_corrupt_file(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
     metrics = JsonMetricsSink(tmp_path, locks, FixedClock())
     empty_snapshot = {
-        "version": 4,
+        "version": 5,
         "operations": {},
         "buckets": {},
+        "calls_by_origin": {},
         "latency": {"tool_classes": {}},
     }
     assert metrics.snapshot() == empty_snapshot
@@ -482,7 +491,7 @@ def test_idempotency_replays_completed_result_and_rejects_conflict(tmp_path: Pat
     assert error.value.retryable is False
 
 
-def test_idempotency_preserves_uncertain_state_after_effect_before_receipt(
+def test_idempotency_persists_authoritative_receipt_after_effect_serialization_failure(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -509,28 +518,66 @@ def test_idempotency_preserves_uncertain_state_after_effect_before_receipt(
             serialize=fail_serialization,
             effect_boundary=effect,
         )
-    assert lost_response.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
+    assert lost_response.value.code.value == "FAILED_AFTER_EFFECT"
     assert lost_response.value.retryable is False
+    assert lost_response.value.details["effect_boundary_crossed"] is True
+    assert lost_response.value.details["receipt_id"].startswith("receipt-")
+    assert lost_response.value.details["operation_id"].startswith("op-")
+    assert lost_response.value.details["result_reference"].startswith("operation-result:op-")
 
     assert ctx.idempotency is not None
     record = ctx.idempotency.load(
         "workspace_write_file", hash_idempotency_key("mutation-key-12345678")
     )
     assert record is not None
-    assert record.state is IdempotencyState.UNCERTAIN
+    assert record.state is IdempotencyState.COMPLETED
+    assert record.result == {"mutated": True}
     assert calls == 1
 
-    with pytest.raises(ConfigError) as uncertain:
-        ctx.idempotent(
-            "workspace_write_file",
-            "mutation-key-12345678",
-            {"workspace_id": "demo", "path": "hello.txt"},
-            operation,
-        )
-    assert uncertain.value.code is ErrorCode.IDEMPOTENCY_UNCERTAIN
-    assert uncertain.value.retryable is False
-    assert "inspect" in uncertain.value.safe_next_action.lower()
+    replayed = ctx.idempotent(
+        "workspace_write_file",
+        "mutation-key-12345678",
+        {"workspace_id": "demo", "path": "hello.txt"},
+        operation,
+    )
+    assert replayed == {"mutated": True}
     assert calls == 1
+
+
+def test_idempotency_preserves_original_error_details_when_effect_outcome_is_unknown(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    effect = IdempotencyEffectBoundary()
+
+    def operation() -> dict[str, Any]:
+        effect.begin()
+        raise RepoForgeError(
+            "provider accepted the effect but returned an ambiguous response",
+            code=ErrorCode.COMMAND_FAILED,
+            details={
+                "provider_status": 502,
+                "provider_request_id": "request-42",
+            },
+        )
+
+    with pytest.raises(ConfigError) as unknown:
+        ctx.idempotent(
+            "workspace_push",
+            "unknown-effect-key-12345678",
+            {"workspace_id": "demo"},
+            operation,
+            effect_boundary=effect,
+        )
+
+    assert unknown.value.code is ErrorCode.EFFECT_OUTCOME_UNKNOWN
+    assert unknown.value.retryable is False
+    assert unknown.value.details["provider_status"] == 502
+    assert unknown.value.details["provider_request_id"] == "request-42"
+    assert unknown.value.details["effect_boundary_crossed"] is True
+    assert str(unknown.value.details["operation_id"]).startswith("op-")
+    assert str(unknown.value.details["receipt_id"]).startswith("receipt-")
+    assert unknown.value.details["original_error_type"] == "RepoForgeError"
 
 
 def test_idempotency_pre_effect_failure_releases_key_for_safe_retry(tmp_path: Path) -> None:

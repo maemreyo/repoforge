@@ -9,7 +9,7 @@ from typing import Any
 
 from ...domain.errors import ConfigError
 from ..context import ApplicationContext
-from .pr import _pull_request
+from .pr import _pull_request, _remote_version
 from .pr_check_details import WorkspacePrCheckDetailsCommand, WorkspacePrCheckDetailsReader
 from .pr_checks import WorkspacePrChecksCommand, WorkspacePrChecksReader
 from .pr_failure_evidence import (
@@ -37,6 +37,14 @@ class WorkspacePrEvidenceResult:
     pull_request: dict[str, object]
     checks: list[dict[str, object]]
     failure_excerpt: list[str]
+    failure_provider: str | None
+    selector_coverage: str
+    selectors_unavailable_reason: str | None
+    failed_selectors: list[str]
+    failure_locations: list[dict[str, object]]
+    output_artifact_reference: str | None
+    output_artifact_status: str
+    remote_version: str
     delta_token: str
     changed_since: bool
     truncated: bool
@@ -119,8 +127,16 @@ class WorkspacePrEvidenceReader:
         record, _repo, _path = self.ctx.workspace(command.workspace_id)
         status_result = self.status.execute(WorkspacePrStatusCommand(command.workspace_id))
         pull_request = _pull_request(status_result.payload, base_ref=record.base)
+        remote_version = _remote_version(status_result.payload, repo_id=record.repo_id)
         checks: list[dict[str, object]] = []
         failure_excerpt: list[str] = []
+        failure_provider: str | None = None
+        selector_coverage = "not_applicable"
+        selectors_unavailable_reason: str | None = None
+        failed_selectors: list[str] = []
+        failure_locations: list[dict[str, object]] = []
+        output_artifact_reference: str | None = None
+        output_artifact_status = "not_applicable"
         truncated = False
 
         if command.detail == "overview":
@@ -168,12 +184,26 @@ class WorkspacePrEvidenceReader:
                 )
             ]
             failure_excerpt = failure.excerpt.splitlines()[:line_limit]
+            failure_provider = failure.failure_provider
+            selector_coverage = failure.selector_coverage
+            selectors_unavailable_reason = failure.selectors_unavailable_reason
+            failed_selectors = failure.failed_selectors
+            failure_locations = failure.failure_locations
+            output_artifact_reference = failure.output_artifact_reference
+            output_artifact_status = failure.output_artifact_status
             truncated = failure.truncated or len(failure.excerpt.splitlines()) > line_limit
 
         snapshot: dict[str, object] = {
             "pull_request": pull_request,
             "checks": checks,
             "failure_excerpt": failure_excerpt,
+            "failure_provider": failure_provider,
+            "selector_coverage": selector_coverage,
+            "selectors_unavailable_reason": selectors_unavailable_reason,
+            "failed_selectors": failed_selectors,
+            "failure_locations": failure_locations,
+            "output_artifact_reference": output_artifact_reference,
+            "output_artifact_status": output_artifact_status,
             "detail": command.detail,
             "truncated": truncated,
         }
@@ -182,6 +212,13 @@ class WorkspacePrEvidenceReader:
         if not changed:
             checks = []
             failure_excerpt = []
+            failure_provider = None
+            selector_coverage = "not_applicable"
+            selectors_unavailable_reason = None
+            failed_selectors = []
+            failure_locations = []
+            output_artifact_reference = None
+            output_artifact_status = "not_applicable"
         return WorkspacePrEvidenceResult(
             summary=(
                 "Pull-request evidence is unchanged since the supplied delta token"
@@ -192,6 +229,14 @@ class WorkspacePrEvidenceReader:
             pull_request=pull_request,
             checks=checks,
             failure_excerpt=failure_excerpt,
+            failure_provider=failure_provider,
+            selector_coverage=selector_coverage,
+            selectors_unavailable_reason=selectors_unavailable_reason,
+            failed_selectors=failed_selectors,
+            failure_locations=failure_locations,
+            output_artifact_reference=output_artifact_reference,
+            output_artifact_status=output_artifact_status,
+            remote_version=remote_version,
             delta_token=token,
             changed_since=changed,
             truncated=truncated,

@@ -4,6 +4,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
@@ -52,6 +53,7 @@ from ..verification_reuse import (
 from .hygiene_status import WorkspaceHygieneStatusCommand, WorkspaceHygieneStatusReader
 
 _KIND = "workspace_run_profile"
+_PROGRESS_HEARTBEAT_JOIN_SECONDS = 1.0
 _ProgressCallback = Callable[[str, int, int, str, str], None]
 #: How often to re-emit "still running" progress for one step while its
 #: command executes. A verification step wraps one opaque subprocess (e.g.
@@ -60,6 +62,7 @@ _ProgressCallback = Callable[[str, int, int, str, str], None]
 #: updated_at freeze for the whole duration, and a slow command becomes
 #: indistinguishable from a hung one until the profile's own timeout fires.
 _PROGRESS_HEARTBEAT_SECONDS = 30.0
+_OPERATION_LEASE_SECONDS = 90
 _REUSABLE_PROFILE_STEP_KINDS = frozenset(
     {
         VerificationStepKind.HYGIENE,
@@ -70,6 +73,12 @@ _REUSABLE_PROFILE_STEP_KINDS = frozenset(
         VerificationStepKind.BUILD,
     }
 )
+
+
+def _operation_lease_deadline(now: str) -> str:
+    return (datetime.fromisoformat(now) + timedelta(seconds=_OPERATION_LEASE_SECONDS)).isoformat()
+
+
 _NON_REUSABLE_PROFILE_CODES = frozenset(
     {
         ErrorCode.COMMAND_TIMEOUT,
@@ -879,6 +888,8 @@ class WorkspaceProfileRunner:
             raise
 
         now = self.ctx.clock.now_iso()
+        owner_id = f"worker-{self.ctx.ids.new_hex(24)}"
+        lease_expires_at = _operation_lease_deadline(now)
         try:
             with self.ctx.locks.lock(
                 "background-profile-admission",
@@ -912,7 +923,12 @@ class WorkspaceProfileRunner:
                     now=now,
                 )
                 try:
-                    task = operations.start(task.operation_id, now=now)
+                    task = operations.start(
+                        task.operation_id,
+                        owner_id=owner_id,
+                        lease_expires_at=lease_expires_at,
+                        now=now,
+                    )
                 except Exception:
                     # The operation record was created but never reached "running"; fail it
                     # closed rather than leaving a PENDING record that recovery does not scan.
@@ -948,6 +964,7 @@ class WorkspaceProfileRunner:
             unit: str,
             message: str,
         ) -> None:
+            progress_now = self.ctx.clock.now_iso()
             with contextlib.suppress(RepoForgeError):
                 operations.progress(
                     operation_id,
@@ -956,6 +973,9 @@ class WorkspaceProfileRunner:
                     total=total,
                     unit=unit,
                     message=message,
+                    owner_id=owner_id,
+                    lease_expires_at=_operation_lease_deadline(progress_now),
+                    now=progress_now,
                 )
 
         def finish_terminal(
@@ -973,6 +993,7 @@ class WorkspaceProfileRunner:
                     operations.succeed(
                         operation_id,
                         result_reference=f"{_KIND}:{operation_id}",
+                        owner_id=owner_id,
                         now=finish_now,
                     )
                 except Exception as persist_exc:
@@ -984,6 +1005,7 @@ class WorkspaceProfileRunner:
                             error_code=ErrorCode.STATE_PERSISTENCE_FAILED.value,
                             error_message=_safe_error_message(str(persist_exc)),
                             retryability=OperationRetryability.MANUAL,
+                            owner_id=owner_id,
                             now=finish_now,
                         )
                 return
@@ -991,7 +1013,11 @@ class WorkspaceProfileRunner:
                 result_store.delete(operation_id)
             if current.cancellation_requested_at is not None or cancel_token.is_cancelled():
                 with contextlib.suppress(RepoForgeError):
-                    operations.cancelled(operation_id, now=finish_now)
+                    operations.cancelled(
+                        operation_id,
+                        owner_id=owner_id,
+                        now=finish_now,
+                    )
                 return
             failure = exc or RepoForgeError(
                 "Background profile completed without a result",
@@ -1019,6 +1045,7 @@ class WorkspaceProfileRunner:
                         if retryable
                         else OperationRetryability.MANUAL
                     ),
+                    owner_id=owner_id,
                     now=finish_now,
                 )
 
@@ -1057,6 +1084,7 @@ class WorkspaceProfileRunner:
                     error_message=_safe_error_message(
                         f"Background task runner raised while accepting the profile run: {exc}"
                     ),
+                    owner_id=owner_id,
                 )
             raise
 
@@ -1069,6 +1097,7 @@ class WorkspaceProfileRunner:
                 operation_id,
                 error_code=ErrorCode.INTERNAL_ERROR.value,
                 error_message="Background task runner could not accept the profile run",
+                owner_id=owner_id,
             )
             raise RepoForgeError(
                 "Background task runner rejected the profile run",

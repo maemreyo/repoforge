@@ -435,3 +435,393 @@ def test_run_release_gates_executes_every_case_once(tmp_path: Path) -> None:
         ("seeded_bugs", "seeded_bugs-1"),
     ]
     assert report.passed is True
+
+
+def _control_step(
+    call: int,
+    tool: str,
+    kind: str,
+    resource: str,
+    outcome: str,
+    *,
+    state_version: str = "v1",
+    cursor: str | None = None,
+    effect_key: str | None = None,
+    actionable_failure: bool = False,
+    timestamp_state: str = "observed",
+) -> dict[str, object]:
+    return {
+        "call": call,
+        "tool": tool,
+        "kind": kind,
+        "resource": resource,
+        "state_version": state_version,
+        "cursor": cursor,
+        "outcome": outcome,
+        "effect_key": effect_key,
+        "actionable_failure": actionable_failure,
+        "temporary_mutation": False,
+        "profile": None,
+        "rerun": False,
+        "timestamp_state": timestamp_state,
+    }
+
+
+def _control_identity():
+    from repoforge.benchmark.control_plane import ControlPlaneIdentity
+
+    return ControlPlaneIdentity(
+        git_head="a" * 40,
+        dirty=False,
+        python_version="3.13.5",
+        package_version="2.2.0",
+        contract_version="forge_v2",
+        tool_count=28,
+        tool_surface_hash="b" * 64,
+        schema_bundle_digest="c" * 64,
+    )
+
+
+def test_control_plane_gate_evaluates_recorded_traces_without_hidden_retries(
+    tmp_path: Path,
+) -> None:
+    from repoforge.benchmark.control_plane import (
+        CONTROL_PLANE_THRESHOLDS,
+        ScenarioExecution,
+        evaluate_control_plane_gates,
+        load_control_plane_manifest,
+    )
+
+    manifest_path = tmp_path / "control-plane.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "thresholds": CONTROL_PLANE_THRESHOLDS,
+                "scenarios": [
+                    {
+                        "id": "after-effect-reconcile",
+                        "selector": "tests/test_example.py::test_after_effect",
+                        "boundary": "after_effect",
+                        "completed": True,
+                        "trace": [
+                            _control_step(
+                                1,
+                                "workspace_pr",
+                                "mutate",
+                                "pr:42",
+                                "effect_outcome_unknown",
+                                effect_key="comment-1",
+                                actionable_failure=True,
+                            ),
+                            _control_step(
+                                2,
+                                "workspace_pr",
+                                "control",
+                                "pr:42",
+                                "reconciled",
+                                state_version="v2",
+                                effect_key="comment-1",
+                            ),
+                        ],
+                    },
+                    {
+                        "id": "bounded-read",
+                        "selector": "tests/test_example.py::test_bounded_read",
+                        "boundary": "bounded_retrieval",
+                        "completed": True,
+                        "trace": [
+                            _control_step(
+                                1,
+                                "runtime_logs_read",
+                                "read",
+                                "failure-artifact:abc",
+                                "partial",
+                                state_version="sha256:abc",
+                                cursor="start",
+                                timestamp_state="unavailable",
+                            ),
+                            _control_step(
+                                2,
+                                "runtime_logs_read",
+                                "read",
+                                "failure-artifact:abc",
+                                "resumed",
+                                state_version="sha256:abc",
+                                cursor="page:2",
+                                timestamp_state="unavailable",
+                            ),
+                        ],
+                    },
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = load_control_plane_manifest(manifest_path)
+    report = evaluate_control_plane_gates(
+        manifest,
+        (
+            ScenarioExecution(
+                scenario_id="after-effect-reconcile",
+                selector="tests/test_example.py::test_after_effect",
+                passed=True,
+                duration_ms=10.0,
+                attempts=1,
+                output_excerpt="1 passed",
+            ),
+            ScenarioExecution(
+                scenario_id="bounded-read",
+                selector="tests/test_example.py::test_bounded_read",
+                passed=True,
+                duration_ms=5.0,
+                attempts=1,
+                output_excerpt="1 passed",
+            ),
+        ),
+        identity=_control_identity(),
+    )
+
+    assert report.passed is True
+    assert report.metrics.unknown_effect_outcomes == 0
+    assert report.metrics.synthetic_timestamp_count == 0
+    assert report.metrics.opaque_failure_count == 0
+    assert report.metrics.calls_per_completed_task == 2.0
+    assert report.metrics.duplicate_read_rate == 0.0
+    assert report.metrics.max_actionable_failure_call == 1
+    assert report.hidden_retry_count == 0
+
+
+def test_control_plane_gate_fails_unreconciled_effect_and_hidden_retry(tmp_path: Path) -> None:
+    from repoforge.benchmark.control_plane import (
+        CONTROL_PLANE_THRESHOLDS,
+        ScenarioExecution,
+        evaluate_control_plane_gates,
+        load_control_plane_manifest,
+    )
+
+    manifest_path = tmp_path / "control-plane-fail.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "thresholds": CONTROL_PLANE_THRESHOLDS,
+                "scenarios": [
+                    {
+                        "id": "unresolved",
+                        "selector": "tests/test_example.py::test_unresolved",
+                        "boundary": "after_effect",
+                        "completed": False,
+                        "trace": [
+                            _control_step(
+                                1,
+                                "repo_issue",
+                                "mutate",
+                                "issue:7",
+                                "effect_outcome_unknown",
+                                effect_key="comment-7",
+                                actionable_failure=True,
+                                timestamp_state="synthetic",
+                            )
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = evaluate_control_plane_gates(
+        load_control_plane_manifest(manifest_path),
+        (
+            ScenarioExecution(
+                scenario_id="unresolved",
+                selector="tests/test_example.py::test_unresolved",
+                passed=True,
+                duration_ms=1.0,
+                attempts=2,
+                output_excerpt="retried internally",
+            ),
+        ),
+        identity=_control_identity(),
+    )
+
+    assert report.passed is False
+    assert report.metrics.unknown_effect_outcomes == 1
+    assert report.metrics.synthetic_timestamp_count == 1
+    assert report.hidden_retry_count == 1
+
+
+def test_committed_control_plane_fault_matrix_covers_epic_boundaries() -> None:
+    from repoforge.benchmark.control_plane import load_control_plane_manifest
+
+    manifest = load_control_plane_manifest(
+        ROOT / "tests/fixtures/v2_corpora/control_plane_faults.json"
+    )
+
+    assert {scenario.boundary for scenario in manifest.scenarios} >= {
+        "before_effect",
+        "commit",
+        "after_effect",
+        "serialization",
+        "result_persistence",
+        "caller_disconnect",
+        "stale_identity",
+        "logs",
+        "bounded_retrieval",
+        "pr_drift",
+        "graph_projection",
+        "generated_refresh",
+    }
+    assert len({scenario.selector for scenario in manifest.scenarios}) == len(manifest.scenarios)
+
+
+def test_control_plane_runner_executes_each_scenario_once(tmp_path: Path) -> None:
+    from repoforge.benchmark.control_plane import (
+        CONTROL_PLANE_THRESHOLDS,
+        ScenarioExecution,
+        load_control_plane_manifest,
+        run_control_plane_scenarios,
+    )
+
+    manifest_path = tmp_path / "control-plane-runner.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "thresholds": CONTROL_PLANE_THRESHOLDS,
+                "scenarios": [
+                    {
+                        "id": "one",
+                        "selector": "tests/test_example.py::test_one",
+                        "boundary": "before_effect",
+                        "completed": True,
+                        "trace": [
+                            _control_step(
+                                1,
+                                "workspace_mutate",
+                                "mutate",
+                                "workspace:one",
+                                "failed_before_effect",
+                                actionable_failure=True,
+                            )
+                        ],
+                    },
+                    {
+                        "id": "two",
+                        "selector": "tests/test_example.py::test_two",
+                        "boundary": "logs",
+                        "completed": True,
+                        "trace": [
+                            _control_step(
+                                1,
+                                "runtime_logs_read",
+                                "read",
+                                "runtime:two",
+                                "completed",
+                            )
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load_control_plane_manifest(manifest_path)
+    seen: list[str] = []
+
+    def executor(scenario):
+        seen.append(scenario.scenario_id)
+        return ScenarioExecution(
+            scenario_id=scenario.scenario_id,
+            selector=scenario.selector,
+            passed=True,
+            duration_ms=1.0,
+            attempts=1,
+            output_excerpt="1 passed",
+        )
+
+    executions = run_control_plane_scenarios(manifest, executor)
+
+    assert seen == ["one", "two"]
+    assert [item.scenario_id for item in executions] == ["one", "two"]
+
+
+def test_control_plane_report_publishes_exact_identity_and_metrics(tmp_path: Path) -> None:
+    from repoforge.benchmark.control_plane import (
+        CONTROL_PLANE_THRESHOLDS,
+        ScenarioExecution,
+        evaluate_control_plane_gates,
+        load_control_plane_manifest,
+        publish_control_plane_report,
+    )
+
+    manifest_path = tmp_path / "control-plane-report.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "thresholds": CONTROL_PLANE_THRESHOLDS,
+                "scenarios": [
+                    {
+                        "id": "report",
+                        "selector": "tests/test_example.py::test_report",
+                        "boundary": "logs",
+                        "completed": True,
+                        "trace": [
+                            _control_step(
+                                1,
+                                "runtime_logs_read",
+                                "read",
+                                "runtime:report",
+                                "completed",
+                            )
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    secret = "ghp_" + "x" * 40
+    report = evaluate_control_plane_gates(
+        load_control_plane_manifest(manifest_path),
+        (
+            ScenarioExecution(
+                scenario_id="report",
+                selector="tests/test_example.py::test_report",
+                passed=True,
+                duration_ms=1.0,
+                attempts=1,
+                output_excerpt=f"failure token={secret}",
+            ),
+        ),
+        identity=_control_identity(),
+    )
+
+    paths = publish_control_plane_report(report, tmp_path / "reports")
+
+    raw_json = paths.json_path.read_text(encoding="utf-8")
+    payload = json.loads(raw_json)
+    assert payload["identity"]["git_head"] == "a" * 40
+    assert payload["identity"]["tool_count"] == 28
+    assert payload["identity"]["tool_surface_hash"] == "b" * 64
+    assert payload["metrics"]["unknown_effect_outcomes"] == 0
+    assert secret not in raw_json
+    assert "<redacted" in raw_json
+    markdown = paths.markdown_path.read_text(encoding="utf-8")
+    assert secret not in markdown
+    assert "Control-plane fault gates" in markdown
+    assert "Calls per completed task" in markdown
+
+
+def test_make_v2_gates_runs_control_plane_matrix_after_reference_corpora() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    reference = "scripts/run_v2_release_gates.py"
+    control_plane = "scripts/run_control_plane_gates.py"
+    assert reference in makefile
+    assert control_plane in makefile
+    assert makefile.index(reference) < makefile.index(control_plane)
+    assert "tests/fixtures/v2_corpora/control_plane_faults.json" in makefile

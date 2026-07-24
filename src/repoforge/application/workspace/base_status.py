@@ -39,6 +39,47 @@ class WorkspaceBaseStatusResult:
     last_pushed_sha: str | None
     upstream_name: str | None
     upstream_sha: str | None
+    generated_overlap_paths: list[str]
+    expected_evidence_invalidation: list[str]
+    verify_selector: list[str]
+    recommended_action: str
+    preflight_warning: str | None
+    recreate_eligible: bool
+    recreate_blockers: list[str]
+
+
+_EXPECTED_REFRESH_INVALIDATION = [
+    "last_verification",
+    "code_intelligence",
+    "diagnostic_receipts",
+    "failure_evidence",
+]
+
+
+def freshness_preflight_payload(result: WorkspaceBaseStatusResult) -> dict[str, object]:
+    """Project one stable pre-mutation/pre-verification freshness contract."""
+
+    return {
+        "staleness": result.staleness,
+        "refresh_required": result.refresh_required,
+        "workspace_base_sha": result.workspace_base_sha,
+        "latest_base_sha": result.latest_base_sha,
+        "head_sha": result.head_sha,
+        "ahead_base": result.ahead_base,
+        "behind_base": result.behind_base,
+        "upstream_changed_paths": list(result.upstream_changed_paths),
+        "workspace_changed_paths": list(result.workspace_changed_paths),
+        "overlap_paths": list(result.overlap_paths),
+        "generated_overlap_paths": list(result.generated_overlap_paths),
+        "expected_evidence_invalidation": list(result.expected_evidence_invalidation),
+        "verify_selector": list(result.verify_selector),
+        "recommended_action": result.recommended_action,
+        "warning": result.preflight_warning,
+        "recreate_eligible": result.recreate_eligible,
+        "recreate_blockers": list(result.recreate_blockers),
+        "remote_available": result.remote_available,
+        "remote_error_code": result.remote_error_code,
+    }
 
 
 def collect_workspace_base_status(
@@ -70,6 +111,9 @@ def collect_workspace_base_status(
     workspace_paths.update(ctx.git.changed_paths(path, repo))
     ordered_workspace_paths = sorted(workspace_paths)
     overlap = sorted(set(upstream_paths).intersection(workspace_paths))
+    generated_overlap = sorted(
+        path for path in overlap if any(rule.matches(path) for rule in repo.generated_paths)
+    )
 
     if not refs.remote_available:
         staleness = "unavailable_remote"
@@ -96,6 +140,59 @@ def collect_workspace_base_status(
     else:
         published_state = "published_stale"
 
+    clean = not bool(ctx.git.status_porcelain(path).strip())
+    recreate_blockers: list[str] = []
+    if not clean:
+        recreate_blockers.append("working_tree_not_clean")
+    if ahead != 0:
+        recreate_blockers.append("unique_commits_present")
+    if published_state != "unpublished":
+        recreate_blockers.append("published_branch")
+    if record.metadata.get("pr_url") or record.metadata.get("pr_number"):
+        recreate_blockers.append("pull_request_bound")
+    if not isinstance(record.metadata.get("task_slug"), str) or not isinstance(
+        record.metadata.get("workspace_create_idempotency"), str
+    ):
+        recreate_blockers.append("task_binding_unavailable")
+    if record.metadata.get("external_write_count") not in {None, 0}:
+        recreate_blockers.append("external_writes_recorded")
+    recreate_eligible = staleness != "current" and refs.remote_available and not recreate_blockers
+
+    if staleness == "current":
+        recommended_action = "continue"
+        warning = None
+    elif not refs.remote_available:
+        recommended_action = "restore_remote_connectivity"
+        warning = (
+            "Base freshness cannot be established before mutation or verification because the "
+            "remote base is unavailable."
+        )
+    elif recreate_eligible:
+        recommended_action = "recreate_from_latest_base"
+        warning = (
+            "Base is stale before mutation or full verification. The clean task-bound workspace "
+            "can be recreated from the latest base; refresh or recreate will invalidate "
+            + ", ".join(_EXPECTED_REFRESH_INVALIDATION)
+            + "."
+        )
+    else:
+        recommended_action = "refresh_preview"
+        overlap_note = (
+            " generated-path overlap: " + ", ".join(generated_overlap) + "."
+            if generated_overlap
+            else " Overlap forecast: " + ", ".join(overlap) + "."
+            if overlap
+            else ""
+        )
+        warning = (
+            "Base is stale before mutation or full verification; review workspace_refresh preview "
+            "first because later refresh will invalidate "
+            + ", ".join(_EXPECTED_REFRESH_INVALIDATION)
+            + "."
+            + overlap_note
+        )
+    verify_selector = sorted(set(upstream_paths).union(overlap, generated_overlap))
+
     return WorkspaceBaseStatusResult(
         record.workspace_id,
         record.repo_id,
@@ -120,6 +217,13 @@ def collect_workspace_base_status(
         last_pushed,
         upstream_name,
         upstream_sha,
+        generated_overlap,
+        list(_EXPECTED_REFRESH_INVALIDATION),
+        verify_selector,
+        recommended_action,
+        warning,
+        recreate_eligible,
+        recreate_blockers,
     )
 
 

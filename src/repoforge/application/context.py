@@ -21,11 +21,13 @@ from ..ports import (
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
+    EffectReceiptStore,
     ExecutableLocator,
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
     ExecutionReceiptStore,
     FailureEvidenceStore,
+    FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
     GitHubCapabilityProbe,
@@ -49,6 +51,7 @@ from ..ports import (
     WorkerBindingStore,
     WorkspaceStore,
 )
+from .audit_context import current_audit_attribution
 from .dto import to_data
 from .execution.coordinator import ExecutionCoordinator
 from .fingerprint_cache import FingerprintCache
@@ -251,8 +254,10 @@ class ApplicationContext:
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
     execution_receipts: ExecutionReceiptStore | None = None
+    effect_receipts: EffectReceiptStore | None = None
     iteration_cache: IterationCache | None = None
     failure_evidence: FailureEvidenceStore | None = None
+    failure_output_artifacts: FailureOutputArtifactStore | None = None
     worker_bindings: WorkerBindingStore | None = None
     reaper: ProcessReaper | None = None
 
@@ -342,12 +347,14 @@ class ApplicationContext:
         if self.metrics is None:
             return
         with contextlib.suppress(Exception):
+            attribution = current_audit_attribution()
             self.metrics.record(
                 action,
                 success=success,
                 duration_ms=duration_ms,
                 error_code=error_code,
                 result_bytes=result_bytes,
+                origin=attribution.origin,
             )
 
     def _resolve_repo_id(self, details: dict[str, Any]) -> str | None:
@@ -373,6 +380,14 @@ class ApplicationContext:
     ) -> None:
         """Mutate *details* with standardised insight fields."""
         details["is_mutating"] = is_mutating
+        attribution = current_audit_attribution()
+        details.setdefault("origin", attribution.origin)
+        if attribution.session_hash is not None:
+            details.setdefault("session_hash", attribution.session_hash)
+        details.setdefault(
+            "correlation_hash",
+            hashlib.sha256(correlation.encode("utf-8")).hexdigest()[:24],
+        )
         repo_id = self._resolve_repo_id(details)
         if repo_id is not None:
             details["repo_id"] = repo_id

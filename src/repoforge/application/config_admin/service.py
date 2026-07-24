@@ -25,7 +25,7 @@ import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -47,6 +47,8 @@ from ...domain.policy_patch import (
 )
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode
+from ...domain.runtime_contract import RuntimeContractIdentity
+from ...domain.runtime_events import parse_runtime_event
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
 from ...ports.ids import IdGenerator
@@ -71,6 +73,8 @@ from ..repository_admin.proposals import RepositoryProposalService
 
 _AUTO_APPLY_DELTAS = frozenset({CapabilityDeltaKind.METADATA_ONLY, CapabilityDeltaKind.RESTRICTION})
 _MAX_LOG_LIMIT = 200
+_FAILURE_OUTPUT_REFERENCE = re.compile(r"^failure-output:([a-f0-9]{64})$")
+_SAFE_RUNTIME_HASH = re.compile(r"^[a-f0-9]{64}$")
 _HOST_PATH_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9:/])/(?:[^/\s]+/)*[^/\s]+"),
     re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\(?:[^\\\s]+\\)*[^\\\s]+"),
@@ -82,6 +86,14 @@ def _redact_host_paths(value: str) -> str:
     for pattern in _HOST_PATH_PATTERNS:
         redacted = pattern.sub("<redacted:host_path>", redacted)
     return redacted
+
+
+def _bounded_optional(value: str | None, limit: int) -> str | None:
+    return value[:limit] if value is not None else None
+
+
+def _safe_runtime_hash(value: str | None) -> str | None:
+    return value if value is not None and _SAFE_RUNTIME_HASH.fullmatch(value) else None
 
 
 class AuditEventPageView(Protocol):
@@ -108,6 +120,14 @@ class AuditPageReader(Protocol):
         end_time: str | None = None,
         cursor: str | None = None,
     ) -> AuditEventPageView: ...
+
+
+class RuntimeLogPageView(Protocol):
+    @property
+    def lines(self) -> tuple[str, ...]: ...
+
+    @property
+    def source_truncated(self) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,9 +157,11 @@ class ConfigAdminService:
         runtime_log_path: Path,
         read_audit: Callable[..., list[dict[str, Any]]],
         read_log: Callable[[Path, int], list[str]],
+        read_log_page: Callable[[Path, int], RuntimeLogPageView] | None = None,
         read_audit_page: AuditPageReader | None = None,
         reload_runtime: Callable[[int], dict[str, Any]] | None = None,
         read_runtime_status: Callable[[], dict[str, object]] | None = None,
+        contract_identity_provider: Callable[[], RuntimeContractIdentity] | None = None,
     ) -> None:
         self._store = store
         self._proposals = proposals
@@ -150,9 +172,11 @@ class ConfigAdminService:
         self._runtime_log_path = runtime_log_path
         self._read_audit = read_audit
         self._read_log = read_log
+        self._read_log_page = read_log_page
         self._read_audit_page = read_audit_page
         self._reload_runtime = reload_runtime
         self._read_runtime_status = read_runtime_status
+        self._contract_identity_provider = contract_identity_provider
 
     # -- reads ---------------------------------------------------------------
 
@@ -272,6 +296,107 @@ class ConfigAdminService:
             "changed_sections": changed_sections,
         }
 
+    @staticmethod
+    def _projection_digest(value: object) -> str:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _ticket_graph_projection(value: object) -> dict[str, object]:
+        table = value.as_table() if hasattr(value, "as_table") else value
+        if not isinstance(table, dict):
+            return {"enabled": False, "root_issue": None, "repository": None}
+        root_issue = table.get("root_issue")
+        repository = table.get("repository")
+        enabled = (
+            isinstance(root_issue, int) and not isinstance(root_issue, bool) and root_issue > 0
+        )
+        return {
+            "enabled": enabled,
+            "root_issue": root_issue if enabled else None,
+            "repository": repository if isinstance(repository, str) and repository else None,
+        }
+
+    def _repository_projection(
+        self,
+        *,
+        name: str,
+        source_item: SourceRepository,
+        accepted_entry: dict[str, Any],
+        active_entry: dict[str, Any] | None,
+        current: ConfigGeneration,
+        active: ConfigGeneration | None,
+        source_changed: bool,
+        pending_approval: bool,
+    ) -> dict[str, object]:
+        source_graph = self._ticket_graph_projection(source_item.ticket_graph)
+        accepted_graph = self._ticket_graph_projection(accepted_entry.get("ticket_graph"))
+        active_graph = self._ticket_graph_projection(
+            active_entry.get("ticket_graph") if active_entry is not None else None
+        )
+        source_enabled = bool(source_graph["enabled"])
+        accepted_enabled = bool(accepted_graph["enabled"])
+        active_enabled = bool(active_graph["enabled"])
+
+        if pending_approval:
+            drift_reason = "pending_approval"
+            status = "pending"
+            action = "Review and decide the repository's pending configuration approval."
+        elif source_changed:
+            drift_reason = "source_not_refreshed"
+            status = "pending"
+            action = "Review and accept a new configuration generation before activation."
+        elif source_graph != accepted_graph:
+            drift_reason = "projection_loss"
+            status = "unavailable"
+            action = (
+                f"Regenerate the accepted configuration from source so repositories.{name}."
+                "ticket_graph exactly matches the reviewed source declaration before activation."
+            )
+        elif not source_enabled and not accepted_enabled and not active_enabled:
+            drift_reason = "intentionally_disabled"
+            status = "disabled"
+            action = (
+                "No ticket-graph reconciliation is required because it is intentionally disabled."
+            )
+        elif active is None or active.generation != current.generation:
+            drift_reason = "accepted_not_active"
+            status = "pending"
+            action = f"Activate accepted configuration generation {current.generation}."
+        elif accepted_graph != active_graph:
+            drift_reason = "accepted_not_active"
+            status = "pending"
+            action = (
+                f"Reconcile the runtime to accepted configuration generation {current.generation}."
+            )
+        else:
+            drift_reason = "none"
+            status = "active"
+            action = "No ticket-graph reconciliation is required."
+
+        return {
+            "repo_id": name,
+            "source_digest": self._projection_digest(asdict(source_item)),
+            "accepted_resolved_digest": self._projection_digest(accepted_entry),
+            "active_resolved_digest": (
+                self._projection_digest(active_entry) if active_entry is not None else None
+            ),
+            "accepted_generation": current.generation,
+            "active_generation": active.generation if active is not None else None,
+            "source_ticket_graph": source_graph,
+            "accepted_ticket_graph": accepted_graph,
+            "active_ticket_graph": active_graph,
+            "capability_projection_status": status,
+            "drift_reason": drift_reason,
+            "safe_reconciliation_action": action,
+        }
+
     def config_inspect_v2(
         self, repo_id: str | None = None, include_pending: bool = True
     ) -> dict[str, Any]:
@@ -279,6 +404,7 @@ class ConfigAdminService:
         if current is None:
             raise ConfigError("No accepted configuration generation")
         active = self._store.active()
+        source = self._source()
         document = parse_resolved(self._store.read_resolved_text(current.generation))
         repositories = document.get("repositories", {})
         if not isinstance(repositories, dict):
@@ -286,7 +412,26 @@ class ConfigAdminService:
         if repo_id is not None and repo_id not in repositories:
             raise ConfigError(f"Unknown repository id: {repo_id}")
         selected = [repo_id] if repo_id is not None else sorted(str(key) for key in repositories)
+        pending_summaries = self.pending.summaries()[:100]
+        pending_repo_ids = {
+            str(item["repo_id"])
+            for item in pending_summaries
+            if isinstance(item.get("repo_id"), str)
+        }
+        source_by_id = {item.repo_id: item for item in source.repositories}
+        active_document = (
+            parse_resolved(self._store.read_resolved_text(active.generation))
+            if active is not None
+            else {"repositories": {}}
+        )
+        active_repositories_raw = active_document.get("repositories", {})
+        active_repositories = (
+            active_repositories_raw if isinstance(active_repositories_raw, dict) else {}
+        )
+        source_digest = sha256_text(self._store.read_source_text())
+        source_changed = source_digest != current.source_sha256
         facts: list[dict[str, str]] = []
+        repository_projections: list[dict[str, object]] = []
         for name in selected:
             entry = repositories.get(name)
             if not isinstance(entry, dict):
@@ -294,6 +439,23 @@ class ConfigAdminService:
             prefix = "" if repo_id is not None or len(selected) == 1 else f"{name}."
             profiles = entry.get("profiles")
             diagnostics = entry.get("diagnostics")
+            source_item = source_by_id.get(name)
+            if source_item is None:
+                raise ConfigError(f"Source configuration is missing repository id: {name}")
+            active_entry_raw = active_repositories.get(name)
+            active_entry = active_entry_raw if isinstance(active_entry_raw, dict) else None
+            repository_projections.append(
+                self._repository_projection(
+                    name=name,
+                    source_item=source_item,
+                    accepted_entry=entry,
+                    active_entry=active_entry,
+                    current=current,
+                    active=active,
+                    source_changed=source_changed,
+                    pending_approval=name in pending_repo_ids,
+                )
+            )
             values = {
                 "repo_id": name,
                 "read_only": str(bool(entry.get("read_only", False))).lower(),
@@ -309,7 +471,7 @@ class ConfigAdminService:
             )
         pending: list[dict[str, Any]] = []
         if include_pending:
-            for item in self.pending.summaries()[:100]:
+            for item in pending_summaries:
                 expected = item.get("expected_generation")
                 if not isinstance(expected, int) or expected <= 0:
                     continue
@@ -323,6 +485,36 @@ class ConfigAdminService:
                     }
                 )
         restart_required = active is None or active.generation != current.generation
+        runtime_status = (
+            self._read_runtime_status() if self._read_runtime_status is not None else {}
+        )
+        runtime_generation_raw = runtime_status.get("active_generation")
+        runtime_generation = (
+            runtime_generation_raw
+            if isinstance(runtime_generation_raw, int) and runtime_generation_raw > 0
+            else None
+        )
+        if source_digest != current.source_sha256:
+            drift_state = "source_changed"
+            safe_reconciliation_action = (
+                "Review and accept a new configuration generation before activation."
+            )
+        elif active is None or active.generation != current.generation:
+            drift_state = "activation_required"
+            safe_reconciliation_action = (
+                f"Activate accepted configuration generation {current.generation}."
+            )
+        elif runtime_generation is not None and runtime_generation != active.generation:
+            drift_state = "runtime_mismatch"
+            safe_reconciliation_action = f"Reconcile the managed runtime to active configuration generation {active.generation}."
+        else:
+            drift_state = "none"
+            safe_reconciliation_action = "No configuration reconciliation is required."
+        contract_identity = (
+            self._contract_identity_provider().as_dict()
+            if self._contract_identity_provider is not None
+            else None
+        )
         return {
             "status": "ok",
             "summary": f"Inspected accepted configuration generation {current.generation}",
@@ -333,6 +525,17 @@ class ConfigAdminService:
             "capability_delta": current.delta.value,
             "restart_required": restart_required,
             "repo_facts": facts,
+            "repository_projections": repository_projections,
+            "contract_identity": contract_identity,
+            "config_projection": {
+                "source_digest": source_digest,
+                "accepted_source_digest": current.source_sha256,
+                "accepted_resolved_digest": current.resolved_sha256,
+                "active_resolved_digest": active.resolved_sha256 if active is not None else None,
+                "runtime_generation": runtime_generation,
+                "drift_state": drift_state,
+                "safe_reconciliation_action": safe_reconciliation_action,
+            },
         }
 
     @staticmethod
@@ -371,39 +574,97 @@ class ConfigAdminService:
 
     @staticmethod
     def _runtime_entry(line: str) -> dict[str, Any]:
-        try:
-            raw = json.loads(line)
-        except json.JSONDecodeError:
-            raw = None
-        if isinstance(raw, dict):
-            timestamp = raw.get("timestamp")
-            level = raw.get("level", "INFO")
-            message = raw.get("message", "")
-            action = raw.get("action")
-            duration = raw.get("duration_ms")
-            return {
-                "timestamp": (
-                    timestamp
-                    if isinstance(timestamp, str) and timestamp
-                    else "1970-01-01T00:00:00+00:00"
-                ),
-                "source": "runtime",
-                "action": action if isinstance(action, str) else None,
-                "level": str(level)[:30] or "INFO",
-                "message": _redact_host_paths(str(message)),
-                "duration_ms": (
-                    float(duration)
-                    if isinstance(duration, (int, float)) and duration >= 0
-                    else None
-                ),
-            }
+        parsed = parse_runtime_event(line)
         return {
-            "timestamp": "1970-01-01T00:00:00+00:00",
+            "timestamp": parsed.timestamp,
+            "timestamp_state": parsed.timestamp_state,
+            "parse_state": parsed.parse_state,
             "source": "runtime",
-            "action": None,
-            "level": "INFO",
-            "message": _redact_host_paths(line),
-            "duration_ms": None,
+            "component": _bounded_optional(parsed.component, 160),
+            "stream": _bounded_optional(parsed.stream, 80),
+            "event_kind": _bounded_optional(parsed.event_kind, 160),
+            "action": _bounded_optional(parsed.action, 160),
+            "level": parsed.level,
+            "message": _redact_host_paths(parsed.message),
+            "duration_ms": parsed.duration_ms,
+            "correlation_id": _bounded_optional(parsed.correlation_id, 160),
+            "operation_id": _bounded_optional(parsed.operation_id, 160),
+            "receipt_id": _bounded_optional(parsed.receipt_id, 160),
+            "trace_id": _bounded_optional(parsed.trace_id, 160),
+            "workspace_hash": _safe_runtime_hash(parsed.workspace_hash),
+            "repository_hash": _safe_runtime_hash(parsed.repository_hash),
+        }
+
+    def _failure_artifact_page(
+        self,
+        artifact_reference: str,
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        match = _FAILURE_OUTPUT_REFERENCE.fullmatch(artifact_reference)
+        if match is None:
+            raise ConfigError("runtime_logs_read artifact_reference is invalid")
+        digest = match.group(1)
+        target = self._audit_log_path.parent / "failure-output-artifacts" / f"{digest}.blob"
+        try:
+            payload = target.read_bytes()
+        except FileNotFoundError as exc:
+            raise ConfigError("runtime_logs_read artifact_reference was not found") from exc
+        except OSError as exc:
+            raise ConfigError("runtime_logs_read artifact_reference is unreadable") from exc
+        if len(payload) > 10 * 1024 * 1024:
+            raise ConfigError("runtime_logs_read artifact is larger than the retrieval bound")
+        if hashlib.sha256(payload).hexdigest() != digest:
+            raise ConfigError("runtime_logs_read artifact digest does not match its reference")
+        text = payload.decode("utf-8", errors="replace")
+        messages: list[str] = []
+        for line in text.splitlines():
+            if not line:
+                messages.append("")
+                continue
+            messages.extend(line[index : index + 4_000] for index in range(0, len(line), 4_000))
+        offset = 0
+        if cursor is not None:
+            parts = cursor.split(":", 2)
+            if (
+                len(parts) != 3
+                or parts[0] != "failure-artifact-v1"
+                or parts[1] != digest
+                or not parts[2].isdigit()
+            ):
+                raise ConfigError(
+                    "Failure artifact cursor is invalid or belongs to another artifact"
+                )
+            offset = int(parts[2])
+            if offset > len(messages):
+                raise ConfigError("Failure artifact cursor offset is outside the artifact")
+        selected = messages[offset : offset + limit]
+        has_more = offset + len(selected) < len(messages)
+        next_cursor = (
+            f"failure-artifact-v1:{digest}:{offset + len(selected)}"
+            if selected and has_more
+            else None
+        )
+        timestamp = datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat()
+        return {
+            "status": "ok",
+            "summary": f"Read {len(selected)} bounded failure artifact entries",
+            "error": None,
+            "source": "failure_artifact",
+            "entries": [
+                {
+                    "timestamp": timestamp,
+                    "source": "failure_artifact",
+                    "action": "failure_artifact",
+                    "level": "ERROR",
+                    "message": message,
+                    "duration_ms": None,
+                }
+                for message in selected
+            ],
+            "truncated": has_more,
+            "next_cursor": next_cursor,
         }
 
     def runtime_logs_read_v2(
@@ -417,15 +678,39 @@ class ConfigAdminService:
         start_time: str | None = None,
         end_time: str | None = None,
         cursor: str | None = None,
+        artifact_reference: str | None = None,
     ) -> dict[str, Any]:
-        if source not in {"audit", "runtime"}:
-            raise ConfigError("runtime_logs_read source must be 'audit' or 'runtime'")
+        if source not in {"audit", "runtime", "failure_artifact"}:
+            raise ConfigError(
+                "runtime_logs_read source must be 'audit', 'runtime', or 'failure_artifact'"
+            )
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
             or not 1 <= limit <= _MAX_LOG_LIMIT
         ):
             raise ConfigError(f"runtime_logs_read limit must be between 1 and {_MAX_LOG_LIMIT}")
+        if source == "failure_artifact":
+            if artifact_reference is None:
+                raise ConfigError(
+                    "runtime_logs_read failure_artifact source requires artifact_reference"
+                )
+            if (
+                any(value is not None for value in (action, min_duration_ms, start_time, end_time))
+                or only_failed
+            ):
+                raise ConfigError(
+                    "runtime_logs_read failure_artifact source does not accept log filters"
+                )
+            return self._failure_artifact_page(
+                artifact_reference,
+                limit=limit,
+                cursor=cursor,
+            )
+        if artifact_reference is not None:
+            raise ConfigError(
+                "runtime_logs_read artifact_reference is only valid for failure_artifact source"
+            )
         start = self._parse_log_time(start_time, "start_time")
         end = self._parse_log_time(end_time, "end_time")
         if start is not None and end is not None and start > end:
@@ -490,7 +775,13 @@ class ConfigAdminService:
             start_time=start_time,
             end_time=end_time,
         )
-        raw_lines = list(reversed(self._read_log(self._runtime_log_path, 1_000)))
+        if self._read_log_page is not None:
+            log_page = self._read_log_page(self._runtime_log_path, 1_000)
+            raw_lines = list(reversed(log_page.lines))
+            source_truncated: bool | None = log_page.source_truncated
+        else:
+            raw_lines = list(reversed(self._read_log(self._runtime_log_path, 1_000)))
+            source_truncated = None
         snapshot = hashlib.sha256(
             json.dumps(raw_lines, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:24]
@@ -519,10 +810,17 @@ class ConfigAdminService:
                 not isinstance(duration, (int, float)) or duration < min_duration_ms
             ):
                 continue
-            timestamp = self._parse_log_time(str(entry["timestamp"]), "runtime timestamp")
-            if start is not None and (timestamp is None or timestamp < start):
+            timestamp_value = entry["timestamp"]
+            timestamp = (
+                self._parse_log_time(timestamp_value, "runtime timestamp")
+                if isinstance(timestamp_value, str)
+                else None
+            )
+            if (start is not None or end is not None) and timestamp is None:
                 continue
-            if end is not None and (timestamp is None or timestamp > end):
+            if start is not None and timestamp is not None and timestamp < start:
+                continue
+            if end is not None and timestamp is not None and timestamp > end:
                 continue
             matched.append(entry)
         selected = matched[offset : offset + limit]
@@ -538,7 +836,23 @@ class ConfigAdminService:
             "error": None,
             "source": "runtime",
             "entries": selected,
-            "truncated": has_more or len(raw_lines) >= 1_000,
+            "malformed_count": sum(
+                1 for entry in selected if entry["parse_state"] == "malformed_json"
+            ),
+            "legacy_count": sum(
+                1
+                for entry in selected
+                if entry["parse_state"] in {"legacy_json", "legacy_plaintext"}
+            ),
+            "structured_count": sum(
+                1 for entry in selected if entry["parse_state"] == "structured_v1"
+            ),
+            "correlated_count": sum(1 for entry in selected if entry["correlation_id"] is not None),
+            "timestamp_unavailable_count": sum(
+                1 for entry in selected if entry["timestamp"] is None
+            ),
+            "source_truncated": source_truncated,
+            "truncated": has_more or source_truncated,
             "next_cursor": next_cursor,
         }
 
@@ -868,9 +1182,10 @@ class ConfigAdminService:
         fingerprint_map[repo_id] = proposal.facts_fingerprint
         fingerprints = tuple(sorted(fingerprint_map.items()))
         reason = f"agent policy change for {repo_id}"
+        candidate_generation = self._store.next_generation()
         candidate = render_resolved(
             document,
-            generation=current.generation + 1,
+            generation=candidate_generation,
             source_path=str(self._store.source_path),
             source_sha256=sha256_text(source_text),
             created_at=self._clock.now_iso(),

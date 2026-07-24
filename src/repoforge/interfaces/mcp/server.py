@@ -8,7 +8,7 @@ import json
 import os
 import secrets
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -17,9 +17,16 @@ from typing import Any, NoReturn, cast
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp.types import Tool as McpTool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from ... import __version__
+from ...application.audit_context import bind_audit_attribution
 from ...application.config_admin import ConfigAdminService
+from ...application.outcome_context import (
+    begin_outcome_capture,
+    current_outcome,
+    reset_outcome_capture,
+)
 from ...application.read_batch import FileReadRequest
 from ...application.retrieval import SearchMode as ApplicationSearchMode
 from ...application.runtime.hot_reload import AtomicServiceRouter
@@ -35,27 +42,104 @@ from ...application.workspace.mutate import (
     WorkspaceMutation,
     WriteMutation,
 )
-from ...config import load_config
-from ...contracts.registry import V2_TOOL_NAMES, V2_TOOL_SPECS, ToolContractSpec
-from ...domain.errors import ConfigError, WorkspaceError, operation_error_from_exception
+from ...config import RepositoryConfig, load_config
+from ...contracts.registry import (
+    V2_TOOL_NAMES,
+    V2_TOOL_SPECS,
+    ToolContractSpec,
+    contract_schema_digests,
+)
+from ...domain.client_capabilities import ClientFeature
+from ...domain.errors import (
+    ConfigError,
+    ErrorCode,
+    WorkspaceError,
+    operation_error_from_exception,
+)
 from ...domain.latency import LatencyLayer, LatencyObservation, LatencyTrace
 from ...domain.operations import automatic_retry_allowed
 from ...domain.redaction import redact_text
+from ...domain.repository_selection import (
+    RepositorySelectionPin,
+    repository_capability_digest,
+)
+from ...domain.runtime import RUNTIME_CONTROL_PROTOCOL_VERSION
+from ...domain.runtime_contract import RuntimeContractIdentity, changed_contract_fields
 from .capabilities import capability_policy_from_context
 from .payload import render_tool_payload
 
 FORGE_V2_IDENTITY = "forge_v2"
 FORGE_V2_CONTRACT_VERSION = 2
+_PROCESS_START_IDENTITY = secrets.token_hex(32)
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+_REPOSITORY_SELECTION_TTL_SECONDS = 900.0
+
+
+class _IssueGraphApprovalForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approve: bool
+
+
+def _compute_server_build_sha(
+    package_root: Path,
+    *,
+    explicit_build_ref: str | None = None,
+) -> str:
+    """Fingerprint the exact package bytes loaded by this server process."""
+
+    explicit = (explicit_build_ref or "").strip()
+    if explicit:
+        normalized = explicit.lower()
+        if len(normalized) == 64 and all(
+            character in "0123456789abcdef" for character in normalized
+        ):
+            return normalized
+        return hashlib.sha256(explicit.encode("utf-8")).hexdigest()
+
+    root = package_root.resolve()
+    candidates = sorted(
+        (
+            path
+            for path in root.rglob("*")
+            if path.is_file()
+            and not path.is_symlink()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".pyo"}
+        ),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    if not candidates:
+        raise RuntimeError("RepoForge package build fingerprint has no readable files")
+
+    digest = hashlib.sha256()
+    for path in candidates:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+_SERVER_BUILD_SHA = _compute_server_build_sha(
+    _PACKAGE_ROOT,
+    explicit_build_ref=os.environ.get("REPOFORGE_BUILD_SHA"),
+)
 
 SERVER_INSTRUCTIONS = """
 Forge v2 connects ChatGPT to allowlisted local Git repositories through isolated worktrees.
-Begin with repo_list, then use repo_task_context before creating or resuming a workspace. The public
-surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
+Begin with repo_list, then use repo_task_context before creating or resuming a workspace. Exact or
+single-repository selection is pinned to the MCP session; reuse that context for later repo-scoped calls
+and do not poll repo_list again unless stale-selection recovery requires it or the user changes repos. The
+public surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
 composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
 profiles, and workspace_pr for draft-PR lifecycle operations. Review workspace_diff after meaningful
-changes. Run final verification immediately before workspace_commit. Never merge, force-push, modify
-protected branches, request secrets, or bypass policy. Use config_inspect and runtime_logs_read for
-bounded operational evidence, and repo_policy for reviewed policy preview/apply flows.
+changes. Run final verification immediately before workspace_commit. For desired GitHub issue graphs,
+use repo_issue mode=manage with plan/apply/status/reconcile; never substitute raw GitHub mutation.
+Resume a disconnected or new session from repo_task_context section ticket_workflow. After apply, use
+operation get/wait or repo_issue manage status and reconcile; never blind-retry external writes. Never
+merge, force-push, modify protected branches, request secrets, or bypass policy. Use config_inspect and
+runtime_logs_read for bounded operational evidence, and repo_policy for reviewed policy preview/apply flows.
 """.strip()
 
 READ_ONLY = ToolAnnotations(
@@ -144,7 +228,7 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "repo_search": "Run bounded literal, regex, or filename search in one immutable repository snapshot.",
     "repo_tree": "List a bounded repository subtree with resumable cursor evidence.",
     "repo_history": "Read a commit, recent history, or a bounded comparison between two refs.",
-    "repo_issue": "Read, plan, graph, create, link, comment on, close, or reopen a GitHub issue through one typed tool.",
+    "repo_issue": "Read or mutate GitHub issues, or plan, approve, publish, inspect, and reconcile one governed issue graph through the existing typed tool.",
     "repo_pr_read": "Read bounded overview, files, checks, reviews, comments, or failure evidence for one pull request.",
     "repo_list": (
         "List configured repositories and optionally include reviewed capability detail. Pass "
@@ -264,6 +348,46 @@ def _raise_structured_error(
             list(envelope.unchanged_state) or ["No unreported state transition was committed."]
         )[:20]
     )
+    public_details: dict[str, object] = {"correlation_id": correlation_id}
+    for field, limit in (
+        ("field", 160),
+        ("expected", 1_000),
+        ("actual", 1_000),
+        ("current_remote_version", 256),
+        ("current_head_sha", 64),
+        ("current_updated_at", 80),
+        ("recovery_action", 160),
+        ("operation_id", 160),
+        ("receipt_id", 160),
+        ("server_build_sha", 64),
+        ("server_version", 160),
+        ("tool_surface_hash", 64),
+        ("input_contract_digest", 64),
+        ("output_contract_digest", 64),
+        ("process_start_identity", 64),
+        ("rediscovery_action", 160),
+        ("result_reference", 256),
+        ("original_error_type", 160),
+    ):
+        value = envelope.details.get(field)
+        if isinstance(value, str) and value:
+            public_details[field] = _bounded(value, limit)
+    for field, item_limit, item_count in (
+        ("remote_delta", 500, 20),
+        ("missing_coverage", 160, 20),
+    ):
+        value = envelope.details.get(field)
+        if isinstance(value, (list, tuple)):
+            bounded = [_bounded(str(item), item_limit) for item in value[:item_count] if str(item)]
+            if bounded:
+                public_details[field] = bounded
+    for field in ("config_generation", "runtime_protocol_version"):
+        value = envelope.details.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            public_details[field] = value
+    boundary_crossed = envelope.details.get("effect_boundary_crossed")
+    if isinstance(boundary_crossed, bool):
+        public_details["effect_boundary_crossed"] = boundary_crossed
     # This is the same {status, summary, error: ToolError} shape every one of
     # the 28 tools' own output model inherits from ToolResponse -- a client
     # can validate an error response against the shared base contract, not
@@ -278,7 +402,7 @@ def _raise_structured_error(
             "why": _bounded(envelope.why),
             "retryable": envelope.retryable,
             "safe_next_action": _bounded(envelope.safe_next_action),
-            "details": {"correlation_id": correlation_id},
+            "details": public_details,
             "unchanged_state": unchanged_state,
             "automatic_retry_allowed": automatic_retry_allowed(
                 operation_name,
@@ -336,12 +460,16 @@ class _ServiceErrorBoundary:
 
     def call(self, name: str, **kwargs: Any) -> dict[str, Any]:
         has_idempotency_key = bool(kwargs.get("idempotency_key"))
+        outcome_token = begin_outcome_capture()
         try:
             with self._selected_service() as service:
                 target = getattr(service, name)
                 result = target(**kwargs)
             if not isinstance(result, dict):
                 raise TypeError("MCP service operation must return an object")
+            outcome = current_outcome()
+            if outcome is not None:
+                result["outcome"] = outcome.payload()
             return result
         except Exception as exc:
             _raise_structured_error(
@@ -349,6 +477,8 @@ class _ServiceErrorBoundary:
                 exc,
                 has_idempotency_key=has_idempotency_key,
             )
+        finally:
+            reset_outcome_capture(outcome_token)
 
 
 class _UnavailableConfigAdmin:
@@ -458,7 +588,12 @@ def _mutation_operations(raw: list[dict[str, Any]]) -> list[WorkspaceMutation]:
     return operations
 
 
-def _dispatch_kwargs(tool_name: str, model: BaseModel) -> dict[str, Any]:
+def _dispatch_kwargs(
+    tool_name: str,
+    model: BaseModel,
+    *,
+    runtime_identity: RuntimeContractIdentity | None = None,
+) -> dict[str, Any]:
     kwargs = model.model_dump(mode="json")
     if tool_name in {"repo_read", "workspace_read"}:
         kwargs["files"] = _read_requests(kwargs["files"])
@@ -472,6 +607,10 @@ def _dispatch_kwargs(tool_name: str, model: BaseModel) -> dict[str, Any]:
         kwargs["issue_ids"] = tuple(kwargs["issue_ids"])
     if tool_name == "workspace_mutate":
         kwargs["operations"] = _mutation_operations(kwargs["operations"])
+    if tool_name == "repo_issue" and kwargs.get("mode") == "manage":
+        if runtime_identity is None:
+            raise ConfigError("Current runtime contract identity is unavailable")
+        kwargs["runtime_identity"] = runtime_identity.as_dict()
     return kwargs
 
 
@@ -523,6 +662,7 @@ class ForgeV2FastMCP(FastMCP[None]):
         *,
         service_boundary: _ServiceErrorBoundary,
         admin_boundary: _ServiceErrorBoundary,
+        contract_identity_provider: Callable[[], RuntimeContractIdentity],
     ) -> None:
         super().__init__(
             FORGE_V2_IDENTITY,
@@ -531,8 +671,144 @@ class ForgeV2FastMCP(FastMCP[None]):
         )
         self._service_boundary = service_boundary
         self._admin_boundary = admin_boundary
+        self._contract_identity_provider = contract_identity_provider
+        self._initial_contract_identity = contract_identity_provider()
+        self._session_contract_identities: dict[int, RuntimeContractIdentity] = {}
+        self._session_repository_selections: dict[int, RepositorySelectionPin] = {}
+
+    def _session_key(self) -> int | None:
+        try:
+            return id(self.get_context().session)
+        except (LookupError, AttributeError, ValueError):
+            return None
+
+    @staticmethod
+    def _repository_config(service: CodingService, repo_id: str) -> RepositoryConfig | None:
+        return service.config.repositories.get(repo_id)
+
+    def _pin_repository_selection(
+        self,
+        result: dict[str, Any],
+        *,
+        identity: RuntimeContractIdentity,
+        service: CodingService,
+    ) -> RepositorySelectionPin | None:
+        key = self._session_key()
+        selection = result.get("selection")
+        if key is None or not isinstance(selection, dict):
+            return None
+        outcome = selection.get("outcome")
+        repo_id = selection.get("repo_id")
+        if outcome not in {"exact_match", "single_enrolled"} or not isinstance(repo_id, str):
+            self._session_repository_selections.pop(key, None)
+            return None
+        repo = self._repository_config(service, repo_id)
+        if repo is None:
+            self._session_repository_selections.pop(key, None)
+            return None
+        pin = RepositorySelectionPin(
+            repo_selection_id=f"selection:{secrets.token_hex(12)}",
+            repo_id=repo_id,
+            selection_generation=identity.active_generation,
+            capability_digest=repository_capability_digest(repo),
+            expires_at_epoch=time.time() + _REPOSITORY_SELECTION_TTL_SECONDS,
+        )
+        self._session_repository_selections[key] = pin
+        selection.update(pin.as_public_dict())
+        return pin
+
+    def _validate_repository_selection(
+        self,
+        *,
+        tool_name: str,
+        kwargs: Mapping[str, Any],
+        identity: RuntimeContractIdentity,
+        service: CodingService,
+    ) -> RepositorySelectionPin | None:
+        key = self._session_key()
+        if key is None or tool_name == "repo_list":
+            return None
+        pin = self._session_repository_selections.get(key)
+        if pin is None:
+            return None
+        requested_repo = kwargs.get("repo_id")
+        if not isinstance(requested_repo, str):
+            return None
+        reasons: list[str] = []
+        if pin.selection_generation != identity.active_generation:
+            reasons.append("generation")
+        if pin.is_expired(now_epoch=time.time()):
+            reasons.append("expiry")
+        if requested_repo != pin.repo_id:
+            reasons.append("repo_id")
+        repo = self._repository_config(service, pin.repo_id)
+        if repo is None or repository_capability_digest(repo) != pin.capability_digest:
+            reasons.append("capability")
+        if reasons:
+            self._session_repository_selections.pop(key, None)
+            raise ConfigError(
+                "REPOSITORY_SELECTION_STALE: pinned repository context changed: "
+                + ", ".join(reasons),
+                code=ErrorCode.STALE_STATE,
+                retryable=False,
+                safe_next_action=(
+                    "Call repo_list again for the intended repository and continue with the new "
+                    "session-bound selection."
+                ),
+                unchanged_state=("The requested repository operation was not invoked.",),
+            )
+        return pin
+
+    def _audit_session_hash(self) -> str | None:
+        key = self._session_key()
+        if key is None:
+            return None
+        return hashlib.sha256(f"{_PROCESS_START_IDENTITY}:{key}".encode()).hexdigest()[:24]
+
+    def _expected_contract_identity(self) -> RuntimeContractIdentity:
+        key = self._session_key()
+        if key is None:
+            return self._initial_contract_identity
+        return self._session_contract_identities.get(key, self._initial_contract_identity)
+
+    def _ensure_contract_fresh(self) -> RuntimeContractIdentity:
+        expected = self._expected_contract_identity()
+        actual = self._contract_identity_provider()
+        changed = changed_contract_fields(expected, actual)
+        if changed:
+            fields = ", ".join(changed)
+            key = self._session_key()
+            selection_invalidated = "active_generation" in changed and key is not None
+            if selection_invalidated and key is not None:
+                self._session_repository_selections.pop(key, None)
+            safe_next_action = (
+                "Rediscover the forge_v2 connector tools, reconnect, and resubmit only after "
+                "reviewing the new contract identity."
+            )
+            if selection_invalidated:
+                safe_next_action += (
+                    " Then call repo_list again for the intended repository because the prior "
+                    "session selection was invalidated."
+                )
+            raise ConfigError(
+                f"CLIENT_CONTRACT_STALE: discovery identity changed: {fields}",
+                code=ErrorCode.CLIENT_CONTRACT_STALE,
+                retryable=False,
+                safe_next_action=safe_next_action,
+                unchanged_state=("The application use case was not invoked.",),
+                details={
+                    "changed_fields": list(changed),
+                    "selection_invalidated": selection_invalidated,
+                },
+            )
+        return actual
 
     async def list_tools(self) -> list[McpTool]:
+        identity = self._contract_identity_provider()
+        key = self._session_key()
+        if key is not None:
+            self._session_contract_identities[key] = identity
+        metadata = {"repoforge_contract_identity": identity.as_dict()}
         return [
             McpTool(
                 name=name,
@@ -541,9 +817,63 @@ class ForgeV2FastMCP(FastMCP[None]):
                 inputSchema=V2_TOOL_SPECS[name].input_model.model_json_schema(mode="validation"),
                 outputSchema=V2_TOOL_SPECS[name].output_schema(),
                 annotations=_tool_annotations(name),
+                _meta=metadata,
             )
             for name in V2_TOOL_NAMES
         ]
+
+    async def _maybe_elicit_issue_graph_approval(
+        self,
+        tool_name: str,
+        result: dict[str, Any],
+    ) -> None:
+        if tool_name != "repo_issue":
+            return
+        workflow = result.get("workflow")
+        if (
+            not isinstance(workflow, dict)
+            or workflow.get("state") != "pending_approval"
+            or workflow.get("approval_status") != "pending"
+        ):
+            return
+        policy = capability_policy_from_context(self.get_context())
+        if not policy.may_emit(ClientFeature.ELICITATION_FORM):
+            return
+        approval_request_id = workflow.get("approval_request_id")
+        proposal_hash = workflow.get("proposal_hash")
+        effect_plan_hash = workflow.get("effect_plan_hash")
+        if not all(
+            isinstance(item, str) and item
+            for item in (
+                approval_request_id,
+                proposal_hash,
+                effect_plan_hash,
+            )
+        ):
+            raise ConfigError("Pending issue graph approval evidence is incomplete")
+        elicited = await self.get_context().elicit(
+            (
+                f"Approve exact RepoForge issue graph publication request {approval_request_id}? "
+                f"proposal_hash={proposal_hash}; effect_plan_hash={effect_plan_hash}. "
+                "This approval permits the separately-invoked apply action to write GitHub issues "
+                "and relationships; it does not apply changes in this call."
+            ),
+            _IssueGraphApprovalForm,
+        )
+        if elicited.action != "accept" or elicited.data is None or not elicited.data.approve:
+            return
+        self._service_boundary.call(
+            "repo_issue_manage_approval",
+            approval_request_id=approval_request_id,
+            actor="mcp-elicitation",
+            reason="Operator accepted the exact issue graph publication request via MCP Elicitation.",
+        )
+        workflow["approval_status"] = "accepted"
+        workflow["state"] = "planned"
+        workflow["recovery_action"] = (
+            "Call repo_issue manage apply with the exact returned proposal, plan, hashes, and "
+            "approval_request_id."
+        )
 
     def _dispatch(self, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         if tool_name in _ADMIN_METHODS:
@@ -600,6 +930,7 @@ class ForgeV2FastMCP(FastMCP[None]):
         self, name: str, arguments: dict[str, Any], spec: ToolContractSpec
     ) -> CallToolResult:
         try:
+            request_identity = self._ensure_contract_fresh()
             validated_input = spec.validate_input(arguments)
         except Exception as exc:
             _raise_structured_error(name, exc)
@@ -607,7 +938,29 @@ class ForgeV2FastMCP(FastMCP[None]):
         with self._service_boundary.bind_request_service() as service:
             started = time.perf_counter()
             try:
-                raw = self._dispatch(name, _dispatch_kwargs(name, validated_input))
+                dispatch_kwargs = _dispatch_kwargs(
+                    name,
+                    validated_input,
+                    runtime_identity=request_identity,
+                )
+                with bind_audit_attribution(
+                    origin="model",
+                    session_hash=self._audit_session_hash(),
+                ):
+                    selection_pin = self._validate_repository_selection(
+                        tool_name=name,
+                        kwargs=dispatch_kwargs,
+                        identity=request_identity,
+                        service=service,
+                    )
+                    raw = self._dispatch(name, dispatch_kwargs)
+                    await self._maybe_elicit_issue_graph_approval(name, raw)
+                    if name == "repo_list":
+                        selection_pin = self._pin_repository_selection(
+                            raw,
+                            identity=request_identity,
+                            service=service,
+                        )
                 validated_output = spec.validate_success_output(_public_output(name, raw))
                 structured = validated_output.model_dump(mode="json", by_alias=True)
             except _StructuredMcpToolError:
@@ -657,11 +1010,17 @@ class ForgeV2FastMCP(FastMCP[None]):
             with suppress(Exception):
                 service.metrics.record_latency(trace)
 
+            response_meta: dict[str, Any] = {
+                "repoforge_trace": trace.as_dict(),
+                "repoforge_contract_identity": request_identity.as_dict(),
+            }
+            if selection_pin is not None:
+                response_meta["repoforge_repository_selection"] = selection_pin.as_public_dict()
             return CallToolResult(
                 content=rendered.content,
                 structuredContent=rendered.structured,
                 isError=False,
-                _meta={"repoforge_trace": trace.as_dict()},
+                _meta=response_meta,
             )
 
 
@@ -701,6 +1060,23 @@ def tool_surface_hash(contract_version: int | None = None) -> str:
     ).hexdigest()
 
 
+def build_runtime_contract_identity(active_generation: int) -> RuntimeContractIdentity:
+    """Build the redaction-safe identity chain for one active generation."""
+
+    digests = contract_schema_digests()
+    surface_hash = tool_surface_hash()
+    return RuntimeContractIdentity(
+        server_build_sha=_SERVER_BUILD_SHA,
+        server_version=__version__,
+        active_generation=active_generation,
+        tool_surface_hash=surface_hash,
+        input_contract_digest=digests.input_digest,
+        output_contract_digest=digests.output_digest,
+        runtime_protocol_version=RUNTIME_CONTROL_PROTOCOL_VERSION,
+        process_start_identity=_PROCESS_START_IDENTITY,
+    )
+
+
 def create_server(
     config_path: str | Path | None = None,
     *,
@@ -708,6 +1084,7 @@ def create_server(
     router: AtomicServiceRouter | None = None,
     contract_version: int | None = None,
     admin: ConfigAdminService | None = None,
+    contract_identity_provider: Callable[[], RuntimeContractIdentity] | None = None,
 ) -> FastMCP:
     if contract_version not in {None, FORGE_V2_CONTRACT_VERSION}:
         raise ValueError("Forge v2 server only supports contract v2")
@@ -720,9 +1097,15 @@ def create_server(
     admin_boundary = _ServiceErrorBoundary(
         admin if admin is not None else _UnavailableConfigAdmin()
     )
+    identity_provider = contract_identity_provider or (
+        (lambda: build_runtime_contract_identity(router.active_generation))
+        if router is not None
+        else (lambda: build_runtime_contract_identity(1))
+    )
     return ForgeV2FastMCP(
         service_boundary=service_boundary,
         admin_boundary=admin_boundary,
+        contract_identity_provider=identity_provider,
     )
 
 
@@ -732,6 +1115,7 @@ __all__ = [
     "SERVER_INSTRUCTIONS",
     "ForgeV2FastMCP",
     "_ServiceErrorBoundary",
+    "build_runtime_contract_identity",
     "create_server",
     "tool_surface_hash",
 ]
