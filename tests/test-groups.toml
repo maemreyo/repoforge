@@ -190,6 +190,7 @@ test_files = [
   "tests/test_bootstrap_factories.py",
   "tests/test_cli_runtime_commands.py",
   "tests/test_execution_identity.py",
+  "tests/test_generation_handoff.py",
   "tests/test_launchd_registrar.py",
   "tests/test_mcp_payload_v2.py",
   "tests/test_phase4_runtime_control.py",

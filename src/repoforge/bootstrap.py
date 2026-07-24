@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .adapters.activation.release_store import RuntimeReleaseStore
+    from .application.activation.handoff import GenerationHandoffReconciler
     from .application.activation.upgrade import UpgradeService
     from .ports.process_supervisor import ProcessSupervisorRegistrar
 
@@ -451,6 +452,19 @@ def build_upgrade_service(
         clock=system_clock(),
         health_probe=health_probe,
         sleeper=SystemSleeper(),
+    )
+
+
+def build_generation_handoff_reconciler(
+    *, state_root: Path, locks: LockManager
+) -> GenerationHandoffReconciler:
+    from .adapters.persistence.json_worker_binding_store import JsonWorkerBindingStore
+    from .adapters.subprocess.os_process_reaper import OsProcessReaper
+    from .application.activation.handoff import GenerationHandoffReconciler as _Reconciler
+
+    return _Reconciler(
+        bindings=JsonWorkerBindingStore(state_root, locks),
+        reaper=OsProcessReaper(),
     )
 
 
