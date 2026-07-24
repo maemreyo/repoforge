@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1703,6 +1704,23 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
         read_runtime_status=lambda: _runtime_status(store),
         contract_identity_provider=contract_identity_provider,
     )
+
+    def _reap_inflight_background() -> None:
+        # Reap detached background children before this process dies, so nothing
+        # outlives the runtime until the next start's recovery sweep. Idempotent
+        # and best-effort; safe to call more than once.
+        with contextlib.suppress(Exception):
+            router.active_container().service.reap_background_workers(reason="runtime shutdown")
+
+    def _terminate(_signum: int, _frame: object) -> None:
+        # Default SIGTERM would kill the process without running the finally
+        # below (and without reaping). Convert it to a normal exit so shutdown
+        # unwinds cleanly through the finally.
+        raise SystemExit(0)
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    with contextlib.suppress(ValueError):  # signal.signal only works on the main thread
+        signal.signal(signal.SIGTERM, _terminate)
     try:
         create_server(
             router=router,
@@ -1710,6 +1728,9 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
             contract_identity_provider=contract_identity_provider,
         ).run(transport="stdio")
     finally:
+        _reap_inflight_background()
+        with contextlib.suppress(ValueError):
+            signal.signal(signal.SIGTERM, previous_sigterm)
         router.close(timeout_seconds=30.0)
         control.close()
         latest_state = state_holder.get("state", state)
