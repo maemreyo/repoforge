@@ -505,7 +505,7 @@ class GhCliGateway:
                 "--repo",
                 self._slug(cwd),
                 "--json",
-                "number,title,body,state,isDraft,author,baseRefName,headRefName,url,files,commits,statusCheckRollup,reviews",
+                "number,title,body,state,isDraft,author,baseRefName,headRefName,headRefOid,url,files,commits,statusCheckRollup,reviews",
             ],
             cwd=cwd,
             output_limit=10_000_000,

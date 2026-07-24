@@ -9,6 +9,7 @@ import pytest
 from conftest import ForgeEnvironment, execution_coordinator_for_tests
 
 from repoforge.adapters.audit import JsonlAuditSink
+from repoforge.adapters.github.gh_cli import GhCliGateway
 from repoforge.adapters.persistence import JsonGitHubReadCache
 from repoforge.application.context import ApplicationContext
 from repoforge.application.repository.issue_read import IssueReadCommand, IssueReader
@@ -19,11 +20,13 @@ from repoforge.application.repository.issue_spec import (
 from repoforge.application.repository.pr_read import PullRequestReadCommand, PullRequestReader
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig
 from repoforge.domain.errors import ConfigError
+from repoforge.ports.command import CommandResult
 from repoforge.testing import (
     FixedClock,
     InMemoryLockManager,
     InMemoryOperationGate,
     InMemoryWorkspaceStore,
+    ScriptedCommandExecutor,
     SequenceIdGenerator,
 )
 
@@ -134,6 +137,38 @@ def test_pr_read_cache_hit_avoids_live_call(tmp_path: Path) -> None:
     second = reader.execute(PullRequestReadCommand("demo", 7))
     assert github.pr_calls == [7]
     assert second.payload["cache_hit"] is True
+
+
+def test_gh_pr_read_requests_authoritative_remote_head_oid(tmp_path: Path) -> None:
+    executor = ScriptedCommandExecutor()
+    executor.enqueue(
+        CommandResult(("gh",), str(tmp_path), 0, "acme/widgets\n", ""),
+        CommandResult(
+            ("gh",),
+            str(tmp_path),
+            0,
+            json.dumps(
+                {
+                    "number": 7,
+                    "title": "Remote PR",
+                    "body": "Body",
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                }
+            ),
+            "",
+        ),
+    )
+    gateway = GhCliGateway(
+        executor,
+        ServerConfig(tmp_path / "workspaces", tmp_path / "state"),
+    )
+
+    result = gateway.pr_read(tmp_path, 7)
+
+    assert result["headRefOid"] == "a" * 40
+    json_fields = executor.calls[1][executor.calls[1].index("--json") + 1].split(",")
+    assert "headRefOid" in json_fields
 
 
 def test_fresh_forces_live_read_and_refreshes_entry(tmp_path: Path) -> None:
