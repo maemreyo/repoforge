@@ -23,6 +23,7 @@ from .dto import to_data
 from .operations.cancel import OperationCancelCommand, OperationCancellationRequester
 from .operations.composite import OperationCommand, OperationCoordinator
 from .operations.list import OperationListCommand, OperationLister
+from .operations.recovery import reap_running_background
 from .operations.status import OperationStatusCommand, OperationStatusReader
 from .read_batch import FileReadRequest
 from .repository.commit_read import (
@@ -476,6 +477,27 @@ class CodingService:
                 )
             )
         )
+
+    def reap_background_workers(self, *, reason: str = "runtime shutdown") -> int:
+        """Reap detached children of in-flight background ops at graceful shutdown.
+
+        Closes the window in which a background child process group (started in
+        its own session) would otherwise outlive this process until the next
+        start's recovery sweep. Resumable kinds (pr_check_watch) are left alone
+        -- they are re-driven on restart. Best-effort; never raises.
+        """
+        ctx = self.application.context
+        try:
+            return reap_running_background(
+                self.operations,
+                now=ctx.clock.now_iso(),
+                reason=f"OPERATION_WORKER_LOST: reaped at {reason}",
+                resumable_kinds=frozenset({"pr_check_watch"}),
+                worker_bindings=ctx.worker_bindings,
+                reaper=ctx.reaper,
+            )
+        except Exception:
+            return 0
 
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         return _result(self._operation_status.execute(OperationStatusCommand(operation_id)))

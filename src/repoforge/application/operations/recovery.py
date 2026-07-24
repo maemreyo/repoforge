@@ -90,6 +90,46 @@ def _prune_bindings(
     return pruned
 
 
+def reap_running_background(
+    manager: OperationManager,
+    *,
+    now: str,
+    reason: str,
+    resumable_kinds: frozenset[str] = frozenset(),
+    worker_bindings: WorkerBindingStore | None = None,
+    reaper: ProcessReaper | None = None,
+) -> int:
+    """Reap + orphan every RUNNING non-resumable background op right now.
+
+    Used at graceful runtime shutdown so a detached child cannot outlive the
+    process. Best-effort and idempotent: already-terminal ops are skipped and a
+    stale conflict on one record never stops the sweep. Returns how many ops were
+    transitioned to orphaned.
+    """
+    transitioned = 0
+    page = manager.list_records(max_records=2_000)
+    for task in page.records:
+        if task.state is not OperationState.RUNNING or task.kind in resumable_kinds:
+            continue
+        detail, _ = _reap_and_describe(
+            task.operation_id,
+            worker_bindings=worker_bindings,
+            reaper=reaper,
+        )
+        try:
+            manager.orphan(
+                task.operation_id,
+                error_message=f"{reason}: {detail}.",
+                now=now,
+            )
+            transitioned += 1
+        except RepoForgeError as exc:
+            if exc.code is ErrorCode.OPERATION_STALE:
+                continue
+            raise
+    return transitioned
+
+
 def recover_operations(
     manager: OperationManager,
     *,
