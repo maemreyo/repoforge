@@ -541,6 +541,9 @@ def test_preview_is_read_only_and_refresh_creates_a_controlled_merge_commit(
     assert refreshed["conflict_paths"] == []
     assert refreshed["force_push_required"] is False
     assert (workspace_path / "upstream.txt").read_text(encoding="utf-8") == "upstream\n"
+    refreshed_base = service.workspace_base_status(workspace_id)
+    assert refreshed_base["staleness"] == "current"
+    assert refreshed_base["refresh_required"] is False
 
     with pytest.raises(WorkspaceError, match="verified commit gate"):
         service.workspace_push(workspace_id)

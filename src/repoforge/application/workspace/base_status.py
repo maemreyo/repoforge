@@ -117,7 +117,7 @@ def collect_workspace_base_status(
 
     if not refs.remote_available:
         staleness = "unavailable_remote"
-    elif refs.local_sha == refs.remote_sha == workspace_base:
+    elif workspace_base == latest and behind == 0:
         staleness = "current"
     elif refs.local_sha == refs.remote_sha:
         staleness = "local_base_stale"
