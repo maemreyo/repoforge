@@ -71,6 +71,20 @@ class SupervisorReloader(Protocol):
     def reload(self) -> bool: ...
 
 
+@dataclass(frozen=True, slots=True)
+class HealthSample:
+    """One post-activation health observation of the running runtime."""
+
+    healthy: bool
+    detail: str
+
+
+class RuntimeHealthProbe(Protocol):
+    """Sample the live runtime's health during the post-activation window (#272)."""
+
+    def sample(self) -> HealthSample: ...
+
+
 class ReleaseStore(Protocol):
     """The immutable-release layout the application orchestrates over.
 

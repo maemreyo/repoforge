@@ -431,14 +431,16 @@ def build_upgrade_service(
         GitWorktreeInspector,
         SubprocessReleaseSmokeTester,
         SupervisorControlReloader,
+        SupervisorHealthProbe,
         UvVenvReleaseInstaller,
         UvWheelBuilder,
     )
+    from .adapters.background import SystemSleeper
     from .application.activation.upgrade import UpgradeService as _Service
 
-    reloader = SupervisorControlReloader(
-        build_runtime_control_client(supervisor_socket), correlation_id=correlation_id
-    )
+    control_client = build_runtime_control_client(supervisor_socket)
+    reloader = SupervisorControlReloader(control_client, correlation_id=correlation_id)
+    health_probe = SupervisorHealthProbe(control_client, correlation_id=correlation_id)
     return _Service(
         store=build_release_store(release_root),
         inspector=GitWorktreeInspector(),
@@ -447,6 +449,8 @@ def build_upgrade_service(
         smoke=SubprocessReleaseSmokeTester(),
         reloader=reloader,
         clock=system_clock(),
+        health_probe=health_probe,
+        sleeper=SystemSleeper(),
     )
 
 

@@ -8,7 +8,7 @@ steps all run against the candidate itself.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,12 +19,16 @@ from ...ports import (
     ReleaseInstaller,
     ReleaseSmokeTester,
     ReleaseStore,
+    RuntimeHealthProbe,
     SupervisorReloader,
     WorktreeInspector,
 )
 from ...ports.clock import Clock
+from ...ports.sleeper import Sleeper
 
 DEFAULT_KEEP_RELEASES = 5
+DEFAULT_HEALTH_WINDOW_SECONDS = 30.0
+DEFAULT_HEALTH_INTERVAL_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +78,8 @@ class UpgradeService:
         smoke: ReleaseSmokeTester,
         reloader: SupervisorReloader,
         clock: Clock,
+        health_probe: RuntimeHealthProbe | None = None,
+        sleeper: Sleeper | None = None,
     ) -> None:
         self._store = store
         self._inspector = inspector
@@ -82,6 +88,8 @@ class UpgradeService:
         self._smoke = smoke
         self._reloader = reloader
         self._clock = clock
+        self._health_probe = health_probe
+        self._sleeper = sleeper
 
     def upgrade(
         self,
@@ -89,6 +97,9 @@ class UpgradeService:
         *,
         activate: bool,
         keep_releases: int = DEFAULT_KEEP_RELEASES,
+        watch: bool = False,
+        health_window_seconds: float = DEFAULT_HEALTH_WINDOW_SECONDS,
+        health_interval_seconds: float = DEFAULT_HEALTH_INTERVAL_SECONDS,
     ) -> UpgradeResult:
         state = self._inspector.inspect(worktree)
         if not state.clean:
@@ -125,7 +136,58 @@ class UpgradeService:
                 previous_sha=self._store.current_sha(),
                 detail="Release built, smoke-tested, and installed. Not activated.",
             )
-        return self._activate(manifest, keep_releases=keep_releases)
+        activated = self._activate(manifest, keep_releases=keep_releases)
+        if not watch:
+            return activated
+        return self._watch_or_rollback(
+            activated,
+            window_seconds=health_window_seconds,
+            interval_seconds=health_interval_seconds,
+        )
+
+    def _watch_or_rollback(
+        self, activated: UpgradeResult, *, window_seconds: float, interval_seconds: float
+    ) -> UpgradeResult:
+        """Watch health for a window; auto-rollback to the warm ``previous`` on failure.
+
+        Health passing at activation time is not proof of health minutes later, so a
+        candidate that crash-loops or degrades inside the window is rolled back to the
+        release that ``previous`` still points at (kept warm -- prune never removes it).
+        """
+        if self._health_probe is None:
+            return replace(
+                activated,
+                detail=activated.detail + " Health window skipped (no probe configured).",
+            )
+        detail = self._sample_window(
+            window_seconds=window_seconds, interval_seconds=interval_seconds
+        )
+        if detail is None:
+            return replace(
+                activated,
+                detail=f"{activated.detail} Healthy through the {window_seconds:g}s window.",
+            )
+        rolled_back = self.rollback(receipt_id=activated.activation_receipt)
+        return replace(
+            rolled_back,
+            detail=(
+                f"Auto-rollback: candidate {activated.candidate_sha} unhealthy within the "
+                f"{window_seconds:g}s window ({detail}). {rolled_back.detail}"
+            ),
+        )
+
+    def _sample_window(self, *, window_seconds: float, interval_seconds: float) -> str | None:
+        """Return a failure detail if health degrades in the window, else ``None``."""
+        assert self._health_probe is not None
+        interval = max(0.1, interval_seconds)
+        iterations = max(1, int(window_seconds // interval))
+        for _ in range(iterations):
+            if self._sleeper is not None:
+                self._sleeper.sleep(interval)
+            sample = self._health_probe.sample()
+            if not sample.healthy:
+                return sample.detail
+        return None
 
     def _activate(self, manifest: ReleaseManifest, *, keep_releases: int) -> UpgradeResult:
         commit_sha = manifest.commit_sha

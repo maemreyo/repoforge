@@ -7,7 +7,7 @@ import pytest
 from repoforge.adapters.activation.release_store import RuntimeReleaseStore
 from repoforge.application.activation.upgrade import UpgradeService
 from repoforge.domain.errors import ConfigError
-from repoforge.ports.activation import BuildArtifact, SmokeResult, WorktreeState
+from repoforge.ports.activation import BuildArtifact, HealthSample, SmokeResult, WorktreeState
 
 _FINGERPRINT = "a" * 64
 _SURFACE = "b" * 64
@@ -62,6 +62,27 @@ class _Reloader:
 class _Clock:
     def now_iso(self) -> str:
         return "2026-07-25T10:00:00+00:00"
+
+
+class _Sleeper:
+    def __init__(self) -> None:
+        self.slept: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+
+
+class _HealthProbe:
+    """Return scripted samples; the last one repeats once exhausted."""
+
+    def __init__(self, samples: list[HealthSample]) -> None:
+        self._samples = samples
+        self.calls = 0
+
+    def sample(self) -> HealthSample:
+        index = min(self.calls, len(self._samples) - 1)
+        self.calls += 1
+        return self._samples[index]
 
 
 def _service(
@@ -166,3 +187,78 @@ def test_rollback_returns_to_the_previous_release(tmp_path: Path) -> None:
     assert result.status == "rolled_back"
     assert store.current_sha() == "1111aaa"
     assert result.rediscovery_required is True
+
+
+def _watched_service(
+    tmp_path: Path,
+    *,
+    store: RuntimeReleaseStore,
+    samples: list[HealthSample],
+    head: str,
+) -> tuple[UpgradeService, _HealthProbe, _Sleeper]:
+    probe = _HealthProbe(samples)
+    sleeper = _Sleeper()
+    service = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha=head, clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(ok=True, surface=_SURFACE),
+        reloader=_Reloader(),
+        clock=_Clock(),
+        health_probe=probe,
+        sleeper=sleeper,
+    )
+    return service, probe, sleeper
+
+
+def test_watch_keeps_the_candidate_active_when_health_holds(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+    # Establish a warm previous so an (unwanted) rollback would be possible.
+    first, _, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+
+    service, probe, sleeper = _watched_service(
+        tmp_path,
+        store=store,
+        samples=[HealthSample(healthy=True, detail="ok")],
+        head="2222bbb",
+    )
+    result = service.upgrade(
+        tmp_path, activate=True, watch=True, health_window_seconds=10, health_interval_seconds=5
+    )
+
+    assert result.status == "activated"
+    assert store.current_sha() == "2222bbb"
+    assert probe.calls == 2  # window // interval = 2 samples
+    assert sleeper.slept == [5, 5]
+
+
+def test_watch_auto_rolls_back_when_the_candidate_degrades(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+    first, _, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+
+    service, _, _ = _watched_service(
+        tmp_path,
+        store=store,
+        samples=[HealthSample(healthy=False, detail="crash-loop")],
+        head="2222bbb",
+    )
+    result = service.upgrade(
+        tmp_path, activate=True, watch=True, health_window_seconds=10, health_interval_seconds=5
+    )
+
+    assert result.status == "rolled_back"
+    # Warm previous is restored automatically.
+    assert store.current_sha() == "1111aaa"
+    assert "Auto-rollback" in result.detail
+    assert "crash-loop" in result.detail
+
+
+def test_watch_without_a_probe_is_a_no_op(tmp_path: Path) -> None:
+    # A service built without a probe must not block activation on a health window.
+    service, store, _ = _service(tmp_path, head="2222bbb")
+    result = service.upgrade(tmp_path, activate=True, watch=True)
+    assert result.status == "activated"
+    assert store.current_sha() == "2222bbb"

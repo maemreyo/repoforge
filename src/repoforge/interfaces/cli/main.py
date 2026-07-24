@@ -19,7 +19,12 @@ from typing import Any
 
 from repoforge import __version__
 
-from ...application.activation.upgrade import DEFAULT_KEEP_RELEASES, UpgradeService
+from ...application.activation.upgrade import (
+    DEFAULT_HEALTH_INTERVAL_SECONDS,
+    DEFAULT_HEALTH_WINDOW_SECONDS,
+    DEFAULT_KEEP_RELEASES,
+    UpgradeService,
+)
 from ...application.activation.version_status import (
     RuntimeIdentityInputs,
     build_version_list,
@@ -1503,7 +1508,14 @@ def _upgrade_command(args: argparse.Namespace) -> int:
         _json(service.rollback(args.receipt).as_dict())
         return 0
     worktree = Path(args.from_worktree).expanduser().resolve()
-    result = service.upgrade(worktree, activate=args.activate, keep_releases=args.keep)
+    result = service.upgrade(
+        worktree,
+        activate=args.activate,
+        keep_releases=args.keep,
+        watch=args.watch,
+        health_window_seconds=args.health_window,
+        health_interval_seconds=args.health_interval,
+    )
     _json(result.as_dict())
     return 0
 
@@ -1871,6 +1883,20 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--activate", action="store_true")
     upgrade.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
     upgrade.add_argument("--release-root", dest="release_root", default=None)
+    upgrade.add_argument(
+        "--watch",
+        action="store_true",
+        help="After activation, watch health for a window and auto-rollback on failure.",
+    )
+    upgrade.add_argument(
+        "--health-window", dest="health_window", type=float, default=DEFAULT_HEALTH_WINDOW_SECONDS
+    )
+    upgrade.add_argument(
+        "--health-interval",
+        dest="health_interval",
+        type=float,
+        default=DEFAULT_HEALTH_INTERVAL_SECONDS,
+    )
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command")
     upgrade_rollback = upgrade_sub.add_parser("rollback")
     upgrade_rollback.add_argument("receipt", nargs="?", default=None)

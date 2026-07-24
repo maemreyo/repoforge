@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ...domain.errors import ConfigError
 from ...domain.runtime import ControlCommand, ControlRequest
-from ...ports.activation import BuildArtifact, SmokeResult, WorktreeState
+from ...ports.activation import BuildArtifact, HealthSample, SmokeResult, WorktreeState
 from ...ports.runtime_control import RuntimeControlClient
 
 _VENV = "venv"
@@ -137,6 +137,25 @@ class SupervisorControlReloader:
         except ConfigError:
             return False
         return response.ok
+
+
+class SupervisorHealthProbe:
+    """Sample runtime health via the supervisor control socket HEALTH command."""
+
+    def __init__(self, client: RuntimeControlClient, *, correlation_id: str) -> None:
+        self._client = client
+        self._correlation_id = correlation_id
+
+    def sample(self) -> HealthSample:
+        try:
+            response = self._client.request(
+                ControlRequest(1, ControlCommand.HEALTH, self._correlation_id),
+                timeout_seconds=5.0,
+            )
+        except ConfigError as exc:
+            return HealthSample(healthy=False, detail=f"health probe unreachable: {exc}")
+        healthy = response.ok and response.status == "healthy"
+        return HealthSample(healthy=healthy, detail=response.message or response.status)
 
 
 def _sha256_file(path: Path) -> str:

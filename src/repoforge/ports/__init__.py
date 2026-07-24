@@ -2,10 +2,12 @@
 
 from .activation import (
     BuildArtifact,
+    HealthSample,
     ReleaseBuilder,
     ReleaseInstaller,
     ReleaseSmokeTester,
     ReleaseStore,
+    RuntimeHealthProbe,
     SmokeResult,
     SupervisorReloader,
     WorktreeInspector,
@@ -141,6 +143,7 @@ __all__ = [
     "GitMergeResult",
     "GitRepository",
     "GitSnapshotBlob",
+    "HealthSample",
     "HygieneBaselineCache",
     "HygieneCacheKey",
     "HygieneFormatReceipt",
@@ -175,6 +178,7 @@ __all__ = [
     "ResolvedRepositoryRef",
     "RuntimeControlClient",
     "RuntimeControlServer",
+    "RuntimeHealthProbe",
     "RuntimeLauncher",
     "RuntimeStore",
     "Sleeper",
