@@ -85,6 +85,20 @@ class RuntimeHealthProbe(Protocol):
     def sample(self) -> HealthSample: ...
 
 
+class DevConfigProvisioner(Protocol):
+    """Synthesize an isolated dev-runtime config from the production config (#271)."""
+
+    def provision(
+        self,
+        base_config: Path,
+        dev_config: Path,
+        *,
+        state_root: Path,
+        tunnel_id: str,
+        profile: str,
+    ) -> None: ...
+
+
 class ReleaseStore(Protocol):
     """The immutable-release layout the application orchestrates over.
 

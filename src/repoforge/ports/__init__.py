@@ -2,6 +2,7 @@
 
 from .activation import (
     BuildArtifact,
+    DevConfigProvisioner,
     HealthSample,
     ReleaseBuilder,
     ReleaseInstaller,
@@ -115,6 +116,7 @@ __all__ = [
     "CommandExecutor",
     "CommandResult",
     "ConfigurationStore",
+    "DevConfigProvisioner",
     "DiscoveryRequest",
     "EnvironmentInspection",
     "EnvironmentPreflight",

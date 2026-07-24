@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .adapters.activation.release_store import RuntimeReleaseStore
+    from .application.activation.dev_runtime import DevRuntimeService
     from .application.activation.handoff import GenerationHandoffReconciler
     from .application.activation.upgrade import UpgradeService
     from .ports.process_supervisor import ProcessSupervisorRegistrar
@@ -452,6 +453,21 @@ def build_upgrade_service(
         clock=system_clock(),
         health_probe=health_probe,
         sleeper=SystemSleeper(),
+    )
+
+
+def build_dev_runtime_service(
+    *, base_config: Path, base_state_root: Path | None = None
+) -> DevRuntimeService:
+    from .adapters.activation.dev_config import TomlDevConfigProvisioner
+    from .application.activation.dev_runtime import DevRuntimeService as _Service
+
+    return _Service(
+        launcher=build_runtime_launcher(),
+        provisioner=TomlDevConfigProvisioner(),
+        runtime_store_factory=build_runtime_store,
+        base_config=base_config,
+        base_state_root=base_state_root or default_state_root(),
     )
 
 

@@ -67,6 +67,7 @@ from ...bootstrap import (
     AdapterOverrides,
     build_application,
     build_configuration_store,
+    build_dev_runtime_service,
     build_lock_manager,
     build_metrics_sink,
     build_operation_gate,
@@ -1520,6 +1521,28 @@ def _upgrade_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dev_runtime_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    service = build_dev_runtime_service(base_config=config_path)
+    command = args.dev_runtime_command
+    if command == "list":
+        _json(service.list())
+        return 0
+    if command == "promote":
+        upgrade = _build_upgrade_service(args)
+        worktree = Path(args.from_worktree).expanduser().resolve()
+        _json(upgrade.upgrade(worktree, activate=True, keep_releases=args.keep).as_dict())
+        return 0
+    if command == "start":
+        _json(service.start(args.name))
+        return 0
+    if command == "stop":
+        _json(service.stop(args.name))
+        return 0
+    _json(service.status(args.name))
+    return 0
+
+
 def _build_launchd_registrar(args: argparse.Namespace) -> ProcessSupervisorRegistrar:
     store = build_release_store(getattr(args, "release_root", None))
     config_path = Path(args.config).expanduser().resolve()
@@ -1900,6 +1923,16 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command")
     upgrade_rollback = upgrade_sub.add_parser("rollback")
     upgrade_rollback.add_argument("receipt", nargs="?", default=None)
+    dev_runtime = commands.add_parser("dev-runtime")
+    dev_runtime_sub = dev_runtime.add_subparsers(dest="dev_runtime_command", required=True)
+    for dev_command in ("start", "stop", "status"):
+        dev_parser = dev_runtime_sub.add_parser(dev_command)
+        dev_parser.add_argument("name")
+    dev_runtime_sub.add_parser("list")
+    dev_promote = dev_runtime_sub.add_parser("promote")
+    dev_promote.add_argument("--from-worktree", dest="from_worktree", default=".")
+    dev_promote.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
+    dev_promote.add_argument("--release-root", dest="release_root", default=None)
     config = commands.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("path")
@@ -2050,6 +2083,8 @@ def main(argv: list[str] | None = None) -> int:
             return _version_command(args)
         if args.command == "upgrade":
             return _upgrade_command(args)
+        if args.command == "dev-runtime":
+            return _dev_runtime_command(args)
         if args.command == "config":
             if args.config_command == "path":
                 _json(_resolved_paths(config_path))
