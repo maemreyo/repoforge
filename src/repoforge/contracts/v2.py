@@ -1538,6 +1538,22 @@ class PrIssueClosureResult(StrictModel):
     external_writes: int = Field(ge=0, le=20)
     marker: str = Field(min_length=1, max_length=200)
     approval_request_id: str | None = Field(default=None, max_length=160)
+    operation_id: Identifier | None = None
+    receipt_id: Identifier | None = None
+    result_reference: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_durable_outcome_references(self) -> PrIssueClosureResult:
+        references = (self.operation_id, self.receipt_id, self.result_reference)
+        if any(value is not None for value in references) and not all(
+            value is not None for value in references
+        ):
+            raise ValueError("closure durable outcome references must be complete")
+        if self.result in {"applied", "reconciled"} and not all(
+            value is not None for value in references
+        ):
+            raise ValueError("applied closure requires durable outcome references")
+        return self
 
 
 class PrIssueReconciliationEvidence(StrictModel):

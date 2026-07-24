@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -9,7 +11,9 @@ from pydantic import ValidationError
 
 from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import CommandError, ErrorCode, RepoForgeError
+from repoforge.domain.issue_writes import IssueWritePolicy
 from repoforge.interfaces.mcp.server import SERVER_INSTRUCTIONS
+from repoforge.ports.issue_mutation import RemoteComment, RemoteIssue
 
 
 def _prepare_commit(env: ForgeEnvironment) -> tuple[str, dict[str, Any]]:
@@ -169,6 +173,71 @@ def test_workspace_pr_requires_complete_issue_dispositions_and_preserves_managed
     assert "Advances #181" in updated_body
 
 
+def test_workspace_pr_integration_fixture_preserves_epic_180_child_closure_intent(
+    forge_env: ForgeEnvironment,
+) -> None:
+    issue_numbers = tuple(range(180, 196))
+    created_workspace = forge_env.service.workspace_create(
+        "demo",
+        "epic 180 integration intent",
+        issue_ids=tuple(str(number) for number in issue_numbers),
+    )
+    workspace_id = created_workspace["workspace_id"]
+    current = forge_env.service.workspace_read_file(workspace_id, "hello.txt")
+    forge_env.service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed for epic 180 integration intent\n",
+        current["sha256"],
+    )
+    forge_env.service.workspace_run_profile(workspace_id, "full")
+    committed = forge_env.service.workspace_commit(
+        workspace_id,
+        "feat: preserve epic 180 integration intent",
+    )
+    forge_env.service.workspace_push(
+        workspace_id,
+        "shipping-epic-180-integration-push-0001",
+    )
+    evidence_ref = "commit:" + committed["head_sha"]
+    dispositions = tuple(
+        {
+            "issue_number": number,
+            "disposition": "closes",
+            "acceptance_evidence_ref": evidence_ref,
+        }
+        for number in issue_numbers
+    )
+
+    with pytest.raises(RepoForgeError, match="explicit disposition") as incomplete:
+        forge_env.service.workspace_pr(
+            workspace_id,
+            action="create_draft",
+            title="Epic 180 integration regression",
+            body="Preserve every approved child closure.",
+            issue_dispositions=dispositions[:-1],
+            idempotency_key="shipping-epic-180-integration-incomplete",
+        )
+    assert incomplete.value.details["missing_issue_numbers"] == [195]
+
+    created = forge_env.service.workspace_pr(
+        workspace_id,
+        action="create_draft",
+        title="Epic 180 integration regression",
+        body="Preserve every approved child closure.",
+        issue_dispositions=dispositions,
+        idempotency_key="shipping-epic-180-integration-create-0001",
+    )
+
+    V2_TOOL_SPECS["workspace_pr"].validate_output(created)
+    assert created["issue_completion"]["closes"] == list(issue_numbers)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = forge_env.service.workspace_status(workspace_id)["branch"]
+    body = state["prs"][branch]["body"]
+    assert body.count("- Closes #") == len(issue_numbers)
+    assert all(f"Closes #{number}" in body for number in issue_numbers)
+
+
 def test_workspace_pr_create_reconciles_existing_pr_after_lost_create_response(
     forge_env: ForgeEnvironment,
 ) -> None:
@@ -278,6 +347,142 @@ def test_workspace_pr_reconciles_merged_completion_intent_without_closing_advanc
     }
     final_state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
     assert final_state["issues"]["181"]["state"] == "OPEN"
+
+
+def test_workspace_pr_applied_closure_returns_durable_outcome_references(
+    forge_env: ForgeEnvironment,
+) -> None:
+    class ClosureGateway:
+        def __init__(self, state_path: Path) -> None:
+            self.state_path = state_path
+            self.issues = {
+                180: RemoteIssue(
+                    180,
+                    1800,
+                    "Implemented issue",
+                    "open",
+                    "Issue body",
+                    "https://github.com/owner/demo/issues/180",
+                )
+            }
+            self.comments: dict[int, list[RemoteComment]] = {180: []}
+
+        def issue_comments(
+            self,
+            cwd: Path,
+            issue_number: int,
+            *,
+            max_comments: int,
+        ) -> tuple[tuple[RemoteComment, ...], bool]:
+            del cwd
+            comments = tuple(self.comments.get(issue_number, ()))
+            return comments[:max_comments], len(comments) > max_comments
+
+        def issue_comment(self, cwd: Path, issue_number: int, body: str) -> RemoteComment:
+            del cwd
+            comments = self.comments.setdefault(issue_number, [])
+            comment = RemoteComment(
+                len(comments) + 1,
+                body,
+                f"https://github.com/owner/demo/issues/{issue_number}#issuecomment-{len(comments) + 1}",
+            )
+            comments.append(comment)
+            return comment
+
+        def issue_details(self, cwd: Path, issue_number: int) -> RemoteIssue:
+            del cwd
+            return self.issues[issue_number]
+
+        def set_issue_state(self, cwd: Path, issue_number: int, state: str) -> RemoteIssue:
+            del cwd
+            issue = replace(self.issues[issue_number], state=state)
+            self.issues[issue_number] = issue
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            payload.setdefault("issues", {}).setdefault(str(issue_number), {})["state"] = (
+                state.upper()
+            )
+            self.state_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            return issue
+
+    workspace_id, evidence_ref = _prepare_issue_linked_pr_workspace(forge_env)
+    service = forge_env.service
+    context = service.application.context
+    object.__setattr__(context, "issue_mutations", ClosureGateway(forge_env.gh_state))
+    configured = service.config.repositories["demo"]
+    policy = IssueWritePolicy(
+        enabled_ops=("close",),
+        approval_required_ops=(),
+        max_writes_per_call=2,
+        max_writes_per_window=10,
+        window_seconds=3600,
+        create_title_prefix="[FOLLOWUP]",
+    )
+    config = replace(
+        service.config,
+        repositories={
+            **service.config.repositories,
+            "demo": replace(configured, issue_writes=policy),
+        },
+    )
+    object.__setattr__(context, "config", config)
+    service.config = config
+
+    service.workspace_pr(
+        workspace_id,
+        action="create_draft",
+        title="Receipt-backed issue completion",
+        body="Close only the accepted implementation issue.",
+        issue_dispositions=(
+            {
+                "issue_number": 180,
+                "disposition": "closes",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+            {
+                "issue_number": 181,
+                "disposition": "advances",
+                "acceptance_evidence_ref": evidence_ref,
+            },
+        ),
+        idempotency_key="shipping-issue-closure-create-0001",
+    )
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    branch = service.workspace_status(workspace_id)["branch"]
+    state["prs"][branch].update(
+        {
+            "state": "MERGED",
+            "baseRefName": "main",
+            "mergedAt": "2026-07-23T16:00:00Z",
+            "updatedAt": "2026-07-23T16:00:00Z",
+        }
+    )
+    state["issues"] = {
+        "180": {"state": "OPEN"},
+        "181": {"state": "OPEN"},
+    }
+    forge_env.gh_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    evidence = service.workspace_pr_evidence(workspace_id)
+
+    reconciled = service.workspace_pr(
+        workspace_id,
+        action="reconcile",
+        expected_remote_version=evidence["remote_version"],
+        apply_closures=True,
+        idempotency_key="shipping-issue-closure-reconcile-0001",
+    )
+
+    V2_TOOL_SPECS["workspace_pr"].validate_output(reconciled)
+    closure = reconciled["reconciliation"]["closure_results"][0]
+    assert closure["issue_number"] == 180
+    assert closure["operation_id"].startswith("op-")
+    assert closure["receipt_id"].startswith("receipt-")
+    assert closure["result_reference"] == f"operation-result:{closure['operation_id']}"
+    receipts = context.effect_receipts
+    assert receipts is not None
+    stored = receipts.read(closure["receipt_id"])
+    assert stored is not None
+    assert stored.value.operation_id == closure["operation_id"]
+    assert stored.value.result_reference == closure["result_reference"]
 
 
 def test_workspace_commit_and_push_return_typed_exact_state_evidence(

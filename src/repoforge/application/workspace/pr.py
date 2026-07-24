@@ -451,15 +451,67 @@ class WorkspacePrCoordinator:
                 digest = hashlib.sha256(
                     f"{command.idempotency_key}:{issue_number}".encode()
                 ).hexdigest()[:24]
+                mutation_key = f"pr-reconcile-close-{issue_number}-{digest}"
                 applied = mutator.execute(
                     RepositoryIssueMutationCommand(
                         repo_id=record.repo_id,
                         mode="close",
                         issue_number=issue_number,
                         evidence_ref=intent.acceptance_evidence_ref,
-                        idempotency_key=f"pr-reconcile-close-{issue_number}-{digest}",
+                        idempotency_key=mutation_key,
                     )
                 )
+                operation_id: str | None = None
+                receipt_id: str | None = None
+                result_reference: str | None = None
+                if applied.result in {"applied", "reconciled"}:
+                    idempotency_store = self.ctx.idempotency
+                    receipt_store = self.ctx.effect_receipts
+                    if idempotency_store is None or receipt_store is None:
+                        raise ConfigError("Durable outcome storage is not configured")
+                    key_hash = hash_idempotency_key(mutation_key)
+                    outcome_record = idempotency_store.load("repo_issue", key_hash)
+                    if (
+                        outcome_record is None
+                        or outcome_record.operation_id is None
+                        or outcome_record.receipt_id is None
+                    ):
+                        raise RepoForgeError(
+                            "Applied PR issue closure has no durable outcome binding",
+                            code=ErrorCode.STATE_INVALID,
+                            retryable=False,
+                            details={"issue_number": issue_number},
+                        )
+                    receipt_envelope = receipt_store.read(outcome_record.receipt_id)
+                    if (
+                        receipt_envelope is None
+                        or receipt_envelope.value.operation_id != outcome_record.operation_id
+                    ):
+                        raise RepoForgeError(
+                            "Applied PR issue closure durable outcome binding is inconsistent",
+                            code=ErrorCode.STATE_INVALID,
+                            retryable=False,
+                            details={
+                                "issue_number": issue_number,
+                                "operation_id": outcome_record.operation_id,
+                                "receipt_id": outcome_record.receipt_id,
+                            },
+                        )
+                    receipt = receipt_envelope.value
+                    if receipt.result_reference is None:
+                        raise RepoForgeError(
+                            "Applied PR issue closure receipt has no durable result reference",
+                            code=ErrorCode.STATE_INVALID,
+                            retryable=False,
+                            details={
+                                "issue_number": issue_number,
+                                "operation_id": receipt.operation_id,
+                                "receipt_id": receipt.receipt_id,
+                            },
+                        )
+                    operation_id = receipt.operation_id
+                    receipt_id = receipt.receipt_id
+                    result_reference = receipt.result_reference
                 closure_results.append(
                     {
                         "issue_number": issue_number,
@@ -467,6 +519,9 @@ class WorkspacePrCoordinator:
                         "external_writes": applied.external_writes,
                         "marker": applied.marker,
                         "approval_request_id": applied.approval_request_id,
+                        "operation_id": operation_id,
+                        "receipt_id": receipt_id,
+                        "result_reference": result_reference,
                     }
                 )
                 live = self.ctx.github.issue_read(path, issue_number)
