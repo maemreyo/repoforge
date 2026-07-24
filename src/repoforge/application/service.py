@@ -6,7 +6,7 @@ from typing import Any
 
 from ..bootstrap import AdapterOverrides, Application, build_application
 from ..config import AppConfig
-from ..domain.egress import EgressDestination, sanitize_egress_data
+from ..domain.egress import EgressDestination, EgressPolicy, sanitize_egress_data
 from ..domain.ticket_sync import TicketProjectOwnerType
 from ..ports import (
     AuditSink,
@@ -267,7 +267,17 @@ def _workspace_verify_plan_envelope(
     }
 
 
-def _result(value: object) -> dict[str, Any]:
+_READ_EGRESS_POLICY = EgressPolicy(
+    max_output_chars=120_000,
+    max_output_lines=20_000,
+)
+
+
+def _result(
+    value: object,
+    *,
+    egress_policy: EgressPolicy | None = None,
+) -> dict[str, Any]:
     data = to_data(value)
     if not isinstance(data, dict):
         raise TypeError("Application result must serialize to an object")
@@ -277,7 +287,11 @@ def _result(value: object) -> dict[str, Any]:
     else:
         data.pop("payload", None)
         payload = data
-    sanitized = sanitize_egress_data(payload, destination=EgressDestination.MODEL)
+    sanitized = sanitize_egress_data(
+        payload,
+        destination=EgressDestination.MODEL,
+        policy=egress_policy,
+    )
     if not isinstance(sanitized, dict):
         raise TypeError("Sanitized application result must remain an object")
     return sanitized
@@ -624,7 +638,8 @@ class CodingService:
         return _result(
             self._repo_read_v2.execute(
                 RepositoryReadCommand(repo_id, tuple(files), ref, byte_budget, cursor)
-            )
+            ),
+            egress_policy=_READ_EGRESS_POLICY,
         )
 
     def repo_search(
@@ -1059,7 +1074,8 @@ class CodingService:
         return _result(
             self._read_v2.execute(
                 WorkspaceReadCommand(workspace_id, tuple(files), byte_budget, cursor)
-            )
+            ),
+            egress_policy=_READ_EGRESS_POLICY,
         )
 
     def workspace_search(
