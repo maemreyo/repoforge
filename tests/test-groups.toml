@@ -199,6 +199,7 @@ test_files = [
   "tests/test_release_store.py",
   "tests/test_runtime.py",
   "tests/test_runtime_adapters_and_serve.py",
+  "tests/test_tunnel_seam_swap.py",
   "tests/test_unix_socket_path_portability.py",
   "tests/test_upgrade_service.py",
   "tests/test_version_status.py",
