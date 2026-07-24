@@ -181,7 +181,9 @@ def _staleness_warning(assessment: Any) -> str | None:
     value = assessment.base_freshness.value
     if not bool(value.get("refresh_required", False)):
         return None
-    warning = value.get("preflight_warning")
+    warning = value.get("warning")
+    if not isinstance(warning, str):
+        warning = value.get("preflight_warning")
     recommended = value.get("recommended_action")
     invalidated = value.get("expected_evidence_invalidation")
     if isinstance(warning, str):
