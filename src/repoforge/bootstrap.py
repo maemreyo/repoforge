@@ -8,6 +8,12 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .adapters.activation.release_store import RuntimeReleaseStore
+    from .application.activation.upgrade import UpgradeService
+    from .ports.process_supervisor import ProcessSupervisorRegistrar
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
 from .adapters.audit.query import prune_audit_log as prune_audit_log
@@ -409,6 +415,61 @@ def build_runtime_control_server(path: Path) -> RuntimeControlServer:
 
 def build_runtime_launcher() -> RuntimeLauncher:
     return SubprocessRuntimeLauncher()
+
+
+def build_release_store(root: Path | None = None) -> RuntimeReleaseStore:
+    from .adapters.activation.release_store import RuntimeReleaseStore as _Store
+    from .domain.user_paths import resolve_release_root
+
+    return _Store(resolve_release_root(root))
+
+
+def build_upgrade_service(
+    *, release_root: Path | None, supervisor_socket: Path, correlation_id: str
+) -> UpgradeService:
+    from .adapters.activation.build import (
+        GitWorktreeInspector,
+        SubprocessReleaseSmokeTester,
+        SupervisorControlReloader,
+        UvVenvReleaseInstaller,
+        UvWheelBuilder,
+    )
+    from .application.activation.upgrade import UpgradeService as _Service
+
+    reloader = SupervisorControlReloader(
+        build_runtime_control_client(supervisor_socket), correlation_id=correlation_id
+    )
+    return _Service(
+        store=build_release_store(release_root),
+        inspector=GitWorktreeInspector(),
+        builder=UvWheelBuilder(),
+        installer=UvVenvReleaseInstaller(),
+        smoke=SubprocessReleaseSmokeTester(),
+        reloader=reloader,
+        clock=system_clock(),
+    )
+
+
+def build_supervisor_launch_agent_registrar(
+    *,
+    launcher_path: Path,
+    config_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    inherited_env: dict[str, str],
+    agents_dir: Path,
+) -> ProcessSupervisorRegistrar:
+    from .adapters.activation.launchd import DEFAULT_LABEL, LaunchAgentSpec, LaunchdRegistrar
+
+    spec = LaunchAgentSpec(
+        label=DEFAULT_LABEL,
+        launcher_path=launcher_path,
+        config_path=config_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        inherited_env=inherited_env,
+    )
+    return LaunchdRegistrar(spec=spec, agents_dir=agents_dir)
 
 
 def build_process_inspector() -> ProcessInspector:

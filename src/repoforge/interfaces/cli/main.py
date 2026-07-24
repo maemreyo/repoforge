@@ -19,6 +19,12 @@ from typing import Any
 
 from repoforge import __version__
 
+from ...application.activation.upgrade import DEFAULT_KEEP_RELEASES, UpgradeService
+from ...application.activation.version_status import (
+    RuntimeIdentityInputs,
+    build_version_list,
+    build_version_status,
+)
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
     apply_policy_patch,
@@ -60,11 +66,14 @@ from ...bootstrap import (
     build_metrics_sink,
     build_operation_gate,
     build_pending_policy_change_store,
+    build_release_store,
     build_repository_probe,
     build_runtime_control_client,
     build_runtime_control_server,
     build_runtime_launcher,
     build_runtime_store,
+    build_supervisor_launch_agent_registrar,
+    build_upgrade_service,
     clear_runtime_state,
     default_state_root,
     id_generator,
@@ -99,6 +108,7 @@ from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
+from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
 
@@ -1450,6 +1460,105 @@ def _runtime_command(args: argparse.Namespace) -> int:
     raise ConfigError(f"Unknown runtime command: {args.runtime_command}")
 
 
+def _runtime_record_best_effort(config_path: Path) -> Any:
+    """Read the live supervisor record without failing version status when absent."""
+    try:
+        store = _ensure_generation(config_path)
+        runtime_path, _, _ = _runtime_paths(store)
+        return build_runtime_store(runtime_path).read()
+    except (ConfigError, OSError, ValueError):
+        return None
+
+
+def _version_command(args: argparse.Namespace) -> int:
+    store = build_release_store(getattr(args, "release_root", None))
+    if args.version_command == "list":
+        _json(build_version_list(store))
+        return 0
+    config_path = Path(args.config).expanduser().resolve()
+    record = _runtime_record_best_effort(config_path)
+    inputs = RuntimeIdentityInputs(
+        launcher_version=__version__,
+        running_tool_surface_hash=record.tool_surface_hash if record else None,
+        process_start_identity=record.process_identity if record else None,
+        active_generation=record.active_generation if record else None,
+    )
+    _json(build_version_status(store, inputs))
+    return 0
+
+
+def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
+    config_path = Path(args.config).expanduser().resolve()
+    supervisor_socket = _ensure_generation(config_path).root / "supervisor.sock"
+    return build_upgrade_service(
+        release_root=getattr(args, "release_root", None),
+        supervisor_socket=supervisor_socket,
+        correlation_id=id_generator().new_hex(24),
+    )
+
+
+def _upgrade_command(args: argparse.Namespace) -> int:
+    service = _build_upgrade_service(args)
+    if getattr(args, "upgrade_command", None) == "rollback":
+        _json(service.rollback(args.receipt).as_dict())
+        return 0
+    worktree = Path(args.from_worktree).expanduser().resolve()
+    result = service.upgrade(worktree, activate=args.activate, keep_releases=args.keep)
+    _json(result.as_dict())
+    return 0
+
+
+def _build_launchd_registrar(args: argparse.Namespace) -> ProcessSupervisorRegistrar:
+    store = build_release_store(getattr(args, "release_root", None))
+    config_path = Path(args.config).expanduser().resolve()
+    log_dir = store.root / "runtime" / "logs"
+    inherited = {
+        key: os.environ[key]
+        for key in ("HOME", "PATH", "LANG", "LC_ALL", "SSH_AUTH_SOCK")
+        if key in os.environ
+    }
+    return build_supervisor_launch_agent_registrar(
+        launcher_path=store.bin_launcher(),
+        config_path=config_path,
+        stdout_path=log_dir / "supervisor.out.log",
+        stderr_path=log_dir / "supervisor.err.log",
+        inherited_env=inherited,
+        agents_dir=Path("~/Library/LaunchAgents").expanduser(),
+    )
+
+
+def _runtime_agent_command(args: argparse.Namespace) -> int:
+    store = build_release_store(getattr(args, "release_root", None))
+    registrar = _build_launchd_registrar(args)
+    if args.runtime_command == "install-agent":
+        store.write_launcher_shim()
+        result = registrar.install()
+        _json(
+            {
+                "status": result.status,
+                "unit_path": result.unit_path,
+                "launcher": str(store.bin_launcher()),
+                "detail": result.detail,
+                "safe_next_action": "Run `rf version status` to confirm the active release.",
+            }
+        )
+        return 0
+    if args.runtime_command == "uninstall-agent":
+        result = registrar.uninstall()
+        _json({"status": result.status, "unit_path": result.unit_path, "detail": result.detail})
+        return 0
+    status = registrar.status()
+    _json(
+        {
+            "registered": status.registered,
+            "loaded": status.loaded,
+            "unit_path": status.unit_path,
+            "detail": status.detail,
+        }
+    )
+    return 0
+
+
 def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     from ..mcp.grace import FORGE_V1_IDENTITY, create_grace_server
     from ..mcp.server import FORGE_V2_IDENTITY, create_server, tool_surface_hash
@@ -1749,6 +1858,22 @@ def build_parser() -> argparse.ArgumentParser:
     restart_command.add_argument("--profile")
     logs = runtime_sub.add_parser("logs")
     logs.add_argument("--tail", type=int, default=100)
+    for agent_command in ("install-agent", "uninstall-agent", "agent-status"):
+        agent_parser = runtime_sub.add_parser(agent_command)
+        agent_parser.add_argument("--release-root", dest="release_root", default=None)
+    version = commands.add_parser("version")
+    version_sub = version.add_subparsers(dest="version_command", required=True)
+    for version_command in ("status", "list"):
+        version_parser = version_sub.add_parser(version_command)
+        version_parser.add_argument("--release-root", dest="release_root", default=None)
+    upgrade = commands.add_parser("upgrade")
+    upgrade.add_argument("--from-worktree", dest="from_worktree", default=".")
+    upgrade.add_argument("--activate", action="store_true")
+    upgrade.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
+    upgrade.add_argument("--release-root", dest="release_root", default=None)
+    upgrade_sub = upgrade.add_subparsers(dest="upgrade_command")
+    upgrade_rollback = upgrade_sub.add_parser("rollback")
+    upgrade_rollback.add_argument("receipt", nargs="?", default=None)
     config = commands.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("path")
@@ -1892,7 +2017,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
         if args.command == "runtime":
+            if args.runtime_command in {"install-agent", "uninstall-agent", "agent-status"}:
+                return _runtime_agent_command(args)
             return _runtime_command(args)
+        if args.command == "version":
+            return _version_command(args)
+        if args.command == "upgrade":
+            return _upgrade_command(args)
         if args.command == "config":
             if args.config_command == "path":
                 _json(_resolved_paths(config_path))

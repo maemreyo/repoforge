@@ -1,5 +1,16 @@
 """Protocols only; concrete implementations live under adapters/."""
 
+from .activation import (
+    BuildArtifact,
+    ReleaseBuilder,
+    ReleaseInstaller,
+    ReleaseSmokeTester,
+    ReleaseStore,
+    SmokeResult,
+    SupervisorReloader,
+    WorktreeInspector,
+    WorktreeState,
+)
 from .approval_store import ApprovalPayloadStore, ApprovalStore
 from .audit import AuditSink
 from .background_tasks import BackgroundTaskRunner
@@ -96,6 +107,7 @@ __all__ = [
     "ArtifactResult",
     "AuditSink",
     "BackgroundTaskRunner",
+    "BuildArtifact",
     "Clock",
     "CodeIntelligenceProvider",
     "CommandExecutor",
@@ -154,6 +166,10 @@ __all__ = [
     "ProviderRegistry",
     "PullRequestGateway",
     "ReapOutcome",
+    "ReleaseBuilder",
+    "ReleaseInstaller",
+    "ReleaseSmokeTester",
+    "ReleaseStore",
     "RepositoryDiscovery",
     "RepositoryProbe",
     "ResolvedRepositoryRef",
@@ -162,7 +178,9 @@ __all__ = [
     "RuntimeLauncher",
     "RuntimeStore",
     "Sleeper",
+    "SmokeResult",
     "StateRepository",
+    "SupervisorReloader",
     "TaskStore",
     "TicketGraphGateway",
     "TicketProjectGateway",
@@ -176,4 +194,6 @@ __all__ = [
     "WorkflowReplayObservation",
     "WorkflowRetentionReport",
     "WorkspaceStore",
+    "WorktreeInspector",
+    "WorktreeState",
 ]
