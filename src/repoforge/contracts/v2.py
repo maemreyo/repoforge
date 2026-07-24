@@ -1232,6 +1232,47 @@ class VerifyStepEvidence(StrictModel):
     failure_domain: str | None = Field(default=None, max_length=160)
 
 
+class WorkspaceFreshnessPreflightValue(StrictModel):
+    staleness: Literal[
+        "current",
+        "unavailable_remote",
+        "local_base_stale",
+        "remote_base_stale",
+        "diverged",
+    ]
+    refresh_required: bool
+    workspace_base_sha: GitObjectId
+    latest_base_sha: GitObjectId
+    head_sha: GitObjectId
+    ahead_base: int = Field(ge=0)
+    behind_base: int = Field(ge=0)
+    upstream_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    workspace_changed_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    generated_overlap_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    expected_evidence_invalidation: tuple[Identifier, ...] = Field(default=(), max_length=32)
+    verify_selector: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    recommended_action: Literal[
+        "continue",
+        "restore_remote_connectivity",
+        "recreate_from_latest_base",
+        "refresh_preview",
+    ]
+    warning: str | None = Field(default=None, max_length=2000)
+    recreate_eligible: bool
+    recreate_blockers: tuple[Identifier, ...] = Field(default=(), max_length=32)
+    remote_available: bool
+    remote_error_code: str | None = Field(default=None, max_length=128)
+
+
+class WorkspaceFreshnessEvidence(StrictModel):
+    status: Literal["current", "partial", "unavailable", "not_applicable"]
+    coverage: Literal["complete", "partial", "none"]
+    value: WorkspaceFreshnessPreflightValue | None = None
+    error_code: str | None = Field(default=None, max_length=128)
+    safe_fallback: str | None = Field(default=None, max_length=1000)
+
+
 class WorkspaceVerifyAssessment(StrictModel):
     snapshot_id: Sha256
     current: bool
@@ -1241,6 +1282,7 @@ class WorkspaceVerifyAssessment(StrictModel):
     uncertainties: tuple[str, ...] = Field(default=(), max_length=64)
     refresh_required: bool
     behind_base: int = Field(ge=0)
+    base_freshness: WorkspaceFreshnessEvidence
     provider: ProviderEvidence | None = None
     final_profile: Identifier
     manual_review_required: bool

@@ -19,7 +19,6 @@ from typing import Any
 
 from repoforge import __version__
 
-from ...adapters.persistence import JsonApprovalPayloadStore, JsonApprovalStore
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
     apply_policy_patch,
@@ -56,6 +55,8 @@ from ...application.verification_detection import VerificationProfileDetector
 from ...bootstrap import (
     AdapterOverrides,
     build_application,
+    build_approval_payload_store,
+    build_approval_store,
     build_configuration_store,
     build_lock_manager,
     build_metrics_sink,
@@ -104,7 +105,13 @@ from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...domain.runtime_contract import RuntimeContractIdentity
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
-from ...ports import ConfigurationStore, LockManager, RepositoryProbe
+from ...ports import (
+    ApprovalPayloadStore,
+    ApprovalStore,
+    ConfigurationStore,
+    LockManager,
+    RepositoryProbe,
+)
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
 
@@ -362,7 +369,7 @@ def _pending_store(config_path: Path) -> PendingPolicyChangeStore:
 
 def _approval_stores(
     config_path: Path,
-) -> tuple[JsonApprovalStore, JsonApprovalPayloadStore]:
+) -> tuple[ApprovalStore, ApprovalPayloadStore]:
     store = _ensure_generation(config_path)
     generation = store.active() or store.current()
     resolved_path = (
@@ -371,8 +378,8 @@ def _approval_stores(
     runtime_state_root = load_config(resolved_path).server.state_root
     locks = build_lock_manager(runtime_state_root)
     return (
-        JsonApprovalStore(runtime_state_root, locks),
-        JsonApprovalPayloadStore(runtime_state_root, locks),
+        build_approval_store(runtime_state_root, locks=locks),
+        build_approval_payload_store(runtime_state_root, locks=locks),
     )
 
 

@@ -145,7 +145,7 @@ def _assessment_projection(assessment: Any) -> tuple[dict[str, object], dict[str
         "base_freshness": {
             "status": assessment.base_freshness.status.value,
             "coverage": assessment.base_freshness.coverage.value,
-            "value": dict(base),
+            "value": dict(base) if base else None,
             "error_code": assessment.base_freshness.error_code,
             "safe_fallback": assessment.base_freshness.safe_fallback,
         },

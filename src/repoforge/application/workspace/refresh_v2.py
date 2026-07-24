@@ -1084,7 +1084,17 @@ class WorkspaceRefreshV2:
             raise WorkspaceError(
                 f"Refresh preview exceeds the {_MAX_GENERATED_CONFLICTS}-generated-conflict limit"
             )
-        payload = {
+        recreate_payload: dict[str, object] = {
+            "eligible": base.recreate_eligible,
+            "blockers": base.recreate_blockers,
+            "recommended_action": base.recommended_action,
+            "task_slug": record.metadata.get("task_slug"),
+            "workspace_create_idempotency": record.metadata.get("workspace_create_idempotency"),
+            "issue_ids": record.metadata.get("issue_ids", []),
+            "published_state": base.published_state,
+            "external_write_count": record.metadata.get("external_write_count", 0),
+        }
+        payload: dict[str, object] = {
             "configured_base": record.base,
             "workspace_base_sha": base.workspace_base_sha,
             "target_base_sha": base.remote_base_sha,
@@ -1104,20 +1114,17 @@ class WorkspaceRefreshV2:
             ],
             "version": 2,
             "workspace_id": record.workspace_id,
-            "recreate": {
-                "eligible": base.recreate_eligible,
-                "blockers": base.recreate_blockers,
-                "recommended_action": base.recommended_action,
-                "task_slug": record.metadata.get("task_slug"),
-                "workspace_create_idempotency": record.metadata.get("workspace_create_idempotency"),
-                "issue_ids": record.metadata.get("issue_ids", []),
-                "published_state": base.published_state,
-                "external_write_count": record.metadata.get("external_write_count", 0),
-            },
+            "recreate": recreate_payload,
         }
+        recreate_identity = {
+            key: value
+            for key, value in recreate_payload.items()
+            if key not in {"eligible", "blockers", "recommended_action"}
+        }
+        plan_identity = {**payload, "recreate": recreate_identity}
         plan_hash = hashlib.sha256(
             json.dumps(
-                payload,
+                plan_identity,
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,

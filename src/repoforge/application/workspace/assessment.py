@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -27,7 +27,11 @@ from ...domain.verification import VerificationIntent
 from ..code_intelligence import CodeIntelligenceAnalyzer, CodeIntelligenceCommand
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
-from .base_status import WorkspaceBaseStatusCommand, WorkspaceBaseStatusReader
+from .base_status import (
+    WorkspaceBaseStatusCommand,
+    WorkspaceBaseStatusReader,
+    freshness_preflight_payload,
+)
 from .diff import WorkspaceDiffCommand, WorkspaceDiffReader
 from .pr_checks import WorkspacePrChecksCommand, WorkspacePrChecksReader
 from .pr_status import WorkspacePrStatusCommand, WorkspacePrStatusReader
@@ -359,7 +363,7 @@ class WorkspaceAssessmentReader:
                 repo,
                 path,
                 lambda: self._base.execute(WorkspaceBaseStatusCommand(command.workspace_id)),
-                lambda result: asdict(result),
+                freshness_preflight_payload,
                 fallback="Base freshness is unknown; do not assume the workspace is current.",
             )
             pr_state = self._collect(
