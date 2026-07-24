@@ -216,12 +216,10 @@ class PrCheckWatchCoordinator:
     def resume_active(self) -> tuple[str, ...]:
         scheduled: list[str] = []
         for watch in self.store.list_records(max_records=2_000).records:
+            if watch.outcome in TERMINAL_PR_CHECK_WATCH_OUTCOMES:
+                continue
             task = self.operations.status(watch.operation_id)
-            if (
-                task.state not in TERMINAL_OPERATION_STATES
-                and watch.outcome not in TERMINAL_PR_CHECK_WATCH_OUTCOMES
-                and self.schedule(watch.operation_id)
-            ):
+            if task.state not in TERMINAL_OPERATION_STATES and self.schedule(watch.operation_id):
                 scheduled.append(watch.operation_id)
         return tuple(scheduled)
 
