@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from repoforge.adapters.activation.release_store import RuntimeReleaseStore
-from repoforge.domain.activation import ActivationOutcome, ActivationReceipt, ReleaseManifest
+from repoforge.domain.activation import (
+    ActivationOutcome,
+    ActivationReceipt,
+    ActivationStage,
+    ReleaseManifest,
+)
 from repoforge.domain.errors import ConfigError
 
 _SHA_A = "a" * 64
@@ -112,6 +117,9 @@ def test_receipts_are_written_read_and_allocated_monotonically(tmp_path: Path) -
         rediscovery_required=False,
         outcome=ActivationOutcome.ACTIVATED,
         activated_at="2026-07-25T10:00:00+00:00",
+        stage=ActivationStage.HEALTH_VERIFIED,
+        observed_sha="aaa1111",
+        converged=True,
     )
     store.write_receipt(receipt)
     assert store.read_receipt(first) == receipt
@@ -120,7 +128,28 @@ def test_receipts_are_written_read_and_allocated_monotonically(tmp_path: Path) -
 
 def test_launcher_shim_is_executable_and_resolves_through_current(tmp_path: Path) -> None:
     store = RuntimeReleaseStore(tmp_path)
-    shim = store.write_launcher_shim()
-    assert shim == tmp_path / "bin" / "rf"
+    written = store.write_launcher_shim()
+    shim = store.bin_launcher()
+    assert shim in written
     assert os.access(shim, os.X_OK)
     assert "current/venv/bin/rf" in shim.read_text(encoding="utf-8")
+
+
+def test_launcher_shim_is_written_once_and_not_rewritten_by_upgrades(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    first = store.write_launcher_shim()
+    assert store.bin_launcher() in first
+    # A later activation must not rewrite the stable shim.
+    assert store.bin_launcher() not in store.write_launcher_shim()
+
+
+def test_reserve_release_refuses_to_overwrite_different_bits(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", built_at="2026-07-25T09:00:00+00:00")
+    # Same commit, identical fingerprint -> already installed, no reinstall needed.
+    assert store.reserve_release("aaa1111", build_fingerprint=_SHA_A) is False
+    # Same commit, different fingerprint -> refuse rather than write over it.
+    with pytest.raises(ConfigError, match="RELEASE_FINGERPRINT_CONFLICT"):
+        store.reserve_release("aaa1111", build_fingerprint="d" * 64)
+    # A fresh commit is claimable.
+    assert store.reserve_release("bbb2222", build_fingerprint=_SHA_A) is True

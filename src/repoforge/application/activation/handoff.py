@@ -35,21 +35,34 @@ class OwnerIdentity:
 
 @dataclass(frozen=True, slots=True)
 class HandoffReport:
-    """What the reconciliation did, for the activation receipt and audit."""
+    """What the reconciliation did, for the activation receipt and audit.
+
+    ``conflicts`` is the fail-closed signal: a prior generation's worker survived
+    termination (or its binding was replaced mid-scan), so ownership could not be
+    transferred. ``ok`` is False whenever any conflict was recorded, and the caller
+    must abort the handoff rather than let a second generation claim that work.
+    """
 
     scanned: int
     retained: tuple[str, ...] = ()
     reaped: tuple[str, ...] = ()
     released: tuple[str, ...] = ()
     resumable_kept: tuple[str, ...] = ()
+    conflicts: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.conflicts
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "ok": self.ok,
             "scanned": self.scanned,
             "retained": list(self.retained),
             "reaped": list(self.reaped),
             "released": list(self.released),
             "resumable_kept": list(self.resumable_kept),
+            "conflicts": [{"operation_id": op, "reason": reason} for op, reason in self.conflicts],
         }
 
 
@@ -73,6 +86,7 @@ class GenerationHandoffReconciler:
         reaped: list[str] = []
         released: list[str] = []
         resumable_kept: list[str] = []
+        conflicts: list[tuple[str, str]] = []
         records = self._bindings.list_all(max_records=self._max_records)
         for binding in records:
             if self._owned_by_current(binding, current_owner):
@@ -82,7 +96,24 @@ class GenerationHandoffReconciler:
                 resumable_kept.append(binding.operation_id)
                 continue
             outcome = self._reaper.reap(binding)
-            self._bindings.delete(binding.operation_id)
+            if outcome.still_alive:
+                # Fail closed: the prior generation's worker is still running. Keeping
+                # its binding preserves the ownership record, so the new generation
+                # cannot claim work that is still producing side effects.
+                conflicts.append(
+                    (
+                        binding.operation_id,
+                        f"worker pid={binding.child_pid} survived termination: {outcome.detail}",
+                    )
+                )
+                continue
+            if not self._bindings.delete_if_unchanged(binding):
+                # The binding was replaced between the scan and the release, so it is
+                # no longer the record we evaluated; never delete a newer owner's.
+                conflicts.append(
+                    (binding.operation_id, "binding was replaced during reconciliation")
+                )
+                continue
             if outcome.reaped:
                 reaped.append(binding.operation_id)
             else:
@@ -93,6 +124,7 @@ class GenerationHandoffReconciler:
             reaped=tuple(reaped),
             released=tuple(released),
             resumable_kept=tuple(resumable_kept),
+            conflicts=tuple(conflicts),
         )
 
     @staticmethod

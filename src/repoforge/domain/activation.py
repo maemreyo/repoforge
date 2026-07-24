@@ -32,6 +32,20 @@ class ActivationOutcome(str, Enum):
     FAILED = "failed"
 
 
+class ActivationStage(str, Enum):
+    """How far an activation attempt got before it terminalized.
+
+    An activation may only terminalize as ``ACTIVATED`` from ``HEALTH_VERIFIED``:
+    switching the symlink is not activation, and a restart that cannot be proven to
+    be serving the candidate is a failure, never a soft success.
+    """
+
+    PREPARED = "prepared"
+    SYMLINK_SWITCHED = "symlink_switched"
+    RUNTIME_RESTARTED = "runtime_restarted"
+    HEALTH_VERIFIED = "health_verified"
+
+
 @dataclass(frozen=True, slots=True)
 class ReleaseManifest:
     """The immutable identity of one installed release directory.
@@ -100,6 +114,10 @@ class ActivationReceipt:
     activated_at: str
     from_fingerprint: str | None = None
     detail: str = ""
+    stage: ActivationStage = ActivationStage.PREPARED
+    observed_sha: str | None = None
+    converged: bool = False
+    cause_receipt_id: str | None = None
 
     def __post_init__(self) -> None:
         if not _RECEIPT_ID.fullmatch(self.receipt_id):
@@ -117,6 +135,18 @@ class ActivationReceipt:
         _clean(self.activated_at, name="activated_at", limit=64)
         if len(self.detail) > 2048:
             raise ValueError("Activation detail is too long")
+        if self.observed_sha is not None and not _COMMIT_SHA.fullmatch(self.observed_sha):
+            raise ValueError("Activation observed_sha must be lowercase hex or null")
+        if self.cause_receipt_id is not None and not _RECEIPT_ID.fullmatch(self.cause_receipt_id):
+            raise ValueError("Activation cause_receipt_id must look like act-YYYYMMDD-NNN")
+        # An activation is only truthfully "activated" when the live runtime was
+        # observed serving the candidate and health-verified.
+        if self.outcome is ActivationOutcome.ACTIVATED and not (
+            self.converged and self.stage is ActivationStage.HEALTH_VERIFIED
+        ):
+            raise ValueError(
+                "Activation cannot be ACTIVATED without convergence and a verified health stage"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -130,6 +160,10 @@ class ActivationReceipt:
             "outcome": self.outcome.value,
             "activated_at": self.activated_at,
             "detail": self.detail,
+            "stage": self.stage.value,
+            "observed_sha": self.observed_sha,
+            "converged": self.converged,
+            "cause_receipt_id": self.cause_receipt_id,
         }
 
     @classmethod
@@ -142,6 +176,12 @@ class ActivationReceipt:
         from_sha = raw.get("from_sha")
         from_fingerprint = raw.get("from_fingerprint")
         rediscovery = raw.get("rediscovery_required")
+        observed_sha = raw.get("observed_sha")
+        cause_receipt_id = raw.get("cause_receipt_id")
+        stage_raw = raw.get("stage")
+        stage = (
+            ActivationStage(stage_raw) if isinstance(stage_raw, str) else ActivationStage.PREPARED
+        )
         try:
             return cls(
                 receipt_id=_require_str(raw, "receipt_id"),
@@ -154,6 +194,10 @@ class ActivationReceipt:
                 outcome=ActivationOutcome(outcome_raw),
                 activated_at=_require_str(raw, "activated_at"),
                 detail=raw.get("detail", "") if isinstance(raw.get("detail"), str) else "",
+                stage=stage,
+                observed_sha=observed_sha if isinstance(observed_sha, str) else None,
+                converged=bool(raw.get("converged")),
+                cause_receipt_id=cause_receipt_id if isinstance(cause_receipt_id, str) else None,
             )
         except KeyError as exc:
             raise ValueError(f"Activation receipt missing field: {exc}") from exc

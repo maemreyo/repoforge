@@ -72,6 +72,7 @@ from ...bootstrap import (
     build_metrics_sink,
     build_operation_gate,
     build_pending_policy_change_store,
+    build_release_observer,
     build_release_store,
     build_repository_probe,
     build_runtime_control_client,
@@ -1489,17 +1490,28 @@ def _version_command(args: argparse.Namespace) -> int:
         process_start_identity=record.process_identity if record else None,
         active_generation=record.active_generation if record else None,
     )
-    _json(build_version_status(store, inputs))
-    return 0
+    observed = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        runtime_path, _, _ = _runtime_paths(_ensure_generation(config_path))
+        observed = build_release_observer(
+            release_root=getattr(args, "release_root", None), runtime_record_path=runtime_path
+        ).observe()
+    status = build_version_status(store, inputs, observed)
+    _json(status)
+    # Fail closed: a non-converged activation must not read as success.
+    return 0 if status.get("activation_converged") or status.get("desired_commit") is None else 1
 
 
 def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
     config_path = Path(args.config).expanduser().resolve()
-    supervisor_socket = _ensure_generation(config_path).root / "supervisor.sock"
+    runtime_path, supervisor_socket, _ = _runtime_paths(_ensure_generation(config_path))
     return build_upgrade_service(
         release_root=getattr(args, "release_root", None),
         supervisor_socket=supervisor_socket,
+        runtime_record_path=runtime_path,
+        config_path=config_path,
         correlation_id=id_generator().new_hex(24),
+        extra_env=_runtime_environment(args),
     )
 
 

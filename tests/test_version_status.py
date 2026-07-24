@@ -8,7 +8,13 @@ from repoforge.application.activation.version_status import (
     build_version_list,
     build_version_status,
 )
-from repoforge.domain.activation import ReleaseManifest
+from repoforge.domain.activation import (
+    ActivationOutcome,
+    ActivationReceipt,
+    ActivationStage,
+    ReleaseManifest,
+)
+from repoforge.ports.activation import ObservedRuntime
 
 _FINGERPRINT = "a" * 64
 _SURFACE = "b" * 64
@@ -29,41 +35,107 @@ def _install(store: RuntimeReleaseStore, commit: str, *, surface: str, built_at:
     )
 
 
-def test_status_reports_the_active_commit_and_manifest(tmp_path: Path) -> None:
+def _observed(sha: str | None, *, phase: str = "healthy") -> ObservedRuntime:
+    return ObservedRuntime(running_release_sha=sha, phase=phase, pid=42, executable="/x/python")
+
+
+def _receipt(store: RuntimeReleaseStore, *, to_sha: str, rediscovery: bool) -> None:
+    store.write_receipt(
+        ActivationReceipt(
+            receipt_id=store.allocate_receipt_id(date_stamp="20260725"),
+            from_sha=None,
+            to_sha=to_sha,
+            to_fingerprint=_FINGERPRINT,
+            tool_surface_hash=_SURFACE,
+            rediscovery_required=rediscovery,
+            outcome=ActivationOutcome.ACTIVATED,
+            activated_at="2026-07-25T09:00:00+00:00",
+            stage=ActivationStage.HEALTH_VERIFIED,
+            observed_sha=to_sha,
+            converged=True,
+        )
+    )
+
+
+def test_status_reports_the_active_commit_when_desired_and_observed_agree(
+    tmp_path: Path,
+) -> None:
     store = RuntimeReleaseStore(tmp_path)
     _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
     store.swap_current("aaa1111")
 
     status = build_version_status(
         store,
-        RuntimeIdentityInputs(launcher_version="2.2.0", running_tool_surface_hash=_SURFACE),
+        RuntimeIdentityInputs(launcher_version="2.2.0"),
+        _observed("aaa1111"),
     )
 
+    assert status["desired_commit"] == "aaa1111"
+    assert status["observed_commit"] == "aaa1111"
     assert status["active_commit"] == "aaa1111"
-    assert status["tool_surface_hash"] == _SURFACE
-    assert status["client_rediscovery_required"] is False
+    assert status["activation_converged"] is True
+    assert status["safe_next_action"] == "Runtime identity is current."
 
 
-def test_status_flags_rediscovery_when_installed_surface_differs_from_running(
+def test_status_fails_closed_when_the_runtime_serves_a_different_release(
     tmp_path: Path,
 ) -> None:
+    """The core acceptance: never report the symlink's wish as the running commit."""
     store = RuntimeReleaseStore(tmp_path)
-    _install(store, "aaa1111", surface=_SURFACE_NEW, built_at="2026-07-25T09:00:00+00:00")
+    _install(store, "aaa0111", surface=_SURFACE, built_at="2026-07-25T08:00:00+00:00")
+    _install(store, "bbb0222", surface=_SURFACE_NEW, built_at="2026-07-25T09:00:00+00:00")
+    store.swap_current("aaa0111")
+    store.swap_current("bbb0222")
+
+    # `current` is the candidate, but the live process is still the old release.
+    status = build_version_status(store, RuntimeIdentityInputs(), _observed("aaa0111"))
+
+    assert status["desired_commit"] == "bbb0222"
+    assert status["observed_commit"] == "aaa0111"
+    # Must NOT claim the candidate is active.
+    assert status["active_commit"] is None
+    assert status["activation_converged"] is False
+    assert "ACTIVATION NOT CONVERGED" in str(status["safe_next_action"])
+    # Surfaces differ between desired and observed -> rediscovery needed.
+    assert status["client_rediscovery_required"] is True
+
+
+def test_status_reports_no_running_runtime_distinctly(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
     store.swap_current("aaa1111")
+
+    status = build_version_status(store, RuntimeIdentityInputs(), _observed(None, phase="stopped"))
+
+    assert status["activation_converged"] is False
+    assert status["active_commit"] is None
+    assert "no runtime is running" in str(status["safe_next_action"])
+
+
+def test_rediscovery_comes_from_the_activation_receipt_not_a_live_hash_compare(
+    tmp_path: Path,
+) -> None:
+    """Once the new runtime is up the hashes match again; the flag must still hold."""
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
+    store.swap_current("aaa1111")
+    _receipt(store, to_sha="aaa1111", rediscovery=True)
 
     status = build_version_status(
         store,
         RuntimeIdentityInputs(running_tool_surface_hash=_SURFACE),
+        _observed("aaa1111"),
     )
 
+    assert status["activation_converged"] is True
     assert status["client_rediscovery_required"] is True
     assert "rediscover" in str(status["safe_next_action"]).lower()
 
 
 def test_status_without_any_release_points_at_upgrade(tmp_path: Path) -> None:
     store = RuntimeReleaseStore(tmp_path)
-    status = build_version_status(store, RuntimeIdentityInputs())
-    assert status["active_commit"] is None
+    status = build_version_status(store, RuntimeIdentityInputs(), _observed(None, phase="stopped"))
+    assert status["desired_commit"] is None
     assert "rf upgrade" in str(status["safe_next_action"])
 
 
@@ -80,7 +152,6 @@ def test_list_marks_current_and_previous(tmp_path: Path) -> None:
     assert listing["previous"] == "aaa1111"
     releases = listing["releases"]
     assert isinstance(releases, list)
-    # Newest first.
     assert releases[0]["commit_sha"] == "bbb2222"
     assert releases[0]["current"] is True
     assert releases[1]["previous"] is True

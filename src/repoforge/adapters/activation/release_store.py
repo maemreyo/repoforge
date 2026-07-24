@@ -27,6 +27,8 @@ _RELEASES = "releases"
 _CURRENT = "current"
 _PREVIOUS = "previous"
 _MANIFEST = ".manifest.json"
+_VENV_BIN = "venv/bin/rf"
+_PATH_BIN_DIR = "~/.local/bin"
 
 
 class RuntimeReleaseStore:
@@ -52,27 +54,64 @@ class RuntimeReleaseStore:
         """The stable launcher shim path; resolves through ``current`` at run time."""
         return self._root / "bin" / "rf"
 
-    def write_launcher_shim(self) -> Path:
-        """Write the stable ``bin/rf`` launcher that execs the active release's ``rf``.
+    def path_launcher(self) -> Path:
+        """The PATH-visible stable launcher (``~/.local/bin/rf``)."""
+        return Path(_PATH_BIN_DIR).expanduser() / "rf"
 
-        The shim is written once and is independent of any single commit: it always
-        resolves through the ``current`` symlink, so upgrades never rewrite it.
+    def write_launcher_shim(self, *, force: bool = False) -> tuple[Path, ...]:
+        """Provision the stable launcher(s) **once**; a no-op when already present.
+
+        The shim is independent of any single commit -- it resolves through the
+        ``current`` symlink -- so upgrades must not rewrite it. It is written to the
+        release root's ``bin/rf`` and to the PATH location ``~/.local/bin/rf`` so
+        ``rf`` on the user's PATH always runs the active release.
         """
-        shim = self.bin_launcher()
-        shim.parent.mkdir(parents=True, exist_ok=True)
-        script = (
-            "#!/bin/sh\n"
-            "# RepoForge stable launcher. Do not edit: resolves through the active release.\n"
-            'here="$(cd "$(dirname "$0")" && pwd)"\n'
-            'exec "$here/../current/venv/bin/rf" "$@"\n'
-        )
-        tmp = shim.with_name(f".{shim.name}.tmp-{os.getpid()}")
-        tmp.write_text(script, encoding="utf-8")
-        tmp.chmod(0o755)
-        os.replace(tmp, shim)
-        return shim
+        written: list[Path] = []
+        for shim, target in (
+            (self.bin_launcher(), self._root / _CURRENT / _VENV_BIN),
+            (self.path_launcher(), self._root / _CURRENT / _VENV_BIN),
+        ):
+            if shim.exists() and not force:
+                continue
+            shim.parent.mkdir(parents=True, exist_ok=True)
+            script = (
+                "#!/bin/sh\n"
+                "# RepoForge stable launcher. Provisioned once; resolves the active\n"
+                "# release through the `current` symlink. Do not edit.\n"
+                f'exec "{target}" "$@"\n'
+            )
+            tmp = shim.with_name(f".{shim.name}.tmp-{os.getpid()}")
+            tmp.write_text(script, encoding="utf-8")
+            tmp.chmod(0o755)
+            os.replace(tmp, shim)
+            written.append(shim)
+        return tuple(written)
 
     # -- manifests ----------------------------------------------------------
+
+    def reserve_release(self, commit_sha: str, *, build_fingerprint: str) -> bool:
+        """Claim ``releases/<sha>`` for a fresh install; ``False`` if already installed.
+
+        Releases are immutable: an existing directory is never written over. When the
+        same commit is already installed we only accept it if its manifest records the
+        identical build fingerprint, so "already installed" can never silently mean
+        "different bits under the same name".
+        """
+        release = self.release_path(commit_sha)
+        if not release.exists():
+            return True
+        existing = self.read_manifest(commit_sha)
+        if existing is None:
+            raise ConfigError(
+                f"RELEASE_DIR_UNCLAIMABLE: {release} exists without a manifest; "
+                "remove it before reinstalling this commit"
+            )
+        if existing.build_fingerprint != build_fingerprint:
+            raise ConfigError(
+                f"RELEASE_FINGERPRINT_CONFLICT: {commit_sha} is already installed with a "
+                f"different build fingerprint ({existing.build_fingerprint} != {build_fingerprint})"
+            )
+        return False
 
     def write_manifest(self, manifest: ReleaseManifest) -> None:
         release = self.release_path(manifest.commit_sha)
@@ -183,8 +222,20 @@ class RuntimeReleaseStore:
     # -- receipts -----------------------------------------------------------
 
     def write_receipt(self, receipt: ActivationReceipt) -> Path:
+        """Persist a receipt with exclusive create, so one can never overwrite another."""
         path = self._receipts / f"{receipt.receipt_id}.json"
-        _atomic_write_json(path, receipt.to_dict())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n"
+        try:
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise ConfigError(
+                f"RECEIPT_EXISTS: {receipt.receipt_id} already exists; receipts are immutable"
+            ) from exc
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         return path
 
     def read_receipt(self, receipt_id: str) -> ActivationReceipt | None:

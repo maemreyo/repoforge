@@ -7,15 +7,25 @@ adapters carry only the subprocess wiring.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from ...domain.errors import ConfigError
 from ...domain.runtime import ControlCommand, ControlRequest
-from ...ports.activation import BuildArtifact, HealthSample, SmokeResult, WorktreeState
-from ...ports.runtime_control import RuntimeControlClient
+from ...ports.activation import (
+    BuildArtifact,
+    HealthSample,
+    ObservedRuntime,
+    RestartOutcome,
+    SmokeResult,
+    WorktreeState,
+)
+from ...ports.runtime_control import RuntimeControlClient, RuntimeLauncher, RuntimeStore
+from ...ports.sleeper import Sleeper
 
 _VENV = "venv"
 
@@ -121,22 +131,117 @@ class SubprocessReleaseSmokeTester:
         return SmokeResult(ok=True, tool_surface_hash=surface, detail="tool surface computed")
 
 
-class SupervisorControlReloader:
-    """Ask the running supervisor to adopt whatever ``current`` now points at."""
+class SupervisorRestarter:
+    """Replace the live supervisor so it re-execs through the ``current`` symlink.
 
-    def __init__(self, client: RuntimeControlClient, *, correlation_id: str) -> None:
-        self._client = client
+    A new release is new code, so it cannot be adopted by an in-process reload -- and
+    the supervisor's control protocol deliberately supports only PING/STATUS/HEALTH/
+    SHUTDOWN. So we stop the running supervisor (SHUTDOWN, falling back to an
+    identity-guarded process-group kill) and start it again through the launcher,
+    which resolves the release via ``current``.
+    """
+
+    def __init__(
+        self,
+        *,
+        control: RuntimeControlClient,
+        runtime: RuntimeStore,
+        launcher: RuntimeLauncher,
+        config_path: Path,
+        correlation_id: str,
+        extra_env: dict[str, str] | None = None,
+        sleeper: Sleeper | None = None,
+        stop_timeout_seconds: float = 20.0,
+        start_timeout_seconds: float = 20.0,
+        poll_interval_seconds: float = 0.2,
+    ) -> None:
+        self._control = control
+        self._runtime = runtime
+        self._launcher = launcher
+        self._config_path = config_path
         self._correlation_id = correlation_id
+        self._extra_env = dict(extra_env or {})
+        self._sleeper = sleeper
+        self._stop_timeout = stop_timeout_seconds
+        self._start_timeout = start_timeout_seconds
+        self._poll = max(0.01, poll_interval_seconds)
 
-    def reload(self) -> bool:
+    def restart(self) -> RestartOutcome:
+        stopped, stop_detail = self._stop()
+        if not stopped:
+            return RestartOutcome(ok=False, detail=f"could not stop the runtime: {stop_detail}")
         try:
-            response = self._client.request(
-                ControlRequest(1, ControlCommand.RELOAD, self._correlation_id),
+            pid = self._launcher.start(
+                self._config_path, foreground=False, extra_env=self._extra_env
+            )
+        except (ConfigError, OSError) as exc:
+            return RestartOutcome(ok=False, detail=f"launcher failed to start: {exc}")
+        if not self._await(lambda: self._runtime.read() is not None, self._start_timeout):
+            return RestartOutcome(
+                ok=False, detail="runtime did not publish state after restart", pid=pid
+            )
+        return RestartOutcome(ok=True, detail=f"restarted (pid {pid})", pid=pid)
+
+    def _stop(self) -> tuple[bool, str]:
+        record = self._runtime.read()
+        if record is None:
+            return True, "no runtime was running"
+        # A refused/unreachable shutdown is not fatal: the force-stop path below is
+        # the identity-guarded fallback.
+        with contextlib.suppress(ConfigError):
+            self._control.request(
+                ControlRequest(1, ControlCommand.SHUTDOWN, self._correlation_id),
                 timeout_seconds=10.0,
             )
-        except ConfigError:
-            return False
-        return response.ok
+        if self._await(lambda: self._runtime.read() is None, self._stop_timeout):
+            return True, "shutdown acknowledged"
+        if self._launcher.force_stop(record, grace_seconds=5.0):
+            return True, "identity-guarded force stop"
+        return False, "runtime still present after shutdown and force stop"
+
+    def _await(self, predicate: Callable[[], bool], timeout_seconds: float) -> bool:
+        attempts = max(1, int(timeout_seconds / self._poll))
+        for _ in range(attempts):
+            if predicate():
+                return True
+            if self._sleeper is not None:
+                self._sleeper.sleep(self._poll)
+        return predicate()
+
+
+class RuntimeRecordReleaseObserver:
+    """Derive the release the live runtime is actually serving from its own record.
+
+    The running supervisor publishes ``executable`` (its own ``sys.executable``). When
+    it was launched through the stable shim, that path lives inside
+    ``<release-root>/releases/<sha>/``, so the serving release is an *observation* of
+    the live process rather than a restatement of what ``current`` points at.
+    """
+
+    def __init__(self, *, runtime: RuntimeStore, releases_root: Path) -> None:
+        self._runtime = runtime
+        self._releases_root = releases_root
+
+    def observe(self) -> ObservedRuntime:
+        record = self._runtime.read()
+        if record is None:
+            return ObservedRuntime(running_release_sha=None, phase="stopped")
+        return ObservedRuntime(
+            running_release_sha=self._release_of(record.executable),
+            phase=record.phase.value,
+            pid=record.pid,
+            executable=record.executable,
+            tool_surface_hash=record.tool_surface_hash or None,
+        )
+
+    def _release_of(self, executable: str | None) -> str | None:
+        if not executable:
+            return None
+        try:
+            relative = Path(executable).resolve().relative_to(self._releases_root.resolve())
+        except (ValueError, OSError):
+            return None
+        return relative.parts[0] if relative.parts else None
 
 
 class SupervisorHealthProbe:

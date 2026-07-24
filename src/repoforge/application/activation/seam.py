@@ -101,8 +101,33 @@ class TunnelSeamSwapCoordinator:
                 candidate_pid=candidate.pid,
             )
 
-        self._drain(old_child)
+        drained, drain_detail = self._drain(old_child)
+        if not drained:
+            # Fail closed: terminating a child that never drained would cut in-flight
+            # requests without a retryable outcome. Retire the candidate instead.
+            self._tunnel.terminate(candidate, grace_seconds=self._grace)
+            return SwapResult(
+                status="aborted",
+                rediscovery_required=False,
+                detail=f"Old serve child did not drain; swap aborted ({drain_detail}).",
+                candidate_pid=candidate.pid,
+            )
+
         report = self._reconciler.reconcile(current_owner=current_owner, is_resumable=is_resumable)
+        if not report.ok:
+            # Ownership could not be transferred (a prior worker survived), so the
+            # candidate must not take over that work: abort and keep the old child.
+            self._tunnel.terminate(candidate, grace_seconds=self._grace)
+            return SwapResult(
+                status="aborted",
+                rediscovery_required=False,
+                detail=(
+                    "Generation handoff could not transfer worker ownership; swap "
+                    f"aborted, old child retained ({len(report.conflicts)} conflict(s))."
+                ),
+                candidate_pid=candidate.pid,
+                handoff=report,
+            )
         self._tunnel.terminate(old_child, grace_seconds=self._grace)
 
         rediscovery = old_surface_hash != new_surface_hash
@@ -128,11 +153,14 @@ class TunnelSeamSwapCoordinator:
                 self._sleeper.sleep(self._health_interval)
         return False, f"not healthy within {self._health_attempts} probes"
 
-    def _drain(self, old_child: ChildProcess) -> None:
+    def _drain(self, old_child: ChildProcess) -> tuple[bool, str]:
+        """Drain the old child's in-flight work, failing closed on refusal/timeout."""
         if self._control is None or self._ids is None:
-            return
+            # No control channel configured: we cannot prove the child drained, so the
+            # caller must not terminate it as if we had.
+            return False, "no control channel configured to request a drain"
         try:
-            self._control.request(
+            response = self._control.request(
                 ControlRequest(
                     1,
                     ControlCommand.DRAIN,
@@ -141,7 +169,8 @@ class TunnelSeamSwapCoordinator:
                 ),
                 timeout_seconds=self._drain_timeout + 5.0,
             )
-        except ConfigError:
-            # Best-effort: a drain that cannot be requested still proceeds to a
-            # reconcile + terminate, which is the safe fallback the old restart path took.
-            return
+        except ConfigError as exc:
+            return False, f"drain request failed: {exc}"
+        if not response.ok:
+            return False, f"drain refused: {response.error_code or response.status}"
+        return True, response.status

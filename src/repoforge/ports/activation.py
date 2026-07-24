@@ -65,10 +65,41 @@ class ReleaseSmokeTester(Protocol):
     def smoke(self, release_path: Path) -> SmokeResult: ...
 
 
-class SupervisorReloader(Protocol):
-    """Ask the running supervisor to adopt whatever ``current`` now points at."""
+@dataclass(frozen=True, slots=True)
+class RestartOutcome:
+    """Result of replacing the live runtime process so it re-execs through ``current``."""
 
-    def reload(self) -> bool: ...
+    ok: bool
+    detail: str
+    pid: int | None = None
+
+
+class RuntimeRestarter(Protocol):
+    """Replace the live runtime process so it adopts whatever ``current`` points at.
+
+    A new *release* is new code, so it cannot be adopted by an in-process config
+    reload -- the process must be replaced. Implementations stop the running
+    supervisor and start it again through the stable launcher.
+    """
+
+    def restart(self) -> RestartOutcome: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedRuntime:
+    """What the live runtime process actually is, as published by that process."""
+
+    running_release_sha: str | None
+    phase: str
+    pid: int | None = None
+    executable: str | None = None
+    tool_surface_hash: str | None = None
+
+
+class ReleaseObserver(Protocol):
+    """Report the release the live runtime is actually serving (not the desired one)."""
+
+    def observe(self) -> ObservedRuntime: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +141,9 @@ class ReleaseStore(Protocol):
     def root(self) -> Path: ...
     def release_path(self, commit_sha: str) -> Path: ...
     def bin_launcher(self) -> Path: ...
-    def write_launcher_shim(self) -> Path: ...
+    def path_launcher(self) -> Path: ...
+    def write_launcher_shim(self, *, force: bool = False) -> tuple[Path, ...]: ...
+    def reserve_release(self, commit_sha: str, *, build_fingerprint: str) -> bool: ...
     def write_manifest(self, manifest: ReleaseManifest) -> None: ...
     def read_manifest(self, commit_sha: str) -> ReleaseManifest | None: ...
     def installed_shas(self) -> list[str]: ...

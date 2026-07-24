@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .application.activation.dev_runtime import DevRuntimeService
     from .application.activation.handoff import GenerationHandoffReconciler
     from .application.activation.upgrade import UpgradeService
+    from .ports.activation import ReleaseObserver
     from .ports.process_supervisor import ProcessSupervisorRegistrar
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
@@ -427,13 +428,20 @@ def build_release_store(root: Path | None = None) -> RuntimeReleaseStore:
 
 
 def build_upgrade_service(
-    *, release_root: Path | None, supervisor_socket: Path, correlation_id: str
+    *,
+    release_root: Path | None,
+    supervisor_socket: Path,
+    runtime_record_path: Path,
+    config_path: Path,
+    correlation_id: str,
+    extra_env: dict[str, str] | None = None,
 ) -> UpgradeService:
     from .adapters.activation.build import (
         GitWorktreeInspector,
+        RuntimeRecordReleaseObserver,
         SubprocessReleaseSmokeTester,
-        SupervisorControlReloader,
         SupervisorHealthProbe,
+        SupervisorRestarter,
         UvVenvReleaseInstaller,
         UvWheelBuilder,
     )
@@ -441,18 +449,41 @@ def build_upgrade_service(
     from .application.activation.upgrade import UpgradeService as _Service
 
     control_client = build_runtime_control_client(supervisor_socket)
-    reloader = SupervisorControlReloader(control_client, correlation_id=correlation_id)
-    health_probe = SupervisorHealthProbe(control_client, correlation_id=correlation_id)
+    runtime_store = build_runtime_store(runtime_record_path)
+    sleeper = SystemSleeper()
+    store = build_release_store(release_root)
     return _Service(
-        store=build_release_store(release_root),
+        store=store,
         inspector=GitWorktreeInspector(),
         builder=UvWheelBuilder(),
         installer=UvVenvReleaseInstaller(),
         smoke=SubprocessReleaseSmokeTester(),
-        reloader=reloader,
+        restarter=SupervisorRestarter(
+            control=control_client,
+            runtime=runtime_store,
+            launcher=build_runtime_launcher(),
+            config_path=config_path,
+            correlation_id=correlation_id,
+            extra_env=extra_env,
+            sleeper=sleeper,
+        ),
+        observer=RuntimeRecordReleaseObserver(
+            runtime=runtime_store, releases_root=store.root / "releases"
+        ),
         clock=system_clock(),
-        health_probe=health_probe,
-        sleeper=SystemSleeper(),
+        health_probe=SupervisorHealthProbe(control_client, correlation_id=correlation_id),
+        sleeper=sleeper,
+    )
+
+
+def build_release_observer(
+    *, release_root: Path | None, runtime_record_path: Path
+) -> ReleaseObserver:
+    from .adapters.activation.build import RuntimeRecordReleaseObserver
+
+    store = build_release_store(release_root)
+    return RuntimeRecordReleaseObserver(
+        runtime=build_runtime_store(runtime_record_path), releases_root=store.root / "releases"
     )
 
 

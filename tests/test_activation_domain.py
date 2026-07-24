@@ -5,6 +5,7 @@ import pytest
 from repoforge.domain.activation import (
     ActivationOutcome,
     ActivationReceipt,
+    ActivationStage,
     ReleaseManifest,
 )
 
@@ -53,6 +54,10 @@ def test_activation_receipt_round_trips_and_preserves_outcome() -> None:
         activated_at="2026-07-25T10:05:00+00:00",
         from_fingerprint=_OTHER_SHA256,
         detail="activated",
+        stage=ActivationStage.HEALTH_VERIFIED,
+        observed_sha="fedcba98",
+        converged=True,
+        cause_receipt_id="act-20260725-000",
     )
     restored = ActivationReceipt.from_dict(receipt.to_dict())
     assert restored == receipt
@@ -69,6 +74,8 @@ def test_activation_receipt_allows_a_null_origin_for_the_first_activation() -> N
         rediscovery_required=False,
         outcome=ActivationOutcome.ACTIVATED,
         activated_at="2026-07-25T10:05:00+00:00",
+        stage=ActivationStage.HEALTH_VERIFIED,
+        converged=True,
     )
     assert receipt.from_sha is None
     assert receipt.from_fingerprint is None
@@ -86,3 +93,39 @@ def test_activation_receipt_rejects_a_malformed_id() -> None:
             outcome=ActivationOutcome.ACTIVATED,
             activated_at="2026-07-25T10:05:00+00:00",
         )
+
+
+def test_activated_receipt_requires_convergence_and_a_verified_stage() -> None:
+    """A symlink switch is not an activation: ACTIVATED must be earned."""
+    with pytest.raises(ValueError, match="without convergence"):
+        ActivationReceipt(
+            receipt_id="act-20260725-001",
+            from_sha=None,
+            to_sha=_COMMIT,
+            to_fingerprint=_SHA256,
+            tool_surface_hash=_OTHER_SHA256,
+            rediscovery_required=False,
+            outcome=ActivationOutcome.ACTIVATED,
+            activated_at="2026-07-25T10:05:00+00:00",
+            stage=ActivationStage.SYMLINK_SWITCHED,
+            converged=False,
+        )
+
+
+def test_failed_receipt_may_record_the_stage_it_reached() -> None:
+    receipt = ActivationReceipt(
+        receipt_id="act-20260725-002",
+        from_sha=_COMMIT,
+        to_sha="fedcba98",
+        to_fingerprint=_SHA256,
+        tool_surface_hash=_OTHER_SHA256,
+        rediscovery_required=False,
+        outcome=ActivationOutcome.FAILED,
+        activated_at="2026-07-25T10:05:00+00:00",
+        stage=ActivationStage.RUNTIME_RESTARTED,
+        observed_sha=_COMMIT,
+        converged=False,
+    )
+    restored = ActivationReceipt.from_dict(receipt.to_dict())
+    assert restored == receipt
+    assert restored.stage is ActivationStage.RUNTIME_RESTARTED
