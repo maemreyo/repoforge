@@ -10,7 +10,7 @@ from conftest import ForgeEnvironment
 from repoforge.adapters.persistence.json_worker_binding_store import JsonWorkerBindingStore
 from repoforge.adapters.subprocess.os_process_reaper import OsProcessReaper
 from repoforge.adapters.subprocess.process_tree import ProcessIdentity
-from repoforge.application.operations.recovery import recover_operations
+from repoforge.application.operations.recovery import reap_running_background, recover_operations
 from repoforge.application.workspace.run_adhoc import WorkspaceAdhocRunner
 from repoforge.domain.errors import RepoForgeError
 from repoforge.domain.operation_task import OperationState
@@ -264,3 +264,66 @@ def test_cross_process_cancel_returns_false_without_binding() -> None:
         {"worker_bindings": InMemoryWorkerBindingStore(), "reaper": RecordingProcessReaper()}
     )
     assert runner.request_live_cancel("op-0000000000000000000000dd") is False
+
+
+# ------------------------------------------------------------ #260 shutdown reap
+
+
+def test_reap_running_background_reaps_and_orphans(forge_env: ForgeEnvironment) -> None:
+    manager = forge_env.service.operations
+    running = manager.create(kind="workspace_run_adhoc", phase="running", cancel_supported=True)
+    manager.start(running.operation_id)
+
+    bindings = InMemoryWorkerBindingStore()
+    bindings.put(_binding(operation_id=running.operation_id, child_pid=44444))
+    reaper = RecordingProcessReaper()
+
+    count = reap_running_background(
+        manager,
+        now="2026-07-24T00:00:00+00:00",
+        reason="OPERATION_WORKER_LOST: reaped at runtime shutdown",
+        resumable_kinds=frozenset({"pr_check_watch"}),
+        worker_bindings=bindings,
+        reaper=reaper,
+    )
+
+    assert count == 1
+    orphaned = manager.status(running.operation_id)
+    assert orphaned.state is OperationState.ORPHANED
+    assert orphaned.error_message is not None
+    assert "runtime shutdown" in orphaned.error_message
+    assert [b.child_pid for b in reaper.reaped] == [44444]
+    assert bindings.get(running.operation_id) is None
+
+
+def test_reap_running_background_leaves_resumable_kind(forge_env: ForgeEnvironment) -> None:
+    manager = forge_env.service.operations
+    watch = manager.create(kind="pr_check_watch", phase="polling", cancel_supported=True)
+    manager.start(watch.operation_id)
+
+    count = reap_running_background(
+        manager,
+        now="2026-07-24T00:00:00+00:00",
+        reason="OPERATION_WORKER_LOST: reaped at runtime shutdown",
+        resumable_kinds=frozenset({"pr_check_watch"}),
+        worker_bindings=InMemoryWorkerBindingStore(),
+        reaper=RecordingProcessReaper(),
+    )
+
+    assert count == 0
+    assert manager.status(watch.operation_id).state is OperationState.RUNNING
+
+
+def test_service_reap_background_workers(forge_env: ForgeEnvironment) -> None:
+    service = forge_env.service
+    manager = service.operations
+    running = manager.create(kind="workspace_run_adhoc", phase="running", cancel_supported=True)
+    manager.start(running.operation_id)
+    service.application.context.worker_bindings.put(
+        _binding(operation_id=running.operation_id, child_pid=33333)
+    )
+
+    # idempotent: second call is a no-op (already terminal)
+    assert service.reap_background_workers(reason="runtime shutdown") == 1
+    assert service.reap_background_workers(reason="runtime shutdown") == 0
+    assert manager.status(running.operation_id).state is OperationState.ORPHANED
