@@ -116,6 +116,7 @@ from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
+from ...domain.user_paths import default_release_root, resolve_release_root
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
 from ...ports.activation import SupervisorKickstarter
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
@@ -1522,12 +1523,14 @@ def _version_command(args: argparse.Namespace) -> int:
 def _manages_path_launcher(args: argparse.Namespace) -> bool:
     """Only the default release root may rewrite the user's PATH launcher.
 
-    A ``--release-root`` override is used for experiments, so it must never mutate
-    ``~/.local/bin/rf``; ``--no-path-shim`` opts out even for the default root.
+    Decided from the *resolved* root, not from whether the CLI flag was passed:
+    ``REPOFORGE_RELEASE_ROOT`` overrides the root too, so a flag-only check let a
+    temporary root rewrite the real ``~/.local/bin/rf`` while claiming otherwise.
+    ``--no-path-shim`` opts out even for the default root.
     """
     if getattr(args, "no_path_shim", False):
         return False
-    return getattr(args, "release_root", None) is None
+    return resolve_release_root(getattr(args, "release_root", None)) == default_release_root()
 
 
 def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:

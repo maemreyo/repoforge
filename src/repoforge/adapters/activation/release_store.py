@@ -275,9 +275,9 @@ class RuntimeReleaseStore:
 
     @staticmethod
     def default_release_root() -> Path:
-        from ...domain.user_paths import resolve_release_root
+        from ...domain.user_paths import default_release_root
 
-        return resolve_release_root(None)
+        return default_release_root()
 
     def supervisor_launcher(self) -> Path:
         """The shim an OS process manager runs to *become* the supervisor worker."""
