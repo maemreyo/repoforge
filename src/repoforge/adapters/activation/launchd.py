@@ -19,8 +19,10 @@ from ...domain.errors import ConfigError
 from ...ports.activation import RestartOutcome
 from ...ports.process_supervisor import RegistrarResult, RegistrarStatus
 
-DEFAULT_LABEL = "dev.repoforge.supervisor"
-"""Label for the DEFAULT release root only; other roots must namespace their own."""
+# The label is NOT defined here. It is supplied by the caller from the release store,
+# which namespaces it per release root (``SUPERVISOR_AGENT_LABEL`` in domain.activation is
+# the single base). A module-level default here would be a second source of truth that
+# could drift from the production wiring while this module's own tests stayed green.
 
 
 @dataclass(frozen=True, slots=True)

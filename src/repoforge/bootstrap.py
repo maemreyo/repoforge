@@ -147,6 +147,7 @@ from .application.workflow import (
 )
 from .application.workspace.pr_watch import PrCheckWatchCoordinator
 from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
+from .domain.activation import AGENT_SECRET_FILE_ENV_VAR, AGENT_SECRET_KEY
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
 from .ports import (
@@ -825,6 +826,36 @@ def _load_dotenv_if_present(path: Path) -> None:
         os.environ[key] = value
 
 
+def _agent_secret_from_file() -> dict[str, str]:
+    """Read the durable agent credential when the supervisor shim pointed us at one.
+
+    The launchd shim deliberately does NOT source the file -- sourcing would execute its
+    contents as shell -- so it passes only the path and the credential is opened here, on
+    the process that needs it. Every security invariant (regular file, owner, mode 0600,
+    exactly one allowlisted key, non-empty value) is re-proven on this start, on the same
+    file descriptor the bytes are read from. A file that was safe when
+    ``rf runtime install-agent`` ran but has since been chmodded or replaced by a symlink
+    is refused here, at the trust boundary, however many months later that boot happens.
+
+    An explicit ``CONTROL_PLANE_API_KEY`` in the environment wins, so this only runs when
+    the process has no inherited credential -- which is always the case under launchd.
+    """
+    from .adapters.activation.release_store import inspect_agent_secret
+
+    raw_path = os.environ.get(AGENT_SECRET_FILE_ENV_VAR, "")
+    if not raw_path:
+        return {}
+    path = Path(raw_path).expanduser()
+    status, secret = inspect_agent_secret(path)
+    if not status.usable:
+        raise ConfigError(
+            f"AGENT_SECRET_UNUSABLE: {AGENT_SECRET_FILE_ENV_VAR} points at {path}, which "
+            "cannot be trusted (" + "; ".join(status.problems()) + "); re-run "
+            "`rf runtime install-agent --persist-api-key` to restore it."
+        )
+    return {AGENT_SECRET_KEY: secret}
+
+
 def run_runtime_worker(
     config_path: Path,
     *,
@@ -898,13 +929,15 @@ def run_runtime_worker(
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "NO_PROXY",
-        "CONTROL_PLANE_API_KEY",
+        AGENT_SECRET_KEY,
     )
     environment = {key: os.environ[key] for key in inherited_keys if key in os.environ}
     environment["REPOFORGE_TUNNEL_ID"] = tunnel_id
     environment["REPOFORGE_TUNNEL_PROFILE"] = profile_name
-    if not environment.get("CONTROL_PLANE_API_KEY"):
-        raise ConfigError("CONTROL_PLANE_API_KEY is required for managed runtime startup")
+    if not environment.get(AGENT_SECRET_KEY):
+        environment.update(_agent_secret_from_file())
+    if not environment.get(AGENT_SECRET_KEY):
+        raise ConfigError(f"{AGENT_SECRET_KEY} is required for managed runtime startup")
     root = configs.root
     supervisor = RuntimeSupervisor(
         store=build_runtime_store(root / "managed-runtime-v3.json"),

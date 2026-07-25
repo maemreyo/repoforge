@@ -129,5 +129,66 @@ def test_agent_status_reports_metadata_but_never_the_secret(
     payload = json.loads(out)
     assert payload["durable_secret_usable"] is True
     assert payload["agent_env_keys"] == ["CONTROL_PLANE_API_KEY"]
+    assert payload["agent_env_expected_key"] == "CONTROL_PLANE_API_KEY"
     assert payload["durable_secret_checks"]["mode_secure"] is True
     assert _SECRET not in out
+
+
+def test_agent_status_never_echoes_file_content_as_a_key_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-7 finding 5: "names only" is only safe if the names are allowlisted.
+
+    A corrupt or hand-edited file must not be able to turn arbitrary text -- possibly the
+    secret itself -- into a printed "key name".
+    """
+    root = tmp_path / "release-root"
+    root.mkdir()
+    store = RuntimeReleaseStore(root)
+    env_path = store.agent_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("actual-sensitive-text=value\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    _stub_launchctl(monkeypatch, tmp_path)
+
+    main(["runtime", "agent-status", "--release-root", str(root)])
+
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert "actual-sensitive-text" not in out
+    assert payload["agent_env_keys"] == []
+    assert payload["agent_env_expected_key"] == "CONTROL_PLANE_API_KEY"
+    assert payload["durable_secret_checks"]["parse_valid"] is False
+    assert payload["durable_secret_usable"] is False
+
+
+def test_install_agent_refuses_a_secret_file_that_only_a_shell_would_accept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-7 finding 1: the preflight grammar must be the runtime's grammar.
+
+    ``CONTROL_PLANE_API_KEY=''; touch marker`` parses as "an assignment" to a loose reader
+    and was reported usable, while a shell would have exported an EMPTY key and run the
+    trailing command at every boot.
+    """
+    root = tmp_path / "release-root"
+    root.mkdir()
+    _usable_release(root)
+    store = RuntimeReleaseStore(root)
+    env_path = store.agent_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    marker = tmp_path / "marker"
+    env_path.write_text(f"CONTROL_PLANE_API_KEY=''; touch '{marker}'\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.delenv("CONTROL_PLANE_API_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _stub_launchctl(monkeypatch, tmp_path)
+
+    assert _install_agent(root) != 0
+
+    assert "AGENT_SECRET_UNUSABLE" in capsys.readouterr().out
+    assert not marker.exists()
+    assert not (tmp_path / "home" / "Library" / "LaunchAgents").exists()

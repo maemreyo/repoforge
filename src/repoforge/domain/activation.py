@@ -18,6 +18,28 @@ _RECEIPT_ID = re.compile(r"^act-[0-9]{8}-[0-9]{3,}$")
 
 ACTIVATION_RECEIPT_SCHEMA_VERSION = 2
 
+SUPERVISOR_AGENT_LABEL = "dev.repoforge.supervisor"
+"""Base launchd label for the supervisor; the DEFAULT release root uses it verbatim.
+
+Defined here, once, because two adapters agree on it (the release store namespaces it
+per root, the launchd adapter registers it). Two module-level copies could drift while
+each module's own unit tests stayed green.
+"""
+
+AGENT_SECRET_KEY = "CONTROL_PLANE_API_KEY"
+"""The ONLY environment key the durable agent credential file may carry.
+
+An allowlist of exactly one name is what makes ``agent-status`` safe to print: it
+reports a name from this contract, never a name parsed out of file content.
+"""
+
+AGENT_SECRET_FILE_ENV_VAR = "REPOFORGE_AGENT_SECRET_FILE"
+"""How the supervisor shim hands the credential file to the worker: a PATH, not a value.
+
+The shim passes the path and the worker opens it, so the credential file is read as data
+by exactly one validator instead of being evaluated as shell by ``.``/``source``.
+"""
+
 
 def _clean(value: str, *, name: str, limit: int = 1024) -> str:
     if not value or len(value) > limit or any(ord(char) < 32 for char in value):

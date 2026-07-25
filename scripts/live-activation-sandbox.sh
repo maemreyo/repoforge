@@ -105,6 +105,11 @@ snapshot_real_home() {
 REAL_HOME_BEFORE="$(snapshot_real_home)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/rf-live-activation.XXXXXX")"
 cleanup() {
+  # The verdict of the RUN, captured before cleanup can overwrite it: in an EXIT trap the
+  # status of the trap's last command becomes the script's exit status, so a cleanup
+  # hiccup used to turn a fully passing gate into a red one (observed: `rm -rf` racing the
+  # supervisor still writing into the sandbox -> "Directory not empty" -> exit 1).
+  local status=$?
   # Always stop anything the sandbox started before removing its state.
   if [[ -f "$SANDBOX/state/supervisor.pid" ]]; then
     pkill -g "$(cat "$SANDBOX/state/supervisor.pid")" 2>/dev/null || true
@@ -113,8 +118,18 @@ cleanup() {
   if [[ "$KEEP" == "1" ]]; then
     echo "sandbox kept at $SANDBOX"
   else
-    rm -rf "$SANDBOX"
+    # Give the processes just signalled a moment to stop writing, then remove. Removal is
+    # housekeeping: it must never decide whether this gate passed.
+    local attempt
+    for attempt in 1 2 3; do
+      rm -rf "$SANDBOX" 2>/dev/null && break
+      sleep 1
+    done
+    if [[ -e "$SANDBOX" ]]; then
+      printf 'note: could not fully remove %s (leftover sandbox)\n' "$SANDBOX" >&2
+    fi
   fi
+  exit "$status"
 }
 trap cleanup EXIT INT TERM
 
@@ -355,6 +370,17 @@ set +e
 STATUS3_EXIT=$?
 set -e
 
+say "The sandbox must not have provisioned a PATH launcher ANYWHERE"
+# The real-home snapshot alone cannot prove this: HOME is redirected, so a regression that
+# provisions `~/.local/bin/rf` from a non-default release root would write into the SANDBOX
+# home and leave every other assertion green -- which is exactly how the resolved-root bug
+# survived the previous live run. Assert the sandbox home too.
+if [[ -e "$SANDBOX/home/.local/bin/rf" || -L "$SANDBOX/home/.local/bin/rf" ]]; then
+  fail "a PATH launcher was provisioned at \$SANDBOX/home/.local/bin/rf; a non-default \
+release root must never manage a PATH launcher"
+fi
+ok "no PATH launcher under the sandbox HOME"
+
 say "The operator's REAL installation must be untouched"
 if [[ "$(snapshot_real_home)" == "$REAL_HOME_BEFORE" ]]; then
   ok "real home unchanged (${ORIGINAL_HOME})"
@@ -396,6 +422,10 @@ def want(label, actual, expected):
 
 want("upgrade exit", upgrade_exit, "0")
 want("upgrade.status", upgrade.get("status"), "activated")
+# The sandbox uses a non-default release root, so the PATH launcher must be SKIPPED, not
+# merely written somewhere harmless. Asserting the reported decision is what turns the
+# resolved-root guard into a regression gate.
+want("upgrade.path_launcher_status", upgrade.get("path_launcher_status"), "skipped")
 want("upgrade.converged", upgrade.get("converged"), True)
 want("upgrade.active_sha", upgrade.get("active_sha"), head)
 want("upgrade.observed_sha", upgrade.get("observed_sha"), head)
@@ -409,6 +439,7 @@ want("status.incomplete_activation", status.get("incomplete_activation"), None)
 upgrade2, status2 = load(upgrade2_path), load(status2_path)
 want("second upgrade exit", upgrade2_exit, "0")
 want("upgrade2.status", upgrade2.get("status"), "activated")
+want("upgrade2.path_launcher_status", upgrade2.get("path_launcher_status"), "skipped")
 want("upgrade2.converged", upgrade2.get("converged"), True)
 want("upgrade2.active_sha", upgrade2.get("active_sha"), second)
 want("upgrade2.observed_sha", upgrade2.get("observed_sha"), second)

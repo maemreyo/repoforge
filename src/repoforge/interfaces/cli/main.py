@@ -98,6 +98,7 @@ from ...bootstrap import (
     write_runtime_state,
 )
 from ...config import DEFAULT_CONFIG_PATH, load_config
+from ...domain.activation import AGENT_SECRET_KEY
 from ...domain.config_generation import (
     ApprovalEvent,
     CapabilityDeltaKind,
@@ -1646,14 +1647,14 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
         # in the operator's terminal disappears at logout. Persist it to the owner-only
         # agent env file when asked, then refuse to install an agent that cannot start.
         if args.persist_api_key:
-            api_key = os.environ.get("CONTROL_PLANE_API_KEY", "")
+            api_key = os.environ.get(AGENT_SECRET_KEY, "")
             if not api_key:
                 raise ConfigError(
                     "CONTROL_PLANE_API_KEY_ABSENT: --persist-api-key reads the value from "
                     "the CONTROL_PLANE_API_KEY environment variable so it never appears "
                     "in argv or shell history; export it and re-run."
                 )
-            store.write_agent_env({"CONTROL_PLANE_API_KEY": api_key})
+            store.write_agent_env({AGENT_SECRET_KEY: api_key})
         secret = store.agent_secret_status()
         if not secret.usable:
             # A stable logical label, not an absolute path: the message is not redacted,
@@ -1694,7 +1695,11 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
             "loaded": status.loaded,
             "unit_path": status.unit_path,
             "agent_env_path": str(store.agent_env_path()),
-            # Names and booleans only: a status command must never echo a secret value.
+            # Booleans and ALLOWLISTED names only. `keys` can never contain anything but
+            # the canonical key: the parser accepts exactly one key name, so a corrupt or
+            # hand-edited file yields `parse_valid: false` and an empty list rather than
+            # echoing arbitrary file content back as a "key name".
+            "agent_env_expected_key": AGENT_SECRET_KEY,
             "agent_env_keys": list(secret.keys),
             "durable_secret_usable": secret.usable,
             "durable_secret_checks": {

@@ -334,27 +334,20 @@ def test_a_stale_shim_target_is_rewritten_even_though_the_marker_matches(
 # ------------------------- durable agent secret (round-5 finding 3)
 
 
-def test_agent_env_is_owner_only_and_sourceable(tmp_path: Path) -> None:
+def test_agent_env_is_owner_only_and_round_trips_the_exact_value(tmp_path: Path) -> None:
     """launchd has no shell environment, so the secret must live in an owner-only file."""
     store = RuntimeReleaseStore(tmp_path)
     path = store.write_agent_env({"CONTROL_PLANE_API_KEY": "s3cret-with-'quote"})
 
     assert path == store.agent_env_path()
     assert oct(path.stat().st_mode & 0o777) == "0o600"
-    # Only names/booleans are exposed; the value is never returned.
+    # A DATA format, not a shell fragment: one line, no `export`, no quoting.
+    assert path.read_text(encoding="utf-8") == "CONTROL_PLANE_API_KEY=s3cret-with-'quote\n"
+    # Only names/booleans are exposed by the status; the value comes from the loader.
     status = store.agent_secret_status()
     assert status.usable is True
     assert status.keys == ("CONTROL_PLANE_API_KEY",)
-    # `sh -c '. file; echo $VAR'` must recover the exact value, quotes included.
-    import subprocess
-
-    out = subprocess.run(
-        ["/bin/sh", "-c", f'. "{path}"; printf "%s" "$CONTROL_PLANE_API_KEY"'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert out.stdout == "s3cret-with-'quote"
+    assert store.load_agent_secret() == "s3cret-with-'quote"
 
 
 def test_agent_env_rejects_a_multiline_value(tmp_path: Path) -> None:
@@ -363,12 +356,91 @@ def test_agent_env_rejects_a_multiline_value(tmp_path: Path) -> None:
         store.write_agent_env({"CONTROL_PLANE_API_KEY": "line1\nline2"})
 
 
-def test_the_supervisor_shim_sources_the_durable_secret(tmp_path: Path) -> None:
+def test_agent_env_refuses_keys_outside_the_allowlist(tmp_path: Path) -> None:
+    """`agent-status` prints key names, so only the canonical key may ever be stored."""
+    store = RuntimeReleaseStore(tmp_path)
+    with pytest.raises(ConfigError, match="AGENT_ENV_KEY_UNSUPPORTED"):
+        store.write_agent_env({"CONTROL_PLANE_API_KEY": "s3cret", "SOMETHING_ELSE": "x"})
+
+
+def test_the_supervisor_shim_passes_the_secret_PATH_and_never_sources_it(tmp_path: Path) -> None:
+    """Round-7 finding 1: a sourced credential file is executable code.
+
+    The validator parses the file as data, so the runtime must consume it the same way. If
+    the shim sourced it, a line like ``CONTROL_PLANE_API_KEY=''; touch /tmp/marker`` would
+    pass preflight (it parses as an assignment) and then run an arbitrary command with an
+    empty credential at every boot.
+    """
     store = RuntimeReleaseStore(tmp_path)
     script = store.write_supervisor_shim().read_text(encoding="utf-8")
-    assert "runtime/agent.env" in script
-    # Sourced BEFORE exec, so the worker inherits it.
-    assert script.index("agent.env") < script.index("exec env")
+
+    assert 'REPOFORGE_AGENT_SECRET_FILE="$root/runtime/agent.env"' in script
+    # No shell evaluation of the credential file, in any spelling.
+    assert '. "$root/runtime/agent.env"' not in script
+    assert "source " not in script
+    for line in script.splitlines():
+        assert not line.strip().startswith(". "), f"the shim sources a file: {line!r}"
+
+
+def test_a_secret_file_carrying_shell_is_refused_rather_than_executed(tmp_path: Path) -> None:
+    """The exact probe from round 7: an assignment followed by a command."""
+    store = RuntimeReleaseStore(tmp_path)
+    path = store.agent_env_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "CONTROL_PLANE_API_KEY=''; touch /tmp/rf-should-never-exist\n", encoding="utf-8"
+    )
+    path.chmod(0o600)
+
+    status = store.agent_secret_status()
+
+    assert status.parse_valid is False
+    assert status.usable is False
+    with pytest.raises(ConfigError, match="AGENT_SECRET_UNUSABLE"):
+        store.load_agent_secret()
+
+
+def test_a_legacy_export_style_secret_file_is_refused(tmp_path: Path) -> None:
+    """`export KEY='v'` is shell, not the data grammar, so it is not silently accepted."""
+    store = RuntimeReleaseStore(tmp_path)
+    path = store.agent_env_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("export CONTROL_PLANE_API_KEY='s3cret'\n", encoding="utf-8")
+    path.chmod(0o600)
+
+    status = store.agent_secret_status()
+
+    assert status.parse_valid is False
+    assert status.usable is False
+    # A name parsed out of the file must never be reported as a key.
+    assert status.keys == ()
+
+
+def test_extra_lines_and_foreign_keys_are_refused(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    path = store.agent_env_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for content in (
+        "CONTROL_PLANE_API_KEY=s3cret\nOTHER=1\n",
+        "OTHER=1\n",
+        # A hand-edited "key name" that is really sensitive text must never be echoed by
+        # `agent-status`, so it may not become a reported key.
+        "actual-sensitive-text=value\n",
+    ):
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+        status = store.agent_secret_status()
+        assert status.usable is False, content
+        assert status.keys == (), content
+
+    # A padded value is grammar-invalid, but the key IS the canonical one, so reporting it
+    # is safe (it comes from the allowlist, not from the file).
+    path.write_text("CONTROL_PLANE_API_KEY= s3cret\n", encoding="utf-8")
+    path.chmod(0o600)
+    status = store.agent_secret_status()
+    assert status.usable is False
+    assert status.parse_valid is False
+    assert status.keys == ("CONTROL_PLANE_API_KEY",)
 
 
 def test_the_secret_is_never_world_readable_even_transiently(tmp_path: Path) -> None:
@@ -413,7 +485,7 @@ def test_a_world_readable_secret_is_not_considered_usable(tmp_path: Path) -> Non
 def test_an_empty_secret_value_is_not_considered_usable(tmp_path: Path) -> None:
     store = RuntimeReleaseStore(tmp_path)
     store.agent_env_path().parent.mkdir(parents=True, exist_ok=True)
-    store.agent_env_path().write_text("export CONTROL_PLANE_API_KEY=''\n", encoding="utf-8")
+    store.agent_env_path().write_text("CONTROL_PLANE_API_KEY=\n", encoding="utf-8")
     store.agent_env_path().chmod(0o600)
 
     status = store.agent_secret_status()
@@ -427,7 +499,7 @@ def test_an_empty_secret_value_is_not_considered_usable(tmp_path: Path) -> None:
 def test_a_symlinked_secret_is_refused_without_following_it(tmp_path: Path) -> None:
     store = RuntimeReleaseStore(tmp_path)
     real = tmp_path / "elsewhere.env"
-    real.write_text("export CONTROL_PLANE_API_KEY='s3cret'\n", encoding="utf-8")
+    real.write_text("CONTROL_PLANE_API_KEY=s3cret\n", encoding="utf-8")
     real.chmod(0o600)
     store.agent_env_path().parent.mkdir(parents=True, exist_ok=True)
     store.agent_env_path().symlink_to(real)
@@ -437,6 +509,59 @@ def test_a_symlinked_secret_is_refused_without_following_it(tmp_path: Path) -> N
     assert status.regular_file is False
     assert status.usable is False
     assert any("symlink" in reason for reason in status.problems())
+    with pytest.raises(ConfigError, match="AGENT_SECRET_UNUSABLE"):
+        store.load_agent_secret()
+
+
+def test_security_invariants_are_re_proven_at_every_load_not_just_at_install(
+    tmp_path: Path,
+) -> None:
+    """Round-7 finding 2: `install-agent` preflight is a past observation, not an invariant.
+
+    launchd may start the agent months after installation, so a file that was 0600 then and
+    0644 now must be refused at THAT start -- by the loader, on the descriptor it reads.
+    """
+    store = RuntimeReleaseStore(tmp_path)
+    store.write_agent_env({"CONTROL_PLANE_API_KEY": "s3cret"})
+    assert store.load_agent_secret() == "s3cret"
+
+    store.agent_env_path().chmod(0o644)
+    with pytest.raises(ConfigError, match="0600"):
+        store.load_agent_secret()
+
+    # ... and the same for a file replaced by a symlink after installation.
+    store.agent_env_path().unlink()
+    elsewhere = tmp_path / "attacker.env"
+    elsewhere.write_text("CONTROL_PLANE_API_KEY=stolen\n", encoding="utf-8")
+    elsewhere.chmod(0o600)
+    store.agent_env_path().symlink_to(elsewhere)
+    with pytest.raises(ConfigError, match="symlink"):
+        store.load_agent_secret()
+
+
+def test_the_secret_write_is_durable_through_a_parent_directory_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-7 finding 6: without an fsync of the parent, the rename may not be durable.
+
+    A command that reports a persisted credential and then loses it to a power cut is worse
+    than one that refuses, so the directory entry is flushed too.
+    """
+    import repoforge.adapters.filesystem.atomic as atomic_module
+
+    fsynced: list[Path] = []
+    original = atomic_module.fsync_dir
+
+    def _record(path: Path) -> None:
+        fsynced.append(path)
+        original(path)
+
+    monkeypatch.setattr(atomic_module, "fsync_dir", _record)
+
+    store = RuntimeReleaseStore(tmp_path)
+    path = store.write_agent_env({"CONTROL_PLANE_API_KEY": "s3cret"})
+
+    assert path.parent in fsynced
 
 
 # ------------- launchd label isolation (found by a live run: a sandbox kickstarted

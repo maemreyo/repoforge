@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +22,67 @@ from repoforge.config import load_config
 from repoforge.domain.mutation_policy import MUTATION_OPS
 from repoforge.ports.clock import Clock
 from repoforge.testing import ScriptedCommandExecutor
+
+_REAL_HOME = Path(os.environ.get("HOME", "~")).expanduser()
+# Paths the operator's REAL installation owns. A unit test that writes any of these has
+# escaped its tmp_path, and the consequence is not hypothetical: an earlier revision that
+# provisioned the PATH launcher unconditionally left `~/.local/bin/rf` exec-ing a deleted
+# pytest tmpdir, which broke the `rf` command on a developer machine until it was repaired
+# by hand. Tests must redirect HOME (or grant an explicit path) instead.
+_PROTECTED_REAL_PATHS = (
+    _REAL_HOME / ".local" / "bin" / "rf",
+    _REAL_HOME / ".local" / "share" / "repoforge" / "bin",
+    _REAL_HOME / ".local" / "share" / "repoforge" / "current",
+    _REAL_HOME / ".local" / "share" / "repoforge" / "previous",
+    _REAL_HOME / ".local" / "share" / "repoforge" / "runtime",
+    _REAL_HOME / "Library" / "LaunchAgents" / "dev.repoforge.supervisor.plist",
+)
+
+
+def _describe_protected(path: Path) -> str:
+    """One protected path's observable state, including what a symlink RESOLVES to.
+
+    Recording only the link target would miss the most damaging case: ``~/.local/bin/rf``
+    is normally a symlink into a tool venv, so a test writing to that path writes THROUGH
+    the link and corrupts the real entry point while the link itself looks untouched.
+    """
+    try:
+        if path.is_symlink():
+            target = os.readlink(path)
+            return f"symlink:{target}->{_describe_protected(path.resolve())}"
+        if path.is_file():
+            info = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+            return f"file:{info.st_size}:{info.st_mode:o}:{digest}"
+        if path.is_dir():
+            return f"dir:{sorted(entry.name for entry in path.iterdir())}"
+    except OSError as exc:
+        return f"unreadable:{exc.errno}"
+    return "absent"
+
+
+def _protected_fingerprint() -> dict[str, str]:
+    """State of every protected path, cheap enough to sample around each test."""
+    return {str(path): _describe_protected(path) for path in _PROTECTED_REAL_PATHS}
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_installation() -> Iterator[None]:
+    """Fail the test that modified the developer's real RepoForge installation.
+
+    Deliberately autouse and unconditional: the failure mode is silent -- the test passes,
+    and the damage only surfaces later when `rf` no longer runs -- so the only useful place
+    to catch it is the moment it happens.
+    """
+    before = _protected_fingerprint()
+    yield
+    after = _protected_fingerprint()
+    changed = [key for key, value in after.items() if before.get(key) != value]
+    assert not changed, (
+        "this test modified the operator's REAL installation: "
+        + ", ".join(f"{key} ({before.get(key)} -> {after[key]})" for key in changed)
+        + ". Redirect HOME to tmp_path, or pass an explicit path inside tmp_path."
+    )
 
 
 def git(*args: str, cwd: Path) -> str:

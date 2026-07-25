@@ -6,17 +6,17 @@ from pathlib import Path
 import pytest
 
 from repoforge.adapters.activation.launchd import (
-    DEFAULT_LABEL,
     LaunchAgentSpec,
     LaunchdRegistrar,
     render_launch_agent,
 )
+from repoforge.domain.activation import SUPERVISOR_AGENT_LABEL
 from repoforge.domain.errors import ConfigError
 
 
 def _spec(tmp_path: Path) -> LaunchAgentSpec:
     return LaunchAgentSpec(
-        label=DEFAULT_LABEL,
+        label=SUPERVISOR_AGENT_LABEL,
         launcher_path=tmp_path / "bin" / "rf",
         config_path=tmp_path / "config.toml",
         stdout_path=tmp_path / "logs" / "out.log",
@@ -33,7 +33,7 @@ def test_render_launch_agent_execs_the_supervisor_directly(tmp_path: Path) -> No
     put a CLI wrapper in between.
     """
     payload = plistlib.loads(render_launch_agent(_spec(tmp_path)))
-    assert payload["Label"] == DEFAULT_LABEL
+    assert payload["Label"] == SUPERVISOR_AGENT_LABEL
     assert payload["ProgramArguments"] == [
         str(tmp_path / "bin" / "rf"),
         "--config",
@@ -58,7 +58,7 @@ def test_install_writes_the_plist_and_bootstraps_the_domain(tmp_path: Path) -> N
     )
     result = registrar.install()
 
-    plist = agents_dir / f"{DEFAULT_LABEL}.plist"
+    plist = agents_dir / f"{SUPERVISOR_AGENT_LABEL}.plist"
     assert plist.is_file()
     assert result.status == "installed"
     # Prior registration is booted out before bootstrapping the new plist.

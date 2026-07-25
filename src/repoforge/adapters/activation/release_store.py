@@ -16,6 +16,7 @@ POSIX. We never use ``ln -sf`` (unlink + symlink), which leaves a window with no
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -23,8 +24,15 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...domain.activation import ActivationReceipt, ReleaseManifest
+from ...domain.activation import (
+    AGENT_SECRET_FILE_ENV_VAR,
+    AGENT_SECRET_KEY,
+    SUPERVISOR_AGENT_LABEL,
+    ActivationReceipt,
+    ReleaseManifest,
+)
 from ...domain.errors import ConfigError
+from ..filesystem.atomic import atomic_write_bytes, atomic_write_text
 
 _RELEASES = "releases"
 _CURRENT = "current"
@@ -34,7 +42,11 @@ _VENV_BIN = "venv/bin/rf"
 _VENV_PYTHON = "venv/bin/python"
 _WORKER_MODULE = "repoforge.interfaces.runtime.worker"
 _PATH_BIN_DIR = "~/.local/bin"
-_DEFAULT_AGENT_LABEL = "dev.repoforge.supervisor"
+_DEFAULT_AGENT_LABEL = SUPERVISOR_AGENT_LABEL
+_AGENT_SECRET_ENV_VAR = AGENT_SECRET_FILE_ENV_VAR
+# A credential file is one short line. A cap keeps a hostile or corrupt file from being
+# read into memory, and any file over it is grammar-invalid by definition.
+_AGENT_SECRET_MAX_BYTES = 8192
 
 
 def _receipt_sort_key(receipt_id: str) -> tuple[int, int, str]:
@@ -52,7 +64,7 @@ def _receipt_sort_key(receipt_id: str) -> tuple[int, int, str]:
         return (0, 0, receipt_id)
 
 
-_AGENT_SECRET_KEY = "CONTROL_PLANE_API_KEY"
+_AGENT_SECRET_KEY = AGENT_SECRET_KEY
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +100,7 @@ class AgentSecretStatus:
             return ("no durable secret file exists",)
         reasons = []
         if not self.regular_file:
-            reasons.append("the path is not a regular file (a symlink is never followed)")
+            reasons.append("the path is not a readable regular file (a symlink is never followed)")
         if not self.owner_matches:
             reasons.append("the file is owned by another user")
         if not self.mode_secure:
@@ -98,28 +110,117 @@ class AgentSecretStatus:
         elif not self.value_nonempty:
             reasons.append(f"{_AGENT_SECRET_KEY} is empty")
         if not self.parse_valid:
-            reasons.append("the file contains lines that are not `export KEY=VALUE`")
+            reasons.append(
+                f"the file is not exactly one `{_AGENT_SECRET_KEY}=<value>` line "
+                "(it is read as data, never evaluated as shell)"
+            )
         return tuple(reasons)
 
 
-def _write_private_file(path: Path, text: str) -> None:
-    """Atomically write owner-only content, never widening permissions even briefly.
+def inspect_agent_secret(path: Path) -> tuple[AgentSecretStatus, str]:
+    """Validate and parse the credential file, returning its status and value.
 
-    ``Path.write_text`` creates with ``0666 & ~umask`` (commonly 0644), so a secret would
-    be world-readable between creation and ``chmod`` -- and would STAY 0644 if the process
-    died in between. Creating with the final mode closes both windows.
+    Every check runs against ONE file descriptor obtained with ``O_NOFOLLOW``, and the
+    bytes are read from that same descriptor: a file swapped between the check and the
+    read cannot be the file we validated. This is the *only* reader of the credential
+    file, so the grammar the validator enforces is exactly the grammar the runtime
+    consumes -- the two contracts cannot diverge.
+
+    The grammar is deliberately a data format, not a shell fragment: exactly one
+    ``CONTROL_PLANE_API_KEY=<value>`` line, with no quoting, substitution, or extra
+    statements. Nothing here evaluates the content.
     """
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    tmp.unlink(missing_ok=True)
-    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return AgentSecretStatus(), ""
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            # O_NOFOLLOW refused a symlink. It exists, and we will not follow it.
+            return AgentSecretStatus(exists=True, regular_file=False), ""
+        return AgentSecretStatus(exists=True), ""
+    try:
+        info = os.fstat(descriptor)
+        owned = info.st_uid == os.getuid()
+        if not stat.S_ISREG(info.st_mode):
+            return AgentSecretStatus(exists=True, regular_file=False, owner_matches=owned), ""
+        secure_mode = stat.S_IMODE(info.st_mode) == 0o600
+        raw = _read_all(descriptor, limit=_AGENT_SECRET_MAX_BYTES + 1)
+    except OSError:
+        return AgentSecretStatus(exists=True, regular_file=True), ""
     finally:
-        tmp.unlink(missing_ok=True)
+        os.close(descriptor)
+    key_present, secret, parse_valid = _parse_agent_secret(raw)
+    return (
+        AgentSecretStatus(
+            exists=True,
+            regular_file=True,
+            owner_matches=owned,
+            mode_secure=secure_mode,
+            key_present=key_present,
+            value_nonempty=bool(secret),
+            parse_valid=parse_valid,
+            # A name from the allowlist contract, never a name parsed out of the file:
+            # `agent-status` prints this, so arbitrary file content must never reach it.
+            keys=(_AGENT_SECRET_KEY,) if key_present else (),
+        ),
+        secret,
+    )
+
+
+def _read_all(descriptor: int, *, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        chunk = os.read(descriptor, min(65536, limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _parse_agent_secret(raw: bytes) -> tuple[bool, str, bool]:
+    """Parse the one-line data grammar. Returns ``(key_present, value, parse_valid)``.
+
+    ``parse_valid`` is False for anything the grammar does not accept: extra lines, an
+    extra or foreign key, a quoted or padded value, or non-UTF-8 bytes. An empty value is
+    grammatically fine but not usable, and is reported that way so the operator gets
+    "the key is empty" rather than "the file is malformed".
+    """
+    if len(raw) > _AGENT_SECRET_MAX_BYTES:
+        return False, "", False
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False, "", False
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        # Exactly one trailing newline is the canonical form this store writes.
+        lines.pop()
+    if len(lines) != 1:
+        return False, "", False
+    name, separator, value = lines[0].partition("=")
+    if not separator or name != _AGENT_SECRET_KEY:
+        return False, "", False
+    if not value:
+        return True, "", True
+    # No quote stripping and no whitespace trimming: the value is taken verbatim, so what
+    # the validator approves is byte-for-byte what the worker exports.
+    if not _valid_secret_value(value):
+        return True, "", False
+    return True, value, True
+
+
+def _valid_secret_value(value: str) -> bool:
+    """A credential is one printable, whitespace-free token.
+
+    Refusing whitespace is defence in depth rather than the primary protection (nothing
+    evaluates this file any more): it also rejects shell-shaped content such as
+    ``''; touch /tmp/x``, so a file hand-edited into a command sequence is reported as
+    malformed instead of being carried anywhere as a "credential".
+    """
+    return bool(value) and value.isprintable() and not any(char.isspace() for char in value)
 
 
 class ReceiptExistsError(ConfigError):
@@ -192,28 +293,44 @@ class RuntimeReleaseStore:
         return Path(_PATH_BIN_DIR).expanduser() / "rf"
 
     def agent_env_path(self) -> Path:
-        """A ``0600`` env file the OS-resident supervisor sources before exec.
+        """A ``0600`` DATA file the OS-resident supervisor reads before it starts.
 
         launchd starts jobs with no shell environment, so a secret exported in the
         operator's terminal is simply absent after logout or reboot. Putting it in the
         plist would leave it in a world-readable property list, so the durable source is
-        an owner-only file the supervisor shim sources instead.
+        an owner-only file.
+
+        The file is never sourced by a shell. It holds exactly one
+        ``CONTROL_PLANE_API_KEY=<value>`` line and is parsed as data by
+        :func:`inspect_agent_secret` -- sourcing it would make every byte of a credential
+        file executable code, so a preflight that merely *parsed* it would be validating a
+        different contract from the one the runtime actually honours.
         """
         return self._root / "runtime" / "agent.env"
 
     def write_agent_env(self, values: dict[str, str]) -> Path:
-        """Persist agent environment values, owner-only from the first byte written."""
+        """Persist agent credentials, owner-only from the first byte and durable.
+
+        Only the allowlisted key is accepted, and the value is written verbatim: the
+        format carries no quoting, so there is nothing for a reader to unquote and nothing
+        an operator can smuggle in that would change how it is interpreted.
+        """
         path = self.agent_env_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lines = []
-        for key in sorted(values):
-            value = values[key]
-            if not value or any(character in value for character in "\n\r"):
-                raise ConfigError(f"AGENT_ENV_VALUE_INVALID: {key} must be a single line")
-            # Single-quoted with embedded quotes escaped, so `.` (source) is safe.
-            escaped = value.replace("'", "'\"'\"'")
-            lines.append(f"export {key}='{escaped}'")
-        _write_private_file(path, "\n".join(lines) + "\n")
+        unsupported = sorted(set(values) - {_AGENT_SECRET_KEY})
+        if unsupported:
+            raise ConfigError(
+                f"AGENT_ENV_KEY_UNSUPPORTED: the agent credential file carries only "
+                f"{_AGENT_SECRET_KEY}; refusing {', '.join(unsupported)}"
+            )
+        if _AGENT_SECRET_KEY not in values:
+            raise ConfigError(f"AGENT_ENV_KEY_MISSING: {_AGENT_SECRET_KEY} is required")
+        value = values[_AGENT_SECRET_KEY]
+        if not _valid_secret_value(value):
+            raise ConfigError(
+                f"AGENT_ENV_VALUE_INVALID: {_AGENT_SECRET_KEY} must be a single "
+                "non-empty printable token containing no whitespace"
+            )
+        atomic_write_text(path, f"{_AGENT_SECRET_KEY}={value}\n", mode=0o600)
         return path
 
     def agent_secret_status(self) -> AgentSecretStatus:
@@ -224,39 +341,25 @@ class RuntimeReleaseStore:
         somewhere else, another user's file, or an empty value all satisfy a name check
         while still being unsafe or guaranteed to fail at boot.
         """
+        status, _ = inspect_agent_secret(self.agent_env_path())
+        return status
+
+    def load_agent_secret(self) -> str:
+        """Return the credential, re-proving every security invariant right now.
+
+        Called on each process start, so ``0600``/owner/regular-file/grammar are invariants
+        at the trust boundary rather than metadata from whenever ``install-agent`` last
+        ran. A file chmodded to 0644 or replaced by a symlink months after installation is
+        refused at the next boot instead of being trusted forever.
+        """
         path = self.agent_env_path()
-        try:
-            info = path.lstat()
-        except OSError:
-            return AgentSecretStatus()
-        regular = stat.S_ISREG(info.st_mode)
-        secure_mode = stat.S_IMODE(info.st_mode) == 0o600
-        owned = info.st_uid == os.getuid()
-        if not regular:
-            # A symlink (or anything else) is refused outright: we will not follow it.
-            return AgentSecretStatus(exists=True, regular_file=False, owner_matches=owned)
-        parsed: dict[str, str] = {}
-        parse_valid = True
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if not stripped.startswith("export ") or "=" not in stripped:
-                parse_valid = False
-                continue
-            name, _, raw = stripped[len("export ") :].partition("=")
-            parsed[name.strip()] = raw.strip().strip("'\"")
-        secret = parsed.get(_AGENT_SECRET_KEY, "")
-        return AgentSecretStatus(
-            exists=True,
-            regular_file=True,
-            owner_matches=owned,
-            mode_secure=secure_mode,
-            key_present=_AGENT_SECRET_KEY in parsed,
-            value_nonempty=bool(secret),
-            parse_valid=parse_valid,
-            keys=tuple(sorted(parsed)),
-        )
+        status, secret = inspect_agent_secret(path)
+        if not status.usable:
+            raise ConfigError(
+                "AGENT_SECRET_UNUSABLE: refusing to start with an untrusted credential "
+                f"file at {path} (" + "; ".join(status.problems()) + ")"
+            )
+        return secret
 
     def supervisor_agent_label(self) -> str:
         """The launchd label for THIS release root.
@@ -302,10 +405,12 @@ class RuntimeReleaseStore:
             'target="$(readlink "$root/current")" || exit 1\n'
             'sha="${target##*/}"\n'
             '[ -n "$sha" ] || { echo "no active release" >&2; exit 1; }\n'
-            "# launchd provides no shell environment, so the durable secret file is the\n"
-            "# only place an OS-resident supervisor can obtain its credentials.\n"
-            '[ -f "$root/runtime/agent.env" ] && . "$root/runtime/agent.env"\n'
-            'exec env REPOFORGE_RUNNING_RELEASE_SHA="$sha" \\\n'
+            "# launchd provides no shell environment, so the durable credential file is\n"
+            "# the only place an OS-resident supervisor can obtain its secret. The file is\n"
+            "# NOT sourced: sourcing it would execute whatever it contains, so the worker\n"
+            "# is handed the PATH and opens, re-validates and parses it as data instead.\n"
+            f'exec env {_AGENT_SECRET_ENV_VAR}="$root/runtime/agent.env" \\\n'
+            '  REPOFORGE_RUNNING_RELEASE_SHA="$sha" \\\n'
             f'  "$root/{_RELEASES}/$sha/{_VENV_PYTHON}" -m {_WORKER_MODULE} "$@"\n'
         )
         self._write_shim_script(shim, script, force=force)
@@ -665,17 +770,10 @@ def _classify_shim(path: Path) -> str:
 
 
 def _atomic_write_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    try:
-        with tmp.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True, indent=2) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        tmp.chmod(0o600)
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    data = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    # Release metadata lives in directories that are readable by design, so only the file
+    # mode is tightened here -- the durability rules are the shared writer's.
+    atomic_write_bytes(path, data, mode=0o600, dir_mode=0o755)
 
 
 def _read_json(path: Path) -> object | None:

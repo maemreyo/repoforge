@@ -17,6 +17,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from ...domain.activation import AGENT_SECRET_FILE_ENV_VAR
 from ...domain.errors import ConfigError
 from ...domain.runtime import RuntimeRecord
 from ..runtime.state_store import process_identity
@@ -43,6 +44,10 @@ _INHERITED = (
     "REPOFORGE_TUNNEL_PROFILE",
     "REPOFORGE_CONFIG",
     "REPOFORGE_RELEASE_ROOT",
+    # Under launchd there is no CONTROL_PLANE_API_KEY in the environment at all -- only
+    # the path to the durable credential file. Dropping it here would leave a supervisor
+    # restarted through this launcher with no credential and no way to obtain one.
+    AGENT_SECRET_FILE_ENV_VAR,
 )
 
 
