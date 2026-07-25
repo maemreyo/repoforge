@@ -21,6 +21,11 @@ from ...domain.errors import ConfigError
 from ...domain.runtime import RuntimeRecord
 from ..runtime.state_store import process_identity
 
+# The shim re-enters the CLI, which re-derives the runtime environment from *its own*
+# environment. Anything omitted here is silently lost across that hop -- a live sandbox
+# activation failed exactly this way, with the worker reporting
+# "Legacy configuration requires REPOFORGE_TUNNEL_ID" because the tunnel identity never
+# reached it. Keep this in sync with SubprocessRuntimeLauncher's allowlist.
 _INHERITED = (
     "HOME",
     "PATH",
@@ -31,6 +36,13 @@ _INHERITED = (
     "HTTP_PROXY",
     "NO_PROXY",
     "CONTROL_PLANE_API_KEY",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    # Runtime identity the worker needs when the accepted configuration is local-only.
+    "REPOFORGE_TUNNEL_ID",
+    "REPOFORGE_TUNNEL_PROFILE",
+    "REPOFORGE_CONFIG",
+    "REPOFORGE_RELEASE_ROOT",
 )
 
 
