@@ -155,3 +155,25 @@ def test_list_marks_current_and_previous(tmp_path: Path) -> None:
     assert releases[0]["commit_sha"] == "bbb2222"
     assert releases[0]["current"] is True
     assert releases[1]["previous"] is True
+
+
+def test_a_stopped_runtime_with_a_release_executable_is_not_converged(
+    tmp_path: Path,
+) -> None:
+    """Round-2 finding 6: a STOPPED record must never read as an active release."""
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
+    store.swap_current("aaa1111")
+
+    # A production STOPPED record still carries the release executable, but has no pid.
+    stopped = ObservedRuntime(
+        running_release_sha=None,
+        phase="stopped",
+        pid=None,
+        executable=str(store.release_path("aaa1111") / "venv" / "bin" / "python"),
+    )
+    status = build_version_status(store, RuntimeIdentityInputs(), stopped)
+
+    assert status["activation_converged"] is False
+    assert status["active_commit"] is None
+    assert "no runtime is running" in str(status["safe_next_action"])

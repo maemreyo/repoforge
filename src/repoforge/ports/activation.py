@@ -157,3 +157,16 @@ class ReleaseStore(Protocol):
     def read_receipt(self, receipt_id: str) -> ActivationReceipt | None: ...
     def list_receipts(self) -> list[ActivationReceipt]: ...
     def allocate_receipt_id(self, *, date_stamp: str) -> str: ...
+
+
+class SupervisorKickstarter(Protocol):
+    """Restart the supervisor through the OS process manager, keeping its ownership.
+
+    When the supervisor is registered with launchd, restarting it by spawning our own
+    detached process would move it *out* of launchd's control (a clean SHUTDOWN exit is
+    not relaunched under ``SuccessfulExit: False``). Kickstarting the registered job
+    instead keeps the OS as the owner across upgrades.
+    """
+
+    def available(self) -> bool: ...
+    def kickstart(self) -> RestartOutcome: ...

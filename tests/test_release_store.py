@@ -153,3 +153,81 @@ def test_reserve_release_refuses_to_overwrite_different_bits(tmp_path: Path) -> 
         store.reserve_release("aaa1111", build_fingerprint="d" * 64)
     # A fresh commit is claimable.
     assert store.reserve_release("bbb2222", build_fingerprint=_SHA_A) is True
+
+
+# ------------------------------------------- legacy receipts (round-2 finding 5)
+
+_LEGACY_ACTIVATED = {
+    # Exactly the shape written before the convergence fields existed.
+    "receipt_id": "act-20260724-001",
+    "from_sha": None,
+    "to_sha": "aaa1111",
+    "from_fingerprint": None,
+    "to_fingerprint": _SHA_A,
+    "tool_surface_hash": _SHA_B,
+    "rediscovery_required": False,
+    "outcome": "activated",
+    "activated_at": "2026-07-24T10:00:00+00:00",
+    "detail": "Activated; supervisor reloaded.",
+}
+
+
+def _write_raw_receipt(store: RuntimeReleaseStore, payload: dict[str, object]) -> None:
+    import json
+
+    path = store.root / "runtime" / "activation-receipts" / f"{payload['receipt_id']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_pre_convergence_receipt_is_still_readable(tmp_path: Path) -> None:
+    """A stored receipt must never become unreadable after an upgrade."""
+    store = RuntimeReleaseStore(tmp_path)
+    _write_raw_receipt(store, dict(_LEGACY_ACTIVATED))
+
+    receipt = store.read_receipt("act-20260724-001")
+
+    assert receipt is not None
+    # Readable, but explicitly NOT counted as verified.
+    assert receipt.stage is ActivationStage.LEGACY_UNKNOWN
+    assert receipt.converged is False
+    assert store.list_receipts()[0].receipt_id == "act-20260724-001"
+
+
+def test_a_corrupt_receipt_does_not_break_the_history_or_allocation(tmp_path: Path) -> None:
+    """One bad file must not take down version status or receipt allocation."""
+    store = RuntimeReleaseStore(tmp_path)
+    _write_raw_receipt(store, dict(_LEGACY_ACTIVATED))
+    bad = store.root / "runtime" / "activation-receipts" / "act-20260724-002.json"
+    bad.write_text("{not json", encoding="utf-8")
+
+    # History still lists the readable one.
+    assert [r.receipt_id for r in store.list_receipts()] == ["act-20260724-001"]
+    # Allocation still avoids BOTH ids on disk, including the unparseable one.
+    assert store.allocate_receipt_id(date_stamp="20260724") == "act-20260724-003"
+
+
+def test_launcher_shim_migrates_a_legacy_uv_tool_entry_point(tmp_path: Path) -> None:
+    """Round-2 finding 9.3: an existing uv-tool `rf` must be migrated, not skipped."""
+    store = RuntimeReleaseStore(tmp_path)
+    legacy = store.bin_launcher()
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        "#!/usr/bin/env python\nfrom repoforge.interfaces.cli.main import main\n",
+        encoding="utf-8",
+    )
+
+    written = store.write_launcher_shim()
+
+    assert legacy in written
+    assert "RepoForge stable launcher" in legacy.read_text(encoding="utf-8")
+
+
+def test_launcher_shim_refuses_to_clobber_an_unrecognized_file(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    occupied = store.bin_launcher()
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_text("some user script\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="LAUNCHER_PATH_OCCUPIED"):
+        store.write_launcher_shim()

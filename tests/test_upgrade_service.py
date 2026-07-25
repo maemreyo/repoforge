@@ -306,7 +306,11 @@ def test_reinstalling_the_same_commit_with_different_bits_is_refused(
 
 
 def test_receipts_are_immutable(tmp_path: Path) -> None:
-    from repoforge.domain.activation import ActivationOutcome, ActivationReceipt
+    from repoforge.domain.activation import (
+        ActivationOutcome,
+        ActivationReceipt,
+        ActivationStage,
+    )
 
     store = RuntimeReleaseStore(tmp_path / "release-root")
     receipt = ActivationReceipt(
@@ -318,6 +322,9 @@ def test_receipts_are_immutable(tmp_path: Path) -> None:
         rediscovery_required=False,
         outcome=ActivationOutcome.ROLLED_BACK,
         activated_at="2026-07-25T10:00:00+00:00",
+        stage=ActivationStage.HEALTH_VERIFIED,
+        observed_sha="aaa1111",
+        converged=True,
     )
     store.write_receipt(receipt)
     with pytest.raises(ConfigError, match="RECEIPT_EXISTS"):
@@ -381,6 +388,9 @@ def test_watch_auto_rolls_back_when_the_candidate_degrades(tmp_path: Path) -> No
         samples=[
             HealthSample(healthy=True, detail="ok at activation"),
             HealthSample(healthy=False, detail="crash-loop"),
+            # Rolling back to the known-good release recovers, so the rollback itself
+            # converges and may truthfully report success.
+            HealthSample(healthy=True, detail="previous release healthy"),
         ],
         head="2222bbb",
     )
@@ -429,6 +439,9 @@ def test_sustained_failure_crosses_the_threshold_and_rolls_back(tmp_path: Path) 
         samples=[
             HealthSample(healthy=True, detail="ok at activation"),
             HealthSample(healthy=False, detail="crash-loop"),
+            HealthSample(healthy=False, detail="crash-loop"),
+            HealthSample(healthy=False, detail="crash-loop"),
+            HealthSample(healthy=True, detail="previous release healthy"),
         ],
         head="2222bbb",
         threshold=3,
@@ -445,3 +458,97 @@ def test_watch_without_a_probe_is_a_no_op(tmp_path: Path) -> None:
     result = service.upgrade(tmp_path, activate=True, watch=True)
     assert result.status == "activated"
     assert store.current_sha() == "2222bbb"
+
+
+# ------------------------------------------ rollback fail-closed (round-2 finding 3)
+
+
+def test_rollback_that_does_not_converge_is_not_reported_as_rolled_back(
+    tmp_path: Path,
+) -> None:
+    """A symlink swap is not a rollback: an unconverged rollback must not claim success."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    activated = second.upgrade(tmp_path, activate=True)
+
+    # Now roll back with a restarter that fails: the runtime cannot adopt the target.
+    failing = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(ok=False),
+        # The runtime is still serving the candidate, so rolling back to 1111aaa can
+        # never be observed as converged.
+        observer=_Observer(store, pinned="2222bbb"),
+        clock=_Clock(),
+        converge_attempts=1,
+        converge_interval_seconds=0,
+    )
+    result = failing.rollback(activated.activation_receipt)
+
+    assert result.status == "rollback_failed"
+    assert result.converged is False
+    assert result.active_sha is None
+    receipt = store.read_receipt(result.activation_receipt or "")
+    assert receipt is not None
+    assert receipt.outcome.value == "rollback_failed"
+
+
+def test_rollback_validates_the_target_before_moving_current(tmp_path: Path) -> None:
+    """Round-2 finding 12: a receipt naming a pruned release must not move `current`."""
+    import shutil
+
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    activated = second.upgrade(tmp_path, activate=True)
+
+    # Destroy the rollback target's release directory.
+    shutil.rmtree(store.release_path("1111aaa"))
+
+    with pytest.raises(ConfigError, match="ROLLBACK_TARGET_UNUSABLE"):
+        second.rollback(activated.activation_receipt)
+    # `current` is untouched because validation happened first.
+    assert store.current_sha() == "2222bbb"
+
+
+def test_concurrent_activations_are_serialized_by_the_activation_lock(
+    tmp_path: Path,
+) -> None:
+    """Round-2 finding 8: the pipeline must hold one lock across swap/restart/receipt."""
+    calls: list[str] = []
+
+    class _Locks:
+        def lock(self, name, *, timeout_seconds=None, metadata=None):
+            from contextlib import contextmanager
+
+            @contextmanager
+            def _held():
+                calls.append(name)
+                yield
+
+            return _held()
+
+        def path_for(self, name):
+            return tmp_path / name
+
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+    service = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha=_CLEAN_SHA, clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(store),
+        clock=_Clock(),
+        converge_attempts=1,
+        converge_interval_seconds=0,
+        locks=_Locks(),
+    )
+    service.upgrade(tmp_path, activate=True)
+    # Exactly one lock acquisition wraps the whole activation (no nested re-entry).
+    assert calls == ["runtime-activation"]

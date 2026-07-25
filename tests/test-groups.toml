@@ -187,6 +187,7 @@ source_globs = [
 ]
 test_files = [
   "tests/test_activation_domain.py",
+  "tests/test_activation_restart_semantics.py",
   "tests/test_bootstrap_factories.py",
   "tests/test_cli_runtime_commands.py",
   "tests/test_dev_runtime.py",

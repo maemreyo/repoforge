@@ -72,7 +72,18 @@ class RuntimeReleaseStore:
             (self.path_launcher(), self._root / _CURRENT / _VENV_BIN),
         ):
             if shim.exists() and not force:
-                continue
+                kind = _classify_shim(shim)
+                if kind == "repoforge_stable":
+                    # Already ours and release-independent: leave it untouched.
+                    continue
+                if kind == "unknown":
+                    raise ConfigError(
+                        f"LAUNCHER_PATH_OCCUPIED: {shim} exists and is not a RepoForge "
+                        "launcher. Move it aside (or re-run with force) so `rf` on PATH "
+                        "resolves to the active release."
+                    )
+                # A legacy uv-tool entry point: migrate it, otherwise the user keeps
+                # invoking the old install instead of the active release.
             shim.parent.mkdir(parents=True, exist_ok=True)
             script = (
                 "#!/bin/sh\n"
@@ -251,25 +262,60 @@ class RuntimeReleaseStore:
         if not self._receipts.is_dir():
             return []
         receipts: list[ActivationReceipt] = []
-        for entry in self._receipts.glob("*.json"):
-            raw = _read_json(entry)
+        for entry in sorted(self._receipts.glob("*.json")):
+            try:
+                raw = _read_json(entry)
+            except ConfigError:
+                # One unreadable receipt must not make the whole history -- and therefore
+                # `rf version status` and receipt allocation -- fail.
+                continue
             if raw is None:
                 continue
             try:
                 receipts.append(ActivationReceipt.from_dict(raw))
-            except ValueError as exc:
-                raise ConfigError(f"RECEIPT_INVALID: {entry.name}: {exc}") from exc
+            except ValueError:
+                continue
         return sorted(receipts, key=lambda receipt: receipt.receipt_id, reverse=True)
 
     def allocate_receipt_id(self, *, date_stamp: str) -> str:
-        """Return the next ``act-<date_stamp>-NNN`` id not already on disk."""
-        existing = {receipt.receipt_id for receipt in self.list_receipts()}
+        """Return the next ``act-<date_stamp>-NNN`` id not already on disk.
+
+        Allocation is advisory: two concurrent activations can pick the same id, so
+        ``write_receipt`` creates exclusively and callers retry (see ``next_receipt_id``).
+        """
+        taken = self._taken_receipt_ids()
         index = 1
         while True:
             candidate = f"act-{date_stamp}-{index:03d}"
-            if candidate not in existing:
+            if candidate not in taken:
                 return candidate
             index += 1
+
+    def _taken_receipt_ids(self) -> set[str]:
+        """Every id present on disk, including receipts this version cannot parse."""
+        if not self._receipts.is_dir():
+            return set()
+        return {entry.stem for entry in self._receipts.glob("*.json")}
+
+
+_STABLE_MARKER = "RepoForge stable launcher"
+
+
+def _classify_shim(path: Path) -> str:
+    """Classify an existing launcher: ours, a legacy uv-tool shim, or unknown."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "unknown"
+    if _STABLE_MARKER in text:
+        return "repoforge_stable"
+    # uv tool installs write a console-script wrapper importing the CLI entry point.
+    if "repoforge" in text and ("interfaces.cli" in text or "console_scripts" in text):
+        return "legacy_uv_tool"
+    if not text.startswith("#!"):
+        # A binary or unrecognized file: never clobber it silently.
+        return "unknown"
+    return "unknown"
 
 
 def _atomic_write_json(path: Path, payload: object) -> None:

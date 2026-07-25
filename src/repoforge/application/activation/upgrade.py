@@ -8,6 +8,8 @@ steps all run against the candidate itself.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,7 @@ from ...ports import (
     WorktreeInspector,
 )
 from ...ports.clock import Clock
+from ...ports.locking import LockManager
 from ...ports.sleeper import Sleeper
 
 DEFAULT_KEEP_RELEASES = 5
@@ -95,9 +98,14 @@ class UpgradeService:
         clock: Clock,
         health_probe: RuntimeHealthProbe | None = None,
         sleeper: Sleeper | None = None,
-        converge_attempts: int = 20,
+        # The supervisor's own startup health budget is ~30s (tunnel init, doctor,
+        # repository self-check), so convergence must outlast it or a valid candidate
+        # would be rolled back before it ever became healthy.
+        converge_attempts: int = 120,
         converge_interval_seconds: float = 0.5,
         health_failure_threshold: int = DEFAULT_HEALTH_FAILURE_THRESHOLD,
+        locks: LockManager | None = None,
+        lock_timeout_seconds: float = 900.0,
     ) -> None:
         self._store = store
         self._inspector = inspector
@@ -112,6 +120,25 @@ class UpgradeService:
         self._converge_attempts = max(1, converge_attempts)
         self._converge_interval = max(0.0, converge_interval_seconds)
         self._failure_threshold = max(1, health_failure_threshold)
+        self._locks = locks
+        self._lock_timeout = lock_timeout_seconds
+
+    @contextmanager
+    def _activation_lock(self) -> Iterator[None]:
+        """Serialize build/install/swap/restart/receipt/prune across processes.
+
+        Without this, two concurrent upgrades can interleave their `current`/`previous`
+        swaps and receipts and leave the layout inconsistent.
+        """
+        if self._locks is None:
+            yield
+            return
+        with self._locks.lock(
+            "runtime-activation",
+            timeout_seconds=self._lock_timeout,
+            metadata={"operation": "runtime-activation"},
+        ):
+            yield
 
     def upgrade(
         self,
@@ -122,6 +149,26 @@ class UpgradeService:
         watch: bool = False,
         health_window_seconds: float = DEFAULT_HEALTH_WINDOW_SECONDS,
         health_interval_seconds: float = DEFAULT_HEALTH_INTERVAL_SECONDS,
+    ) -> UpgradeResult:
+        with self._activation_lock():
+            return self._upgrade_locked(
+                worktree,
+                activate=activate,
+                keep_releases=keep_releases,
+                watch=watch,
+                health_window_seconds=health_window_seconds,
+                health_interval_seconds=health_interval_seconds,
+            )
+
+    def _upgrade_locked(
+        self,
+        worktree: Path,
+        *,
+        activate: bool,
+        keep_releases: int,
+        watch: bool,
+        health_window_seconds: float,
+        health_interval_seconds: float,
     ) -> UpgradeResult:
         state = self._inspector.inspect(worktree)
         if not state.clean:
@@ -135,22 +182,40 @@ class UpgradeService:
         destination = self._store.release_path(commit_sha)
         # Releases are immutable: only install when this commit is not already present
         # with identical bits (reserve_release raises on a fingerprint conflict).
-        if self._store.reserve_release(commit_sha, build_fingerprint=artifact.build_fingerprint):
+        fresh = self._store.reserve_release(
+            commit_sha, build_fingerprint=artifact.build_fingerprint
+        )
+        if fresh:
             self._installer.install(artifact.wheel_path, destination)
 
         smoke = self._smoke.smoke(destination)
         if not smoke.ok:
             raise ConfigError(f"SMOKE_FAILED: candidate {commit_sha} did not pass: {smoke.detail}")
 
-        manifest = ReleaseManifest(
-            commit_sha=commit_sha,
-            package_version=artifact.package_version,
-            build_fingerprint=artifact.build_fingerprint,
-            tool_surface_hash=smoke.tool_surface_hash,
-            source_worktree=str(worktree),
-            built_at=self._clock.now_iso(),
-        )
-        self._store.write_manifest(manifest)
+        if fresh:
+            manifest = ReleaseManifest(
+                commit_sha=commit_sha,
+                package_version=artifact.package_version,
+                build_fingerprint=artifact.build_fingerprint,
+                tool_surface_hash=smoke.tool_surface_hash,
+                source_worktree=str(worktree),
+                built_at=self._clock.now_iso(),
+            )
+            self._store.write_manifest(manifest)
+        else:
+            # The release was already installed. Its manifest is immutable, so keep the
+            # recorded one rather than restamping built_at/source_worktree; only verify
+            # that what we just smoke-tested still matches it.
+            existing = self._store.read_manifest(commit_sha)
+            if existing is None:
+                raise ConfigError(f"RELEASE_MANIFEST_MISSING: {commit_sha}")
+            if existing.tool_surface_hash != smoke.tool_surface_hash:
+                raise ConfigError(
+                    f"RELEASE_SURFACE_DRIFT: installed {commit_sha} records tool surface "
+                    f"{existing.tool_surface_hash} but the release now reports "
+                    f"{smoke.tool_surface_hash}"
+                )
+            manifest = existing
 
         if not activate:
             return UpgradeResult(
@@ -192,7 +257,7 @@ class UpgradeService:
                 activated,
                 detail=f"{activated.detail} Healthy through the {window_seconds:g}s window.",
             )
-        rolled_back = self.rollback(receipt_id=activated.activation_receipt)
+        rolled_back = self._rollback_locked(receipt_id=activated.activation_receipt)
         return replace(
             rolled_back,
             detail=(
@@ -368,7 +433,7 @@ class UpgradeService:
                 f"ACTIVATION_FAILED: {detail}. No previous release exists to roll back to; "
                 f"receipt {failed_receipt.receipt_id}."
             )
-        rolled_back = self.rollback(
+        rolled_back = self._rollback_locked(
             receipt_id=failed_receipt.receipt_id, expected_current=manifest.commit_sha
         )
         raise ConfigError(
@@ -384,14 +449,31 @@ class UpgradeService:
         expected_current: str | None = None,
         force: bool = False,
     ) -> UpgradeResult:
+        """Public rollback: takes the activation lock, then delegates."""
+        with self._activation_lock():
+            return self._rollback_locked(receipt_id, expected_current=expected_current, force=force)
+
+    def _rollback_locked(
+        self,
+        receipt_id: str | None = None,
+        *,
+        expected_current: str | None = None,
+        force: bool = False,
+    ) -> UpgradeResult:
         """Roll back, targeting the release named by ``receipt_id`` when given.
 
         A receipted rollback is reproducible: the target is the receipt's ``from_sha``,
         and it is refused unless `current` still matches what that receipt activated
         (so repeating the command cannot toggle releases back and forth).
+
+        Everything is validated *before* the symlink is touched, and the rollback only
+        terminalizes as ``rolled_back`` when the live runtime is observed serving the
+        target and health-verified -- otherwise it is a ``rollback_failed``.
         """
         current = self._store.current_sha()
         cause_receipt_id: str | None = None
+        target: str
+
         if receipt_id is not None:
             cause = self._store.read_receipt(receipt_id)
             if cause is None:
@@ -404,21 +486,45 @@ class UpgradeService:
             cause_receipt_id = cause.receipt_id
             target = cause.from_sha
             guard = expected_current if expected_current is not None else cause.to_sha
-            if not force and current is not None and current != guard:
+            if not force and current != guard:
                 raise ConfigError(
                     f"ROLLBACK_STATE_MISMATCH: receipt {receipt_id} activated {guard} but "
-                    f"current is {current}; re-run with force to override"
+                    f"current is {current}; re-run with --force to override"
                 )
-            self._store.swap_current(target)
         else:
-            target = self._store.rollback()
+            previous = self._store.previous_sha()
+            if previous is None:
+                raise ConfigError("NO_PREVIOUS_RELEASE: nothing to roll back to")
+            target = previous
 
+        # Validate the target *before* mutating `current`: a receipt naming a release
+        # that has been pruned or corrupted must not move the symlink first.
         manifest = self._store.read_manifest(target)
         if manifest is None:
-            raise ConfigError(f"ROLLBACK_MANIFEST_MISSING: {target}")
+            raise ConfigError(
+                f"ROLLBACK_TARGET_UNUSABLE: {target} has no manifest; refusing to switch "
+                "`current` to a release that cannot be verified"
+            )
+
+        self._store.swap_current(target)
         restart = self._restarter.restart()
         converged, observed_sha, verify_detail = self._verify_serving(target)
-        detail = f"Rolled back to {target}: {verify_detail}"
+        stage = (
+            ActivationStage.HEALTH_VERIFIED
+            if converged
+            else ActivationStage.RUNTIME_RESTARTED
+            if restart.ok
+            else ActivationStage.SYMLINK_SWITCHED
+        )
+        succeeded = restart.ok and converged
+        detail = (
+            f"Rolled back to {target}: {verify_detail}"
+            if succeeded
+            else (
+                f"Rollback to {target} did NOT converge: "
+                f"{restart.detail if not restart.ok else verify_detail}"
+            )
+        )
         receipt = ActivationReceipt(
             receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
             from_sha=current,
@@ -427,33 +533,29 @@ class UpgradeService:
             to_fingerprint=manifest.build_fingerprint,
             tool_surface_hash=manifest.tool_surface_hash,
             rediscovery_required=True,
-            outcome=ActivationOutcome.ROLLED_BACK,
+            outcome=(
+                ActivationOutcome.ROLLED_BACK if succeeded else ActivationOutcome.ROLLBACK_FAILED
+            ),
             activated_at=self._clock.now_iso(),
             detail=detail,
-            stage=(
-                ActivationStage.HEALTH_VERIFIED
-                if converged
-                else ActivationStage.RUNTIME_RESTARTED
-                if restart.ok
-                else ActivationStage.SYMLINK_SWITCHED
-            ),
+            stage=stage,
             observed_sha=observed_sha,
             converged=converged,
             cause_receipt_id=cause_receipt_id,
         )
         self._store.write_receipt(receipt)
         return UpgradeResult(
-            status="rolled_back",
+            status="rolled_back" if succeeded else "rollback_failed",
             candidate_sha=target,
             build_fingerprint=manifest.build_fingerprint,
             tool_surface_hash=manifest.tool_surface_hash,
             previous_sha=current,
-            active_sha=target,
+            active_sha=target if succeeded else None,
             activation_receipt=receipt.receipt_id,
             rediscovery_required=True,
             observed_sha=observed_sha,
             converged=converged,
-            stage=receipt.stage.value,
+            stage=stage.value,
             detail=detail,
         )
 

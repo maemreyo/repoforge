@@ -16,6 +16,8 @@ _COMMIT_SHA = re.compile(r"^[0-9a-f]{7,40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RECEIPT_ID = re.compile(r"^act-[0-9]{8}-[0-9]{3,}$")
 
+ACTIVATION_RECEIPT_SCHEMA_VERSION = 2
+
 
 def _clean(value: str, *, name: str, limit: int = 1024) -> str:
     if not value or len(value) > limit or any(ord(char) < 32 for char in value):
@@ -30,6 +32,7 @@ class ActivationOutcome(str, Enum):
     ACTIVATED = "activated"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
+    ROLLBACK_FAILED = "rollback_failed"
 
 
 class ActivationStage(str, Enum):
@@ -44,6 +47,9 @@ class ActivationStage(str, Enum):
     SYMLINK_SWITCHED = "symlink_switched"
     RUNTIME_RESTARTED = "runtime_restarted"
     HEALTH_VERIFIED = "health_verified"
+    # Receipts written before the convergence fields existed. Their truthfulness is
+    # unknown, so they are readable but never counted as verified.
+    LEGACY_UNKNOWN = "legacy_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,13 +145,19 @@ class ActivationReceipt:
             raise ValueError("Activation observed_sha must be lowercase hex or null")
         if self.cause_receipt_id is not None and not _RECEIPT_ID.fullmatch(self.cause_receipt_id):
             raise ValueError("Activation cause_receipt_id must look like act-YYYYMMDD-NNN")
-        # An activation is only truthfully "activated" when the live runtime was
-        # observed serving the candidate and health-verified.
-        if self.outcome is ActivationOutcome.ACTIVATED and not (
-            self.converged and self.stage is ActivationStage.HEALTH_VERIFIED
+        # A terminal *success* -- whether an activation or a rollback -- is only
+        # truthful when the live runtime was observed serving the target and
+        # health-verified. Legacy receipts predate these fields, so the invariant is
+        # not applied retroactively to them (they carry LEGACY_UNKNOWN instead).
+        verified_outcomes = {ActivationOutcome.ACTIVATED, ActivationOutcome.ROLLED_BACK}
+        if (
+            self.outcome in verified_outcomes
+            and self.stage is not ActivationStage.LEGACY_UNKNOWN
+            and not (self.converged and self.stage is ActivationStage.HEALTH_VERIFIED)
         ):
             raise ValueError(
-                "Activation cannot be ACTIVATED without convergence and a verified health stage"
+                f"Activation cannot be {self.outcome.value.upper()} without convergence "
+                "and a verified health stage"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -164,6 +176,7 @@ class ActivationReceipt:
             "observed_sha": self.observed_sha,
             "converged": self.converged,
             "cause_receipt_id": self.cause_receipt_id,
+            "schema_version": ACTIVATION_RECEIPT_SCHEMA_VERSION,
         }
 
     @classmethod
@@ -179,8 +192,13 @@ class ActivationReceipt:
         observed_sha = raw.get("observed_sha")
         cause_receipt_id = raw.get("cause_receipt_id")
         stage_raw = raw.get("stage")
+        # A pre-v2 receipt has no stage/converged fields, so its convergence was never
+        # recorded. Load it as explicitly unverified rather than rejecting it: a stored
+        # receipt must never become unreadable after an upgrade.
         stage = (
-            ActivationStage(stage_raw) if isinstance(stage_raw, str) else ActivationStage.PREPARED
+            ActivationStage(stage_raw)
+            if isinstance(stage_raw, str)
+            else ActivationStage.LEGACY_UNKNOWN
         )
         try:
             return cls(

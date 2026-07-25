@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .application.activation.dev_runtime import DevRuntimeService
     from .application.activation.handoff import GenerationHandoffReconciler
     from .application.activation.upgrade import UpgradeService
-    from .ports.activation import ReleaseObserver
+    from .ports.activation import ReleaseObserver, SupervisorKickstarter
     from .ports.process_supervisor import ProcessSupervisorRegistrar
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
@@ -435,6 +435,7 @@ def build_upgrade_service(
     config_path: Path,
     correlation_id: str,
     extra_env: dict[str, str] | None = None,
+    kickstarter: SupervisorKickstarter | None = None,
 ) -> UpgradeService:
     from .adapters.activation.build import (
         GitWorktreeInspector,
@@ -445,6 +446,7 @@ def build_upgrade_service(
         UvVenvReleaseInstaller,
         UvWheelBuilder,
     )
+    from .adapters.activation.launcher import ReleaseAwareRuntimeLauncher
     from .adapters.background import SystemSleeper
     from .application.activation.upgrade import UpgradeService as _Service
 
@@ -461,11 +463,15 @@ def build_upgrade_service(
         restarter=SupervisorRestarter(
             control=control_client,
             runtime=runtime_store,
-            launcher=build_runtime_launcher(),
+            # NOT build_runtime_launcher(): that spawns with the *calling* CLI's
+            # sys.executable, which is the old release, so the candidate would never be
+            # adopted. The shim resolves through `current`.
+            launcher=ReleaseAwareRuntimeLauncher(store.bin_launcher()),
             config_path=config_path,
             correlation_id=correlation_id,
             extra_env=extra_env,
             sleeper=sleeper,
+            kickstarter=kickstarter,
         ),
         observer=RuntimeRecordReleaseObserver(
             runtime=runtime_store, releases_root=store.root / "releases"
@@ -473,6 +479,7 @@ def build_upgrade_service(
         clock=system_clock(),
         health_probe=SupervisorHealthProbe(control_client, correlation_id=correlation_id),
         sleeper=sleeper,
+        locks=build_lock_manager(store.root / "runtime"),
     )
 
 
@@ -512,6 +519,31 @@ def build_generation_handoff_reconciler(
     return _Reconciler(
         bindings=JsonWorkerBindingStore(state_root, locks),
         reaper=OsProcessReaper(),
+    )
+
+
+def build_supervisor_kickstarter(
+    *,
+    launcher_path: Path,
+    config_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    inherited_env: dict[str, str],
+    agents_dir: Path,
+) -> SupervisorKickstarter:
+    """The launchd job as a kickstarter, so activation keeps OS ownership."""
+    from .adapters.activation.launchd import DEFAULT_LABEL, LaunchAgentSpec, LaunchdRegistrar
+
+    return LaunchdRegistrar(
+        spec=LaunchAgentSpec(
+            label=DEFAULT_LABEL,
+            launcher_path=launcher_path,
+            config_path=config_path,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            inherited_env=inherited_env,
+        ),
+        agents_dir=agents_dir,
     )
 
 

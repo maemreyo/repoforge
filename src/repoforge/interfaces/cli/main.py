@@ -79,6 +79,7 @@ from ...bootstrap import (
     build_runtime_control_server,
     build_runtime_launcher,
     build_runtime_store,
+    build_supervisor_kickstarter,
     build_supervisor_launch_agent_registrar,
     build_upgrade_service,
     clear_runtime_state,
@@ -115,6 +116,7 @@ from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
+from ...ports.activation import SupervisorKickstarter
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
@@ -1505,6 +1507,11 @@ def _version_command(args: argparse.Namespace) -> int:
 def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
     config_path = Path(args.config).expanduser().resolve()
     runtime_path, supervisor_socket, _ = _runtime_paths(_ensure_generation(config_path))
+    # Prefer restarting through launchd when the agent owns the supervisor, so an
+    # upgrade never moves it out of OS management.
+    kickstarter = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        kickstarter = _build_launchd_kickstarter(args)
     return build_upgrade_service(
         release_root=getattr(args, "release_root", None),
         supervisor_socket=supervisor_socket,
@@ -1512,14 +1519,17 @@ def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
         config_path=config_path,
         correlation_id=id_generator().new_hex(24),
         extra_env=_runtime_environment(args),
+        kickstarter=kickstarter,
     )
 
 
 def _upgrade_command(args: argparse.Namespace) -> int:
     service = _build_upgrade_service(args)
     if getattr(args, "upgrade_command", None) == "rollback":
-        _json(service.rollback(args.receipt).as_dict())
-        return 0
+        result = service.rollback(args.receipt, force=args.force)
+        _json(result.as_dict())
+        # Fail closed: a rollback that did not converge must not exit 0.
+        return 0 if result.status == "rolled_back" else 1
     worktree = Path(args.from_worktree).expanduser().resolve()
     result = service.upgrade(
         worktree,
@@ -1555,23 +1565,29 @@ def _dev_runtime_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_launchd_registrar(args: argparse.Namespace) -> ProcessSupervisorRegistrar:
+def _launch_agent_arguments(args: argparse.Namespace) -> dict[str, Any]:
     store = build_release_store(getattr(args, "release_root", None))
-    config_path = Path(args.config).expanduser().resolve()
     log_dir = store.root / "runtime" / "logs"
-    inherited = {
-        key: os.environ[key]
-        for key in ("HOME", "PATH", "LANG", "LC_ALL", "SSH_AUTH_SOCK")
-        if key in os.environ
+    return {
+        "launcher_path": store.bin_launcher(),
+        "config_path": Path(args.config).expanduser().resolve(),
+        "stdout_path": log_dir / "supervisor.out.log",
+        "stderr_path": log_dir / "supervisor.err.log",
+        "inherited_env": {
+            key: os.environ[key]
+            for key in ("HOME", "PATH", "LANG", "LC_ALL", "SSH_AUTH_SOCK")
+            if key in os.environ
+        },
+        "agents_dir": Path("~/Library/LaunchAgents").expanduser(),
     }
-    return build_supervisor_launch_agent_registrar(
-        launcher_path=store.bin_launcher(),
-        config_path=config_path,
-        stdout_path=log_dir / "supervisor.out.log",
-        stderr_path=log_dir / "supervisor.err.log",
-        inherited_env=inherited,
-        agents_dir=Path("~/Library/LaunchAgents").expanduser(),
-    )
+
+
+def _build_launchd_kickstarter(args: argparse.Namespace) -> SupervisorKickstarter:
+    return build_supervisor_kickstarter(**_launch_agent_arguments(args))
+
+
+def _build_launchd_registrar(args: argparse.Namespace) -> ProcessSupervisorRegistrar:
+    return build_supervisor_launch_agent_registrar(**_launch_agent_arguments(args))
 
 
 def _runtime_agent_command(args: argparse.Namespace) -> int:
@@ -1935,6 +1951,11 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command")
     upgrade_rollback = upgrade_sub.add_parser("rollback")
     upgrade_rollback.add_argument("receipt", nargs="?", default=None)
+    upgrade_rollback.add_argument(
+        "--force",
+        action="store_true",
+        help="Roll back even when `current` no longer matches the receipt's target.",
+    )
     dev_runtime = commands.add_parser("dev-runtime")
     dev_runtime_sub = dev_runtime.add_subparsers(dest="dev_runtime_command", required=True)
     for dev_command in ("start", "stop", "status"):

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ...domain.errors import ConfigError
+from ...ports.activation import RestartOutcome
 from ...ports.process_supervisor import RegistrarResult, RegistrarStatus
 
 DEFAULT_LABEL = "dev.repoforge.supervisor"
@@ -115,6 +116,21 @@ class LaunchdRegistrar:
             detail=detail or "LaunchAgent removed.",
             unit_path=str(self._plist_path),
         )
+
+    def available(self) -> bool:
+        """True when this supervisor is a registered, loaded launchd job."""
+        return self.status().loaded
+
+    def kickstart(self) -> RestartOutcome:
+        """Stop-and-restart the registered job so launchd keeps owning the supervisor."""
+        code, detail = self._run(
+            ["launchctl", "kickstart", "-k", f"{self._domain()}/{self._spec.label}"]
+        )
+        if code != 0:
+            return RestartOutcome(
+                ok=False, detail=f"launchctl kickstart exited {code}: {detail or 'no output'}"
+            )
+        return RestartOutcome(ok=True, detail="kickstarted the launchd job")
 
     def status(self) -> RegistrarStatus:
         registered = self._plist_path.is_file()
