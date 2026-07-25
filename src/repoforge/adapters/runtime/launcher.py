@@ -35,6 +35,12 @@ class SubprocessRuntimeLauncher:
             "CONTROL_PLANE_API_KEY",
             "PYTHONPATH",
             "VIRTUAL_ENV",
+            "REPOFORGE_TUNNEL_ID",
+            "REPOFORGE_TUNNEL_PROFILE",
+            # Captured by the stable shim before exec. Dropping it here would make the
+            # worker publish no release identity, so the runtime could come up healthy
+            # while `rf version status` reported an unidentifiable release.
+            "REPOFORGE_RUNNING_RELEASE_SHA",
         )
         env = {key: os.environ[key] for key in inherited if key in os.environ}
         env.update(extra_env)
