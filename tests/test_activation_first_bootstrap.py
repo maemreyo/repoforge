@@ -277,7 +277,10 @@ def test_activation_provisions_the_supervisor_shim_for_the_process_manager(
     # Execs the worker module directly, so launchd owns the supervisor pid itself.
     assert "exec " in script
     assert "repoforge.interfaces.runtime.worker" in script
-    assert "current/venv/bin/python" in script
+    # Captures the release before exec instead of exec-ing through the mutable symlink.
+    assert 'readlink "$root/current"' in script
+    assert "REPOFORGE_RUNNING_RELEASE_SHA" in script
+    assert "releases/$sha/venv/bin/python" in script
 
 
 # ------------------------------- durable activation journal (round-4 follow-up F7)
@@ -326,3 +329,60 @@ def test_a_completed_activation_clears_the_journal(tmp_path: Path) -> None:
 
     assert result.status == "activated"
     assert store.read_in_flight_activation() is None
+
+
+# ------------------------ journal is forensic evidence (round-5 finding 2)
+
+
+def _crash_after_swap(store: RuntimeReleaseStore, tmp_path: Path) -> None:
+    class _CrashingRestarter(_RealLauncherRestarter):
+        def restart(self) -> RestartOutcome:
+            raise KeyboardInterrupt("killed mid-activation")
+
+    restarter = _CrashingRestarter(store, tmp_path / "config.toml")
+    service = UpgradeService(
+        store=store,
+        inspector=_Inspector(),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=restarter,
+        observer=_ObserverFollowingCurrent(store, restarter),
+        clock=_Clock(),
+        converge_attempts=1,
+        converge_interval_seconds=0,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        service.upgrade(tmp_path, activate=True)
+
+
+def test_a_second_activation_is_refused_while_one_is_unterminalized(tmp_path: Path) -> None:
+    """Re-running must not silently overwrite the record of the last-known-good release."""
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+    _crash_after_swap(store, tmp_path)
+
+    journal_before = store.journal_path().read_bytes()
+    current_before = store.current_sha()
+    previous_before = store.previous_sha()
+    receipts_before = {r.receipt_id for r in store.list_receipts()}
+
+    service, _ = _service(store, tmp_path)
+    with pytest.raises(ConfigError, match="ACTIVATION_RECONCILIATION_REQUIRED"):
+        service.upgrade(tmp_path, activate=True)
+
+    # Forensic evidence is byte-identical and nothing moved.
+    assert store.journal_path().read_bytes() == journal_before
+    assert store.current_sha() == current_before
+    assert store.previous_sha() == previous_before
+    assert {r.receipt_id for r in store.list_receipts()} == receipts_before
+
+
+def test_begin_activation_refuses_to_overwrite_an_existing_journal(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+    store.begin_activation(receipt_id="act-20260725-001", from_sha="aaa1111", to_sha="bbb2222")
+    before = store.journal_path().read_bytes()
+
+    with pytest.raises(ConfigError, match="ACTIVATION_IN_FLIGHT"):
+        store.begin_activation(receipt_id="act-20260725-002", from_sha="bbb2222", to_sha="ccc3333")
+
+    assert store.journal_path().read_bytes() == before

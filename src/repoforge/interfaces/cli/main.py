@@ -1507,8 +1507,15 @@ def _version_command(args: argparse.Namespace) -> int:
         ).observe()
     status = build_version_status(store, inputs, observed)
     _json(status)
-    # Fail closed: a non-converged activation must not read as success.
-    return 0 if status.get("activation_converged") or status.get("desired_commit") is None else 1
+    # Fail closed. An unterminalized activation or an unknown newest receipt means the
+    # state is not trustworthy, so automation and release gates must not see exit 0 even
+    # when convergence itself looks fine.
+    incomplete = status.get("incomplete_activation") is not None
+    unknown_latest = bool(status.get("receipt_history_degraded")) and (
+        status.get("activation_receipt") is None
+    )
+    healthy = bool(status.get("activation_converged")) or status.get("desired_commit") is None
+    return 0 if healthy and not incomplete and not unknown_latest else 1
 
 
 def _manages_path_launcher(args: argparse.Namespace) -> bool:

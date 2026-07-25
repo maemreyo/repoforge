@@ -356,20 +356,29 @@ class RuntimeRecordReleaseObserver:
             RuntimePhase.STOPPED,
             RuntimePhase.FAILED,
         }
+        # Source of truth is the identity the process itself published. `executable` is
+        # NOT usable for this: a relocatable venv's python is a symlink to a shared
+        # uv-managed interpreter, so resolving it escapes the release directory entirely.
         return ObservedRuntime(
-            running_release_sha=self._release_of(record.executable) if live else None,
+            running_release_sha=record.running_release_sha if live else None,
             phase=record.phase.value,
             pid=record.pid,
             executable=record.executable,
             tool_surface_hash=record.tool_surface_hash or None,
         )
 
-    def _release_of(self, executable: str | None) -> str | None:
+    def release_of_executable(self, executable: str | None) -> str | None:
+        """Supporting evidence only -- never the identity source.
+
+        Deliberately does NOT resolve symlinks: a relocatable venv's ``bin/python`` points
+        at a shared uv-managed interpreter, so resolving would leave the release tree.
+        Kept for diagnostics where a legacy record has no published identity.
+        """
         if not executable:
             return None
         try:
-            relative = Path(executable).resolve().relative_to(self._releases_root.resolve())
-        except (ValueError, OSError):
+            relative = Path(executable).relative_to(self._releases_root)
+        except ValueError:
             return None
         return relative.parts[0] if relative.parts else None
 

@@ -282,8 +282,11 @@ def test_observer_reports_no_release_for_a_stopped_runtime(tmp_path: Path) -> No
     assert observed.running_release_sha is None
 
 
-def test_observer_reports_the_release_of_a_live_runtime(tmp_path: Path) -> None:
-    """Uses this test process's own pid/identity so the real store validates liveness."""
+def test_observer_trusts_the_published_release_identity(tmp_path: Path) -> None:
+    """Round-5 finding 1: identity is what the process published, not a derived path.
+
+    Uses this test process's own pid/identity so the real store validates liveness.
+    """
     releases = tmp_path / "releases"
     executable = releases / "aaa1111" / "venv" / "bin" / "python"
     executable.parent.mkdir(parents=True)
@@ -302,6 +305,7 @@ def test_observer_reports_the_release_of_a_live_runtime(tmp_path: Path) -> None:
             ),
             child_pid=live_pid,
             child_process_identity=live_identity,
+            running_release_sha="aaa1111",
         )
     )
 
@@ -309,3 +313,45 @@ def test_observer_reports_the_release_of_a_live_runtime(tmp_path: Path) -> None:
 
     assert observed.running_release_sha == "aaa1111"
     assert observed.pid == live_pid
+
+
+def test_a_relocatable_venv_symlink_is_never_used_to_infer_identity(tmp_path: Path) -> None:
+    """`uv venv --relocatable` makes bin/python a symlink OUT of the release tree.
+
+    Resolving it lands in the shared uv-managed interpreter, so a path-derived identity
+    silently yields nothing. A record with no published sha must report None -- never a
+    guess -- and the path helper must not resolve its way out of the release directory.
+    """
+    releases = tmp_path / "releases"
+    shared = tmp_path / "uv-python" / "bin" / "python3.13"
+    shared.parent.mkdir(parents=True)
+    shared.touch()
+    executable = releases / "aaa1111" / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(shared)
+    assert executable.resolve() == shared.resolve(), "precondition: resolves out of release"
+
+    live_pid = os.getpid()
+    live_identity = process_identity(live_pid)
+    assert live_identity is not None
+    store = JsonRuntimeStore(tmp_path / "managed-runtime-v3.json")
+    store.write(
+        dataclasses.replace(
+            _record(
+                phase=RuntimePhase.HEALTHY,
+                pid=live_pid,
+                identity=live_identity,
+                executable=str(executable),
+            ),
+            child_pid=live_pid,
+            child_process_identity=live_identity,
+            running_release_sha=None,  # a legacy record: identity was never published
+        )
+    )
+    observer = RuntimeRecordReleaseObserver(runtime=store, releases_root=releases)
+
+    # No published identity -> no claim. The old model would have returned None here too,
+    # but silently, while claiming the derived path was authoritative.
+    assert observer.observe().running_release_sha is None
+    # The supporting-evidence helper does NOT resolve, so it still recognises the release.
+    assert observer.release_of_executable(str(executable)) == "aaa1111"

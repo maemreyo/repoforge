@@ -31,6 +31,21 @@ KEEP=0
 [[ "${1:-}" == "--keep" ]] && KEEP=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Captured BEFORE HOME is overridden: the "real installation untouched" assertion must
+# check the operator's actual home, not the sandbox one.
+ORIGINAL_HOME="$HOME"
+# `env -i` strips PATH, so uv must be addressed absolutely.
+UV_BIN="$(command -v uv)" || { echo "uv is required" >&2; exit 1; }
+snapshot_real_home() {
+  {
+    ls -la "$ORIGINAL_HOME/.local/bin/rf" 2>/dev/null || echo "absent: .local/bin/rf"
+    ls -la "$ORIGINAL_HOME/Library/LaunchAgents/dev.repoforge.supervisor.plist" 2>/dev/null \
+      || echo "absent: LaunchAgent plist"
+    find "$ORIGINAL_HOME/.local/share/repoforge" -maxdepth 1 2>/dev/null | sort || true
+    find "$ORIGINAL_HOME/.local/state/repoforge" -maxdepth 1 2>/dev/null | sort || true
+  } | shasum -a 256 | cut -d" " -f1
+}
+REAL_HOME_BEFORE="$(snapshot_real_home)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/rf-live-activation.XXXXXX")"
 cleanup() {
   # Always stop anything the sandbox started before removing its state.
@@ -167,7 +182,22 @@ say "Sandbox environment"
 printf '  HOME=%s\n  REPOFORGE_CONFIG=%s\n  REPOFORGE_RELEASE_ROOT=%s\n  tunnel-client=%s\n' \
   "$HOME" "$REPOFORGE_CONFIG" "$REPOFORGE_RELEASE_ROOT" "$(command -v tunnel-client)"
 
-RF=(uv run --directory "$REPO_ROOT" --extra dev rf --config "$SANDBOX/config.toml")
+# P1-5: `env -i` so no ambient CONTROL_PLANE_API_KEY, and cwd inside the sandbox so the
+# repository's own .env can never be picked up. The key is a local-only placeholder: the
+# stub tunnel-client never contacts a control plane.
+RF=(env -i
+    HOME="$SANDBOX/home"
+    PATH="$SANDBOX/bin:/usr/local/bin:/usr/bin:/bin"
+    TMPDIR="${TMPDIR:-/tmp}"
+    XDG_DATA_HOME="$SANDBOX/home/.local/share"
+    XDG_STATE_HOME="$SANDBOX/home/.local/state"
+    REPOFORGE_CONFIG="$SANDBOX/config.toml"
+    REPOFORGE_RELEASE_ROOT="$SANDBOX/release-root"
+    REPOFORGE_TUNNEL_ID="sandbox-tunnel"
+    REPOFORGE_TUNNEL_PROFILE="sandbox"
+    CONTROL_PLANE_API_KEY="sandbox-only-never-networked"
+    "$UV_BIN" run --directory "$REPO_ROOT" --project "$REPO_ROOT" --extra dev
+    rf --config "$SANDBOX/config.toml")
 
 # `rf setup` is the real bootstrap: it enrolls the repository and writes a MODERN
 # configuration generation. A hand-written config would be imported as *legacy*, which
@@ -201,8 +231,8 @@ say "rf version status (before any activation)"
 
 say "rf upgrade --from-worktree <clone> --activate  [THE REAL THING]"
 set +e
-"${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3
-UPGRADE_EXIT=$?
+"${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3 | tee "$SANDBOX/upgrade.json"
+UPGRADE_EXIT=${PIPESTATUS[0]}
 set -e
 echo "upgrade exit=$UPGRADE_EXIT"
 
@@ -229,17 +259,67 @@ echo "--- current symlink ---"
 readlink "$SANDBOX/release-root/current" 2>/dev/null || echo "(none)"
 echo "--- receipts ---"
 ls "$SANDBOX/release-root/runtime/activation-receipts" 2>/dev/null || echo "(none)"
-echo "--- runtime record ---"
-find "$SANDBOX/state" -name 'managed-runtime-v3.json' -exec cat {} \; 2>/dev/null | head -30 || true
+echo "--- runtime record (the exact path the probe located) ---"
+if [[ -n "$RECORD" ]]; then
+  python3 -c "import json;d=json.load(open('$RECORD'));print(json.dumps({k:d.get(k) for k in ('phase','pid','running_release_sha','active_generation','executable')}, indent=2))"
+else
+  echo "(none)"
+fi
 
 say "rf version status (after activation)"
-"${RF[@]}" version status || true
+set +e
+"${RF[@]}" version status | tee "$SANDBOX/status.json"
+STATUS_EXIT=${PIPESTATUS[0]}
+set -e
 
 say "The operator's REAL installation must be untouched"
-[[ ! -e "$HOME/.local/bin/rf" ]] && ok "no PATH shim inside the sandbox HOME" \
-  || fail "sandbox created $HOME/.local/bin/rf unexpectedly"
-
-if [[ "$UPGRADE_EXIT" != "0" ]]; then
-  fail "live activation did not succeed (exit $UPGRADE_EXIT) -- see evidence above"
+if [[ "$(snapshot_real_home)" == "$REAL_HOME_BEFORE" ]]; then
+  ok "real home unchanged (${ORIGINAL_HOME})"
+else
+  fail "the sandbox modified the operator's real installation under $ORIGINAL_HOME"
 fi
-ok "live activation converged"
+
+say "Acceptance assertions (#274)"
+python3 - "$HEAD_SHA" "$UPGRADE_EXIT" "$STATUS_EXIT" "$SANDBOX/upgrade.json" "$SANDBOX/status.json" <<'ASSERT'
+import json
+import sys
+
+head, upgrade_exit, status_exit, upgrade_path, status_path = sys.argv[1:6]
+failures = []
+
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception as exc:  # noqa: BLE001 - report, do not mask
+        failures.append(f"could not parse {path}: {exc}")
+        return {}
+
+
+upgrade, status = load(upgrade_path), load(status_path)
+
+
+def want(label, actual, expected):
+    if actual != expected:
+        failures.append(f"{label}: expected {expected!r}, got {actual!r}")
+
+
+want("upgrade exit", upgrade_exit, "0")
+want("upgrade.status", upgrade.get("status"), "activated")
+want("upgrade.converged", upgrade.get("converged"), True)
+want("upgrade.active_sha", upgrade.get("active_sha"), head)
+want("upgrade.observed_sha", upgrade.get("observed_sha"), head)
+want("status exit", status_exit, "0")
+want("status.activation_converged", status.get("activation_converged"), True)
+want("status.desired_commit", status.get("desired_commit"), head)
+want("status.observed_commit", status.get("observed_commit"), head)
+want("status.incomplete_activation", status.get("incomplete_activation"), None)
+
+if failures:
+    print("\033[31m✗ acceptance assertions failed:\033[0m")
+    for line in failures:
+        print(f"    - {line}")
+    raise SystemExit(1)
+print("\033[32m✓ every acceptance assertion holds\033[0m")
+ASSERT

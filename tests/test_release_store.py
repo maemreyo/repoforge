@@ -131,7 +131,12 @@ def test_internal_shim_is_executable_and_resolves_through_current(tmp_path: Path
     shim = store.write_internal_launcher_shim()
     assert shim == store.bin_launcher()
     assert os.access(shim, os.X_OK)
-    assert "current/venv/bin/rf" in shim.read_text(encoding="utf-8")
+    script = shim.read_text(encoding="utf-8")
+    # Resolves `current` once, then execs the CONCRETE release while publishing the
+    # captured sha, so the runtime identity cannot drift with a later swap.
+    assert 'readlink "$root/current"' in script
+    assert "REPOFORGE_RUNNING_RELEASE_SHA" in script
+    assert "releases/$sha/venv/bin/rf" in script
 
 
 def test_a_store_without_a_path_launcher_never_provisions_one(tmp_path: Path) -> None:

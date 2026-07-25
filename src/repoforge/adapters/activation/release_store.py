@@ -130,11 +130,19 @@ class RuntimeReleaseStore:
         the runtime record. Exec-ing the worker directly makes them the same process.
         """
         shim = self.supervisor_launcher()
+        # Resolve `current` ONCE, here, and hand the concrete release down: the runtime
+        # must publish an immutable identity. Exec-ing through the mutable `current`
+        # symlink without capturing it would let a later swap re-attribute this process.
         script = (
             "#!/bin/sh\n"
             f"# {_STABLE_MARKER} RepoForge supervisor launcher. Execs the worker so the\n"
             "# process manager owns the supervisor pid directly. Do not edit.\n"
-            f'exec "{self._root / _CURRENT / _VENV_PYTHON}" -m {_WORKER_MODULE} "$@"\n'
+            f'root="{self._root}"\n'
+            'target="$(readlink "$root/current")" || exit 1\n'
+            'sha="${target##*/}"\n'
+            '[ -n "$sha" ] || { echo "no active release" >&2; exit 1; }\n'
+            'exec env REPOFORGE_RUNNING_RELEASE_SHA="$sha" \\\n'
+            f'  "$root/{_RELEASES}/$sha/{_VENV_PYTHON}" -m {_WORKER_MODULE} "$@"\n'
         )
         self._write_shim_script(shim, script, force=force)
         return shim
@@ -164,12 +172,18 @@ class RuntimeReleaseStore:
         return shim
 
     def _provision_shim(self, shim: Path, *, force: bool) -> None:
-        target = self._root / _CURRENT / _VENV_BIN
+        # The CLI shim also captures the release it resolved, so a runtime started through
+        # `rf start` publishes the same immutable identity as one started by launchd.
         script = (
             "#!/bin/sh\n"
             f"# {_STABLE_MARKER} RepoForge stable launcher. Resolves the active release\n"
             "# through the `current` symlink. Provisioned once; do not edit.\n"
-            f'exec "{target}" "$@"\n'
+            f'root="{self._root}"\n'
+            'target="$(readlink "$root/current")" || exit 1\n'
+            'sha="${target##*/}"\n'
+            '[ -n "$sha" ] || { echo "no active release" >&2; exit 1; }\n'
+            'exec env REPOFORGE_RUNNING_RELEASE_SHA="$sha" \\\n'
+            f'  "$root/{_RELEASES}/$sha/{_VENV_BIN}" "$@"\n'
         )
         self._write_shim_script(shim, script, force=force)
 
@@ -343,10 +357,27 @@ class RuntimeReleaseStore:
         evidence that an activation was ever in progress. This journal closes that gap:
         it is written first and cleared only when a terminal receipt exists.
         """
-        _atomic_write_json(
-            self.journal_path(),
+        path = self.journal_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
             {"receipt_id": receipt_id, "from_sha": from_sha, "to_sha": to_sha, "stage": "prepared"},
+            sort_keys=True,
+            indent=2,
         )
+        try:
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            # Exclusive create, never replace: overwriting would destroy the record of an
+            # earlier activation that never terminalized, which is the only evidence of
+            # what the last-known-good release was before the crash.
+            raise ConfigError(
+                "ACTIVATION_IN_FLIGHT: an earlier activation has not terminalized; "
+                f"reconcile {path} before starting another"
+            ) from exc
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def record_activation_stage(self, stage: str) -> None:
         """Advance the in-flight journal; a no-op when no activation is in flight."""

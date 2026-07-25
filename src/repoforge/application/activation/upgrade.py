@@ -175,6 +175,18 @@ class UpgradeService:
         health_window_seconds: float,
         health_interval_seconds: float,
     ) -> UpgradeResult:
+        # Fail closed on an earlier activation that never terminalized. Re-running would
+        # overwrite `previous` and delete the only evidence of the last-known-good release,
+        # so the operator must reconcile first -- "just re-run it" is not safe advice here.
+        in_flight = self._store.read_in_flight_activation()
+        if in_flight is not None:
+            raise ConfigError(
+                "ACTIVATION_RECONCILIATION_REQUIRED: an earlier activation reached stage "
+                f"{in_flight.get('stage')!r} targeting {in_flight.get('to_sha')} without "
+                "writing a terminal receipt. Inspect `rf version status` and reconcile it "
+                "before starting another activation."
+            )
+
         state = self._inspector.inspect(worktree)
         if not state.clean:
             raise ConfigError(
