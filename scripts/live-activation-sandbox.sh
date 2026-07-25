@@ -15,14 +15,13 @@
 #                               tunnel is ever registered with a real control plane
 #   LaunchAgents             -> never installed (the agent path is exercised by unit tests)
 #
-# STATUS (honest scope): this harness reaches the *supervisor start* boundary and has
-# already earned its keep -- it found a production defect no unit test caught (the tunnel
-# identity was silently dropped when the CLI re-entered itself through the stable shim,
-# because REPOFORGE_TUNNEL_ID was missing from the launcher's inherited env allowlist).
-# It does NOT yet demonstrate a fully converged activation: the enrollment step below
-# still fails, so the resolved generation the worker loads is incomplete. Finishing that
-# is tracked as a follow-up; until it passes, "live activation converged" remains
-# unproven.
+# STATUS: this harness demonstrates a CONVERGED live activation and asserts it, so a
+# regression that merely returns exit 0 cannot pass. It found four production defects no
+# unit test caught: the tunnel identity dropped across the shim hop; a staged install
+# breaking every activation because venv console scripts hard-code the interpreter path;
+# runtime identity being underivable from `sys.executable` (relocatable venvs symlink out
+# of the release tree); and the captured release identity dropped again when the inner CLI
+# spawned the worker.
 #
 # Usage: scripts/live-activation-sandbox.sh [--keep]
 set -euo pipefail
@@ -36,6 +35,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIGINAL_HOME="$HOME"
 # `env -i` strips PATH, so uv must be addressed absolutely.
 UV_BIN="$(command -v uv)" || { echo "uv is required" >&2; exit 1; }
+# `uv` is also invoked as a *subprocess* by the builder/installer, so its directory must
+# be on the scrubbed PATH. It is a build tool, not a credential.
+UV_DIR="$(dirname "$UV_BIN")"
 snapshot_real_home() {
   {
     ls -la "$ORIGINAL_HOME/.local/bin/rf" 2>/dev/null || echo "absent: .local/bin/rf"
@@ -187,7 +189,7 @@ printf '  HOME=%s\n  REPOFORGE_CONFIG=%s\n  REPOFORGE_RELEASE_ROOT=%s\n  tunnel-
 # stub tunnel-client never contacts a control plane.
 RF=(env -i
     HOME="$SANDBOX/home"
-    PATH="$SANDBOX/bin:/usr/local/bin:/usr/bin:/bin"
+    PATH="$SANDBOX/bin:$UV_DIR:/usr/local/bin:/usr/bin:/bin"
     TMPDIR="${TMPDIR:-/tmp}"
     XDG_DATA_HOME="$SANDBOX/home/.local/share"
     XDG_STATE_HOME="$SANDBOX/home/.local/state"
