@@ -118,6 +118,49 @@ class RuntimeReleaseStore:
         """The conventional PATH launcher location (``~/.local/bin/rf``)."""
         return Path(_PATH_BIN_DIR).expanduser() / "rf"
 
+    def agent_env_path(self) -> Path:
+        """A ``0600`` env file the OS-resident supervisor sources before exec.
+
+        launchd starts jobs with no shell environment, so a secret exported in the
+        operator's terminal is simply absent after logout or reboot. Putting it in the
+        plist would leave it in a world-readable property list, so the durable source is
+        an owner-only file the supervisor shim sources instead.
+        """
+        return self._root / "runtime" / "agent.env"
+
+    def write_agent_env(self, values: dict[str, str]) -> Path:
+        """Persist agent environment values with owner-only permissions."""
+        path = self.agent_env_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for key in sorted(values):
+            value = values[key]
+            if not value or any(character in value for character in "\n\r"):
+                raise ConfigError(f"AGENT_ENV_VALUE_INVALID: {key} must be a single line")
+            # Single-quoted with embedded quotes escaped, so `.` (source) is safe.
+            escaped = value.replace("'", "'\"'\"'")
+            lines.append(f"export {key}='{escaped}'")
+        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tmp.chmod(0o600)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return path
+
+    def agent_env_keys(self) -> set[str]:
+        """Names present in the durable agent env file (never the values)."""
+        path = self.agent_env_path()
+        if not path.is_file():
+            return set()
+        keys: set[str] = set()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("export ") and "=" in stripped:
+                keys.add(stripped[len("export ") :].split("=", 1)[0].strip())
+        return keys
+
     def supervisor_launcher(self) -> Path:
         """The shim an OS process manager runs to *become* the supervisor worker."""
         return self._root / "bin" / "rf-supervisor"
@@ -141,6 +184,9 @@ class RuntimeReleaseStore:
             'target="$(readlink "$root/current")" || exit 1\n'
             'sha="${target##*/}"\n'
             '[ -n "$sha" ] || { echo "no active release" >&2; exit 1; }\n'
+            "# launchd provides no shell environment, so the durable secret file is the\n"
+            "# only place an OS-resident supervisor can obtain its credentials.\n"
+            '[ -f "$root/runtime/agent.env" ] && . "$root/runtime/agent.env"\n'
             'exec env REPOFORGE_RUNNING_RELEASE_SHA="$sha" \\\n'
             f'  "$root/{_RELEASES}/$sha/{_VENV_PYTHON}" -m {_WORKER_MODULE} "$@"\n'
         )

@@ -268,6 +268,26 @@ else
   echo "(none)"
 fi
 
+say "SECOND activation: a new candidate must take over and demote the first"
+# A second commit in the clone gives a genuinely different release sha.
+printf 'second candidate\n' >> "$CLONE/README.md"
+git -C "$CLONE" -c user.email=s@x -c user.name=s commit --quiet -am "second candidate"
+SECOND_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+ok "second candidate at ${SECOND_SHA:0:12}"
+set +e
+"${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3 | tee "$SANDBOX/upgrade2.json"
+UPGRADE2_EXIT=${PIPESTATUS[0]}
+set -e
+"${RF[@]}" version status > "$SANDBOX/status2.json" || true
+RECEIPT2="$(python3 -c "import json;print(json.load(open('$SANDBOX/upgrade2.json')).get('activation_receipt') or '')")"
+
+say "ROLLBACK: the receipted rollback must restore the first candidate"
+set +e
+"${RF[@]}" upgrade rollback "$RECEIPT2" | tee "$SANDBOX/rollback.json"
+ROLLBACK_EXIT=${PIPESTATUS[0]}
+set -e
+"${RF[@]}" version status > "$SANDBOX/status3.json" || true
+
 say "rf version status (after activation)"
 set +e
 "${RF[@]}" version status | tee "$SANDBOX/status.json"
@@ -282,11 +302,15 @@ else
 fi
 
 say "Acceptance assertions (#274)"
-python3 - "$HEAD_SHA" "$UPGRADE_EXIT" "$STATUS_EXIT" "$SANDBOX/upgrade.json" "$SANDBOX/status.json" <<'ASSERT'
+python3 - "$HEAD_SHA" "$UPGRADE_EXIT" "$STATUS_EXIT" "$SANDBOX/upgrade.json" "$SANDBOX/status.json" \
+        "$SECOND_SHA" "$UPGRADE2_EXIT" "$ROLLBACK_EXIT" "$SANDBOX/upgrade2.json" \
+        "$SANDBOX/status2.json" "$SANDBOX/rollback.json" "$SANDBOX/status3.json" <<'ASSERT'
 import json
 import sys
 
 head, upgrade_exit, status_exit, upgrade_path, status_path = sys.argv[1:6]
+second, upgrade2_exit, rollback_exit = sys.argv[6:9]
+upgrade2_path, status2_path, rollback_path, status3_path = sys.argv[9:13]
 failures = []
 
 
@@ -317,6 +341,29 @@ want("status.activation_converged", status.get("activation_converged"), True)
 want("status.desired_commit", status.get("desired_commit"), head)
 want("status.observed_commit", status.get("observed_commit"), head)
 want("status.incomplete_activation", status.get("incomplete_activation"), None)
+
+# --- second activation: the new candidate takes over, the first becomes `previous`
+upgrade2, status2 = load(upgrade2_path), load(status2_path)
+want("second upgrade exit", upgrade2_exit, "0")
+want("upgrade2.status", upgrade2.get("status"), "activated")
+want("upgrade2.converged", upgrade2.get("converged"), True)
+want("upgrade2.active_sha", upgrade2.get("active_sha"), second)
+want("upgrade2.observed_sha", upgrade2.get("observed_sha"), second)
+want("upgrade2.previous_sha", upgrade2.get("previous_sha"), head)
+want("status2.observed_commit", status2.get("observed_commit"), second)
+want("status2.previous_commit", status2.get("previous_commit"), head)
+
+# --- receipted rollback: the FIRST candidate is restored, and observed follows
+rollback, status3 = load(rollback_path), load(status3_path)
+want("rollback exit", rollback_exit, "0")
+want("rollback.status", rollback.get("status"), "rolled_back")
+want("rollback.converged", rollback.get("converged"), True)
+want("rollback.active_sha", rollback.get("active_sha"), head)
+want("rollback.observed_sha", rollback.get("observed_sha"), head)
+want("status3.desired_commit", status3.get("desired_commit"), head)
+want("status3.observed_commit", status3.get("observed_commit"), head)
+want("status3.activation_converged", status3.get("activation_converged"), True)
+want("status3.incomplete_activation", status3.get("incomplete_activation"), None)
 
 if failures:
     print("\033[31m✗ acceptance assertions failed:\033[0m")

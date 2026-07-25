@@ -329,3 +329,41 @@ def test_a_stale_shim_target_is_rewritten_even_though_the_marker_matches(
     script = shim.read_text(encoding="utf-8")
     assert "/somewhere/else/" not in script
     assert str(tmp_path) in script
+
+
+# ------------------------- durable agent secret (round-5 finding 3)
+
+
+def test_agent_env_is_owner_only_and_sourceable(tmp_path: Path) -> None:
+    """launchd has no shell environment, so the secret must live in an owner-only file."""
+    store = RuntimeReleaseStore(tmp_path)
+    path = store.write_agent_env({"CONTROL_PLANE_API_KEY": "s3cret-with-'quote"})
+
+    assert path == store.agent_env_path()
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    # Only names are exposed by the query API; the value is never returned.
+    assert store.agent_env_keys() == {"CONTROL_PLANE_API_KEY"}
+    # `sh -c '. file; echo $VAR'` must recover the exact value, quotes included.
+    import subprocess
+
+    out = subprocess.run(
+        ["/bin/sh", "-c", f'. "{path}"; printf "%s" "$CONTROL_PLANE_API_KEY"'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout == "s3cret-with-'quote"
+
+
+def test_agent_env_rejects_a_multiline_value(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    with pytest.raises(ConfigError, match="AGENT_ENV_VALUE_INVALID"):
+        store.write_agent_env({"CONTROL_PLANE_API_KEY": "line1\nline2"})
+
+
+def test_the_supervisor_shim_sources_the_durable_secret(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    script = store.write_supervisor_shim().read_text(encoding="utf-8")
+    assert "runtime/agent.env" in script
+    # Sourced BEFORE exec, so the worker inherits it.
+    assert script.index("agent.env") < script.index("exec env")

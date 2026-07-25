@@ -1635,6 +1635,26 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
                 f"or interpreter is missing ({entry_point}); re-activate before "
                 "installing the agent."
             )
+        # An OS-resident supervisor gets no shell environment, so a credential exported
+        # in the operator's terminal disappears at logout. Persist it to the owner-only
+        # agent env file when asked, then refuse to install an agent that cannot start.
+        if args.persist_api_key:
+            secret = os.environ.get("CONTROL_PLANE_API_KEY", "")
+            if not secret:
+                raise ConfigError(
+                    "CONTROL_PLANE_API_KEY_ABSENT: --persist-api-key reads the value from "
+                    "the CONTROL_PLANE_API_KEY environment variable so it never appears "
+                    "in argv or shell history; export it and re-run."
+                )
+            store.write_agent_env({"CONTROL_PLANE_API_KEY": secret})
+        if "CONTROL_PLANE_API_KEY" not in store.agent_env_keys():
+            raise ConfigError(
+                "AGENT_SECRET_MISSING: the managed runtime requires CONTROL_PLANE_API_KEY, "
+                "and launchd starts jobs with no shell environment, so an agent installed "
+                "now would fail at every boot. Run `rf runtime install-agent "
+                "--persist-api-key` with CONTROL_PLANE_API_KEY exported to store it in "
+                f"{store.agent_env_path()} (owner-only)."
+            )
         # The agent runs the supervisor shim, so both shims must exist.
         store.write_internal_launcher_shim()
         store.write_supervisor_shim()
@@ -1654,11 +1674,16 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
         _json({"status": result.status, "unit_path": result.unit_path, "detail": result.detail})
         return 0
     status = registrar.status()
+    keys = sorted(store.agent_env_keys())
     _json(
         {
             "registered": status.registered,
             "loaded": status.loaded,
             "unit_path": status.unit_path,
+            "agent_env_path": str(store.agent_env_path()),
+            # Names only: a status command must never echo a secret.
+            "agent_env_keys": keys,
+            "durable_secret_present": "CONTROL_PLANE_API_KEY" in keys,
             "detail": status.detail,
         }
     )
@@ -1967,6 +1992,17 @@ def build_parser() -> argparse.ArgumentParser:
     for agent_command in ("install-agent", "uninstall-agent", "agent-status"):
         agent_parser = runtime_sub.add_parser(agent_command)
         agent_parser.add_argument("--release-root", dest="release_root", default=None)
+        if agent_command == "install-agent":
+            agent_parser.add_argument(
+                "--persist-api-key",
+                dest="persist_api_key",
+                action="store_true",
+                help=(
+                    "Store CONTROL_PLANE_API_KEY (read from the environment, never argv) "
+                    "in the owner-only agent env file so the OS-resident supervisor can "
+                    "start after a reboot."
+                ),
+            )
     version = commands.add_parser("version")
     version_sub = version.add_subparsers(dest="version_command", required=True)
     for version_command in ("status", "list"):
