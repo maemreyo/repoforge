@@ -110,7 +110,12 @@ class UvVenvReleaseInstaller:
     def _install_into(self, wheel: Path, destination: Path) -> None:
         destination.mkdir(parents=True, exist_ok=True)
         venv = destination / _VENV
-        code, out, err = _run(["uv", "venv", str(venv)], timeout=120.0)
+        # `--relocatable` is required, not cosmetic: a venv's console scripts normally
+        # hard-code the absolute interpreter path, so staging the install and renaming it
+        # into releases/<sha> would leave `venv/bin/rf` exec-ing the deleted staging path.
+        # A live sandbox activation failed exactly this way ("cannot execute: No such file
+        # or directory") until the venv was made relocatable.
+        code, out, err = _run(["uv", "venv", "--relocatable", str(venv)], timeout=120.0)
         if code != 0:
             raise ConfigError(f"VENV_FAILED: uv venv exited {code}: {err.strip() or out.strip()}")
         code, out, err = _run(

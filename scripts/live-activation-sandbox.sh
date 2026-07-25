@@ -140,20 +140,7 @@ git -C "$DEMO" remote add origin "$REMOTE"
 git -C "$DEMO" push --quiet origin main
 
 # ------------------------------------------------------------------------------ config
-cat > "$SANDBOX/config.toml" <<CONFIG
-[server]
-workspace_root = "$SANDBOX/workspaces"
-state_root = "$SANDBOX/state"
-
-[tunnel]
-id = "sandbox-tunnel"
-profile = "sandbox"
-
-[[repo]]
-id = "demo"
-path = "$DEMO"
-CONFIG
-
+# `rf setup` creates the configuration at this path.
 export HOME="$SANDBOX/home"
 export XDG_DATA_HOME="$SANDBOX/home/.local/share"
 export XDG_STATE_HOME="$SANDBOX/home/.local/state"
@@ -170,27 +157,32 @@ printf '  HOME=%s\n  REPOFORGE_CONFIG=%s\n  REPOFORGE_RELEASE_ROOT=%s\n  tunnel-
 
 RF=(uv run --directory "$REPO_ROOT" --extra dev rf --config "$SANDBOX/config.toml")
 
-# A hand-written `[[repo]]` is not an enrolled repository: the resolved generation would
-# carry no `repositories` table and the worker would refuse to load it. Enroll properly.
-say "Enrolling the demo repository (so the resolved generation has a repositories table)"
-# `read_only=true` satisfies the "no safe verification profile" finding for this
-# synthetic repository without granting write capability.
+# `rf setup` is the real bootstrap: it enrolls the repository and writes a MODERN
+# configuration generation. A hand-written config would be imported as *legacy*, which
+# refuses repository mutation and renders a resolved config with no [repositories] table,
+# so the supervisor worker could never load it.
+say "Bootstrapping the sandbox installation with rf setup (enrolls the demo repo)"
+SETUP=("${RF[@]}" setup "$DEMO" --tunnel-id sandbox-tunnel --profile sandbox
+       --template read_only --activate never)
+# `rf setup` without --approve exits non-zero by design (approval required), so the
+# probe must not trip `set -e`.
 set +e
-PROPOSAL="$("${RF[@]}" repo propose "$DEMO" --repo-id demo --policy-override read_only=true 2>&1)"
+SETUP_OUT="$("${SETUP[@]}" 2>&1)"
 set -e
-TOKEN="$(printf '%s' "$PROPOSAL" | python3 -c 'import json,sys
+TOKEN="$(printf '%s' "$SETUP_OUT" | python3 -c 'import json,sys
 try:
-    print(json.load(sys.stdin).get("approval_token") or "")
+    print(json.load(sys.stdin)["required_approval_tokens"][0])
 except Exception:
     print("")')"
 if [[ -z "$TOKEN" ]]; then
-  echo "$PROPOSAL" | head -40
-  fail "could not obtain an enrollment approval token (see proposal above)"
+  printf '%s\n' "$SETUP_OUT" | head -40
+  fail "rf setup did not offer an approval token (see output above)"
 fi
-[[ -n "$TOKEN" ]] || fail "could not obtain an enrollment approval token"
-"${RF[@]}" repo enroll "$DEMO" --repo-id demo --policy-override read_only=true \
-  --approve "$TOKEN" >/dev/null || fail "repo enroll failed"
-ok "demo repository enrolled"
+"${SETUP[@]}" --approve "$TOKEN" >/dev/null || fail "rf setup --approve failed"
+RESOLVED="$(find "$HOME/.local/state/repoforge" -name resolved.toml | head -1)"
+[[ -n "$RESOLVED" ]] && grep -q '^\[repositories' "$RESOLVED" \
+  || fail "the resolved generation has no [repositories] table"
+ok "sandbox installation bootstrapped (modern generation with an enrolled repository)"
 
 say "rf version status (before any activation)"
 "${RF[@]}" version status || true
