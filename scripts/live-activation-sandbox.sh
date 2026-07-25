@@ -60,14 +60,16 @@ cat > "$SANDBOX/bin/tunnel-client" <<'STUB'
 """Local stand-in for tunnel-client: never contacts a control plane."""
 import http.server
 import json
-import os
 import shlex
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
-STATE = Path(os.environ["RF_SANDBOX"]) / "tunnel-stub"
+# Derive state from our own location: the supervisor runs us with a restricted env
+# allowlist, so depending on an ambient variable here would crash the worker.
+STATE = Path(__file__).resolve().parent.parent / "tunnel-stub"
 STATE.mkdir(parents=True, exist_ok=True)
 
 
@@ -109,9 +111,19 @@ if argv and argv[0] == "run":
     command = (STATE / "mcp-command").read_text(encoding="utf-8").strip()
     if not command:
         raise SystemExit("stub: no MCP command recorded by init")
-    # Spawn the serve child exactly as the real tunnel-client does, and outlive it only
-    # if it exits; the supervisor treats our exit as the child dying.
-    child = subprocess.Popen(shlex.split(command), stdin=subprocess.DEVNULL)
+    # The MCP child serves over STDIO, so it must be given a stdin pipe that stays open.
+    # With DEVNULL it reads EOF and exits immediately, and the supervisor then respawns
+    # the tunnel in a loop until it gives up -- which is exactly what happened here.
+    child = subprocess.Popen(shlex.split(command), stdin=subprocess.PIPE)
+
+    def _heartbeat() -> None:
+        # tunnel_cli treats this exact phrase as a successful control-plane round trip;
+        # without it the supervisor never reaches a fully healthy phase.
+        while child.poll() is None:
+            print("dispatcher acknowledged notification with control plane", flush=True)
+            time.sleep(2)
+
+    threading.Thread(target=_heartbeat, daemon=True).start()
     raise SystemExit(child.wait())
 raise SystemExit(f"stub: unsupported argv {argv}")
 STUB
@@ -193,6 +205,22 @@ set +e
 UPGRADE_EXIT=$?
 set -e
 echo "upgrade exit=$UPGRADE_EXIT"
+
+# Distinguish "the supervisor never started" from "it started later than the CLI was
+# willing to wait" -- those are very different defects and the error message is the same.
+say "Late-arrival probe: did a runtime record appear AFTER the command gave up?"
+RECORD=""
+for _ in $(seq 1 60); do
+  RECORD="$(find "$HOME/.local/state/repoforge" -name managed-runtime-v3.json 2>/dev/null | head -1)"
+  [[ -n "$RECORD" ]] && break
+  sleep 1
+done
+if [[ -n "$RECORD" ]]; then
+  printf '  \033[33m! a runtime record appeared late at %s\033[0m\n' "${RECORD#"$HOME"}"
+  python3 -c "import json,sys; d=json.load(open('$RECORD')); print('  phase=',d.get('phase'),'pid=',d.get('pid'),'gen=',d.get('active_generation'))"
+else
+  echo "  no runtime record appeared within 60s"
+fi
 
 say "Post-activation evidence"
 echo "--- release root tree ---"

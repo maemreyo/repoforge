@@ -100,6 +100,7 @@ def build_version_status(
             converged=converged,
             running=running,
             rediscovery_required=rediscovery_required,
+            phase=phase,
             unreadable_newest_receipt=history.degraded and latest is None,
             in_flight=in_flight,
         ),
@@ -137,6 +138,7 @@ def _safe_next_action(
     converged: bool,
     running: bool,
     rediscovery_required: bool,
+    phase: str = "unknown",
     unreadable_newest_receipt: bool = False,
     in_flight: dict[str, object] | None = None,
 ) -> str:
@@ -159,11 +161,21 @@ def _safe_next_action(
             "Run `rf start --background` to serve it."
         )
     if not converged:
-        # Fail closed: never claim identity is current while the two disagree.
+        # Fail closed: never claim identity is current while the two disagree. Be precise
+        # about *why*: a runtime in a failed phase is a different problem from one serving
+        # a release we cannot identify, and telling them apart changes what the operator
+        # should do next.
+        if observed_sha is None:
+            return (
+                f"ACTIVATION NOT CONVERGED: `current` points at {desired_sha} but the "
+                f"runtime is in phase {phase!r} and is not serving an identifiable "
+                "release. Inspect `rf runtime status` and the runtime log, then re-run "
+                "the activation or roll back."
+            )
         return (
             f"ACTIVATION NOT CONVERGED: `current` points at {desired_sha} but the live "
-            f"runtime is serving {observed_sha or 'an unidentified release'}. Run "
-            "`rf runtime restart` to adopt it, or `rf upgrade rollback` to return."
+            f"runtime is serving {observed_sha}. Run `rf runtime restart` to adopt it, "
+            "or `rf upgrade rollback` to return."
         )
     if rediscovery_required:
         return (
