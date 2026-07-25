@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,16 @@ def _usable_release(root: Path) -> None:
     (root / "current").symlink_to(Path("releases") / "abc1234")
 
 
+def _stub_launchctl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Never run the real `launchctl` from a test: it would touch the user's session."""
+    shim_dir = tmp_path / "fake-bin"
+    shim_dir.mkdir(exist_ok=True)
+    launchctl = shim_dir / "launchctl"
+    launchctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launchctl.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}:{os.environ.get('PATH', '')}")
+
+
 def _install_agent(root: Path, *, persist: bool = False) -> int:
     argv = ["runtime", "install-agent", "--release-root", str(root)]
     if persist:
@@ -48,13 +59,15 @@ def test_install_agent_refuses_without_a_durable_secret(
     root.mkdir()
     _usable_release(root)
     monkeypatch.delenv("CONTROL_PLANE_API_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _stub_launchctl(monkeypatch, tmp_path)
 
     assert _install_agent(root) != 0
 
     payload = capsys.readouterr().out
     assert "AGENT_SECRET_UNUSABLE" in payload
     # No LaunchAgent may be registered when the agent could not start.
-    assert not (tmp_path / "LaunchAgents").exists()
+    assert not (tmp_path / "home" / "Library" / "LaunchAgents").exists()
     # The refusal must not leak the operator's home directory.
     assert str(Path.home()) not in payload
 
@@ -66,6 +79,8 @@ def test_persist_api_key_refuses_when_the_environment_is_empty(
     root.mkdir()
     _usable_release(root)
     monkeypatch.delenv("CONTROL_PLANE_API_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _stub_launchctl(monkeypatch, tmp_path)
 
     assert _install_agent(root, persist=True) != 0
     assert "CONTROL_PLANE_API_KEY_ABSENT" in capsys.readouterr().out
@@ -79,9 +94,14 @@ def test_persist_api_key_stores_it_owner_only_and_never_prints_it(
     _usable_release(root)
     monkeypatch.setenv("CONTROL_PLANE_API_KEY", _SECRET)
     # Never touch the operator's real LaunchAgents directory from a test.
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    # `~` is expanded from $HOME, so patching Path.home() would NOT redirect it: an
+    # earlier version of this test therefore installed a real LaunchAgent on the
+    # developer's machine. Redirect HOME, and stub launchctl so nothing is bootstrapped.
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    _stub_launchctl(monkeypatch, tmp_path)
 
-    # launchctl is unavailable/irrelevant here; the assertions below are about the secret.
     _install_agent(root, persist=True)
 
     store = RuntimeReleaseStore(root)
@@ -98,7 +118,10 @@ def test_agent_status_reports_metadata_but_never_the_secret(
     root.mkdir()
     store = RuntimeReleaseStore(root)
     store.write_agent_env({"CONTROL_PLANE_API_KEY": _SECRET})
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    _stub_launchctl(monkeypatch, tmp_path)
 
     main(["runtime", "agent-status", "--release-root", str(root)])
 
