@@ -224,3 +224,17 @@ def test_degraded_history_keeps_rediscovery_true_even_with_equal_surfaces(
     assert status["receipt_history_degraded"] is True
     # Fail closed: unknown history must not be reported as "no rediscovery needed".
     assert status["client_rediscovery_required"] is True
+
+
+def test_status_reports_an_incomplete_activation(tmp_path: Path) -> None:
+    """An activation that never terminalized must be surfaced, not ignored."""
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
+    store.swap_current("aaa1111")
+    store.begin_activation(receipt_id="act-20260725-001", from_sha=None, to_sha="aaa1111")
+    store.record_activation_stage("symlink_switched")
+
+    status = build_version_status(store, RuntimeIdentityInputs(), _observed("aaa1111"))
+
+    assert status["incomplete_activation"] is not None
+    assert "did not finish" in str(status["safe_next_action"])

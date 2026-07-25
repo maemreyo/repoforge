@@ -1469,12 +1469,16 @@ def _runtime_command(args: argparse.Namespace) -> int:
     raise ConfigError(f"Unknown runtime command: {args.runtime_command}")
 
 
+def _runtime_record_path_readonly(config_path: Path) -> Path:
+    """Locate the supervisor runtime record without creating or migrating anything."""
+    paths = resolve_repoforge_paths(config_path, state_root=default_state_root())
+    return paths.generation_root.parent / "managed-runtime-v3.json"
+
+
 def _runtime_record_best_effort(config_path: Path) -> Any:
     """Read the live supervisor record without failing version status when absent."""
     try:
-        store = _ensure_generation(config_path)
-        runtime_path, _, _ = _runtime_paths(store)
-        return build_runtime_store(runtime_path).read()
+        return build_runtime_store(_runtime_record_path_readonly(config_path)).read()
     except (ConfigError, OSError, ValueError):
         return None
 
@@ -1494,7 +1498,10 @@ def _version_command(args: argparse.Namespace) -> int:
     )
     observed = None
     with contextlib.suppress(ConfigError, OSError, ValueError):
-        runtime_path, _, _ = _runtime_paths(_ensure_generation(config_path))
+        # Deliberately NOT _ensure_generation(): that can import a legacy configuration,
+        # and `version status` is documented as a pure read. Resolve the runtime record
+        # path read-only instead.
+        runtime_path = _runtime_record_path_readonly(config_path)
         observed = build_release_observer(
             release_root=getattr(args, "release_root", None), runtime_record_path=runtime_path
         ).observe()

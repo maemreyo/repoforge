@@ -317,6 +317,14 @@ class UpgradeService:
             and previous_manifest.tool_surface_hash != manifest.tool_surface_hash
         )
 
+        # Journal the attempt BEFORE any side effect. A receipt is only written at a
+        # terminal outcome, so without this a crash between the swap and the receipt
+        # would leave `current` moved with no record that an activation ever started.
+        journal_receipt_id = self._store.allocate_receipt_id(date_stamp=self._date_stamp())
+        self._store.begin_activation(
+            receipt_id=journal_receipt_id, from_sha=previous_sha, to_sha=commit_sha
+        )
+
         # Both shims must exist BEFORE the first restart -- on a fresh release root there
         # is nothing to launch otherwise. The internal shim is what the manual restarter
         # execs; the supervisor shim is what an OS process manager execs.
@@ -324,13 +332,16 @@ class UpgradeService:
         self._store.write_supervisor_shim()
         self._store.swap_current(commit_sha)
         stage = ActivationStage.SYMLINK_SWITCHED
+        self._store.record_activation_stage(stage.value)
 
         restart = self._restarter.restart()
         if restart.ok:
             stage = ActivationStage.RUNTIME_RESTARTED
+            self._store.record_activation_stage(stage.value)
         converged, observed_sha, verify_detail = self._verify_serving(commit_sha)
         if converged:
             stage = ActivationStage.HEALTH_VERIFIED
+            self._store.record_activation_stage(stage.value)
 
         if not (restart.ok and converged):
             return self._fail_and_rollback(
@@ -365,6 +376,7 @@ class UpgradeService:
         # the runtime is already live and verified, so an auxiliary failure must never be
         # able to erase the fact that the activation happened.
         receipt = self._write_receipt(receipt)
+        self._store.end_activation()
         path_status, path_detail = self._install_path_launcher_best_effort()
         pruned = self._store.prune(keep=keep_releases)
         return UpgradeResult(
@@ -455,6 +467,7 @@ class UpgradeService:
             converged=False,
         )
         failed_receipt = self._write_receipt(failed_receipt)
+        self._store.end_activation()
         if previous_sha is None:
             # Nothing to restore: there was no prior release. Leave `current` at the
             # candidate but report failure loudly -- never a soft success.
@@ -573,6 +586,7 @@ class UpgradeService:
             cause_receipt_id=cause_receipt_id,
         )
         receipt = self._write_receipt(receipt)
+        self._store.end_activation()
         return UpgradeResult(
             status="rolled_back" if succeeded else "rollback_failed",
             candidate_sha=target,

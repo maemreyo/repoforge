@@ -278,3 +278,51 @@ def test_activation_provisions_the_supervisor_shim_for_the_process_manager(
     assert "exec " in script
     assert "repoforge.interfaces.runtime.worker" in script
     assert "current/venv/bin/python" in script
+
+
+# ------------------------------- durable activation journal (round-4 follow-up F7)
+
+
+def test_a_crash_between_the_swap_and_the_receipt_is_detectable(tmp_path: Path) -> None:
+    """A moved `current` with no terminal receipt must leave evidence to reconcile."""
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+
+    class _CrashingRestarter(_RealLauncherRestarter):
+        def restart(self) -> RestartOutcome:
+            raise KeyboardInterrupt("operator killed the activation mid-flight")
+
+    restarter = _CrashingRestarter(store, tmp_path / "config.toml")
+    service = UpgradeService(
+        store=store,
+        inspector=_Inspector(),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=restarter,
+        observer=_ObserverFollowingCurrent(store, restarter),
+        clock=_Clock(),
+        converge_attempts=1,
+        converge_interval_seconds=0,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        service.upgrade(tmp_path, activate=True)
+
+    # `current` moved and no receipt was written...
+    assert store.current_sha() == _SHA
+    assert store.list_receipts() == []
+    # ...but the in-flight journal records the attempt and how far it got.
+    in_flight = store.read_in_flight_activation()
+    assert in_flight is not None
+    assert in_flight["to_sha"] == _SHA
+    assert in_flight["stage"] == "symlink_switched"
+
+
+def test_a_completed_activation_clears_the_journal(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+    service, _ = _service(store, tmp_path)
+
+    result = service.upgrade(tmp_path, activate=True)
+
+    assert result.status == "activated"
+    assert store.read_in_flight_activation() is None

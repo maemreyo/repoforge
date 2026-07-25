@@ -46,6 +46,7 @@ def build_version_status(
     converged = observed_sha is not None and observed_sha == desired_sha
     history = store.receipt_history()
     latest = history.latest
+    in_flight = store.read_in_flight_activation()
 
     # Rediscovery is a property of the activation that installed the running release,
     # not a live hash comparison: once the new runtime is up the hashes match again,
@@ -89,6 +90,7 @@ def build_version_status(
         "active_generation": inputs.active_generation,
         "activation_receipt": latest.receipt_id if latest is not None else None,
         "activation_receipt_outcome": latest.outcome.value if latest is not None else None,
+        "incomplete_activation": in_flight,
         "receipt_history_degraded": history.degraded,
         "unreadable_receipts": list(history.unreadable),
         "client_rediscovery_required": rediscovery_required,
@@ -99,6 +101,7 @@ def build_version_status(
             running=running,
             rediscovery_required=rediscovery_required,
             unreadable_newest_receipt=history.degraded and latest is None,
+            in_flight=in_flight,
         ),
     }
 
@@ -135,7 +138,14 @@ def _safe_next_action(
     running: bool,
     rediscovery_required: bool,
     unreadable_newest_receipt: bool = False,
+    in_flight: dict[str, object] | None = None,
 ) -> str:
+    if in_flight is not None:
+        return (
+            "An activation did not finish: a previous attempt reached stage "
+            f"{in_flight.get('stage')!r} targeting {in_flight.get('to_sha')} without "
+            "writing a terminal receipt. Re-run the activation or roll back."
+        )
     if unreadable_newest_receipt:
         return (
             "The newest activation receipt is unreadable, so the last activation's "

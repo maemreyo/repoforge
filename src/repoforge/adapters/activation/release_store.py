@@ -330,6 +330,40 @@ class RuntimeReleaseStore:
             removed.append(sha)
         return removed
 
+    # -- in-flight journal --------------------------------------------------
+
+    def journal_path(self) -> Path:
+        return self._root / "runtime" / "activation-in-flight.json"
+
+    def begin_activation(self, *, receipt_id: str, from_sha: str | None, to_sha: str) -> None:
+        """Record an activation attempt BEFORE any side effect, so a crash is detectable.
+
+        Receipts are immutable and only written at a terminal outcome, so a process that
+        dies between the symlink swap and the receipt would leave `current` moved with no
+        evidence that an activation was ever in progress. This journal closes that gap:
+        it is written first and cleared only when a terminal receipt exists.
+        """
+        _atomic_write_json(
+            self.journal_path(),
+            {"receipt_id": receipt_id, "from_sha": from_sha, "to_sha": to_sha, "stage": "prepared"},
+        )
+
+    def record_activation_stage(self, stage: str) -> None:
+        """Advance the in-flight journal; a no-op when no activation is in flight."""
+        raw = _read_json(self.journal_path())
+        if not isinstance(raw, dict):
+            return
+        _atomic_write_json(self.journal_path(), {**raw, "stage": stage})
+
+    def read_in_flight_activation(self) -> dict[str, object] | None:
+        """Return the in-flight activation, if a previous attempt did not terminalize."""
+        raw = _read_json(self.journal_path())
+        return raw if isinstance(raw, dict) else None
+
+    def end_activation(self) -> None:
+        """Clear the journal once a terminal receipt has been durably written."""
+        self.journal_path().unlink(missing_ok=True)
+
     # -- receipts -----------------------------------------------------------
 
     def write_receipt(self, receipt: ActivationReceipt) -> Path:

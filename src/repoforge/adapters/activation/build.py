@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -90,6 +92,22 @@ class UvVenvReleaseInstaller:
     """Install a wheel into a self-contained per-release virtual environment."""
 
     def install(self, wheel: Path, destination: Path) -> None:
+        """Build into a staging directory, then atomically rename it into place.
+
+        Installing straight into ``releases/<sha>`` means a crashed ``uv venv``/``uv pip
+        install`` leaves a partial directory with no manifest, which the next attempt can
+        only report as unclaimable. Staging keeps the release directory all-or-nothing.
+        """
+        staging = destination.with_name(f".staging-{destination.name}-{os.getpid()}")
+        _remove_tree(staging)
+        try:
+            self._install_into(wheel, staging)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging, destination)
+        finally:
+            _remove_tree(staging)
+
+    def _install_into(self, wheel: Path, destination: Path) -> None:
         destination.mkdir(parents=True, exist_ok=True)
         venv = destination / _VENV
         code, out, err = _run(["uv", "venv", str(venv)], timeout=120.0)
@@ -368,6 +386,11 @@ class SupervisorHealthProbe:
             return HealthSample(healthy=False, detail=f"health probe unreachable: {exc}")
         healthy = response.ok and response.status == "healthy"
         return HealthSample(healthy=healthy, detail=response.message or response.status)
+
+
+def _remove_tree(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _sha256_file(path: Path) -> str:
