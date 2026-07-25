@@ -44,13 +44,17 @@ def build_version_status(
     # Convergence is only claimable when a live process was observed serving the
     # release the symlink desires.
     converged = observed_sha is not None and observed_sha == desired_sha
-    receipts = store.list_receipts()
-    latest = receipts[0] if receipts else None
+    history = store.receipt_history()
+    latest = history.latest
 
     # Rediscovery is a property of the activation that installed the running release,
     # not a live hash comparison: once the new runtime is up the hashes match again,
     # which would wrongly clear the flag for clients still holding the old surface.
     rediscovery_required = bool(latest.rediscovery_required) if latest is not None else False
+    # When the newest receipt is unreadable we cannot know what the last activation did,
+    # so assume a client may need to rediscover rather than claiming it does not.
+    if history.degraded and latest is None:
+        rediscovery_required = True
     if not converged and desired_manifest is not None and observed_manifest is not None:
         rediscovery_required = (
             desired_manifest.tool_surface_hash != observed_manifest.tool_surface_hash
@@ -83,6 +87,8 @@ def build_version_status(
         "active_generation": inputs.active_generation,
         "activation_receipt": latest.receipt_id if latest is not None else None,
         "activation_receipt_outcome": latest.outcome.value if latest is not None else None,
+        "receipt_history_degraded": history.degraded,
+        "unreadable_receipts": list(history.unreadable),
         "client_rediscovery_required": rediscovery_required,
         "safe_next_action": _safe_next_action(
             desired_sha=desired_sha,
@@ -90,6 +96,7 @@ def build_version_status(
             converged=converged,
             running=running,
             rediscovery_required=rediscovery_required,
+            unreadable_newest_receipt=history.degraded and latest is None,
         ),
     }
 
@@ -125,7 +132,13 @@ def _safe_next_action(
     converged: bool,
     running: bool,
     rediscovery_required: bool,
+    unreadable_newest_receipt: bool = False,
 ) -> str:
+    if unreadable_newest_receipt:
+        return (
+            "The newest activation receipt is unreadable, so the last activation's "
+            "outcome is unknown. Inspect or recover it before relying on this status."
+        )
     if desired_sha is None:
         return "No release is active. Run `rf upgrade --from-worktree . --activate`."
     if not running:

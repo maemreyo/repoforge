@@ -40,6 +40,7 @@ DEFAULT_HEALTH_WINDOW_SECONDS = 30.0
 DEFAULT_HEALTH_INTERVAL_SECONDS = 5.0
 # A single failed sample is a blip; rollback needs sustained failure.
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 3
+_RECEIPT_ID_ATTEMPTS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +313,9 @@ class UpgradeService:
             and previous_manifest.tool_surface_hash != manifest.tool_surface_hash
         )
 
+        # The restarter execs the internal shim, so it must exist BEFORE the first
+        # restart -- on a fresh release root there is nothing to launch otherwise.
+        self._store.write_internal_launcher_shim()
         self._store.swap_current(commit_sha)
         stage = ActivationStage.SYMLINK_SWITCHED
 
@@ -335,9 +339,9 @@ class UpgradeService:
                 ),
             )
 
-        # Only a converged, health-verified activation may publish the stable shim
+        # Only a converged, health-verified activation may publish the PATH launcher
         # and prune: both are irreversible relative to the release we just proved.
-        self._store.write_launcher_shim()
+        self._store.install_path_launcher()
         detail = f"Activated and verified: {verify_detail}"
         receipt = ActivationReceipt(
             receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
@@ -354,7 +358,7 @@ class UpgradeService:
             observed_sha=observed_sha,
             converged=True,
         )
-        self._store.write_receipt(receipt)
+        receipt = self._write_receipt(receipt)
         pruned = self._store.prune(keep=keep_releases)
         return UpgradeResult(
             status="activated",
@@ -425,7 +429,7 @@ class UpgradeService:
             observed_sha=observed_sha,
             converged=False,
         )
-        self._store.write_receipt(failed_receipt)
+        failed_receipt = self._write_receipt(failed_receipt)
         if previous_sha is None:
             # Nothing to restore: there was no prior release. Leave `current` at the
             # candidate but report failure loudly -- never a soft success.
@@ -543,7 +547,7 @@ class UpgradeService:
             converged=converged,
             cause_receipt_id=cause_receipt_id,
         )
-        self._store.write_receipt(receipt)
+        receipt = self._write_receipt(receipt)
         return UpgradeResult(
             status="rolled_back" if succeeded else "rollback_failed",
             candidate_sha=target,
@@ -557,6 +561,26 @@ class UpgradeService:
             converged=converged,
             stage=stage.value,
             detail=detail,
+        )
+
+    def _write_receipt(self, receipt: ActivationReceipt) -> ActivationReceipt:
+        """Persist a receipt, re-allocating its id if another writer took it first."""
+        from dataclasses import replace as _replace
+
+        for _ in range(_RECEIPT_ID_ATTEMPTS):
+            try:
+                self._store.write_receipt(receipt)
+                return receipt
+            except ConfigError as exc:
+                if "RECEIPT_EXISTS" not in str(exc):
+                    raise
+                receipt = _replace(
+                    receipt,
+                    receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
+                )
+        raise ConfigError(
+            f"RECEIPT_ID_EXHAUSTED: could not allocate a free receipt id after "
+            f"{_RECEIPT_ID_ATTEMPTS} attempts"
         )
 
     def _date_stamp(self) -> str:

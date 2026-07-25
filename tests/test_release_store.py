@@ -126,21 +126,26 @@ def test_receipts_are_written_read_and_allocated_monotonically(tmp_path: Path) -
     assert store.allocate_receipt_id(date_stamp="20260725") == "act-20260725-002"
 
 
-def test_launcher_shim_is_executable_and_resolves_through_current(tmp_path: Path) -> None:
+def test_internal_shim_is_executable_and_resolves_through_current(tmp_path: Path) -> None:
     store = RuntimeReleaseStore(tmp_path)
-    written = store.write_launcher_shim()
-    shim = store.bin_launcher()
-    assert shim in written
+    shim = store.write_internal_launcher_shim()
+    assert shim == store.bin_launcher()
     assert os.access(shim, os.X_OK)
     assert "current/venv/bin/rf" in shim.read_text(encoding="utf-8")
 
 
-def test_launcher_shim_is_written_once_and_not_rewritten_by_upgrades(tmp_path: Path) -> None:
+def test_a_store_without_a_path_launcher_never_provisions_one(tmp_path: Path) -> None:
+    """A temporary release root must not be able to touch ~/.local/bin/rf."""
     store = RuntimeReleaseStore(tmp_path)
-    first = store.write_launcher_shim()
-    assert store.bin_launcher() in first
-    # A later activation must not rewrite the stable shim.
-    assert store.bin_launcher() not in store.write_launcher_shim()
+    assert store.path_launcher() is None
+    assert store.install_path_launcher() is None
+
+
+def test_path_launcher_is_provisioned_only_when_granted(tmp_path: Path) -> None:
+    target = tmp_path / "home-bin" / "rf"
+    store = RuntimeReleaseStore(tmp_path, path_launcher=target)
+    assert store.install_path_launcher() == target
+    assert "RepoForge stable launcher" in target.read_text(encoding="utf-8")
 
 
 def test_reserve_release_refuses_to_overwrite_different_bits(tmp_path: Path) -> None:
@@ -217,9 +222,9 @@ def test_launcher_shim_migrates_a_legacy_uv_tool_entry_point(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    written = store.write_launcher_shim()
+    written = store.write_internal_launcher_shim()
 
-    assert legacy in written
+    assert written == legacy
     assert "RepoForge stable launcher" in legacy.read_text(encoding="utf-8")
 
 
@@ -230,4 +235,41 @@ def test_launcher_shim_refuses_to_clobber_an_unrecognized_file(tmp_path: Path) -
     occupied.write_text("some user script\n", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="LAUNCHER_PATH_OCCUPIED"):
-        store.write_launcher_shim()
+        store.write_internal_launcher_shim()
+
+
+# --------------------------------- degraded receipt history (round-3 finding 4)
+
+
+def test_a_corrupt_newest_receipt_makes_history_degraded_with_no_latest(
+    tmp_path: Path,
+) -> None:
+    """Never report an older receipt as "latest" when a newer one is unreadable."""
+    store = RuntimeReleaseStore(tmp_path)
+    _write_raw_receipt(store, dict(_LEGACY_ACTIVATED))  # act-20260724-001, readable
+    newest = store.root / "runtime" / "activation-receipts" / "act-20260724-009.json"
+    newest.write_text("{corrupt", encoding="utf-8")
+
+    history = store.receipt_history()
+
+    assert history.degraded is True
+    assert history.unreadable == ("act-20260724-009",)
+    # The readable one is still listed, but it is NOT the latest.
+    assert [r.receipt_id for r in history.valid] == ["act-20260724-001"]
+    assert history.latest is None
+
+
+def test_an_older_corrupt_receipt_does_not_hide_a_readable_newest(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    newer = dict(_LEGACY_ACTIVATED)
+    newer["receipt_id"] = "act-20260724-009"
+    _write_raw_receipt(store, newer)
+    older = store.root / "runtime" / "activation-receipts" / "act-20260724-001.json"
+    older.write_text("{corrupt", encoding="utf-8")
+
+    history = store.receipt_history()
+
+    assert history.degraded is True
+    # The newest is readable, so reporting it as latest is truthful.
+    assert history.latest is not None
+    assert history.latest.receipt_id == "act-20260724-009"

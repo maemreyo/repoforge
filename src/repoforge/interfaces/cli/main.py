@@ -1504,6 +1504,17 @@ def _version_command(args: argparse.Namespace) -> int:
     return 0 if status.get("activation_converged") or status.get("desired_commit") is None else 1
 
 
+def _manages_path_launcher(args: argparse.Namespace) -> bool:
+    """Only the default release root may rewrite the user's PATH launcher.
+
+    A ``--release-root`` override is used for experiments, so it must never mutate
+    ``~/.local/bin/rf``; ``--no-path-shim`` opts out even for the default root.
+    """
+    if getattr(args, "no_path_shim", False):
+        return False
+    return getattr(args, "release_root", None) is None
+
+
 def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
     config_path = Path(args.config).expanduser().resolve()
     runtime_path, supervisor_socket, _ = _runtime_paths(_ensure_generation(config_path))
@@ -1514,6 +1525,7 @@ def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
         kickstarter = _build_launchd_kickstarter(args)
     return build_upgrade_service(
         release_root=getattr(args, "release_root", None),
+        manage_path_launcher=_manages_path_launcher(args),
         supervisor_socket=supervisor_socket,
         runtime_record_path=runtime_path,
         config_path=config_path,
@@ -1594,7 +1606,8 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
     store = build_release_store(getattr(args, "release_root", None))
     registrar = _build_launchd_registrar(args)
     if args.runtime_command == "install-agent":
-        store.write_launcher_shim()
+        # The agent's ProgramArguments point at the internal shim, so it must exist.
+        store.write_internal_launcher_shim()
         result = registrar.install()
         _json(
             {
@@ -1934,6 +1947,12 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--activate", action="store_true")
     upgrade.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
     upgrade.add_argument("--release-root", dest="release_root", default=None)
+    upgrade.add_argument(
+        "--no-path-shim",
+        dest="no_path_shim",
+        action="store_true",
+        help="Do not create or migrate ~/.local/bin/rf during activation.",
+    )
     upgrade.add_argument(
         "--watch",
         action="store_true",

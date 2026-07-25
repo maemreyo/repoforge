@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...domain.activation import ActivationReceipt, ReleaseManifest
@@ -31,15 +32,49 @@ _VENV_BIN = "venv/bin/rf"
 _PATH_BIN_DIR = "~/.local/bin"
 
 
+class ReceiptExistsError(ConfigError):
+    """Raised when a receipt id is already taken, so the caller can re-allocate."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptHistory:
+    """Readable activation receipts plus the ids that could not be parsed."""
+
+    valid: tuple[ActivationReceipt, ...]
+    unreadable: tuple[str, ...]
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.unreadable)
+
+    @property
+    def latest(self) -> ActivationReceipt | None:
+        """The newest *readable* receipt, or None when a newer one is unreadable.
+
+        Returns None when an unreadable receipt sorts above every readable one: the
+        truthful answer is "unknown", never the older receipt.
+        """
+        if not self.valid:
+            return None
+        newest_valid = self.valid[0].receipt_id
+        if any(candidate > newest_valid for candidate in self.unreadable):
+            return None
+        return self.valid[0]
+
+
 class RuntimeReleaseStore:
     """Own the on-disk release directory, symlinks, manifests, and receipts."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, path_launcher: Path | None = None) -> None:
         self._root = root
         self._releases = root / _RELEASES
         self._current = root / _CURRENT
         self._previous = root / _PREVIOUS
         self._receipts = root / "runtime" / "activation-receipts"
+        # The PATH-visible launcher lives OUTSIDE the release root, so it is only
+        # provisioned when a caller explicitly opts in. A temporary release root must
+        # never be able to rewrite the user's real ``~/.local/bin/rf``.
+        self._path_launcher = path_launcher
 
     # -- paths --------------------------------------------------------------
 
@@ -54,49 +89,65 @@ class RuntimeReleaseStore:
         """The stable launcher shim path; resolves through ``current`` at run time."""
         return self._root / "bin" / "rf"
 
-    def path_launcher(self) -> Path:
-        """The PATH-visible stable launcher (``~/.local/bin/rf``)."""
+    def path_launcher(self) -> Path | None:
+        """The PATH-visible stable launcher, when this store is allowed to manage one."""
+        return self._path_launcher
+
+    @staticmethod
+    def default_path_launcher() -> Path:
+        """The conventional PATH launcher location (``~/.local/bin/rf``)."""
         return Path(_PATH_BIN_DIR).expanduser() / "rf"
 
-    def write_launcher_shim(self, *, force: bool = False) -> tuple[Path, ...]:
-        """Provision the stable launcher(s) **once**; a no-op when already present.
+    def write_internal_launcher_shim(self, *, force: bool = False) -> Path:
+        """Provision ``<release-root>/bin/rf`` -- required *before* a restart can run.
 
-        The shim is independent of any single commit -- it resolves through the
-        ``current`` symlink -- so upgrades must not rewrite it. It is written to the
-        release root's ``bin/rf`` and to the PATH location ``~/.local/bin/rf`` so
-        ``rf`` on the user's PATH always runs the active release.
+        This is the launcher the activation restarter execs, so it must exist before the
+        first restart, not after a successful one. It is release-independent (it resolves
+        through the ``current`` symlink), so it is written once and left alone afterwards.
         """
-        written: list[Path] = []
-        for shim, target in (
-            (self.bin_launcher(), self._root / _CURRENT / _VENV_BIN),
-            (self.path_launcher(), self._root / _CURRENT / _VENV_BIN),
-        ):
-            if shim.exists() and not force:
-                kind = _classify_shim(shim)
-                if kind == "repoforge_stable":
-                    # Already ours and release-independent: leave it untouched.
-                    continue
-                if kind == "unknown":
-                    raise ConfigError(
-                        f"LAUNCHER_PATH_OCCUPIED: {shim} exists and is not a RepoForge "
-                        "launcher. Move it aside (or re-run with force) so `rf` on PATH "
-                        "resolves to the active release."
-                    )
-                # A legacy uv-tool entry point: migrate it, otherwise the user keeps
-                # invoking the old install instead of the active release.
-            shim.parent.mkdir(parents=True, exist_ok=True)
-            script = (
-                "#!/bin/sh\n"
-                "# RepoForge stable launcher. Provisioned once; resolves the active\n"
-                "# release through the `current` symlink. Do not edit.\n"
-                f'exec "{target}" "$@"\n'
-            )
-            tmp = shim.with_name(f".{shim.name}.tmp-{os.getpid()}")
-            tmp.write_text(script, encoding="utf-8")
-            tmp.chmod(0o755)
-            os.replace(tmp, shim)
-            written.append(shim)
-        return tuple(written)
+        shim = self.bin_launcher()
+        self._provision_shim(shim, force=force)
+        return shim
+
+    def install_path_launcher(self, *, force: bool = False) -> Path | None:
+        """Provision the PATH-visible launcher, if this store manages one.
+
+        Deliberately separate from the internal shim: it mutates a location outside the
+        release root, so it only happens for a store constructed with an explicit
+        ``path_launcher`` and only after an activation has converged.
+        """
+        shim = self._path_launcher
+        if shim is None:
+            return None
+        self._provision_shim(shim, force=force)
+        return shim
+
+    def _provision_shim(self, shim: Path, *, force: bool) -> None:
+        target = self._root / _CURRENT / _VENV_BIN
+        if shim.exists() and not force:
+            kind = _classify_shim(shim)
+            if kind == "repoforge_stable":
+                # Already ours and release-independent: leave it untouched.
+                return
+            if kind == "unknown":
+                raise ConfigError(
+                    f"LAUNCHER_PATH_OCCUPIED: {shim} exists and is not a RepoForge "
+                    "launcher. Move it aside (or re-run with force) so `rf` resolves to "
+                    "the active release."
+                )
+            # A legacy uv-tool entry point: migrate it, otherwise the user keeps
+            # invoking the old install instead of the active release.
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        script = (
+            "#!/bin/sh\n"
+            "# RepoForge stable launcher. Provisioned once; resolves the active\n"
+            "# release through the `current` symlink. Do not edit.\n"
+            f'exec "{target}" "$@"\n'
+        )
+        tmp = shim.with_name(f".{shim.name}.tmp-{os.getpid()}")
+        tmp.write_text(script, encoding="utf-8")
+        tmp.chmod(0o755)
+        os.replace(tmp, shim)
 
     # -- manifests ----------------------------------------------------------
 
@@ -240,7 +291,7 @@ class RuntimeReleaseStore:
         try:
             handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError as exc:
-            raise ConfigError(
+            raise ReceiptExistsError(
                 f"RECEIPT_EXISTS: {receipt.receipt_id} already exists; receipts are immutable"
             ) from exc
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
@@ -259,29 +310,42 @@ class RuntimeReleaseStore:
             raise ConfigError(f"RECEIPT_INVALID: {receipt_id}: {exc}") from exc
 
     def list_receipts(self) -> list[ActivationReceipt]:
+        return list(self.receipt_history().valid)
+
+    def receipt_history(self) -> ReceiptHistory:
+        """Return readable receipts plus the ids that could not be parsed.
+
+        Skipping a bad file keeps one corrupt receipt from breaking every command, but
+        callers must know when history is incomplete: if the *newest* receipt is the
+        unreadable one, reporting the previous receipt as "latest" would be a lie.
+        """
         if not self._receipts.is_dir():
-            return []
-        receipts: list[ActivationReceipt] = []
+            return ReceiptHistory(valid=(), unreadable=())
+        valid: list[ActivationReceipt] = []
+        unreadable: list[str] = []
         for entry in sorted(self._receipts.glob("*.json")):
             try:
                 raw = _read_json(entry)
             except ConfigError:
-                # One unreadable receipt must not make the whole history -- and therefore
-                # `rf version status` and receipt allocation -- fail.
+                unreadable.append(entry.stem)
                 continue
             if raw is None:
                 continue
             try:
-                receipts.append(ActivationReceipt.from_dict(raw))
+                valid.append(ActivationReceipt.from_dict(raw))
             except ValueError:
-                continue
-        return sorted(receipts, key=lambda receipt: receipt.receipt_id, reverse=True)
+                unreadable.append(entry.stem)
+        return ReceiptHistory(
+            valid=tuple(sorted(valid, key=lambda receipt: receipt.receipt_id, reverse=True)),
+            unreadable=tuple(sorted(unreadable, reverse=True)),
+        )
 
     def allocate_receipt_id(self, *, date_stamp: str) -> str:
         """Return the next ``act-<date_stamp>-NNN`` id not already on disk.
 
         Allocation is advisory: two concurrent activations can pick the same id, so
-        ``write_receipt`` creates exclusively and callers retry (see ``next_receipt_id``).
+        ``write_receipt`` creates exclusively and raises :class:`ReceiptExistsError`,
+        which callers retry against a freshly allocated id.
         """
         taken = self._taken_receipt_ids()
         index = 1

@@ -46,7 +46,10 @@ class ReleaseAwareRuntimeLauncher:
                 f"LAUNCHER_SHIM_MISSING: {self._shim} does not exist; run an activation "
                 "or `rf runtime install-agent` to provision the stable launcher"
             )
-        argv = [str(self._shim), "--config", str(config_path), "start"]
+        # `--background` matters: without it the CLI runs the supervisor in the
+        # foreground as a *child* of this shim, so the published worker pid would not be
+        # its own process-group leader and a later force-stop (killpg) would miss it.
+        argv = [str(self._shim), "--config", str(config_path), "start", "--background"]
         env = {key: os.environ[key] for key in _INHERITED if key in os.environ}
         env.update(extra_env)
         if foreground:
@@ -66,20 +69,29 @@ class ReleaseAwareRuntimeLauncher:
         return process.pid
 
     def force_stop(self, record: RuntimeRecord, *, grace_seconds: float = 5.0) -> bool:
-        """Terminate only the identity-bound supervisor process group."""
+        """Terminate only the identity-bound supervisor process group.
+
+        The recorded pid is validated against its start identity first, then its *actual*
+        process group is resolved: assuming ``pgid == pid`` would silently signal nothing
+        when the runtime was started as a child of another process.
+        """
         if (
             record.pid is None
             or record.process_identity is None
             or process_identity(record.pid) != record.process_identity
         ):
             return False
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(record.pid, signal.SIGTERM)
-        deadline = time.monotonic() + max(0.0, grace_seconds)
-        while time.monotonic() < deadline:
-            if process_identity(record.pid) != record.process_identity:
-                return True
-            time.sleep(0.05)
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(record.pid, signal.SIGKILL)
+        try:
+            group = os.getpgid(record.pid)
+        except (OSError, ProcessLookupError):
+            # The process is already gone; nothing to terminate.
+            return process_identity(record.pid) != record.process_identity
+        for signal_number in (signal.SIGTERM, signal.SIGKILL):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(group, signal_number)
+            deadline = time.monotonic() + max(0.0, grace_seconds)
+            while time.monotonic() < deadline:
+                if process_identity(record.pid) != record.process_identity:
+                    return True
+                time.sleep(0.05)
         return process_identity(record.pid) != record.process_identity

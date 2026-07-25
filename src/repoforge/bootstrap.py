@@ -420,11 +420,18 @@ def build_runtime_launcher() -> RuntimeLauncher:
     return SubprocessRuntimeLauncher()
 
 
-def build_release_store(root: Path | None = None) -> RuntimeReleaseStore:
+def build_release_store(
+    root: Path | None = None, *, manage_path_launcher: bool = False
+) -> RuntimeReleaseStore:
     from .adapters.activation.release_store import RuntimeReleaseStore as _Store
     from .domain.user_paths import resolve_release_root
 
-    return _Store(resolve_release_root(root))
+    # The PATH launcher lives outside the release root, so the store only gets to manage
+    # it when the caller explicitly opts in (never for a temporary --release-root).
+    return _Store(
+        resolve_release_root(root),
+        path_launcher=_Store.default_path_launcher() if manage_path_launcher else None,
+    )
 
 
 def build_upgrade_service(
@@ -436,6 +443,7 @@ def build_upgrade_service(
     correlation_id: str,
     extra_env: dict[str, str] | None = None,
     kickstarter: SupervisorKickstarter | None = None,
+    manage_path_launcher: bool = False,
 ) -> UpgradeService:
     from .adapters.activation.build import (
         GitWorktreeInspector,
@@ -453,7 +461,7 @@ def build_upgrade_service(
     control_client = build_runtime_control_client(supervisor_socket)
     runtime_store = build_runtime_store(runtime_record_path)
     sleeper = SystemSleeper()
-    store = build_release_store(release_root)
+    store = build_release_store(release_root, manage_path_launcher=manage_path_launcher)
     return _Service(
         store=store,
         inspector=GitWorktreeInspector(),

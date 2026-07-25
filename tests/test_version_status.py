@@ -177,3 +177,26 @@ def test_a_stopped_runtime_with_a_release_executable_is_not_converged(
     assert status["activation_converged"] is False
     assert status["active_commit"] is None
     assert "no runtime is running" in str(status["safe_next_action"])
+
+
+def test_status_reports_degraded_history_when_the_newest_receipt_is_corrupt(
+    tmp_path: Path,
+) -> None:
+    """Round-3 finding 4: status must not silently fall back to an older receipt."""
+    import json
+
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
+    store.swap_current("aaa1111")
+    _receipt(store, to_sha="aaa1111", rediscovery=False)
+    receipts = store.root / "runtime" / "activation-receipts"
+    (receipts / "act-20260725-009.json").write_text("{corrupt", encoding="utf-8")
+    assert json  # keep the import meaningful for readers
+
+    status = build_version_status(store, RuntimeIdentityInputs(), _observed("aaa1111"))
+
+    assert status["receipt_history_degraded"] is True
+    assert status["unreadable_receipts"] == ["act-20260725-009"]
+    # No lie about which activation was last.
+    assert status["activation_receipt"] is None
+    assert "unreadable" in str(status["safe_next_action"])
