@@ -18,4 +18,13 @@ class WorkerBindingStore(Protocol):
         """Remove the binding; idempotent when it is already absent."""
         ...
 
+    def delete_if_unchanged(self, binding: OperationWorkerBinding) -> bool:
+        """Remove the binding only while it still matches ``binding`` exactly.
+
+        Returns ``False`` without deleting when the stored record has been replaced
+        since it was read, so a generation handoff can never release a *newer*
+        generation's binding that was written after its scan.
+        """
+        ...
+
     def list_all(self, *, max_records: int = 2_000) -> tuple[OperationWorkerBinding, ...]: ...

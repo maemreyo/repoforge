@@ -424,6 +424,15 @@ class InMemoryWorkerBindingStore:
     def delete(self, operation_id: str) -> None:
         self._records.pop(operation_id, None)
 
+    def delete_if_unchanged(self, binding: OperationWorkerBinding) -> bool:
+        current = self._records.get(binding.operation_id)
+        if current is None:
+            return True
+        if current != binding:
+            return False
+        del self._records[binding.operation_id]
+        return True
+
     def list_all(self, *, max_records: int = 2_000) -> tuple[OperationWorkerBinding, ...]:
         return tuple(list(self._records.values())[:max_records])
 

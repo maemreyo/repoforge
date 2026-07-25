@@ -8,6 +8,15 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .adapters.activation.release_store import RuntimeReleaseStore
+    from .application.activation.dev_runtime import DevRuntimeService
+    from .application.activation.handoff import GenerationHandoffReconciler
+    from .application.activation.upgrade import UpgradeService
+    from .ports.activation import ReleaseObserver, SupervisorKickstarter
+    from .ports.process_supervisor import ProcessSupervisorRegistrar
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
 from .adapters.audit.query import prune_audit_log as prune_audit_log
@@ -138,6 +147,7 @@ from .application.workflow import (
 )
 from .application.workspace.pr_watch import PrCheckWatchCoordinator
 from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
+from .domain.activation import AGENT_SECRET_FILE_ENV_VAR, AGENT_SECRET_KEY
 from .domain.errors import ConfigError
 from .domain.runtime import TunnelProfile
 from .ports import (
@@ -411,6 +421,165 @@ def build_runtime_launcher() -> RuntimeLauncher:
     return SubprocessRuntimeLauncher()
 
 
+def build_release_store(
+    root: Path | None = None, *, manage_path_launcher: bool = False
+) -> RuntimeReleaseStore:
+    from .adapters.activation.release_store import RuntimeReleaseStore as _Store
+    from .domain.user_paths import resolve_release_root
+
+    # The PATH launcher lives outside the release root, so the store only gets to manage
+    # it when the caller explicitly opts in (never for a temporary --release-root).
+    return _Store(
+        resolve_release_root(root),
+        path_launcher=_Store.default_path_launcher() if manage_path_launcher else None,
+    )
+
+
+def build_upgrade_service(
+    *,
+    release_root: Path | None,
+    supervisor_socket: Path,
+    runtime_record_path: Path,
+    config_path: Path,
+    correlation_id: str,
+    extra_env: dict[str, str] | None = None,
+    kickstarter: SupervisorKickstarter | None = None,
+    manage_path_launcher: bool = False,
+) -> UpgradeService:
+    from .adapters.activation.build import (
+        GitWorktreeInspector,
+        RuntimeRecordReleaseObserver,
+        SubprocessReleaseSmokeTester,
+        SupervisorHealthProbe,
+        SupervisorRestarter,
+        UvVenvReleaseInstaller,
+        UvWheelBuilder,
+    )
+    from .adapters.activation.launcher import ReleaseAwareRuntimeLauncher
+    from .adapters.background import SystemSleeper
+    from .application.activation.upgrade import UpgradeService as _Service
+
+    control_client = build_runtime_control_client(supervisor_socket)
+    runtime_store = build_runtime_store(runtime_record_path)
+    sleeper = SystemSleeper()
+    store = build_release_store(release_root, manage_path_launcher=manage_path_launcher)
+    return _Service(
+        store=store,
+        inspector=GitWorktreeInspector(),
+        builder=UvWheelBuilder(),
+        installer=UvVenvReleaseInstaller(),
+        smoke=SubprocessReleaseSmokeTester(),
+        restarter=SupervisorRestarter(
+            control=control_client,
+            runtime=runtime_store,
+            # NOT build_runtime_launcher(): that spawns with the *calling* CLI's
+            # sys.executable, which is the old release, so the candidate would never be
+            # adopted. The shim resolves through `current`.
+            launcher=ReleaseAwareRuntimeLauncher(store.bin_launcher()),
+            config_path=config_path,
+            correlation_id=correlation_id,
+            extra_env=extra_env,
+            sleeper=sleeper,
+            kickstarter=kickstarter,
+        ),
+        observer=RuntimeRecordReleaseObserver(
+            runtime=runtime_store, releases_root=store.root / "releases"
+        ),
+        clock=system_clock(),
+        health_probe=SupervisorHealthProbe(control_client, correlation_id=correlation_id),
+        sleeper=sleeper,
+        locks=build_lock_manager(store.root / "runtime"),
+    )
+
+
+def build_release_observer(
+    *, release_root: Path | None, runtime_record_path: Path
+) -> ReleaseObserver:
+    from .adapters.activation.build import RuntimeRecordReleaseObserver
+
+    store = build_release_store(release_root)
+    return RuntimeRecordReleaseObserver(
+        runtime=build_runtime_store(runtime_record_path), releases_root=store.root / "releases"
+    )
+
+
+def build_dev_runtime_service(
+    *, base_config: Path, base_state_root: Path | None = None
+) -> DevRuntimeService:
+    from .adapters.activation.dev_config import TomlDevConfigProvisioner
+    from .application.activation.dev_runtime import DevRuntimeService as _Service
+
+    return _Service(
+        launcher=build_runtime_launcher(),
+        provisioner=TomlDevConfigProvisioner(),
+        runtime_store_factory=build_runtime_store,
+        base_config=base_config,
+        base_state_root=base_state_root or default_state_root(),
+    )
+
+
+def build_generation_handoff_reconciler(
+    *, state_root: Path, locks: LockManager
+) -> GenerationHandoffReconciler:
+    from .adapters.persistence.json_worker_binding_store import JsonWorkerBindingStore
+    from .adapters.subprocess.os_process_reaper import OsProcessReaper
+    from .application.activation.handoff import GenerationHandoffReconciler as _Reconciler
+
+    return _Reconciler(
+        bindings=JsonWorkerBindingStore(state_root, locks),
+        reaper=OsProcessReaper(),
+    )
+
+
+def build_supervisor_kickstarter(
+    *,
+    launcher_path: Path,
+    config_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    inherited_env: dict[str, str],
+    agents_dir: Path,
+    label: str,
+) -> SupervisorKickstarter:
+    """The launchd job as a kickstarter, so activation keeps OS ownership."""
+    from .adapters.activation.launchd import LaunchAgentSpec, LaunchdRegistrar
+
+    return LaunchdRegistrar(
+        spec=LaunchAgentSpec(
+            label=label,
+            launcher_path=launcher_path,
+            config_path=config_path,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            inherited_env=inherited_env,
+        ),
+        agents_dir=agents_dir,
+    )
+
+
+def build_supervisor_launch_agent_registrar(
+    *,
+    launcher_path: Path,
+    config_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    inherited_env: dict[str, str],
+    agents_dir: Path,
+    label: str,
+) -> ProcessSupervisorRegistrar:
+    from .adapters.activation.launchd import LaunchAgentSpec, LaunchdRegistrar
+
+    spec = LaunchAgentSpec(
+        label=label,
+        launcher_path=launcher_path,
+        config_path=config_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        inherited_env=inherited_env,
+    )
+    return LaunchdRegistrar(spec=spec, agents_dir=agents_dir)
+
+
 def build_process_inspector() -> ProcessInspector:
     return SystemProcessInspector()
 
@@ -657,6 +826,36 @@ def _load_dotenv_if_present(path: Path) -> None:
         os.environ[key] = value
 
 
+def _agent_secret_from_file() -> dict[str, str]:
+    """Read the durable agent credential when the supervisor shim pointed us at one.
+
+    The launchd shim deliberately does NOT source the file -- sourcing would execute its
+    contents as shell -- so it passes only the path and the credential is opened here, on
+    the process that needs it. Every security invariant (regular file, owner, mode 0600,
+    exactly one allowlisted key, non-empty value) is re-proven on this start, on the same
+    file descriptor the bytes are read from. A file that was safe when
+    ``rf runtime install-agent`` ran but has since been chmodded or replaced by a symlink
+    is refused here, at the trust boundary, however many months later that boot happens.
+
+    An explicit ``CONTROL_PLANE_API_KEY`` in the environment wins, so this only runs when
+    the process has no inherited credential -- which is always the case under launchd.
+    """
+    from .adapters.activation.release_store import inspect_agent_secret
+
+    raw_path = os.environ.get(AGENT_SECRET_FILE_ENV_VAR, "")
+    if not raw_path:
+        return {}
+    path = Path(raw_path).expanduser()
+    status, secret = inspect_agent_secret(path)
+    if not status.usable:
+        raise ConfigError(
+            f"AGENT_SECRET_UNUSABLE: {AGENT_SECRET_FILE_ENV_VAR} points at {path}, which "
+            "cannot be trusted (" + "; ".join(status.problems()) + "); re-run "
+            "`rf runtime install-agent --persist-api-key` to restore it."
+        )
+    return {AGENT_SECRET_KEY: secret}
+
+
 def run_runtime_worker(
     config_path: Path,
     *,
@@ -730,13 +929,15 @@ def run_runtime_worker(
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "NO_PROXY",
-        "CONTROL_PLANE_API_KEY",
+        AGENT_SECRET_KEY,
     )
     environment = {key: os.environ[key] for key in inherited_keys if key in os.environ}
     environment["REPOFORGE_TUNNEL_ID"] = tunnel_id
     environment["REPOFORGE_TUNNEL_PROFILE"] = profile_name
-    if not environment.get("CONTROL_PLANE_API_KEY"):
-        raise ConfigError("CONTROL_PLANE_API_KEY is required for managed runtime startup")
+    if not environment.get(AGENT_SECRET_KEY):
+        environment.update(_agent_secret_from_file())
+    if not environment.get(AGENT_SECRET_KEY):
+        raise ConfigError(f"{AGENT_SECRET_KEY} is required for managed runtime startup")
     root = configs.root
     supervisor = RuntimeSupervisor(
         store=build_runtime_store(root / "managed-runtime-v3.json"),

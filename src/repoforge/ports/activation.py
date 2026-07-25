@@ -1,0 +1,222 @@
+"""Boundaries for building, installing, and activating immutable runtime releases.
+
+The upgrade pipeline is expressed against these ports so its orchestration -- clean
+check, build, smoke, atomic swap, receipt, rollback -- is exercised with fakes and
+never has to spawn `uv`, touch git, or restart a live supervisor to be tested.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from ..domain.activation import ActivationReceipt, ReleaseManifest
+
+
+class AgentSecretStatusView(Protocol):
+    """Whether a durable agent secret exists, is safely stored, and is usable."""
+
+    @property
+    def usable(self) -> bool: ...
+    @property
+    def exists(self) -> bool: ...
+    @property
+    def regular_file(self) -> bool: ...
+    @property
+    def owner_matches(self) -> bool: ...
+    @property
+    def mode_secure(self) -> bool: ...
+    @property
+    def key_present(self) -> bool: ...
+    @property
+    def value_nonempty(self) -> bool: ...
+    @property
+    def parse_valid(self) -> bool: ...
+    @property
+    def keys(self) -> tuple[str, ...]: ...
+    def problems(self) -> tuple[str, ...]: ...
+
+
+class ReceiptHistoryView(Protocol):
+    """Readable receipts, unreadable ids, and whether history is incomplete."""
+
+    @property
+    def valid(self) -> tuple[ActivationReceipt, ...]: ...
+    @property
+    def unreadable(self) -> tuple[str, ...]: ...
+    @property
+    def degraded(self) -> bool: ...
+    @property
+    def latest(self) -> ActivationReceipt | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeState:
+    """The exact source identity an upgrade is built from."""
+
+    head_sha: str
+    clean: bool
+    dirty_detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BuildArtifact:
+    """A wheel built from a worktree, with the fingerprint that identifies it."""
+
+    wheel_path: Path
+    build_fingerprint: str
+    package_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class SmokeResult:
+    """The verdict of running a candidate release against itself."""
+
+    ok: bool
+    tool_surface_hash: str
+    detail: str
+
+
+class WorktreeInspector(Protocol):
+    """Report whether a worktree is clean and what commit it is at."""
+
+    def inspect(self, worktree: Path) -> WorktreeState: ...
+
+
+class ReleaseBuilder(Protocol):
+    """Build exactly one wheel from a clean worktree."""
+
+    def build(self, worktree: Path) -> BuildArtifact: ...
+
+
+class ReleaseInstaller(Protocol):
+    """Materialize an immutable, self-contained release environment from a wheel."""
+
+    def install(self, wheel: Path, destination: Path) -> None: ...
+
+
+class ReleaseSmokeTester(Protocol):
+    """Run health/schema/tool-surface checks using the newly installed release itself."""
+
+    def smoke(self, release_path: Path) -> SmokeResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RestartOutcome:
+    """Result of replacing the live runtime process so it re-execs through ``current``."""
+
+    ok: bool
+    detail: str
+    pid: int | None = None
+
+
+class RuntimeRestarter(Protocol):
+    """Replace the live runtime process so it adopts whatever ``current`` points at.
+
+    A new *release* is new code, so it cannot be adopted by an in-process config
+    reload -- the process must be replaced. Implementations stop the running
+    supervisor and start it again through the stable launcher.
+    """
+
+    def restart(self) -> RestartOutcome: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedRuntime:
+    """What the live runtime process actually is, as published by that process."""
+
+    running_release_sha: str | None
+    phase: str
+    pid: int | None = None
+    executable: str | None = None
+    tool_surface_hash: str | None = None
+
+
+class ReleaseObserver(Protocol):
+    """Report the release the live runtime is actually serving (not the desired one)."""
+
+    def observe(self) -> ObservedRuntime: ...
+
+
+@dataclass(frozen=True, slots=True)
+class HealthSample:
+    """One post-activation health observation of the running runtime."""
+
+    healthy: bool
+    detail: str
+
+
+class RuntimeHealthProbe(Protocol):
+    """Sample the live runtime's health during the post-activation window (#272)."""
+
+    def sample(self) -> HealthSample: ...
+
+
+class DevConfigProvisioner(Protocol):
+    """Synthesize an isolated dev-runtime config from the production config (#271)."""
+
+    def provision(
+        self,
+        base_config: Path,
+        dev_config: Path,
+        *,
+        state_root: Path,
+        tunnel_id: str,
+        profile: str,
+    ) -> None: ...
+
+
+class ReleaseStore(Protocol):
+    """The immutable-release layout the application orchestrates over.
+
+    Implemented by the filesystem adapter; the application and CLI depend only on
+    this boundary so they never import the concrete store directly.
+    """
+
+    @property
+    def root(self) -> Path: ...
+    def release_path(self, commit_sha: str) -> Path: ...
+    def bin_launcher(self) -> Path: ...
+    def path_launcher(self) -> Path | None: ...
+    def supervisor_launcher(self) -> Path: ...
+    def supervisor_agent_label(self) -> str: ...
+    def agent_env_path(self) -> Path: ...
+    def write_agent_env(self, values: dict[str, str]) -> Path: ...
+    def agent_secret_status(self) -> AgentSecretStatusView: ...
+    def write_supervisor_shim(self, *, force: bool = False) -> Path: ...
+    def write_internal_launcher_shim(self, *, force: bool = False) -> Path: ...
+    def install_path_launcher(self, *, force: bool = False) -> Path | None: ...
+    def reserve_release(self, commit_sha: str, *, build_fingerprint: str) -> bool: ...
+    def write_manifest(self, manifest: ReleaseManifest) -> None: ...
+    def read_manifest(self, commit_sha: str) -> ReleaseManifest | None: ...
+    def installed_shas(self) -> list[str]: ...
+    def list_releases(self) -> list[ReleaseManifest]: ...
+    def current_sha(self) -> str | None: ...
+    def previous_sha(self) -> str | None: ...
+    def swap_current(self, commit_sha: str) -> str | None: ...
+    def rollback(self) -> str: ...
+    def prune(self, *, keep: int) -> list[str]: ...
+    def journal_path(self) -> Path: ...
+    def begin_activation(self, *, receipt_id: str, from_sha: str | None, to_sha: str) -> None: ...
+    def record_activation_stage(self, stage: str) -> None: ...
+    def read_in_flight_activation(self) -> dict[str, object] | None: ...
+    def end_activation(self) -> None: ...
+    def write_receipt(self, receipt: ActivationReceipt) -> Path: ...
+    def read_receipt(self, receipt_id: str) -> ActivationReceipt | None: ...
+    def list_receipts(self) -> list[ActivationReceipt]: ...
+    def receipt_history(self) -> ReceiptHistoryView: ...
+    def allocate_receipt_id(self, *, date_stamp: str) -> str: ...
+
+
+class SupervisorKickstarter(Protocol):
+    """Restart the supervisor through the OS process manager, keeping its ownership.
+
+    When the supervisor is registered with launchd, restarting it by spawning our own
+    detached process would move it *out* of launchd's control (a clean SHUTDOWN exit is
+    not relaunched under ``SuccessfulExit: False``). Kickstarting the registered job
+    instead keeps the OS as the owner across upgrades.
+    """
+
+    def available(self) -> bool: ...
+    def kickstart(self) -> RestartOutcome: ...
