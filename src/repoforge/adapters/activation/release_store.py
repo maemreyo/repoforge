@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,76 @@ def _receipt_sort_key(receipt_id: str) -> tuple[int, int, str]:
         return (int(parts[1]), int(parts[2]), receipt_id)
     except ValueError:
         return (0, 0, receipt_id)
+
+
+_AGENT_SECRET_KEY = "CONTROL_PLANE_API_KEY"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSecretStatus:
+    """Whether a durable agent secret exists AND is safe AND is usable."""
+
+    exists: bool = False
+    regular_file: bool = False
+    owner_matches: bool = False
+    mode_secure: bool = False
+    key_present: bool = False
+    value_nonempty: bool = False
+    parse_valid: bool = False
+    keys: tuple[str, ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        return all(
+            (
+                self.exists,
+                self.regular_file,
+                self.owner_matches,
+                self.mode_secure,
+                self.key_present,
+                self.value_nonempty,
+                self.parse_valid,
+            )
+        )
+
+    def problems(self) -> tuple[str, ...]:
+        """Human-readable reasons the secret cannot be trusted, for a refusal message."""
+        if not self.exists:
+            return ("no durable secret file exists",)
+        reasons = []
+        if not self.regular_file:
+            reasons.append("the path is not a regular file (a symlink is never followed)")
+        if not self.owner_matches:
+            reasons.append("the file is owned by another user")
+        if not self.mode_secure:
+            reasons.append("the file is not mode 0600")
+        if not self.key_present:
+            reasons.append(f"{_AGENT_SECRET_KEY} is absent")
+        elif not self.value_nonempty:
+            reasons.append(f"{_AGENT_SECRET_KEY} is empty")
+        if not self.parse_valid:
+            reasons.append("the file contains lines that are not `export KEY=VALUE`")
+        return tuple(reasons)
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    """Atomically write owner-only content, never widening permissions even briefly.
+
+    ``Path.write_text`` creates with ``0666 & ~umask`` (commonly 0644), so a secret would
+    be world-readable between creation and ``chmod`` -- and would STAY 0644 if the process
+    died in between. Creating with the final mode closes both windows.
+    """
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    tmp.unlink(missing_ok=True)
+    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class ReceiptExistsError(ConfigError):
@@ -129,7 +200,7 @@ class RuntimeReleaseStore:
         return self._root / "runtime" / "agent.env"
 
     def write_agent_env(self, values: dict[str, str]) -> Path:
-        """Persist agent environment values with owner-only permissions."""
+        """Persist agent environment values, owner-only from the first byte written."""
         path = self.agent_env_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = []
@@ -140,26 +211,50 @@ class RuntimeReleaseStore:
             # Single-quoted with embedded quotes escaped, so `.` (source) is safe.
             escaped = value.replace("'", "'\"'\"'")
             lines.append(f"export {key}='{escaped}'")
-        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-        try:
-            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            tmp.chmod(0o600)
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        _write_private_file(path, "\n".join(lines) + "\n")
         return path
 
-    def agent_env_keys(self) -> set[str]:
-        """Names present in the durable agent env file (never the values)."""
+    def agent_secret_status(self) -> AgentSecretStatus:
+        """Inspect the durable secret without ever returning its value.
+
+        Every field is a separate invariant because "the name appears in the file" is not
+        the same as "a usable secret is stored safely": a world-readable file, a symlink to
+        somewhere else, another user's file, or an empty value all satisfy a name check
+        while still being unsafe or guaranteed to fail at boot.
+        """
         path = self.agent_env_path()
-        if not path.is_file():
-            return set()
-        keys: set[str] = set()
+        try:
+            info = path.lstat()
+        except OSError:
+            return AgentSecretStatus()
+        regular = stat.S_ISREG(info.st_mode)
+        secure_mode = stat.S_IMODE(info.st_mode) == 0o600
+        owned = info.st_uid == os.getuid()
+        if not regular:
+            # A symlink (or anything else) is refused outright: we will not follow it.
+            return AgentSecretStatus(exists=True, regular_file=False, owner_matches=owned)
+        parsed: dict[str, str] = {}
+        parse_valid = True
         for line in path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
-            if stripped.startswith("export ") and "=" in stripped:
-                keys.add(stripped[len("export ") :].split("=", 1)[0].strip())
-        return keys
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not stripped.startswith("export ") or "=" not in stripped:
+                parse_valid = False
+                continue
+            name, _, raw = stripped[len("export ") :].partition("=")
+            parsed[name.strip()] = raw.strip().strip("'\"")
+        secret = parsed.get(_AGENT_SECRET_KEY, "")
+        return AgentSecretStatus(
+            exists=True,
+            regular_file=True,
+            owner_matches=owned,
+            mode_secure=secure_mode,
+            key_present=_AGENT_SECRET_KEY in parsed,
+            value_nonempty=bool(secret),
+            parse_valid=parse_valid,
+            keys=tuple(sorted(parsed)),
+        )
 
     def supervisor_launcher(self) -> Path:
         """The shim an OS process manager runs to *become* the supervisor worker."""

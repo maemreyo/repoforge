@@ -108,6 +108,7 @@ from ...domain.config_generation import (
 )
 from ...domain.errors import (
     ConfigError,
+    ErrorCode,
     PersonalCodingMCPError,
     operation_error_from_exception,
 )
@@ -1639,21 +1640,27 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
         # in the operator's terminal disappears at logout. Persist it to the owner-only
         # agent env file when asked, then refuse to install an agent that cannot start.
         if args.persist_api_key:
-            secret = os.environ.get("CONTROL_PLANE_API_KEY", "")
-            if not secret:
+            api_key = os.environ.get("CONTROL_PLANE_API_KEY", "")
+            if not api_key:
                 raise ConfigError(
                     "CONTROL_PLANE_API_KEY_ABSENT: --persist-api-key reads the value from "
                     "the CONTROL_PLANE_API_KEY environment variable so it never appears "
                     "in argv or shell history; export it and re-run."
                 )
-            store.write_agent_env({"CONTROL_PLANE_API_KEY": secret})
-        if "CONTROL_PLANE_API_KEY" not in store.agent_env_keys():
+            store.write_agent_env({"CONTROL_PLANE_API_KEY": api_key})
+        secret = store.agent_secret_status()
+        if not secret.usable:
+            # A stable logical label, not an absolute path: the message is not redacted,
+            # so it must not carry the operator's home directory.
             raise ConfigError(
-                "AGENT_SECRET_MISSING: the managed runtime requires CONTROL_PLANE_API_KEY, "
-                "and launchd starts jobs with no shell environment, so an agent installed "
-                "now would fail at every boot. Run `rf runtime install-agent "
-                "--persist-api-key` with CONTROL_PLANE_API_KEY exported to store it in "
-                f"{store.agent_env_path()} (owner-only)."
+                "AGENT_SECRET_UNUSABLE: the managed runtime requires "
+                "CONTROL_PLANE_API_KEY, and launchd starts jobs with no shell "
+                "environment, so an agent installed now would fail at every boot ("
+                + "; ".join(secret.problems())
+                + "). Run `rf runtime install-agent --persist-api-key` with "
+                "CONTROL_PLANE_API_KEY exported to store it in "
+                "<release-root>/runtime/agent.env (owner-only, mode 0600).",
+                code=ErrorCode.CONFIG_INVALID,
             )
         # The agent runs the supervisor shim, so both shims must exist.
         store.write_internal_launcher_shim()
@@ -1674,16 +1681,26 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
         _json({"status": result.status, "unit_path": result.unit_path, "detail": result.detail})
         return 0
     status = registrar.status()
-    keys = sorted(store.agent_env_keys())
+    secret = store.agent_secret_status()
     _json(
         {
             "registered": status.registered,
             "loaded": status.loaded,
             "unit_path": status.unit_path,
             "agent_env_path": str(store.agent_env_path()),
-            # Names only: a status command must never echo a secret.
-            "agent_env_keys": keys,
-            "durable_secret_present": "CONTROL_PLANE_API_KEY" in keys,
+            # Names and booleans only: a status command must never echo a secret value.
+            "agent_env_keys": list(secret.keys),
+            "durable_secret_usable": secret.usable,
+            "durable_secret_checks": {
+                "exists": secret.exists,
+                "regular_file": secret.regular_file,
+                "owner_matches": secret.owner_matches,
+                "mode_secure": secret.mode_secure,
+                "key_present": secret.key_present,
+                "value_nonempty": secret.value_nonempty,
+                "parse_valid": secret.parse_valid,
+            },
+            "durable_secret_problems": list(secret.problems()),
             "detail": status.detail,
         }
     )

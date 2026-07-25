@@ -39,12 +39,32 @@ UV_BIN="$(command -v uv)" || { echo "uv is required" >&2; exit 1; }
 # be on the scrubbed PATH. It is a build tool, not a credential.
 UV_DIR="$(dirname "$UV_BIN")"
 snapshot_real_home() {
+  # Content-addressed, not name-only: hashing directory listings would miss a modified
+  # file *inside* existing state, which is exactly the mutation worth catching.
   {
-    ls -la "$ORIGINAL_HOME/.local/bin/rf" 2>/dev/null || echo "absent: .local/bin/rf"
-    ls -la "$ORIGINAL_HOME/Library/LaunchAgents/dev.repoforge.supervisor.plist" 2>/dev/null \
-      || echo "absent: LaunchAgent plist"
-    find "$ORIGINAL_HOME/.local/share/repoforge" -maxdepth 1 2>/dev/null | sort || true
-    find "$ORIGINAL_HOME/.local/state/repoforge" -maxdepth 1 2>/dev/null | sort || true
+    for target in \
+      "$ORIGINAL_HOME/.local/bin/rf" \
+      "$ORIGINAL_HOME/Library/LaunchAgents/dev.repoforge.supervisor.plist" \
+      "$ORIGINAL_HOME/.local/share/repoforge" \
+      "$ORIGINAL_HOME/.local/state/repoforge"; do
+      if [[ ! -e "$target" && ! -L "$target" ]]; then
+        echo "absent ${target#"$ORIGINAL_HOME"}"
+        continue
+      fi
+      find "$target" \( -type f -o -type d -o -type l \) -print0 2>/dev/null | sort -z |
+        while IFS= read -r -d "" path; do
+          rel="${path#"$ORIGINAL_HOME"}"
+          if [[ -L "$path" ]]; then
+            printf 'L %s -> %s\n' "$rel" "$(readlink "$path")"
+          elif [[ -d "$path" ]]; then
+            printf 'D %s %s\n' "$rel" "$(stat -f '%Lp' "$path" 2>/dev/null)"
+          else
+            printf 'F %s %s %s %s\n' "$rel" "$(stat -f '%Lp' "$path" 2>/dev/null)" \
+              "$(stat -f '%z' "$path" 2>/dev/null)" \
+              "$(shasum -a 256 "$path" 2>/dev/null | cut -d' ' -f1)"
+          fi
+        done
+    done
   } | shasum -a 256 | cut -d" " -f1
 }
 REAL_HOME_BEFORE="$(snapshot_real_home)"
@@ -198,7 +218,7 @@ RF=(env -i
     REPOFORGE_TUNNEL_ID="sandbox-tunnel"
     REPOFORGE_TUNNEL_PROFILE="sandbox"
     CONTROL_PLANE_API_KEY="sandbox-only-never-networked"
-    "$UV_BIN" run --directory "$REPO_ROOT" --project "$REPO_ROOT" --extra dev
+    "$UV_BIN" run --directory "$SANDBOX" --project "$REPO_ROOT" --extra dev
     rf --config "$SANDBOX/config.toml")
 
 # `rf setup` is the real bootstrap: it enrolls the repository and writes a MODERN
@@ -268,6 +288,12 @@ else
   echo "(none)"
 fi
 
+say "rf version status (immediately after activation 1)"
+set +e
+"${RF[@]}" version status | tee "$SANDBOX/status1.json"
+STATUS1_EXIT=${PIPESTATUS[0]}
+set -e
+
 say "SECOND activation: a new candidate must take over and demote the first"
 # A second commit in the clone gives a genuinely different release sha.
 printf 'second candidate\n' >> "$CLONE/README.md"
@@ -278,7 +304,10 @@ set +e
 "${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3 | tee "$SANDBOX/upgrade2.json"
 UPGRADE2_EXIT=${PIPESTATUS[0]}
 set -e
-"${RF[@]}" version status > "$SANDBOX/status2.json" || true
+set +e
+"${RF[@]}" version status > "$SANDBOX/status2.json"
+STATUS2_EXIT=$?
+set -e
 RECEIPT2="$(python3 -c "import json;print(json.load(open('$SANDBOX/upgrade2.json')).get('activation_receipt') or '')")"
 
 say "ROLLBACK: the receipted rollback must restore the first candidate"
@@ -286,12 +315,9 @@ set +e
 "${RF[@]}" upgrade rollback "$RECEIPT2" | tee "$SANDBOX/rollback.json"
 ROLLBACK_EXIT=${PIPESTATUS[0]}
 set -e
-"${RF[@]}" version status > "$SANDBOX/status3.json" || true
-
-say "rf version status (after activation)"
 set +e
-"${RF[@]}" version status | tee "$SANDBOX/status.json"
-STATUS_EXIT=${PIPESTATUS[0]}
+"${RF[@]}" version status > "$SANDBOX/status3.json"
+STATUS3_EXIT=$?
 set -e
 
 say "The operator's REAL installation must be untouched"
@@ -302,15 +328,17 @@ else
 fi
 
 say "Acceptance assertions (#274)"
-python3 - "$HEAD_SHA" "$UPGRADE_EXIT" "$STATUS_EXIT" "$SANDBOX/upgrade.json" "$SANDBOX/status.json" \
+python3 - "$HEAD_SHA" "$UPGRADE_EXIT" "$STATUS1_EXIT" "$SANDBOX/upgrade.json" "$SANDBOX/status1.json" \
         "$SECOND_SHA" "$UPGRADE2_EXIT" "$ROLLBACK_EXIT" "$SANDBOX/upgrade2.json" \
-        "$SANDBOX/status2.json" "$SANDBOX/rollback.json" "$SANDBOX/status3.json" <<'ASSERT'
+        "$SANDBOX/status2.json" "$SANDBOX/rollback.json" "$SANDBOX/status3.json" \
+        "$STATUS2_EXIT" "$STATUS3_EXIT" <<'ASSERT'
 import json
 import sys
 
 head, upgrade_exit, status_exit, upgrade_path, status_path = sys.argv[1:6]
 second, upgrade2_exit, rollback_exit = sys.argv[6:9]
 upgrade2_path, status2_path, rollback_path, status3_path = sys.argv[9:13]
+status2_exit, status3_exit = sys.argv[13:15]
 failures = []
 
 
@@ -350,6 +378,9 @@ want("upgrade2.converged", upgrade2.get("converged"), True)
 want("upgrade2.active_sha", upgrade2.get("active_sha"), second)
 want("upgrade2.observed_sha", upgrade2.get("observed_sha"), second)
 want("upgrade2.previous_sha", upgrade2.get("previous_sha"), head)
+want("status2 exit", status2_exit, "0")
+want("status2.activation_converged", status2.get("activation_converged"), True)
+want("status2.incomplete_activation", status2.get("incomplete_activation"), None)
 want("status2.observed_commit", status2.get("observed_commit"), second)
 want("status2.previous_commit", status2.get("previous_commit"), head)
 
@@ -360,6 +391,7 @@ want("rollback.status", rollback.get("status"), "rolled_back")
 want("rollback.converged", rollback.get("converged"), True)
 want("rollback.active_sha", rollback.get("active_sha"), head)
 want("rollback.observed_sha", rollback.get("observed_sha"), head)
+want("status3 exit", status3_exit, "0")
 want("status3.desired_commit", status3.get("desired_commit"), head)
 want("status3.observed_commit", status3.get("observed_commit"), head)
 want("status3.activation_converged", status3.get("activation_converged"), True)

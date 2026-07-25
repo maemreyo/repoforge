@@ -341,8 +341,10 @@ def test_agent_env_is_owner_only_and_sourceable(tmp_path: Path) -> None:
 
     assert path == store.agent_env_path()
     assert oct(path.stat().st_mode & 0o777) == "0o600"
-    # Only names are exposed by the query API; the value is never returned.
-    assert store.agent_env_keys() == {"CONTROL_PLANE_API_KEY"}
+    # Only names/booleans are exposed; the value is never returned.
+    status = store.agent_secret_status()
+    assert status.usable is True
+    assert status.keys == ("CONTROL_PLANE_API_KEY",)
     # `sh -c '. file; echo $VAR'` must recover the exact value, quotes included.
     import subprocess
 
@@ -367,3 +369,71 @@ def test_the_supervisor_shim_sources_the_durable_secret(tmp_path: Path) -> None:
     assert "runtime/agent.env" in script
     # Sourced BEFORE exec, so the worker inherits it.
     assert script.index("agent.env") < script.index("exec env")
+
+
+def test_the_secret_is_never_world_readable_even_transiently(tmp_path: Path) -> None:
+    """Round-6 finding 1: `write_text()` honours umask, so it creates 0644 first.
+
+    Simulates a crash by making `os.replace` fail after the payload is written, then
+    proves no leftover file anywhere under the release root is group/other readable.
+    """
+    import os as _os
+
+    store = RuntimeReleaseStore(tmp_path)
+    original_replace = _os.replace
+
+    def _boom(src, dst):
+        raise OSError("simulated crash after write, before promotion")
+
+    _os.replace = _boom
+    try:
+        with pytest.raises(OSError, match="simulated crash"):
+            store.write_agent_env({"CONTROL_PLANE_API_KEY": "s3cret"})
+    finally:
+        _os.replace = original_replace
+
+    leaked = [
+        path for path in tmp_path.rglob("*") if path.is_file() and (path.stat().st_mode & 0o077)
+    ]
+    assert leaked == [], f"world/group-readable leftovers: {leaked}"
+
+
+def test_a_world_readable_secret_is_not_considered_usable(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    path = store.write_agent_env({"CONTROL_PLANE_API_KEY": "s3cret"})
+    path.chmod(0o644)
+
+    status = store.agent_secret_status()
+
+    assert status.usable is False
+    assert status.mode_secure is False
+    assert any("0600" in reason for reason in status.problems())
+
+
+def test_an_empty_secret_value_is_not_considered_usable(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    store.agent_env_path().parent.mkdir(parents=True, exist_ok=True)
+    store.agent_env_path().write_text("export CONTROL_PLANE_API_KEY=''\n", encoding="utf-8")
+    store.agent_env_path().chmod(0o600)
+
+    status = store.agent_secret_status()
+
+    # The NAME is present -- a name-only check would have passed here.
+    assert status.key_present is True
+    assert status.value_nonempty is False
+    assert status.usable is False
+
+
+def test_a_symlinked_secret_is_refused_without_following_it(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    real = tmp_path / "elsewhere.env"
+    real.write_text("export CONTROL_PLANE_API_KEY='s3cret'\n", encoding="utf-8")
+    real.chmod(0o600)
+    store.agent_env_path().parent.mkdir(parents=True, exist_ok=True)
+    store.agent_env_path().symlink_to(real)
+
+    status = store.agent_secret_status()
+
+    assert status.regular_file is False
+    assert status.usable is False
+    assert any("symlink" in reason for reason in status.problems())
