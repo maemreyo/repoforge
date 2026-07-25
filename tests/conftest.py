@@ -68,20 +68,27 @@ def _protected_fingerprint() -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def _never_touch_the_real_installation() -> Iterator[None]:
-    """Fail the test that modified the developer's real RepoForge installation.
+    """Fail when the developer's real RepoForge installation changed during a test.
 
     Deliberately autouse and unconditional: the failure mode is silent -- the test passes,
     and the damage only surfaces later when `rf` no longer runs -- so the only useful place
     to catch it is the moment it happens.
+
+    It cannot tell WHO wrote: a genuine `rf upgrade --activate` running in another terminal
+    while the suite runs also trips it, on whichever test happened to be in flight (observed
+    exactly once, and the message used to blame that innocent test). So the message names
+    both causes; on CI, where nothing else touches the runner's home, only the first applies.
     """
     before = _protected_fingerprint()
     yield
     after = _protected_fingerprint()
     changed = [key for key, value in after.items() if before.get(key) != value]
     assert not changed, (
-        "this test modified the operator's REAL installation: "
+        "the operator's REAL installation changed while this test ran: "
         + ", ".join(f"{key} ({before.get(key)} -> {after[key]})" for key in changed)
-        + ". Redirect HOME to tmp_path, or pass an explicit path inside tmp_path."
+        + ". Either this test escaped tmp_path -- redirect HOME to tmp_path, or pass an "
+        "explicit path inside it -- or a real `rf` activation ran concurrently on this "
+        "machine, in which case re-run the suite once it has finished."
     )
 
 
