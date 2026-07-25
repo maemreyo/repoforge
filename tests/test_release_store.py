@@ -437,3 +437,31 @@ def test_a_symlinked_secret_is_refused_without_following_it(tmp_path: Path) -> N
     assert status.regular_file is False
     assert status.usable is False
     assert any("symlink" in reason for reason in status.problems())
+
+
+# ------------- launchd label isolation (found by a live run: a sandbox kickstarted
+# ------------- the operator's production supervisor)
+
+
+def test_a_non_default_release_root_gets_its_own_launchd_label(tmp_path: Path) -> None:
+    """A sandbox/dev root must not resolve the operator's production launchd job.
+
+    With one fixed label, `launchctl kickstart -k` from a temporary release root restarts
+    the operator's real supervisor -- observed live: a sandbox activation failed with
+    "OS-managed supervisor did not publish a live record after kickstart" precisely because
+    it had kickstarted the production job.
+    """
+    production = RuntimeReleaseStore.default_release_root()
+    sandbox = RuntimeReleaseStore(tmp_path / "sandbox-root")
+    other = RuntimeReleaseStore(tmp_path / "another-root")
+
+    assert RuntimeReleaseStore(production).supervisor_agent_label() == "dev.repoforge.supervisor"
+    # Namespaced, and distinct per root, so neither can address production.
+    assert sandbox.supervisor_agent_label() != "dev.repoforge.supervisor"
+    assert sandbox.supervisor_agent_label().startswith("dev.repoforge.supervisor.")
+    assert sandbox.supervisor_agent_label() != other.supervisor_agent_label()
+    # Stable for a given root, so an installed agent stays addressable.
+    assert (
+        sandbox.supervisor_agent_label()
+        == RuntimeReleaseStore(tmp_path / "sandbox-root").supervisor_agent_label()
+    )

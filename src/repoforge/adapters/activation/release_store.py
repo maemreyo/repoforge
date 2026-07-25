@@ -16,6 +16,7 @@ POSIX. We never use ``ln -sf`` (unlink + symlink), which leaves a window with no
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -33,6 +34,7 @@ _VENV_BIN = "venv/bin/rf"
 _VENV_PYTHON = "venv/bin/python"
 _WORKER_MODULE = "repoforge.interfaces.runtime.worker"
 _PATH_BIN_DIR = "~/.local/bin"
+_DEFAULT_AGENT_LABEL = "dev.repoforge.supervisor"
 
 
 def _receipt_sort_key(receipt_id: str) -> tuple[int, int, str]:
@@ -255,6 +257,27 @@ class RuntimeReleaseStore:
             parse_valid=parse_valid,
             keys=tuple(sorted(parsed)),
         )
+
+    def supervisor_agent_label(self) -> str:
+        """The launchd label for THIS release root.
+
+        Namespacing by root is a safety boundary, not cosmetics: with one fixed label a
+        sandbox or dev release root would resolve to the operator's production job and
+        ``launchctl kickstart -k`` would restart it. A namespaced label simply does not
+        exist for a foreign root, so ``available()`` is False and the caller falls back to
+        its own launcher instead of touching production. The default root keeps the plain
+        label so existing installations are unaffected.
+        """
+        if self._root == self.default_release_root():
+            return _DEFAULT_AGENT_LABEL
+        digest = hashlib.sha256(str(self._root).encode("utf-8")).hexdigest()[:12]
+        return f"{_DEFAULT_AGENT_LABEL}.{digest}"
+
+    @staticmethod
+    def default_release_root() -> Path:
+        from ...domain.user_paths import resolve_release_root
+
+        return resolve_release_root(None)
 
     def supervisor_launcher(self) -> Path:
         """The shim an OS process manager runs to *become* the supervisor worker."""

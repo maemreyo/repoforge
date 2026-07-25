@@ -20,6 +20,7 @@ from ...ports.activation import RestartOutcome
 from ...ports.process_supervisor import RegistrarResult, RegistrarStatus
 
 DEFAULT_LABEL = "dev.repoforge.supervisor"
+"""Label for the DEFAULT release root only; other roots must namespace their own."""
 
 
 @dataclass(frozen=True, slots=True)

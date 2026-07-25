@@ -538,13 +538,14 @@ def build_supervisor_kickstarter(
     stderr_path: Path,
     inherited_env: dict[str, str],
     agents_dir: Path,
+    label: str,
 ) -> SupervisorKickstarter:
     """The launchd job as a kickstarter, so activation keeps OS ownership."""
-    from .adapters.activation.launchd import DEFAULT_LABEL, LaunchAgentSpec, LaunchdRegistrar
+    from .adapters.activation.launchd import LaunchAgentSpec, LaunchdRegistrar
 
     return LaunchdRegistrar(
         spec=LaunchAgentSpec(
-            label=DEFAULT_LABEL,
+            label=label,
             launcher_path=launcher_path,
             config_path=config_path,
             stdout_path=stdout_path,
@@ -563,11 +564,12 @@ def build_supervisor_launch_agent_registrar(
     stderr_path: Path,
     inherited_env: dict[str, str],
     agents_dir: Path,
+    label: str,
 ) -> ProcessSupervisorRegistrar:
-    from .adapters.activation.launchd import DEFAULT_LABEL, LaunchAgentSpec, LaunchdRegistrar
+    from .adapters.activation.launchd import LaunchAgentSpec, LaunchdRegistrar
 
     spec = LaunchAgentSpec(
-        label=DEFAULT_LABEL,
+        label=label,
         launcher_path=launcher_path,
         config_path=config_path,
         stdout_path=stdout_path,

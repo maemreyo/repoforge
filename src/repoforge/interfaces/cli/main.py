@@ -1606,6 +1606,9 @@ def _launch_agent_arguments(args: argparse.Namespace) -> dict[str, Any]:
             if key in os.environ
         },
         "agents_dir": Path("~/Library/LaunchAgents").expanduser(),
+        # Namespaced per release root so a sandbox/dev root can never resolve -- let alone
+        # kickstart -- the operator's production launchd job.
+        "label": store.supervisor_agent_label(),
     }
 
 
