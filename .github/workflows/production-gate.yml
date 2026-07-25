@@ -64,6 +64,29 @@ jobs:
         run: uv run pytest tests/test_onboarding_real_git.py tests/test_repository_discovery.py
       - run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
 
+  # A release gate that no unit test can replace: it performs a REAL `rf upgrade
+  # --activate` (real wheel build, real per-release venv, real smoke, real supervisor
+  # process), a second activation, and a receipted rollback, asserting the JSON payloads
+  # and `rf version status` at every stage. Five production defects reached `main`-bound
+  # branches invisible to the unit suite and were caught only here, so this runs on the
+  # gate rather than on demand.
+  live-activation:
+    needs: [static-contracts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - name: Live activation, second activation, and receipted rollback
+        # The harness provisions its own stub tunnel-client and an isolated HOME, config,
+        # state root and release root, so it never contacts a control plane and never
+        # touches an installation outside its sandbox.
+        run: scripts/live-activation-sandbox.sh
+
   package:
     needs: [static-contracts, tests]
     runs-on: ubuntu-latest

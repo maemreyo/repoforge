@@ -14,7 +14,7 @@ endif
 .PHONY: default start dev-server restart status stop logs doctor
 .PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check test-map
 .PHONY: v2-gates build check install release
-.PHONY: smoke clean
+.PHONY: smoke clean live-activation
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
 
 # Keep this list explicit: config.repoforge.toml profiles and operator docs rely on
@@ -35,6 +35,7 @@ help:  # Show available commands without changing local or runtime state
 	  '  make v2-gates          Run frozen Forge v2 release corpora' \
 	  '  make check             Run the full dirty-tree production gate' \
 	  '  make production-check  Run the clean-tree production gate' \
+	  '  make live-activation   Real activate/rollback lifecycle in an isolated sandbox' \
 	  '  make tickets           Run deterministic ticket-governance tests' \
 	  '  make build             Build exactly one wheel and one sdist' \
 	  '  make install           Install the freshly built wheel as rf' \
@@ -145,7 +146,8 @@ start: install  # Build, install, stop the managed old process, and start this r
 		flags=''; \
 		if [ -n "$(BG)$(WATCH)" ]; then flags='--background'; fi; \
 		printf '\n\033[36m══> Starting %s %s\033[0m\n' "$$(rf --version)" "$$flags"; \
-		CONTROL_PLANE_API_KEY="$${CONTROL_PLANE_API_KEY:-}" rf start $$flags; \
+		if [ -n "$${CONTROL_PLANE_API_KEY:-}" ]; then export CONTROL_PLANE_API_KEY; fi; \
+		rf start $$flags; \
 		if [ -n "$$flags" ]; then \
 			sleep 2; \
 			rf runtime status; \
@@ -176,6 +178,9 @@ watch:  # Follow the managed runtime log without scraping pretty-JSON spacing
 
 doctor:  # Inspect repositories, runtime paths, tools, and configuration state
 	uv run --extra dev rf doctor
+
+live-activation:  # Prove a real activation -> second activation -> rollback in a sandbox
+	scripts/live-activation-sandbox.sh
 
 smoke:  # Run a bounded repository-list smoke check
 	@test -n "$(REPO_ID)" || { echo "Set REPO_ID to a configured repository id" >&2; exit 2; }

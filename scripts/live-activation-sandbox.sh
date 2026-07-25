@@ -43,6 +43,14 @@ UV_DIR="$(dirname "$UV_BIN")"
 # git checkouts (6 GB / 200k files on this machine), so hashing it made the harness appear
 # to hang for an hour. A bounded, correct check beats an unbounded one that never finishes.
 SNAPSHOT_FILE_CAP=20000
+# `stat -f` is BSD/macOS and `stat -c` is GNU; the harness must run on both (CI is Linux).
+if stat -f '%Lp' . >/dev/null 2>&1; then
+  stat_mode() { stat -f '%Lp' "$1" 2>/dev/null; }
+  stat_size() { stat -f '%z' "$1" 2>/dev/null; }
+else
+  stat_mode() { stat -c '%a' "$1" 2>/dev/null; }
+  stat_size() { stat -c '%s' "$1" 2>/dev/null; }
+fi
 snapshot_real_home() {
   local targets=(
     "$ORIGINAL_HOME/.local/bin/rf"
@@ -77,13 +85,19 @@ snapshot_real_home() {
     # One shasum process for every file, not one per file.
     find "${existing[@]}" -type f -print0 2>/dev/null | sort -z \
       | xargs -0 -r shasum -a 256 2>/dev/null
+    # Mode and size matter for the launcher and the plist, so record them too.
+    find "${existing[@]}" -type f -print0 2>/dev/null | sort -z \
+      | while IFS= read -r -d "" path; do
+          printf 'M %s %s %s\n' "${path#"$ORIGINAL_HOME"}" \
+            "$(stat_mode "$path")" "$(stat_size "$path")"
+        done
     # Directories and symlinks carry no content, so record structure explicitly.
     find "${existing[@]}" \( -type d -o -type l \) -print0 2>/dev/null | sort -z \
       | while IFS= read -r -d "" path; do
           if [[ -L "$path" ]]; then
             printf 'L %s -> %s\n' "${path#"$ORIGINAL_HOME"}" "$(readlink "$path")"
           else
-            printf 'D %s\n' "${path#"$ORIGINAL_HOME"}"
+            printf 'D %s %s\n' "${path#"$ORIGINAL_HOME"}" "$(stat_mode "$path")"
           fi
         done
   } | sed "s|$ORIGINAL_HOME|~|g" | shasum -a 256 | cut -d" " -f1
