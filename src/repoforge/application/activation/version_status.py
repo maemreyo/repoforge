@@ -56,7 +56,9 @@ def build_version_status(
     if history.degraded and latest is None:
         rediscovery_required = True
     if not converged and desired_manifest is not None and observed_manifest is not None:
-        rediscovery_required = (
+        # `or`, never `=`: a degraded history already forced this True, and equal
+        # surfaces must not clear a flag we cannot actually rule out.
+        rediscovery_required = rediscovery_required or (
             desired_manifest.tool_surface_hash != observed_manifest.tool_surface_hash
         )
 

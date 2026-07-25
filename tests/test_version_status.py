@@ -200,3 +200,27 @@ def test_status_reports_degraded_history_when_the_newest_receipt_is_corrupt(
     # No lie about which activation was last.
     assert status["activation_receipt"] is None
     assert "unreadable" in str(status["safe_next_action"])
+
+
+def test_degraded_history_keeps_rediscovery_true_even_with_equal_surfaces(
+    tmp_path: Path,
+) -> None:
+    """Round-4 finding 3: an equal-surface non-converged branch must not clear the flag."""
+    store = RuntimeReleaseStore(tmp_path)
+    # Two releases with the SAME tool surface, so the surface compare would say "no".
+    _install(store, "aaa0111", surface=_SURFACE, built_at="2026-07-25T08:00:00+00:00")
+    _install(store, "bbb0222", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
+    store.swap_current("aaa0111")
+    store.swap_current("bbb0222")
+    # The newest receipt is unreadable -> the last activation's effect is unknown.
+    receipts = store.root / "runtime" / "activation-receipts"
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / "act-20260725-009.json").write_text("{corrupt", encoding="utf-8")
+
+    # Not converged: desired is bbb0222 but the runtime still serves aaa0111.
+    status = build_version_status(store, RuntimeIdentityInputs(), _observed("aaa0111"))
+
+    assert status["activation_converged"] is False
+    assert status["receipt_history_degraded"] is True
+    # Fail closed: unknown history must not be reported as "no rediscovery needed".
+    assert status["client_rediscovery_required"] is True

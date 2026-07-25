@@ -58,6 +58,8 @@ class UpgradeResult:
     observed_sha: str | None = None
     converged: bool = False
     stage: str = ""
+    path_launcher_status: str = ""
+    path_launcher_detail: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         rollback = (
@@ -78,6 +80,8 @@ class UpgradeResult:
             "activation_receipt": self.activation_receipt,
             "client_rediscovery_required": self.rediscovery_required,
             "pruned_releases": list(self.pruned),
+            "path_launcher_status": self.path_launcher_status,
+            "path_launcher_detail": self.path_launcher_detail,
             "rollback_command": rollback,
             "detail": self.detail,
         }
@@ -313,9 +317,11 @@ class UpgradeService:
             and previous_manifest.tool_surface_hash != manifest.tool_surface_hash
         )
 
-        # The restarter execs the internal shim, so it must exist BEFORE the first
-        # restart -- on a fresh release root there is nothing to launch otherwise.
+        # Both shims must exist BEFORE the first restart -- on a fresh release root there
+        # is nothing to launch otherwise. The internal shim is what the manual restarter
+        # execs; the supervisor shim is what an OS process manager execs.
         self._store.write_internal_launcher_shim()
+        self._store.write_supervisor_shim()
         self._store.swap_current(commit_sha)
         stage = ActivationStage.SYMLINK_SWITCHED
 
@@ -339,9 +345,6 @@ class UpgradeService:
                 ),
             )
 
-        # Only a converged, health-verified activation may publish the PATH launcher
-        # and prune: both are irreversible relative to the release we just proved.
-        self._store.install_path_launcher()
         detail = f"Activated and verified: {verify_detail}"
         receipt = ActivationReceipt(
             receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
@@ -358,7 +361,11 @@ class UpgradeService:
             observed_sha=observed_sha,
             converged=True,
         )
+        # Commit the durable truth FIRST. Everything after this point is convenience:
+        # the runtime is already live and verified, so an auxiliary failure must never be
+        # able to erase the fact that the activation happened.
         receipt = self._write_receipt(receipt)
+        path_status, path_detail = self._install_path_launcher_best_effort()
         pruned = self._store.prune(keep=keep_releases)
         return UpgradeResult(
             status="activated",
@@ -373,8 +380,26 @@ class UpgradeService:
             observed_sha=observed_sha,
             converged=True,
             stage=ActivationStage.HEALTH_VERIFIED.value,
+            path_launcher_status=path_status,
+            path_launcher_detail=path_detail,
             detail=detail,
         )
+
+    def _install_path_launcher_best_effort(self) -> tuple[str, str]:
+        """Provision the PATH launcher, reporting failure instead of raising.
+
+        A PATH shim is developer convenience. The runtime is already activated and
+        verified by the time this runs, so a blocked or unwritable ``~/.local/bin/rf``
+        must be surfaced as a warning -- never allowed to fail the command and leave the
+        operator believing a live activation did not happen.
+        """
+        try:
+            installed = self._store.install_path_launcher()
+        except (ConfigError, OSError) as exc:
+            return "failed", str(exc)
+        if installed is None:
+            return "skipped", "This release store does not manage a PATH launcher."
+        return "installed", str(installed)
 
     def _verify_serving(self, expected_sha: str) -> tuple[bool, str | None, str]:
         """Poll until the live runtime is observed serving ``expected_sha`` and healthy."""

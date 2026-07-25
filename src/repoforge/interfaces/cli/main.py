@@ -1581,7 +1581,7 @@ def _launch_agent_arguments(args: argparse.Namespace) -> dict[str, Any]:
     store = build_release_store(getattr(args, "release_root", None))
     log_dir = store.root / "runtime" / "logs"
     return {
-        "launcher_path": store.bin_launcher(),
+        "launcher_path": store.supervisor_launcher(),
         "config_path": Path(args.config).expanduser().resolve(),
         "stdout_path": log_dir / "supervisor.out.log",
         "stderr_path": log_dir / "supervisor.err.log",
@@ -1606,8 +1606,24 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
     store = build_release_store(getattr(args, "release_root", None))
     registrar = _build_launchd_registrar(args)
     if args.runtime_command == "install-agent":
-        # The agent's ProgramArguments point at the internal shim, so it must exist.
+        # A LaunchAgent with RunAtLoad pointing at a release that does not exist would
+        # report "installed" while failing to start forever, so require a usable one.
+        active = store.current_sha()
+        if active is None:
+            raise ConfigError(
+                "NO_ACTIVE_RELEASE: activate a release before installing the runtime "
+                "agent (`rf upgrade --from-worktree . --activate`)."
+            )
+        entry_point = store.release_path(active) / "venv" / "bin" / "python"
+        if store.read_manifest(active) is None or not entry_point.is_file():
+            raise ConfigError(
+                f"ACTIVE_RELEASE_UNUSABLE: `current` points at {active} but its manifest "
+                f"or interpreter is missing ({entry_point}); re-activate before "
+                "installing the agent."
+            )
+        # The agent runs the supervisor shim, so both shims must exist.
         store.write_internal_launcher_shim()
+        store.write_supervisor_shim()
         result = registrar.install()
         _json(
             {

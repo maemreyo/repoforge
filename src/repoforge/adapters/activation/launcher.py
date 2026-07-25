@@ -86,6 +86,12 @@ class ReleaseAwareRuntimeLauncher:
         except (OSError, ProcessLookupError):
             # The process is already gone; nothing to terminate.
             return process_identity(record.pid) != record.process_identity
+        if group != record.pid:
+            # We validated ONE pid, not the group. If the recorded process is not its own
+            # group leader, the group may contain unrelated processes, so signalling it
+            # would exceed what we can prove we own. The runtime is started detached
+            # (``--background``) precisely so it *is* the leader.
+            return False
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(group, signal_number)

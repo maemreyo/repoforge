@@ -145,7 +145,7 @@ def test_path_launcher_is_provisioned_only_when_granted(tmp_path: Path) -> None:
     target = tmp_path / "home-bin" / "rf"
     store = RuntimeReleaseStore(tmp_path, path_launcher=target)
     assert store.install_path_launcher() == target
-    assert "RepoForge stable launcher" in target.read_text(encoding="utf-8")
+    assert "repoforge-launcher:v1" in target.read_text(encoding="utf-8")
 
 
 def test_reserve_release_refuses_to_overwrite_different_bits(tmp_path: Path) -> None:
@@ -225,7 +225,7 @@ def test_launcher_shim_migrates_a_legacy_uv_tool_entry_point(tmp_path: Path) -> 
     written = store.write_internal_launcher_shim()
 
     assert written == legacy
-    assert "RepoForge stable launcher" in legacy.read_text(encoding="utf-8")
+    assert "repoforge-launcher:v1" in legacy.read_text(encoding="utf-8")
 
 
 def test_launcher_shim_refuses_to_clobber_an_unrecognized_file(tmp_path: Path) -> None:
@@ -273,3 +273,54 @@ def test_an_older_corrupt_receipt_does_not_hide_a_readable_newest(tmp_path: Path
     # The newest is readable, so reporting it as latest is truthful.
     assert history.latest is not None
     assert history.latest.receipt_id == "act-20260724-009"
+
+
+def test_receipt_ordering_is_numeric_across_the_thousand_boundary(tmp_path: Path) -> None:
+    """Round-4 finding 7: lexicographic order would rank 999 above 1000."""
+    store = RuntimeReleaseStore(tmp_path)
+    for sequence in ("998", "999", "1000", "1001"):
+        payload = dict(_LEGACY_ACTIVATED)
+        payload["receipt_id"] = f"act-20260725-{sequence}"
+        _write_raw_receipt(store, payload)
+
+    history = store.receipt_history()
+
+    assert history.valid[0].receipt_id == "act-20260725-1001"
+    assert history.latest is not None
+    assert history.latest.receipt_id == "act-20260725-1001"
+
+
+def test_a_corrupt_thousandth_receipt_is_recognised_as_the_newest(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    payload = dict(_LEGACY_ACTIVATED)
+    payload["receipt_id"] = "act-20260725-999"
+    _write_raw_receipt(store, payload)
+    corrupt = store.root / "runtime" / "activation-receipts" / "act-20260725-1000.json"
+    corrupt.write_text("{corrupt", encoding="utf-8")
+
+    history = store.receipt_history()
+
+    # 1000 > 999 numerically, so the unreadable one IS the newest -> no truthful latest.
+    assert history.degraded is True
+    assert history.latest is None
+
+
+def test_a_stale_shim_target_is_rewritten_even_though_the_marker_matches(
+    tmp_path: Path,
+) -> None:
+    """Round-4 finding 8: the marker alone does not prove the shim targets this root."""
+    store = RuntimeReleaseStore(tmp_path)
+    shim = store.bin_launcher()
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    # Our marker, but an absolute target from a DIFFERENT (moved) release root.
+    shim.write_text(
+        "#!/bin/sh\n# repoforge-launcher:v1 stale RepoForge stable launcher\n"
+        'exec "/somewhere/else/current/venv/bin/rf" "$@"\n',
+        encoding="utf-8",
+    )
+
+    store.write_internal_launcher_shim()
+
+    script = shim.read_text(encoding="utf-8")
+    assert "/somewhere/else/" not in script
+    assert str(tmp_path) in script

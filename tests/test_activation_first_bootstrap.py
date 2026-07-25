@@ -1,10 +1,14 @@
-"""Round-3 regressions: first activation on an EMPTY release root, end to end.
+"""Round-3/4 regressions: first activation on an EMPTY release root.
 
-These wire the production `RuntimeReleaseStore`, `UpgradeService` and
-`ReleaseAwareRuntimeLauncher` together. The round-3 review found a circular dependency
-the earlier per-unit tests could not see: the restarter execs
-``<release-root>/bin/rf``, but that shim was only written *after* a successful restart,
-so a fresh release root could never activate at all.
+Scope caveat (round-4 finding 6): this wires the production `RuntimeReleaseStore`,
+`UpgradeService` and `ReleaseAwareRuntimeLauncher`, but the installer/smoke/observer are
+fakes and the installed `rf` is a stub script. It proves shim ordering, PATH-launcher
+isolation and receipt durability -- it is NOT a live end-to-end activation (no real
+wheel, venv, CLI, worker, socket, health probe or launchd ownership).
+
+The round-3 review found a circular dependency the earlier per-unit tests could not
+see: the restarter execs ``<release-root>/bin/rf``, but that shim was only written
+*after* a successful restart, so a fresh release root could never activate at all.
 """
 
 from __future__ import annotations
@@ -117,8 +121,10 @@ def _service(
     return service, restarter
 
 
-def test_first_activation_on_an_empty_release_root_succeeds(tmp_path: Path) -> None:
-    """The whole point of round-3 finding 1: bootstrap must not need a prior activation."""
+def test_first_activation_provisions_the_internal_shim_before_the_launcher_runs(
+    tmp_path: Path,
+) -> None:
+    """Round-3 finding 1: bootstrap must not need a prior activation."""
     store = RuntimeReleaseStore(tmp_path / "release-root")
     service, restarter = _service(store, tmp_path)
 
@@ -186,7 +192,7 @@ def test_a_store_granted_a_path_launcher_provisions_it_after_convergence(
 
     assert result.status == "activated"
     assert path_launcher.is_file()
-    assert "RepoForge stable launcher" in path_launcher.read_text(encoding="utf-8")
+    assert "repoforge-launcher:v1" in path_launcher.read_text(encoding="utf-8")
 
 
 def test_first_activation_failure_reports_that_there_is_no_rollback_target(
@@ -222,3 +228,53 @@ def test_first_activation_failure_reports_that_there_is_no_rollback_target(
     # The failure is receipted so the operator can see what happened.
     outcomes = {receipt.outcome.value for receipt in store.list_receipts()}
     assert "failed" in outcomes
+
+
+def test_a_path_launcher_failure_cannot_erase_a_converged_activation(
+    tmp_path: Path,
+) -> None:
+    """Round-4 finding 1 (P0): the runtime is live; convenience must not report failure.
+
+    An occupied/unwritable PATH launcher used to raise *after* the candidate was verified
+    but *before* the receipt was written, leaving a live candidate with no durable record
+    and a command that claimed failure.
+    """
+    occupied = tmp_path / "home-bin" / "rf"
+    occupied.parent.mkdir(parents=True)
+    occupied.write_text("some unrelated user script\n", encoding="utf-8")
+    store = RuntimeReleaseStore(tmp_path / "release-root", path_launcher=occupied)
+    service, _ = _service(store, tmp_path)
+
+    result = service.upgrade(tmp_path, activate=True)
+
+    # The activation is reported truthfully as a success...
+    assert result.status == "activated"
+    assert result.converged is True
+    assert store.current_sha() == _SHA
+    # ...the durable receipt exists...
+    assert result.activation_receipt is not None
+    receipt = store.read_receipt(result.activation_receipt)
+    assert receipt is not None and receipt.outcome.value == "activated"
+    # ...and the auxiliary failure is surfaced as a warning, not an exception.
+    assert result.path_launcher_status == "failed"
+    assert "LAUNCHER_PATH_OCCUPIED" in result.path_launcher_detail
+    # The unrelated file was not clobbered.
+    assert occupied.read_text(encoding="utf-8") == "some unrelated user script\n"
+
+
+def test_activation_provisions_the_supervisor_shim_for_the_process_manager(
+    tmp_path: Path,
+) -> None:
+    """Round-4 finding 2: the shim launchd execs must exist and target the worker."""
+    store = RuntimeReleaseStore(tmp_path / "release-root")
+    service, _ = _service(store, tmp_path)
+
+    service.upgrade(tmp_path, activate=True)
+
+    shim = store.supervisor_launcher()
+    assert shim.is_file()
+    script = shim.read_text(encoding="utf-8")
+    # Execs the worker module directly, so launchd owns the supervisor pid itself.
+    assert "exec " in script
+    assert "repoforge.interfaces.runtime.worker" in script
+    assert "current/venv/bin/python" in script

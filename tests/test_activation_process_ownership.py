@@ -105,20 +105,24 @@ def test_force_stop_kills_the_whole_process_group(tmp_path) -> None:
         assert _await_gone(child_pid), "no descendant may survive a force stop"
 
 
-def test_force_stop_resolves_the_real_group_when_pid_is_not_the_leader(tmp_path) -> None:
-    """The F2 scenario: the recorded pid is a group member, not the group leader."""
+def test_force_stop_refuses_a_group_it_cannot_prove_it_owns(tmp_path) -> None:
+    """Round-4 finding 4: validating one pid does not authorize killing its whole group.
+
+    When the recorded process is not its own group leader, the group may contain
+    unrelated processes, so force-stop must decline rather than widen its blast radius.
+    The runtime is started detached (``--background``) precisely so it IS the leader.
+    """
     launcher = ReleaseAwareRuntimeLauncher(tmp_path / "bin" / "rf")
     with _process_group_with_a_child() as (leader, child_pid):
         identity = process_identity(child_pid)
         if identity is None:  # pragma: no cover - platform without ps lstart
             pytest.skip("host cannot report a process start identity")
-        # Precondition: the child is NOT its own process-group leader, so a naive
-        # killpg(child_pid) would signal a group that does not exist.
-        assert os.getpgid(child_pid) != child_pid
+        assert os.getpgid(child_pid) != child_pid, "precondition: child is not the leader"
 
-        assert launcher.force_stop(_record(child_pid, identity), grace_seconds=2.0) is True
-        assert _await_gone(child_pid)
-        assert _await_leader_gone(leader), "the group leader must also be terminated"
+        assert launcher.force_stop(_record(child_pid, identity), grace_seconds=0.2) is False
+        # Nothing was signalled: neither the unverified group nor its leader.
+        assert _alive(child_pid)
+        assert leader.poll() is None
 
 
 def test_force_stop_refuses_a_pid_whose_identity_does_not_match(tmp_path) -> None:

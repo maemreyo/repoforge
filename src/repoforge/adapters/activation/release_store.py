@@ -29,7 +29,24 @@ _CURRENT = "current"
 _PREVIOUS = "previous"
 _MANIFEST = ".manifest.json"
 _VENV_BIN = "venv/bin/rf"
+_VENV_PYTHON = "venv/bin/python"
+_WORKER_MODULE = "repoforge.interfaces.runtime.worker"
 _PATH_BIN_DIR = "~/.local/bin"
+
+
+def _receipt_sort_key(receipt_id: str) -> tuple[int, int, str]:
+    """Order receipts numerically: ``act-20260725-1000`` is newer than ``...-999``.
+
+    A lexicographic compare would rank "999" above "1000" because it compares '9' to
+    '1', which would pick the wrong latest receipt after the 999th activation in a day.
+    """
+    parts = receipt_id.split("-")
+    if len(parts) != 3:
+        return (0, 0, receipt_id)
+    try:
+        return (int(parts[1]), int(parts[2]), receipt_id)
+    except ValueError:
+        return (0, 0, receipt_id)
 
 
 class ReceiptExistsError(ConfigError):
@@ -57,7 +74,10 @@ class ReceiptHistory:
         if not self.valid:
             return None
         newest_valid = self.valid[0].receipt_id
-        if any(candidate > newest_valid for candidate in self.unreadable):
+        if any(
+            _receipt_sort_key(candidate) > _receipt_sort_key(newest_valid)
+            for candidate in self.unreadable
+        ):
             return None
         return self.valid[0]
 
@@ -98,6 +118,27 @@ class RuntimeReleaseStore:
         """The conventional PATH launcher location (``~/.local/bin/rf``)."""
         return Path(_PATH_BIN_DIR).expanduser() / "rf"
 
+    def supervisor_launcher(self) -> Path:
+        """The shim an OS process manager runs to *become* the supervisor worker."""
+        return self._root / "bin" / "rf-supervisor"
+
+    def write_supervisor_shim(self, *, force: bool = False) -> Path:
+        """Provision a shim that ``exec``s the worker instead of spawning it.
+
+        Running ``rf ... start`` under launchd would leave launchd owning a CLI wrapper
+        whose *child* is the supervisor, so the pid launchd supervises is not the pid in
+        the runtime record. Exec-ing the worker directly makes them the same process.
+        """
+        shim = self.supervisor_launcher()
+        script = (
+            "#!/bin/sh\n"
+            f"# {_STABLE_MARKER} RepoForge supervisor launcher. Execs the worker so the\n"
+            "# process manager owns the supervisor pid directly. Do not edit.\n"
+            f'exec "{self._root / _CURRENT / _VENV_PYTHON}" -m {_WORKER_MODULE} "$@"\n'
+        )
+        self._write_shim_script(shim, script, force=force)
+        return shim
+
     def write_internal_launcher_shim(self, *, force: bool = False) -> Path:
         """Provision ``<release-root>/bin/rf`` -- required *before* a restart can run.
 
@@ -124,12 +165,26 @@ class RuntimeReleaseStore:
 
     def _provision_shim(self, shim: Path, *, force: bool) -> None:
         target = self._root / _CURRENT / _VENV_BIN
+        script = (
+            "#!/bin/sh\n"
+            f"# {_STABLE_MARKER} RepoForge stable launcher. Resolves the active release\n"
+            "# through the `current` symlink. Provisioned once; do not edit.\n"
+            f'exec "{target}" "$@"\n'
+        )
+        self._write_shim_script(shim, script, force=force)
+
+    def _write_shim_script(self, shim: Path, script: str, *, force: bool) -> None:
+        """Write a shim once, migrating a legacy one and refusing unknown occupants."""
         if shim.exists() and not force:
             kind = _classify_shim(shim)
             if kind == "repoforge_stable":
-                # Already ours and release-independent: leave it untouched.
-                return
-            if kind == "unknown":
+                if shim.read_text(encoding="utf-8", errors="replace") == script:
+                    # Already ours and pointing at THIS release root: leave it alone.
+                    return
+                # Marker present but the embedded target is stale (the release root was
+                # moved, copied, or the shim was written for a different root), so the
+                # shim would exec a path that is no longer correct. Rewrite it.
+            elif kind == "unknown":
                 raise ConfigError(
                     f"LAUNCHER_PATH_OCCUPIED: {shim} exists and is not a RepoForge "
                     "launcher. Move it aside (or re-run with force) so `rf` resolves to "
@@ -138,12 +193,6 @@ class RuntimeReleaseStore:
             # A legacy uv-tool entry point: migrate it, otherwise the user keeps
             # invoking the old install instead of the active release.
         shim.parent.mkdir(parents=True, exist_ok=True)
-        script = (
-            "#!/bin/sh\n"
-            "# RepoForge stable launcher. Provisioned once; resolves the active\n"
-            "# release through the `current` symlink. Do not edit.\n"
-            f'exec "{target}" "$@"\n'
-        )
         tmp = shim.with_name(f".{shim.name}.tmp-{os.getpid()}")
         tmp.write_text(script, encoding="utf-8")
         tmp.chmod(0o755)
@@ -336,8 +385,12 @@ class RuntimeReleaseStore:
             except ValueError:
                 unreadable.append(entry.stem)
         return ReceiptHistory(
-            valid=tuple(sorted(valid, key=lambda receipt: receipt.receipt_id, reverse=True)),
-            unreadable=tuple(sorted(unreadable, reverse=True)),
+            valid=tuple(
+                sorted(
+                    valid, key=lambda receipt: _receipt_sort_key(receipt.receipt_id), reverse=True
+                )
+            ),
+            unreadable=tuple(sorted(unreadable, key=_receipt_sort_key, reverse=True)),
         )
 
     def allocate_receipt_id(self, *, date_stamp: str) -> str:
@@ -362,7 +415,7 @@ class RuntimeReleaseStore:
         return {entry.stem for entry in self._receipts.glob("*.json")}
 
 
-_STABLE_MARKER = "RepoForge stable launcher"
+_STABLE_MARKER = "repoforge-launcher:v1"
 
 
 def _classify_shim(path: Path) -> str:

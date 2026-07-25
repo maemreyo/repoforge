@@ -25,17 +25,21 @@ def _spec(tmp_path: Path) -> LaunchAgentSpec:
     )
 
 
-def test_render_launch_agent_runs_the_stable_launcher_in_foreground(tmp_path: Path) -> None:
+def test_render_launch_agent_execs_the_supervisor_directly(tmp_path: Path) -> None:
+    """Round-4 finding 2: launchd must own the supervisor pid, not a CLI wrapper.
+
+    The agent runs the supervisor shim, which ``exec``s the worker, so the pid launchd
+    supervises is the same pid the runtime record publishes. Passing `start` here would
+    put a CLI wrapper in between.
+    """
     payload = plistlib.loads(render_launch_agent(_spec(tmp_path)))
     assert payload["Label"] == DEFAULT_LABEL
-    # `start` (not `start --background`) runs the supervisor in foreground so
-    # launchd can KeepAlive it.
     assert payload["ProgramArguments"] == [
         str(tmp_path / "bin" / "rf"),
         "--config",
         str(tmp_path / "config.toml"),
-        "start",
     ]
+    assert "start" not in payload["ProgramArguments"]
     assert payload["RunAtLoad"] is True
     assert payload["KeepAlive"] == {"SuccessfulExit": False, "Crashed": True}
     assert payload["EnvironmentVariables"] == {"PATH": "/usr/bin"}

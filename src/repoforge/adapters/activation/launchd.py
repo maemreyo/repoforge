@@ -34,11 +34,13 @@ class LaunchAgentSpec:
 
 def render_launch_agent(spec: LaunchAgentSpec) -> bytes:
     """Render the LaunchAgent plist. Pure: no filesystem or launchctl side effects."""
+    # `launcher_path` is the supervisor shim, which execs the worker: launchd then owns
+    # the supervisor process itself rather than a CLI wrapper whose child is the
+    # supervisor (which would make the launchd pid differ from the runtime record pid).
     program_arguments = [
         str(spec.launcher_path),
         "--config",
         str(spec.config_path),
-        "start",
     ]
     payload: dict[str, object] = {
         "Label": spec.label,
