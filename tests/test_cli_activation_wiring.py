@@ -87,3 +87,50 @@ def test_the_default_root_keeps_the_base_label(
     arguments = _launch_agent_arguments(_args(config=str(tmp_path / "config.toml")))
 
     assert arguments["label"] == SUPERVISOR_AGENT_LABEL
+
+
+def test_runtime_ls_reports_an_empty_release_root_without_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`rf runtime ls` is what someone runs when lost, so it must survive a bare install.
+
+    No config, no runtime record, no launchd job: it still has to answer with what IS
+    known instead of raising.
+    """
+    import json
+
+    from repoforge.interfaces.cli.main import main
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REPOFORGE_CONFIG", str(tmp_path / "absent-config.toml"))
+
+    assert main(["runtime", "ls", "--release-root", str(tmp_path / "release-root")]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["releases"] == []
+    assert payload["counts"]["releases"] == 0
+    # "stopped" (record absent) or "unknown" (no observation) -- never a running claim.
+    assert payload["production"]["phase"] in {"stopped", "unknown"}
+    assert payload["production"]["converged"] is False
+    assert payload["production"]["os_resident"] is False
+    assert "rf upgrade --from-worktree" in payload["safe_next_action"]
+
+
+def test_version_switch_fails_closed_and_leaves_current_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch that cannot proceed must exit non-zero and never move `current`.
+
+    Resolution itself is covered at the service level; what this pins down is that the CLI
+    wires the subcommand and fails closed rather than exiting 0 having done nothing.
+    """
+    from repoforge.interfaces.cli.main import main
+
+    release_root = tmp_path / "release-root"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REPOFORGE_CONFIG", str(tmp_path / "absent-config.toml"))
+
+    exit_code = main(["version", "switch", "no-such-branch", "--release-root", str(release_root)])
+
+    assert exit_code != 0
+    assert not (release_root / "current").exists()

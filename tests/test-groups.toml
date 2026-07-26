@@ -202,6 +202,7 @@ test_files = [
   "tests/test_phase4_runtime_control.py",
   "tests/test_phase7_atomic_hot_reload.py",
   "tests/test_phase7_regressions.py",
+  "tests/test_release_selection.py",
   "tests/test_release_store.py",
   "tests/test_runtime.py",
   "tests/test_runtime_adapters_and_serve.py",
@@ -210,6 +211,7 @@ test_files = [
   "tests/test_upgrade_service.py",
   "tests/test_version_status.py",
   "tests/test_worker_agent_secret.py",
+  "tests/test_worktree_provenance.py",
 ]
 
 [groups.policy_configuration]

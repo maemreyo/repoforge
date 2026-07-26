@@ -58,6 +58,10 @@ class WorktreeState:
     head_sha: str
     clean: bool
     dirty_detail: str = ""
+    # Provenance for humans, not identity: empty on a detached HEAD, which is a normal
+    # state for a release build and must never fail the upgrade.
+    branch: str = ""
+    subject: str = ""
 
 
 @dataclass(frozen=True, slots=True)
