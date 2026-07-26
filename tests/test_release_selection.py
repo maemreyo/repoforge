@@ -281,3 +281,53 @@ def test_inventory_on_an_empty_release_root_still_answers(tmp_path: Path) -> Non
     assert production["phase"] == "unknown"
     assert inventory["releases"] == []
     assert "rf upgrade --from-worktree" in str(inventory["safe_next_action"])
+
+
+def test_a_listing_never_offers_an_ambiguous_switch_command(tmp_path: Path) -> None:
+    """Deploying one branch twice is normal, and then its NAME resolves to two releases.
+
+    Observed live: two `main` releases made `rf runtime ls` print
+    `rf version switch main` for both, and running it failed with
+    RELEASE_SELECTOR_AMBIGUOUS -- the listing was advertising a command that cannot work.
+    Every offered selector must therefore resolve to exactly one release.
+    """
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", branch="main")
+    _install(store, "bbb2222", branch="main", built_at="2026-07-25T11:00:00+00:00")
+    _install(store, "ccc3333", branch="feat/solo", built_at="2026-07-25T12:00:00+00:00")
+
+    choices = release_choices(store)
+    by_sha = {choice.commit_sha: choice for choice in choices}
+
+    # Shared branch -> the selector falls back to the short sha.
+    assert by_sha["aaa1111"].selector == "aaa1111"
+    assert by_sha["bbb2222"].selector == "bbb2222"
+    # Unique branch -> the friendly name survives.
+    assert by_sha["ccc3333"].selector == "feat/solo"
+
+    # Every advertised command must actually resolve to the release it belongs to.
+    for choice in choices:
+        offered = str(choice.as_dict()["switch_command"])
+        selector = offered.removeprefix("rf version switch ")
+        assert resolve_release(store, selector).commit_sha == choice.commit_sha
+
+
+def test_the_rollback_hint_is_also_unambiguous(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", branch="main")
+    _install(store, "bbb2222", branch="main", built_at="2026-07-25T11:00:00+00:00")
+    store.swap_current("aaa1111")
+    store.swap_current("bbb2222")
+
+    inventory = build_runtime_inventory(
+        releases=release_choices(store),
+        observed=_observed("bbb2222"),
+        agent=None,
+        agent_secret_usable=False,
+        dev_runtimes=[],
+    )
+
+    rollback = inventory["rollback_target"]
+    assert isinstance(rollback, dict)
+    selector = str(rollback["switch_command"]).removeprefix("rf version switch ")
+    assert resolve_release(store, selector).commit_sha == "aaa1111"

@@ -32,24 +32,35 @@ class ReleaseChoice:
     built_at: str
     is_current: bool
     is_previous: bool
+    # False when another installed release shares this branch. Deploying the same branch
+    # twice is the NORMAL case, and then the branch name resolves to two releases -- so a
+    # listing that offered `switch <branch>` would be printing a command that fails with
+    # RELEASE_SELECTOR_AMBIGUOUS (observed: two `main` releases did exactly that).
+    label_is_unique: bool = True
 
     @property
     def label(self) -> str:
         return self.branch or self.commit_sha[:12]
+
+    @property
+    def selector(self) -> str:
+        """The shortest selector that resolves to THIS release and no other."""
+        return self.label if self.label_is_unique else self.commit_sha[:12]
 
     def as_dict(self) -> dict[str, object]:
         return {
             "commit_sha": self.commit_sha,
             "short_sha": self.commit_sha[:12],
             "label": self.label,
+            "selector": self.selector,
             "branch": self.branch,
             "subject": self.subject,
             "built_at": self.built_at,
             "current": self.is_current,
             "previous": self.is_previous,
             # The exact command that makes this release live, so a listing is actionable
-            # without the reader having to assemble one.
-            "switch_command": f"rf version switch {self.label}",
+            # without the reader having to assemble one -- and it must actually resolve.
+            "switch_command": f"rf version switch {self.selector}",
         }
 
 
@@ -57,6 +68,11 @@ def release_choices(store: ReleaseStore) -> list[ReleaseChoice]:
     """Every installed release, newest first, annotated with current/previous."""
     current = store.current_sha()
     previous = store.previous_sha()
+    manifests = store.list_releases()
+    branch_counts: dict[str, int] = {}
+    for manifest in manifests:
+        if manifest.branch:
+            branch_counts[manifest.branch] = branch_counts.get(manifest.branch, 0) + 1
     return [
         ReleaseChoice(
             commit_sha=manifest.commit_sha,
@@ -65,8 +81,9 @@ def release_choices(store: ReleaseStore) -> list[ReleaseChoice]:
             built_at=manifest.built_at,
             is_current=manifest.commit_sha == current,
             is_previous=manifest.commit_sha == previous,
+            label_is_unique=branch_counts.get(manifest.branch, 0) <= 1,
         )
-        for manifest in store.list_releases()
+        for manifest in manifests
     ]
 
 

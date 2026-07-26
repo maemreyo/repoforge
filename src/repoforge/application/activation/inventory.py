@@ -58,7 +58,7 @@ def build_runtime_inventory(
             {
                 "label": previous.label,
                 "commit_sha": previous.commit_sha,
-                "switch_command": f"rf version switch {previous.label}",
+                "switch_command": f"rf version switch {previous.selector}",
             }
             if previous is not None
             else None
