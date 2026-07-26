@@ -106,6 +106,7 @@ test_files = [
   "tests/test_repository_commit_evidence.py",
   "tests/test_workspace_edit.py",
   "tests/test_workspace_hygiene.py",
+  "tests/test_workspace_adopt_branch.py",
   "tests/test_workspace_mutate.py",
   "tests/test_workspace_refresh.py",
 ]
@@ -505,6 +506,7 @@ test_files = [
   "tests/test_verification_dag_cache.py",
   "tests/test_workflow_recording.py",
   "tests/test_workspace_adhoc.py",
+  "tests/test_workspace_adopt_branch.py",
   "tests/test_workspace_assessment.py",
   "tests/test_workspace_diagnostics.py",
   "tests/test_workspace_edit.py",

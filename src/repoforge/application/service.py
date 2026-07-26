@@ -923,10 +923,13 @@ class CodingService:
         base: str | None = None,
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
+        adopt_branch: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._create.execute(
-                WorkspaceCreateCommand(repo_id, task_slug, base, idempotency_key, issue_ids)
+                WorkspaceCreateCommand(
+                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                )
             )
         )
 
@@ -937,10 +940,13 @@ class CodingService:
         base: str | None = None,
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
+        adopt_branch: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._create_v2.execute(
-                WorkspaceCreateV2Command(repo_id, task_slug, base, idempotency_key, issue_ids)
+                WorkspaceCreateV2Command(
+                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                )
             )
         )
 
