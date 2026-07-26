@@ -921,6 +921,47 @@ def test_v2_runtime_logs_support_time_range_cursor_and_no_host_paths(tmp_path: P
     assert all("<redacted:host_path>" in message for message in messages)
     assert str(tmp_path) not in json.dumps(runtime, sort_keys=True)
     assert all("C:\\Users\\alice" not in message for message in messages)
+    # A plain-text line has no readable timestamp, so it must report none rather than a
+    # fabricated 1970 (which is indistinguishable from a real epoch-zero record).
+    plain = next(item for item in runtime["entries"] if "plain runtime" in item["message"])
+    assert plain["timestamp"] is None
+
+
+def test_runtime_logs_read_understands_go_slog_records(tmp_path: Path) -> None:
+    """The tunnel-client writes slog's `time`/`msg`; reading only `timestamp`/`message`
+    turned every managed-runtime record into a 1970 timestamp with an empty message even
+    though the log file was well-formed JSONL. Observed live: 100 such entries."""
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    admin = _admin(tmp_path)
+    runtime_path = tmp_path / "state" / "managed-runtime.log"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "time": "2026-07-26T20:50:19.896816+07:00",
+                "level": "INFO",
+                "msg": "tunnel metadata fetched",
+            }
+        )
+        + "\n"
+        + json.dumps({"level": "WARN", "msg": "no clock in this record"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = admin.runtime_logs_read_v2(source="runtime", limit=10)
+
+    V2_TOOL_SPECS["runtime_logs_read"].validate_output(result)
+    entries = {item["message"]: item for item in result["entries"]}
+    fetched = entries["tunnel metadata fetched"]
+    assert fetched["timestamp"] == "2026-07-26T20:50:19.896816+07:00"
+    assert fetched["level"] == "INFO"
+    # A record genuinely missing its clock stays unknown instead of being invented.
+    assert entries["no clock in this record"]["timestamp"] is None
+    assert entries["no clock in this record"]["level"] == "WARN"
+    # No entry may carry the old fabricated stamp.
+    assert all(item["timestamp"] != "1970-01-01T00:00:00+00:00" for item in result["entries"])
 
 
 def test_v2_runtime_log_cursor_fails_closed_when_audit_snapshot_changes(tmp_path: Path) -> None:

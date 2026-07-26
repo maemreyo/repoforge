@@ -1527,7 +1527,10 @@ class RuntimeLogSource(str, Enum):
 
 
 class RuntimeLogEntry(StrictModel):
-    timestamp: str = Field(min_length=1, max_length=80)
+    # Nullable on purpose. A log line whose timestamp cannot be read has an UNKNOWN time,
+    # and stamping it 1970-01-01 turned every managed-runtime record into a confident lie
+    # (observed: 100 entries, all 1970, all empty). Readers must treat null as "unknown".
+    timestamp: str | None = Field(default=None, max_length=80)
     source: RuntimeLogSource
     action: str | None = Field(default=None, max_length=160)
     level: str = Field(min_length=1, max_length=30)

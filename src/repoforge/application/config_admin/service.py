@@ -77,6 +77,20 @@ _HOST_PATH_PATTERNS = (
 )
 
 
+def _first_string(raw: dict[str, Any], *keys: str) -> str | None:
+    """Return the first key present as a NON-EMPTY string, else None.
+
+    Runtime logs are written by two producers with different field names -- the Go
+    tunnel-client emits slog's `time`/`msg`, the Python side emits `timestamp`/`message` --
+    so a reader that knows only one spelling silently loses every record from the other.
+    """
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _redact_host_paths(value: str) -> str:
     redacted = redact_text(value, limit=4_000)
     for pattern in _HOST_PATH_PATTERNS:
@@ -376,17 +390,17 @@ class ConfigAdminService:
         except json.JSONDecodeError:
             raw = None
         if isinstance(raw, dict):
-            timestamp = raw.get("timestamp")
+            # `tunnel-client` writes Go slog records (`time`/`msg`), the Python side writes
+            # `timestamp`/`message`. Reading only one spelling meant EVERY managed-runtime
+            # record fell through to the fabricated 1970 timestamp with an empty message,
+            # while the log file itself was perfectly well-formed JSONL.
+            timestamp = _first_string(raw, "timestamp", "time")
             level = raw.get("level", "INFO")
-            message = raw.get("message", "")
+            message = _first_string(raw, "message", "msg") or ""
             action = raw.get("action")
             duration = raw.get("duration_ms")
             return {
-                "timestamp": (
-                    timestamp
-                    if isinstance(timestamp, str) and timestamp
-                    else "1970-01-01T00:00:00+00:00"
-                ),
+                "timestamp": timestamp,
                 "source": "runtime",
                 "action": action if isinstance(action, str) else None,
                 "level": str(level)[:30] or "INFO",
@@ -397,8 +411,9 @@ class ConfigAdminService:
                     else None
                 ),
             }
+        # A plain-text line carries no timestamp we can read, so it reports none.
         return {
-            "timestamp": "1970-01-01T00:00:00+00:00",
+            "timestamp": None,
             "source": "runtime",
             "action": None,
             "level": "INFO",
@@ -451,9 +466,11 @@ class ConfigAdminService:
                 error_code = details.get("error_code") if isinstance(details, dict) else None
                 entries.append(
                     {
-                        "timestamp": str(event.get("timestamp") or "1970-01-01T00:00:00+00:00")[
-                            :80
-                        ],
+                        "timestamp": (
+                            str(event["timestamp"])[:80]
+                            if isinstance(event.get("timestamp"), str) and event["timestamp"]
+                            else None
+                        ),
                         "source": "audit",
                         "action": (
                             str(event["action"])[:160]
@@ -519,7 +536,12 @@ class ConfigAdminService:
                 not isinstance(duration, (int, float)) or duration < min_duration_ms
             ):
                 continue
-            timestamp = self._parse_log_time(str(entry["timestamp"]), "runtime timestamp")
+            raw_timestamp = entry.get("timestamp")
+            timestamp = (
+                self._parse_log_time(raw_timestamp, "runtime timestamp")
+                if isinstance(raw_timestamp, str) and raw_timestamp
+                else None
+            )
             if start is not None and (timestamp is None or timestamp < start):
                 continue
             if end is not None and (timestamp is None or timestamp > end):
