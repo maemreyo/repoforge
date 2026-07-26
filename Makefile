@@ -39,10 +39,20 @@ help:  # Show available commands without changing local or runtime state
 	  '  make tickets           Run deterministic ticket-governance tests' \
 	  '  make build             Build exactly one wheel and one sdist' \
 	  '  make install           Install the freshly built wheel as rf' \
+	  '' \
+	  '  Versioned runtime (an OS-resident agent owns the supervisor):' \
+	  '  make activate          Build this worktree into a release and activate it' \
+	  '  make runtimes          Show every release and runtime, and how to switch' \
+	  '  make switch REF=x      Activate an installed release by branch or short sha' \
+	  '  make rollback          Return to the previous release via its receipt' \
+	  '  make restart-agent     Restart the OS-resident supervisor in place' \
+	  '' \
+	  '  Unmanaged runtime (no agent installed):' \
 	  '  make start             Build, install, and start in foreground' \
 	  '  make start BG=1        Build, install, and start in background' \
 	  '  make start WATCH=1     Start in background and follow runtime log' \
 	  '  make status|logs|stop  Inspect or stop the managed runtime' \
+	  '' \
 	  '  make release BUMP=patch|minor|major'
 
 # =============================================================================
@@ -139,8 +149,19 @@ inspector:  # Launch the MCP Inspector workflow
 # Runtime lifecycle
 # =============================================================================
 
-start: install  # Build, install, stop the managed old process, and start this release
+start:  # Build, install, stop the managed old process, and start this release
 	@set -eu; \
+		if rf runtime agent-status 2>/dev/null | grep -q '"loaded": true'; then \
+			printf '\n\033[31m✗ An OS-resident agent owns the supervisor.\033[0m\n'; \
+			printf '  `make start` would install over the activation launcher and start a\n'; \
+			printf '  supervisor outside the agent, so the agent job then fails with\n'; \
+			printf '  LOCK_TIMEOUT on runtime-single-instance.\n\n'; \
+			printf '  Deploy this worktree with:  make activate\n'; \
+			printf '  Restart in place with:      make restart-agent\n'; \
+			printf '  Remove OS residency with:  rf runtime uninstall-agent\n\n'; \
+			exit 1; \
+		fi; \
+		$(MAKE) -s install; \
 		printf '\n\033[36m══> Stopping managed runtime\033[0m\n'; \
 		rf runtime stop >/dev/null 2>&1 || true; \
 		flags=''; \
@@ -159,6 +180,38 @@ dev-server:  # Run current source in foreground without installing a wheel
 
 restart:  # Gracefully restart the managed installed runtime
 	rf runtime restart
+
+
+activate:  # Build this worktree into an immutable release and activate it
+	@set -eu; \
+		printf '\n\033[36m══> Activating this worktree as a release\033[0m\n'; \
+		rf upgrade --from-worktree . --activate
+
+runtimes:  # Show every installed release and runtime, and the command to switch to each
+	@rf runtime ls
+
+switch:  # Activate an ALREADY-INSTALLED release: make switch REF=<branch|sha-prefix>
+	@set -eu; \
+		if [ -z "$(REF)" ]; then \
+			printf '\033[31m✗ REF is required.\033[0m Run `make runtimes` to list them, then\n'; \
+			printf '  make switch REF=<branch-or-sha-prefix>\n'; \
+			exit 2; \
+		fi; \
+		rf version switch "$(REF)"
+
+rollback:  # Return to the previous release using the newest activation receipt
+	@set -eu; \
+		rf upgrade rollback
+
+restart-agent:  # Restart the OS-resident supervisor without changing the active release
+	@set -eu; \
+		if ! rf runtime agent-status 2>/dev/null | grep -q '"loaded": true'; then \
+			printf '\033[31m✗ No OS-resident agent is loaded.\033[0m Use `make start` instead.\n'; \
+			exit 1; \
+		fi; \
+		launchctl kickstart -k "gui/$$(id -u)/dev.repoforge.supervisor"; \
+		sleep 3; \
+		rf runtime ls
 
 status:  # Show process, generation, and tool-surface state
 	rf runtime status

@@ -632,7 +632,7 @@ class CodingService:
         repo_id: str,
         files: list[FileReadRequest],
         ref: str | None = None,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -665,7 +665,7 @@ class CodingService:
         path_glob: str | None = None,
         max_results: int = 100,
         context_lines: int = 0,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -690,7 +690,7 @@ class CodingService:
         ref: str | None = None,
         subtree: str | None = None,
         max_entries: int = 500,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -719,7 +719,7 @@ class CodingService:
         path_glob: str | None = None,
         limit: int = 20,
         include_patch: bool = False,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -972,7 +972,7 @@ class CodingService:
         self,
         workspace_id: str,
         sections: tuple[str, ...] = ("local",),
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
     ) -> dict[str, Any]:
         return _result(
             self._status_v2.execute(WorkspaceStatusV2Command(workspace_id, sections, byte_budget))
@@ -1052,7 +1052,7 @@ class CodingService:
         self,
         workspace_id: str,
         files: list[FileReadRequest],
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -1083,7 +1083,7 @@ class CodingService:
         path_glob: str | None = None,
         max_results: int = 100,
         context_lines: int = 0,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -1106,7 +1106,7 @@ class CodingService:
         workspace_id: str,
         subtree: str | None = None,
         max_entries: int = 500,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(

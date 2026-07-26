@@ -73,7 +73,7 @@ class RepoTaskContextInput(StrictModel):
         min_length=1,
         max_length=5,
     )
-    byte_budget: ByteBudget = 96_000
+    byte_budget: ByteBudget = 120_000
 
 
 class RepoTaskContextOutput(ToolResponse):
@@ -87,7 +87,7 @@ class RepoReadInput(StrictModel):
     repo_id: RepoId
     files: tuple[ReadFileRequest, ...] = Field(min_length=1, max_length=20)
     ref: GitRef | None = None
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -108,7 +108,7 @@ class RepoSearchInput(StrictModel):
     path_glob: str | None = Field(default=None, max_length=4096)
     max_results: int = Field(default=100, ge=1, le=200)
     context_lines: int = Field(default=0, ge=0, le=5)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -129,7 +129,7 @@ class RepoTreeInput(StrictModel):
     ref: GitRef | None = None
     subtree: RelativePath | None = None
     max_entries: int = Field(default=500, ge=1, le=2000)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -176,7 +176,7 @@ class RepoHistoryInput(StrictModel):
     path_glob: str | None = Field(default=None, max_length=4096)
     limit: int = Field(default=20, ge=1, le=200)
     include_patch: bool = False
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -644,7 +644,7 @@ class WorkspaceStatusInput(StrictModel):
     sections: tuple[WorkspaceStatusSection, ...] = Field(
         default=(WorkspaceStatusSection.LOCAL,), min_length=1, max_length=3
     )
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
 
 
 class WorkspaceStatusOutput(ToolResponse):
@@ -683,7 +683,7 @@ class WorkspaceFormatChangedOutput(ToolResponse):
 class WorkspaceReadInput(StrictModel):
     workspace_id: Identifier
     files: tuple[ReadFileRequest, ...] = Field(min_length=1, max_length=20)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -703,7 +703,7 @@ class WorkspaceSearchInput(StrictModel):
     path_glob: str | None = Field(default=None, max_length=4096)
     max_results: int = Field(default=100, ge=1, le=200)
     context_lines: int = Field(default=0, ge=0, le=5)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -723,7 +723,7 @@ class WorkspaceTreeInput(StrictModel):
     workspace_id: Identifier
     subtree: RelativePath | None = None
     max_entries: int = Field(default=500, ge=1, le=2000)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 

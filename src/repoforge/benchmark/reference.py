@@ -285,7 +285,7 @@ def _read_golden(case: CorpusCase, started: float) -> CaseObservation:
         scope=case.case_id,
         requests=_requests(case.input.get("files")),
         loader=_read_loader,
-        byte_budget=_integer(case.input.get("byte_budget"), "byte_budget", default=60_000),
+        byte_budget=_integer(case.input.get("byte_budget"), "byte_budget", default=120_000),
         cursor=None,
     )
     expected_failed = case.expected.get("status") == "failed"
