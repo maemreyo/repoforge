@@ -743,14 +743,27 @@ class WorkspaceDiffInput(StrictModel):
     workspace_id: Identifier
     staged: bool = False
     path_glob: str | None = Field(default=None, max_length=4096)
-    max_files: int = Field(default=100, ge=1, le=1000)
+    max_files: int = Field(default=20, ge=1, le=1000)
     byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
+    include_hunks: bool = Field(
+        default=False,
+        description=(
+            "Include the patch text. Off by default: reviewing a diff is the largest "
+            "consumer of response budget by far, and the file list with per-file "
+            "added/deleted counts answers most questions at a fraction of the size. Turn "
+            "it on -- ideally with `path_glob` narrowing to the files you actually need -- "
+            "when you need the hunks themselves. Mirrors `include_patch` on repo_history."
+        ),
+    )
 
 
 class WorkspaceDiffOutput(ToolResponse):
     workspace_id: Identifier
     staged: bool
+    # Empty `hunks` is ambiguous on its own -- a binary file, a pure rename, or patch text
+    # the caller did not ask for all look alike -- so the served shape is stated.
+    hunks_included: bool = False
     files: tuple[DiffFile, ...] = Field(default=(), max_length=1000)
     change_metrics: ChangeMetrics
     head_sha: GitObjectId

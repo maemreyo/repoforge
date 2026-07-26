@@ -245,7 +245,13 @@ def test_retrieval_contracts_publish_budget_and_truncation_metadata() -> None:
         assert fields <= set(model_fields), (tool_name, set(model_fields))
 
     diff_input = registry.V2_TOOL_SPECS["workspace_diff"].input_model
-    assert diff_input.model_fields["max_files"].default == 100
+    # 20, not 100: shipping every hunk of 100 files was the single largest consumer of
+    # response budget in real audit data, so the diff tool now defaults to a narrow page
+    # of the cheap shape and patch text is opt-in.
+    assert diff_input.model_fields["max_files"].default == 20
+    assert diff_input.model_fields["include_hunks"].default is False
+    diff_output = registry.V2_TOOL_SPECS["workspace_diff"].output_model
+    assert diff_output.model_fields["hunks_included"].default is False
     schema = diff_input.model_json_schema()["properties"]["max_files"]
     assert schema["minimum"] == 1
     assert schema["maximum"] == 1000

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from ...domain.errors import ErrorCode, RepoForgeError, SecurityError
@@ -77,15 +77,17 @@ class WorkspaceDiffV2Command:
     workspace_id: str
     staged: bool = False
     path_glob: str | None = None
-    max_files: int = 100
+    max_files: int = 20
     byte_budget: int = 120_000
     cursor: str | None = None
+    include_hunks: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceDiffV2Result:
     workspace_id: str
     staged: bool
+    hunks_included: bool
     files: tuple[StructuredDiffFile, ...]
     change_metrics: dict[str, object]
     head_sha: str
@@ -283,6 +285,8 @@ class WorkspaceRetrieval:
                 files = [
                     item for item in files if PurePosixPath(item.path).match(command.path_glob)
                 ]
+            if not command.include_hunks:
+                files = [replace(item, hunks=()) for item in files]
             page = paginate(
                 files,
                 kind="workspace_diff_v2",
@@ -290,6 +294,9 @@ class WorkspaceRetrieval:
                 request={
                     "staged": command.staged,
                     "path_glob": command.path_glob,
+                    # Part of the cursor identity: a page issued for the light shape must
+                    # not be replayable against the heavy one.
+                    "include_hunks": command.include_hunks,
                 },
                 max_items=command.max_files,
                 byte_budget=command.byte_budget,
@@ -310,6 +317,7 @@ class WorkspaceRetrieval:
             return WorkspaceDiffV2Result(
                 command.workspace_id,
                 command.staged,
+                command.include_hunks,
                 tuple(page.items),  # type: ignore[arg-type]
                 public_metrics,
                 head_sha,
@@ -327,6 +335,7 @@ class WorkspaceRetrieval:
                 "staged": command.staged,
                 "path_glob": command.path_glob,
                 "max_files": command.max_files,
+                "include_hunks": command.include_hunks,
             },
             operation,
         )

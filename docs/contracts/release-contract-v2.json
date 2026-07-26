@@ -114,7 +114,7 @@
       "runtime_logs_read": "40a0ef0c48f78123262903a100c361f52528cef07c8460261c65b5e7086193bf",
       "workspace_commit": "61f81b3ff248d831f2b11fc34c913099b96ae992cd73be282a9047852089d52a",
       "workspace_create": "7b36b078d517ac510e75b2e25dd367f8fdc944eae6f5920dc6d9a9c707a68bc6",
-      "workspace_diff": "ce1cf16ab7127c4c50130f398ad6124896f86685c24e7dfaae764f9143230853",
+      "workspace_diff": "32c289f5b4b68cc15646026d1897aafb19d79ca750dcbbc52687f4bf40783369",
       "workspace_format_changed": "3b8417dfdb6dec0af7d28adbf7260d7f5e3a0a5c5539df45113168d5183af69c",
       "workspace_list": "8167dd44735a2a5ffc478fabb19f21d205e457ee7f20abf79379f2ed65ba8a1c",
       "workspace_mutate": "6e4a0c1be3de9323cd491aa424127c568c12c483fbc86ea949e842f83339a8c6",
@@ -159,8 +159,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "e77bfe3eb50ff04274eda22b6f816f60b97ebb070f4da119d77f3758501143e8",
-    "tool_surface_hash": "4962ba28a4d0176b82a25157bc0d271180cac51df654ec62e12524c11c37a556"
+    "tool_schema_bundle_sha256": "e8b18a45d0b598d09d920ea08d63abd84dc9864a11c6a84143d0c91e0dc39886",
+    "tool_surface_hash": "26c9c6d7c2fb17e48d5da36a651567b8cb37df869d8bb6ac637dc81adf29a00a"
   },
   "package_version": "2.2.0",
   "runtime": {

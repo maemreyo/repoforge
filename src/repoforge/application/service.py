@@ -1126,9 +1126,10 @@ class CodingService:
         workspace_id: str,
         staged: bool = False,
         path_glob: str | None = None,
-        max_files: int = 100,
+        max_files: int = 20,
         byte_budget: int = 120_000,
         cursor: str | None = None,
+        include_hunks: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._workspace_retrieval.diff(
@@ -1139,6 +1140,7 @@ class CodingService:
                     max_files,
                     byte_budget,
                     cursor,
+                    include_hunks,
                 )
             )
         )

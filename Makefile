@@ -38,7 +38,7 @@ help:  # Show available commands without changing local or runtime state
 	  '  make live-activation   Real activate/rollback lifecycle in an isolated sandbox' \
 	  '  make tickets           Run deterministic ticket-governance tests' \
 	  '  make build             Build exactly one wheel and one sdist' \
-	  '  make install           Install the freshly built wheel as rf' \
+	  '  make install           Install the freshly built wheel as rf (refused when an agent owns it)' \
 	  '' \
 	  '  Versioned runtime (an OS-resident agent owns the supervisor):' \
 	  '  make activate          Build this worktree into a release and activate it' \
@@ -127,8 +127,18 @@ build: clean-dist  # Build source and wheel into a clean artifact directory
 		set -- $$(find dist -maxdepth 1 -type f -name '*.tar.gz' -print); \
 		[ "$$#" -eq 1 ] || { echo "Expected exactly one sdist in dist, found $$#" >&2; exit 1; }
 
-install: build  # Install the exact freshly built wheel as the system-wide rf tool
+install:  # Install the exact freshly built wheel as the system-wide rf tool
 	@set -eu; \
+		if [ -z "$(FORCE)" ] && rf runtime agent-status 2>/dev/null | grep -q '"loaded": true'; then \
+			printf '\n\033[31m✗ An OS-resident agent owns the supervisor.\033[0m\n'; \
+			printf '  `uv tool install` writes its entry point over ~/.local/bin/rf, which is\n'; \
+			printf '  the activation launcher that resolves through `current` -- so `rf` would\n'; \
+			printf '  stop following the active release (observed: it happened once here).\n\n'; \
+			printf '  Deploy this worktree with:  make activate\n'; \
+			printf '  Install anyway with:       make install FORCE=1\n\n'; \
+			exit 1; \
+		fi; \
+		$(MAKE) -s build; \
 		set -- $$(find dist -maxdepth 1 -type f -name '*.whl' -print); \
 		[ "$$#" -eq 1 ] || { echo "Expected exactly one wheel in dist, found $$#" >&2; exit 1; }; \
 		uv tool install --reinstall "$$1" -q
@@ -161,7 +171,7 @@ start:  # Build, install, stop the managed old process, and start this release
 			printf '  Remove OS residency with:  rf runtime uninstall-agent\n\n'; \
 			exit 1; \
 		fi; \
-		$(MAKE) -s install; \
+		$(MAKE) -s install FORCE=1; \
 		printf '\n\033[36m══> Stopping managed runtime\033[0m\n'; \
 		rf runtime stop >/dev/null 2>&1 || true; \
 		flags=''; \

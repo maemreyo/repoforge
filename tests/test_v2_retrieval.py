@@ -172,7 +172,8 @@ def test_workspace_diff_returns_structured_files_hunks_and_lines(
     )
     service.workspace_write_file(workspace_id, "new.txt", "new\n", "<new>")
 
-    result = service.workspace_diff_v2(workspace_id, staged=False)
+    # `include_hunks=True`: this test is about hunk structure, which is now opt-in.
+    result = service.workspace_diff_v2(workspace_id, staged=False, include_hunks=True)
 
     assert {item["path"] for item in result["files"]} == {"hello.txt", "new.txt"}
     hello_diff = next(item for item in result["files"] if item["path"] == "hello.txt")
@@ -215,7 +216,8 @@ def test_staged_diff_preserves_multiple_hunk_coordinates(
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     subprocess.run(["git", "add", "multi.txt"], cwd=root, check=True)
 
-    result = service.workspace_diff_v2(workspace_id, staged=True)
+    # `include_hunks=True`: this test is about hunk coordinates, which are now opt-in.
+    result = service.workspace_diff_v2(workspace_id, staged=True, include_hunks=True)
 
     diff = next(item for item in result["files"] if item["path"] == "multi.txt")
     assert diff["status"] == "modified"
