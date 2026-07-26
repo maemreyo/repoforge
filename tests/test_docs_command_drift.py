@@ -125,6 +125,15 @@ def test_make_default_is_read_only_and_verification_targets_remain_available() -
     assert re.search(r"^install-hooks:\s*(?:#.*)?$", makefile, re.MULTILINE)
 
 
+def test_make_start_does_not_override_control_plane_api_key() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    start_body = makefile.split("start:", 1)[1].split("\ndev-server:", 1)[0]
+    api_key_assignment = "CONTROL_PLANE_API_" + "KEY="
+
+    assert api_key_assignment not in start_body
+    assert "\t\trf start $$flags" in start_body
+
+
 def test_pre_push_autoformats_but_requires_generated_changes_to_be_committed() -> None:
     script = (ROOT / "scripts/pre-push.sh").read_text(encoding="utf-8")
 
