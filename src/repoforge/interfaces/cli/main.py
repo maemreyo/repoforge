@@ -20,6 +20,19 @@ from typing import Any
 
 from repoforge import __version__
 
+from ...application.activation.inventory import build_runtime_inventory
+from ...application.activation.selection import release_choices, resolve_receipt_id
+from ...application.activation.upgrade import (
+    DEFAULT_HEALTH_INTERVAL_SECONDS,
+    DEFAULT_HEALTH_WINDOW_SECONDS,
+    DEFAULT_KEEP_RELEASES,
+    UpgradeService,
+)
+from ...application.activation.version_status import (
+    RuntimeIdentityInputs,
+    build_version_list,
+    build_version_status,
+)
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
     apply_policy_patch,
@@ -57,15 +70,21 @@ from ...bootstrap import (
     AdapterOverrides,
     build_application,
     build_configuration_store,
+    build_dev_runtime_service,
     build_lock_manager,
     build_metrics_sink,
     build_operation_gate,
     build_pending_policy_change_store,
+    build_release_observer,
+    build_release_store,
     build_repository_probe,
     build_runtime_control_client,
     build_runtime_control_server,
     build_runtime_launcher,
     build_runtime_store,
+    build_supervisor_kickstarter,
+    build_supervisor_launch_agent_registrar,
+    build_upgrade_service,
     clear_runtime_state,
     default_state_root,
     id_generator,
@@ -82,6 +101,7 @@ from ...bootstrap import (
     write_runtime_state,
 )
 from ...config import DEFAULT_CONFIG_PATH, load_config
+from ...domain.activation import AGENT_SECRET_KEY
 from ...domain.config_generation import (
     ApprovalEvent,
     CapabilityDeltaKind,
@@ -92,6 +112,7 @@ from ...domain.config_generation import (
 )
 from ...domain.errors import (
     ConfigError,
+    ErrorCode,
     PersonalCodingMCPError,
     operation_error_from_exception,
 )
@@ -99,7 +120,10 @@ from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
+from ...domain.user_paths import default_release_root, resolve_release_root
 from ...ports import ConfigurationStore, LockManager, RepositoryProbe
+from ...ports.activation import SupervisorKickstarter
+from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
 
@@ -1451,6 +1475,307 @@ def _runtime_command(args: argparse.Namespace) -> int:
     raise ConfigError(f"Unknown runtime command: {args.runtime_command}")
 
 
+def _runtime_record_path_readonly(config_path: Path) -> Path:
+    """Locate the supervisor runtime record without creating or migrating anything."""
+    paths = resolve_repoforge_paths(config_path, state_root=default_state_root())
+    return paths.generation_root.parent / "managed-runtime-v3.json"
+
+
+def _runtime_record_best_effort(config_path: Path) -> Any:
+    """Read the live supervisor record without failing version status when absent."""
+    try:
+        return build_runtime_store(_runtime_record_path_readonly(config_path)).read()
+    except (ConfigError, OSError, ValueError):
+        return None
+
+
+def _version_command(args: argparse.Namespace) -> int:
+    if args.version_command == "switch":
+        return _version_switch_command(args)
+    store = build_release_store(getattr(args, "release_root", None))
+    if args.version_command == "list":
+        _json(build_version_list(store))
+        return 0
+    config_path = Path(args.config).expanduser().resolve()
+    record = _runtime_record_best_effort(config_path)
+    inputs = RuntimeIdentityInputs(
+        launcher_version=__version__,
+        running_tool_surface_hash=record.tool_surface_hash if record else None,
+        process_start_identity=record.process_identity if record else None,
+        active_generation=record.active_generation if record else None,
+    )
+    observed = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        # Deliberately NOT _ensure_generation(): that can import a legacy configuration,
+        # and `version status` is documented as a pure read. Resolve the runtime record
+        # path read-only instead.
+        runtime_path = _runtime_record_path_readonly(config_path)
+        observed = build_release_observer(
+            release_root=getattr(args, "release_root", None), runtime_record_path=runtime_path
+        ).observe()
+    status = build_version_status(store, inputs, observed)
+    _json(status)
+    # Fail closed. An unterminalized activation or an unknown newest receipt means the
+    # state is not trustworthy, so automation and release gates must not see exit 0 even
+    # when convergence itself looks fine.
+    incomplete = status.get("incomplete_activation") is not None
+    unknown_latest = bool(status.get("receipt_history_degraded")) and (
+        status.get("activation_receipt") is None
+    )
+    healthy = bool(status.get("activation_converged")) or status.get("desired_commit") is None
+    return 0 if healthy and not incomplete and not unknown_latest else 1
+
+
+def _manages_path_launcher(args: argparse.Namespace) -> bool:
+    """Only the default release root may rewrite the user's PATH launcher.
+
+    Decided from the *resolved* root, not from whether the CLI flag was passed:
+    ``REPOFORGE_RELEASE_ROOT`` overrides the root too, so a flag-only check let a
+    temporary root rewrite the real ``~/.local/bin/rf`` while claiming otherwise.
+    ``--no-path-shim`` opts out even for the default root.
+    """
+    if getattr(args, "no_path_shim", False):
+        return False
+    return resolve_release_root(getattr(args, "release_root", None)) == default_release_root()
+
+
+def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
+    config_path = Path(args.config).expanduser().resolve()
+    runtime_path, supervisor_socket, _ = _runtime_paths(_ensure_generation(config_path))
+    # Prefer restarting through launchd when the agent owns the supervisor, so an
+    # upgrade never moves it out of OS management.
+    kickstarter = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        kickstarter = _build_launchd_kickstarter(args)
+    return build_upgrade_service(
+        release_root=getattr(args, "release_root", None),
+        manage_path_launcher=_manages_path_launcher(args),
+        supervisor_socket=supervisor_socket,
+        runtime_record_path=runtime_path,
+        config_path=config_path,
+        correlation_id=id_generator().new_hex(24),
+        extra_env=_runtime_environment(args),
+        kickstarter=kickstarter,
+    )
+
+
+def _version_switch_command(args: argparse.Namespace) -> int:
+    """Activate an already-installed release named by branch or short sha."""
+    result = _build_upgrade_service(args).switch(args.selector, keep_releases=args.keep)
+    _json(result.as_dict())
+    # Fail closed, exactly like an upgrade: a switch that did not converge is not a switch.
+    return 0 if result.status in {"activated", "already_active"} else 1
+
+
+def _runtime_inventory_command(args: argparse.Namespace) -> int:
+    """`rf runtime ls`: assemble the whole picture, degrading rather than failing.
+
+    Every probe here is best-effort on purpose. This is the command someone runs when they
+    have lost track of what is installed, which is exactly when a half-broken installation
+    is likely -- so a missing config, an unreadable runtime record or an absent launchd
+    must still produce a listing of what IS known.
+    """
+    store = build_release_store(getattr(args, "release_root", None))
+    observed = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        config_path = Path(args.config).expanduser().resolve()
+        observed = build_release_observer(
+            release_root=getattr(args, "release_root", None),
+            runtime_record_path=_runtime_record_path_readonly(config_path),
+        ).observe()
+    agent = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        agent = _build_launchd_registrar(args).status()
+    dev_runtimes: list[dict[str, Any]] = []
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        listed = build_dev_runtime_service(
+            base_config=Path(args.config).expanduser().resolve()
+        ).list()["dev_runtimes"]
+        if isinstance(listed, list):
+            dev_runtimes = [entry for entry in listed if isinstance(entry, dict)]
+    _json(
+        build_runtime_inventory(
+            releases=release_choices(store),
+            observed=observed,
+            agent=agent,
+            agent_secret_usable=store.agent_secret_status().usable,
+            dev_runtimes=list(dev_runtimes),
+        )
+    )
+    return 0
+
+
+def _upgrade_command(args: argparse.Namespace) -> int:
+    service = _build_upgrade_service(args)
+    if getattr(args, "upgrade_command", None) == "rollback":
+        receipt = args.receipt
+        if receipt is not None:
+            # Accept a unique prefix: the full `act-20260725-001` form is where these get
+            # mistyped, and a mistyped rollback target is the worst kind of typo.
+            receipt = resolve_receipt_id(
+                build_release_store(getattr(args, "release_root", None)), receipt
+            )
+        result = service.rollback(receipt, force=args.force)
+        _json(result.as_dict())
+        # Fail closed: a rollback that did not converge must not exit 0.
+        return 0 if result.status == "rolled_back" else 1
+    worktree = Path(args.from_worktree).expanduser().resolve()
+    result = service.upgrade(
+        worktree,
+        activate=args.activate,
+        keep_releases=args.keep,
+        watch=args.watch,
+        health_window_seconds=args.health_window,
+        health_interval_seconds=args.health_interval,
+    )
+    _json(result.as_dict())
+    return 0
+
+
+def _dev_runtime_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    service = build_dev_runtime_service(base_config=config_path)
+    command = args.dev_runtime_command
+    if command == "list":
+        _json(service.list())
+        return 0
+    if command == "promote":
+        upgrade = _build_upgrade_service(args)
+        worktree = Path(args.from_worktree).expanduser().resolve()
+        _json(upgrade.upgrade(worktree, activate=True, keep_releases=args.keep).as_dict())
+        return 0
+    if command == "start":
+        _json(service.start(args.name))
+        return 0
+    if command == "stop":
+        _json(service.stop(args.name))
+        return 0
+    _json(service.status(args.name))
+    return 0
+
+
+def _launch_agent_arguments(args: argparse.Namespace) -> dict[str, Any]:
+    store = build_release_store(getattr(args, "release_root", None))
+    log_dir = store.root / "runtime" / "logs"
+    return {
+        "launcher_path": store.supervisor_launcher(),
+        "config_path": Path(args.config).expanduser().resolve(),
+        "stdout_path": log_dir / "supervisor.out.log",
+        "stderr_path": log_dir / "supervisor.err.log",
+        "inherited_env": {
+            key: os.environ[key]
+            for key in ("HOME", "PATH", "LANG", "LC_ALL", "SSH_AUTH_SOCK")
+            if key in os.environ
+        },
+        "agents_dir": Path("~/Library/LaunchAgents").expanduser(),
+        # Namespaced per release root so a sandbox/dev root can never resolve -- let alone
+        # kickstart -- the operator's production launchd job.
+        "label": store.supervisor_agent_label(),
+    }
+
+
+def _build_launchd_kickstarter(args: argparse.Namespace) -> SupervisorKickstarter:
+    return build_supervisor_kickstarter(**_launch_agent_arguments(args))
+
+
+def _build_launchd_registrar(args: argparse.Namespace) -> ProcessSupervisorRegistrar:
+    return build_supervisor_launch_agent_registrar(**_launch_agent_arguments(args))
+
+
+def _runtime_agent_command(args: argparse.Namespace) -> int:
+    store = build_release_store(getattr(args, "release_root", None))
+    registrar = _build_launchd_registrar(args)
+    if args.runtime_command == "install-agent":
+        # A LaunchAgent with RunAtLoad pointing at a release that does not exist would
+        # report "installed" while failing to start forever, so require a usable one.
+        active = store.current_sha()
+        if active is None:
+            raise ConfigError(
+                "NO_ACTIVE_RELEASE: activate a release before installing the runtime "
+                "agent (`rf upgrade --from-worktree . --activate`)."
+            )
+        entry_point = store.release_path(active) / "venv" / "bin" / "python"
+        if store.read_manifest(active) is None or not entry_point.is_file():
+            raise ConfigError(
+                f"ACTIVE_RELEASE_UNUSABLE: `current` points at {active} but its manifest "
+                f"or interpreter is missing ({entry_point}); re-activate before "
+                "installing the agent."
+            )
+        # An OS-resident supervisor gets no shell environment, so a credential exported
+        # in the operator's terminal disappears at logout. Persist it to the owner-only
+        # agent env file when asked, then refuse to install an agent that cannot start.
+        if args.persist_api_key:
+            api_key = os.environ.get(AGENT_SECRET_KEY, "")
+            if not api_key:
+                raise ConfigError(
+                    "CONTROL_PLANE_API_KEY_ABSENT: --persist-api-key reads the value from "
+                    "the CONTROL_PLANE_API_KEY environment variable so it never appears "
+                    "in argv or shell history; export it and re-run."
+                )
+            store.write_agent_env({AGENT_SECRET_KEY: api_key})
+        secret = store.agent_secret_status()
+        if not secret.usable:
+            # A stable logical label, not an absolute path: the message is not redacted,
+            # so it must not carry the operator's home directory.
+            raise ConfigError(
+                "AGENT_SECRET_UNUSABLE: the managed runtime requires "
+                "CONTROL_PLANE_API_KEY, and launchd starts jobs with no shell "
+                "environment, so an agent installed now would fail at every boot ("
+                + "; ".join(secret.problems())
+                + "). Run `rf runtime install-agent --persist-api-key` with "
+                "CONTROL_PLANE_API_KEY exported to store it in "
+                "<release-root>/runtime/agent.env (owner-only, mode 0600).",
+                code=ErrorCode.CONFIG_INVALID,
+            )
+        # The agent runs the supervisor shim, so both shims must exist.
+        store.write_internal_launcher_shim()
+        store.write_supervisor_shim()
+        result = registrar.install()
+        _json(
+            {
+                "status": result.status,
+                "unit_path": result.unit_path,
+                "launcher": str(store.bin_launcher()),
+                "detail": result.detail,
+                "safe_next_action": "Run `rf version status` to confirm the active release.",
+            }
+        )
+        return 0
+    if args.runtime_command == "uninstall-agent":
+        result = registrar.uninstall()
+        _json({"status": result.status, "unit_path": result.unit_path, "detail": result.detail})
+        return 0
+    status = registrar.status()
+    secret = store.agent_secret_status()
+    _json(
+        {
+            "registered": status.registered,
+            "loaded": status.loaded,
+            "unit_path": status.unit_path,
+            "agent_env_path": str(store.agent_env_path()),
+            # Booleans and ALLOWLISTED names only. `keys` can never contain anything but
+            # the canonical key: the parser accepts exactly one key name, so a corrupt or
+            # hand-edited file yields `parse_valid: false` and an empty list rather than
+            # echoing arbitrary file content back as a "key name".
+            "agent_env_expected_key": AGENT_SECRET_KEY,
+            "agent_env_keys": list(secret.keys),
+            "durable_secret_usable": secret.usable,
+            "durable_secret_checks": {
+                "exists": secret.exists,
+                "regular_file": secret.regular_file,
+                "owner_matches": secret.owner_matches,
+                "mode_secure": secret.mode_secure,
+                "key_present": secret.key_present,
+                "value_nonempty": secret.value_nonempty,
+                "parse_valid": secret.parse_valid,
+            },
+            "durable_secret_problems": list(secret.problems()),
+            "detail": status.detail,
+        }
+    )
+    return 0
+
+
 def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     from ..mcp.grace import FORGE_V1_IDENTITY, create_grace_server
     from ..mcp.server import FORGE_V2_IDENTITY, create_server, tool_surface_hash
@@ -1757,6 +2082,11 @@ def build_parser() -> argparse.ArgumentParser:
     runtime = commands.add_parser("runtime")
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
     runtime_sub.add_parser("status")
+    runtime_ls = runtime_sub.add_parser(
+        "ls",
+        help="One view of every runtime and release: what is live, and how to switch.",
+    )
+    runtime_ls.add_argument("--release-root", dest="release_root", default=None)
     start = runtime_sub.add_parser("start")
     start.add_argument("--foreground", action="store_true")
     start.add_argument("--tunnel-id")
@@ -1770,6 +2100,84 @@ def build_parser() -> argparse.ArgumentParser:
     restart_command.add_argument("--profile")
     logs = runtime_sub.add_parser("logs")
     logs.add_argument("--tail", type=int, default=100)
+    for agent_command in ("install-agent", "uninstall-agent", "agent-status"):
+        agent_parser = runtime_sub.add_parser(agent_command)
+        agent_parser.add_argument("--release-root", dest="release_root", default=None)
+        if agent_command == "install-agent":
+            agent_parser.add_argument(
+                "--persist-api-key",
+                dest="persist_api_key",
+                action="store_true",
+                help=(
+                    "Store CONTROL_PLANE_API_KEY (read from the environment, never argv) "
+                    "in the owner-only agent env file so the OS-resident supervisor can "
+                    "start after a reboot."
+                ),
+            )
+    version = commands.add_parser("version")
+    version_sub = version.add_subparsers(dest="version_command", required=True)
+    for version_command in ("status", "list"):
+        version_parser = version_sub.add_parser(version_command)
+        version_parser.add_argument("--release-root", dest="release_root", default=None)
+    version_switch = version_sub.add_parser(
+        "switch",
+        help="Activate an already-installed release by branch name or short commit sha.",
+    )
+    version_switch.add_argument(
+        "selector",
+        help="Branch name recorded at build time, a commit sha, or a sha prefix (>=4 hex).",
+    )
+    version_switch.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
+    version_switch.add_argument("--release-root", dest="release_root", default=None)
+    version_switch.add_argument(
+        "--no-path-shim",
+        dest="no_path_shim",
+        action="store_true",
+        help="Do not create or migrate ~/.local/bin/rf during the switch.",
+    )
+    upgrade = commands.add_parser("upgrade")
+    upgrade.add_argument("--from-worktree", dest="from_worktree", default=".")
+    upgrade.add_argument("--activate", action="store_true")
+    upgrade.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
+    upgrade.add_argument("--release-root", dest="release_root", default=None)
+    upgrade.add_argument(
+        "--no-path-shim",
+        dest="no_path_shim",
+        action="store_true",
+        help="Do not create or migrate ~/.local/bin/rf during activation.",
+    )
+    upgrade.add_argument(
+        "--watch",
+        action="store_true",
+        help="After activation, watch health for a window and auto-rollback on failure.",
+    )
+    upgrade.add_argument(
+        "--health-window", dest="health_window", type=float, default=DEFAULT_HEALTH_WINDOW_SECONDS
+    )
+    upgrade.add_argument(
+        "--health-interval",
+        dest="health_interval",
+        type=float,
+        default=DEFAULT_HEALTH_INTERVAL_SECONDS,
+    )
+    upgrade_sub = upgrade.add_subparsers(dest="upgrade_command")
+    upgrade_rollback = upgrade_sub.add_parser("rollback")
+    upgrade_rollback.add_argument("receipt", nargs="?", default=None)
+    upgrade_rollback.add_argument(
+        "--force",
+        action="store_true",
+        help="Roll back even when `current` no longer matches the receipt's target.",
+    )
+    dev_runtime = commands.add_parser("dev-runtime")
+    dev_runtime_sub = dev_runtime.add_subparsers(dest="dev_runtime_command", required=True)
+    for dev_command in ("start", "stop", "status"):
+        dev_parser = dev_runtime_sub.add_parser(dev_command)
+        dev_parser.add_argument("name")
+    dev_runtime_sub.add_parser("list")
+    dev_promote = dev_runtime_sub.add_parser("promote")
+    dev_promote.add_argument("--from-worktree", dest="from_worktree", default=".")
+    dev_promote.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
+    dev_promote.add_argument("--release-root", dest="release_root", default=None)
     config = commands.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("path")
@@ -1913,7 +2321,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
         if args.command == "runtime":
+            if args.runtime_command == "ls":
+                return _runtime_inventory_command(args)
+            if args.runtime_command in {"install-agent", "uninstall-agent", "agent-status"}:
+                return _runtime_agent_command(args)
             return _runtime_command(args)
+        if args.command == "version":
+            return _version_command(args)
+        if args.command == "upgrade":
+            return _upgrade_command(args)
+        if args.command == "dev-runtime":
+            return _dev_runtime_command(args)
         if args.command == "config":
             if args.config_command == "path":
                 _json(_resolved_paths(config_path))

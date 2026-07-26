@@ -166,6 +166,12 @@ class RuntimeRecord:
     package_version: str | None = None
     executable: str | None = None
     install_origin: str | None = None
+    # The release this process was launched from, captured by the launcher BEFORE exec.
+    # It must never be re-derived from `executable`: a relocatable venv's interpreter is a
+    # symlink to a shared uv-managed Python (so resolving it escapes the release), and the
+    # `current` symlink is mutable (so mapping it at read time could attribute a still-live
+    # old worker to a newly activated release).
+    running_release_sha: str | None = None
     health_observed_at: str | None = None
     consecutive_health_failures: int = 0
 
@@ -193,6 +199,10 @@ class RuntimeRecord:
             or not self.correlation_id
         ):
             raise ValueError("Runtime record metadata is invalid")
+        if self.running_release_sha is not None and not re.fullmatch(
+            r"[0-9a-f]{7,40}", self.running_release_sha
+        ):
+            raise ValueError("Runtime running_release_sha must be lowercase hex")
         for name, value in (
             ("package_version", self.package_version),
             ("executable", self.executable),

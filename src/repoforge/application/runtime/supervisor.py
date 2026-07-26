@@ -183,6 +183,8 @@ class RuntimeSupervisor:
             package_version=__version__,
             executable=sys.executable,
             install_origin=_install_origin(),
+            # Captured by the launcher before exec; never re-derived here.
+            running_release_sha=os.environ.get("REPOFORGE_RUNNING_RELEASE_SHA") or None,
             health_observed_at=now if health else None,
             consecutive_health_failures=consecutive_health_failures,
         )
