@@ -20,6 +20,8 @@ from typing import Any
 
 from repoforge import __version__
 
+from ...application.activation.inventory import build_runtime_inventory
+from ...application.activation.selection import release_choices, resolve_receipt_id
 from ...application.activation.upgrade import (
     DEFAULT_HEALTH_INTERVAL_SECONDS,
     DEFAULT_HEALTH_WINDOW_SECONDS,
@@ -1488,6 +1490,8 @@ def _runtime_record_best_effort(config_path: Path) -> Any:
 
 
 def _version_command(args: argparse.Namespace) -> int:
+    if args.version_command == "switch":
+        return _version_switch_command(args)
     store = build_release_store(getattr(args, "release_root", None))
     if args.version_command == "list":
         _json(build_version_list(store))
@@ -1555,10 +1559,63 @@ def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
     )
 
 
+def _version_switch_command(args: argparse.Namespace) -> int:
+    """Activate an already-installed release named by branch or short sha."""
+    result = _build_upgrade_service(args).switch(args.selector, keep_releases=args.keep)
+    _json(result.as_dict())
+    # Fail closed, exactly like an upgrade: a switch that did not converge is not a switch.
+    return 0 if result.status in {"activated", "already_active"} else 1
+
+
+def _runtime_inventory_command(args: argparse.Namespace) -> int:
+    """`rf runtime ls`: assemble the whole picture, degrading rather than failing.
+
+    Every probe here is best-effort on purpose. This is the command someone runs when they
+    have lost track of what is installed, which is exactly when a half-broken installation
+    is likely -- so a missing config, an unreadable runtime record or an absent launchd
+    must still produce a listing of what IS known.
+    """
+    store = build_release_store(getattr(args, "release_root", None))
+    observed = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        config_path = Path(args.config).expanduser().resolve()
+        observed = build_release_observer(
+            release_root=getattr(args, "release_root", None),
+            runtime_record_path=_runtime_record_path_readonly(config_path),
+        ).observe()
+    agent = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        agent = _build_launchd_registrar(args).status()
+    dev_runtimes: list[dict[str, Any]] = []
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        listed = build_dev_runtime_service(
+            base_config=Path(args.config).expanduser().resolve()
+        ).list()["dev_runtimes"]
+        if isinstance(listed, list):
+            dev_runtimes = [entry for entry in listed if isinstance(entry, dict)]
+    _json(
+        build_runtime_inventory(
+            releases=release_choices(store),
+            observed=observed,
+            agent=agent,
+            agent_secret_usable=store.agent_secret_status().usable,
+            dev_runtimes=list(dev_runtimes),
+        )
+    )
+    return 0
+
+
 def _upgrade_command(args: argparse.Namespace) -> int:
     service = _build_upgrade_service(args)
     if getattr(args, "upgrade_command", None) == "rollback":
-        result = service.rollback(args.receipt, force=args.force)
+        receipt = args.receipt
+        if receipt is not None:
+            # Accept a unique prefix: the full `act-20260725-001` form is where these get
+            # mistyped, and a mistyped rollback target is the worst kind of typo.
+            receipt = resolve_receipt_id(
+                build_release_store(getattr(args, "release_root", None)), receipt
+            )
+        result = service.rollback(receipt, force=args.force)
         _json(result.as_dict())
         # Fail closed: a rollback that did not converge must not exit 0.
         return 0 if result.status == "rolled_back" else 1
@@ -2025,6 +2082,11 @@ def build_parser() -> argparse.ArgumentParser:
     runtime = commands.add_parser("runtime")
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
     runtime_sub.add_parser("status")
+    runtime_ls = runtime_sub.add_parser(
+        "ls",
+        help="One view of every runtime and release: what is live, and how to switch.",
+    )
+    runtime_ls.add_argument("--release-root", dest="release_root", default=None)
     start = runtime_sub.add_parser("start")
     start.add_argument("--foreground", action="store_true")
     start.add_argument("--tunnel-id")
@@ -2057,6 +2119,22 @@ def build_parser() -> argparse.ArgumentParser:
     for version_command in ("status", "list"):
         version_parser = version_sub.add_parser(version_command)
         version_parser.add_argument("--release-root", dest="release_root", default=None)
+    version_switch = version_sub.add_parser(
+        "switch",
+        help="Activate an already-installed release by branch name or short commit sha.",
+    )
+    version_switch.add_argument(
+        "selector",
+        help="Branch name recorded at build time, a commit sha, or a sha prefix (>=4 hex).",
+    )
+    version_switch.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
+    version_switch.add_argument("--release-root", dest="release_root", default=None)
+    version_switch.add_argument(
+        "--no-path-shim",
+        dest="no_path_shim",
+        action="store_true",
+        help="Do not create or migrate ~/.local/bin/rf during the switch.",
+    )
     upgrade = commands.add_parser("upgrade")
     upgrade.add_argument("--from-worktree", dest="from_worktree", default=".")
     upgrade.add_argument("--activate", action="store_true")
@@ -2243,6 +2321,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
         if args.command == "runtime":
+            if args.runtime_command == "ls":
+                return _runtime_inventory_command(args)
             if args.runtime_command in {"install-agent", "uninstall-agent", "agent-status"}:
                 return _runtime_agent_command(args)
             return _runtime_command(args)

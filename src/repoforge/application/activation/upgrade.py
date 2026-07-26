@@ -34,6 +34,7 @@ from ...ports import (
 from ...ports.clock import Clock
 from ...ports.locking import LockManager
 from ...ports.sleeper import Sleeper
+from .selection import resolve_release
 
 DEFAULT_KEEP_RELEASES = 5
 DEFAULT_HEALTH_WINDOW_SECONDS = 30.0
@@ -217,6 +218,8 @@ class UpgradeService:
                 tool_surface_hash=smoke.tool_surface_hash,
                 source_worktree=str(worktree),
                 built_at=self._clock.now_iso(),
+                branch=state.branch,
+                subject=state.subject,
             )
             self._store.write_manifest(manifest)
         else:
@@ -495,6 +498,54 @@ class UpgradeService:
             f"(failed receipt {failed_receipt.receipt_id}, "
             f"rollback receipt {rolled_back.activation_receipt})."
         )
+
+    def switch(
+        self,
+        selector: str,
+        *,
+        keep_releases: int = DEFAULT_KEEP_RELEASES,
+    ) -> UpgradeResult:
+        """Activate an ALREADY-INSTALLED release, named by branch or short sha.
+
+        Switching between branches previously meant re-running the whole build pipeline
+        against a worktree parked at the right commit, even though the release was already
+        installed and immutable. This activates one directly, through the same
+        journal -> swap -> restart -> observe -> receipt path as a fresh activation (and
+        the same automatic rollback when it does not converge), because a switch is an
+        activation: nothing about it may be less verified than one.
+        """
+        with self._activation_lock():
+            in_flight = self._store.read_in_flight_activation()
+            if in_flight is not None:
+                raise ConfigError(
+                    "ACTIVATION_RECONCILIATION_REQUIRED: an earlier activation reached "
+                    f"stage {in_flight.get('stage')!r} targeting {in_flight.get('to_sha')} "
+                    "without writing a terminal receipt. Inspect `rf version status` and "
+                    "reconcile it before switching."
+                )
+            manifest = resolve_release(self._store, selector)
+            if not self._store.release_path(manifest.commit_sha).is_dir():
+                raise ConfigError(
+                    f"RELEASE_NOT_INSTALLED: {manifest.commit_sha} has a manifest but its "
+                    "release directory is gone; rebuild it with `rf upgrade`"
+                )
+            if manifest.commit_sha == self._store.current_sha():
+                # Not an error: the operator asked for a state that already holds. Doing a
+                # real activation anyway would restart a healthy runtime for nothing.
+                return UpgradeResult(
+                    status="already_active",
+                    candidate_sha=manifest.commit_sha,
+                    build_fingerprint=manifest.build_fingerprint,
+                    tool_surface_hash=manifest.tool_surface_hash,
+                    active_sha=manifest.commit_sha,
+                    converged=True,
+                    stage=ActivationStage.HEALTH_VERIFIED.value,
+                    detail=(
+                        f"{manifest.label} ({manifest.commit_sha[:12]}) is already the "
+                        "active release; nothing to switch."
+                    ),
+                )
+            return self._activate(manifest, keep_releases=keep_releases)
 
     def rollback(
         self,

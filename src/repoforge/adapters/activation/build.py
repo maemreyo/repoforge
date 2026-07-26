@@ -66,7 +66,32 @@ class GitWorktreeInspector:
             head_sha=head,
             clean=not dirty,
             dirty_detail=_first_lines(dirty, 5),
+            branch=self._branch(worktree),
+            subject=self._subject(worktree),
         )
+
+    @staticmethod
+    def _branch(worktree: Path) -> str:
+        """The checked-out branch, or "" on a detached HEAD.
+
+        Best-effort by design: this is a label for humans reading a release list, so a
+        detached HEAD or an unexpected git failure must degrade to "unknown" rather than
+        refuse to build a release that is otherwise perfectly identified by its sha.
+        """
+        code, out, _ = _run(
+            ["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            timeout=30.0,
+        )
+        return out.strip()[:255] if code == 0 else ""
+
+    @staticmethod
+    def _subject(worktree: Path) -> str:
+        """The HEAD commit subject, so a listing shows what a release actually contains."""
+        code, out, _ = _run(
+            ["git", "-C", str(worktree), "log", "-1", "--no-color", "--pretty=%s"],
+            timeout=30.0,
+        )
+        return out.strip()[:255] if code == 0 else ""
 
 
 class UvWheelBuilder:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -552,3 +553,108 @@ def test_concurrent_activations_are_serialized_by_the_activation_lock(
     service.upgrade(tmp_path, activate=True)
     # Exactly one lock acquisition wraps the whole activation (no nested re-entry).
     assert calls == ["runtime-activation"]
+
+
+# ------------------- switching to an already-installed release (branch/short sha)
+
+
+def test_switch_activates_an_installed_release_by_branch_name(tmp_path: Path) -> None:
+    """Switching branches must not require re-running the build against a worktree.
+
+    The release is already installed and immutable, so `switch` takes the same
+    journal -> swap -> restart -> observe -> receipt path a fresh activation does.
+    """
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, restarter = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    assert store.current_sha() == "2222bbb"
+    # Label the installed releases the way a real build would.
+    for sha, branch in (("1111aaa", "main"), ("2222bbb", "feat/x")):
+        existing = store.read_manifest(sha)
+        assert existing is not None
+        store.write_manifest(replace(existing, branch=branch))
+    restarts_before = restarter.calls
+
+    result = second.switch("main")
+
+    assert result.status == "activated"
+    assert result.converged is True
+    assert result.active_sha == "1111aaa"
+    assert store.current_sha() == "1111aaa"
+    assert store.previous_sha() == "2222bbb"
+    # A switch is an activation: it restarts the runtime and writes its own receipt.
+    assert restarter.calls == restarts_before + 1
+    assert result.activation_receipt is not None
+    receipt = store.read_receipt(result.activation_receipt)
+    assert receipt is not None
+    assert receipt.to_sha == "1111aaa"
+    assert receipt.converged is True
+
+
+def test_switch_accepts_a_short_sha(tmp_path: Path) -> None:
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+
+    assert second.switch("1111").active_sha == "1111aaa"
+
+
+def test_switching_to_the_active_release_does_not_restart_anything(tmp_path: Path) -> None:
+    """The operator asked for a state that already holds; restarting a healthy runtime
+    for nothing would be a worse answer than saying so."""
+    service, store, restarter = _service(tmp_path, head="1111aaa")
+    service.upgrade(tmp_path, activate=True)
+    restarts_before = restarter.calls
+
+    result = service.switch("1111aaa")
+
+    assert result.status == "already_active"
+    assert result.converged is True
+    assert restarter.calls == restarts_before
+    assert store.current_sha() == "1111aaa"
+
+
+def test_switch_refuses_an_unknown_release(tmp_path: Path) -> None:
+    service, store, _ = _service(tmp_path, head="1111aaa")
+    service.upgrade(tmp_path, activate=True)
+
+    with pytest.raises(ConfigError, match="RELEASE_NOT_FOUND"):
+        service.switch("no-such-branch")
+    assert store.current_sha() == "1111aaa"
+
+
+def test_switch_refuses_while_an_activation_is_unterminalized(tmp_path: Path) -> None:
+    """An unreconciled activation means the on-disk state is not trustworthy yet."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    store.begin_activation(receipt_id="act-20260725-900", from_sha="2222bbb", to_sha="1111aaa")
+
+    with pytest.raises(ConfigError, match="ACTIVATION_RECONCILIATION_REQUIRED"):
+        second.switch("1111aaa")
+
+
+def test_a_removed_release_is_simply_not_selectable(tmp_path: Path) -> None:
+    """Pruned releases must vanish from selection, not resolve to a missing tree.
+
+    In this store the manifest lives INSIDE the release directory, so removing the release
+    removes its manifest too and `list_releases` stops offering it. That is why `switch`
+    cannot be tricked into swapping `current` to a release that is not installed.
+    """
+    import shutil
+
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+
+    shutil.rmtree(store.release_path("1111aaa"))
+
+    assert store.read_manifest("1111aaa") is None
+    with pytest.raises(ConfigError, match="RELEASE_NOT_FOUND"):
+        second.switch("1111aaa")
+    # `current` must be untouched by a refused switch.
+    assert store.current_sha() == "2222bbb"

@@ -32,6 +32,41 @@ def test_release_manifest_round_trips_through_a_dict() -> None:
     assert ReleaseManifest.from_dict(manifest.to_dict()) == manifest
 
 
+def test_release_manifest_carries_human_provenance_without_changing_identity() -> None:
+    """`branch`/`subject` are labels, so they must not alter what a release IS."""
+    plain = _manifest()
+    labelled = _manifest(branch="feat/activation", subject="ship the gate")
+
+    assert labelled.branch == "feat/activation"
+    assert labelled.label == "feat/activation"
+    assert ReleaseManifest.from_dict(labelled.to_dict()) == labelled
+    # Identity is the commit and the build fingerprint; the label is not part of it.
+    assert labelled.commit_sha == plain.commit_sha
+    assert labelled.build_fingerprint == plain.build_fingerprint
+
+
+def test_a_manifest_written_before_provenance_existed_is_still_readable() -> None:
+    """Releases installed by an earlier version must not become unreadable."""
+    legacy = _manifest().to_dict()
+    del legacy["branch"]
+    del legacy["subject"]
+
+    manifest = ReleaseManifest.from_dict(legacy)
+
+    assert manifest.branch == ""
+    assert manifest.subject == ""
+    # Still displayable: a short sha is the fallback label.
+    assert manifest.label == _COMMIT[:12]
+
+
+def test_a_manifest_with_a_non_string_branch_is_corruption_not_age() -> None:
+    raw = _manifest().to_dict()
+    broken: dict[str, object] = dict(raw)
+    broken["branch"] = 17
+    with pytest.raises(ValueError, match="branch"):
+        ReleaseManifest.from_dict(broken)
+
+
 def test_release_manifest_rejects_a_non_hex_commit() -> None:
     with pytest.raises(ValueError, match="commit_sha"):
         _manifest(commit_sha="not-a-sha")

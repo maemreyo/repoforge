@@ -89,6 +89,14 @@ class ReleaseManifest:
     tool_surface_hash: str
     source_worktree: str
     built_at: str
+    # Human-memorable provenance. OPTIONAL and deliberately outside the identity:
+    # `build_fingerprint` decides what is installed, so recording a branch name can never
+    # change which bits a release is, and two branches at the same commit stay one release
+    # (the label is whichever built first). `source_worktree` cannot serve this purpose --
+    # every branch of one repo shares it -- which is why "which release is which" was
+    # unanswerable from a listing before.
+    branch: str = ""
+    subject: str = ""
 
     def __post_init__(self) -> None:
         if not _COMMIT_SHA.fullmatch(self.commit_sha):
@@ -100,6 +108,12 @@ class ReleaseManifest:
         _clean(self.package_version, name="package_version", limit=128)
         _clean(self.source_worktree, name="source_worktree")
         _clean(self.built_at, name="built_at", limit=64)
+        # Empty is legitimate (detached HEAD, or a manifest written before these existed),
+        # so only non-empty values are validated.
+        if self.branch:
+            _clean(self.branch, name="branch", limit=255)
+        if self.subject:
+            _clean(self.subject, name="subject", limit=255)
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -109,7 +123,14 @@ class ReleaseManifest:
             "tool_surface_hash": self.tool_surface_hash,
             "source_worktree": self.source_worktree,
             "built_at": self.built_at,
+            "branch": self.branch,
+            "subject": self.subject,
         }
+
+    @property
+    def label(self) -> str:
+        """The shortest identity a human recognizes: the branch, else a short sha."""
+        return self.branch or self.commit_sha[:12]
 
     @classmethod
     def from_dict(cls, raw: Any) -> ReleaseManifest:
@@ -123,6 +144,10 @@ class ReleaseManifest:
                 tool_surface_hash=_require_str(raw, "tool_surface_hash"),
                 source_worktree=_require_str(raw, "source_worktree"),
                 built_at=_require_str(raw, "built_at"),
+                # Absent in every manifest written before this field existed, so a missing
+                # value must read as "unknown" rather than making the release unreadable.
+                branch=_optional_str(raw, "branch"),
+                subject=_optional_str(raw, "subject"),
             )
         except KeyError as exc:
             raise ValueError(f"Release manifest missing field: {exc}") from exc
@@ -248,3 +273,14 @@ def _require_str(raw: dict[str, Any], key: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"Field {key} must be a string")
     return value
+
+
+def _optional_str(raw: dict[str, Any], key: str) -> str:
+    """Read a field that older records may not carry at all.
+
+    A wrong TYPE is still an error -- that is corruption, not age -- but absence reads as
+    the empty string so a manifest written before the field existed stays readable.
+    """
+    if key not in raw or raw[key] is None:
+        return ""
+    return _require_str(raw, key)

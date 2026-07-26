@@ -138,9 +138,19 @@ class DevRuntimeService:
             "active_generation": record.active_generation if record else None,
         }
 
-    def list(self) -> dict[str, object]:
+    def names(self) -> list[str]:
+        """Every provisioned dev runtime name, whether running or not."""
         parent = self._base_state_root.expanduser().resolve() / "dev-runtimes"
-        names: list[str] = []
-        if parent.is_dir():
-            names = sorted(entry.name for entry in parent.iterdir() if entry.is_dir())
-        return {"dev_runtimes": names}
+        if not parent.is_dir():
+            return []
+        return sorted(entry.name for entry in parent.iterdir() if entry.is_dir())
+
+    def list(self) -> dict[str, object]:
+        """List dev runtimes WITH their live state.
+
+        Names alone cannot answer the only question a listing is for -- "which of these is
+        running, and which one do I switch to" -- and ``status()`` already computes exactly
+        that, so the listing reports it per runtime instead of making the reader call
+        ``status`` once per name to find out.
+        """
+        return {"dev_runtimes": [self.status(name) for name in self.names()]}

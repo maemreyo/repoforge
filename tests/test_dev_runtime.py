@@ -165,9 +165,31 @@ def test_stop_reports_not_running_when_no_record_exists(tmp_path: Path) -> None:
     assert service.stop("cand")["status"] == "not_running"
 
 
-def test_list_enumerates_started_dev_runtimes(tmp_path: Path) -> None:
+def test_list_enumerates_started_dev_runtimes_with_their_state(tmp_path: Path) -> None:
+    """A listing of bare names cannot answer "which one is running, which do I switch to".
+
+    The names are still there, but each entry now carries the same live state ``status()``
+    reports, so nobody has to call ``status`` once per name to make a decision.
+    """
     launcher = _Launcher()
     service = _service(tmp_path, launcher, _RecordingProvisioner())
     service.start("alpha")
     service.start("beta")
-    assert service.list() == {"dev_runtimes": ["alpha", "beta"]}
+
+    assert service.names() == ["alpha", "beta"]
+    listed = service.list()["dev_runtimes"]
+    assert isinstance(listed, list)
+    assert [entry["name"] for entry in listed] == ["alpha", "beta"]
+    for entry in listed:
+        # The fields a reader actually needs to choose between runtimes.
+        assert set(entry) >= {
+            "name",
+            "phase",
+            "pid",
+            "tunnel_id",
+            "config_path",
+            "state_root",
+            "exists",
+        }
+        assert entry["tunnel_id"] == f"dev-{entry['name']}"
+        assert entry["exists"] is True
