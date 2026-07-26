@@ -24,6 +24,23 @@ def slugify(value: str, *, max_length: int = 48) -> str:
 def validate_branch(branch: str, repo: RepositoryConfig) -> None:
     if not branch.startswith(repo.branch_prefix):
         raise SecurityError(f"Branch must start with {repo.branch_prefix!r}")
+    validate_adopted_branch(branch, repo)
+
+
+def validate_adopted_branch(branch: str, repo: RepositoryConfig) -> None:
+    """Validate a branch the operator named themselves, WITHOUT the ``ai/`` prefix rule.
+
+    Adopting an existing branch is an explicit instruction ("work on this branch"), so the
+    naming convention is not enforced -- that convention exists to keep agent-created
+    branches recognizable, and a branch the operator already made is theirs to name.
+
+    Two checks are NOT relaxed, because neither is a convention:
+
+    * a protected branch stays unwritable. Committing straight onto ``main`` is the one
+      outcome a warning cannot undo, and it is never what "work on my branch" means.
+    * the name must still be shell/ref safe. ``..``, a leading ``-`` or ``//`` are argument
+      injection into git, not a style preference.
+    """
     if branch in repo.protected_branches:
         raise SecurityError(f"Protected branch is not writable: {branch}")
     if (

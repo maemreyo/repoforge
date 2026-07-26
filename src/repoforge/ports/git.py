@@ -282,6 +282,10 @@ class GitRepository(Protocol):
         self, repo: RepositoryConfig, destination: Path, branch: str, base: str
     ) -> str: ...
 
+    def adopt_worktree(self, repo: RepositoryConfig, destination: Path, branch: str) -> str:
+        """Check out an EXISTING branch into a new worktree, creating no branch."""
+        ...
+
     def remove_worktree(
         self, repo: RepositoryConfig, path: Path, branch: str, delete_branch: bool
     ) -> bool: ...
