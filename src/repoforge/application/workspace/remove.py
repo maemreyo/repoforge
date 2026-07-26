@@ -61,10 +61,31 @@ class WorkspaceRemover:
                             "The workspace, its worktree, and the workspace registry were not modified.",
                         ),
                     )
+                # An adopted branch predates this workspace and belongs to the operator, so
+                # removing the workspace must never delete it: that would destroy work this
+                # workspace did not create, and unlike everything else here it is not
+                # recoverable from the registry.
+                #
+                # This refusal deliberately runs BEFORE `boundary.begin()`: the boundary
+                # means "an effect may have happened", so opening it and then raising would
+                # write a receipt claiming a started effect for a call that touched nothing.
+                delete_branch = c.delete_local_branch and not record.metadata.get("adopted_branch")
+                if c.delete_local_branch and not delete_branch:
+                    raise WorkspaceError(
+                        f"ADOPTED_BRANCH_NOT_DELETABLE: {record.branch!r} was adopted, not "
+                        "created by this workspace, so removal will not delete it",
+                        safe_next_action=(
+                            "Re-run workspace_remove without delete_local_branch to release "
+                            "the worktree and keep the branch, or delete the branch yourself "
+                            "once you are done with it."
+                        ),
+                        unchanged_state=(
+                            "The workspace, its worktree, the branch, and the registry were "
+                            "not modified.",
+                        ),
+                    )
                 boundary.begin()
-                deleted = self.ctx.git.remove_worktree(
-                    repo, path, record.branch, c.delete_local_branch
-                )
+                deleted = self.ctx.git.remove_worktree(repo, path, record.branch, delete_branch)
                 authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, deleted)
                 boundary.record_result(authoritative_result)
                 self.ctx.store.delete(c.workspace_id)

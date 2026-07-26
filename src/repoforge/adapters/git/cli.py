@@ -1726,6 +1726,47 @@ class GitCliRepository:
         )
         return self.head_sha(destination)
 
+    def adopt_worktree(self, repo: RepositoryConfig, destination: Path, branch: str) -> str:
+        """Check out an existing branch into a new worktree, creating no branch.
+
+        ``worktree add`` WITHOUT ``-b``, so the operator's own commits and history are what
+        the agent lands on. A branch that exists only on the remote is materialized as a
+        tracking branch, because "work on my branch" means the same thing whether the
+        operator pushed it or not.
+
+        Git itself refuses a branch already checked out in another worktree, and that
+        refusal is kept: two worktrees sharing one branch would let an agent commit under
+        someone's editor.
+        """
+        local_ref = f"refs/heads/{branch}"
+        exists_locally = (
+            self._executor.run(
+                ["git", "rev-parse", "--verify", "--quiet", local_ref],
+                cwd=repo.path,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if not exists_locally and repo.fetch_before_workspace and not repo.read_only:
+            # Best-effort: a purely local branch has nothing to fetch, and that is fine.
+            self._executor.run(
+                ["git", "fetch", "--prune", repo.remote, branch], cwd=repo.path, check=False
+            )
+        argv = ["git", "worktree", "add", str(destination), branch]
+        if not exists_locally:
+            argv = [
+                "git",
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                branch,
+                str(destination),
+                f"{repo.remote}/{branch}",
+            ]
+        self._executor.run(argv, cwd=repo.path, timeout=self.server.verification_timeout_seconds)
+        return self.head_sha(destination)
+
     def remove_worktree(
         self, repo: RepositoryConfig, path: Path, branch: str, delete_branch: bool
     ) -> bool:

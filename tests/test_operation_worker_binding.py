@@ -66,6 +66,47 @@ def test_worker_binding_from_payload_rejects_extra_fields() -> None:
         worker_binding_from_payload(payload)
 
 
+def test_worker_binding_round_trips_the_v2_owner_generation() -> None:
+    binding = OperationWorkerBinding(
+        operation_id="op-0000000000000000000000aa",
+        child_pid=4321,
+        child_pgid=4321,
+        child_start_token="tok-child",
+        server_pid=999,
+        server_start_token="tok-server",
+        created_at="2026-07-25T00:00:00+00:00",
+        owner_generation=7,
+    )
+    restored = worker_binding_from_payload(worker_binding_payload(binding))
+    assert restored == binding
+    assert restored.owner_generation == 7
+
+
+def test_pre_v2_payload_without_owner_generation_loads_as_none() -> None:
+    # A binding persisted before schema v2 has no owner_generation key; it must still
+    # load (backward compatibility) with owner_generation defaulting to None.
+    payload = worker_binding_payload(_binding())
+    del payload["owner_generation"]
+    restored = worker_binding_from_payload(payload)
+    assert restored.owner_generation is None
+
+
+def test_worker_binding_rejects_non_positive_owner_generation() -> None:
+    with pytest.raises(RepoForgeError):
+        validate_operation_worker_binding(
+            OperationWorkerBinding(
+                operation_id="op-0000000000000000000000aa",
+                child_pid=4321,
+                child_pgid=4321,
+                child_start_token="tok-child",
+                server_pid=999,
+                server_start_token="tok-server",
+                created_at="2026-07-25T00:00:00+00:00",
+                owner_generation=0,
+            )
+        )
+
+
 # ---------------------------------------------------------------------------- store
 
 

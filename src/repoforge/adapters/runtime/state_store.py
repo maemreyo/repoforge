@@ -96,6 +96,11 @@ class JsonRuntimeStore:
                     str(raw["package_version"]) if raw.get("package_version") is not None else None
                 ),
                 executable=str(raw["executable"]) if raw.get("executable") is not None else None,
+                running_release_sha=(
+                    str(raw["running_release_sha"])
+                    if raw.get("running_release_sha") is not None
+                    else None
+                ),
                 install_origin=(
                     str(raw["install_origin"]) if raw.get("install_origin") is not None else None
                 ),

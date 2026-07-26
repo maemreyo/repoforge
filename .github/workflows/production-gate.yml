@@ -64,8 +64,34 @@ jobs:
         run: uv run pytest tests/test_onboarding_real_git.py tests/test_repository_discovery.py
       - run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
 
+  # A release gate that no unit test can replace: it performs a REAL `rf upgrade
+  # --activate` (real wheel build, real per-release venv, real smoke, real supervisor
+  # process), a second activation, and a receipted rollback, asserting the JSON payloads
+  # and `rf version status` at every stage. Five production defects reached `main`-bound
+  # branches invisible to the unit suite and were caught only here, so this runs on the
+  # gate rather than on demand.
+  live-activation:
+    needs: [static-contracts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - name: Live activation, second activation, and receipted rollback
+        # The harness provisions its own stub tunnel-client and an isolated HOME, config,
+        # state root and release root, so it never contacts a control plane and never
+        # touches an installation outside its sandbox.
+        run: scripts/live-activation-sandbox.sh
+
   package:
-    needs: [static-contracts, tests]
+    # `live-activation` is a dependency, not just a sibling: a DAG where the live gate
+    # fails while `package` still succeeds is a valid DAG, so any branch rule that
+    # requires only `package` would let a broken activation merge.
+    needs: [static-contracts, tests, live-activation]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,3 +104,29 @@ jobs:
       - run: scripts/verify-wheel-install.sh dist
       - name: Ensure build did not rewrite tracked files
         run: git diff --exit-code
+
+  # THE required check. One stable name that fails unless every job above succeeded, so
+  # adding a job to this workflow can never silently fall outside the gate: `if: always()`
+  # means this job runs even when a dependency failed or was skipped, and an explicitly
+  # asserted `success` for each result is what makes a skipped job a failure here too.
+  # Branch protection should require `production-gate` and nothing else.
+  production-gate:
+    if: always()
+    needs: [static-contracts, tests, live-activation, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gate job to have succeeded
+        run: |
+          set -eu
+          status=0
+          for entry in \
+            'static-contracts=${{ needs.static-contracts.result }}' \
+            'tests=${{ needs.tests.result }}' \
+            'live-activation=${{ needs.live-activation.result }}' \
+            'package=${{ needs.package.result }}'; do
+            name=${entry%%=*}
+            result=${entry#*=}
+            printf '%-18s %s\n' "$name" "$result"
+            [ "$result" = success ] || status=1
+          done
+          exit "$status"

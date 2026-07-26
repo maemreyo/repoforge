@@ -673,6 +673,17 @@ class WorkspaceCreateInput(StrictModel):
     base: GitRef | None = None
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=256)
     issue_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    adopt_branch: GitRef | None = Field(
+        default=None,
+        description=(
+            "Work directly ON this existing branch instead of cutting a fresh ai/* one. "
+            "Use it when the instruction names a branch already in progress. Mutually "
+            "exclusive with `base` (there is nothing to branch from). The response carries "
+            "a warning because isolation is reduced: commits land on a branch this "
+            "workspace does not exclusively own, and workspace_remove will never delete "
+            "it. A protected branch is still refused."
+        ),
+    )
 
 
 class WorkspaceCreateOutput(ToolResponse):
@@ -684,6 +695,18 @@ class WorkspaceCreateOutput(ToolResponse):
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
     issue_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    adopted_branch: bool = Field(
+        default=False,
+        description="True when `branch` is a pre-existing branch this workspace adopted.",
+    )
+    warnings: tuple[str, ...] = Field(
+        default=(),
+        max_length=20,
+        description=(
+            "Non-blocking advisories about reduced guarantees, e.g. an adopted branch. The "
+            "call succeeded; these are conditions the caller should carry forward."
+        ),
+    )
 
 
 class WorkspaceRemoveInput(StrictModel):

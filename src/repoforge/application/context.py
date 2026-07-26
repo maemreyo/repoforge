@@ -14,7 +14,7 @@ from typing import Any, TypeVar
 from ..config import AppConfig, RepositoryConfig
 from ..domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ..domain.operations import automatic_retry_allowed, unchanged_state_for
-from ..domain.policy import validate_branch
+from ..domain.policy import validate_adopted_branch, validate_branch
 from ..domain.workspace import WorkspaceRecord
 from ..ports import (
     AuditSink,
@@ -332,7 +332,15 @@ class ApplicationContext:
                     "isolated workspace for the other branch."
                 ),
             )
-        validate_branch(branch, repo)
+        # Every workspace tool passes through here, so this is where an adopted branch is
+        # either honoured or silently unusable: the ai/* prefix rule would refuse the very
+        # branch the operator asked for on EVERY subsequent call, not just at creation.
+        # The rest of the validation -- protected branches, ref safety -- still applies,
+        # and the registry (not the request) decides which branches count as adopted.
+        if record.metadata.get("adopted_branch"):
+            validate_adopted_branch(branch, repo)
+        else:
+            validate_branch(branch, repo)
         return (record, repo, path)
 
     def record_metric(

@@ -19,14 +19,21 @@ from dataclasses import dataclass
 from .errors import ErrorCode, RepoForgeError
 from .operation_task import validate_operation_id
 
-OPERATION_WORKER_BINDING_SCHEMA_VERSION = 1
+OPERATION_WORKER_BINDING_SCHEMA_VERSION = 2
 
 _MAX_START_TOKEN = 128
 
 
 @dataclass(frozen=True, slots=True)
 class OperationWorkerBinding:
-    """Identity of the OS process group running one background operation."""
+    """Identity of the OS process group running one background operation.
+
+    ``owner_generation`` (schema v2) records which runtime generation spawned the
+    work, so a generation handoff can tell an old draining generation's bindings
+    apart from the new generation's and reconcile them (#270). It is optional and
+    defaults to ``None`` for pre-v2 bindings, which are attributed by the
+    ``server_pid``/``server_start_token`` process identity instead.
+    """
 
     operation_id: str
     child_pid: int
@@ -35,6 +42,7 @@ class OperationWorkerBinding:
     server_pid: int
     server_start_token: str | None
     created_at: str
+    owner_generation: int | None = None
 
 
 def _error(message: str) -> RepoForgeError:
@@ -67,6 +75,8 @@ def validate_operation_worker_binding(binding: OperationWorkerBinding) -> Operat
     _start_token(binding.child_start_token, "child_start_token")
     _positive_pid(binding.server_pid, "server_pid")
     _start_token(binding.server_start_token, "server_start_token")
+    if binding.owner_generation is not None:
+        _positive_pid(binding.owner_generation, "owner_generation")
     if (
         not isinstance(binding.created_at, str)
         or not binding.created_at
@@ -86,6 +96,7 @@ def worker_binding_payload(binding: OperationWorkerBinding) -> dict[str, object]
         "server_pid": binding.server_pid,
         "server_start_token": binding.server_start_token,
         "created_at": binding.created_at,
+        "owner_generation": binding.owner_generation,
     }
 
 
@@ -96,7 +107,7 @@ def _as_int(value: object, field: str) -> int:
 
 
 def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBinding:
-    expected = {
+    required = {
         "operation_id",
         "child_pid",
         "child_pgid",
@@ -105,10 +116,17 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
         "server_start_token",
         "created_at",
     }
-    if set(payload) != expected:
+    # owner_generation is a v2 addition: absent in pre-v2 records (read back as None),
+    # present (possibly null) in v2 records. Any other key is a schema mismatch.
+    allowed = required | {"owner_generation"}
+    if not required.issubset(payload) or (set(payload) - allowed):
         raise _error("worker binding payload fields do not match the schema")
     child_start = payload["child_start_token"]
     server_start = payload["server_start_token"]
+    owner_generation_raw = payload.get("owner_generation")
+    owner_generation = (
+        None if owner_generation_raw is None else _as_int(owner_generation_raw, "owner_generation")
+    )
     binding = OperationWorkerBinding(
         operation_id=str(payload["operation_id"]),
         child_pid=_as_int(payload["child_pid"], "child_pid"),
@@ -117,5 +135,6 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
         server_pid=_as_int(payload["server_pid"], "server_pid"),
         server_start_token=None if server_start is None else str(server_start),
         created_at=str(payload["created_at"]),
+        owner_generation=owner_generation,
     )
     return validate_operation_worker_binding(binding)
