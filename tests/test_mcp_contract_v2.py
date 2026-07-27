@@ -67,6 +67,10 @@ async def test_forge_v2_identity_publishes_exact_authoritative_roster_and_schema
     tools = await server.list_tools()
     assert tuple(tool.name for tool in tools) == V2_TOOL_NAMES
     assert len(tools) == 28
+    diff_tool = next(tool for tool in tools if tool.name == "workspace_diff")
+    include_hunks_schema = diff_tool.inputSchema["properties"]["include_hunks"]
+    assert include_hunks_schema["type"] == "boolean"
+    assert include_hunks_schema["default"] is False
     assert {"repo_status", "workspace_run_profile", "repo_policy_apply"}.isdisjoint(
         tool.name for tool in tools
     )

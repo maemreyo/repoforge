@@ -250,6 +250,13 @@ def test_retrieval_contracts_publish_budget_and_truncation_metadata() -> None:
     schema = diff_input.model_json_schema()["properties"]["max_files"]
     assert schema["minimum"] == 1
     assert schema["maximum"] == 1000
+    assert diff_input.model_fields["include_hunks"].default is False
+    assert diff_input.model_json_schema()["properties"]["include_hunks"]["default"] is False
+    assert diff_input.model_validate({"workspace_id": "demo"}).include_hunks is False
+    assert (
+        diff_input.model_validate({"workspace_id": "demo", "include_hunks": True}).include_hunks
+        is True
+    )
 
 
 def test_repo_policy_contract_carries_typed_generated_paths() -> None:

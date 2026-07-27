@@ -1168,16 +1168,19 @@ class CodingService:
         max_files: int = 100,
         byte_budget: int = 120_000,
         cursor: str | None = None,
+        *,
+        include_hunks: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._workspace_retrieval.diff(
                 WorkspaceDiffV2Command(
-                    workspace_id,
-                    staged,
-                    path_glob,
-                    max_files,
-                    byte_budget,
-                    cursor,
+                    workspace_id=workspace_id,
+                    staged=staged,
+                    path_glob=path_glob,
+                    max_files=max_files,
+                    byte_budget=byte_budget,
+                    cursor=cursor,
+                    include_hunks=include_hunks,
                 )
             )
         )

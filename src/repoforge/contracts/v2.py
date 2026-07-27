@@ -941,6 +941,7 @@ class WorkspaceDiffInput(StrictModel):
     max_files: int = Field(default=100, ge=1, le=1000)
     byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
+    include_hunks: bool = False
 
 
 class WorkspaceDiffOutput(ToolResponse):

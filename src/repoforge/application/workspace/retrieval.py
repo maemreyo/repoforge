@@ -89,6 +89,7 @@ class WorkspaceDiffV2Command:
     max_files: int = 100
     byte_budget: int = 120_000
     cursor: str | None = None
+    include_hunks: bool = False
 
 
 @dataclass(frozen=True, slots=True)
