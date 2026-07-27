@@ -194,7 +194,7 @@ test_files = [
   "tests/test_activation_restart_semantics.py",
   "tests/test_bootstrap_factories.py",
   "tests/test_cli_activation_wiring.py",
-  "tests/test_cli_agent_secret.py",
+  "tests/test_cli_agent_auth_material.py",
   "tests/test_cli_runtime_commands.py",
   "tests/test_dev_runtime.py",
   "tests/test_execution_identity.py",
@@ -212,7 +212,7 @@ test_files = [
   "tests/test_unix_socket_path_portability.py",
   "tests/test_upgrade_service.py",
   "tests/test_version_status.py",
-  "tests/test_worker_agent_secret.py",
+  "tests/test_worker_agent_auth_material.py",
   "tests/test_worktree_provenance.py",
 ]
 
