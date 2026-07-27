@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -825,6 +828,420 @@ def test_json_repository_binding_registry_is_private_restart_safe_and_cas(tmp_pa
     )
     assert "github-personal-v1" not in encoded
     assert "token" not in encoded.lower()
+
+
+def _auth_material(
+    *,
+    material_id: str = "material-personal",
+    profile_id: str = "personal",
+    secret: str = "personal-secret-canary-123456789",
+    actor_class: ActorClass = ActorClass.HUMAN_OPERATED,
+    target_id: str = "github-repository-987654",
+    capability_ids: tuple[str, ...] = ("github_api_read", "git_transport_write"),
+    issued_at: str = "2026-07-27T10:00:00+00:00",
+    expires_at: str = "2026-07-27T11:00:00+00:00",
+    state: object = None,
+):
+    from repoforge.domain.repository_auth_broker import (
+        AuthEnvironmentBinding,
+        AuthMaterial,
+        AuthMaterialState,
+        EphemeralSecret,
+    )
+
+    return AuthMaterial(
+        material_id=material_id,
+        profile_id=profile_id,
+        actor_class=actor_class,
+        target_kind=AuthTargetKind.REPOSITORY,
+        target_id=target_id,
+        capability_ids=capability_ids,
+        issued_at=issued_at,
+        expires_at=expires_at,
+        state=state or AuthMaterialState.ACTIVE,
+        environment=(AuthEnvironmentBinding("GH_TOKEN", EphemeralSecret.from_text(secret)),),
+        git_config=(("credential.useHttpPath", "true"),),
+        callback_config=(("helper_mode", "askpass"),),
+    )
+
+
+def _auth_request(
+    *,
+    profile: CredentialProfile | None = None,
+    target_id: str = "github-repository-987654",
+    now: str = "2026-07-27T10:30:00+00:00",
+):
+    from repoforge.domain.repository_auth_broker import AuthBrokerRequest
+
+    return AuthBrokerRequest(
+        profile=profile or _profile(),
+        target_kind=AuthTargetKind.REPOSITORY,
+        target_id=target_id,
+        required_capability_ids=("github_api_read",),
+        allowed_environment_keys=("GH_TOKEN",),
+        allowed_git_config_keys=("credential.useHttpPath",),
+        allowed_callback_keys=("helper_mode",),
+        now=now,
+    )
+
+
+def test_auth_broker_scrubs_ambient_identity_and_builds_safe_context() -> None:
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    secret = "company-secret-canary-987654321"
+    material = _auth_material(secret=secret)
+    provider = DeterministicAuthMaterialProvider({"github-personal-v1": material})
+    inherited = {
+        "PATH": "/safe/bin",
+        "LANG": "en_US.UTF-8",
+        "GH_TOKEN": "ambient-personal-token",
+        "GITHUB_TOKEN": "ambient-github-token",
+        "SSH_AUTH_SOCK": "/tmp/personal-agent.sock",
+        "SSH_AGENT_PID": "123",
+        "GIT_ASKPASS": "/tmp/personal-helper",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "store",
+        "GIT_AUTHOR_NAME": "Wrong User",
+        "GIT_COMMITTER_EMAIL": "wrong@example.com",
+        "GIT_SSH_COMMAND": "ssh -i /tmp/personal-key",
+    }
+
+    with RepositoryAuthBroker(provider).session(_auth_request()) as session:
+        context = session.process_context(inherited)
+        environment = context.environment_dict()
+        rendered = json.dumps(context.safe_payload(), sort_keys=True)
+
+        assert environment["PATH"] == "/safe/bin"
+        assert environment["LANG"] == "en_US.UTF-8"
+        assert environment["GH_TOKEN"] == secret
+        assert environment["GIT_TERMINAL_PROMPT"] == "0"
+        assert environment["GH_PROMPT_DISABLED"] == "1"
+        assert set(environment).isdisjoint(
+            {
+                "GITHUB_TOKEN",
+                "SSH_AUTH_SOCK",
+                "SSH_AGENT_PID",
+                "GIT_ASKPASS",
+                "GIT_CONFIG_COUNT",
+                "GIT_CONFIG_KEY_0",
+                "GIT_CONFIG_VALUE_0",
+                "GIT_AUTHOR_NAME",
+                "GIT_COMMITTER_EMAIL",
+                "GIT_SSH_COMMAND",
+            }
+        )
+        assert context.git_config == (("credential.useHttpPath", "true"),)
+        assert context.callback_config == (("helper_mode", "askpass"),)
+        assert secret not in rendered
+        assert "ambient-personal-token" not in rendered
+
+    assert material.environment[0].value.released is True
+    assert provider.release_calls == ["material-personal"]
+
+
+def test_auth_process_receives_selected_secret_but_captures_only_redacted_output(
+    tmp_path: Path,
+) -> None:
+    from repoforge.adapters.subprocess import SubprocessCommandExecutor
+    from repoforge.adapters.subprocess.auth_runner import SubprocessAuthRunner
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    secret = "company-process-secret-canary-24680"
+    material = _auth_material(secret=secret)
+    provider = DeterministicAuthMaterialProvider({"github-personal-v1": material})
+    executor = SubprocessCommandExecutor(ServerConfig(tmp_path / "w", tmp_path / "s"))
+    runner = SubprocessAuthRunner(executor)
+    script = tmp_path / "check_context.py"
+    script.write_text(
+        "import os\n"
+        f"expected = {secret!r}\n"
+        "assert os.environ.get('GH_TOKEN') == expected\n"
+        "assert 'GITHUB_TOKEN' not in os.environ\n"
+        "assert 'SSH_AUTH_SOCK' not in os.environ\n"
+        "print('received=' + os.environ['GH_TOKEN'])\n",
+        encoding="utf-8",
+    )
+
+    with RepositoryAuthBroker(provider).session(_auth_request()) as session:
+        context = session.process_context(
+            {"PATH": os.environ.get("PATH", ""), "GITHUB_TOKEN": "ambient-token"}
+        )
+        result = runner.run(context, (sys.executable, str(script)), cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert secret not in result.stdout
+    assert "<redacted>" in result.stdout
+
+
+def test_auth_runner_blocks_secret_in_argv_and_url_before_launch(tmp_path: Path) -> None:
+    from repoforge.adapters.subprocess import SubprocessCommandExecutor
+    from repoforge.adapters.subprocess.auth_runner import SubprocessAuthRunner
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    secret = "argv-secret-canary-13579"
+    marker = tmp_path / "started"
+    material = _auth_material(secret=secret)
+    provider = DeterministicAuthMaterialProvider({"github-personal-v1": material})
+    runner = SubprocessAuthRunner(
+        SubprocessCommandExecutor(ServerConfig(tmp_path / "w", tmp_path / "s"))
+    )
+
+    with RepositoryAuthBroker(provider).session(_auth_request()) as session:
+        context = session.process_context({"PATH": os.environ.get("PATH", "")})
+        with pytest.raises(RepoForgeError) as blocked:
+            runner.run(
+                context,
+                (
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(marker)!r}).write_text('x')",
+                    f"https://oauth2:{secret}@github.com/maemreyo/repoforge.git",
+                ),
+                cwd=tmp_path,
+            )
+
+    assert blocked.value.code is ErrorCode.CREDENTIAL_LEAK_BLOCKED
+    assert secret not in str(blocked.value)
+    assert marker.exists() is False
+
+
+def test_concurrent_personal_and_company_auth_sessions_are_isolated(tmp_path: Path) -> None:
+    from repoforge.adapters.subprocess import SubprocessCommandExecutor
+    from repoforge.adapters.subprocess.auth_runner import SubprocessAuthRunner
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    personal_secret = "personal-concurrent-secret-111"
+    company_secret = "company-concurrent-secret-222"
+    company_profile = _company_profile()
+    provider = DeterministicAuthMaterialProvider(
+        {
+            "github-personal-v1": _auth_material(secret=personal_secret),
+            "github-company-v1": _auth_material(
+                material_id="material-company",
+                profile_id="company",
+                secret=company_secret,
+                target_id="github-repository-123456",
+                capability_ids=company_profile.capability_ids,
+            ),
+        }
+    )
+    runner = SubprocessAuthRunner(
+        SubprocessCommandExecutor(ServerConfig(tmp_path / "w", tmp_path / "s"))
+    )
+
+    def execute(profile: CredentialProfile, target_id: str, expected: str) -> str:
+        request = _auth_request(profile=profile, target_id=target_id)
+        script = tmp_path / f"check-{profile.profile_id}.py"
+        script.write_text(
+            "import os\n"
+            f"assert os.environ.get('GH_TOKEN') == {expected!r}\n"
+            "print('ok-' + os.environ['GH_TOKEN'])\n",
+            encoding="utf-8",
+        )
+        with RepositoryAuthBroker(provider).session(request) as session:
+            context = session.process_context(
+                {
+                    "PATH": os.environ.get("PATH", ""),
+                    "GH_TOKEN": "ambient-wrong-token",
+                    "SSH_AUTH_SOCK": "/tmp/wrong-agent",
+                }
+            )
+            return runner.run(context, (sys.executable, str(script)), cwd=tmp_path).stdout
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        personal_future = pool.submit(
+            execute, _profile(), "github-repository-987654", personal_secret
+        )
+        company_future = pool.submit(
+            execute, company_profile, "github-repository-123456", company_secret
+        )
+        personal_output = personal_future.result()
+        company_output = company_future.result()
+
+    assert personal_secret not in personal_output
+    assert company_secret not in company_output
+    assert "<redacted>" in personal_output
+    assert "<redacted>" in company_output
+
+
+def test_auth_broker_missing_reference_and_outage_fail_closed_without_fallback() -> None:
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    with pytest.raises(RepoForgeError) as missing_error:
+        RepositoryAuthBroker(DeterministicAuthMaterialProvider()).session(_auth_request())
+    assert missing_error.value.code is ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND
+
+    with pytest.raises(RepoForgeError) as outage_error:
+        RepositoryAuthBroker(DeterministicAuthMaterialProvider(unavailable=True)).session(
+            _auth_request()
+        )
+    assert outage_error.value.code is ErrorCode.CREDENTIAL_BROKER_UNAVAILABLE
+    assert "must-not-leak" not in str(outage_error.value)
+    assert outage_error.value.__cause__ is None
+    assert outage_error.value.__context__ is None
+
+
+def test_expired_auth_material_refreshes_only_with_equivalent_identity_and_ceiling() -> None:
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    expired = _auth_material(
+        material_id="material-expired",
+        secret="expired-secret-canary-111",
+        expires_at="2026-07-27T10:10:00+00:00",
+    )
+    refreshed = _auth_material(
+        material_id="material-refreshed",
+        secret="refreshed-secret-canary-222",
+        issued_at="2026-07-27T10:10:00+00:00",
+        expires_at="2026-07-27T11:10:00+00:00",
+    )
+    provider = DeterministicAuthMaterialProvider(
+        {"github-personal-v1": expired},
+        refreshes={"github-personal-v1": refreshed},
+    )
+
+    with RepositoryAuthBroker(provider).session(_auth_request()) as session:
+        context = session.process_context({})
+        assert context.material_id == "material-refreshed"
+        assert context.environment_dict()["GH_TOKEN"] == "refreshed-secret-canary-222"
+
+    assert expired.environment[0].value.released is True
+    assert refreshed.environment[0].value.released is True
+    assert provider.refresh_calls == ["github-personal-v1"]
+
+    changed = _auth_material(
+        material_id="material-cross-profile",
+        profile_id="company",
+        secret="cross-profile-secret-canary-333",
+        capability_ids=("github_api_read",),
+    )
+    mismatch_provider = DeterministicAuthMaterialProvider(
+        {
+            "github-personal-v1": _auth_material(
+                material_id="material-expired-two",
+                secret="expired-two-secret-canary-444",
+                expires_at="2026-07-27T10:10:00+00:00",
+            )
+        },
+        refreshes={"github-personal-v1": changed},
+    )
+    with pytest.raises(RepoForgeError) as mismatch:
+        RepositoryAuthBroker(mismatch_provider).session(_auth_request())
+    assert mismatch.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
+    assert changed.environment[0].value.released is True
+
+
+def test_revoked_or_scope_mismatched_auth_material_is_denied_and_released() -> None:
+    from repoforge.domain.repository_auth_broker import AuthMaterialState, RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    revoked = _auth_material(
+        material_id="material-revoked",
+        secret="revoked-secret-canary-555",
+        state=AuthMaterialState.REVOKED,
+    )
+    provider = DeterministicAuthMaterialProvider({"github-personal-v1": revoked})
+    with pytest.raises(RepoForgeError) as revoked_error:
+        RepositoryAuthBroker(provider).session(_auth_request())
+    assert revoked_error.value.code is ErrorCode.CREDENTIAL_REVOKED
+    assert revoked.environment[0].value.released is True
+
+    wrong_target = _auth_material(
+        material_id="material-wrong-target",
+        secret="wrong-target-secret-canary-666",
+        target_id="github-repository-other",
+    )
+    target_provider = DeterministicAuthMaterialProvider({"github-personal-v1": wrong_target})
+    with pytest.raises(RepoForgeError) as scope_error:
+        RepositoryAuthBroker(target_provider).session(_auth_request())
+    assert scope_error.value.code is ErrorCode.CREDENTIAL_SCOPE_MISMATCH
+    assert wrong_target.environment[0].value.released is True
+
+
+def test_auth_callback_crash_is_sanitized_and_material_is_zeroised() -> None:
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    secret = "callback-secret-canary-777"
+    material = _auth_material(secret=secret)
+    provider = DeterministicAuthMaterialProvider({"github-personal-v1": material})
+
+    with (
+        pytest.raises(RepoForgeError) as failure,
+        RepositoryAuthBroker(provider).session(_auth_request()) as session,
+    ):
+        session.invoke(
+            lambda context: (_ for _ in ()).throw(
+                RuntimeError("callback failed with " + context.environment_dict()["GH_TOKEN"])
+            )
+        )
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_CALLBACK_FAILED
+    assert secret not in str(failure.value)
+    assert failure.value.__cause__ is None
+    assert failure.value.__context__ is None
+    assert material.environment[0].value.released is True
+    assert provider.release_calls == ["material-personal"]
+
+
+def test_auth_failure_artifact_and_exception_never_persist_raw_secret(tmp_path: Path) -> None:
+    from repoforge.adapters.subprocess import SubprocessCommandExecutor
+    from repoforge.adapters.subprocess.auth_runner import SubprocessAuthRunner
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    secret = "artifact-secret-canary-888"
+    material = _auth_material(secret=secret)
+    provider = DeterministicAuthMaterialProvider({"github-personal-v1": material})
+    executor = SubprocessCommandExecutor(ServerConfig(tmp_path / "w", tmp_path / "s"))
+    runner = SubprocessAuthRunner(executor)
+    script = tmp_path / "leak_and_fail.py"
+    script.write_text(
+        "import os, sys\n"
+        "print((os.environ['GH_TOKEN'] + '-') * 1000)\n"
+        "sys.stderr.write('stderr=' + os.environ['GH_TOKEN'])\n"
+        "sys.exit(7)\n",
+        encoding="utf-8",
+    )
+
+    with RepositoryAuthBroker(provider).session(_auth_request()) as session:
+        context = session.process_context({"PATH": os.environ.get("PATH", "")})
+        with pytest.raises(RepoForgeError) as failure:
+            runner.run(
+                context,
+                (sys.executable, str(script)),
+                cwd=tmp_path,
+                output_limit=128,
+            )
+
+    rendered = json.dumps(failure.value.details, sort_keys=True)
+    assert secret not in str(failure.value)
+    assert secret not in rendered
+    reference = failure.value.details.get("output_artifact_reference")
+    assert isinstance(reference, str) and reference.startswith("failure-output:")
+    digest = reference.removeprefix("failure-output:")
+    artifact = tmp_path / "s" / "failure-output-artifacts" / f"{digest}.blob"
+    assert secret not in artifact.read_text(encoding="utf-8")
+
+
+def test_auth_material_repr_and_payload_are_secret_safe() -> None:
+    secret = "repr-secret-canary-999"
+    material = _auth_material(secret=secret)
+
+    assert secret not in repr(material)
+    assert secret not in repr(material.environment[0].value)
+    assert secret not in json.dumps(material.safe_payload(), sort_keys=True)
+    material.release()
+    assert material.environment[0].value.released is True
+    with pytest.raises(RuntimeError, match="released"):
+        material.environment[0].value.reveal()
 
 
 def test_build_application_wires_repository_binding_registry(tmp_path: Path) -> None:

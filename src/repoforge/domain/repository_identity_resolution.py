@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from .durable_state import Revision
 from .repository_identity import (
     ActorClass,
     CredentialProfile,
@@ -22,6 +21,7 @@ from .repository_identity import (
     RepositoryIdentityBinding,
     RepositoryProvider,
 )
+from .versioning import Revision
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HOST = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")

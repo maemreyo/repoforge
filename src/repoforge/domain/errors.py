@@ -115,6 +115,15 @@ class ErrorCode(str, Enum):
     ADHOC_RUNNER_NOT_ALLOWED = "ADHOC_RUNNER_NOT_ALLOWED"
     ADHOC_ARGV_INVALID = "ADHOC_ARGV_INVALID"
     ADHOC_COMMAND_FORBIDDEN = "ADHOC_COMMAND_FORBIDDEN"
+    CREDENTIAL_BROKER_UNAVAILABLE = "CREDENTIAL_BROKER_UNAVAILABLE"
+    CREDENTIAL_REFERENCE_NOT_FOUND = "CREDENTIAL_REFERENCE_NOT_FOUND"
+    CREDENTIAL_EXPIRED = "CREDENTIAL_EXPIRED"
+    CREDENTIAL_REVOKED = "CREDENTIAL_REVOKED"
+    CREDENTIAL_SCOPE_MISMATCH = "CREDENTIAL_SCOPE_MISMATCH"
+    CREDENTIAL_CAPABILITY_DENIED = "CREDENTIAL_CAPABILITY_DENIED"
+    CREDENTIAL_REFRESH_IDENTITY_MISMATCH = "CREDENTIAL_REFRESH_IDENTITY_MISMATCH"
+    CREDENTIAL_LEAK_BLOCKED = "CREDENTIAL_LEAK_BLOCKED"
+    CREDENTIAL_CALLBACK_FAILED = "CREDENTIAL_CALLBACK_FAILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +344,15 @@ def operation_error_from_exception(
         ErrorCode.ADHOC_COMMAND_FORBIDDEN: "The ad-hoc command is an irreversible or history-rewriting form that RepoForge blocks; use the reviewed typed tools instead.",
         ErrorCode.EXECUTION_POLICY_UNSUPPORTED: "The selected execution backend cannot truthfully satisfy a required execution policy.",
         ErrorCode.EXECUTION_ENVIRONMENT_DRIFT: "The execution environment identity changed across a reviewed session or commit gate.",
+        ErrorCode.CREDENTIAL_BROKER_UNAVAILABLE: "The reviewed repository-auth material provider could not resolve the opaque reference.",
+        ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND: "No repository-auth material exists for the selected opaque reference.",
+        ErrorCode.CREDENTIAL_EXPIRED: "The selected repository-auth material expired and an equivalent refresh was unavailable.",
+        ErrorCode.CREDENTIAL_REVOKED: "The selected repository-auth material was explicitly revoked.",
+        ErrorCode.CREDENTIAL_SCOPE_MISMATCH: "Repository-auth material does not match the reviewed profile, actor class, or target.",
+        ErrorCode.CREDENTIAL_CAPABILITY_DENIED: "Repository-auth material exceeds or does not satisfy the reviewed capability ceiling.",
+        ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH: "Refreshed repository-auth material changed a locked identity or capability field.",
+        ErrorCode.CREDENTIAL_LEAK_BLOCKED: "A raw repository-auth value was detected in a process-visible argument or diagnostic boundary.",
+        ErrorCode.CREDENTIAL_CALLBACK_FAILED: "A repository-auth callback failed inside its bounded material lifetime.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

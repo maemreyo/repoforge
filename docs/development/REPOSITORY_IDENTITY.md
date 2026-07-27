@@ -18,6 +18,12 @@ An `OperationIdentityContext` contains one or more target-bound `AuthLease` valu
 
 Discovery patterns may name one repository or use `host/owner/*`; they may not cross an owner boundary. Resolution evidence exposes the provider host, stable repository ID, canonical name, selected profile ID, binding revision, and outcome without exposing credential references.
 
+## Ephemeral broker and process isolation
+
+`RepositoryAuthBroker` resolves only the opaque reference selected by the repository binding. Material is validated against the exact profile, actor class, target and capability ceiling, then exposed for one bounded session. Missing, revoked or expired material fails closed; refresh is accepted only when profile, actor, target and capability identity remain equivalent.
+
+`ProcessAuthContext` starts from a scrubbed environment. Ambient GitHub tokens, SSH-agent sockets, askpass/helper chains, Git configuration injection and author/committer variables are removed before the selected material is injected. `SubprocessAuthRunner` launches with that exact environment rather than merging process-global state. Raw values are blocked from argv, URLs, stdin and cwd, and are redacted before stdout/stderr, exceptions or failure artifacts cross the process boundary. Session exit zeroises the in-memory buffers and releases provider material.
+
 ## Evidence semantics
 
 - `verified_actor` proves the observed API or provider actor only for the named surface.

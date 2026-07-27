@@ -110,13 +110,17 @@ class SubprocessCommandExecutor:
         text: bool,
         timeout: int,
         extra_env: Mapping[str, str] | None,
+        exact_env: Mapping[str, str] | None = None,
         cancel_token: CancellationToken | None = None,
     ) -> tuple[subprocess.Popen[Any], tuple[str | bytes, str | bytes]]:
+        if exact_env is not None and extra_env is not None:
+            raise CommandError("exact_env and extra_env are mutually exclusive")
+        environment = dict(exact_env) if exact_env is not None else self.environment(extra_env)
         try:
             process = subprocess.Popen(
                 list(argv),
                 cwd=cwd,
-                env=self.environment(extra_env),
+                env=environment,
                 stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -230,6 +234,66 @@ class SubprocessCommandExecutor:
         output_limit: int | None = None,
         cancel_token: CancellationToken | None = None,
     ) -> CommandResult:
+        return self._run_text(
+            argv,
+            cwd=cwd,
+            input_text=input_text,
+            timeout=timeout,
+            check=check,
+            extra_env=extra_env,
+            output_limit=output_limit,
+            cancel_token=cancel_token,
+        )
+
+    def run_isolated(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str],
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> CommandResult:
+        """Run with an exact environment and redact the issued secrets at capture time."""
+
+        raw_secrets = tuple(secret for secret in secrets if secret)
+        visible_inputs = (*argv, str(cwd), input_text or "")
+        if any(secret in value for secret in raw_secrets for value in visible_inputs):
+            raise CommandError(
+                "Raw repository-auth material is not allowed in argv, URLs, cwd, or stdin.",
+                code=ErrorCode.CREDENTIAL_LEAK_BLOCKED,
+                unchanged_state=("No child process was started.",),
+            )
+        return self._run_text(
+            argv,
+            cwd=cwd,
+            input_text=input_text,
+            timeout=timeout,
+            check=check,
+            exact_env=environment,
+            secrets=raw_secrets,
+            output_limit=output_limit,
+            cancel_token=cancel_token,
+        )
+
+    def _run_text(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        extra_env: Mapping[str, str] | None = None,
+        exact_env: Mapping[str, str] | None = None,
+        secrets: Sequence[str] = (),
+        output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> CommandResult:
         if not argv or not all(isinstance(x, str) and x for x in argv):
             raise CommandError("Command argv must contain non-empty strings")
         actual_timeout = timeout or self.config.default_command_timeout_seconds
@@ -241,15 +305,21 @@ class SubprocessCommandExecutor:
             text=True,
             timeout=actual_timeout,
             extra_env=extra_env,
+            exact_env=exact_env,
             cancel_token=cancel_token,
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise CommandError("Text command returned binary output")
-        selectors = _failed_selectors("\n".join(part for part in (stdout, stderr) if part))
-        bounded_stdout, stdout_truncated = self._truncate(stdout, limit)
-        bounded_stderr, stderr_truncated = self._truncate(stderr, limit)
+        redact_limit = max(1, min(max(len(stdout), len(stderr), limit), 1_000_000))
+        safe_stdout = redact_text(stdout, secrets=secrets, limit=redact_limit)
+        safe_stderr = redact_text(stderr, secrets=secrets, limit=redact_limit)
+        selectors = _failed_selectors(
+            "\n".join(part for part in (safe_stdout, safe_stderr) if part)
+        )
+        bounded_stdout, stdout_truncated = self._truncate(safe_stdout, limit)
+        bounded_stderr, stderr_truncated = self._truncate(safe_stderr, limit)
         artifact_reference = (
-            self._persist_failure_output(stdout, stderr)
+            self._persist_failure_output(safe_stdout, safe_stderr)
             if (process.returncode or 0) != 0 and (stdout_truncated or stderr_truncated)
             else None
         )
@@ -278,10 +348,10 @@ class SubprocessCommandExecutor:
                 code=ErrorCode.COMMAND_FAILED,
                 details={
                     "command": argv[0],
-                    "argv": [redact_text(item, limit=256) for item in argv[:32]],
+                    "argv": [redact_text(item, secrets=secrets, limit=256) for item in argv[:32]],
                     "exit_code": result.returncode,
-                    "stdout_excerpt": redact_text(stdout_excerpt, limit=2_000),
-                    "stderr_excerpt": redact_text(stderr_excerpt, limit=2_000),
+                    "stdout_excerpt": redact_text(stdout_excerpt, secrets=secrets, limit=2_000),
+                    "stderr_excerpt": redact_text(stderr_excerpt, secrets=secrets, limit=2_000),
                     "stdout_truncated": result.stdout_truncated or stdout_excerpt_truncated,
                     "stderr_truncated": result.stderr_truncated or stderr_excerpt_truncated,
                     **(
