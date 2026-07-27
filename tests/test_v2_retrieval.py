@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -160,7 +161,7 @@ def test_tree_supports_subtree_cursor_and_explicit_omitted_count(
     assert directory == {"path": "pkg/nested", "kind": "directory", "size_bytes": None}
 
 
-def test_workspace_diff_returns_structured_files_hunks_and_lines(
+def test_workspace_diff_defaults_to_summaries_and_supports_opt_in_hunks(
     forge_env: ForgeEnvironment,
 ) -> None:
     service = forge_env.service
@@ -174,22 +175,17 @@ def test_workspace_diff_returns_structured_files_hunks_and_lines(
     )
     service.workspace_write_file(workspace_id, "new.txt", "new\n", "<new>")
 
-    result = service.workspace_diff_v2(workspace_id, staged=False)
+    summary = service.workspace_diff_v2(workspace_id, staged=False)
 
-    assert {item["path"] for item in result["files"]} == {"hello.txt", "new.txt"}
-    hello_diff = next(item for item in result["files"] if item["path"] == "hello.txt")
-    assert hello_diff["status"] == "modified"
-    assert hello_diff["additions"] == 2
-    assert hello_diff["deletions"] == 1
-    assert hello_diff["hunks"][0]["header"].startswith("@@")
-    assert {line["kind"] for line in hello_diff["hunks"][0]["lines"]} >= {
-        "add",
-        "delete",
-    }
-    new_diff = next(item for item in result["files"] if item["path"] == "new.txt")
-    assert new_diff["status"] == "added"
-    assert result["change_metrics"]["changed_files"] == 2
-    assert set(result["change_metrics"]) == {
+    assert {item["path"] for item in summary["files"]} == {"hello.txt", "new.txt"}
+    assert all(item["hunks"] == [] for item in summary["files"])
+    hello_summary = next(item for item in summary["files"] if item["path"] == "hello.txt")
+    assert hello_summary["status"] == "modified"
+    assert (hello_summary["additions"], hello_summary["deletions"]) == (2, 1)
+    new_summary = next(item for item in summary["files"] if item["path"] == "new.txt")
+    assert new_summary["status"] == "added"
+    assert summary["change_metrics"]["changed_files"] == 2
+    assert set(summary["change_metrics"]) == {
         "changed_files",
         "added_lines",
         "deleted_lines",
@@ -197,7 +193,21 @@ def test_workspace_diff_returns_structured_files_hunks_and_lines(
         "total_current_bytes",
         "within_limits",
     }
-    assert result["head_sha"] == service.workspace_status(workspace_id)["head_sha"]
+    assert summary["head_sha"] == service.workspace_status(workspace_id)["head_sha"]
+
+    detailed = service.workspace_diff_v2(
+        workspace_id,
+        staged=False,
+        path_glob="hello.txt",
+        max_files=1,
+        include_hunks=True,
+    )
+    hello_diff = detailed["files"][0]
+    assert hello_diff["hunks"][0]["header"].startswith("@@")
+    assert {line["kind"] for line in hello_diff["hunks"][0]["lines"]} >= {
+        "add",
+        "delete",
+    }
 
 
 def test_staged_diff_preserves_multiple_hunk_coordinates(
@@ -217,7 +227,7 @@ def test_staged_diff_preserves_multiple_hunk_coordinates(
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     subprocess.run(["git", "add", "multi.txt"], cwd=root, check=True)
 
-    result = service.workspace_diff_v2(workspace_id, staged=True)
+    result = service.workspace_diff_v2(workspace_id, staged=True, include_hunks=True)
 
     diff = next(item for item in result["files"] if item["path"] == "multi.txt")
     assert diff["status"] == "modified"
@@ -226,6 +236,139 @@ def test_staged_diff_preserves_multiple_hunk_coordinates(
     assert len(diff["hunks"]) == 2
     assert diff["hunks"][0]["lines"][0]["old_line"] == 1
     assert diff["hunks"][1]["lines"][0]["old_line"] >= 24
+
+
+def test_summary_mode_never_calls_full_diff(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "summary routing")["workspace_id"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    (root / "staged.txt").write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "staged.txt"], cwd=root, check=True)
+    monkeypatch.setattr(
+        service._workspace_retrieval.ctx.git,
+        "diff",
+        lambda *args, **kwargs: pytest.fail("full diff called in summary mode"),
+    )
+
+    result = service.workspace_diff_v2(workspace_id, staged=True)
+
+    assert result["files"][0]["hunks"] == []
+
+
+def test_hunk_mode_never_calls_summary_adapter(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "hunk routing")["workspace_id"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    (root / "staged.txt").write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "staged.txt"], cwd=root, check=True)
+    monkeypatch.setattr(
+        service._workspace_retrieval.ctx.git,
+        "diff_summary",
+        lambda *args, **kwargs: pytest.fail("summary adapter called in hunk mode"),
+    )
+
+    result = service.workspace_diff_v2(workspace_id, staged=True, include_hunks=True)
+
+    assert result["files"][0]["hunks"]
+
+
+def test_diff_cursor_binds_mode_but_not_page_size_controls(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "diff cursor modes")["workspace_id"]
+    for name in ("a.txt", "b.txt", "c.txt"):
+        service.workspace_write_file(workspace_id, name, f"{name}\n", "<new>")
+
+    summary = service.workspace_diff_v2(workspace_id, max_files=2)
+    assert summary["next_cursor"] is not None
+    resumed_summary = service.workspace_diff_v2(
+        workspace_id,
+        max_files=1,
+        byte_budget=60_000,
+        cursor=summary["next_cursor"],
+    )
+    assert len(resumed_summary["files"]) == 1
+    with pytest.raises(ValueError, match=r"cursor.*request"):
+        service.workspace_diff_v2(
+            workspace_id,
+            include_hunks=True,
+            cursor=summary["next_cursor"],
+        )
+
+    hunks = service.workspace_diff_v2(workspace_id, max_files=2, include_hunks=True)
+    assert hunks["next_cursor"] is not None
+    resumed_hunks = service.workspace_diff_v2(
+        workspace_id,
+        max_files=1,
+        byte_budget=60_000,
+        cursor=hunks["next_cursor"],
+        include_hunks=True,
+    )
+    assert len(resumed_hunks["files"]) == 1
+    with pytest.raises(ValueError, match=r"cursor.*request"):
+        service.workspace_diff_v2(workspace_id, cursor=hunks["next_cursor"])
+
+
+@pytest.mark.parametrize("include_hunks", [False, True])
+def test_diff_filter_and_pagination_work_in_both_modes(
+    forge_env: ForgeEnvironment,
+    include_hunks: bool,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", f"filtered diff {include_hunks}")[
+        "workspace_id"
+    ]
+    for name in ("a.txt", "b.txt", "ignored.py"):
+        service.workspace_write_file(workspace_id, name, f"{name}\n", "<new>")
+
+    result = service.workspace_diff_v2(
+        workspace_id,
+        path_glob="*.txt",
+        max_files=1,
+        include_hunks=include_hunks,
+    )
+
+    assert len(result["files"]) == 1
+    assert result["files"][0]["path"].endswith(".txt")
+    assert bool(result["files"][0]["hunks"]) is include_hunks
+    assert result["truncated"] is True
+    assert result["next_cursor"] is not None
+
+
+def test_unchanged_workspace_diff_is_empty(forge_env: ForgeEnvironment) -> None:
+    workspace_id = forge_env.service.workspace_create("demo", "empty diff")["workspace_id"]
+
+    assert forge_env.service.workspace_diff_v2(workspace_id)["files"] == []
+
+
+def test_diff_audit_records_summary_and_hunk_modes(forge_env: ForgeEnvironment) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "diff audit modes")["workspace_id"]
+    service.workspace_write_file(workspace_id, "new.txt", "new\n", "<new>")
+
+    service.workspace_diff_v2(workspace_id)
+    service.workspace_diff_v2(workspace_id, include_hunks=True)
+
+    events = [
+        json.loads(line)
+        for line in (forge_env.root / "state" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line
+    ]
+    details = [
+        event["details"]
+        for event in events
+        if event["action"] == "workspace_diff_v2" and event["success"]
+    ]
+    assert [item["include_hunks"] for item in details[-2:]] == [False, True]
 
 
 def test_retrieval_cursor_is_bound_to_query_and_scope(forge_env: ForgeEnvironment) -> None:

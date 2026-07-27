@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
 
+from ...config import RepositoryConfig
 from ...domain.errors import ErrorCode, RepoForgeError, SecurityError
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ..context import ApplicationContext
@@ -353,44 +354,72 @@ class WorkspaceRetrieval:
             operation,
         )
 
+    def _hunk_diff(
+        self,
+        command: WorkspaceDiffV2Command,
+        repo: RepositoryConfig,
+        workspace: Path,
+        head_sha: str,
+    ) -> tuple[list[StructuredDiffFile], bool]:
+        source_truncated = False
+        if command.staged:
+            raw = self.ctx.git.diff(workspace, repo, staged=True)
+            files = list(parse_unified_diff(raw["diff"]))
+            for parsed_file in files:
+                assert_path_allowed(parsed_file.path, repo)
+            source_truncated = bool(raw["truncated"])
+        else:
+            files = []
+            for raw_path in sorted(self.ctx.git.changed_paths(workspace, repo)):
+                path = assert_path_allowed(raw_path, repo)
+                try:
+                    base = self.ctx.git.read_snapshot_blob(workspace, repo, head_sha, path).data
+                except RepoForgeError as exc:
+                    if exc.code is not ErrorCode.NOT_FOUND:
+                        raise
+                    base = None
+                candidate = resolve_workspace_path(workspace, path, repo)
+                if candidate.is_file() and not candidate.is_symlink():
+                    if candidate.stat().st_size > self.ctx.config.server.max_file_bytes:
+                        raise SecurityError(f"Diff target exceeds max_file_bytes: {path}")
+                    current = candidate.read_bytes()
+                else:
+                    current = None
+                diff_file = build_diff_file(path, base, current)
+                if diff_file is not None:
+                    files.append(diff_file)
+        return files, source_truncated
+
     def diff(self, command: WorkspaceDiffV2Command) -> WorkspaceDiffV2Result:
         _, repo, workspace = self.ctx.workspace(command.workspace_id)
 
         def operation() -> WorkspaceDiffV2Result:
             validate_path_glob(command.path_glob)
             head_sha, fingerprint = self._identity(command.workspace_id, workspace)
-            source_truncated = False
-            if command.staged:
-                raw = self.ctx.git.diff(workspace, repo, staged=True)
-                files = list(parse_unified_diff(raw["diff"]))
-                for parsed_file in files:
-                    assert_path_allowed(parsed_file.path, repo)
-                source_truncated = bool(raw["truncated"])
+            if command.include_hunks:
+                files, source_truncated = self._hunk_diff(
+                    command,
+                    repo,
+                    workspace,
+                    head_sha,
+                )
             else:
-                files = []
-                for raw_path in sorted(self.ctx.git.changed_paths(workspace, repo)):
-                    path = assert_path_allowed(raw_path, repo)
-                    if command.path_glob is not None and not PurePosixPath(path).match(
-                        command.path_glob
-                    ):
-                        continue
-                    try:
-                        base = self.ctx.git.read_snapshot_blob(workspace, repo, head_sha, path).data
-                    except RepoForgeError as exc:
-                        if exc.code is not ErrorCode.NOT_FOUND:
-                            raise
-                        base = None
-                    candidate = resolve_workspace_path(workspace, path, repo)
-                    if candidate.is_file() and not candidate.is_symlink():
-                        if candidate.stat().st_size > self.ctx.config.server.max_file_bytes:
-                            raise SecurityError(f"Diff target exceeds max_file_bytes: {path}")
-                        current = candidate.read_bytes()
-                    else:
-                        current = None
-                    diff_file = build_diff_file(path, base, current)
-                    if diff_file is not None:
-                        files.append(diff_file)
-            if command.path_glob is not None and command.staged:
+                files = [
+                    StructuredDiffFile(
+                        path=item.path,
+                        status=item.status,
+                        additions=item.additions,
+                        deletions=item.deletions,
+                        hunks=(),
+                    )
+                    for item in self.ctx.git.diff_summary(
+                        workspace,
+                        repo,
+                        staged=command.staged,
+                    )
+                ]
+                source_truncated = False
+            if command.path_glob is not None:
                 files = [
                     item for item in files if PurePosixPath(item.path).match(command.path_glob)
                 ]
@@ -401,6 +430,7 @@ class WorkspaceRetrieval:
                 request={
                     "staged": command.staged,
                     "path_glob": command.path_glob,
+                    "include_hunks": command.include_hunks,
                 },
                 max_items=command.max_files,
                 byte_budget=command.byte_budget,
@@ -438,6 +468,7 @@ class WorkspaceRetrieval:
                 "staged": command.staged,
                 "path_glob": command.path_glob,
                 "max_files": command.max_files,
+                "include_hunks": command.include_hunks,
             },
             operation,
         )
