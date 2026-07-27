@@ -304,6 +304,9 @@ source_globs = [
   "src/repoforge/domain/provider_config.py",
   "src/repoforge/domain/provider_manifest.py",
   "src/repoforge/domain/publishing.py",
+  "src/repoforge/domain/repository_identity.py",
+  "docs/development/REPOSITORY_IDENTITY.md",
+  "docs/development/REPOSITORY_IDENTITY_SURFACES.json",
   "src/repoforge/adapters/persistence/json_github_read_cache.py",
   "src/repoforge/adapters/persistence/json_pr_check_watch_store.py",
 ]
@@ -314,6 +317,7 @@ test_files = [
   "tests/test_pr_check_watch.py",
   "tests/test_provider_manifest.py",
   "tests/test_provider_registry.py",
+  "tests/test_repository_identity_contracts.py",
 ]
 
 [groups.verification_diagnostics]
