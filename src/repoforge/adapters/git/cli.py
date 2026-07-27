@@ -22,12 +22,14 @@ from ...ports.git import (
     GitChangedFileEvidence,
     GitCommitEvidence,
     GitComparisonEvidence,
+    GitDiffSummary,
     GitMergePreview,
     GitMergeResult,
     GitSearchLocation,
     GitSnapshotBlob,
     ResolvedRepositoryRef,
 )
+from .diff_summary import parse_diff_summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -1614,6 +1616,54 @@ class GitCliRepository:
             f"{text[:half]}\n\n... <{len(text) - 2 * half} characters omitted> ...\n\n{text[-half:]}",
             True,
         )
+
+    def diff_summary(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        *,
+        staged: bool,
+    ) -> tuple[GitDiffSummary, ...]:
+        self.changed_paths(path, repo)
+        base = ["git", "diff", "--no-ext-diff"]
+        if staged:
+            base.append("--cached")
+        else:
+            base.append("HEAD")
+        name_status = self._executor.run_bytes(
+            [*base, "--name-status", "-z", "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        )
+        numstat = self._executor.run_bytes(
+            [*base, "--numstat", "-z", "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        )
+        summaries = list(parse_diff_summary(name_status, numstat))
+        for item in summaries:
+            assert_path_allowed(item.path, repo)
+
+        if not staged:
+            existing = {item.path for item in summaries}
+            for relative in self.untracked_paths(path, repo):
+                if relative in existing:
+                    continue
+                unresolved = path / relative
+                if unresolved.is_symlink():
+                    raise SecurityError(f"Changed symlinks are not allowed: {relative}")
+                candidate = resolve_workspace_path(path, relative, repo)
+                if not candidate.is_file():
+                    continue
+                if candidate.stat().st_size > self.server.max_file_bytes:
+                    raise SecurityError(f"Diff target exceeds max_file_bytes: {relative}")
+                data = candidate.read_bytes()
+                additions = 0
+                if b"\x00" not in data:
+                    additions = data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
+                summaries.append(GitDiffSummary(relative, "added", additions, 0))
+
+        return tuple(sorted(summaries, key=lambda item: item.path))
 
     def diff(self, path: Path, repo: RepositoryConfig, *, staged: bool) -> dict[str, Any]:
         changed = self.changed_paths(path, repo)
