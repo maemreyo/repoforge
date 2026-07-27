@@ -71,6 +71,10 @@ async def test_forge_v2_identity_publishes_exact_authoritative_roster_and_schema
     include_hunks_schema = diff_tool.inputSchema["properties"]["include_hunks"]
     assert include_hunks_schema["type"] == "boolean"
     assert include_hunks_schema["default"] is False
+    description = diff_tool.description or ""
+    assert "summary" in description
+    assert "include_hunks=True" in description
+    assert "path_glob" in description
     assert {"repo_status", "workspace_run_profile", "repo_policy_apply"}.isdisjoint(
         tool.name for tool in tools
     )

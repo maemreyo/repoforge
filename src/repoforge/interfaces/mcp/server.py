@@ -249,7 +249,12 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "workspace_read": "Read one or more allowed UTF-8 workspace files under one byte budget.",
     "workspace_search": "Run bounded literal, regex, or filename search in allowed workspace files.",
     "workspace_tree": "List a bounded allowed workspace subtree with exact-state evidence.",
-    "workspace_diff": "Return a structured bounded diff for the current workspace tree.",
+    "workspace_diff": (
+        "Return a structured bounded diff for the current workspace tree. "
+        "Defaults to a hunk-free per-file summary; inspect paths and change counts first, "
+        "then request include_hunks=True with a narrow path_glob and small max_files only "
+        "for files whose patch content is needed. Follow next_cursor when truncated."
+    ),
     "workspace_mutate": "Atomically plan or apply typed exact-state mutations under workspace policy and budgets.",
     "workspace_verify": "Plan, route, or run reviewed diagnostics, profiles, or relaxed-mode adhoc verification.",
     "workspace_commit": "Commit only the exact verified tree with optional exact-head and fingerprint locks.",

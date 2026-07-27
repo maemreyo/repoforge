@@ -79,9 +79,30 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 | `workspace_read` | Read up to 20 workspace files with independent ranges, byte budgets, partial-error evidence, and cursors. |
 | `workspace_search` | Search reviewed workspace files without exposing a shell. |
 | `workspace_tree` | List a bounded policy-filtered workspace tree. |
-| `workspace_diff` | Return structured hunks, metrics, exact HEAD, and fingerprint. |
+| `workspace_diff` | Return hunk-free per-file summaries by default, or bounded structured hunks on explicit opt-in. |
 
 `workspace_refresh.action` is `preview` or `apply`. Apply requires exact preview/base/workspace bindings and explicit conflict resolutions where necessary.
+
+#### Summary-first diff review
+
+Start with the cheap default summary:
+
+```json
+{"workspace_id":"demo-workspace"}
+```
+
+Inspect the returned paths and change counts, then request hunks only for a selected file:
+
+```json
+{
+  "workspace_id":"demo-workspace",
+  "include_hunks":true,
+  "path_glob":"src/repoforge/application/workspace/retrieval.py",
+  "max_files":1
+}
+```
+
+Default `files[*].hunks` is empty. `change_metrics` always describes the whole workspace, while `files` is the filtered and paginated selection. Follow `next_cursor` when present. The 120 KB `byte_budget` maximum is a safety cap, not a target response size; keep hunk requests narrow.
 
 ### Mutation and verification
 

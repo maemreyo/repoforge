@@ -230,6 +230,11 @@ def test_operator_docs_match_the_static_forge_v2_cutover() -> None:
     assert "forge_v2" in reference
     assert "forge_v1" in reference and "migration_required" in reference
     assert "structuredContent" in reference
+    for document in (reference, full_flow):
+        assert "include_hunks" in document
+        assert "path_glob" in document
+    assert "change_metrics" in reference
+    assert "120 KB" in reference
     assert "forty-six focused MCP tools" not in reference
     assert "contract v1 remains supported" not in reference
     assert "`repo_policy_apply`" not in reference

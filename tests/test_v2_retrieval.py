@@ -371,6 +371,44 @@ def test_diff_audit_records_summary_and_hunk_modes(forge_env: ForgeEnvironment) 
     assert [item["include_hunks"] for item in details[-2:]] == [False, True]
 
 
+def test_summary_payload_is_materially_smaller_than_hunk_payload(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "diff payload ratio")["workspace_id"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    payload = root / "payload"
+    payload.mkdir()
+    original = [f"line {index}" for index in range(12)]
+    for index in range(40):
+        (payload / f"file_{index:02d}.txt").write_text(
+            "\n".join(original) + "\n",
+            encoding="utf-8",
+        )
+    subprocess.run(["git", "add", "payload"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "add payload fixtures"], cwd=root, check=True)
+    for index in range(40):
+        changed = list(original)
+        for line_index in (1, 5, 9):
+            changed[line_index] = f"changed {index} at {line_index}"
+        (payload / f"file_{index:02d}.txt").write_text(
+            "\n".join(changed) + "\n",
+            encoding="utf-8",
+        )
+
+    summary = service.workspace_diff_v2(workspace_id, max_files=40)
+    detailed = service.workspace_diff_v2(
+        workspace_id,
+        include_hunks=True,
+        max_files=40,
+    )
+    summary_bytes = len(json.dumps(summary, separators=(",", ":")).encode())
+    detailed_bytes = len(json.dumps(detailed, separators=(",", ":")).encode())
+
+    assert summary_bytes < detailed_bytes
+    assert summary_bytes <= detailed_bytes // 3
+
+
 def test_retrieval_cursor_is_bound_to_query_and_scope(forge_env: ForgeEnvironment) -> None:
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "v2 retrieval cursor")["workspace_id"]
