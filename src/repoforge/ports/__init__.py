@@ -79,6 +79,7 @@ from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
 from .process_reaper import ProcessReaper, ReapOutcome
 from .provider_registry import ProviderRegistry
+from .repository_binding_store import RepositoryBindingStore
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
 from .runtime_control import (
@@ -180,6 +181,7 @@ __all__ = [
     "ReleaseObserver",
     "ReleaseSmokeTester",
     "ReleaseStore",
+    "RepositoryBindingStore",
     "RepositoryDiscovery",
     "RepositoryProbe",
     "ResolvedRepositoryRef",

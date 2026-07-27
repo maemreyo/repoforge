@@ -10,6 +10,14 @@ An `OperationIdentityContext` contains one or more target-bound `AuthLease` valu
 
 `PublicationIntent` binds the source repository ID, destination repository ID, exact source and destination refs, expected commit SHA, and any approved cross-boundary exception before an external write. `IdentityReceipt` records only safe actor/profile/lease IDs, repository and ref identities, digests, revisions, and independently collected surface evidence.
 
+## Binding registry and resolver
+
+`JsonRepositoryBindingStore` persists one CAS-protected binding under the stable key `(provider_host, repository_id)`. The encoded record contains profile IDs, canonical repository metadata, and configuration revision only; credential references and secret bodies are not persisted in the binding registry.
+
+`resolve_repository_identity` is pure and process-global-state free. An exact stable-ID binding wins. A rename within the same provider owner boundary succeeds with a typed reconciliation event, while an owner transfer, delete/recreate identity change, duplicate stable-ID claim, or stale binding/config revision fails closed. An unbound repository produces a reviewable proposal only when exactly one enabled profile is eligible for the requested human or agent role.
+
+Discovery patterns may name one repository or use `host/owner/*`; they may not cross an owner boundary. Resolution evidence exposes the provider host, stable repository ID, canonical name, selected profile ID, binding revision, and outcome without exposing credential references.
+
 ## Evidence semantics
 
 - `verified_actor` proves the observed API or provider actor only for the named surface.

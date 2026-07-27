@@ -67,6 +67,7 @@ from .adapters.persistence import (
     JsonOperationResultStore,
     JsonOperationStore,
     JsonPrCheckWatchStore,
+    JsonRepositoryBindingStore,
     JsonTaskStore,
     JsonWorkerBindingStore,
     JsonWorkflowRecordingStore,
@@ -187,6 +188,7 @@ from .ports import (
     ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
+    RepositoryBindingStore,
     RepositoryDiscovery,
     RepositoryProbe,
     RuntimeControlClient,
@@ -240,6 +242,7 @@ class AdapterOverrides:
     sleeper: Sleeper | None = None
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
+    repository_bindings: RepositoryBindingStore | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
     approvals: ApprovalStore | None = None
     approval_payloads: ApprovalPayloadStore | None = None
@@ -689,6 +692,9 @@ def build_application(
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
+    repository_bindings = o.repository_bindings or JsonRepositoryBindingStore(
+        config.server.state_root, locks
+    )
     code_intelligence = o.code_intelligence or FallbackCodeIntelligenceProvider(
         primary=TreeSitterCodeIntelligenceProvider(),
         fallback=SyntaxCodeIntelligenceProvider(),
@@ -745,6 +751,7 @@ def build_application(
         executables=executables,
         execution=execution,
         provider_registry=provider_registry,
+        repository_bindings=repository_bindings,
         code_intelligence=code_intelligence,
         metrics=metrics,
         idempotency=idempotency,

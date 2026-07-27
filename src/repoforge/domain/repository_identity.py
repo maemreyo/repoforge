@@ -15,9 +15,8 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]{0,31}$")
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_CANONICAL_GITHUB_REPOSITORY = re.compile(
-    r"^github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
-)
+_REPOSITORY_NAME_PART = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+_PROVIDER_HOST = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 _SECRET_REFERENCE = re.compile(
     r"(?:^gh[pousr]_|^github_pat_|^bearer[- _]|private[-_ ]?key|authorization|"
     r"begin [^-\n]{0,32}private key)",
@@ -162,6 +161,7 @@ class RepositoryAuthFailureCode(str, Enum):
     PROFILE_NOT_AUTHORIZED = "PROFILE_NOT_AUTHORIZED"
     REPOSITORY_BINDING_NOT_FOUND = "REPOSITORY_BINDING_NOT_FOUND"
     BINDING_AMBIGUOUS = "BINDING_AMBIGUOUS"
+    BINDING_STALE = "BINDING_STALE"
     BINDING_REPOSITORY_MISMATCH = "BINDING_REPOSITORY_MISMATCH"
     ACTOR_MISMATCH = "ACTOR_MISMATCH"
     TRANSPORT_PROOF_UNAVAILABLE = "TRANSPORT_PROOF_UNAVAILABLE"
@@ -258,16 +258,25 @@ class RepositoryIdentityBinding:
     human_profile_id: str | None
     agent_profile_id: str | None
     config_revision: str
+    provider_host: str = "github.com"
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, RepositoryProvider):
             raise ValueError("provider must be a RepositoryProvider")
-        _safe_id(self.repository_id, "repository_id")
         if (
-            self.provider is RepositoryProvider.GITHUB
-            and _CANONICAL_GITHUB_REPOSITORY.fullmatch(self.canonical_name) is None
+            not isinstance(self.provider_host, str)
+            or _PROVIDER_HOST.fullmatch(self.provider_host) is None
         ):
-            raise ValueError("canonical_name must be github.com/<owner>/<repository>")
+            raise ValueError("provider_host must be a bounded lowercase host")
+        _safe_id(self.repository_id, "repository_id")
+        canonical_parts = self.canonical_name.split("/")
+        if (
+            len(canonical_parts) != 3
+            or canonical_parts[0] != self.provider_host
+            or _REPOSITORY_NAME_PART.fullmatch(canonical_parts[1]) is None
+            or _REPOSITORY_NAME_PART.fullmatch(canonical_parts[2]) is None
+        ):
+            raise ValueError("canonical_name must be provider_host/<owner>/<repository>")
         _optional_safe_id(self.human_profile_id, "human_profile_id")
         _optional_safe_id(self.agent_profile_id, "agent_profile_id")
         if self.human_profile_id is None and self.agent_profile_id is None:
@@ -282,6 +291,7 @@ class RepositoryIdentityBinding:
             "human_profile_id": self.human_profile_id,
             "agent_profile_id": self.agent_profile_id,
             "config_revision": self.config_revision,
+            "provider_host": self.provider_host,
         }
 
 

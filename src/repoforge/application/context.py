@@ -44,6 +44,7 @@ from ..ports import (
     ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
+    RepositoryBindingStore,
     TicketGraphGateway,
     TicketProjectGateway,
     WorkerBindingStore,
@@ -239,6 +240,7 @@ class ApplicationContext:
     operation_result_store: OperationResultStore | None = None
     fingerprint_cache: FingerprintCache | None = None
     provider_registry: ProviderRegistry | None = None
+    repository_bindings: RepositoryBindingStore | None = None
     code_intelligence: CodeIntelligenceProvider | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
