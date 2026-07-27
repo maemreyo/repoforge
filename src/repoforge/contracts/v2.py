@@ -75,7 +75,7 @@ class RepoTaskContextInput(StrictModel):
         min_length=1,
         max_length=5,
     )
-    byte_budget: ByteBudget = 96_000
+    byte_budget: ByteBudget = 120_000
 
 
 class RepoTaskContextOutput(ToolResponse):
@@ -89,7 +89,7 @@ class RepoReadInput(StrictModel):
     repo_id: RepoId
     files: tuple[ReadFileRequest, ...] = Field(min_length=1, max_length=20)
     ref: GitRef | None = None
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -110,7 +110,7 @@ class RepoSearchInput(StrictModel):
     path_glob: str | None = Field(default=None, max_length=4096)
     max_results: int = Field(default=100, ge=1, le=200)
     context_lines: int = Field(default=0, ge=0, le=5)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -145,7 +145,7 @@ class RepoTreeInput(StrictModel):
     ref: GitRef | None = None
     subtree: RelativePath | None = None
     max_entries: int = Field(default=500, ge=1, le=2000)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -192,7 +192,7 @@ class RepoHistoryInput(StrictModel):
     path_glob: str | None = Field(default=None, max_length=4096)
     limit: int = Field(default=20, ge=1, le=200)
     include_patch: bool = False
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -673,6 +673,17 @@ class WorkspaceCreateInput(StrictModel):
     base: GitRef | None = None
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=256)
     issue_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    adopt_branch: GitRef | None = Field(
+        default=None,
+        description=(
+            "Work directly ON this existing branch instead of cutting a fresh ai/* one. "
+            "Use it when the instruction names a branch already in progress. Mutually "
+            "exclusive with `base` (there is nothing to branch from). The response carries "
+            "a warning because isolation is reduced: commits land on a branch this "
+            "workspace does not exclusively own, and workspace_remove will never delete "
+            "it. A protected branch is still refused."
+        ),
+    )
 
 
 class WorkspaceCreateOutput(ToolResponse):
@@ -684,6 +695,18 @@ class WorkspaceCreateOutput(ToolResponse):
     head_sha: GitObjectId
     workspace_fingerprint: Sha256
     issue_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    adopted_branch: bool = Field(
+        default=False,
+        description="True when `branch` is a pre-existing branch this workspace adopted.",
+    )
+    warnings: tuple[str, ...] = Field(
+        default=(),
+        max_length=20,
+        description=(
+            "Non-blocking advisories about reduced guarantees, e.g. an adopted branch. The "
+            "call succeeded; these are conditions the caller should carry forward."
+        ),
+    )
 
 
 class WorkspaceRemoveInput(StrictModel):
@@ -824,7 +847,7 @@ class WorkspaceStatusInput(StrictModel):
     sections: tuple[WorkspaceStatusSection, ...] = Field(
         default=(WorkspaceStatusSection.LOCAL,), min_length=1, max_length=3
     )
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
 
 
 class WorkspaceStatusOutput(ToolResponse):
@@ -864,7 +887,7 @@ class WorkspaceFormatChangedOutput(ToolResponse):
 class WorkspaceReadInput(StrictModel):
     workspace_id: Identifier
     files: tuple[ReadFileRequest, ...] = Field(min_length=1, max_length=20)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -884,7 +907,7 @@ class WorkspaceSearchInput(StrictModel):
     path_glob: str | None = Field(default=None, max_length=4096)
     max_results: int = Field(default=100, ge=1, le=200)
     context_lines: int = Field(default=0, ge=0, le=5)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -918,7 +941,7 @@ class WorkspaceTreeInput(StrictModel):
     workspace_id: Identifier
     subtree: RelativePath | None = None
     max_entries: int = Field(default=500, ge=1, le=2000)
-    byte_budget: ByteBudget = 60_000
+    byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
 
 
@@ -938,15 +961,27 @@ class WorkspaceDiffInput(StrictModel):
     workspace_id: Identifier
     staged: bool = False
     path_glob: str | None = Field(default=None, max_length=4096)
-    max_files: int = Field(default=100, ge=1, le=1000)
+    max_files: int = Field(default=20, ge=1, le=1000)
     byte_budget: ByteBudget = 120_000
     cursor: Cursor | None = None
-    include_hunks: bool = False
+    include_hunks: bool = Field(
+        default=False,
+        description=(
+            "Include the patch text. Off by default: reviewing a diff is the largest "
+            "consumer of response budget by far, and the file list with per-file "
+            "added/deleted counts answers most questions at a fraction of the size. Turn "
+            "it on -- ideally with `path_glob` narrowing to the files you actually need -- "
+            "when you need the hunks themselves. Mirrors `include_patch` on repo_history."
+        ),
+    )
 
 
 class WorkspaceDiffOutput(ToolResponse):
     workspace_id: Identifier
     staged: bool
+    # Empty `hunks` is ambiguous on its own -- a binary file, a pure rename, or patch text
+    # the caller did not ask for all look alike -- so the served shape is stated.
+    hunks_included: bool = False
     files: tuple[DiffFile, ...] = Field(default=(), max_length=1000)
     change_metrics: ChangeMetrics
     head_sha: GitObjectId
@@ -2010,6 +2045,9 @@ class RuntimeLogParseState(str, Enum):
 
 
 class RuntimeLogEntry(StrictModel):
+    # Nullable on purpose. A log line whose timestamp cannot be read has an UNKNOWN time,
+    # and stamping it 1970-01-01 turned every managed-runtime record into a confident lie
+    # (observed: 100 entries, all 1970, all empty). Readers must treat null as "unknown".
     timestamp: str | None = Field(default=None, max_length=80)
     timestamp_state: RuntimeTimestampState | None = None
     parse_state: RuntimeLogParseState | None = None

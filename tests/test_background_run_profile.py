@@ -639,8 +639,40 @@ def test_background_completion_matches_synchronous_receipt_audit_and_metrics(
         for event in _audit_events(forge_env.root, "workspace_run_profile")
         if event["details"].get("workspace_id") == bg_workspace_id and event["success"]
     ]
-    assert len(sync_events) == 1
-    assert len(bg_events) == 1
+
+    # This pair has failed intermittently on CI four times (ubuntu 3.10/3.11, macOS 3.13)
+    # with bg_events == 0 while the receipt above was already asserted present -- and it does
+    # not reproduce in isolation (40 consecutive local runs passed), so the next CI failure
+    # has to carry its own evidence instead of costing another round trip.
+    def _diagnose() -> str:
+        observed = _audit_events(forge_env.root, "workspace_run_profile")
+        rendered = [
+            {
+                "success": event.get("success"),
+                "workspace_id": event["details"].get("workspace_id"),
+                "error_code": event["details"].get("error_code"),
+                "detail_keys": sorted(event["details"]),
+            }
+            for event in observed
+        ]
+        rotated = sorted(path.name for path in (forge_env.root / "state").glob("audit.jsonl*"))
+        # The operation's own verdict separates the two candidate causes: if the operation
+        # recorded success while no successful audit event exists, the audit write is wrong;
+        # if the operation itself failed, the receipt asserted above was written by work that
+        # then failed afterwards, which is a different defect entirely.
+        try:
+            operation = service.operation_status(bg_admission["operation_id"])
+            verdict = {key: operation.get(key) for key in ("state", "error_code", "detail")}
+        except Exception as exc:  # diagnosis must never mask the assertion it explains
+            verdict = {"unavailable": repr(exc)}
+        return (
+            f"sync_workspace_id={sync_workspace_id} bg_workspace_id={bg_workspace_id} "
+            f"audit_files={rotated} operation={verdict} "
+            f"workspace_run_profile_events={rendered}"
+        )
+
+    assert len(sync_events) == 1, _diagnose()
+    assert len(bg_events) == 1, _diagnose()
     sync_details, bg_details = sync_events[0]["details"], bg_events[0]["details"]
     # Same bounded audit shape; only workspace-identifying and timing/size values differ.
     assert (

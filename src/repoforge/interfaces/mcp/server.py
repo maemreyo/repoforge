@@ -240,7 +240,7 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "no_match means no repository is enrolled yet."
     ),
     "repo_policy": "Preview or apply an exact-state-bound repository policy proposal through the reviewed generation pipeline.",
-    "workspace_create": "Create one isolated ai/* worktree for a task or deliberate stacked issue chain.",
+    "workspace_create": "Create one worktree for a task: a fresh ai/* branch, or -- with adopt_branch -- an existing branch the instruction named.",
     "workspace_remove": "Remove a clean local worktree without touching remote data.",
     "workspace_list": "List bounded workspace lifecycle and cleanup evidence.",
     "workspace_refresh": "Preview or apply a merge-based refresh against the configured remote base.",

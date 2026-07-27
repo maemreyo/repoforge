@@ -25,6 +25,7 @@ class WorkspaceCreateV2Command:
     base: str | None = None
     idempotency_key: str | None = None
     issue_ids: tuple[str, ...] = ()
+    adopt_branch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,8 @@ class WorkspaceCreateV2Result:
     head_sha: str
     workspace_fingerprint: str
     issue_ids: tuple[str, ...]
+    adopted_branch: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 class WorkspaceCreatorV2:
@@ -55,6 +58,7 @@ class WorkspaceCreatorV2:
                 command.base,
                 command.idempotency_key,
                 command.issue_ids,
+                command.adopt_branch,
             )
         )
         status = self._status.compute(WorkspaceStatusCommand(created.workspace_id))
@@ -69,6 +73,8 @@ class WorkspaceCreatorV2:
             created.head_sha,
             status.workspace_fingerprint,
             created.issue_ids,
+            created.adopted_branch,
+            created.warnings,
         )
 
 

@@ -227,6 +227,7 @@ def test_staged_diff_preserves_multiple_hunk_coordinates(
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     subprocess.run(["git", "add", "multi.txt"], cwd=root, check=True)
 
+    # `include_hunks=True`: this test is about hunk coordinates, which are now opt-in.
     result = service.workspace_diff_v2(workspace_id, staged=True, include_hunks=True)
 
     diff = next(item for item in result["files"] if item["path"] == "multi.txt")

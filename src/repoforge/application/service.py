@@ -654,7 +654,7 @@ class CodingService:
         repo_id: str,
         files: list[FileReadRequest],
         ref: str | None = None,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -688,7 +688,7 @@ class CodingService:
         path_glob: str | None = None,
         max_results: int = 100,
         context_lines: int = 0,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -713,7 +713,7 @@ class CodingService:
         ref: str | None = None,
         subtree: str | None = None,
         max_entries: int = 500,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -742,7 +742,7 @@ class CodingService:
         path_glob: str | None = None,
         limit: int = 20,
         include_patch: bool = False,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -967,10 +967,13 @@ class CodingService:
         base: str | None = None,
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
+        adopt_branch: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._create.execute(
-                WorkspaceCreateCommand(repo_id, task_slug, base, idempotency_key, issue_ids)
+                WorkspaceCreateCommand(
+                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                )
             )
         )
 
@@ -981,10 +984,13 @@ class CodingService:
         base: str | None = None,
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
+        adopt_branch: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._create_v2.execute(
-                WorkspaceCreateV2Command(repo_id, task_slug, base, idempotency_key, issue_ids)
+                WorkspaceCreateV2Command(
+                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                )
             )
         )
 
@@ -1010,7 +1016,7 @@ class CodingService:
         self,
         workspace_id: str,
         sections: tuple[str, ...] = ("local",),
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
     ) -> dict[str, Any]:
         return _result(
             self._status_v2.execute(WorkspaceStatusV2Command(workspace_id, sections, byte_budget))
@@ -1090,7 +1096,7 @@ class CodingService:
         self,
         workspace_id: str,
         files: list[FileReadRequest],
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -1122,7 +1128,7 @@ class CodingService:
         path_glob: str | None = None,
         max_results: int = 100,
         context_lines: int = 0,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -1145,7 +1151,7 @@ class CodingService:
         workspace_id: str,
         subtree: str | None = None,
         max_entries: int = 500,
-        byte_budget: int = 60_000,
+        byte_budget: int = 120_000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return _result(
@@ -1165,7 +1171,7 @@ class CodingService:
         workspace_id: str,
         staged: bool = False,
         path_glob: str | None = None,
-        max_files: int = 100,
+        max_files: int = 20,
         byte_budget: int = 120_000,
         cursor: str | None = None,
         *,

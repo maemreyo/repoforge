@@ -81,6 +81,20 @@ _HOST_PATH_PATTERNS = (
 )
 
 
+def _first_string(raw: dict[str, Any], *keys: str) -> str | None:
+    """Return the first key present as a NON-EMPTY string, else None.
+
+    Runtime logs are written by two producers with different field names -- the Go
+    tunnel-client emits slog's `time`/`msg`, the Python side emits `timestamp`/`message` --
+    so a reader that knows only one spelling silently loses every record from the other.
+    """
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _redact_host_paths(value: str) -> str:
     redacted = redact_text(value, limit=4_000)
     for pattern in _HOST_PATH_PATTERNS:
@@ -736,9 +750,11 @@ class ConfigAdminService:
                 error_code = details.get("error_code") if isinstance(details, dict) else None
                 entries.append(
                     {
-                        "timestamp": str(event.get("timestamp") or "1970-01-01T00:00:00+00:00")[
-                            :80
-                        ],
+                        "timestamp": (
+                            str(event["timestamp"])[:80]
+                            if isinstance(event.get("timestamp"), str) and event["timestamp"]
+                            else None
+                        ),
                         "source": "audit",
                         "action": (
                             str(event["action"])[:160]

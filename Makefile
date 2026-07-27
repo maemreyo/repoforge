@@ -14,7 +14,7 @@ endif
 .PHONY: default start dev-server restart status stop logs doctor
 .PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check test-map
 .PHONY: v2-gates build check install release
-.PHONY: smoke clean
+.PHONY: smoke clean live-activation
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
 
 # Keep this list explicit: config.repoforge.toml profiles and operator docs rely on
@@ -35,13 +35,24 @@ help:  # Show available commands without changing local or runtime state
 	  '  make v2-gates          Run corpora and control-plane fault gates' \
 	  '  make check             Run the full dirty-tree production gate' \
 	  '  make production-check  Run the clean-tree production gate' \
+	  '  make live-activation   Real activate/rollback lifecycle in an isolated sandbox' \
 	  '  make tickets           Run deterministic ticket-governance tests' \
 	  '  make build             Build exactly one wheel and one sdist' \
-	  '  make install           Install the freshly built wheel as rf' \
+	  '  make install           Install the freshly built wheel as rf (refused when an agent owns it)' \
+	  '' \
+	  '  Versioned runtime (an OS-resident agent owns the supervisor):' \
+	  '  make activate          Build this worktree into a release and activate it' \
+	  '  make runtimes          Show every release and runtime, and how to switch' \
+	  '  make switch REF=x      Activate an installed release by branch or short sha' \
+	  '  make rollback          Return to the previous release via its receipt' \
+	  '  make restart-agent     Restart the OS-resident supervisor in place' \
+	  '' \
+	  '  Unmanaged runtime (no agent installed):' \
 	  '  make start             Build, install, and start in foreground' \
 	  '  make start BG=1        Build, install, and start in background' \
 	  '  make start WATCH=1     Start in background and follow runtime log' \
 	  '  make status|logs|stop  Inspect or stop the managed runtime' \
+	  '' \
 	  '  make release BUMP=patch|minor|major'
 
 # =============================================================================
@@ -119,8 +130,18 @@ build: clean-dist  # Build source and wheel into a clean artifact directory
 		set -- $$(find dist -maxdepth 1 -type f -name '*.tar.gz' -print); \
 		[ "$$#" -eq 1 ] || { echo "Expected exactly one sdist in dist, found $$#" >&2; exit 1; }
 
-install: build  # Install the exact freshly built wheel as the system-wide rf tool
+install:  # Install the exact freshly built wheel as the system-wide rf tool
 	@set -eu; \
+		if [ -z "$(FORCE)" ] && rf runtime agent-status 2>/dev/null | grep -q '"loaded": true'; then \
+			printf '\n\033[31m✗ An OS-resident agent owns the supervisor.\033[0m\n'; \
+			printf '  `uv tool install` writes its entry point over ~/.local/bin/rf, which is\n'; \
+			printf '  the activation launcher that resolves through `current` -- so `rf` would\n'; \
+			printf '  stop following the active release (observed: it happened once here).\n\n'; \
+			printf '  Deploy this worktree with:  make activate\n'; \
+			printf '  Install anyway with:       make install FORCE=1\n\n'; \
+			exit 1; \
+		fi; \
+		$(MAKE) -s build; \
 		set -- $$(find dist -maxdepth 1 -type f -name '*.whl' -print); \
 		[ "$$#" -eq 1 ] || { echo "Expected exactly one wheel in dist, found $$#" >&2; exit 1; }; \
 		uv tool install --reinstall "$$1" -q
@@ -141,14 +162,26 @@ inspector:  # Launch the MCP Inspector workflow
 # Runtime lifecycle
 # =============================================================================
 
-start: install  # Build, install, stop the managed old process, and start this release
+start:  # Build, install, stop the managed old process, and start this release
 	@set -eu; \
+		if rf runtime agent-status 2>/dev/null | grep -q '"loaded": true'; then \
+			printf '\n\033[31m✗ An OS-resident agent owns the supervisor.\033[0m\n'; \
+			printf '  `make start` would install over the activation launcher and start a\n'; \
+			printf '  supervisor outside the agent, so the agent job then fails with\n'; \
+			printf '  LOCK_TIMEOUT on runtime-single-instance.\n\n'; \
+			printf '  Deploy this worktree with:  make activate\n'; \
+			printf '  Restart in place with:      make restart-agent\n'; \
+			printf '  Remove OS residency with:  rf runtime uninstall-agent\n\n'; \
+			exit 1; \
+		fi; \
+		$(MAKE) -s install FORCE=1; \
 		printf '\n\033[36m══> Stopping managed runtime\033[0m\n'; \
 		rf runtime stop >/dev/null 2>&1 || true; \
 		flags=''; \
 		if [ -n "$(BG)$(WATCH)" ]; then flags='--background'; fi; \
 		printf '\n\033[36m══> Starting %s %s\033[0m\n' "$$(rf --version)" "$$flags"; \
-		CONTROL_PLANE_API_KEY="$${CONTROL_PLANE_API_KEY:-}" rf start $$flags; \
+		if [ -n "$${CONTROL_PLANE_API_KEY:-}" ]; then export CONTROL_PLANE_API_KEY; fi; \
+		rf start $$flags; \
 		if [ -n "$$flags" ]; then \
 			sleep 2; \
 			rf runtime status; \
@@ -160,6 +193,38 @@ dev-server:  # Run current source in foreground without installing a wheel
 
 restart:  # Gracefully restart the managed installed runtime
 	rf runtime restart
+
+
+activate:  # Build this worktree into an immutable release and activate it
+	@set -eu; \
+		printf '\n\033[36m══> Activating this worktree as a release\033[0m\n'; \
+		rf upgrade --from-worktree . --activate
+
+runtimes:  # Show every installed release and runtime, and the command to switch to each
+	@rf runtime ls
+
+switch:  # Activate an ALREADY-INSTALLED release: make switch REF=<branch|sha-prefix>
+	@set -eu; \
+		if [ -z "$(REF)" ]; then \
+			printf '\033[31m✗ REF is required.\033[0m Run `make runtimes` to list them, then\n'; \
+			printf '  make switch REF=<branch-or-sha-prefix>\n'; \
+			exit 2; \
+		fi; \
+		rf version switch "$(REF)"
+
+rollback:  # Return to the previous release using the newest activation receipt
+	@set -eu; \
+		rf upgrade rollback
+
+restart-agent:  # Restart the OS-resident supervisor without changing the active release
+	@set -eu; \
+		if ! rf runtime agent-status 2>/dev/null | grep -q '"loaded": true'; then \
+			printf '\033[31m✗ No OS-resident agent is loaded.\033[0m Use `make start` instead.\n'; \
+			exit 1; \
+		fi; \
+		launchctl kickstart -k "gui/$$(id -u)/dev.repoforge.supervisor"; \
+		sleep 3; \
+		rf runtime ls
 
 status:  # Show process, generation, and tool-surface state
 	rf runtime status
@@ -179,6 +244,9 @@ watch:  # Follow the managed runtime log without scraping pretty-JSON spacing
 
 doctor:  # Inspect repositories, runtime paths, tools, and configuration state
 	uv run --extra dev rf doctor
+
+live-activation:  # Prove a real activation -> second activation -> rollback in a sandbox
+	scripts/live-activation-sandbox.sh
 
 smoke:  # Run a bounded repository-list smoke check
 	@test -n "$(REPO_ID)" || { echo "Set REPO_ID to a configured repository id" >&2; exit 2; }

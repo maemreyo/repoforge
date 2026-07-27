@@ -19,6 +19,7 @@ from ...domain.config_generation import (
 )
 from ...domain.errors import ConfigError
 from ...ports.locking import LockManager
+from ..filesystem.atomic import atomic_write_bytes, fsync_dir
 
 
 class ConfigGenerationStore:
@@ -46,31 +47,13 @@ class ConfigGenerationStore:
     def active_resolved_path(self) -> Path:
         return self._active_resolved_path
 
-    @staticmethod
-    def _fsync_dir(path: Path) -> None:
-        try:
-            fd = os.open(path, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+    # Durability and permission rules live in ONE place (adapters.filesystem.atomic), so
+    # this store and the release store cannot drift apart on them again.
+    _fsync_dir = staticmethod(fsync_dir)
 
     @classmethod
     def _atomic_write(cls, path: Path, data: bytes, *, mode: int = 0o600) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{os.urandom(4).hex()}")
-        try:
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-            cls._fsync_dir(path.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
+        atomic_write_bytes(path, data, mode=mode, dir_mode=0o700)
 
     @staticmethod
     def _integer(raw: dict[str, Any], key: str, *, optional: bool = False) -> int | None:

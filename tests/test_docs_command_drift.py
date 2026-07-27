@@ -125,6 +125,15 @@ def test_make_default_is_read_only_and_verification_targets_remain_available() -
     assert re.search(r"^install-hooks:\s*(?:#.*)?$", makefile, re.MULTILINE)
 
 
+def test_make_start_does_not_override_control_plane_api_key() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    start_body = makefile.split("start:", 1)[1].split("\ndev-server:", 1)[0]
+    api_key_assignment = "CONTROL_PLANE_API_" + "KEY="
+
+    assert api_key_assignment not in start_body
+    assert "\t\trf start $$flags" in start_body
+
+
 def test_pre_push_autoformats_but_requires_generated_changes_to_be_committed() -> None:
     script = (ROOT / "scripts/pre-push.sh").read_text(encoding="utf-8")
 
@@ -253,3 +262,41 @@ def test_operator_docs_match_the_static_forge_v2_cutover() -> None:
     assert "release-contract-v2.json" in contracts
     assert "release-contract-v1.json" not in contracts
     assert "repo_policy" in examples and "repo_policy_apply" not in examples
+
+
+def test_make_start_refuses_before_it_builds_when_an_agent_owns_the_supervisor() -> None:
+    """`make start` is the pre-activation deploy path and must refuse FIRST, not late.
+
+    Observed live: with the guard expressed as an `install` prerequisite, `uv tool install`
+    had already overwritten the activation launcher at ~/.local/bin/rf by the time the
+    refusal printed -- so `rf` stopped resolving through `current` even though the command
+    "failed". The guard therefore has to run before anything is built or installed, which
+    means `start` must not depend on `install` and must invoke it from inside the recipe.
+    """
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    start_line = next(line for line in makefile.splitlines() if line.startswith("start:"))
+    # Only the prerequisite list matters; the trailing comment legitimately says "install".
+    prerequisites = start_line.split("#", 1)[0].split(":", 1)[1].strip()
+
+    assert "install" not in prerequisites, (
+        "`start` must not take `install` as a prerequisite: prerequisites run before the "
+        "recipe, so the agent guard could not stop the install from happening"
+    )
+    start_body = makefile.split("\nstart:", 1)[1].split("\n\n", 1)[0]
+    guard_at = start_body.index("agent-status")
+    install_at = start_body.index("$(MAKE) -s install")
+    assert guard_at < install_at, "the agent guard must run before install"
+
+
+def test_versioned_runtime_targets_exist_and_are_documented() -> None:
+    """Deploying and CHOOSING a runtime must be reachable from make, not just `rf`."""
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    help_body = makefile.split("help:", 1)[1].split("\n\n", 1)[0]
+
+    for target in ("activate", "runtimes", "switch", "rollback", "restart-agent"):
+        assert re.search(rf"^{re.escape(target)}:", makefile, re.MULTILINE), (
+            f"missing make target: {target}"
+        )
+        assert f"make {target}" in help_body, f"`make {target}` is not in `make help`"
+    # Selecting a release is the point of `switch`, so its argument must be documented.
+    assert "REF=" in help_body

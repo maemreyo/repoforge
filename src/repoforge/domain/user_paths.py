@@ -10,6 +10,26 @@ from pathlib import Path
 DEFAULT_CONFIG_PATH = Path("~/.config/repoforge/config.toml").expanduser()
 DEFAULT_WORKSPACE_ROOT = "~/.local/share/repoforge/workspaces"
 DEFAULT_STATE_ROOT = "~/.local/state/repoforge"
+DEFAULT_RELEASE_ROOT = "~/.local/share/repoforge"
+
+
+def default_release_root() -> Path:
+    """The conventional release root, ignoring any override.
+
+    Used to decide whether a run is allowed to manage PATH-visible artifacts: only the
+    conventional root may, and that must be judged from the *resolved* root rather than
+    from whether a CLI flag was passed, since ``REPOFORGE_RELEASE_ROOT`` overrides it too.
+    """
+    return Path(DEFAULT_RELEASE_ROOT).expanduser().resolve()
+
+
+def resolve_release_root(override: str | Path | None = None) -> Path:
+    """Resolve the immutable-release root without creating it.
+
+    Honours an explicit override, then ``REPOFORGE_RELEASE_ROOT``, then the default.
+    """
+    chosen = override or os.environ.get("REPOFORGE_RELEASE_ROOT") or DEFAULT_RELEASE_ROOT
+    return Path(chosen).expanduser().resolve()
 
 
 @dataclass(frozen=True, slots=True)

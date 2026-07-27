@@ -5,7 +5,7 @@ from typing import Any, cast
 
 from ...domain.errors import SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
-from ...domain.policy import slugify, validate_branch
+from ...domain.policy import slugify, validate_adopted_branch, validate_branch
 from ...domain.workspace import WorkspaceRecord, normalize_issue_ids
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
@@ -20,6 +20,10 @@ class WorkspaceCreateCommand:
     base: str | None = None
     idempotency_key: str | None = None
     issue_ids: tuple[str, ...] = ()
+    # "Work on THIS branch": check out an existing branch instead of cutting a fresh
+    # ai/* one. Mutually exclusive with `base` -- there is nothing to branch from when the
+    # branch already exists.
+    adopt_branch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +39,11 @@ class WorkspaceCreateResult:
     )
     issue_ids: tuple[str, ...] = ()
     stale_workspaces: dict[str, Any] | None = None
+    adopted_branch: bool = False
+    # Non-blocking, and deliberately part of the result rather than a log line: adopting a
+    # branch trades away isolation, and the caller acting on it must be told, not the
+    # operator's terminal history.
+    warnings: tuple[str, ...] = ()
 
 
 class WorkspaceCreator:
@@ -44,17 +53,43 @@ class WorkspaceCreator:
     def execute(self, c: WorkspaceCreateCommand) -> WorkspaceCreateResult:
         repo = self.ctx.repo(c.repo_id)
         issue_ids = normalize_issue_ids(c.issue_ids)
-        base = c.base or repo.default_base
-        if base not in repo.allowed_base_branches:
-            raise SecurityError(
-                f"Base branch {base!r} is not allowlisted: {repo.allowed_base_branches}"
+        adopt = c.adopt_branch.strip() if c.adopt_branch else None
+        if adopt and c.base:
+            raise WorkspaceError(
+                "ADOPT_BASE_CONFLICT: adopt_branch works ON an existing branch, so there "
+                "is nothing to branch from; pass one or the other, not both."
             )
         slug = slugify(c.task_slug)
         key_hash = hash_idempotency_key(c.idempotency_key) if c.idempotency_key else None
         suffix = key_hash[:10] if key_hash else self.ctx.ids.new_hex(10)
         workspace_id = f"{slug[:24]}-{suffix}"
-        branch = f"{repo.branch_prefix}{slug}-{suffix}"
-        validate_branch(branch, repo)
+        warnings: tuple[str, ...] = ()
+        if adopt:
+            # The operator named this branch explicitly, so the ai/* convention and the
+            # base allowlist do not apply -- neither describes a branch that already
+            # exists. What still applies is refused, not warned: see
+            # validate_adopted_branch.
+            validate_adopted_branch(adopt, repo)
+            branch = adopt
+            # `base` records what the workspace sits on; for an adopted branch that is the
+            # branch itself, and claiming `main` here would misreport what a diff is
+            # against.
+            base = adopt
+            warnings = (
+                f"ADOPTED_BRANCH: this workspace works directly on {adopt!r} instead of a "
+                f"fresh {repo.branch_prefix}* branch. Commits land on a branch that is not "
+                "exclusively owned by this workspace, so isolation is reduced: anything "
+                "else using it (your editor, another worktree, a teammate) sees these "
+                "changes, and `workspace_remove` will not delete it.",
+            )
+        else:
+            base = c.base or repo.default_base
+            if base not in repo.allowed_base_branches:
+                raise SecurityError(
+                    f"Base branch {base!r} is not allowlisted: {repo.allowed_base_branches}"
+                )
+            branch = f"{repo.branch_prefix}{slug}-{suffix}"
+            validate_branch(branch, repo)
         root = self.ctx.config.server.workspace_root.resolve()
         destination = (root / repo.repo_id / workspace_id).resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +139,8 @@ class WorkspaceCreator:
                 self.ctx.git.head_sha(destination),
                 next_step,
                 tuple(existing.metadata.get("issue_ids", ())),
+                adopted_branch=bool(existing.metadata.get("adopted_branch")),
+                warnings=warnings,
             )
 
         def op() -> WorkspaceCreateResult:
@@ -119,12 +156,20 @@ class WorkspaceCreator:
                     ),
                 )
             boundary.begin()
-            head = self.ctx.git.create_worktree(repo, destination, branch, base)
+            head = (
+                self.ctx.git.adopt_worktree(repo, destination, branch)
+                if adopt
+                else self.ctx.git.create_worktree(repo, destination, branch, base)
+            )
             metadata: dict[str, object] = {
                 "repository_policy_snapshot": repository_policy_snapshot(repo),
                 "workspace_base_sha": head,
                 "task_slug": c.task_slug,
             }
+            if adopt:
+                # Durable, because removal has to know: deleting an adopted branch
+                # would destroy work this workspace did not create.
+                metadata["adopted_branch"] = True
             if issue_ids:
                 metadata["issue_ids"] = list(issue_ids)
             if key_hash:
@@ -159,6 +204,8 @@ class WorkspaceCreator:
                 head,
                 next_step,
                 issue_ids,
+                adopted_branch=bool(adopt),
+                warnings=warnings,
             )
 
         request = {
@@ -166,6 +213,7 @@ class WorkspaceCreator:
             "task_slug": c.task_slug,
             "base": base,
             "issue_ids": list(issue_ids),
+            "adopt_branch": adopt,
         }
         result = cast(
             WorkspaceCreateResult,
