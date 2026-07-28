@@ -144,6 +144,58 @@ class ReleaseObserver(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ReleaseProcess:
+    """A live process executing from a release directory.
+
+    ``release_installed`` is False once its tree has been removed underneath it: the
+    process is then running code that no longer exists on disk, which is unrecoverable
+    rather than merely stale. Reported as a fact, never inferred from the pointers.
+    """
+
+    pid: int
+    ppid: int
+    commit_sha: str
+    executable: str
+    release_installed: bool
+    # The parent chain up to init, from the same table snapshot. Required because a
+    # supervised process is often not a DIRECT child of the supervisor: the MCP worker's
+    # parent is `tunnel-client`, which the supervisor owns.
+    ancestor_pids: tuple[int, ...] = ()
+
+    def supervised_by(self, supervisor_pid: int | None) -> bool:
+        """Is this process the live supervisor, or descended from it?
+
+        Deliberately NOT ``ppid == 1``. Under launchd -- which IS pid 1 on macOS -- the
+        healthy production supervisor has ppid 1, so treating that as orphanhood reported
+        the live runtime as abandoned and told the operator to kill it. Caught by running
+        this against a real installation.
+        """
+        if supervisor_pid is None:
+            return False
+        return self.pid == supervisor_pid or supervisor_pid in self.ancestor_pids
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "pid": self.pid,
+            "ppid": self.ppid,
+            "commit_sha": self.commit_sha,
+            "executable": self.executable,
+            "release_installed": self.release_installed,
+            "ancestor_pids": list(self.ancestor_pids),
+        }
+
+
+class ReleaseProcessInspector(Protocol):
+    """Enumerate live processes running out of the release root.
+
+    Raises rather than returning an empty tuple when the process table cannot be read:
+    callers treat "nothing is running" as permission to delete a release tree.
+    """
+
+    def list_processes(self) -> tuple[ReleaseProcess, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
 class HealthSample:
     """One post-activation health observation of the running runtime."""
 
@@ -200,7 +252,8 @@ class ReleaseStore(Protocol):
     def previous_sha(self) -> str | None: ...
     def swap_current(self, commit_sha: str) -> str | None: ...
     def rollback(self) -> str: ...
-    def prune(self, *, keep: int) -> list[str]: ...
+    def retention_candidates(self, *, keep: int) -> list[str]: ...
+    def prune(self, *, keep: int, protect: frozenset[str] = frozenset()) -> list[str]: ...
     def journal_path(self) -> Path: ...
     def begin_activation(self, *, receipt_id: str, from_sha: str | None, to_sha: str) -> None: ...
     def record_activation_stage(self, stage: str) -> None: ...

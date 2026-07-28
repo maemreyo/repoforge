@@ -78,6 +78,7 @@ from ...bootstrap import (
     build_operation_gate,
     build_pending_policy_change_store,
     build_release_observer,
+    build_release_process_inspector,
     build_release_store,
     build_repository_probe,
     build_runtime_activation_journal,
@@ -137,7 +138,7 @@ from ...ports import (
     LockManager,
     RepositoryProbe,
 )
-from ...ports.activation import SupervisorKickstarter
+from ...ports.activation import ReleaseProcess, SupervisorKickstarter
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
@@ -1658,6 +1659,7 @@ def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
     return build_upgrade_service(
         release_root=getattr(args, "release_root", None),
         manage_path_launcher=_manages_path_launcher(args),
+        inspect_release_processes=True,
         supervisor_socket=supervisor_socket,
         runtime_record_path=runtime_path,
         config_path=config_path,
@@ -1701,6 +1703,11 @@ def _runtime_inventory_command(args: argparse.Namespace) -> int:
         ).list()["dev_runtimes"]
         if isinstance(listed, list):
             dev_runtimes = [entry for entry in listed if isinstance(entry, dict)]
+    release_processes: tuple[ReleaseProcess, ...] = ()
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        release_processes = build_release_process_inspector(
+            release_root=getattr(args, "release_root", None)
+        ).list_processes()
     _json(
         build_runtime_inventory(
             releases=release_choices(store),
@@ -1708,6 +1715,7 @@ def _runtime_inventory_command(args: argparse.Namespace) -> int:
             agent=agent,
             agent_secret_usable=store.agent_secret_status().usable,
             dev_runtimes=list(dev_runtimes),
+            release_processes=release_processes,
         )
     )
     return 0

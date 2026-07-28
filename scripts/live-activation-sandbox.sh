@@ -483,6 +483,59 @@ LOCKASSERT
 LOCK_ASSERT_EXIT=$?
 set -e
 [[ "$LOCK_ASSERT_EXIT" == "0" ]] || fail "the supervisor handoff violated single-instance"
+
+say "Retention must not delete a release a live process is executing from (#306)"
+# Retention decides from `current`, `previous` and recency, none of which says anything
+# about what is RUNNING. On a real installation it removed two release trees out from under
+# live MCP workers, leaving them executing code that no longer existed on disk.
+set +e
+python3 - "$SANDBOX/release-root/releases" <<'PRUNEASSERT'
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+root = os.path.realpath(sys.argv[1])
+rows: list[tuple[int, str]] = []
+if os.path.isdir("/proc"):
+    for name in sorted(entry for entry in os.listdir("/proc") if entry.isdigit()):
+        try:
+            rows.append((int(name), os.readlink(f"/proc/{name}/exe")))
+        except OSError:
+            continue
+elif shutil.which("ps"):
+    completed = subprocess.run(
+        ["ps", "-A", "-o", "pid=,comm="], capture_output=True, text=True, check=False
+    )
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) == 2 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[1]))
+else:
+    print("  ! no /proc and no ps; retention assertion SKIPPED")
+    raise SystemExit(0)
+
+evicted = []
+for pid, executable in rows:
+    if not executable.startswith(root + os.sep):
+        continue
+    release = executable[len(root) + 1 :].split(os.sep, 1)[0]
+    if not os.path.isdir(os.path.join(root, release)):
+        evicted.append({"pid": pid, "release": release, "executable": executable})
+
+if evicted:
+    print("\033[31m✗ processes are executing from a release that was deleted:\033[0m")
+    for entry in evicted:
+        print(f"    - {json.dumps(entry)}")
+    raise SystemExit(1)
+print("\033[32m✓ every live release process still has its release installed\033[0m")
+PRUNEASSERT
+PRUNE_ASSERT_EXIT=$?
+set -e
+[[ "$PRUNE_ASSERT_EXIT" == "0" ]] || fail "retention deleted a release that was still running"
+
 set +e
 "${RF[@]}" version status > "$SANDBOX/status2.json"
 STATUS2_EXIT=$?
