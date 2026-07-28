@@ -214,6 +214,9 @@ def test_inventory_reports_the_live_release_by_label_and_how_to_switch(tmp_path:
         "releases": 2,
         "dev_runtimes": 0,
         "dev_runtimes_running": 0,
+        # No process table was supplied, so nothing can be reported as unsupervised.
+        "orphan_processes": 0,
+        "orphan_processes_on_removed_releases": 0,
     }
 
 
@@ -261,6 +264,8 @@ def test_inventory_counts_running_dev_runtimes_and_names_them(tmp_path: Path) ->
         "releases": 1,
         "dev_runtimes": 2,
         "dev_runtimes_running": 1,
+        "orphan_processes": 0,
+        "orphan_processes_on_removed_releases": 0,
     }
     assert "feat-x" in str(inventory["safe_next_action"])
 
