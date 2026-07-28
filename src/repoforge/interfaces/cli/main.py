@@ -81,6 +81,7 @@ from ...bootstrap import (
     build_release_store,
     build_repository_probe,
     build_runtime_activation_journal,
+    build_runtime_activation_store,
     build_runtime_control_client,
     build_runtime_control_server,
     build_runtime_launcher,
@@ -125,6 +126,7 @@ from ...domain.errors import (
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
+from ...domain.runtime_activation import RuntimeActivationReceipt
 from ...domain.runtime_contract import RuntimeContractIdentity
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
 from ...domain.user_paths import default_release_root, resolve_release_root
@@ -2009,6 +2011,18 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
             "active_generation": result.active_generation,
         }
 
+    def _latest_activation_receipt() -> RuntimeActivationReceipt | None:
+        """The newest persisted activation receipt, or nothing if none survived.
+
+        Read from the durable store so `config_inspect` can corroborate an
+        activation independently of what the activation command reported.
+        """
+        page = build_runtime_activation_store(store.root).list_all(max_records=200)
+        receipts = [envelope.value for envelope in page.records]
+        if not receipts:
+            return None
+        return max(receipts, key=lambda item: (item.updated_at, item.receipt_id))
+
     server_config = getattr(
         load_config(store.resolved_path(initial_generation.generation)), "server", None
     )
@@ -2028,6 +2042,7 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
         read_audit_page=read_audit_event_page,
         read_runtime_status=lambda: _runtime_status(store),
         contract_identity_provider=contract_identity_provider,
+        latest_activation_receipt=_latest_activation_receipt,
     )
 
     def _reap_inflight_background() -> None:
