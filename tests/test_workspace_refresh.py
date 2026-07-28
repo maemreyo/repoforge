@@ -1788,3 +1788,74 @@ def test_v2_refresh_legacy_content_resolution_is_unchanged(
     workspace_path = Path(str(service.workspace_status(workspace_id)["path"]))
     assert applied["result"] == "applied"
     assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "changed: hand merged\n"
+
+
+def test_v2_refresh_refuses_hand_written_content_for_a_generated_path(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """A registered generator owns its outputs; a caller may not overwrite them.
+
+    Hand-merging a generated file produces output no generator would ever emit,
+    so the next regeneration silently reverts it and the reviewed resolution is
+    lost. The apply path must refuse the resolution instead of accepting a write
+    it is about to discard. Automatic regeneration is covered separately; this
+    pins the refusal the design requires alongside it.
+    """
+    _install_hello_generator(forge_env)
+    configured = forge_env.service.config.repositories["demo"]
+    generated_repo = replace(
+        configured,
+        generated_paths=(
+            GeneratedPathRule(
+                "hello.txt",
+                ("python3", "scripts/render_hello.py"),
+                "Generated hello fixture",
+            ),
+        ),
+    )
+    service = CodingService(
+        replace(
+            forge_env.service.config,
+            repositories={**forge_env.service.config.repositories, "demo": generated_repo},
+        )
+    )
+    workspace_id = str(service.workspace_create("demo", "generated refusal")["workspace_id"])
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id, "hello.txt", "changed locally\n", str(current["sha256"])
+    )
+    service.workspace_run_profile(workspace_id)
+    service.workspace_commit(workspace_id, "change generated output locally")
+    _push_upstream_file(
+        forge_env, "hello.txt", "changed remotely\n", "change generated output upstream"
+    )
+    status = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+    assert preview["conflicts"][0]["kind"] == "generated"
+
+    with pytest.raises(WorkspaceError, match=r"unexpected=hello\.txt"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(status["head_sha"]),
+            expected_fingerprint=str(status["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.txt", "content": "hand written generated output\n"}],
+        )
+
+    # The same refusal applies to a side-keeping strategy: `ours`/`theirs` would
+    # also install content the generator did not produce.
+    with pytest.raises(WorkspaceError, match=r"unexpected=hello\.txt"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(status["head_sha"]),
+            expected_fingerprint=str(status["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.txt", "strategy": "ours"}],
+        )
