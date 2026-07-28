@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import os
 import signal
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -76,6 +78,7 @@ class RuntimeSupervisor:
         watchdog_interval_seconds: float = 2.0,
         health_failure_threshold: int = 3,
         stable_health_reset_seconds: float = 60.0,
+        single_instance_wait_seconds: float = 45.0,
     ) -> None:
         self._store = store
         self._configs = configs
@@ -99,9 +102,11 @@ class RuntimeSupervisor:
             or watchdog_interval_seconds <= 0
             or health_failure_threshold <= 0
             or stable_health_reset_seconds <= 0
+            or single_instance_wait_seconds < 0
         ):
             raise ValueError("Runtime health and restart bounds must be positive")
         self._health_timeout = health_timeout_seconds
+        self._single_instance_wait = single_instance_wait_seconds
         self._max_restarts = max_restarts
         self._watchdog_interval = watchdog_interval_seconds
         self._health_failure_threshold = health_failure_threshold
@@ -377,6 +382,48 @@ class RuntimeSupervisor:
             ("tunnel_child", False, "managed child process did not become healthy"),
         )
 
+    @contextlib.contextmanager
+    def _single_instance_lock(self, correlation_id: str) -> Iterator[None]:
+        """Take the single-instance lock, waiting a bounded interval for a handoff.
+
+        An activation replaces this process: the incoming supervisor starts while the
+        outgoing one is still shutting down and still holds this lock. Taking it with no
+        wait therefore made every handoff a race the incoming process usually lost, which
+        failed activations that were otherwise fine. Waiting is bounded and never
+        unlimited -- a lock that is genuinely held by a supervisor which is not leaving is
+        reported as a typed timeout, because two live supervisors is the exact state this
+        lock exists to prevent.
+        """
+        entered = False
+        try:
+            with self._locks.lock(
+                "runtime-single-instance",
+                timeout_seconds=self._single_instance_wait,
+                metadata={"correlation_id": correlation_id},
+            ):
+                entered = True
+                yield
+        except ConfigError as exc:
+            if entered or "LOCK_TIMEOUT" not in str(exc):
+                raise
+            raise ConfigError(
+                "RUNTIME_SUPERVISOR_HANDOFF_TIMEOUT: another supervisor still holds "
+                f"'runtime-single-instance' after {self._single_instance_wait:g}s "
+                f"({self._single_instance_holder()}). Stop it with `rf runtime stop` "
+                "before starting this one; two live supervisors are never started."
+            ) from exc
+
+    def _single_instance_holder(self) -> str:
+        """Describe the current lock holder from the lock file, for the timeout message."""
+        try:
+            path = self._locks.path_for("runtime-single-instance")
+            payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except (AttributeError, OSError, ValueError):
+            return "holder unknown"
+        if not isinstance(payload, dict) or not payload.get("pid"):
+            return "holder unknown"
+        return f"holder pid {payload['pid']}"
+
     def run(
         self,
         *,
@@ -386,11 +433,7 @@ class RuntimeSupervisor:
         environment: dict[str, str],
     ) -> int:
         correlation_id = self._ids.new_hex(24)
-        with self._locks.lock(
-            "runtime-single-instance",
-            timeout_seconds=0,
-            metadata={"correlation_id": correlation_id},
-        ):
+        with self._single_instance_lock(correlation_id):
             self._control.start(self._control_handler)
             previous_handlers: dict[signal.Signals, object] = {}
 

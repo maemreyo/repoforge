@@ -227,7 +227,12 @@ def test_degraded_history_keeps_rediscovery_true_even_with_equal_surfaces(
 
 
 def test_status_reports_an_incomplete_activation(tmp_path: Path) -> None:
-    """An activation that never terminalized must be surfaced, not ignored."""
+    """An activation that never terminalized must be surfaced, not ignored.
+
+    This one reached its target: the runtime is serving exactly what the journal was
+    activating. Advising a re-run (which the activation guard refuses) or a rollback
+    (which would demote a healthy runtime) is not an option -- #304.
+    """
     store = RuntimeReleaseStore(tmp_path)
     _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
     store.swap_current("aaa1111")
@@ -237,4 +242,29 @@ def test_status_reports_an_incomplete_activation(tmp_path: Path) -> None:
     status = build_version_status(store, RuntimeIdentityInputs(), _observed("aaa1111"))
 
     assert status["incomplete_activation"] is not None
-    assert "did not finish" in str(status["safe_next_action"])
+    assert status["incomplete_activation_reconcilable"] is True
+    action = str(status["safe_next_action"])
+    assert "rf upgrade reconcile" in action
+    assert "Re-run" not in action
+
+
+def test_an_unconverged_incomplete_activation_offers_reconcile_or_rollback(
+    tmp_path: Path,
+) -> None:
+    """The journal target is NOT what the runtime serves, so it cannot be terminalized."""
+    store = RuntimeReleaseStore(tmp_path)
+    _install(store, "aaa1111", surface=_SURFACE, built_at="2026-07-25T09:00:00+00:00")
+    _install(store, "bbb2222", surface=_SURFACE, built_at="2026-07-25T10:00:00+00:00")
+    store.swap_current("aaa1111")
+    store.swap_current("bbb2222")
+    store.begin_activation(receipt_id="act-20260725-002", from_sha="aaa1111", to_sha="bbb2222")
+    store.record_activation_stage("symlink_switched")
+
+    # The live runtime never adopted the candidate: it is still serving the old release.
+    status = build_version_status(store, RuntimeIdentityInputs(), _observed("aaa1111"))
+
+    assert status["incomplete_activation_reconcilable"] is False
+    action = str(status["safe_next_action"])
+    assert "did not finish" in action
+    assert "rf upgrade reconcile" in action
+    assert "rf upgrade rollback" in action
