@@ -313,8 +313,19 @@ class JsonPrCheckWatchStore:
             )
         paths = sorted(self.root.glob("op-*.json"))
         records: list[PrCheckWatch] = []
+        unreadable: list[str] = []
         for path in paths[:max_records]:
-            record = self.read(path.stem)
+            # A scan must survive one bad record. `read()` stays strict, because a
+            # caller asking for one exact watch has to hear that it is unusable;
+            # a sweep over every watch does not, and startup runs such a sweep --
+            # so raising here takes the whole runtime down over a single file.
+            try:
+                record = self.read(path.stem)
+            except RepoForgeError as exc:
+                if exc.code is not ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT:
+                    raise
+                unreadable.append(path.stem)
+                continue
             if record is not None:
                 records.append(record)
         records.sort(
@@ -324,6 +335,7 @@ class JsonPrCheckWatchStore:
         return PrCheckWatchPage(
             tuple(records),
             len(paths) > max_records,
+            tuple(sorted(unreadable)),
         )
 
     def delete(self, operation_id: str) -> None:

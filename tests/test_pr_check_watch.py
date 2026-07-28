@@ -34,9 +34,9 @@ from repoforge.testing.fakes import (
 )
 
 
-def _record() -> PrCheckWatch:
+def _record(operation_id: str = "op-000000000000000000000001") -> PrCheckWatch:
     return new_pr_check_watch(
-        operation_id="op-000000000000000000000001",
+        operation_id=operation_id,
         workspace_id="workspace-1",
         branch="ai/example-1234567890",
         pr_number=42,
@@ -189,6 +189,66 @@ def test_json_watch_store_is_private_atomic_cas_and_strict(tmp_path: Path) -> No
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RepoForgeError):
         store.read(watch.operation_id)
+
+
+def test_scanning_survives_a_record_written_by_an_older_schema(tmp_path: Path) -> None:
+    """One record from a previous release must not take the whole runtime down.
+
+    Bumping PR_CHECK_WATCH_SCHEMA_VERSION to 2 added two required fields, and
+    every already-stored v1 record then failed to decode. `list_records` raised
+    on the first one, and because startup calls it through
+    `resume_active()` -> `build_application()`, an installation that had ever
+    watched a PR could not start any process at all -- MCP, the execution
+    worker, or a plain `rf doctor`. Tests never caught it because they always
+    begin with an empty state root.
+
+    A scan therefore reports what it could not read and returns the rest. A
+    direct `read()` of one exact watch stays strict: a caller asking for that
+    watch has to hear that it is unusable.
+    """
+    store = JsonPrCheckWatchStore(tmp_path, InMemoryLockManager())
+    readable = _record()
+    store.create(readable)
+
+    legacy = json.loads(store.encode_for_test(_record(operation_id="op-" + "9" * 24)))
+    legacy["schema_version"] = 1
+    del legacy["remote_version"]
+    del legacy["stability_version"]
+    legacy_path = tmp_path / "pr-check-watches" / f"{legacy['operation_id']}.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    page = store.list_records(max_records=100)
+
+    assert page.records == (readable,)
+    assert page.unreadable_operation_ids == (legacy["operation_id"],)
+    with pytest.raises(RepoForgeError) as direct:
+        store.read(legacy["operation_id"])
+    assert direct.value.code is ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT
+
+
+def test_resume_records_the_watches_it_could_not_read(forge_env: ForgeEnvironment) -> None:
+    """A skipped watch is no longer polled, so the skip has to be visible."""
+    watches = forge_env.service.application.pr_check_watches
+    root = forge_env.service.application.context.config.server.state_root / "pr-check-watches"
+    root.mkdir(parents=True, exist_ok=True)
+    legacy_id = "op-" + "8" * 24
+    (root / f"{legacy_id}.json").write_text(
+        json.dumps({"schema_version": 1, "operation_id": legacy_id}), encoding="utf-8"
+    )
+
+    assert watches.resume_active() == ()
+
+    events = [
+        json.loads(line)
+        for line in (forge_env.service.application.context.config.server.state_root / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    resumed = [item for item in events if item["action"] == "pr_check_watch_resume"]
+    assert len(resumed) == 1
+    assert resumed[0]["details"]["unreadable_watch_count"] == 1
+    assert resumed[0]["details"]["unreadable_operation_ids"] == [legacy_id]
 
 
 def test_watch_completes_after_pending_checks_finish(forge_env: ForgeEnvironment) -> None:

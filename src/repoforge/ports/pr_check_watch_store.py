@@ -12,6 +12,10 @@ from ..domain.pr_check_watch import PrCheckWatch
 class PrCheckWatchPage:
     records: tuple[PrCheckWatch, ...]
     scan_truncated: bool
+    #: Operation ids whose stored watch could not be decoded -- a record written by
+    #: an older schema, or a corrupt one. A scan reports them rather than raising,
+    #: so one unreadable record cannot stop a caller from seeing the rest.
+    unreadable_operation_ids: tuple[str, ...] = ()
 
 
 class PrCheckWatchStore(Protocol):
