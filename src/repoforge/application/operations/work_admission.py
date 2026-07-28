@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ...domain.operation_task import (
     TERMINAL_OPERATION_STATES,
+    OperationRetryability,
     OperationSnapshotBinding,
     OperationState,
     OperationTask,
@@ -31,30 +32,47 @@ class DurableWorkAdmission:
     ) -> OperationTask:
         operation_id = f"op-{self._operations.ctx.ids.new_hex(24)}"
         now = self._operations.ctx.clock.now_iso()
+        # The operation record is written FIRST, and the work item -- the thing a worker
+        # claims -- only after it. Claiming calls `OperationManager.start`, which reads
+        # this record, so an entry that becomes claimable before its record exists makes
+        # that read raise OPERATION_NOT_FOUND *inside the worker loop*. Observed in CI on
+        # two unrelated branches: the worker thread died on exactly that and the admitted
+        # work was never executed. The same window let a concurrent recovery pass see a
+        # work item with no operation record and delete it as an orphan, silently dropping
+        # work that had just been admitted.
+        operation = self._operations.create(
+            operation_id=operation_id,
+            kind=operation_kind,
+            phase="queued",
+            cancel_supported=True,
+            workspace_id=request.workspace_id,
+            snapshot_binding=OperationSnapshotBinding(
+                head_sha=request.expected_head_sha,
+                workspace_fingerprint=request.expected_fingerprint,
+                config_generation=request.config_generation,
+            ),
+            expires_at=expires_at,
+            now=now,
+        )
         work = new_work_item(
             operation_id=operation_id,
             request=request,
             now=now,
         )
-        self._queue.create(work)
         try:
-            return self._operations.create(
-                operation_id=operation_id,
-                kind=operation_kind,
-                phase="queued",
-                cancel_supported=True,
-                workspace_id=request.workspace_id,
-                snapshot_binding=OperationSnapshotBinding(
-                    head_sha=request.expected_head_sha,
-                    workspace_fingerprint=request.expected_fingerprint,
-                    config_generation=request.config_generation,
-                ),
-                expires_at=expires_at,
+            self._queue.create(work)
+        except Exception as exc:
+            # Terminalize rather than delete: the caller already holds this operation_id,
+            # so it must resolve to a record that states why nothing will run.
+            self._operations.fail(
+                operation_id,
+                error_code="OPERATION_WORK_ADMISSION_FAILED",
+                error_message=f"Durable work could not be queued: {type(exc).__name__}",
+                retryability=OperationRetryability.MANUAL,
                 now=now,
             )
-        except Exception:
-            self._queue.delete(operation_id)
             raise
+        return operation
 
     def cancel(self, operation_id: str) -> OperationTask:
         operation = self._operations.status(operation_id)
