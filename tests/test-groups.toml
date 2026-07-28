@@ -363,11 +363,13 @@ source_globs = [
   "scripts/run_test_shards.py",
   "scripts/select_affected_tests.py",
   "scripts/check_release_contracts.py",
+  "scripts/check_conflict_markers.py",
   "scripts/run_v2_release_gates.py",
   "scripts/v2_release_reference.py",
   "tests/test-groups.toml",
 ]
 test_files = [
+  "tests/test_conflict_marker_gate.py",
   "tests/test_parallel_test_runner.py",
   "tests/test_select_affected_tests.py",
   "tests/test_syntax_diagnostics.py",
