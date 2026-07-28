@@ -237,7 +237,9 @@ def test_runtime_start_foreground_background_and_duplicate(
 ) -> None:
     store = Store(tmp_path)
     monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
-    monkeypatch.setattr(cli, "_locks", lambda: Locks())
+    monkeypatch.setattr(
+        cli, "_locks", lambda *_: Locks()
+    )  # `*_`: these helpers take the config path they resolve for (#318).
     launcher_calls: list[tuple[bool, dict[str, str]]] = []
 
     class Launcher:
@@ -279,7 +281,9 @@ def test_runtime_start_ignores_a_stale_record_from_a_previous_process(
     """
     store = Store(tmp_path)
     monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
-    monkeypatch.setattr(cli, "_locks", lambda: Locks())
+    monkeypatch.setattr(
+        cli, "_locks", lambda *_: Locks()
+    )  # `*_`: these helpers take the config path they resolve for (#318).
     fresh_pid = os.getpid()  # guaranteed alive for the duration of this test
 
     class Launcher:
