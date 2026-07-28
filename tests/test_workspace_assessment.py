@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import ForgeEnvironment, git
+from conftest import ForgeEnvironment, durable_worker, git
 
 from repoforge.adapters.code_intelligence.syntax import SyntaxCodeIntelligenceProvider
 from repoforge.application.service import CodingService
@@ -17,7 +17,6 @@ from repoforge.application.workspace.assessment import (
 from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.application.workspace.run_diagnostic import WorkspaceRunDiagnosticResult
 from repoforge.application.workspace.run_profile import (
-    WorkspaceRunProfileBackgroundResult,
     WorkspaceRunProfileResult,
 )
 from repoforge.bootstrap import AdapterOverrides, build_application
@@ -295,30 +294,25 @@ def test_workspace_verify_auto_routes_high_confidence_exact_test_selector(
         current["sha256"],
     )
     status = forge_env.service.workspace_status(workspace_id)
-    captured: list[Any] = []
 
-    def run_diagnostic(command: Any) -> WorkspaceRunDiagnosticResult:
-        captured.append(command)
-        return _diagnostic_result(workspace_id, status["workspace_fingerprint"], status["head_sha"])
-
-    monkeypatch.setattr(forge_env.service._verify._diagnostic, "execute", run_diagnostic)
-    monkeypatch.setattr(
-        forge_env.service._verify._profile,
-        "execute",
-        lambda _command: (_ for _ in ()).throw(AssertionError("full profile must not run")),
-    )
-
-    result = forge_env.service.workspace_verify(
-        workspace_id,
-        mode="auto",
-        intent="tdd_green",
-        expectation="pass",
-    )
+    with durable_worker(
+        forge_env.service,
+        diagnostic=_diagnostic_result(
+            workspace_id, status["workspace_fingerprint"], status["head_sha"]
+        ),
+    ) as handlers:
+        result = forge_env.service.workspace_verify(
+            workspace_id,
+            mode="auto",
+            intent="tdd_green",
+            expectation="pass",
+        )
 
     assert result["selected_mode"] == "diagnostic"
-    assert captured[0].diagnostic_id == "pytest-target"
-    assert captured[0].selector == ["tests/test_math_utils.py"]
-    assert captured[0].intent == "tdd_green"
+    admitted = handlers.claimed[0].request
+    assert admitted.diagnostic_id == "pytest-target"
+    assert admitted.selector == ("tests/test_math_utils.py",)
+    assert admitted.intent == "tdd_green"
     assert result["outcome"] == "passed"
     assert result["satisfies_commit_gate"] is False
 
@@ -343,24 +337,16 @@ def test_workspace_verify_auto_falls_back_to_final_profile_when_intelligence_una
     service = CodingService(config, application=application)
     workspace_id = service.workspace_create("demo", "verify fallback")["workspace_id"]
     status = service.workspace_status(workspace_id)
-    captured: list[Any] = []
 
-    def run_profile(command: Any) -> WorkspaceRunProfileResult:
-        captured.append(command)
-        return _profile_result(workspace_id, status["workspace_fingerprint"], status["head_sha"])
-
-    monkeypatch.setattr(service._verify._profile, "execute", run_profile)
-    monkeypatch.setattr(
-        service._verify._diagnostic,
-        "execute",
-        lambda _command: (_ for _ in ()).throw(AssertionError("diagnostic must not run")),
-    )
-
-    result = service.workspace_verify(workspace_id, mode="auto")
+    with durable_worker(
+        service,
+        profile=_profile_result(workspace_id, status["workspace_fingerprint"], status["head_sha"]),
+    ) as handlers:
+        result = service.workspace_verify(workspace_id, mode="auto")
 
     assert result["selected_mode"] == "profile"
     assert result["outcome"] == "fallback_full"
-    assert captured[0].profile_name == "full"
+    assert handlers.claimed[0].request.profile_name == "full"
     assert "unavailable" in result["routing_reason"].lower()
 
 
@@ -370,29 +356,29 @@ def test_workspace_verify_explicit_diagnostic_forwards_intent_and_reuse_controls
 ) -> None:
     workspace_id = _changed_workspace(forge_env)
     status = forge_env.service.workspace_status(workspace_id)
-    captured: list[Any] = []
 
-    def run_diagnostic(command: Any) -> WorkspaceRunDiagnosticResult:
-        captured.append(command)
-        return _diagnostic_result(workspace_id, status["workspace_fingerprint"], status["head_sha"])
+    with durable_worker(
+        forge_env.service,
+        diagnostic=_diagnostic_result(
+            workspace_id, status["workspace_fingerprint"], status["head_sha"]
+        ),
+    ) as handlers:
+        result = forge_env.service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id="pytest-target",
+            selector=["tests/test_math_utils.py"],
+            intent="tdd_red",
+            expectation="fail",
+            expected_failure_class="test_failure",
+            force_rerun=True,
+        )
 
-    monkeypatch.setattr(forge_env.service._verify._diagnostic, "execute", run_diagnostic)
-    result = forge_env.service.workspace_verify(
-        workspace_id,
-        mode="diagnostic",
-        diagnostic_id="pytest-target",
-        selector=["tests/test_math_utils.py"],
-        intent="tdd_red",
-        expectation="fail",
-        expected_failure_class="test_failure",
-        force_rerun=True,
-    )
-
-    command = captured[0]
-    assert command.intent == "tdd_red"
-    assert command.expectation == "fail"
-    assert command.expected_failure_class == "test_failure"
-    assert command.force_rerun is True
+    admitted = handlers.claimed[0].request
+    assert admitted.intent == "tdd_red"
+    assert admitted.expectation == "fail"
+    assert admitted.expected_failure_class == "test_failure"
+    assert admitted.force_rerun is True
     assert result["selected_mode"] == "diagnostic"
 
 
@@ -447,20 +433,20 @@ def test_workspace_verify_staleness_warning_does_not_block_execution(
     )
     stale_assessment = replace(assessment, base_freshness=stale_base)
     monkeypatch.setattr(verifier._assessment, "execute", lambda _command: stale_assessment)
-    captured: list[Any] = []
 
-    def run_profile(command: Any) -> WorkspaceRunProfileResult:
-        captured.append(command)
-        return _profile_result(
+    with durable_worker(
+        forge_env.service,
+        profile=_profile_result(
             workspace_id,
             assessment.snapshot.workspace_fingerprint,
             assessment.snapshot.head_sha,
+        ),
+    ) as handlers:
+        result = forge_env.service.workspace_verify(
+            workspace_id, mode="profile", profile_name="full"
         )
 
-    monkeypatch.setattr(verifier._profile, "execute", run_profile)
-    result = forge_env.service.workspace_verify(workspace_id, mode="profile", profile_name="full")
-
-    assert captured
+    assert handlers.claimed
     assert "3 commit(s) behind" in result["staleness_warning"]
     assert result["outcome"] == "passed"
     assert result["steps"][0]["status"] == "completed"
@@ -473,22 +459,21 @@ def test_workspace_verify_journaled_artifact_invalidates_commit_gate(
 ) -> None:
     workspace_id = _changed_workspace(forge_env)
     status = forge_env.service.workspace_status(workspace_id)
-    monkeypatch.setattr(
-        forge_env.service._verify._profile,
-        "execute",
-        lambda _command: _profile_result(
+
+    with durable_worker(
+        forge_env.service,
+        profile=_profile_result(
             workspace_id,
             status["workspace_fingerprint"],
             status["head_sha"],
         ),
-    )
-
-    result = forge_env.service.workspace_verify(
-        workspace_id,
-        mode="profile",
-        profile_name="full",
-        artifact_output_path="verify-result.json",
-    )
+    ):
+        result = forge_env.service.workspace_verify(
+            workspace_id,
+            mode="profile",
+            profile_name="full",
+            artifact_output_path="verify-result.json",
+        )
 
     workspace_path = Path(forge_env.service.workspace_status(workspace_id)["path"])
     decoded = json.loads((workspace_path / "verify-result.json").read_text(encoding="utf-8"))
@@ -503,15 +488,6 @@ def test_workspace_verify_preserves_durable_profile_background_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = _changed_workspace(forge_env)
-    monkeypatch.setattr(
-        forge_env.service._verify._profile,
-        "execute",
-        lambda _command: WorkspaceRunProfileBackgroundResult(
-            operation_id="op-verify-background-0001",
-            phase="running",
-            safe_next_action="Poll operation_status.",
-        ),
-    )
 
     result = forge_env.service.workspace_verify(
         workspace_id,
@@ -520,9 +496,15 @@ def test_workspace_verify_preserves_durable_profile_background_operation(
         background=True,
     )
 
+    # Nothing has claimed the work yet, so the honest report is a queued operation
+    # the caller can poll or cancel -- not a fabricated verdict.
     assert result["outcome"] == "running"
-    assert result["operation"]["operation_id"] == "op-verify-background-0001"
     assert result["operation"]["kind"] == "workspace_run_profile"
+    assert result["operation"]["state"] == "pending"
+    assert result["operation"]["phase"] == "queued"
+    queue = forge_env.service.application.context.operation_work_queue
+    assert queue is not None
+    assert queue.read(result["operation"]["operation_id"]) is not None
     from repoforge.contracts.registry import V2_TOOL_SPECS
 
     V2_TOOL_SPECS["workspace_verify"].validate_output(result)

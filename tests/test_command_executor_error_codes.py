@@ -1,6 +1,8 @@
 import contextlib
 import os
 import signal
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -126,13 +128,19 @@ def test_command_error_carries_complete_failed_selectors_and_artifact_reference(
 def test_run_timeout_is_command_timeout(tmp_path: Path) -> None:
     executor = _executor(tmp_path)
     script = tmp_path / "sleep.py"
-    script.write_text("import time\ntime.sleep(5)\n")
+    script.write_text("import time\nprint('before timeout', flush=True)\ntime.sleep(5)\n")
     with pytest.raises(CommandError) as excinfo:
         executor.run(["python3", str(script)], cwd=tmp_path, timeout=1)
     err = excinfo.value
     assert err.code is ErrorCode.COMMAND_TIMEOUT
     assert err.retryable is True
     assert err.details["timeout_seconds"] == 1
+    assert err.details["output_artifact_status"] == "available"
+    reference = err.details["output_artifact_reference"]
+    assert isinstance(reference, str)
+    digest = reference.removeprefix("failure-output:")
+    artifact = tmp_path / "s" / "failure-output-artifacts" / f"{digest}.blob"
+    assert "before timeout" in artifact.read_text(encoding="utf-8")
 
 
 def test_timeout_cleanup_does_not_hang_when_killpg_reports_permission_error(
@@ -361,12 +369,16 @@ def test_timeout_rescans_descendants_and_reports_inspection_failure(
 def test_ps_identity_parser_and_probe_failure_are_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    parsed = process_tree._parse_ps_line("123 42 Sun Jul 19 12:34:56 2026")
+    parsed = process_tree._parse_ps_line("S 123 42 Sun Jul 19 12:34:56 2026")
     assert parsed == process_tree.ProcessIdentity(
         pid=123,
         ppid=42,
         start_token="Sun Jul 19 12:34:56 2026",
     )
+    # A process that has stopped and only awaits a wait() from its parent is not
+    # live: reporting it as live makes a successful kill look like a survivor.
+    assert process_tree._parse_ps_line("Z 123 42 Sun Jul 19 12:34:56 2026") is None
+    assert process_tree._parse_ps_line("123 42 Sun Jul 19 12:34:56 2026") is None
     monkeypatch.setattr(
         process_tree.subprocess,
         "Popen",
@@ -381,12 +393,34 @@ def test_ps_identity_probe_parses_rows_and_contains_selector_errors(
     monkeypatch.setattr(
         process_tree,
         "_bounded_ps",
-        lambda argv: "123 42 Sun Jul 19 12:34:56 2026\n124 42 Sun Jul 19 12:34:57 2026\n",
+        lambda argv: (
+            "S 123 42 Sun Jul 19 12:34:56 2026\n"
+            "Z 999 42 Sun Jul 19 12:34:56 2026\n"
+            "S+ 124 42 Sun Jul 19 12:34:57 2026\n"
+        ),
     )
     assert process_tree._read_ps_identities() == (
         process_tree.ProcessIdentity(123, 42, "Sun Jul 19 12:34:56 2026"),
         process_tree.ProcessIdentity(124, 42, "Sun Jul 19 12:34:57 2026"),
     )
+
+
+def test_group_liveness_ignores_zombies_and_fails_closed_when_uninspectable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group of stopped-but-unreaped members is contained; an unknown host is not."""
+    if sys.platform.startswith("linux"):  # pragma: no cover - probe is /proc-based there
+        pytest.skip("the ps-based group probe is only used off Linux")
+
+    monkeypatch.setattr(process_tree, "_bounded_ps", lambda argv: "Z 4242\nS 77\n")
+    assert process_tree.group_has_live_member(4242) is False
+
+    monkeypatch.setattr(process_tree, "_bounded_ps", lambda argv: "Z 4242\nS 4242\n")
+    assert process_tree.group_has_live_member(4242) is True
+
+    monkeypatch.setattr(process_tree, "_bounded_ps", lambda argv: None)
+    assert process_tree.group_has_live_member(4242) is None
+    assert process_tree.group_has_live_member(0) is None
 
 
 def test_bounded_ps_contains_selector_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -445,6 +479,9 @@ def test_run_missing_executable_is_not_found_even_with_not_found_in_message(
     err = excinfo.value
     assert err.code is ErrorCode.NOT_FOUND
     assert err.retryable is False
+    assert err.details["selector_coverage"] == "unavailable"
+    assert err.details["selectors_unavailable_reason"] == "artifact_unavailable"
+    assert err.details["output_artifact_status"] == "not_applicable"
 
 
 def test_run_output_containing_not_found_does_not_misclassify(tmp_path: Path) -> None:
@@ -469,6 +506,33 @@ def test_run_bytes_nonzero_exit_is_command_failed(tmp_path: Path) -> None:
     err = excinfo.value
     assert err.code is ErrorCode.COMMAND_FAILED
     assert err.details["exit_code"] == 1
+
+
+def test_spawn_boundary_failure_prevents_subprocess_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed durable spawn marker must fail closed before creating a child."""
+    executor = _executor(tmp_path)
+    popen_called = False
+
+    def unexpected_popen(*args: object, **kwargs: object) -> None:
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("Popen must not run after spawn-boundary persistence fails")
+
+    def fail_marker() -> None:
+        raise RepoForgeError(
+            "cannot persist spawn boundary", code=ErrorCode.STATE_PERSISTENCE_FAILED
+        )
+
+    monkeypatch.setattr(command_executor_module.subprocess, "Popen", unexpected_popen)
+    token = CancellationToken(on_spawn=fail_marker, raise_on_spawn_error=True)
+
+    with pytest.raises(RepoForgeError, match="cannot persist spawn boundary"):
+        executor.run(["echo", "never"], cwd=tmp_path, cancel_token=token)
+
+    assert popen_called is False
 
 
 def test_cancel_token_terminates_a_running_process_group(tmp_path: Path) -> None:
@@ -524,9 +588,186 @@ def test_cancel_token_is_released_after_the_process_exits(tmp_path: Path) -> Non
     assert token.is_cancelled() is True
 
 
+def test_run_extracts_ruff_failure_location_and_exact_path_selector(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "ruff_failure.py"
+    script.write_text(
+        "import sys\nprint('src/demo.py:12:5: F821 Undefined name `missing`')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(
+        ["python3", str(script)],
+        cwd=tmp_path,
+        check=False,
+        output_limit=40,
+    )
+
+    assert result.failure_provider == "ruff"
+    assert result.selector_coverage == "complete"
+    assert result.selectors_unavailable_reason is None
+    assert result.failed_selectors == ("src/demo.py",)
+    assert len(result.failure_locations) == 1
+    location = result.failure_locations[0]
+    assert location.path == "src/demo.py"
+    assert location.line == 12
+    assert location.column == 5
+    assert location.code == "F821"
+
+
+def test_run_persists_every_failure_as_secret_safe_artifact(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    secret = "ghp_" + "a" * 36
+    script = tmp_path / "secret_failure.py"
+    script.write_text(
+        f"import sys\nprint('token={secret}')\nprint('ordinary diagnostic context')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, check=False)
+
+    assert result.output_artifact_reference is not None
+    assert result.output_artifact_status == "available"
+    digest = result.output_artifact_reference.removeprefix("failure-output:")
+    artifact = tmp_path / "s" / "failure-output-artifacts" / f"{digest}.blob"
+    body = artifact.read_text(encoding="utf-8")
+    assert secret not in body
+    assert "<redacted>" in body
+    assert "ordinary diagnostic context" in body
+
+
+def test_run_reports_typed_selector_unavailability_for_unrecognized_output(
+    tmp_path: Path,
+) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "custom_failure.py"
+    script.write_text(
+        "import sys\nprint('custom build exploded without a location')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, check=False)
+
+    assert result.failure_provider == "custom"
+    assert result.selector_coverage == "unavailable"
+    assert result.selectors_unavailable_reason == "output_unrecognized"
+    assert result.failed_selectors == ()
+    assert result.failure_locations == ()
+
+
+def test_bounded_selector_coverage(
+    tmp_path: Path,
+) -> None:
+    executor = _executor(tmp_path)
+    script = tmp_path / "many_failures.py"
+    script.write_text(
+        "import sys\n"
+        "[print(f'FAILED tests/test_many.py::test_{index}') for index in range(101)]\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, check=False)
+
+    assert len(result.failed_selectors) == 100
+    assert result.selector_coverage == "partial"
+    assert result.selectors_unavailable_reason == "selectors_truncated"
+
+
 def test_uncancelled_token_does_not_change_success_behavior(tmp_path: Path) -> None:
     executor = _executor(tmp_path)
     token = CancellationToken()
     result = executor.run(["echo", "hello"], cwd=tmp_path, cancel_token=token)
     assert result.returncode == 0
     assert "hello" in result.stdout
+
+
+def test_launch_gate_prevents_target_after_owner_crashes_before_binding(tmp_path: Path) -> None:
+    """The reviewed target must not execute until durable child binding succeeds."""
+    marker = tmp_path / "target-ran"
+    bind_started = tmp_path / "bind-started"
+    worker_script = tmp_path / "crash_during_bind.py"
+    target_code = (
+        "from pathlib import Path; import sys; "
+        "Path(sys.argv[1]).write_text('ran', encoding='utf-8')"
+    )
+    worker_script.write_text(
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from repoforge.adapters.subprocess import SubprocessCommandExecutor\n"
+        "from repoforge.config import ServerConfig\n"
+        "from repoforge.ports.cancellation import CancellationToken\n"
+        f"root = Path({str(tmp_path)!r})\n"
+        f"marker = Path({str(marker)!r})\n"
+        f"bind_started = Path({str(bind_started)!r})\n"
+        "def block_binding(pid):\n"
+        "    bind_started.write_text(str(pid), encoding='utf-8')\n"
+        "    time.sleep(30)\n"
+        "executor = SubprocessCommandExecutor(ServerConfig(root / 'w', root / 's'))\n"
+        "token = CancellationToken(on_bind=block_binding, raise_on_bind_error=True)\n"
+        f"executor.run([sys.executable, '-c', {target_code!r}, str(marker)], "
+        "cwd=root, timeout=30, cancel_token=token)\n",
+        encoding="utf-8",
+    )
+
+    worker = subprocess.Popen([sys.executable, str(worker_script)])
+    try:
+        deadline = time.monotonic() + 3
+        while not bind_started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert bind_started.exists()
+        time.sleep(0.2)
+        os.kill(worker.pid, signal.SIGKILL)
+        worker.wait(timeout=3)
+        time.sleep(0.2)
+
+        assert not marker.exists()
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait(timeout=3)
+
+
+def test_launch_gate_runs_exact_argv_after_durable_binding(tmp_path: Path) -> None:
+    """A successful durable bind releases exactly the reviewed target argv."""
+    executor = _executor(tmp_path)
+    bound_pids: list[int] = []
+    token = CancellationToken(on_bind=bound_pids.append, raise_on_bind_error=True)
+    target = "import sys; print('|'.join(sys.argv[1:]))"
+
+    result = executor.run(
+        [sys.executable, "-c", target, "--alpha", "two words"],
+        cwd=tmp_path,
+        cancel_token=token,
+    )
+
+    assert bound_pids
+    assert result.returncode == 0
+    assert result.stdout.strip() == "--alpha|two words"
+
+
+def test_gated_popen_failure_closes_both_pipe_ends_and_is_not_target_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapper/cwd spawn failure must close the gate and preserve target semantics."""
+    executor = _executor(tmp_path)
+    closed: list[int] = []
+
+    monkeypatch.setattr(command_executor_module.os, "pipe", lambda: (101, 102))
+    monkeypatch.setattr(command_executor_module.os, "close", closed.append)
+
+    def fail_popen(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("missing gated cwd")
+
+    monkeypatch.setattr(command_executor_module.subprocess, "Popen", fail_popen)
+
+    with pytest.raises(CommandError) as excinfo:
+        executor.run(
+            ["reviewed-target", "--flag"],
+            cwd=tmp_path / "missing",
+            cancel_token=CancellationToken(),
+        )
+
+    assert excinfo.value.code is ErrorCode.COMMAND_FAILED
+    assert sorted(closed) == [101, 102]

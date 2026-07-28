@@ -11,6 +11,7 @@ from .egress import (
     EgressPolicy,
     EgressRange,
     EgressRequest,
+    entropy_exempt_field,
     evaluate_egress,
 )
 
@@ -36,8 +37,21 @@ def _bound_text(value: str, limit: int) -> str:
     return f"{value[:half]}\n... <{omitted} characters omitted> ...\n{value[-half:]}"
 
 
-def redact_text(value: str, *, secrets: Iterable[str] = (), limit: int = 8_000) -> str:
-    """Redact credential-shaped values while preserving the legacy marker contract."""
+def redact_text(
+    value: str,
+    *,
+    secrets: Iterable[str] = (),
+    limit: int = 8_000,
+    field_key: str = "",
+) -> str:
+    """Redact credential-shaped values while preserving the legacy marker contract.
+
+    `field_key` is the name of the structured field this text came from, when
+    there is one. It can only ever excuse the generic high-entropy heuristic for
+    a value whose field name and shape are known-safe -- never a high-confidence
+    secret-pattern match -- and it exists so the audit sink and the result
+    boundary cannot disagree about the same value.
+    """
 
     if not isinstance(value, str):
         value = str(value)
@@ -60,6 +74,13 @@ def redact_text(value: str, *, secrets: Iterable[str] = (), limit: int = 8_000) 
             ),
         )
     )
+    if (
+        result.findings
+        and all(item.category == "high_entropy" for item in result.findings)
+        and field_key
+        and entropy_exempt_field(field_key, value)
+    ):
+        return _bound_text(value, limit)
     redacted = _legacy_redaction(value, result.redaction_ranges)
     return _bound_text(redacted, limit)
 
@@ -78,7 +99,7 @@ _SENSITIVE_KEYS = {
 }
 
 
-def redact_data(value: object, *, secrets: Iterable[str] = ()) -> object:
+def redact_data(value: object, *, secrets: Iterable[str] = (), _key: str = "") -> object:
     """Recursively redact structured diagnostic/audit data without changing safe scalars."""
 
     explicit = tuple(item for item in secrets if item)
@@ -89,13 +110,13 @@ def redact_data(value: object, *, secrets: Iterable[str] = ()) -> object:
             result[str(key)] = (
                 "<redacted>"
                 if normalized in _SENSITIVE_KEYS
-                else redact_data(item, secrets=explicit)
+                else redact_data(item, secrets=explicit, _key=normalized)
             )
         return result
     if isinstance(value, (list, tuple)):
-        return [redact_data(item, secrets=explicit) for item in value]
+        return [redact_data(item, secrets=explicit, _key=_key) for item in value]
     if isinstance(value, str):
-        return redact_text(value, secrets=explicit)
+        return redact_text(value, secrets=explicit, field_key=_key)
     return value
 
 
@@ -110,7 +131,9 @@ _OMITTED_CONTENT_KEYS = {
 }
 
 
-def sanitize_persisted_data(value: object, *, secrets: Iterable[str] = ()) -> object:
+def sanitize_persisted_data(
+    value: object, *, secrets: Iterable[str] = (), _key: str = ""
+) -> object:
     """Redact secrets and omit high-risk content from durable operational receipts."""
 
     explicit = tuple(item for item in secrets if item)
@@ -125,10 +148,10 @@ def sanitize_persisted_data(value: object, *, secrets: Iterable[str] = ()) -> ob
                 result[f"{key}_omitted"] = True
                 result[f"{key}_sha256"] = hashlib.sha256(encoded).hexdigest()
             else:
-                result[str(key)] = sanitize_persisted_data(item, secrets=explicit)
+                result[str(key)] = sanitize_persisted_data(item, secrets=explicit, _key=normalized)
         return result
     if isinstance(value, (list, tuple)):
-        return [sanitize_persisted_data(item, secrets=explicit) for item in value]
+        return [sanitize_persisted_data(item, secrets=explicit, _key=_key) for item in value]
     if isinstance(value, str):
-        return redact_text(value, secrets=explicit)
+        return redact_text(value, secrets=explicit, field_key=_key)
     return value

@@ -34,14 +34,16 @@ from repoforge.testing.fakes import (
 )
 
 
-def _record() -> PrCheckWatch:
+def _record(operation_id: str = "op-000000000000000000000001") -> PrCheckWatch:
     return new_pr_check_watch(
-        operation_id="op-000000000000000000000001",
+        operation_id=operation_id,
         workspace_id="workspace-1",
         branch="ai/example-1234567890",
         pr_number=42,
         pushed_sha="a" * 40,
         workspace_fingerprint="b" * 64,
+        remote_version="prv2:" + "c" * 64,
+        stability_version="prm2:" + "d" * 64,
         until=PrCheckWatchUntil.ALL_COMPLETED,
         include_failure_evidence=True,
         timeout_seconds=300,
@@ -115,7 +117,7 @@ def _coordinator(
 
 def test_watch_domain_is_bounded_deterministic_and_monotonic() -> None:
     watch = _record()
-    assert watch.schema_version == PR_CHECK_WATCH_SCHEMA_VERSION == 1
+    assert watch.schema_version == PR_CHECK_WATCH_SCHEMA_VERSION == 2
     assert watch.until is PrCheckWatchUntil.ALL_COMPLETED
     updated = _updated(watch)
     assert updated.selectors == ("check-run:101", "check-run:102")
@@ -130,6 +132,8 @@ def test_watch_domain_is_bounded_deterministic_and_monotonic() -> None:
             pr_number=watch.pr_number,
             pushed_sha=watch.pushed_sha,
             workspace_fingerprint=watch.workspace_fingerprint,
+            remote_version=watch.remote_version,
+            stability_version=watch.stability_version,
             until=watch.until,
             include_failure_evidence=True,
             timeout_seconds=4,
@@ -180,11 +184,71 @@ def test_json_watch_store_is_private_atomic_cas_and_strict(tmp_path: Path) -> No
         store.read(watch.operation_id)
     assert future.value.code is ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT
 
-    payload["schema_version"] = 1
+    payload["schema_version"] = PR_CHECK_WATCH_SCHEMA_VERSION
     payload["stdout"] = "secret"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RepoForgeError):
         store.read(watch.operation_id)
+
+
+def test_scanning_survives_a_record_written_by_an_older_schema(tmp_path: Path) -> None:
+    """One record from a previous release must not take the whole runtime down.
+
+    Bumping PR_CHECK_WATCH_SCHEMA_VERSION to 2 added two required fields, and
+    every already-stored v1 record then failed to decode. `list_records` raised
+    on the first one, and because startup calls it through
+    `resume_active()` -> `build_application()`, an installation that had ever
+    watched a PR could not start any process at all -- MCP, the execution
+    worker, or a plain `rf doctor`. Tests never caught it because they always
+    begin with an empty state root.
+
+    A scan therefore reports what it could not read and returns the rest. A
+    direct `read()` of one exact watch stays strict: a caller asking for that
+    watch has to hear that it is unusable.
+    """
+    store = JsonPrCheckWatchStore(tmp_path, InMemoryLockManager())
+    readable = _record()
+    store.create(readable)
+
+    legacy = json.loads(store.encode_for_test(_record(operation_id="op-" + "9" * 24)))
+    legacy["schema_version"] = 1
+    del legacy["remote_version"]
+    del legacy["stability_version"]
+    legacy_path = tmp_path / "pr-check-watches" / f"{legacy['operation_id']}.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    page = store.list_records(max_records=100)
+
+    assert page.records == (readable,)
+    assert page.unreadable_operation_ids == (legacy["operation_id"],)
+    with pytest.raises(RepoForgeError) as direct:
+        store.read(legacy["operation_id"])
+    assert direct.value.code is ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT
+
+
+def test_resume_records_the_watches_it_could_not_read(forge_env: ForgeEnvironment) -> None:
+    """A skipped watch is no longer polled, so the skip has to be visible."""
+    watches = forge_env.service.application.pr_check_watches
+    root = forge_env.service.application.context.config.server.state_root / "pr-check-watches"
+    root.mkdir(parents=True, exist_ok=True)
+    legacy_id = "op-" + "8" * 24
+    (root / f"{legacy_id}.json").write_text(
+        json.dumps({"schema_version": 1, "operation_id": legacy_id}), encoding="utf-8"
+    )
+
+    assert watches.resume_active() == ()
+
+    events = [
+        json.loads(line)
+        for line in (forge_env.service.application.context.config.server.state_root / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    resumed = [item for item in events if item["action"] == "pr_check_watch_resume"]
+    assert len(resumed) == 1
+    assert resumed[0]["details"]["unreadable_watch_count"] == 1
+    assert resumed[0]["details"]["unreadable_operation_ids"] == [legacy_id]
 
 
 def test_watch_completes_after_pending_checks_finish(forge_env: ForgeEnvironment) -> None:
@@ -274,6 +338,7 @@ def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_even
     assert details["until"] == "all_completed"
     assert details["timeout_seconds"] == 300
     assert details["include_failure_evidence"] is True
+    assert details["expected_remote_version"] is False
     assert details["operation_id"] == result.operation.operation_id
     # Bounded: a PR number is an identifier, never the PR title/body or check output.
     assert set(details) == {
@@ -281,6 +346,7 @@ def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_even
         "until",
         "timeout_seconds",
         "include_failure_evidence",
+        "expected_remote_version",
         "operation_id",
         "pr_number",
         "deadline_at",
@@ -288,6 +354,8 @@ def test_workspace_pr_watch_registration_produces_exactly_one_bounded_audit_even
         "duration_ms",
         "result_bytes",
         "is_mutating",
+        "origin",
+        "correlation_hash",
         "repo_id",
     }
     assert "Watch checks" not in json.dumps(details)
@@ -349,14 +417,195 @@ async def test_workspace_pr_watch_is_exposed_through_actual_mcp(
         assert tool.annotations.readOnlyHint is False
         assert tool.annotations.destructiveHint is False
         assert tool.annotations.openWorldHint is True
+        evidence = await session.call_tool(
+            "workspace_pr_evidence",
+            {"workspace_id": workspace_id},
+        )
+        assert evidence.isError is False
+        assert evidence.structuredContent is not None
         result = await session.call_tool(
             "workspace_pr",
             {
                 "workspace_id": workspace_id,
                 "action": "watch",
+                "expected_remote_version": evidence.structuredContent["remote_version"],
                 "until": "all_completed",
                 "timeout_seconds": 300,
             },
         )
         assert result.isError is False
         assert result.structuredContent["operation"]["kind"] == "pr_check_watch"
+
+
+def _seed_failed_ci_check(
+    forge_env: ForgeEnvironment,
+    *,
+    workspace_id: str,
+    check_run_id: int = 501,
+    job_id: int = 900,
+) -> None:
+    ctx = forge_env.service.application.context
+    record = ctx.store.load(workspace_id)
+    workspace = Path(forge_env.service.workspace_status(workspace_id)["path"])
+    head_sha = ctx.git.head_sha(workspace)
+    record.metadata["last_pushed_sha"] = head_sha
+    ctx.store.save(record)
+    state = {
+        "prs": {
+            record.branch: {
+                "number": 42,
+                "title": "Failure evidence",
+                "body": "Failure evidence body",
+                "url": "https://github.com/owner/demo/pull/42",
+                "state": "OPEN",
+                "isDraft": True,
+                "mergeable": "MERGEABLE",
+                "reviewDecision": "",
+                "statusCheckRollup": [],
+                "comments": [],
+                "reviews": [],
+                "updatedAt": "2026-07-21T14:00:00Z",
+                "headRefOid": head_sha,
+            }
+        },
+        "check_runs": {
+            str(check_run_id): {
+                "id": check_run_id,
+                "name": "tests (ubuntu-latest, 3.10)",
+                "head_sha": head_sha,
+                "status": "completed",
+                "conclusion": "failure",
+                "details_url": (f"https://github.com/owner/demo/actions/runs/800/job/{job_id}"),
+                "html_url": f"https://github.com/owner/demo/actions/runs/800/job/{job_id}",
+                "started_at": "2026-07-21T13:07:11Z",
+                "completed_at": "2026-07-21T13:14:06Z",
+                "output": {
+                    "title": "",
+                    "summary": "",
+                    "text": "",
+                    "annotations_count": 1,
+                },
+                "app": {"name": "GitHub Actions"},
+            }
+        },
+        "annotations": {
+            str(check_run_id): [
+                {
+                    "path": ".github",
+                    "start_line": 1014,
+                    "end_line": 1014,
+                    "annotation_level": "failure",
+                    "title": "",
+                    "message": "Process completed with exit code 1.",
+                    "raw_details": "",
+                }
+            ]
+        },
+        "jobs": {
+            str(job_id): {
+                "id": job_id,
+                "run_id": 800,
+                "run_attempt": 1,
+                "name": "tests (ubuntu-latest, 3.10)",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": f"https://github.com/owner/demo/actions/runs/800/job/{job_id}",
+                "steps": [
+                    {
+                        "number": 4,
+                        "name": "Run pytest",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    }
+                ],
+            }
+        },
+        "logs": {
+            str(job_id): (
+                "FAILED tests/test_alpha.py::test_one - AssertionError: expected true\n"
+                "FAILED tests/test_beta.py::test_two - ValueError: broken\n"
+                "tests/test_alpha.py:12: AssertionError\n"
+                "2 failed in 0.42s\n"
+            )
+        },
+    }
+    forge_env.gh_state.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_ci_log_projection(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id = forge_env.service.workspace_create(
+        "demo", "generic annotation job log fallback"
+    )["workspace_id"]
+    _seed_failed_ci_check(forge_env, workspace_id=workspace_id)
+
+    evidence = forge_env.service.workspace_pr_failure_evidence(
+        workspace_id,
+        "check-run:501",
+        max_excerpt_lines=80,
+    )
+
+    assert evidence["failed_step"] == "Run pytest"
+    assert evidence["failure_provider"] == "pytest"
+    assert evidence["selector_coverage"] == "complete"
+    assert evidence["selectors_unavailable_reason"] is None
+    assert evidence["failed_selectors"] == [
+        "tests/test_alpha.py::test_one",
+        "tests/test_beta.py::test_two",
+    ]
+    assert evidence["failure_locations"] == []
+    assert "FAILED tests/test_alpha.py::test_one" in evidence["excerpt"]
+    assert evidence["coverage"] == "complete"
+    assert evidence["output_artifact_status"] == "available"
+    reference = evidence["output_artifact_reference"]
+    assert reference.startswith("failure-output:")
+    digest = reference.removeprefix("failure-output:")
+    artifact = (
+        forge_env.service.config.server.state_root / "failure-output-artifacts" / f"{digest}.blob"
+    )
+    artifact_body = artifact.read_text(encoding="utf-8")
+    assert "FAILED tests/test_alpha.py::test_one" in artifact_body
+    assert "FAILED tests/test_beta.py::test_two" in artifact_body
+
+    public = forge_env.service.workspace_pr_evidence(
+        workspace_id,
+        detail="failure",
+        check_selector="check-run:501",
+        max_excerpt_lines=80,
+    )
+    from repoforge.contracts.registry import V2_TOOL_SPECS
+
+    V2_TOOL_SPECS["workspace_pr_evidence"].validate_output(public)
+    assert public["failure_provider"] == "pytest"
+    assert public["selector_coverage"] == "complete"
+    assert public["failed_selectors"] == evidence["failed_selectors"]
+    assert public["output_artifact_reference"] == reference
+    assert public["output_artifact_status"] == "available"
+
+
+def test_ci_log_source_unavailable_is_explicit(
+    forge_env: ForgeEnvironment,
+) -> None:
+    workspace_id = forge_env.service.workspace_create("demo", "ci log source unavailable")[
+        "workspace_id"
+    ]
+    _seed_failed_ci_check(forge_env, workspace_id=workspace_id)
+    state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
+    state["logs_permission_denied"] = True
+    forge_env.gh_state.write_text(json.dumps(state), encoding="utf-8")
+
+    evidence = forge_env.service.workspace_pr_failure_evidence(
+        workspace_id,
+        "check-run:501",
+        max_excerpt_lines=80,
+    )
+
+    assert evidence["coverage"] == "partial"
+    assert evidence["failure_provider"] == "custom"
+    assert evidence["selector_coverage"] == "unavailable"
+    assert evidence["selectors_unavailable_reason"] == "output_unrecognized"
+    assert evidence["failed_selectors"] == []
+    assert evidence["output_artifact_status"] == "source_unavailable"
+    assert evidence["output_artifact_reference"].startswith("failure-output:")
+    assert any(item.startswith("job_log_") for item in evidence["source_errors"])

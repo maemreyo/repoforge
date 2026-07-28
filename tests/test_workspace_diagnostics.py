@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import ForgeEnvironment
+from conftest import ForgeEnvironment, durable_worker
 
 from repoforge.application.configuration.document import render_resolved
 from repoforge.application.workspace.diagnostic_parser import parse_diagnostic
@@ -21,6 +22,7 @@ from repoforge.domain.diagnostics import (
     validate_diagnostic_profile,
 )
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
+from repoforge.domain.failure_artifacts import FailureLocation
 from repoforge.domain.workspace import VerificationReceipt
 from repoforge.ports.command import CommandResult
 
@@ -909,6 +911,31 @@ def test_pytest_parser_preserves_structured_failures_when_excerpt_is_truncated()
     assert parsed.output_artifact_reference == "failure-output:" + "a" * 64
 
 
+def test_parser_projects_provider_neutral_failure_evidence() -> None:
+    parsed = parse_diagnostic(
+        _profile(),
+        CommandResult(
+            ("ruff", "check", "src"),
+            "/workspace",
+            1,
+            "src/demo.py:12:5: F821 Undefined name `missing`",
+            "",
+            failed_selectors=("src/demo.py",),
+            output_artifact_reference="failure-output:" + "a" * 64,
+            failure_provider="ruff",
+            selector_coverage="complete",
+            failure_locations=(FailureLocation("src/demo.py", 12, 5, "F821"),),
+            output_artifact_status="available",
+        ),
+    )
+
+    assert parsed.failure_provider == "ruff"
+    assert parsed.selector_coverage == "complete"
+    assert parsed.selectors_unavailable_reason is None
+    assert parsed.failure_locations == (FailureLocation("src/demo.py", 12, 5, "F821"),)
+    assert parsed.output_artifact_status == "available"
+
+
 @pytest.mark.parametrize(
     ("output", "expected_failure_class"),
     [
@@ -985,6 +1012,40 @@ def _runtime_profile(
         output_limit=output_limit,
         artifact_paths=artifact_paths,
     )
+
+
+def test_workspace_verify_projects_provider_neutral_failure_artifact(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "provider neutral failure")["workspace_id"]
+    profile = _runtime_profile(
+        "ruff-failure-artifact",
+        (
+            "python3",
+            "-c",
+            "import sys; print('src/demo.py:12:5: F821 Undefined name `missing`'); sys.exit(1)",
+        ),
+        output_limit=20,
+    )
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+
+    with durable_worker(service):
+        result = service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+        )
+
+    assert result["failure_provider"] == "ruff"
+    assert result["selector_coverage"] == "complete"
+    assert result["selectors_unavailable_reason"] is None
+    assert result["failure_locations"] == [
+        {"path": "src/demo.py", "line": 12, "column": 5, "code": "F821"}
+    ]
+    assert result["failed_selectors"] == ["src/demo.py"]
+    assert result["output_artifact_status"] == "available"
+    assert result["output_artifact_reference"].startswith("failure-output:")
 
 
 def test_deterministic_diagnostic_failure_is_reused_and_forceable(
@@ -1404,26 +1465,27 @@ def test_workspace_verify_rerun_failed_uses_only_complete_last_failure_set(
     profile = _rerun_failed_profile("rerun-failed", script)
     service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
 
-    first = service.workspace_verify(
-        workspace_id,
-        mode="diagnostic",
-        diagnostic_id=profile.diagnostic_id,
-        selector="suite",
-    )
-    assert first["failed_selectors"] == [
-        "tests/test_alpha.py::test_one",
-        "tests/test_beta.py::test_two",
-    ]
-    assert first["output_artifact_reference"].startswith("failure-output:")
-    assert first["failure_expectation"] == "unexpected"
-    chain_id = first["failure_chain_id"]
+    with durable_worker(service):
+        first = service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            selector="suite",
+        )
+        assert first["failed_selectors"] == [
+            "tests/test_alpha.py::test_one",
+            "tests/test_beta.py::test_two",
+        ]
+        assert first["output_artifact_reference"].startswith("failure-output:")
+        assert first["failure_expectation"] == "unexpected"
+        chain_id = first["failure_chain_id"]
 
-    rerun = service.workspace_verify(
-        workspace_id,
-        mode="diagnostic",
-        diagnostic_id=profile.diagnostic_id,
-        rerun="failed",
-    )
+        rerun = service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            rerun="failed",
+        )
 
     assert rerun["rerun_of_selectors"] == first["failed_selectors"]
     assert rerun["failed_selectors"] == first["failed_selectors"]
@@ -1450,26 +1512,116 @@ def test_workspace_verify_rerun_failed_green_merges_into_same_chain(
     profile = _rerun_failed_profile("rerun-failed-green", script)
     service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
 
-    first = service.workspace_verify(
-        workspace_id,
-        mode="diagnostic",
-        diagnostic_id=profile.diagnostic_id,
-        selector="suite",
-    )
-    chain_id = first["failure_chain_id"]
+    with durable_worker(service):
+        first = service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            selector="suite",
+        )
+        chain_id = first["failure_chain_id"]
 
-    rerun = service.workspace_verify(
-        workspace_id,
-        mode="diagnostic",
-        diagnostic_id=profile.diagnostic_id,
-        rerun="failed",
-    )
+        rerun = service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            rerun="failed",
+        )
 
     assert rerun["outcome"] == "passed"
     assert rerun["failed_selectors"] == []
     assert rerun["rerun_of_selectors"] == ["tests/test_alpha.py::test_one"]
     assert rerun["failure_chain_id"] == chain_id
     assert counter.read_text(encoding="utf-8") == "2"
+
+
+def test_legacy_rerun_binding_state(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "legacy rerun history")["workspace_id"]
+    counter = tmp_path / "legacy-rerun-attempts.txt"
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "print('1 failed in 0.01s'); "
+        "print('FAILED tests/test_alpha.py::test_one'); sys.exit(1)"
+    )
+    profile = _rerun_failed_profile("legacy-rerun-history", script)
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+    with durable_worker(service):
+        service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            selector="suite",
+        )
+    ctx = service.application.context
+    record = ctx.store.load(workspace_id)
+    target = f"diagnostic:{profile.diagnostic_id}"
+    history = record.metadata["failed_selector_history_v1"]
+    current = history[target]
+    history[target] = {
+        "version": 1,
+        "fingerprint": current["fingerprint"],
+        "selectors": current["selectors"],
+        "chain_id": current["chain_id"],
+        "attempts": current["attempts"],
+    }
+    ctx.store.save(record)
+
+    with durable_worker(service), pytest.raises(RepoForgeError) as excinfo:
+        service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            rerun="failed",
+        )
+
+    assert excinfo.value.code is ErrorCode.DIAGNOSTIC_STALE_WORKSPACE
+    assert "predates exact compatibility binding" in str(excinfo.value)
+    assert counter.read_text(encoding="utf-8") == "1"
+
+
+def test_workspace_verify_rerun_failed_refuses_reviewed_target_drift(
+    forge_env: ForgeEnvironment,
+    tmp_path: Path,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "rerun failed target drift")["workspace_id"]
+    counter = tmp_path / "rerun-target-drift-attempts.txt"
+    script = (
+        "from pathlib import Path; import sys; "
+        f"p=Path({str(counter)!r}); p.write_text(str((int(p.read_text()) if p.exists() else 0)+1)); "
+        "print('1 failed in 0.01s'); "
+        "print('FAILED tests/test_alpha.py::test_one'); sys.exit(1)"
+    )
+    profile = _rerun_failed_profile("rerun-target-drift", script)
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
+    with durable_worker(service):
+        service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            selector="suite",
+        )
+    service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = replace(
+        profile,
+        output_limit=profile.output_limit + 1,
+    )
+
+    with durable_worker(service), pytest.raises(RepoForgeError) as excinfo:
+        service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            rerun="failed",
+        )
+
+    assert excinfo.value.code is ErrorCode.DIAGNOSTIC_STALE_WORKSPACE
+    assert "compatibility" in str(excinfo.value).lower()
+    assert counter.read_text(encoding="utf-8") == "1"
 
 
 def test_workspace_verify_rerun_failed_refuses_fingerprint_drift(
@@ -1487,16 +1639,17 @@ def test_workspace_verify_rerun_failed_refuses_fingerprint_drift(
     )
     profile = _rerun_failed_profile("rerun-failed-drift", script)
     service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
-    service.workspace_verify(
-        workspace_id,
-        mode="diagnostic",
-        diagnostic_id=profile.diagnostic_id,
-        selector="suite",
-    )
+    with durable_worker(service):
+        service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            selector="suite",
+        )
     _, _, workspace = service.application.context.workspace(workspace_id)
     (workspace / "hello.txt").write_text("changed\n", encoding="utf-8")
 
-    with pytest.raises(RepoForgeError) as excinfo:
+    with durable_worker(service), pytest.raises(RepoForgeError) as excinfo:
         service.workspace_verify(
             workspace_id,
             mode="diagnostic",
@@ -1517,15 +1670,16 @@ def test_expected_tdd_red_failure_is_classified_separately(
     profile = _rerun_failed_profile("expected-red", script)
     service.config.repositories["demo"].diagnostics[profile.diagnostic_id] = profile
 
-    result = service.workspace_verify(
-        workspace_id,
-        mode="diagnostic",
-        diagnostic_id=profile.diagnostic_id,
-        selector="suite",
-        intent="tdd_red",
-        expectation="fail",
-        expected_failure_class="test_failure",
-    )
+    with durable_worker(service):
+        result = service.workspace_verify(
+            workspace_id,
+            mode="diagnostic",
+            diagnostic_id=profile.diagnostic_id,
+            selector="suite",
+            intent="tdd_red",
+            expectation="fail",
+            expected_failure_class="test_failure",
+        )
 
     assert result["failure_expectation"] == "expected_red"
     audit_path = vars(service.application.context.audit)["path"]

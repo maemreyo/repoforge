@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from repoforge.application.read_batch import FileReadRequest
 from repoforge.domain.errors import WorkspaceError
+from repoforge.interfaces.mcp.server import create_server
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -113,7 +115,7 @@ def test_workspace_read_partial_error_is_typed_and_does_not_leak_denied_content(
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "v2 read partial error")["workspace_id"]
     root = Path(service.workspace_status(workspace_id)["path"])
-    (root / ".env").write_text("SECRET=value\n", encoding="utf-8")
+    (root / ".env").write_text("SECRET=<redacted:sensitive_config>", encoding="utf-8")
 
     result = service.workspace_read(
         workspace_id,
@@ -162,3 +164,50 @@ def test_read_rejects_duplicate_paths_and_invalid_ranges(
             workspace_id,
             [FileReadRequest("hello.txt", 3, 2)],
         )
+
+
+@pytest.mark.anyio
+async def test_workspace_read_five_documents_stays_within_mcp_transport_budget(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 five document transport")["workspace_id"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    document = '"' * 24_000
+    paths = [f"document-{index}.txt" for index in range(5)]
+    for path in paths:
+        (root / path).write_text(document, encoding="utf-8")
+
+    server = create_server(service=service)
+    assembled = {path: "" for path in paths}
+    cursor = None
+    page_count = 0
+    async with create_connected_server_and_client_session(server) as session:
+        while True:
+            result = await session.call_tool(
+                "workspace_read",
+                {
+                    "workspace_id": workspace_id,
+                    "files": [{"path": path} for path in paths],
+                    "byte_budget": 120_000,
+                    "cursor": cursor,
+                },
+            )
+            assert result.isError is False
+            assert result.structuredContent is not None
+            metadata = result.model_dump(by_alias=True)["_meta"]
+            assert metadata["repoforge_trace"]["payload"]["within_budget"] is True
+            for item in result.structuredContent["files"]:
+                assembled[item["path"]] += item["content"]
+            cursor = result.structuredContent["next_cursor"]
+            page_count += 1
+            assert page_count <= 10
+            if cursor is None:
+                break
+
+    assert page_count > 1
+    expected = {path: f"1: {document}" for path in paths}
+    assert {path: len(value) for path, value in assembled.items()} == {
+        path: len(value) for path, value in expected.items()
+    }
+    assert assembled == expected

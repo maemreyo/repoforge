@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -12,7 +11,7 @@ from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
 from ...ports.progress_reporter import NullProgressReporter, ProgressReporter
 from ..workspace.failure_intelligence import FailureEvidenceReadCommand, FailureIntelligenceService
 from .cancel import OperationCancelCommand, OperationCancellationRequester
-from .dto import OperationStatusView, OperationSummary, operation_summary
+from .dto import OperationStatusView, OperationSummary
 from .list import OperationListCommand, OperationLister
 from .status import OperationStatusCommand, OperationStatusReader
 
@@ -124,12 +123,21 @@ def operation_evidence(view: OperationSummary | OperationStatusView) -> dict[str
         "kind": view.kind,
         "state": view.state,
         "phase": view.phase,
+        "attempt": view.attempt,
+        "heartbeat_at": view.heartbeat_at,
+        "heartbeat_age_seconds": view.heartbeat_age_seconds,
+        "evidence_complete": view.evidence_complete,
         "progress_current": view.progress.current,
         "progress_total": view.progress.total,
         "progress_unit": view.progress.unit,
         "progress_message": view.progress.message,
         "workspace_id": view.workspace_id,
+        "owner_id": view.owner_id,
+        "lease_expires_at": view.lease_expires_at,
         "result_reference": view.result_reference,
+        "result_reference_status": view.result_reference_status,
+        "receipt_id": view.receipt_id,
+        "receipt_status": view.receipt_status,
         "error_code": view.error_code,
         "retryability": view.retryability,
         "terminal": terminal,
@@ -138,6 +146,10 @@ def operation_evidence(view: OperationSummary | OperationStatusView) -> dict[str
         "suggested_poll_after_s": _poll_after(view),
         "eta_seconds": _eta_seconds(view),
         "updated_at": view.updated_at,
+        "schema_version": view.schema_version,
+        "record_provenance": view.record_provenance,
+        "record_consistency": view.record_consistency,
+        "record_diagnostics": view.record_diagnostics,
     }
 
 
@@ -149,13 +161,11 @@ class OperationCoordinator:
         lister: OperationLister,
         cancel: OperationCancellationRequester,
         failure_evidence: FailureIntelligenceService,
-        request_live_cancel: Callable[[str, str], bool] | None = None,
     ) -> None:
         self.status = status
         self.lister = lister
         self.cancel = cancel
         self.failure_evidence = failure_evidence
-        self.request_live_cancel = request_live_cancel
 
     @staticmethod
     def _emit_progress(
@@ -197,7 +207,7 @@ class OperationCoordinator:
             if not 1 <= timeout_seconds <= 60:
                 raise _invalid("operation wait timeout_seconds must be between 1 and 60")
             reporter: ProgressReporter = progress_reporter or NullProgressReporter()
-            current = operation_summary(self.status.operations.status(command.operation_id))
+            current = self.status.read(command.operation_id)
             baseline = command.since_updated_at or current.updated_at
             terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
             changed_since = command.since_updated_at is not None and current.updated_at != baseline
@@ -211,7 +221,7 @@ class OperationCoordinator:
                 if remaining <= 0:
                     break
                 time.sleep(min(0.1, remaining))
-                current = operation_summary(self.status.operations.status(command.operation_id))
+                current = self.status.read(command.operation_id)
                 terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
                 changed_since = current.updated_at != baseline
                 # Heartbeat the open request so a progress-capable client learns
@@ -221,6 +231,12 @@ class OperationCoordinator:
                     self._emit_progress(reporter, current)
                     last_reported_at = current.updated_at
             timed_out = not terminal and not changed_since
+            self.status.operations.ctx.record_metric(
+                "operation_wait_empty_delta" if timed_out else "operation_wait_delta",
+                success=True,
+                duration_ms=0.0,
+                error_code=None,
+            )
             return OperationResult(
                 summary=(
                     f"Operation {command.operation_id} reached terminal state"
@@ -232,7 +248,7 @@ class OperationCoordinator:
                     )
                 ),
                 action="wait",
-                operation=operation_evidence(current),
+                operation=(operation_evidence(current) if terminal or changed_since else None),
                 operations=[],
                 cancellation_requested=False,
                 truncated=False,
@@ -276,8 +292,6 @@ class OperationCoordinator:
         decision = self.cancel.execute(
             OperationCancelCommand(command.operation_id, command.expected_updated_at)
         )
-        if decision.cancellation_requested and self.request_live_cancel is not None:
-            self.request_live_cancel(decision.operation.kind, command.operation_id)
         return OperationResult(
             summary=(
                 f"Requested cancellation for {command.operation_id}"

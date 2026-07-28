@@ -3,50 +3,64 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
-import re
 import signal
 import subprocess
-import tempfile
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from ...config import ServerConfig
 from ...domain.errors import CommandError, ErrorCode
+from ...domain.failure_artifacts import extract_failure
 from ...domain.redaction import redact_text
 from ...domain.repository_auth_broker import EphemeralSecret
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
+from ..persistence.failure_output_artifact_store import persist_failure_output
 from .process_tree import inspect_descendants, kill_identity, wait_identities_gone
 
-_MAX_FAILED_SELECTORS = 100
-_MAX_FAILURE_OUTPUT_ARTIFACT_BYTES = 10 * 1024 * 1024
-_PYTEST_LEADING_SELECTOR = re.compile(
-    r"^(?:FAILED|ERROR)\s+(?P<selector>[^\s]+(?:\:\:[^\s]+)*)",
-    re.MULTILINE,
-)
-_PYTEST_TRAILING_SELECTOR = re.compile(
-    r"^(?P<selector>[^\s]+\:\:[^\s]+)\s+(?:FAILED|ERROR)\b",
-    re.MULTILINE,
-)
+_LAUNCH_EXEC_NOT_FOUND = "__REPOFORGE_LAUNCH_EXEC_NOT_FOUND__"
+_LAUNCH_GATE_SCRIPT = """\
+import os
+import sys
+
+gate_fd = int(sys.argv[1])
+try:
+    released = os.read(gate_fd, 1)
+finally:
+    os.close(gate_fd)
+if released != b"1":
+    os._exit(125)
+argv = sys.argv[2:]
+try:
+    os.execvpe(argv[0], argv, os.environ)
+except FileNotFoundError:
+    os.write(2, b"__REPOFORGE_LAUNCH_EXEC_NOT_FOUND__\\n")
+    os._exit(127)
+except OSError as exc:
+    os.write(2, ("__REPOFORGE_LAUNCH_EXEC_FAILED__:" + str(exc) + "\\n").encode("utf-8", "replace"))
+    os._exit(126)
+"""
 
 
-def _failed_selectors(output: str) -> tuple[str, ...]:
-    selectors: list[str] = []
-    seen: set[str] = set()
-    for pattern in (_PYTEST_LEADING_SELECTOR, _PYTEST_TRAILING_SELECTOR):
-        for match in pattern.finditer(output):
-            selector = match.group("selector").replace("\\", "/").rstrip(":")
-            if not selector or selector in seen:
-                continue
-            seen.add(selector)
-            selectors.append(selector)
-            if len(selectors) >= _MAX_FAILED_SELECTORS:
-                return tuple(selectors)
-    return tuple(selectors)
+def _mask_issued_secrets(text: str, secrets: tuple[str, ...]) -> str:
+    """Remove exactly the credentials this call was issued, and nothing else.
+
+    Deliberately not the full egress detector. Running that at capture would
+    inject markers into machine-readable output -- `gh` emits JSON, and a marker
+    dropped inside it makes the payload unparseable -- and the egress boundary
+    already applies the detector later with more precise markers. What has to
+    happen here is narrower: a credential handed to a pinned transport must never
+    appear in captured output, including the failure artifact that outlives the
+    call, because nothing downstream can tell it was ever a secret.
+    """
+
+    for secret in secrets:
+        text = text.replace(secret, "<redacted>")
+    return text
 
 
 class SubprocessCommandExecutor:
@@ -77,31 +91,31 @@ class SubprocessCommandExecutor:
             True,
         )
 
-    def _persist_failure_output(self, stdout: str, stderr: str) -> str | None:
-        payload = ("--- stdout ---\n" + stdout + "\n--- stderr ---\n" + stderr).encode(
-            "utf-8", errors="replace"
+    def _persist_failure_output(self, stdout: str, stderr: str) -> tuple[str | None, str]:
+        artifact = persist_failure_output(
+            self.config.state_root,
+            "--- stdout ---\n" + stdout + "\n--- stderr ---\n" + stderr,
         )
-        if not payload or len(payload) > _MAX_FAILURE_OUTPUT_ARTIFACT_BYTES:
-            return None
-        digest = hashlib.sha256(payload).hexdigest()
-        root = self.config.state_root / "failure-output-artifacts"
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(root, 0o700)
-        target = root / f"{digest}.blob"
-        if not target.exists():
-            descriptor, temporary_name = tempfile.mkstemp(prefix=f".{digest}.tmp-", dir=root)
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    os.fchmod(handle.fileno(), 0o600)
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, target)
-                os.chmod(target, 0o600)
-            finally:
-                temporary.unlink(missing_ok=True)
-        return f"failure-output:{digest}"
+        return artifact.reference, artifact.status
+
+    @staticmethod
+    def _unstarted_failure_details(argv: Sequence[str]) -> dict[str, object]:
+        extraction = extract_failure(argv, "", returncode=127)
+        return {
+            "failure_provider": extraction.provider,
+            "selector_coverage": "unavailable",
+            "selectors_unavailable_reason": "artifact_unavailable",
+            "failed_selectors": [],
+            "failure_locations": [],
+            "output_artifact_status": "not_applicable",
+        }
+
+    @staticmethod
+    def _captured_text(value: str | bytes | None, previous: str = "") -> str:
+        if value is None:
+            return previous
+        current = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+        return current if len(current) >= len(previous) else previous
 
     def _communicate(
         self,
@@ -118,9 +132,24 @@ class SubprocessCommandExecutor:
         if exact_env is not None and extra_env is not None:
             raise CommandError("exact_env and extra_env are mutually exclusive")
         environment = dict(exact_env) if exact_env is not None else self.environment(extra_env)
+        gate_read: int | None = None
+        gate_write: int | None = None
+        popen_argv = list(argv)
+        pass_fds: tuple[int, ...] = ()
+        if cancel_token is not None:
+            cancel_token.before_spawn()
+            gate_read, gate_write = os.pipe()
+            popen_argv = [
+                sys.executable,
+                "-c",
+                _LAUNCH_GATE_SCRIPT,
+                str(gate_read),
+                *argv,
+            ]
+            pass_fds = (gate_read,)
         try:
             process = subprocess.Popen(
-                list(argv),
+                popen_argv,
                 cwd=cwd,
                 env=environment,
                 stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
@@ -130,24 +159,59 @@ class SubprocessCommandExecutor:
                 encoding="utf-8" if text else None,
                 errors="replace" if text else None,
                 start_new_session=True,
+                pass_fds=pass_fds,
             )
-        except FileNotFoundError as exc:
-            raise CommandError(
-                f"Executable not found: {argv[0]}",
-                code=ErrorCode.NOT_FOUND,
-                details={"executable": argv[0]},
-            ) from exc
         except OSError as exc:
+            if gate_write is not None:
+                with contextlib.suppress(OSError):
+                    os.close(gate_write)
+                gate_write = None
+            if isinstance(exc, FileNotFoundError) and cancel_token is None:
+                raise CommandError(
+                    f"Executable not found: {argv[0]}",
+                    code=ErrorCode.NOT_FOUND,
+                    details={
+                        "executable": argv[0],
+                        **self._unstarted_failure_details(argv),
+                    },
+                ) from exc
+            message = (
+                f"Cannot start gated command {' '.join(argv)}: {exc}"
+                if cancel_token is not None
+                else f"Cannot execute {' '.join(argv)}: {exc}"
+            )
             raise CommandError(
-                f"Cannot execute {' '.join(argv)}: {exc}",
+                message,
                 code=ErrorCode.COMMAND_FAILED,
+                details=self._unstarted_failure_details(argv),
             ) from exc
+        finally:
+            if gate_read is not None:
+                with contextlib.suppress(OSError):
+                    os.close(gate_read)
         if cancel_token is not None:
-            cancel_token.bind(process)
+            assert gate_write is not None
+            try:
+                cancel_token.bind(process)
+            except Exception:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=2)
+                cancel_token.release()
+                raise
+            else:
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    os.write(gate_write, b"1")
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(gate_write)
         try:
             try:
                 return (process, process.communicate(input_data, timeout=timeout))
             except subprocess.TimeoutExpired as exc:
+                captured_stdout = self._captured_text(exc.output)
+                captured_stderr = self._captured_text(exc.stderr)
                 # Snapshot descendants before sending any kill signal: a child
                 # that daemonized a grandchild via its own start_new_session/
                 # setsid is still reachable by ppid here as long as it (or
@@ -177,8 +241,12 @@ class SubprocessCommandExecutor:
                 # this bounds the caller's wait either way, but still tries hard
                 # not to leave the child orphaned.
                 try:
-                    process.communicate(timeout=2)
-                except subprocess.TimeoutExpired:
+                    drained_stdout, drained_stderr = process.communicate(timeout=2)
+                    captured_stdout = self._captured_text(drained_stdout, captured_stdout)
+                    captured_stderr = self._captured_text(drained_stderr, captured_stderr)
+                except subprocess.TimeoutExpired as drain_exc:
+                    captured_stdout = self._captured_text(drain_exc.output, captured_stdout)
+                    captured_stderr = self._captured_text(drain_exc.stderr, captured_stderr)
                     with contextlib.suppress(ProcessLookupError, PermissionError):
                         process.kill()
                     with contextlib.suppress(subprocess.TimeoutExpired):
@@ -204,6 +272,15 @@ class SubprocessCommandExecutor:
                     if kill_identity(descendant, signal.SIGKILL)
                 )
                 survivors = wait_identities_gone(signalled_identities)
+                artifact_reference, artifact_status = self._persist_failure_output(
+                    captured_stdout,
+                    captured_stderr,
+                )
+                extraction = extract_failure(
+                    argv,
+                    "\n".join(part for part in (captured_stdout, captured_stderr) if part),
+                    returncode=124,
+                )
                 raise CommandError(
                     f"Command timed out after {timeout}s: {' '.join(argv)}",
                     code=ErrorCode.COMMAND_TIMEOUT,
@@ -218,6 +295,25 @@ class SubprocessCommandExecutor:
                         "descendant_snapshot_count": len(descendants),
                         "descendant_signal_count": len(signalled_identities),
                         "descendant_survivor_count": len(survivors),
+                        "failed_selectors": list(extraction.selectors),
+                        "failure_provider": extraction.provider,
+                        "selector_coverage": extraction.selector_coverage,
+                        "selectors_unavailable_reason": (extraction.selectors_unavailable_reason),
+                        "failure_locations": [
+                            {
+                                "path": item.path,
+                                "line": item.line,
+                                "column": item.column,
+                                "code": item.code,
+                            }
+                            for item in extraction.locations
+                        ],
+                        "output_artifact_status": artifact_status,
+                        **(
+                            {"output_artifact_reference": artifact_reference}
+                            if artifact_reference is not None
+                            else {}
+                        ),
                     },
                 ) from exc
         finally:
@@ -452,29 +548,46 @@ class SubprocessCommandExecutor:
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise CommandError("Text command returned binary output")
-        redact_limit = max(1, min(max(len(stdout), len(stderr), limit), 1_000_000))
-        safe_stdout = redact_text(stdout, secrets=secrets, limit=redact_limit)
-        safe_stderr = redact_text(stderr, secrets=secrets, limit=redact_limit)
-        selectors = _failed_selectors(
-            "\n".join(part for part in (safe_stdout, safe_stderr) if part)
-        )
-        bounded_stdout, stdout_truncated = self._truncate(safe_stdout, limit)
-        bounded_stderr, stderr_truncated = self._truncate(safe_stderr, limit)
-        artifact_reference = (
-            self._persist_failure_output(safe_stdout, safe_stderr)
-            if (process.returncode or 0) != 0 and (stdout_truncated or stderr_truncated)
-            else None
-        )
+        if process.returncode == 127 and _LAUNCH_EXEC_NOT_FOUND in stderr:
+            raise CommandError(
+                f"Executable not found: {argv[0]}",
+                code=ErrorCode.NOT_FOUND,
+                details={
+                    "executable": argv[0],
+                    **self._unstarted_failure_details(argv),
+                },
+            )
+        returncode = process.returncode or 0
+        # Issued secrets are removed at capture so nothing downstream -- selector
+        # extraction, truncation, or the failure artifact that outlives this call
+        # -- can observe them. Ordinary commands issue none, so this is a no-op
+        # for them and their output reaches the egress boundary untouched.
+        if issued_secrets := tuple(secret for secret in secrets if secret):
+            stdout = _mask_issued_secrets(stdout, issued_secrets)
+            stderr = _mask_issued_secrets(stderr, issued_secrets)
+        full_output = "\n".join(part for part in (stdout, stderr) if part)
+        extraction = extract_failure(argv, full_output, returncode=returncode)
+        bounded_stdout, stdout_truncated = self._truncate(stdout, limit)
+        bounded_stderr, stderr_truncated = self._truncate(stderr, limit)
+        artifact_reference: str | None = None
+        artifact_status = "not_applicable"
+        if returncode != 0:
+            artifact_reference, artifact_status = self._persist_failure_output(stdout, stderr)
         result = CommandResult(
-            tuple(argv),
-            str(cwd),
-            process.returncode or 0,
-            bounded_stdout,
-            bounded_stderr,
-            stdout_truncated,
-            stderr_truncated,
-            selectors,
-            artifact_reference,
+            argv=tuple(argv),
+            cwd=str(cwd),
+            returncode=returncode,
+            stdout=bounded_stdout,
+            stderr=bounded_stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+            failed_selectors=extraction.selectors,
+            output_artifact_reference=artifact_reference,
+            failure_provider=extraction.provider,
+            selector_coverage=extraction.selector_coverage,
+            selectors_unavailable_reason=extraction.selectors_unavailable_reason,
+            failure_locations=extraction.locations,
+            output_artifact_status=artifact_status,
         )
         if check and result.returncode != 0:
             cancelled = cancel_token is not None and cancel_token.is_cancelled()
@@ -504,6 +617,19 @@ class SubprocessCommandExecutor:
                         if result.failed_selectors
                         else {}
                     ),
+                    "failure_provider": result.failure_provider,
+                    "selector_coverage": result.selector_coverage,
+                    "selectors_unavailable_reason": result.selectors_unavailable_reason,
+                    "failure_locations": [
+                        {
+                            "path": item.path,
+                            "line": item.line,
+                            "column": item.column,
+                            "code": item.code,
+                        }
+                        for item in result.failure_locations
+                    ],
+                    "output_artifact_status": result.output_artifact_status,
                     **(
                         {"output_artifact_reference": result.output_artifact_reference}
                         if result.output_artifact_reference is not None

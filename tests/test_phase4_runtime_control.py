@@ -534,9 +534,29 @@ def test_supervisor_commits_active_generation_only_after_health(tmp_path: Path) 
             del profile, env
             return (True, "ok")
 
-        def start(self, profile, *, env, log_path):
-            del profile, env, log_path
+        def start(self, profile, *, env, log_path, correlation_id):
+            del profile, env, log_path, correlation_id
             return ChildProcess(222, "f" * 64, "now")
+
+        def terminate(self, child, *, grace_seconds):
+            del child, grace_seconds
+            self.alive = False
+            self.terminated = True
+
+        def is_alive(self, child):
+            del child
+            return self.alive
+
+    class ExecutionWorker:
+        def __init__(self):
+            self.started_generations = []
+            self.terminated = False
+            self.alive = True
+
+        def start(self, generation, *, env, log_path, correlation_id):
+            del env, log_path, correlation_id
+            self.started_generations.append(generation)
+            return ChildProcess(333, "e" * 64, "now")
 
         def terminate(self, child, *, grace_seconds):
             del child, grace_seconds
@@ -553,6 +573,7 @@ def test_supervisor_commits_active_generation_only_after_health(tmp_path: Path) 
     runtime = FakeRuntimeStore()
     mcp = Mcp()
     tunnel = Tunnel()
+    execution_worker = ExecutionWorker()
     runtime_path = tmp_path / "runtime.json"
     runtime_path.write_text(
         '{"pid":999,"process_identity":"' + "f" * 64 + '","active_generation":2}',
@@ -572,6 +593,8 @@ def test_supervisor_commits_active_generation_only_after_health(tmp_path: Path) 
         processes=Processes(),
         mcp_runtime_path=runtime_path,
         log_path=tmp_path / "runtime.log",
+        execution_worker=execution_worker,
+        execution_worker_log_path=tmp_path / "execution-worker.log",
         health_timeout_seconds=0.2,
         max_restarts=0,
     )
@@ -591,6 +614,8 @@ def test_supervisor_commits_active_generation_only_after_health(tmp_path: Path) 
     assert configs.active_item.generation == 2
     assert tunnel.terminated
     assert tunnel.initialize_calls == 1
+    assert execution_worker.started_generations == [2]
+    assert execution_worker.terminated
     assert profile_store.value == profile.fingerprint
     assert profile_store.commits == [profile.fingerprint]
 
@@ -709,6 +734,7 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
             self.starts = 0
             self.health_calls = 0
             self.terminated = 0
+            self.correlations: list[str] = []
 
         def initialize(self, profile, *, env):
             del profile, env
@@ -717,10 +743,11 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
             del profile, env
             return True, "ok"
 
-        def start(self, profile, *, env, log_path):
+        def start(self, profile, *, env, log_path, correlation_id):
             del profile, env, log_path
             self.starts += 1
             self.health_calls = 0
+            self.correlations.append(correlation_id)
             return ChildProcess(200 + self.starts, "f" * 64, "now")
 
         def is_alive(self, child):
@@ -779,3 +806,60 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
     )
     assert tunnel.starts == 2
     assert tunnel.terminated >= 2
+    assert runtime.record is not None
+    assert tunnel.correlations == [runtime.record.correlation_id] * 2
+
+
+def test_execution_worker_restarts_when_generation_changes_or_process_dies(tmp_path) -> None:
+    from repoforge.application.runtime.supervisor import RuntimeSupervisor
+    from repoforge.domain.runtime import ChildProcess
+
+    class Worker:
+        def __init__(self):
+            self.started = []
+            self.alive = set()
+            self.terminated = []
+
+        def start(self, generation, *, env, log_path, correlation_id):
+            del env, log_path, correlation_id
+            self.started.append(generation)
+            child = ChildProcess(400 + len(self.started), f"{generation:064x}", "now")
+            self.alive.add(child.pid)
+            return child
+
+        def is_alive(self, child):
+            return child.pid in self.alive
+
+        def terminate(self, child, *, grace_seconds):
+            del grace_seconds
+            self.terminated.append(child.pid)
+            self.alive.discard(child.pid)
+
+    worker = Worker()
+    supervisor = RuntimeSupervisor(
+        store=object(),
+        configs=object(),
+        locks=object(),
+        control=object(),
+        mcp_control=object(),
+        tunnel=object(),
+        profile_store=object(),
+        clock=FixedClock("2026-07-27T00:00:00+00:00"),
+        ids=SequenceIdGenerator(("worker",)),
+        processes=object(),
+        mcp_runtime_path=tmp_path / "mcp.json",
+        log_path=tmp_path / "runtime.log",
+        execution_worker=worker,
+        execution_worker_log_path=tmp_path / "worker.log",
+    )
+
+    supervisor._ensure_execution_worker(12, environment={}, correlation_id="first")
+    first_pid = supervisor._execution_child.pid
+    supervisor._ensure_execution_worker(12, environment={}, correlation_id="same")
+    supervisor._ensure_execution_worker(13, environment={}, correlation_id="generation")
+    second_pid = supervisor._execution_child.pid
+    worker.alive.discard(second_pid)
+    supervisor._ensure_execution_worker(13, environment={}, correlation_id="dead")
+
+    assert worker.started == [12, 13, 13]
+    assert worker.terminated == [first_pid]

@@ -30,6 +30,7 @@ from ...domain.runtime import (
 )
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
+from ...ports.execution_worker import ExecutionWorkerClient
 from ...ports.ids import IdGenerator
 from ...ports.locking import LockManager
 from ...ports.process import ProcessInspector
@@ -68,6 +69,8 @@ class RuntimeSupervisor:
         processes: ProcessInspector,
         mcp_runtime_path: Path,
         log_path: Path,
+        execution_worker: ExecutionWorkerClient | None = None,
+        execution_worker_log_path: Path | None = None,
         health_timeout_seconds: float = 30.0,
         max_restarts: int = 3,
         watchdog_interval_seconds: float = 2.0,
@@ -86,6 +89,10 @@ class RuntimeSupervisor:
         self._processes = processes
         self._mcp_runtime_path = mcp_runtime_path
         self._log_path = log_path
+        self._execution_worker = execution_worker
+        self._execution_worker_log_path = execution_worker_log_path
+        if execution_worker is not None and execution_worker_log_path is None:
+            raise ValueError("execution_worker_log_path is required with execution_worker")
         if (
             health_timeout_seconds <= 0
             or max_restarts < 0
@@ -101,6 +108,37 @@ class RuntimeSupervisor:
         self._stable_health_reset = stable_health_reset_seconds
         self._stop = threading.Event()
         self._child: ChildProcess | None = None
+        self._execution_child: ChildProcess | None = None
+        self._execution_generation: int | None = None
+
+    def _ensure_execution_worker(
+        self,
+        generation: int,
+        *,
+        environment: dict[str, str],
+        correlation_id: str,
+    ) -> None:
+        if self._execution_worker is None:
+            return
+        assert self._execution_worker_log_path is not None
+        child = self._execution_child
+        if (
+            child is not None
+            and self._execution_generation == generation
+            and self._execution_worker.is_alive(child)
+        ):
+            return
+        if child is not None and self._execution_worker.is_alive(child):
+            self._execution_worker.terminate(child, grace_seconds=3)
+        self._execution_child = None
+        self._execution_generation = None
+        self._execution_child = self._execution_worker.start(
+            generation,
+            env=environment,
+            log_path=self._execution_worker_log_path,
+            correlation_id=correlation_id,
+        )
+        self._execution_generation = generation
 
     def _clear_target(self, generation: int) -> None:
         with contextlib.suppress(ConfigError):
@@ -217,6 +255,21 @@ class RuntimeSupervisor:
         self, generation: int, child: ChildProcess
     ) -> tuple[bool, tuple[tuple[str, bool, str], ...]]:
         checks = list(self._tunnel_health(child))
+        if self._execution_worker is not None:
+            worker_alive = bool(
+                self._execution_child and self._execution_worker.is_alive(self._execution_child)
+            )
+            checks.append(
+                HealthCheck(
+                    "execution_worker",
+                    worker_alive,
+                    (
+                        "isolated execution worker is alive"
+                        if worker_alive
+                        else "isolated execution worker exited"
+                    ),
+                )
+            )
         mcp_generation = self._mcp_generation()
         generation_ok = mcp_generation == generation
         checks.append(
@@ -253,11 +306,17 @@ class RuntimeSupervisor:
     def _control_handler(self, request: ControlRequest) -> ControlResponse:
         record = self._store.read()
         child_alive = bool(self._child and self._tunnel.is_alive(self._child))
+        execution_worker_alive = bool(
+            self._execution_worker
+            and self._execution_child
+            and self._execution_worker.is_alive(self._execution_child)
+        )
         payload: dict[str, object] = {
             "record": record.phase.value if record else "stopped",
             "active_generation": record.active_generation if record else None,
             "accepted_generation": record.accepted_generation if record else None,
             "child_alive": child_alive,
+            "execution_worker_alive": execution_worker_alive,
             "health": list(record.health) if record else [],
             "health_observed_at": record.health_observed_at if record else None,
         }
@@ -368,6 +427,30 @@ class RuntimeSupervisor:
                     self._clear_target(generation)
                     return 2
 
+                if self._execution_worker is not None:
+                    try:
+                        self._ensure_execution_worker(
+                            generation,
+                            environment=environment,
+                            correlation_id=correlation_id,
+                        )
+                    except Exception as exc:
+                        self._store.write(
+                            self._record(
+                                RuntimePhase.FAILED,
+                                accepted_generation=generation,
+                                active_generation=None,
+                                profile=profile,
+                                tool_surface_hash=tool_surface_hash,
+                                correlation_id=correlation_id,
+                                child=None,
+                                error_code="EXECUTION_WORKER_START_FAILED",
+                                error=redact_text(f"{type(exc).__name__}: {exc}"),
+                            )
+                        )
+                        self._clear_target(generation)
+                        return 2
+
                 while not self._stop.is_set():
                     generation = self._adopt_committed_runtime_generation(generation)
                     self._store.write(
@@ -384,7 +467,10 @@ class RuntimeSupervisor:
                     )
                     try:
                         child = self._tunnel.start(
-                            profile, env=environment, log_path=self._log_path
+                            profile,
+                            env=environment,
+                            log_path=self._log_path,
+                            correlation_id=correlation_id,
                         )
                     except Exception as exc:
                         restart_count += 1
@@ -480,6 +566,12 @@ class RuntimeSupervisor:
                     while not self._stop.is_set() and self._tunnel.is_alive(child):
                         time.sleep(self._watchdog_interval)
                         generation = self._adopt_committed_runtime_generation(generation)
+                        with contextlib.suppress(Exception):
+                            self._ensure_execution_worker(
+                                generation,
+                                environment=environment,
+                                correlation_id=correlation_id,
+                            )
                         observed_ok, observed_health = self._observe_health(generation, child)
                         current = self._store.read()
                         if observed_ok:
@@ -587,6 +679,14 @@ class RuntimeSupervisor:
                 if self._child and self._tunnel.is_alive(self._child):
                     self._tunnel.terminate(self._child, grace_seconds=15)
                 self._child = None
+                if (
+                    self._execution_worker is not None
+                    and self._execution_child is not None
+                    and self._execution_worker.is_alive(self._execution_child)
+                ):
+                    self._execution_worker.terminate(self._execution_child, grace_seconds=15)
+                self._execution_child = None
+                self._execution_generation = None
                 current = self._store.read()
                 if current:
                     self._store.write(
@@ -606,6 +706,14 @@ class RuntimeSupervisor:
                 if self._child and self._tunnel.is_alive(self._child):
                     self._tunnel.terminate(self._child, grace_seconds=3)
                 self._child = None
+                if (
+                    self._execution_worker is not None
+                    and self._execution_child is not None
+                    and self._execution_worker.is_alive(self._execution_child)
+                ):
+                    self._execution_worker.terminate(self._execution_child, grace_seconds=3)
+                self._execution_child = None
+                self._execution_generation = None
                 with contextlib.suppress(Exception):
                     self._store.write(
                         self._record(

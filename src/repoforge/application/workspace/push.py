@@ -1,4 +1,3 @@
-import contextlib
 from dataclasses import dataclass
 from typing import cast
 
@@ -7,6 +6,7 @@ from ...domain.policy import validate_branch
 from ...domain.redaction import redact_text
 from ..context import ApplicationContext
 from ..dto import to_data
+from ..idempotency import IdempotencyEffectBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +37,7 @@ class WorkspacePusher:
     def execute(self, c: WorkspacePushCommand) -> WorkspacePushResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
         validate_branch(record.branch, repo)
+        boundary = IdempotencyEffectBoundary()
 
         def op() -> WorkspacePushResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -84,6 +85,7 @@ class WorkspacePusher:
                         output="already synchronized with upstream",
                     )
                 try:
+                    boundary.begin()
                     result = self.ctx.git.push(
                         path,
                         fresh.remote,
@@ -100,18 +102,51 @@ class WorkspacePusher:
                         marker in lowered
                         for marker in ("non-fast-forward", "fetch first", "rejected", "stale info")
                     )
-                    remote_head_after_failure = remote_head_before
-                    with contextlib.suppress(Exception):
+                    remote_head_after_failure: str | None = None
+                    remote_head_after_observed = False
+                    try:
                         remote_head_after_failure = self.ctx.git.remote_branch_sha(
                             path,
                             fresh.remote,
                             fresh.branch,
                             self.ctx.config.server.verification_timeout_seconds,
                         )
+                        remote_head_after_observed = True
+                    except Exception:
+                        pass
+                    if (
+                        boundary.started
+                        and remote_head_after_observed
+                        and remote_head_after_failure == remote_head_before
+                    ):
+                        boundary.rollback()
+                    elif (
+                        boundary.started
+                        and remote_head_after_observed
+                        and remote_head_after_failure == head
+                    ):
+                        boundary.record_result(
+                            WorkspacePushResult(
+                                summary=f"Pushed {head} to {fresh.remote}/{fresh.branch}",
+                                workspace_id=c.workspace_id,
+                                branch=fresh.branch,
+                                remote=fresh.remote,
+                                head_sha=head,
+                                remote_head_before=remote_head_before,
+                                remote_head_after=head,
+                                pushed=True,
+                                retryable_rejection=False,
+                                output=(
+                                    "Push effect reconciled from remote state after command error: "
+                                    f"{rendered}"
+                                ),
+                            )
+                        )
                     exc.details.update(
                         {
                             "remote_head_before": remote_head_before,
                             "remote_head_after": remote_head_after_failure,
+                            "remote_head_after_observed": remote_head_after_observed,
                             "retryable_rejection": False if rejected else exc.retryable,
                         }
                     )
@@ -138,14 +173,7 @@ class WorkspacePusher:
                             "actual_remote_head": remote_head_after,
                         },
                     )
-                fresh.metadata["last_pushed_sha"] = head
-                try:
-                    self.ctx.store.save(fresh)
-                except Exception as exc:
-                    raise WorkspaceError(
-                        f"Push of {head} succeeded but workspace registry update failed; retry workspace_push to reconcile state"
-                    ) from exc
-                return WorkspacePushResult(
+                authoritative_result = WorkspacePushResult(
                     summary=f"Pushed {head} to {fresh.remote}/{fresh.branch}",
                     workspace_id=c.workspace_id,
                     branch=fresh.branch,
@@ -157,6 +185,15 @@ class WorkspacePusher:
                     retryable_rejection=False,
                     output=redact_text(result.combined),
                 )
+                boundary.record_result(authoritative_result)
+                fresh.metadata["last_pushed_sha"] = head
+                try:
+                    self.ctx.store.save(fresh)
+                except Exception as exc:
+                    raise WorkspaceError(
+                        f"Push of {head} succeeded but workspace registry update failed; retry workspace_push to reconcile state"
+                    ) from exc
+                return authoritative_result
 
         return cast(
             WorkspacePushResult,
@@ -175,5 +212,6 @@ class WorkspacePusher:
                 },
                 serialize=to_data,
                 deserialize=lambda value: WorkspacePushResult(**value),
+                effect_boundary=boundary,
             ),
         )

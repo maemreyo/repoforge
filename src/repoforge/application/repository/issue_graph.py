@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ...config import GitHubTicketGraphConfig, RepositoryConfig
-from ...domain.errors import ConfigError
+from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.tickets import (
     CapabilityCoverage,
     GraphEvidenceCapability,
@@ -274,7 +274,15 @@ def read_github_ticket_snapshot(
 ) -> tuple[TicketGraphSnapshot, bool]:
     source = _source(repo, root_issue)
     if ctx.ticket_graphs is None:
-        raise ConfigError("GitHub ticket graph adapter is unavailable")
+        raise RepoForgeError(
+            "TICKET_GRAPH_PROVIDER_UNAVAILABLE: GitHub ticket graph adapter is unavailable",
+            code=ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE,
+            retryable=True,
+            safe_next_action=(
+                "Restore the GitHub ticket-graph provider and retry with fresh=true; "
+                "do not modify the reviewed graph configuration."
+            ),
+        )
     cache = ctx.github_read_cache
     now_epoch = ctx.now_epoch()
     if not fresh and cache is not None:
@@ -289,7 +297,30 @@ def read_github_ticket_snapshot(
         snapshot = _snapshot_from_payload(cached)
         if snapshot is not None:
             return snapshot, True
-    snapshot = ctx.ticket_graphs.read(repo.path, source, max_items=200)
+    try:
+        snapshot = ctx.ticket_graphs.read(repo.path, source, max_items=200)
+    except RepoForgeError as exc:
+        if exc.code is ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE:
+            raise
+        raise RepoForgeError(
+            "TICKET_GRAPH_PROVIDER_UNAVAILABLE: GitHub ticket graph read failed",
+            code=ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE,
+            retryable=True,
+            safe_next_action=(
+                "Repair GitHub authentication or provider availability and retry with fresh=true; "
+                "do not rewrite the reviewed graph root."
+            ),
+        ) from exc
+    except Exception as exc:
+        raise RepoForgeError(
+            "TICKET_GRAPH_PROVIDER_UNAVAILABLE: GitHub ticket graph read failed",
+            code=ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE,
+            retryable=True,
+            safe_next_action=(
+                "Repair GitHub authentication or provider availability and retry with fresh=true; "
+                "do not rewrite the reviewed graph root."
+            ),
+        ) from exc
     if cache is not None:
         cache.put(
             repo.repo_id,

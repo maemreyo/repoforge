@@ -20,6 +20,7 @@ from repoforge.domain.policy import (
     slugify,
     validate_patch,
 )
+from repoforge.domain.redaction import redact_data, sanitize_persisted_data
 
 
 def repo_config(tmp_path: Path) -> RepositoryConfig:
@@ -251,6 +252,43 @@ def test_egress_never_redacts_long_slug_and_hex_compound_identifiers() -> None:
     }
     sanitized = sanitize_egress_data(generated_ids, destination=EgressDestination.MODEL)
     assert sanitized == generated_ids
+
+
+def test_audit_and_receipt_redaction_agree_with_the_result_boundary_on_generated_ids() -> None:
+    """Every sanitizer must answer identically for the same field and value.
+
+    `sanitize_egress_data` exempted generated compound IDs from the entropy
+    heuristic, but the audit sink and durable receipts went through
+    `redact_data`/`sanitize_persisted_data`, which threw the field name away and
+    so redacted the same `workspace_id` -- but only when its random hex suffix
+    happened to clear the entropy threshold. That intermittency is what makes it
+    dangerous: the audit trail silently loses which workspace an event belongs to
+    for some ids and not others, and a reader cannot tell the two apart.
+
+    The pair below is a real observed case: both are valid workspace ids of the
+    same shape, and only the first crosses the threshold.
+    """
+    for workspace_id in ("background-parity-check-16d0152f37", "sync-parity-baseline-8f87699adc"):
+        details = {"workspace_id": workspace_id, "profile": "slow"}
+        assert redact_data(details) == details
+        assert sanitize_persisted_data(details) == details
+        assert sanitize_egress_data(details, destination=EgressDestination.MODEL) == details
+
+
+def test_audit_redaction_keeps_catching_secrets_under_generated_id_keys() -> None:
+    """The field-name exemption must not become a hole in the audit sink either."""
+    token = "ghp_" + "a" * 30
+    assert redact_data({"workspace_id": token})["workspace_id"] != token
+    assert sanitize_persisted_data({"workspace_id": token})["workspace_id"] != token
+    # A sensitive key is redacted whatever it holds.
+    assert redact_data({"api_key": "background-parity-check-16d0152f37"}) == {
+        "api_key": "<redacted>"
+    }
+    # The exemption is gated on the field name: the same value under an
+    # unrecognized key still falls through to the ordinary entropy scan.
+    assert redact_data({"note": "background-parity-check-16d0152f37"}) != {
+        "note": "background-parity-check-16d0152f37"
+    }
 
 
 def test_egress_still_redacts_lowercase_secret_shaped_values_under_id_keys() -> None:

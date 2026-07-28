@@ -299,6 +299,24 @@ class JsonStateRepository(Generic[T]):
             self._write(path, data)
         return envelope
 
+    def create_or_read_equal(self, record_id: str, value: T) -> StateEnvelope[T]:
+        """Atomically create a record or return its equal durable envelope."""
+
+        safe_id = self._record_id(record_id)
+        path = self._path(safe_id)
+        envelope = StateEnvelope(safe_id, self._codec.schema_version, Revision(1), value)
+        data = self._encode(envelope)
+        with self._files.locked(safe_id, operation="create_or_read_equal"):
+            current = self.read(safe_id)
+            if current is not None:
+                if current.value == value:
+                    return current
+                raise self._error(
+                    f"State record already exists: {safe_id}", ErrorCode.ALREADY_EXISTS
+                )
+            self._write(path, data)
+        return envelope
+
     def read(self, record_id: str) -> StateEnvelope[T] | None:
         safe_id = self._record_id(record_id)
         data = self._files.read_bytes(safe_id)
@@ -382,12 +400,22 @@ class JsonStateRepository(Generic[T]):
             raise self._error("max_records must be between 1 and 2000", ErrorCode.STATE_INVALID)
         record_ids, scan_truncated = self._files.list_ids(pattern="*.json", max_records=max_records)
         records: list[StateEnvelope[T]] = []
+        unreadable: list[str] = []
         for record_id in record_ids:
-            item = self.read(record_id)
+            # A sweep survives one bad record; `read()` of one exact id stays
+            # strict, because a caller asking for that record has to hear that it
+            # is unusable. Startup sweeps every store, so a raise here turns a
+            # single file written by an older release into a runtime that cannot
+            # start at all.
+            try:
+                item = self.read(record_id)
+            except RepoForgeError:
+                unreadable.append(record_id)
+                continue
             if item is not None:
                 records.append(item)
         records.sort(key=lambda item: (item.revision.value, item.record_id), reverse=True)
-        return StatePage(tuple(records), scan_truncated)
+        return StatePage(tuple(records), scan_truncated, tuple(sorted(unreadable)))
 
     def delete(self, record_id: str) -> None:
         safe_id = self._record_id(record_id)

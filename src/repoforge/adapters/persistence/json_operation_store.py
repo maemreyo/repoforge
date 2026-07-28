@@ -9,11 +9,13 @@ from typing import Any
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import (
+    LEGACY_OPERATION_SCHEMA_VERSION,
     OPERATION_SCHEMA_VERSION,
     OperationRetryability,
     OperationSnapshotBinding,
     OperationState,
     OperationTask,
+    normalize_loaded_operation,
     validate_operation_id,
     validate_operation_task,
 )
@@ -127,14 +129,14 @@ class JsonOperationStore:
         if (
             not isinstance(version, int)
             or isinstance(version, bool)
-            or version != OPERATION_SCHEMA_VERSION
+            or version not in {LEGACY_OPERATION_SCHEMA_VERSION, OPERATION_SCHEMA_VERSION}
         ):
             raise JsonOperationStore._error(
                 f"Unsupported operation schema version: {version!r}",
                 code=ErrorCode.OPERATION_SCHEMA_UNSUPPORTED,
             )
         JsonOperationStore._assert_safe(raw)
-        expected_fields = {
+        legacy_fields = {
             "operation_id",
             "kind",
             "state",
@@ -157,9 +159,22 @@ class JsonOperationStore:
             "expires_at",
             "schema_version",
         }
-        if set(raw) != expected_fields:
+        previous_current_fields = legacy_fields | {
+            "receipt_id",
+            "record_provenance",
+            "record_consistency",
+            "record_diagnostics",
+        }
+        current_fields = previous_current_fields | {"owner_id", "lease_expires_at"}
+        current_fields_with_attempt = current_fields | {"attempt"}
+        expected_field_sets = (
+            (legacy_fields,)
+            if version == LEGACY_OPERATION_SCHEMA_VERSION
+            else (previous_current_fields, current_fields, current_fields_with_attempt)
+        )
+        if set(raw) not in expected_field_sets:
             raise JsonOperationStore._error(
-                "Operation record fields do not match schema version 1",
+                f"Operation record fields do not match schema version {version}",
                 code=ErrorCode.OPERATION_CORRUPT,
             )
         if raw.get("operation_id") != expected_operation_id:
@@ -176,6 +191,7 @@ class JsonOperationStore:
                 if binding_raw is None
                 else (_ for _ in ()).throw(TypeError("snapshot_binding must be an object or null"))
             )
+            has_ownership_fields = "owner_id" in raw and "lease_expires_at" in raw
             task = OperationTask(
                 operation_id=str(raw["operation_id"]),
                 kind=str(raw["kind"]),
@@ -197,9 +213,26 @@ class JsonOperationStore:
                 created_at=str(raw["created_at"]),
                 updated_at=str(raw["updated_at"]),
                 expires_at=raw["expires_at"],
-                schema_version=raw["schema_version"],
+                owner_id=raw.get("owner_id"),
+                lease_expires_at=raw.get("lease_expires_at"),
+                receipt_id=(raw["receipt_id"] if version == OPERATION_SCHEMA_VERSION else None),
+                record_provenance=(
+                    str(raw["record_provenance"])
+                    if version == OPERATION_SCHEMA_VERSION and has_ownership_fields
+                    else "legacy_migrated"
+                ),
+                record_consistency=(
+                    str(raw["record_consistency"])
+                    if version == OPERATION_SCHEMA_VERSION
+                    else "consistent"
+                ),
+                record_diagnostics=(
+                    tuple(raw["record_diagnostics"]) if version == OPERATION_SCHEMA_VERSION else ()
+                ),
+                schema_version=OPERATION_SCHEMA_VERSION,
+                attempt=raw.get("attempt", 0),
             )
-            return validate_operation_task(task)
+            return normalize_loaded_operation(task, source_schema_version=version)
         except (KeyError, TypeError, ValueError, RepoForgeError) as exc:
             if (
                 isinstance(exc, RepoForgeError)
@@ -266,12 +299,20 @@ class JsonOperationStore:
             pattern="op-*.json", max_records=max_records
         )
         records: list[OperationTask] = []
+        unreadable: list[str] = []
         for operation_id in operation_ids:
-            record = self.read(operation_id)
+            # Same rule as every other durable sweep: report what cannot be
+            # decoded and return the rest. `read()` stays strict. Startup scans
+            # this store, so raising would let one stale record stop the runtime.
+            try:
+                record = self.read(operation_id)
+            except RepoForgeError:
+                unreadable.append(operation_id)
+                continue
             if record is not None:
                 records.append(record)
         records.sort(key=lambda item: (item.updated_at, item.operation_id), reverse=True)
-        return OperationRecordPage(tuple(records), scan_truncated)
+        return OperationRecordPage(tuple(records), scan_truncated, tuple(sorted(unreadable)))
 
     def delete(self, operation_id: str) -> None:
         safe_id = validate_operation_id(operation_id)

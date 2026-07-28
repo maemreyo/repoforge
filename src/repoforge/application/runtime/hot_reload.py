@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...domain.errors import ConfigError
+from ...domain.runtime_contract import RuntimeContractIdentity
 from ...ports.operation_gate import OperationGate
 
 
@@ -181,11 +182,38 @@ class HotReloadCoordinator:
         router: AtomicServiceRouter,
         build_candidate: Callable[[int], GenerationServiceContainer],
         commit_activation: Callable[[int, int | None], object],
+        contract_identity_provider: Callable[[int], RuntimeContractIdentity] | None = None,
+        drain_timeout_seconds: float = 30.0,
     ) -> None:
         self._router = router
         self._build_candidate = build_candidate
         self._commit_activation = commit_activation
+        self._contract_identity_provider = contract_identity_provider
+        self._drain_timeout_seconds = max(0.0, drain_timeout_seconds)
         self._lock = threading.Lock()
+
+    def _reconnect_details(
+        self,
+        generation: int,
+        *,
+        activation_operation_id: str | None,
+        activation_receipt_id: str | None,
+    ) -> dict[str, object] | None:
+        if (activation_operation_id is None) != (activation_receipt_id is None):
+            raise ConfigError(
+                "HOT_RELOAD_HANDOFF_IDENTITY_INVALID: activation operation and receipt ids must be supplied together"
+            )
+        if self._contract_identity_provider is None:
+            return None
+        identity = self._contract_identity_provider(generation)
+        details = identity.as_dict()
+        details["config_generation"] = details.pop("active_generation")
+        details["rediscovery_action"] = "reconnect_and_rediscover"
+        if activation_operation_id is not None:
+            details["operation_id"] = activation_operation_id
+        if activation_receipt_id is not None:
+            details["receipt_id"] = activation_receipt_id
+        return details
 
     def reload(
         self,
@@ -193,6 +221,8 @@ class HotReloadCoordinator:
         *,
         expected_active: int | None,
         correlation_id: str,
+        activation_operation_id: str | None = None,
+        activation_receipt_id: str | None = None,
     ) -> HotReloadResult:
         with self._lock:
             current = self._router.active_generation
@@ -228,12 +258,52 @@ class HotReloadCoordinator:
                 raise ConfigError(
                     f"HOT_RELOAD_CANDIDATE_FAILED: {type(exc).__name__}: {exc}"
                 ) from exc
+            drained_container: GenerationServiceContainer | None = None
+            try:
+                reconnect_details = self._reconnect_details(
+                    generation,
+                    activation_operation_id=activation_operation_id,
+                    activation_receipt_id=activation_receipt_id,
+                )
+                if reconnect_details is not None:
+                    drained_container = self._router.active_container()
+                    if drained_container.generation != current:
+                        raise ConfigError(
+                            f"STALE_ACTIVE_GENERATION: expected {current}, "
+                            f"found {drained_container.generation}"
+                        )
+                    drained_container.gate.begin_drain(
+                        reason="runtime generation activation",
+                        correlation_id=correlation_id,
+                        reconnect_details=reconnect_details,
+                    )
+                    if not drained_container.gate.wait_for_idle(self._drain_timeout_seconds):
+                        raise ConfigError(
+                            "HOT_RELOAD_DRAIN_TIMEOUT: admitted operations did not finish before handoff"
+                        )
+            except Exception as exc:
+                if drained_container is not None:
+                    drained_container.gate.reopen()
+                self._router.dispose(candidate)
+                if isinstance(exc, ConfigError) and str(exc).startswith(
+                    (
+                        "HOT_RELOAD_DRAIN_TIMEOUT",
+                        "HOT_RELOAD_HANDOFF_IDENTITY_INVALID",
+                        "STALE_ACTIVE_GENERATION",
+                    )
+                ):
+                    raise
+                raise ConfigError(
+                    f"HOT_RELOAD_HANDOFF_FAILED: {type(exc).__name__}: {exc}"
+                ) from exc
             try:
                 previous = self._router.commit_swap(
                     candidate,
                     lambda: self._commit_activation(generation, current),
                 )
             except Exception as exc:
+                if drained_container is not None:
+                    drained_container.gate.reopen()
                 self._router.dispose(candidate)
                 raise ConfigError(f"HOT_RELOAD_COMMIT_FAILED: {type(exc).__name__}: {exc}") from exc
             return HotReloadResult(

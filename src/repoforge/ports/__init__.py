@@ -26,6 +26,7 @@ from .code_intelligence import CodeIntelligenceProvider
 from .command import CommandExecutor, CommandResult
 from .commit_identity import CommitIdentityGateway
 from .configuration import ConfigurationStore
+from .effect_receipt_store import EffectReceiptStore
 from .execution_environment import (
     ApprovedExecution,
     ArtifactResult,
@@ -37,7 +38,9 @@ from .execution_environment import (
 )
 from .execution_plan_store import ExecutionPlanAcceptanceStore, ExecutionPlanStore
 from .execution_receipt_store import ExecutionReceiptStore
+from .execution_worker import ExecutionWorkerClient
 from .failure_evidence_store import FailureEvidencePage, FailureEvidenceStore
+from .failure_output_artifact_store import FailureOutputArtifact, FailureOutputArtifactStore
 from .file_transactions import FileTransaction, FileTransactionFactory
 from .filesystem import FileSystem
 from .git import (
@@ -83,6 +86,7 @@ from .operation_gate import GateState, OperationGate
 from .operation_identity_store import OperationIdentityStore
 from .operation_result_store import OperationResultStore
 from .operation_store import OperationRecordPage, OperationStore
+from .operation_work_queue import OperationWorkPage, OperationWorkQueue
 from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
@@ -92,6 +96,7 @@ from .repository_auth_material import RepositoryAuthMaterialProvider
 from .repository_binding_store import RepositoryBindingStore
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
+from .runtime_activation_store import RuntimeActivationStore
 from .runtime_control import (
     RuntimeControlClient,
     RuntimeControlServer,
@@ -133,6 +138,7 @@ __all__ = [
     "ConfigurationStore",
     "DevConfigProvisioner",
     "DiscoveryRequest",
+    "EffectReceiptStore",
     "EnvironmentInspection",
     "EnvironmentPreflight",
     "ExecutableLocator",
@@ -142,8 +148,11 @@ __all__ = [
     "ExecutionReceipt",
     "ExecutionReceiptStore",
     "ExecutionRequest",
+    "ExecutionWorkerClient",
     "FailureEvidencePage",
     "FailureEvidenceStore",
+    "FailureOutputArtifact",
+    "FailureOutputArtifactStore",
     "FileSystem",
     "FileTransaction",
     "FileTransactionFactory",
@@ -183,6 +192,8 @@ __all__ = [
     "OperationRecordPage",
     "OperationResultStore",
     "OperationStore",
+    "OperationWorkPage",
+    "OperationWorkQueue",
     "OperatorIO",
     "PrCheckWatchPage",
     "PrCheckWatchStore",
@@ -203,6 +214,7 @@ __all__ = [
     "RepositoryProbe",
     "ResolvedRepositoryRef",
     "RestartOutcome",
+    "RuntimeActivationStore",
     "RuntimeControlClient",
     "RuntimeControlServer",
     "RuntimeHealthProbe",

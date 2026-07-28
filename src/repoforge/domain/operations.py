@@ -27,6 +27,8 @@ class IdempotencyRecord:
     updated_at_epoch: float
     correlation_id: str
     result: Any | None = None
+    receipt_id: str | None = None
+    operation_id: str | None = None
 
 
 _KEYED_IDEMPOTENT_ACTIONS = frozenset(

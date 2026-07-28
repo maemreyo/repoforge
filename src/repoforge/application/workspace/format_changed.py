@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError
 from ...domain.execution_environment import ExecutionEvidence
 from ..context import ApplicationContext
 from ..fingerprint_cache import prime_fingerprint, read_fingerprint
+from ..idempotency import IdempotencyEffectBoundary
+from ..outcome_receipts import execute_with_outcome_receipt
 from .hygiene_common import select_formatter, select_policy_paths
 
 
@@ -74,6 +76,7 @@ class WorkspaceChangedFormatter:
             "formatter_id": policy.formatter_id,
             "formatter_contract_hash": policy.contract_hash,
         }
+        boundary = IdempotencyEffectBoundary()
 
         def operation() -> WorkspaceFormatChangedResult:
             with self.ctx.locks.lock(command.workspace_id):
@@ -118,6 +121,7 @@ class WorkspaceChangedFormatter:
                     "\n".join(approved).encode("utf-8")
                 ).hexdigest()
                 before_states = _path_state(workspace, before_paths)
+                boundary.begin()
                 if approved:
                     receipt = hygiene.format_paths(
                         workspace,
@@ -182,7 +186,7 @@ class WorkspaceChangedFormatter:
                             "required": False,
                         }
                     )
-                return WorkspaceFormatChangedResult(
+                authoritative_result = WorkspaceFormatChangedResult(
                     workspace_id=command.workspace_id,
                     formatter_id=locked_policy.formatter_id,
                     formatter_contract_hash=locked_policy.contract_hash,
@@ -200,10 +204,15 @@ class WorkspaceChangedFormatter:
                     next_safe_actions=actions,
                     execution_evidence=receipt.execution_evidence,
                 )
+                boundary.record_result(authoritative_result)
+                return authoritative_result
 
-        return self.ctx.audited(
+        return execute_with_outcome_receipt(
+            self.ctx,
             "workspace_format_changed",
-            audit_details,
+            asdict(command),
             operation,
-            mutating=True,
+            details=audit_details,
+            serialize=asdict,
+            effect_boundary=boundary,
         )

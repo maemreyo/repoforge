@@ -38,6 +38,14 @@ class RuntimeState:
     process_identity: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeLogPage:
+    """One bounded runtime-log tail with honest source-truncation evidence."""
+
+    lines: tuple[str, ...]
+    source_truncated: bool
+
+
 @dataclass(frozen=True)
 class ManagedRuntime:
     """The tunnel-client process group managed for one reviewed generation."""
@@ -272,23 +280,28 @@ def runtime_log_files(path: Path) -> tuple[Path, ...]:
     return tuple(ordered)
 
 
-def read_runtime_log(path: Path, tail: int) -> list[str]:
-    """Read one global bounded redacted tail across active and rotated runtime logs."""
+def read_runtime_log_page(path: Path, tail: int) -> RuntimeLogPage:
+    """Read a redacted tail and report whether earlier source evidence was omitted."""
     if tail <= 0 or tail > 1_000:
         raise ConfigError("Runtime log tail must be between 1 and 1000 lines")
     files = runtime_log_files(path)
     if not files:
-        return []
+        return RuntimeLogPage((), False)
     remaining = _LOG_READ_LIMIT
     chunks: list[str] = []
+    source_truncated = False
     try:
-        for candidate in reversed(files):
+        newest_first = tuple(reversed(files))
+        for index, candidate in enumerate(newest_first):
             if remaining <= 0:
+                source_truncated = True
                 break
             with candidate.open("rb") as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
                 start = max(0, size - remaining)
+                if start > 0:
+                    source_truncated = True
                 handle.seek(start)
                 data = handle.read(remaining)
             text = data.decode("utf-8", errors="replace")
@@ -296,7 +309,20 @@ def read_runtime_log(path: Path, tail: int) -> list[str]:
                 text = text.split("\n", 1)[1]
             chunks.insert(0, text)
             remaining -= len(data)
+            if remaining <= 0 and index + 1 < len(newest_first):
+                source_truncated = True
     except OSError as exc:
         raise ConfigError(f"Cannot read runtime log {path.name}: {exc}") from exc
-    text = "".join(chunks)
-    return [redact_text(line) for line in text.splitlines()[-tail:]]
+    lines = "".join(chunks).splitlines()
+    if len(lines) > tail:
+        source_truncated = True
+    return RuntimeLogPage(
+        tuple(redact_text(line) for line in lines[-tail:]),
+        source_truncated,
+    )
+
+
+def read_runtime_log(path: Path, tail: int) -> list[str]:
+    """Read one global bounded redacted tail across active and rotated runtime logs."""
+
+    return list(read_runtime_log_page(path, tail).lines)

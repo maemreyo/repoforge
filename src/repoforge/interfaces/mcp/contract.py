@@ -12,7 +12,11 @@ from ...application.configuration.document import RESOLVED_CONFIG_FORMAT_VERSION
 from ...application.configuration.source import SOURCE_CONFIG_VERSION
 from ...application.diagnostics.bundle import DIAGNOSTICS_SCHEMA_VERSION
 from ...application.service import CodingService
-from ...contracts.registry import V2_TOOL_NAMES, render_v2_schema_bundle
+from ...contracts.registry import (
+    V2_TOOL_NAMES,
+    contract_schema_digests,
+    render_v2_schema_bundle,
+)
 from ...domain.runtime import RUNTIME_CONTROL_PROTOCOL_VERSION
 from .grace import FORGE_V1_IDENTITY, create_grace_server
 from .server import (
@@ -30,6 +34,7 @@ def _normalise_tool(tool: Any) -> dict[str, Any]:
     raw: dict[str, Any] = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
     if isinstance(raw.get("description"), str):
         raw["description"] = inspect.cleandoc(raw["description"])
+    raw.pop("_meta", None)
     return raw
 
 
@@ -55,6 +60,7 @@ async def build_release_contract() -> dict[str, Any]:
     tools = [_normalise_tool(tool) for tool in await server.list_tools()]
     grace = create_grace_server()
     grace_tools = [_normalise_tool(tool) for tool in await grace.list_tools()]
+    digests = contract_schema_digests()
     return {
         "contract_version": RELEASE_CONTRACT_VERSION,
         "package_version": __version__,
@@ -73,6 +79,8 @@ async def build_release_contract() -> dict[str, Any]:
                 SERVER_INSTRUCTIONS.encode("utf-8")
             ).hexdigest(),
             "tool_surface_hash": tool_surface_hash(),
+            "input_contract_digest": digests.input_digest,
+            "output_contract_digest": digests.output_digest,
             "tool_count": len(tools),
             "tool_names": list(V2_TOOL_NAMES),
             "tool_hashes": _tool_hashes(tools),

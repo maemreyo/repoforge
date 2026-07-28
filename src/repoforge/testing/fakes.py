@@ -7,13 +7,14 @@ import json
 import os
 import subprocess
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..domain.errors import ErrorCode, RepoForgeError
+from ..domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ..domain.operation_task import OperationTask
 from ..domain.operation_worker import (
     OperationWorkerBinding,
@@ -240,13 +241,18 @@ class InMemoryLockManager:
         metadata: dict[str, str] | None = None,
     ) -> Iterator[None]:
         del metadata
+        # Mirror the fcntl manager: a bounded wait that expires raises LOCK_TIMEOUT, so callers
+        # can branch on the same typed error in tests as in production.
+        deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
         with self._condition:
-            if name in self._held and timeout_seconds == 0:
-                raise RuntimeError(f"lock already held: {name}")
             while name in self._held:
-                self._condition.wait(timeout=timeout_seconds)
-                if name in self._held and timeout_seconds is not None:
-                    raise RuntimeError(f"lock timeout: {name}")
+                if deadline is None:
+                    self._condition.wait(timeout=0.05)
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConfigError(f"LOCK_TIMEOUT: could not acquire {name!r}")
+                self._condition.wait(timeout=remaining)
             self._held.add(name)
         try:
             yield
@@ -482,3 +488,45 @@ class RecordingProcessReaper:
 
     def read_start_token(self, pid: int) -> str | None:
         return self._start_tokens.get(pid)
+
+
+class NullCommitIdentityGateway:
+    """Resolve a fixed, valid commit identity without touching a real worktree.
+
+    Workspace creation pins commit identity and fails closed when no gateway is
+    configured, which is deliberate: an unpinned workspace would attribute commits
+    to whatever the host's global Git config happens to say. Tests that build a
+    context by hand still need that dependency satisfied, and this supplies the
+    smallest valid one rather than each fixture inventing its own.
+    """
+
+    def __init__(self, digest: str | None = None) -> None:
+        from ..domain.commit_identity import (
+            CommitConfigSnapshot,
+            CommitIdentityPolicy,
+            CommitSigningMode,
+        )
+        from ..domain.repository_identity import ActorClass
+
+        self.policy = CommitIdentityPolicy(
+            profile_id="test-profile",
+            actor_class=ActorClass.AUTONOMOUS_AGENT,
+            author_name="RepoForge Test",
+            author_email="test@example.test",
+            committer_name="RepoForge Test",
+            committer_email="test@example.test",
+            signing_mode=CommitSigningMode.UNSIGNED_ATTESTED,
+        )
+        self.snapshot = CommitConfigSnapshot(
+            digest=digest or "0" * 64,
+            worktree_config_enabled=True,
+            entries=(),
+        )
+
+    def resolve_policy(self, path: object, configured: object) -> object:
+        del path, configured
+        return self.policy
+
+    def config_snapshot(self, path: object) -> object:
+        del path
+        return self.snapshot

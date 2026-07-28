@@ -222,6 +222,7 @@ class ServerConfig:
     runtime_log_backup_count: int = 3
     idempotency_stale_seconds: int = 900
     idempotency_lock_timeout_seconds: int = 2
+    status_read_lock_timeout_seconds: float = 0.5
     max_background_profiles: int = 2
     fast_fail_threshold_seconds: float = 10.0
     stale_workspace_candidate_threshold: int = 3
@@ -1008,6 +1009,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             server_raw.get("idempotency_lock_timeout_seconds"),
             2,
             "server.idempotency_lock_timeout_seconds",
+        ),
+        status_read_lock_timeout_seconds=_bounded_float(
+            server_raw.get("status_read_lock_timeout_seconds"),
+            0.5,
+            0.0,
+            60.0,
+            "server.status_read_lock_timeout_seconds",
         ),
         max_background_profiles=_positive_int(
             server_raw.get("max_background_profiles"),

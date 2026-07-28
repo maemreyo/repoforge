@@ -6,6 +6,7 @@ from ...domain.policy import validate_branch
 from ...domain.publishing import render_pr_body, validate_pr_create
 from ..context import ApplicationContext
 from ..dto import to_data
+from ..idempotency import IdempotencyEffectBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,7 @@ class DraftPullRequestCreator:
     def execute(self, c: WorkspaceCreateDraftPrCommand) -> WorkspaceCreateDraftPrResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
         title, body = validate_pr_create(c.title, c.body)
+        boundary = IdempotencyEffectBoundary()
 
         def op() -> WorkspaceCreateDraftPrResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -56,13 +58,6 @@ class DraftPullRequestCreator:
                     )
                 if self.ctx.git.ahead_of_base(path, fresh.remote, fresh.base) <= 0:
                     raise WorkspaceError("Branch has no commits ahead of the base branch")
-                existing = self.ctx.github.find_pr(path, fresh.branch)
-                if existing is not None:
-                    existing["already_existed"] = True
-                    fresh.metadata["pr_url"] = existing.get("url")
-                    fresh.metadata["pr_number"] = existing.get("number")
-                    self.ctx.store.save(fresh)
-                    return WorkspaceCreateDraftPrResult(payload=existing, already_existed=True)
                 final = render_pr_body(
                     body,
                     branch=fresh.branch,
@@ -70,6 +65,28 @@ class DraftPullRequestCreator:
                     verification_profile=fresh.metadata.get("verification_profile"),
                     verification_completed_at=fresh.metadata.get("verification_completed_at"),
                 )
+                existing = self.ctx.github.find_pr(path, fresh.branch)
+                if existing is not None:
+                    if existing.get("title") != title or existing.get("body") != final:
+                        boundary.begin()
+                        existing = self.ctx.github.update(
+                            path,
+                            fresh.branch,
+                            title=title,
+                            body=final,
+                        )
+                    existing["already_existed"] = True
+                    fresh.metadata["pr_url"] = existing.get("url")
+                    fresh.metadata["pr_number"] = existing.get("number")
+                    authoritative_result = WorkspaceCreateDraftPrResult(
+                        payload=existing,
+                        already_existed=True,
+                    )
+                    if boundary.started:
+                        boundary.record_result(authoritative_result)
+                    self.ctx.store.save(fresh)
+                    return authoritative_result
+                boundary.begin()
                 url = self.ctx.github.create_draft(
                     path,
                     repo,
@@ -78,14 +95,7 @@ class DraftPullRequestCreator:
                     title=title,
                     body=final,
                 )
-                fresh.metadata["pr_url"] = url
-                try:
-                    self.ctx.store.save(fresh)
-                except Exception as exc:
-                    raise WorkspaceError(
-                        f"Draft PR {url} was created but workspace registry update failed; retry will discover the existing PR"
-                    ) from exc
-                return WorkspaceCreateDraftPrResult(
+                authoritative_result = WorkspaceCreateDraftPrResult(
                     c.workspace_id,
                     url,
                     True,
@@ -95,6 +105,15 @@ class DraftPullRequestCreator:
                     list(repo.pr_reviewers),
                     False,
                 )
+                boundary.record_result(authoritative_result)
+                fresh.metadata["pr_url"] = url
+                try:
+                    self.ctx.store.save(fresh)
+                except Exception as exc:
+                    raise WorkspaceError(
+                        f"Draft PR {url} was created but workspace registry update failed; retry will discover the existing PR"
+                    ) from exc
+                return authoritative_result
 
         return cast(
             WorkspaceCreateDraftPrResult,
@@ -110,5 +129,6 @@ class DraftPullRequestCreator:
                 },
                 serialize=to_data,
                 deserialize=lambda value: WorkspaceCreateDraftPrResult(**value),
+                effect_boundary=boundary,
             ),
         )

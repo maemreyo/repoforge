@@ -79,9 +79,37 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 | `workspace_read` | Read up to 20 workspace files with independent ranges, byte budgets, partial-error evidence, and cursors. |
 | `workspace_search` | Search reviewed workspace files without exposing a shell. |
 | `workspace_tree` | List a bounded policy-filtered workspace tree. |
-| `workspace_diff` | Return structured hunks, metrics, exact HEAD, and fingerprint. |
+| `workspace_diff` | Return hunk-free per-file summaries by default, or bounded structured hunks on explicit opt-in. |
 
 `workspace_refresh.action` is `preview` or `apply`. Apply requires exact preview/base/workspace bindings and explicit conflict resolutions where necessary.
+
+#### Status reads during a running command
+
+`workspace_status` never waits out a running verification. It waits at most `server.status_read_lock_timeout_seconds` (default `0.5`) for the workspace lock and then answers regardless, reporting which happened in `read_consistency`:
+
+- `locked` — the read held the workspace lock and is exclusive of RepoForge writers. This is the normal case and the previous behavior.
+- `concurrent_write` — a command was running in that workspace and kept the lock. Every returned fact was true when sampled, but the facts are not guaranteed to describe one instant, and `workspace_fingerprint` must not be used as the exact-state binding for `workspace_mutate` or `workspace_commit`. Read status again after the operation reaches a terminal state to get a `locked` read.
+
+#### Summary-first diff review
+
+Start with the cheap default summary:
+
+```json
+{"workspace_id":"demo-workspace"}
+```
+
+Inspect the returned paths and change counts, then request hunks only for a selected file:
+
+```json
+{
+  "workspace_id":"demo-workspace",
+  "include_hunks":true,
+  "path_glob":"src/repoforge/application/workspace/retrieval.py",
+  "max_files":1
+}
+```
+
+Default `files[*].hunks` is empty. `change_metrics` always describes the whole workspace, while `files` is the filtered and paginated selection. Follow `next_cursor` when present. The 120 KB `byte_budget` maximum is a safety cap, not a target response size; keep hunk requests narrow.
 
 ### Mutation and verification
 

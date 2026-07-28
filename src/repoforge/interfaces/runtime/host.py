@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from ...application.runtime.hot_reload import AtomicServiceRouter, HotReloadCoordinator
@@ -13,6 +14,9 @@ from ...domain.runtime import (
     ControlRequest,
     ControlResponse,
 )
+
+_ACTIVATION_OPERATION_ID = re.compile(r"^op-[a-f0-9]{24}$")
+_ACTIVATION_RECEIPT_ID = re.compile(r"^receipt-[a-f0-9]{24}$")
 
 
 class McpRuntimeHost:
@@ -39,11 +43,25 @@ class McpRuntimeHost:
             raise ConfigError(f"INVALID_RELOAD_REQUEST: {field} must be a positive integer")
         return value
 
+    @staticmethod
+    def _activation_id(
+        value: object,
+        field: str,
+        pattern: re.Pattern[str],
+    ) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or pattern.fullmatch(value) is None:
+            raise ConfigError(f"INVALID_RELOAD_REQUEST: {field} is invalid")
+        return value
+
     def _reload(self, request: ControlRequest) -> ControlResponse:
         payload = dict(request.payload)
         if len(payload) != len(request.payload) or set(payload) - {
             "generation",
             "expected_active",
+            "activation_operation_id",
+            "activation_receipt_id",
         }:
             return ControlResponse(
                 RUNTIME_CONTROL_PROTOCOL_VERSION,
@@ -61,10 +79,26 @@ class McpRuntimeHost:
                 if expected_raw is None or expected_raw == 0
                 else self._positive_generation(expected_raw, "expected_active")
             )
+            activation_operation_id = self._activation_id(
+                payload.get("activation_operation_id"),
+                "activation_operation_id",
+                _ACTIVATION_OPERATION_ID,
+            )
+            activation_receipt_id = self._activation_id(
+                payload.get("activation_receipt_id"),
+                "activation_receipt_id",
+                _ACTIVATION_RECEIPT_ID,
+            )
+            if (activation_operation_id is None) != (activation_receipt_id is None):
+                raise ConfigError(
+                    "INVALID_RELOAD_REQUEST: activation operation and receipt ids must be supplied together"
+                )
             result = self._reloader.reload(
                 generation,
                 expected_active=expected,
                 correlation_id=request.correlation_id,
+                activation_operation_id=activation_operation_id,
+                activation_receipt_id=activation_receipt_id,
             )
         except Exception as exc:
             message = redact_text(f"{type(exc).__name__}: {exc}")

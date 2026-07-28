@@ -1,3 +1,4 @@
+from .execution_worker import SubprocessExecutionWorker
 from .launcher import SubprocessRuntimeLauncher
 from .operation_gate import InProcessOperationGate
 from .process import SystemProcessInspector
@@ -10,6 +11,7 @@ __all__ = [
     "InProcessOperationGate",
     "JsonRuntimeStore",
     "JsonTunnelProfileStore",
+    "SubprocessExecutionWorker",
     "SubprocessRuntimeLauncher",
     "SystemProcessInspector",
     "TunnelCliClient",
