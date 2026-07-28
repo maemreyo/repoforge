@@ -110,6 +110,15 @@ def _bounded_ps(argv: list[str]) -> str | None:
                 process.wait(timeout=0.2)
 
 
+def bounded_ps(argv: list[str]) -> str | None:
+    """Read one `ps` response under the same byte and time bounds as the reaper.
+
+    Exposed so other adapters inspecting the process table share this single bounded
+    implementation instead of growing their own unbounded `subprocess.run`.
+    """
+    return _bounded_ps(argv)
+
+
 def _parse_ps_line(line: str) -> ProcessIdentity | None:
     """Parse one `state pid ppid lstart` row, treating a zombie as not live.
 
