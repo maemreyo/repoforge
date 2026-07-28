@@ -407,7 +407,16 @@ ok "second candidate at ${SECOND_SHA:0:12}"
 # -- one per release -- is what made a real activation fail: the incoming process died on
 # this lock while the outgoing one still held it. A gate that only inspects the end state
 # cannot see that, so sample continuously while the transition is happening.
+# The supervisor derives its lock root from the state root, which the sandbox HOME already
+# redirects. Locate it rather than only assuming the default layout, so a state-root change
+# turns into a clear failure here instead of a silent "no holders" pass.
 LOCK_FILE="$HOME/.local/state/repoforge/locks/runtime-single-instance.lock"
+if [[ ! -e "$LOCK_FILE" ]]; then
+  LOCK_FILE="$(find "$SANDBOX" -name 'runtime-single-instance.lock' -print -quit 2>/dev/null || true)"
+fi
+[[ -n "$LOCK_FILE" && -e "$LOCK_FILE" ]] \
+  || fail "could not locate runtime-single-instance.lock under \$SANDBOX; the handoff \
+assertion would test nothing"
 LOCK_SAMPLES="$SANDBOX/lock-samples.jsonl"
 : > "$LOCK_SAMPLES"
 (
