@@ -14,11 +14,13 @@ Two selection strategies, in order of precision:
 Both strategies fail closed: an always-wide path (build/verification config), a
 package module missing from the coverage map (new/uncovered), or any path with
 no mapping at all escalates to the full suite -- this tool never silently
-narrows a run it cannot justify. Safety does not depend on the map being fresh:
-the authoritative gate (production-gate.yml) runs the full suite regardless, so
-a stale map can only make a *local* ``test-affected`` run less precise, never
-let a real failure through. Regenerate with ``make test-map`` after material
-source/test changes.
+narrows a run it cannot justify.
+
+This selection is load-bearing in CI: production-gate.yml uses it for pull
+requests, and runs the full suite with coverage on every push to a protected
+branch. So a stale map can make a PR run less precise, while the push-to-`main`
+run is what still catches a cross-module regression before it reaches a release.
+Regenerate with ``make test-map`` after material source/test changes.
 """
 
 from __future__ import annotations
