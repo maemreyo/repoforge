@@ -24,6 +24,14 @@ Discovery patterns may name one repository or use `host/owner/*`; they may not c
 
 `ProcessAuthContext` starts from a scrubbed environment. Ambient GitHub tokens, SSH-agent sockets, askpass/helper chains, Git configuration injection and author/committer variables are removed before the selected material is injected. `SubprocessAuthRunner` launches with that exact environment rather than merging process-global state. Raw values are blocked from argv, URLs, stdin and cwd, and are redacted before stdout/stderr, exceptions or failure artifacts cross the process boundary. Session exit zeroises the in-memory buffers and releases provider material.
 
+## GitHub API identities
+
+Stored GitHub accounts are selected by an explicit reviewed login using `gh auth token --hostname ... --user ...`; RepoForge never changes the machine-global active account. The returned token is verified independently against the expected API actor and stable repository ID before the broker can admit it.
+
+Autonomous GitHub writes prefer repository-selected App installation tokens. The App JWT is supplied by an external signer, installation-token issuance requests the exact repository ID and minimal permission map, and refresh is accepted only when installation, actor, repository, capability ceiling and provider metadata remain identical. Release revokes the installation token where supported and zeroises both JWT and token buffers.
+
+`github_api_auth_lease` copies only the token digest, actor ID, installation/repository metadata, revisions and opaque reference into `AuthLease`; raw API material never enters leases or receipts.
+
 ## Evidence semantics
 
 - `verified_actor` proves the observed API or provider actor only for the named surface.

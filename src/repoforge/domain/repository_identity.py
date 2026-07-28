@@ -310,6 +310,8 @@ class AuthLease:
     state: AuthLeaseState
     config_revision: str
     policy_revision: str
+    material_digest: str | None = None
+    provider_metadata: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _safe_id(self.lease_id, "lease_id")
@@ -331,6 +333,16 @@ class AuthLease:
             raise ValueError("state must be an AuthLeaseState")
         _sha256(self.config_revision, "config_revision")
         _sha256(self.policy_revision, "policy_revision")
+        if self.material_digest is not None:
+            _sha256(self.material_digest, "material_digest")
+        if not isinstance(self.provider_metadata, tuple) or len(self.provider_metadata) > 16:
+            raise ValueError("provider_metadata must be a bounded tuple")
+        metadata_names: list[str] = []
+        for name, value in self.provider_metadata:
+            metadata_names.append(_safe_id(name, "provider metadata name"))
+            _bounded_text(value, "provider metadata value")
+        if len(set(metadata_names)) != len(metadata_names):
+            raise ValueError("provider metadata names must be unique")
 
     def payload(self) -> dict[str, object]:
         return {
@@ -347,6 +359,8 @@ class AuthLease:
             "state": self.state.value,
             "config_revision": self.config_revision,
             "policy_revision": self.policy_revision,
+            "material_digest": self.material_digest,
+            "provider_metadata": dict(self.provider_metadata),
         }
 
 

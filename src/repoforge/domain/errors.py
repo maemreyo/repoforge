@@ -124,6 +124,13 @@ class ErrorCode(str, Enum):
     CREDENTIAL_REFRESH_IDENTITY_MISMATCH = "CREDENTIAL_REFRESH_IDENTITY_MISMATCH"
     CREDENTIAL_LEAK_BLOCKED = "CREDENTIAL_LEAK_BLOCKED"
     CREDENTIAL_CALLBACK_FAILED = "CREDENTIAL_CALLBACK_FAILED"
+    GITHUB_API_ACTOR_MISMATCH = "GITHUB_API_ACTOR_MISMATCH"
+    GITHUB_API_REPOSITORY_MISMATCH = "GITHUB_API_REPOSITORY_MISMATCH"
+    GITHUB_API_PERMISSION_DENIED = "GITHUB_API_PERMISSION_DENIED"
+    GITHUB_SSO_AUTHORIZATION_REQUIRED = "GITHUB_SSO_AUTHORIZATION_REQUIRED"
+    GITHUB_INSTALLATION_APPROVAL_REQUIRED = "GITHUB_INSTALLATION_APPROVAL_REQUIRED"
+    GITHUB_TOKEN_REVOKED = "GITHUB_TOKEN_REVOKED"
+    GITHUB_PROVIDER_UNAVAILABLE = "GITHUB_PROVIDER_UNAVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +360,13 @@ def operation_error_from_exception(
         ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH: "Refreshed repository-auth material changed a locked identity or capability field.",
         ErrorCode.CREDENTIAL_LEAK_BLOCKED: "A raw repository-auth value was detected in a process-visible argument or diagnostic boundary.",
         ErrorCode.CREDENTIAL_CALLBACK_FAILED: "A repository-auth callback failed inside its bounded material lifetime.",
+        ErrorCode.GITHUB_API_ACTOR_MISMATCH: "The observed GitHub API actor or App installation does not match the reviewed profile.",
+        ErrorCode.GITHUB_API_REPOSITORY_MISMATCH: "The issued GitHub API identity is not scoped to the reviewed stable repository ID.",
+        ErrorCode.GITHUB_API_PERMISSION_DENIED: "The observed GitHub API permissions or capabilities do not match the reviewed minimal ceiling.",
+        ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED: "The selected GitHub identity requires organization SSO authorization before use.",
+        ErrorCode.GITHUB_INSTALLATION_APPROVAL_REQUIRED: "The selected GitHub App installation requires organization approval before use.",
+        ErrorCode.GITHUB_TOKEN_REVOKED: "The selected GitHub API token or installation grant was revoked.",
+        ErrorCode.GITHUB_PROVIDER_UNAVAILABLE: "GitHub token issuance or live identity verification was unavailable.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

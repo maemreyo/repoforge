@@ -298,6 +298,7 @@ source_globs = [
   "src/repoforge/application/workspace/push.py",
   "src/repoforge/application/workspace/update_draft_pr.py",
   "src/repoforge/domain/ci_evidence.py",
+  "src/repoforge/domain/github_api_identity.py",
   "src/repoforge/domain/github_capability_probe.py",
   "src/repoforge/domain/issue_writes.py",
   "src/repoforge/domain/pr_check_watch.py",
@@ -307,6 +308,7 @@ source_globs = [
   "src/repoforge/domain/repository_identity.py",
   "src/repoforge/domain/repository_identity_resolution.py",
   "src/repoforge/domain/repository_auth_broker.py",
+  "src/repoforge/ports/github_api_token.py",
   "src/repoforge/ports/repository_auth_material.py",
   "src/repoforge/adapters/subprocess/auth_runner.py",
   "src/repoforge/testing/auth_fakes.py",
@@ -319,6 +321,7 @@ source_globs = [
 ]
 test_files = [
   "tests/test_ci_failure_evidence.py",
+  "tests/test_github_api_identity.py",
   "tests/test_github_capability_probe.py",
   "tests/test_github_webhook_ingress.py",
   "tests/test_pr_check_watch.py",

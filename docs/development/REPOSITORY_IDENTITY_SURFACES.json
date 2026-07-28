@@ -47,6 +47,15 @@
       "planned_owner": "#289"
     },
     {
+      "path": "src/repoforge/adapters/github/api_identity.py",
+      "executables": ["gh"],
+      "surfaces": ["github_api", "repository_binding", "operation_identity"],
+      "credential_inputs": ["opaque stored-account reference", "short-lived GitHub App installation token", "external app JWT signer"],
+      "target_inputs": ["provider host", "stable repository ID", "installation ID", "minimal permission set"],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#288"
+    },
+    {
       "path": "src/repoforge/adapters/github/capability_probe.py",
       "executables": ["gh"],
       "surfaces": ["github_api", "enterprise_preflight"],

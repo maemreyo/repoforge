@@ -55,6 +55,12 @@ from .github import (
     GitHubJobLog,
     PullRequestGateway,
 )
+from .github_api_token import (
+    GitHubApiIdentityVerifier,
+    GitHubAppInstallationTokenIssuer,
+    GitHubAppJwtSigner,
+    StoredGhAccountTokenSource,
+)
 from .github_capabilities import GitHubCapabilityProbe
 from .github_read_cache import GitHubReadCache
 from .hygiene import (
@@ -141,6 +147,9 @@ __all__ = [
     "GitBaseReferences",
     "GitHubActionsJob",
     "GitHubActionsStep",
+    "GitHubApiIdentityVerifier",
+    "GitHubAppInstallationTokenIssuer",
+    "GitHubAppJwtSigner",
     "GitHubCapabilityProbe",
     "GitHubCheckAnnotation",
     "GitHubCheckRun",
@@ -197,6 +206,7 @@ __all__ = [
     "Sleeper",
     "SmokeResult",
     "StateRepository",
+    "StoredGhAccountTokenSource",
     "TaskStore",
     "TicketGraphGateway",
     "TicketProjectGateway",

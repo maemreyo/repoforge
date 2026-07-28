@@ -124,6 +124,19 @@ class EphemeralSecret:
             raise ValueError("secret value must be bounded non-empty text")
         return cls(bytearray(value.encode("utf-8")))
 
+    @classmethod
+    def from_bytes(cls, value: bytes | bytearray) -> EphemeralSecret:
+        buffer = bytearray(value)
+        if not buffer or len(buffer) > 1_000_000 or 0 in buffer:
+            raise ValueError("secret value must be bounded non-empty UTF-8 bytes")
+        try:
+            buffer.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            for index in range(len(buffer)):
+                buffer[index] = 0
+            raise ValueError("secret value must be bounded non-empty UTF-8 bytes") from exc
+        return cls(buffer)
+
     @property
     def released(self) -> bool:
         return self._released
@@ -170,6 +183,9 @@ class AuthMaterial:
     issued_at: str
     expires_at: str
     state: AuthMaterialState
+    actor_id: str | None = None
+    material_digest: str | None = None
+    provider_metadata: tuple[tuple[str, str], ...] = ()
     environment: tuple[AuthEnvironmentBinding, ...] = ()
     git_config: tuple[tuple[str, str], ...] = ()
     callback_config: tuple[tuple[str, str], ...] = ()
@@ -189,6 +205,14 @@ class AuthMaterial:
             raise ValueError("expires_at must be later than issued_at")
         if not isinstance(self.state, AuthMaterialState):
             raise ValueError("state must be an AuthMaterialState")
+        if self.actor_id is not None:
+            _safe_id(self.actor_id, "actor_id")
+        if (
+            self.material_digest is not None
+            and re.fullmatch(r"[0-9a-f]{64}", self.material_digest) is None
+        ):
+            raise ValueError("material_digest must be a lowercase SHA-256")
+        _config_pairs(self.provider_metadata, "provider_metadata")
         if not isinstance(self.environment, tuple) or len(self.environment) > 32:
             raise ValueError("environment must be a bounded tuple")
         if any(not isinstance(item, AuthEnvironmentBinding) for item in self.environment):
@@ -217,6 +241,9 @@ class AuthMaterial:
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
             "state": self.state.value,
+            "actor_id": self.actor_id,
+            "material_digest": self.material_digest,
+            "provider_metadata": dict(self.provider_metadata),
             "environment_keys": [item.name for item in self.environment],
             "git_config_keys": [key for key, _value in self.git_config],
             "callback_config_keys": [key for key, _value in self.callback_config],
@@ -312,6 +339,10 @@ def _material_scope_matches(material: AuthMaterial, request: AuthBrokerRequest) 
     return (
         material.profile_id == request.profile.profile_id
         and material.actor_class is request.profile.actor_class
+        and (
+            request.profile.expected_actor_id is None
+            or material.actor_id == request.profile.expected_actor_id
+        )
         and material.target_kind is request.target_kind
         and material.target_id == request.target_id
     )
@@ -493,9 +524,11 @@ class RepositoryAuthBroker:
             equivalent = (
                 refreshed.profile_id == previous.profile_id
                 and refreshed.actor_class is previous.actor_class
+                and refreshed.actor_id == previous.actor_id
                 and refreshed.target_kind is previous.target_kind
                 and refreshed.target_id == previous.target_id
                 and refreshed.capability_ids == previous.capability_ids
+                and refreshed.provider_metadata == previous.provider_metadata
             )
             if not equivalent:
                 _release(self._provider, refreshed)
