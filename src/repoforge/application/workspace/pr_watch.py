@@ -244,7 +244,21 @@ class PrCheckWatchCoordinator:
 
     def resume_active(self) -> tuple[str, ...]:
         scheduled: list[str] = []
-        for watch in self.store.list_records(max_records=2_000).records:
+        page = self.store.list_records(max_records=2_000)
+        if page.unreadable_operation_ids:
+            # Recorded, not swallowed: these watches are still on disk and are no
+            # longer being polled, so an operator has to be able to find out that
+            # they were passed over -- and how many.
+            self.ctx.audit.record(
+                "pr_check_watch_resume",
+                success=True,
+                details={
+                    "unreadable_watch_count": len(page.unreadable_operation_ids),
+                    "unreadable_operation_ids": list(page.unreadable_operation_ids[:20]),
+                    "reason": "stored watch could not be decoded under the current schema",
+                },
+            )
+        for watch in page.records:
             if watch.outcome in TERMINAL_PR_CHECK_WATCH_OUTCOMES:
                 continue
             task = self.operations.status(watch.operation_id)
