@@ -27,6 +27,9 @@ from ...domain.runtime import (
 _MAX_MESSAGE = 64 * 1024
 _PROTOCOL = RUNTIME_CONTROL_PROTOCOL_VERSION
 _MAX_SOCKET_PATH_BYTES = 100
+# One exchange is a local request/response over a Unix socket: a peer that cannot finish
+# in this long is not one this loop may wait on, because waiting means serving nobody.
+_CLIENT_TIMEOUT_SECONDS = 5.0
 
 
 def resolve_unix_socket_path(path: Path) -> Path:
@@ -132,6 +135,7 @@ class UnixRuntimeControlServer:
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._client_failures = 0
 
     @property
     def bound_path(self) -> Path:
@@ -150,6 +154,50 @@ class UnixRuntimeControlServer:
         listener.settimeout(0.25)
         self._socket = listener
 
+        def deny(connection: socket.socket) -> None:
+            connection.sendall(
+                _encode(
+                    ControlResponse(
+                        _PROTOCOL,
+                        False,
+                        "unknown",
+                        "denied",
+                        error_code="PEER_NOT_ALLOWED",
+                        message="Control peer does not own the runtime",
+                    )
+                )
+            )
+
+        def exchange(connection: socket.socket) -> None:
+            """Read one request and answer it, bounded in time and in bytes."""
+            # A deadline is mandatory, not defensive: `accept()` returns a socket in
+            # BLOCKING mode regardless of the listener's timeout, so without this a client
+            # that connects and stays silent holds this loop -- and therefore the entire
+            # control plane -- forever (#322).
+            connection.settimeout(_CLIENT_TIMEOUT_SECONDS)
+            if _peer_uid(connection) != os.getuid():
+                deny(connection)
+                return
+            chunks = bytearray()
+            while b"\n" not in chunks and len(chunks) <= _MAX_MESSAGE:
+                block = connection.recv(4096)
+                if not block:
+                    break
+                chunks.extend(block)
+            try:
+                request = _decode_request(bytes(chunks).split(b"\n", 1)[0])
+                response = handler(request)
+            except Exception as exc:
+                response = ControlResponse(
+                    _PROTOCOL,
+                    False,
+                    "unknown",
+                    "failed",
+                    error_code=type(exc).__name__,
+                    message=redact_text(str(exc)),
+                )
+            connection.sendall(_encode(response))
+
         def serve() -> None:
             while not self._stop.is_set():
                 try:
@@ -158,41 +206,16 @@ class UnixRuntimeControlServer:
                     continue
                 except OSError:
                     break
-                with connection:
-                    peer = _peer_uid(connection)
-                    if peer != os.getuid():
-                        connection.sendall(
-                            _encode(
-                                ControlResponse(
-                                    _PROTOCOL,
-                                    False,
-                                    "unknown",
-                                    "denied",
-                                    error_code="PEER_NOT_ALLOWED",
-                                    message="Control peer does not own the runtime",
-                                )
-                            )
-                        )
-                        continue
-                    chunks = bytearray()
-                    while b"\n" not in chunks and len(chunks) <= _MAX_MESSAGE:
-                        block = connection.recv(4096)
-                        if not block:
-                            break
-                        chunks.extend(block)
-                    try:
-                        request = _decode_request(bytes(chunks).split(b"\n", 1)[0])
-                        response = handler(request)
-                    except Exception as exc:
-                        response = ControlResponse(
-                            _PROTOCOL,
-                            False,
-                            "unknown",
-                            "failed",
-                            error_code=type(exc).__name__,
-                            message=redact_text(str(exc)),
-                        )
-                    connection.sendall(_encode(response))
+                # NOTHING a peer does may end this loop. The previous version let
+                # `sendall` to a closed peer raise out of `serve`, which killed the thread
+                # while the process kept running and the watchdog kept recording `healthy`
+                # -- so the control plane was gone with every durable fact still claiming
+                # otherwise. A dropped connection costs that one exchange, nothing more.
+                try:
+                    with connection:
+                        exchange(connection)
+                except Exception:
+                    self._client_failures += 1
 
         self._thread = threading.Thread(target=serve, name="repoforge-runtime-control", daemon=True)
         self._thread.start()
