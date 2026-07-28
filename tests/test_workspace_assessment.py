@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import ForgeEnvironment, durable_worker, git
+from conftest import TEST_CONFIG_GENERATION, ForgeEnvironment, durable_worker, git
 
 from repoforge.adapters.code_intelligence.syntax import SyntaxCodeIntelligenceProvider
 from repoforge.application.service import CodingService
@@ -333,6 +333,7 @@ def test_workspace_verify_auto_falls_back_to_final_profile_when_intelligence_una
     application = build_application(
         config,
         overrides=AdapterOverrides(code_intelligence=FailingProvider()),
+        config_generation=TEST_CONFIG_GENERATION,
     )
     service = CodingService(config, application=application)
     workspace_id = service.workspace_create("demo", "verify fallback")["workspace_id"]
@@ -578,6 +579,7 @@ def test_assessment_degrades_code_intelligence_provider_failure(
     application = build_application(
         config,
         overrides=AdapterOverrides(code_intelligence=FailingProvider()),
+        config_generation=TEST_CONFIG_GENERATION,
     )
     service = CodingService(config, application=application)
     workspace_id = service.workspace_create("demo", "assessment intelligence fallback")[
@@ -624,7 +626,11 @@ command = ["python3", "-c", "import sys; sys.exit(3)"]
 """,
         encoding="utf-8",
     )
-    service = CodingService(load_config(forge_env.config_path))
+    reloaded = load_config(forge_env.config_path)
+    service = CodingService(
+        reloaded,
+        application=build_application(reloaded, config_generation=TEST_CONFIG_GENERATION),
+    )
     workspace_id = service.workspace_create("demo", "profile intelligence")["workspace_id"]
     current = service.workspace_read_file(workspace_id, "src/math_utils.py")
     service.workspace_write_file(

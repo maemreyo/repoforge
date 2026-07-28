@@ -45,6 +45,44 @@ def _store_and_generation(config_path: Path) -> tuple[object, int]:
     return store, generation.generation
 
 
+def _plant_unclaimable_work(application, *, stamped_generation: int) -> str:
+    """Write the operation+work pair directly, as a misconfigured process once would.
+
+    Admission refuses this now (#312), so constructing it through `admit` is impossible --
+    but the state can still exist on disk from a release that predates the refusal, and
+    that is exactly what these tests are about.
+    """
+    from repoforge.domain.operation_task import OperationSnapshotBinding
+    from repoforge.domain.operation_work import new_work_item
+
+    queue = application.context.operation_work_queue
+    assert queue is not None
+    operation_id = f"op-{application.context.ids.new_hex(24)}"
+    now = application.context.clock.now_iso()
+    request = OperationWorkRequest.profile(
+        workspace_id="workspace-1",
+        profile_name="quick",
+        expected_head_sha="a" * 40,
+        expected_fingerprint="b" * 64,
+        config_generation=stamped_generation,
+    )
+    application.operations.create(
+        operation_id=operation_id,
+        kind="workspace_run_profile",
+        phase="queued",
+        cancel_supported=True,
+        workspace_id=request.workspace_id,
+        snapshot_binding=OperationSnapshotBinding(
+            head_sha=request.expected_head_sha,
+            workspace_fingerprint=request.expected_fingerprint,
+            config_generation=stamped_generation,
+        ),
+        now=now,
+    )
+    queue.create(new_work_item(operation_id=operation_id, request=request, now=now))
+    return operation_id
+
+
 def test_the_managed_runtime_container_carries_its_generation(tmp_path: Path) -> None:
     """The exact bug site: the container is built FROM a generation, so it must carry it."""
     env = create_forge_environment(tmp_path)
@@ -108,32 +146,20 @@ def test_a_generation_zero_request_side_is_what_broke(tmp_path: Path) -> None:
 
     A worker running a real generation claims only matching work, so an item stamped 0 is
     invisible to it -- which is why the caller waited and recovery later terminalized it.
+    Admission refuses to create this state now (#312), so it is planted directly.
     """
     env = create_forge_environment(tmp_path)
     store, generation = _store_and_generation(env.config_path)
     config = load_config(store.resolved_path(generation))
-
-    # The old composition: no generation reaches the application.
-    broken = CodingService(config, application=build_application(config))
-    assert broken.application.context.config_generation == 0
-    queue = broken.application.context.operation_work_queue
+    application = build_application(config, config_generation=generation)
+    operation_id = _plant_unclaimable_work(application, stamped_generation=0)
+    queue = application.context.operation_work_queue
     assert queue is not None
-    admitted = DurableWorkAdmission(broken.application.operations, queue).admit(
-        OperationWorkRequest.profile(
-            workspace_id="workspace-1",
-            profile_name="quick",
-            expected_head_sha="a" * 40,
-            expected_fingerprint="b" * 64,
-            config_generation=broken.application.context.config_generation,
-        ),
-        operation_kind="workspace_run_profile",
-    )
-    assert queue.read(admitted.operation_id).request.config_generation == 0
+    assert queue.read(operation_id).request.config_generation == 0
 
     # A worker on the real generation cannot see it.
-    worker_application = build_application(config, config_generation=generation)
     assert (
-        worker_application.context.operation_work_queue.claim_next(
+        queue.claim_next(
             owner_id="worker-test",
             now="2026-07-28T10:00:00+00:00",
             lease_expires_at="2026-07-28T10:01:30+00:00",
@@ -147,36 +173,28 @@ def test_a_generation_zero_request_side_is_what_broke(tmp_path: Path) -> None:
 def test_recovery_terminalizes_the_unclaimable_item_with_both_generations(
     tmp_path: Path,
 ) -> None:
-    """And the error an operator actually sees names both sides of the mismatch.
+    """The error an operator actually sees names both sides of the mismatch."""
+    from repoforge.application.operations.recovery import recover_operation_work
 
-    No explicit recovery call: composing the worker application runs the startup sweep
-    itself, which is exactly how the live installation's operations were terminalized.
-    """
     env = create_forge_environment(tmp_path)
     store, generation = _store_and_generation(env.config_path)
     config = load_config(store.resolved_path(generation))
-    broken = CodingService(config, application=build_application(config))
-    queue = broken.application.context.operation_work_queue
-    assert queue is not None
-    admitted = DurableWorkAdmission(broken.application.operations, queue).admit(
-        OperationWorkRequest.profile(
-            workspace_id="workspace-1",
-            profile_name="quick",
-            expected_head_sha="a" * 40,
-            expected_fingerprint="b" * 64,
-            config_generation=0,
-        ),
-        operation_kind="workspace_run_profile",
+    application = build_application(config, config_generation=generation)
+    operation_id = _plant_unclaimable_work(application, stamped_generation=0)
+
+    report = recover_operation_work(
+        application.operations,
+        application.context.operation_work_queue,
+        now="2026-07-28T10:00:00+00:00",
+        expected_config_generation=generation,
     )
 
-    worker_application = build_application(config, config_generation=generation)
-
-    terminal = worker_application.operations.status(admitted.operation_id)
+    assert report.stale_generation == 1
+    terminal = application.operations.status(operation_id)
     assert terminal.error_code == "OPERATION_GENERATION_STALE"
     assert "generation 0" in (terminal.error_message or "")
     assert f"generation {generation}" in (terminal.error_message or "")
-    # The sidecar is gone too, so nothing keeps retrying work that can never match.
-    assert worker_application.context.operation_work_queue.read(admitted.operation_id) is None
+    assert application.context.operation_work_queue.read(operation_id) is None
 
 
 def test_an_unknown_generation_is_still_refused(tmp_path: Path) -> None:
@@ -245,19 +263,72 @@ def test_work_from_an_older_generation_is_still_terminalized(tmp_path: Path) -> 
             profile_name="quick",
             expected_head_sha="a" * 40,
             expected_fingerprint="b" * 64,
-            config_generation=generation - 1,
+            config_generation=generation,
         ),
         operation_kind="workspace_run_profile",
     )
 
+    # The worker has moved on to a later generation, so this work is the older side.
     report = recover_operation_work(
         application.operations,
         queue,
         now="2026-07-28T10:00:00+00:00",
-        expected_config_generation=generation,
+        expected_config_generation=generation + 1,
     )
 
     assert report.stale_generation == 1
     assert application.operations.status(older.operation_id).error_code == (
         "OPERATION_GENERATION_STALE"
     )
+
+
+def test_admission_refuses_work_no_worker_could_claim(tmp_path: Path) -> None:
+    """#312: unclaimable work is refused at the boundary, not 30 seconds later.
+
+    A process that does not know its generation stamps 0, which no worker running a real
+    generation will ever claim. Accepting it meant the caller waited and recovery
+    terminalized it with a message about staleness -- describing the symptom, in a
+    different process, half a minute after the actual fault.
+    """
+    import pytest
+
+    from repoforge.domain.errors import ErrorCode, RepoForgeError
+
+    env = create_forge_environment(tmp_path)
+    store, generation = _store_and_generation(env.config_path)
+    config = load_config(store.resolved_path(generation))
+    unknowing = CodingService(config, application=build_application(config))
+    queue = unknowing.application.context.operation_work_queue
+    assert queue is not None
+
+    with pytest.raises(RepoForgeError) as raised:
+        DurableWorkAdmission(unknowing.application.operations, queue).admit(
+            OperationWorkRequest.profile(
+                workspace_id="workspace-1",
+                profile_name="quick",
+                expected_head_sha="a" * 40,
+                expected_fingerprint="b" * 64,
+                config_generation=unknowing.application.context.config_generation,
+            ),
+            operation_kind="workspace_run_profile",
+        )
+
+    assert "OPERATION_GENERATION_UNKNOWN" in str(raised.value)
+    assert raised.value.code is ErrorCode.CONFIG_INVALID
+    # Nothing durable was created: no operation record and no queue entry to reconcile.
+    assert queue.list_records(max_records=10).records == ()
+    assert unknowing.application.operations.list_records(max_records=10).records == ()
+
+
+def test_the_test_environment_serves_a_real_generation(tmp_path: Path) -> None:
+    """The harness must represent production, or it cannot catch this class of bug.
+
+    Both sides at 0 is what made #313 invisible: the generation filter matched, so no
+    admitted work was ever unclaimable in a test.
+    """
+    from conftest import TEST_CONFIG_GENERATION
+
+    env = create_forge_environment(tmp_path)
+
+    assert TEST_CONFIG_GENERATION > 0
+    assert env.service.application.context.config_generation == TEST_CONFIG_GENERATION

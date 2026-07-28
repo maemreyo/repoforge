@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from conftest import ForgeEnvironment, create_forge_environment
+from conftest import TEST_CONFIG_GENERATION, ForgeEnvironment, create_forge_environment
 
 from repoforge.application.operations.work_executor import VerificationWorkHandlers
 from repoforge.application.operations.work_loop import OperationWorkLoop
@@ -72,7 +72,10 @@ def _poll(predicate, *, timeout: float = 20.0, interval: float = 0.02):
 def _worker_loop(config_path: Path) -> tuple[OperationWorkLoop, CodingService]:
     """Build a worker-side loop over the same state root as the request-side service."""
     config = load_config(config_path)
-    application = build_application(config, config_generation=0)
+    # The SAME generation the request side serves. At 0 a worker claims any generation
+    # (the filter degrades to None), so a mismatch could never be observed -- the mirror
+    # of the production bug in #313.
+    application = build_application(config, config_generation=TEST_CONFIG_GENERATION)
     service = CodingService(config, application=application)
     handlers = VerificationWorkHandlers(
         WorkspaceProfileRunner(application.context),
@@ -116,6 +119,10 @@ def _blocked_verification(tmp_path: Path) -> Iterator[BlockedVerification]:
         application=build_application(
             config,
             overrides=AdapterOverrides(background_tasks=legacy_background),
+            # Both sides carry the same real generation, as they do in production. Built
+            # without it, this side stamped work with 0 while the worker ran the fixture's
+            # generation, and nothing could be claimed -- the #313 topology exactly.
+            config_generation=TEST_CONFIG_GENERATION,
         ),
     )
     workspace_id = request_side.workspace_create("demo", "blocked control plane")["workspace_id"]
@@ -225,7 +232,10 @@ def test_queued_work_survives_a_request_process_restart_and_runs_once(tmp_path) 
     release.write_text("go", encoding="utf-8")
     _add_blocked_profile(env, release)
     config = load_config(env.config_path)
-    admitting = CodingService(config, application=build_application(config))
+    admitting = CodingService(
+        config,
+        application=build_application(config, config_generation=TEST_CONFIG_GENERATION),
+    )
     workspace_id = admitting.workspace_create("demo", "restart durable work")["workspace_id"]
     operation_id = admitting.workspace_verify(
         workspace_id,
@@ -240,7 +250,11 @@ def test_queued_work_survives_a_request_process_restart_and_runs_once(tmp_path) 
     # A second worker pass finds nothing left to claim: the attempt ran once.
     assert loop.run_once() is False
 
-    restarted = CodingService(load_config(env.config_path))
+    restarted_config = load_config(env.config_path)
+    restarted = CodingService(
+        restarted_config,
+        application=build_application(restarted_config, config_generation=TEST_CONFIG_GENERATION),
+    )
     terminal = restarted.operation("get", operation_id=operation_id)["operation"]
     assert terminal["state"] == "succeeded"
     assert terminal["phase"] == "succeeded"
