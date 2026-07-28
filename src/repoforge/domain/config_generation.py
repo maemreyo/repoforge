@@ -267,6 +267,22 @@ def _record_profile_changes(
             right.get("timeout_seconds", 0),
             reason="profile process duration",
         )
+        _record_bool(
+            changes,
+            profile_prefix + ".model_invocable",
+            bool(left.get("model_invocable", True)),
+            bool(right.get("model_invocable", True)),
+            true_is_restriction=False,
+            reason="model-initiated profile eligibility changed",
+        )
+        _record_number(
+            changes,
+            profile_prefix + ".min_interval_seconds",
+            left.get("min_interval_seconds", 0),
+            right.get("min_interval_seconds", 0),
+            reason="profile rerun floor",
+            higher_is_restriction=True,
+        )
         if left.get("working_directory") != right.get("working_directory"):
             changes.append(
                 CapabilityChange(
@@ -501,6 +517,7 @@ def _record_number(
     after: object,
     *,
     reason: str,
+    higher_is_restriction: bool = False,
 ) -> None:
     if (
         isinstance(before, bool)
@@ -535,12 +552,15 @@ def _record_number(
             )
         return
     if left != right:
+        # Most bounds grant more when they grow. A floor is the opposite: raising it takes
+        # capability away, so the caller states which direction widens.
+        wider = right < left if higher_is_restriction else right > left
         changes.append(
             CapabilityChange(
                 path,
                 left,
                 right,
-                CapabilityDeltaKind.EXPANSION if right > left else CapabilityDeltaKind.RESTRICTION,
+                CapabilityDeltaKind.EXPANSION if wider else CapabilityDeltaKind.RESTRICTION,
                 f"{reason} increased" if right > left else f"{reason} decreased",
             )
         )

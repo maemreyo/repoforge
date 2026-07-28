@@ -411,6 +411,11 @@ def render_resolved(
                         "timeout_seconds",
                         "working_directory",
                         "baseline_policy",
+                        # Reserving a profile is only real if it survives to here: this
+                        # render is the config the runtime loads, and a key the allowlist
+                        # omits is dropped without complaint.
+                        "model_invocable",
+                        "min_interval_seconds",
                     ):
                         if key in profile and isinstance(profile[key], (str, int, bool)):
                             lines.append(f"{key} = {_toml(profile[key])}")

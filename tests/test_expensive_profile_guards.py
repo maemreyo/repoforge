@@ -22,6 +22,7 @@ import pytest
 from conftest import TEST_CONFIG_GENERATION, create_forge_environment, durable_worker
 
 from repoforge.application.audit_context import bind_audit_attribution
+from repoforge.application.configuration.document import RESOLVED_CONFIG_FORMAT_VERSION
 from repoforge.application.operations.work_admission import DurableWorkAdmission
 from repoforge.bootstrap import build_application
 from repoforge.config import load_config
@@ -243,6 +244,102 @@ def test_the_patch_rejects_an_invalid_reservation() -> None:
         ProfilePatch.from_table("gate", {"commands": [["true"]], "model_invocable": "false"})
     with pytest.raises(PolicyPatchError, match="min_interval_seconds"):
         ProfilePatch.from_table("gate", {"commands": [["true"]], "min_interval_seconds": -1})
+
+
+def _resolved_lock(*, generation: int = 1, extra: str = "") -> str:
+    return f"""[repoforge_lock]
+format_version = {RESOLVED_CONFIG_FORMAT_VERSION}
+generation = {generation}
+source_config = "config.toml"
+source_sha256 = "a"
+
+[repoforge_lock.repositories]
+demo = "fingerprint"
+
+[server]
+workspace_root = "/tmp/workspaces"
+state_root = "/tmp/state"
+
+[repositories.demo]
+path = "/tmp/demo"
+
+[repositories.demo.profiles.gate]
+commands = [["true"]]
+verification = true
+timeout_seconds = 1800
+{extra}"""
+
+
+def test_the_reservation_survives_the_render_of_the_config_the_runtime_loads(
+    tmp_path: Path,
+) -> None:
+    """The patch is not the last layer: the resolved generation is rendered key by key.
+
+    `render_resolved` writes profiles from an explicit allowlist, so a field the patch
+    expresses is silently dropped unless the renderer names it too. Asserting on
+    `as_table()` alone passes while the runtime never sees the policy at all.
+    """
+    from repoforge.application.configuration.document import (
+        apply_policy_patch,
+        parse_resolved,
+        render_resolved,
+    )
+    from repoforge.domain.policy_patch import ProfilePatch, RepositoryPolicyPatch
+
+    document = parse_resolved(_resolved_lock())
+    patch = RepositoryPolicyPatch(
+        profiles=(
+            ProfilePatch.from_table(
+                "gate",
+                {
+                    "commands": [["true"]],
+                    "verification": True,
+                    "timeout_seconds": 1800,
+                    "model_invocable": False,
+                    "min_interval_seconds": 900,
+                },
+            ),
+        )
+    )
+
+    rendered = render_resolved(
+        apply_policy_patch(document, "demo", patch),
+        generation=2,
+        source_path="config.toml",
+        source_sha256="a" * 64,
+        created_at="2026-07-29T00:00:00+00:00",
+        reason="test",
+        proposal_id=None,
+        repository_fingerprints=(("demo", "fingerprint"),),
+    )
+
+    resolved_path = tmp_path / "resolved.toml"
+    resolved_path.write_text(rendered, encoding="utf-8")
+    profile = load_config(resolved_path).repositories["demo"].profiles["gate"]
+
+    assert profile.model_invocable is False
+    assert profile.min_interval_seconds == 900
+
+
+def test_reserving_a_profile_is_a_capability_change_not_a_comment_edit() -> None:
+    """`accept` returns the current generation unchanged when the delta is EQUIVALENT.
+
+    A restriction the classifier cannot see is therefore discarded in silence: the
+    configuration on disk reserves the gate, and the runtime keeps serving it.
+    """
+    from repoforge.domain.config_generation import (
+        CapabilityDeltaKind,
+        classify_capability_delta,
+    )
+
+    before = _resolved_lock()
+    reserved = _resolved_lock(extra="model_invocable = false\n")
+    throttled = _resolved_lock(extra="min_interval_seconds = 900\n")
+
+    assert classify_capability_delta(before, reserved).kind is CapabilityDeltaKind.RESTRICTION
+    assert classify_capability_delta(reserved, before).kind is CapabilityDeltaKind.EXPANSION
+    assert classify_capability_delta(before, throttled).kind is CapabilityDeltaKind.RESTRICTION
+    assert classify_capability_delta(throttled, before).kind is CapabilityDeltaKind.EXPANSION
 
 
 def test_an_old_release_would_have_rejected_these_keys() -> None:
