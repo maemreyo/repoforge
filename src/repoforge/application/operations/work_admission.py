@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import (
     TERMINAL_OPERATION_STATES,
     OperationRetryability,
@@ -30,6 +31,24 @@ class DurableWorkAdmission:
         operation_kind: str,
         expires_at: str | None = None,
     ) -> OperationTask:
+        # A worker claims only work stamped with its own configuration generation, so work
+        # admitted without one can never be claimed: the caller waits, and about thirty
+        # seconds later recovery terminalizes it as OPERATION_GENERATION_STALE. Refusing
+        # here makes the fault immediate and names it -- a process admitting durable work
+        # without knowing which generation it serves is misconfigured, which is not
+        # something the caller can fix by retrying (#312, after #313 was exactly this).
+        if request.config_generation <= 0:
+            raise RepoForgeError(
+                "OPERATION_GENERATION_UNKNOWN: this process does not know which "
+                "configuration generation it serves, so durable work admitted here could "
+                "never be claimed by a worker.",
+                code=ErrorCode.CONFIG_INVALID,
+                safe_next_action=(
+                    "Report this: the runtime was composed without a configuration "
+                    "generation. `rf runtime restart` picks up a correctly composed "
+                    "process."
+                ),
+            )
         operation_id = f"op-{self._operations.ctx.ids.new_hex(24)}"
         now = self._operations.ctx.clock.now_iso()
         # The operation record is written FIRST, and the work item -- the thing a worker

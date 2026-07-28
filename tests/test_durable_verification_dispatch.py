@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import create_forge_environment
+from conftest import TEST_CONFIG_GENERATION, create_forge_environment
 
 from repoforge.adapters.persistence.json_operation_work_queue import (
     JsonOperationWorkQueue,
@@ -22,7 +22,9 @@ def test_admission_persists_queued_phase_without_marking_running(tmp_path) -> No
     from repoforge.application.operations.work_admission import DurableWorkAdmission
 
     env = create_forge_environment(tmp_path)
-    application = build_application(load_config(env.config_path))
+    application = build_application(
+        load_config(env.config_path), config_generation=TEST_CONFIG_GENERATION
+    )
     queue = JsonOperationWorkQueue(
         application.context.config.server.state_root,
         application.context.locks,
@@ -54,7 +56,9 @@ def test_pending_cancel_terminalizes_and_deletes_work(tmp_path) -> None:
     from repoforge.application.operations.work_admission import DurableWorkAdmission
 
     env = create_forge_environment(tmp_path)
-    application = build_application(load_config(env.config_path))
+    application = build_application(
+        load_config(env.config_path), config_generation=TEST_CONFIG_GENERATION
+    )
     queue = JsonOperationWorkQueue(
         application.context.config.server.state_root,
         application.context.locks,
@@ -82,7 +86,9 @@ def test_bootstrap_wires_durable_work_queue(tmp_path) -> None:
     """Catch production composition that leaves durable admission unavailable."""
     env = create_forge_environment(tmp_path)
 
-    application = build_application(load_config(env.config_path))
+    application = build_application(
+        load_config(env.config_path), config_generation=TEST_CONFIG_GENERATION
+    )
 
     queue = application.context.operation_work_queue
     assert isinstance(queue, JsonOperationWorkQueue)
@@ -96,6 +102,7 @@ def test_public_background_profile_admits_queued_work_without_daemon_closure(tmp
     application = build_application(
         config,
         overrides=AdapterOverrides(background_tasks=legacy_background),
+        config_generation=TEST_CONFIG_GENERATION,
     )
     service = CodingService(config, application=application)
     workspace_id = service.workspace_create("demo", "durable public verify")["workspace_id"]
@@ -123,7 +130,7 @@ def test_public_background_profile_admits_queued_work_without_daemon_closure(tmp
 def test_public_background_diagnostic_is_durable_and_preserves_selectors(tmp_path) -> None:
     env = create_forge_environment(tmp_path)
     config = load_config(env.config_path)
-    application = build_application(config)
+    application = build_application(config, config_generation=TEST_CONFIG_GENERATION)
     service = CodingService(config, application=application)
     workspace_id = service.workspace_create("demo", "durable diagnostic")["workspace_id"]
 
@@ -167,6 +174,7 @@ def test_foreground_profile_only_bounded_waits_on_durable_operation(
     application = build_application(
         config,
         overrides=AdapterOverrides(background_tasks=legacy_background),
+        config_generation=TEST_CONFIG_GENERATION,
     )
     service = CodingService(config, application=application)
     workspace_id = service.workspace_create("demo", "bounded foreground verify")["workspace_id"]
@@ -198,7 +206,7 @@ def test_public_cancel_terminalizes_queued_work_and_is_idempotent(tmp_path) -> N
     """The public operation API must make queued verification unclaimable immediately."""
     env = create_forge_environment(tmp_path)
     config = load_config(env.config_path)
-    application = build_application(config)
+    application = build_application(config, config_generation=TEST_CONFIG_GENERATION)
     service = CodingService(config, application=application)
     workspace_id = service.workspace_create("demo", "cancel durable verify")["workspace_id"]
     dispatched = service.workspace_verify(
@@ -234,7 +242,9 @@ def test_the_operation_record_is_durable_before_the_work_item_exists(tmp_path) -
     from repoforge.application.operations.work_admission import DurableWorkAdmission
 
     env = create_forge_environment(tmp_path)
-    application = build_application(load_config(env.config_path))
+    application = build_application(
+        load_config(env.config_path), config_generation=TEST_CONFIG_GENERATION
+    )
     queue = JsonOperationWorkQueue(
         application.context.config.server.state_root,
         application.context.locks,
@@ -274,7 +284,9 @@ def test_a_failed_queue_write_terminalizes_the_operation_it_created(tmp_path) ->
     from repoforge.domain.operation_task import OperationRetryability
 
     env = create_forge_environment(tmp_path)
-    application = build_application(load_config(env.config_path))
+    application = build_application(
+        load_config(env.config_path), config_generation=TEST_CONFIG_GENERATION
+    )
     queue = JsonOperationWorkQueue(
         application.context.config.server.state_root,
         application.context.locks,
@@ -312,7 +324,9 @@ def test_recovery_does_not_fail_an_admission_that_is_still_in_flight(tmp_path) -
     from repoforge.application.operations.recovery import recover_operation_work
 
     env = create_forge_environment(tmp_path)
-    application = build_application(load_config(env.config_path))
+    application = build_application(
+        load_config(env.config_path), config_generation=TEST_CONFIG_GENERATION
+    )
     queue = JsonOperationWorkQueue(
         application.context.config.server.state_root,
         application.context.locks,
@@ -340,7 +354,9 @@ def test_recovery_still_fails_an_admission_that_really_crashed(tmp_path) -> None
     from repoforge.application.operations.recovery import recover_operation_work
 
     env = create_forge_environment(tmp_path)
-    application = build_application(load_config(env.config_path))
+    application = build_application(
+        load_config(env.config_path), config_generation=TEST_CONFIG_GENERATION
+    )
     queue = JsonOperationWorkQueue(
         application.context.config.server.state_root,
         application.context.locks,
