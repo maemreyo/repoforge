@@ -78,6 +78,7 @@ from ...bootstrap import (
     build_operation_gate,
     build_pending_policy_change_store,
     build_release_observer,
+    build_release_process_inspector,
     build_release_store,
     build_repository_probe,
     build_runtime_activation_journal,
@@ -137,7 +138,7 @@ from ...ports import (
     LockManager,
     RepositoryProbe,
 )
-from ...ports.activation import SupervisorKickstarter
+from ...ports.activation import ReleaseProcess, SupervisorKickstarter
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
@@ -1658,6 +1659,7 @@ def _build_upgrade_service(args: argparse.Namespace) -> UpgradeService:
     return build_upgrade_service(
         release_root=getattr(args, "release_root", None),
         manage_path_launcher=_manages_path_launcher(args),
+        inspect_release_processes=True,
         supervisor_socket=supervisor_socket,
         runtime_record_path=runtime_path,
         config_path=config_path,
@@ -1701,6 +1703,11 @@ def _runtime_inventory_command(args: argparse.Namespace) -> int:
         ).list()["dev_runtimes"]
         if isinstance(listed, list):
             dev_runtimes = [entry for entry in listed if isinstance(entry, dict)]
+    release_processes: tuple[ReleaseProcess, ...] = ()
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        release_processes = build_release_process_inspector(
+            release_root=getattr(args, "release_root", None)
+        ).list_processes()
     _json(
         build_runtime_inventory(
             releases=release_choices(store),
@@ -1708,6 +1715,7 @@ def _runtime_inventory_command(args: argparse.Namespace) -> int:
             agent=agent,
             agent_secret_usable=store.agent_secret_status().usable,
             dev_runtimes=list(dev_runtimes),
+            release_processes=release_processes,
         )
     )
     return 0
@@ -1890,6 +1898,72 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_generation_service_container(
+    store: ConfigurationStore,
+    generation: int,
+    *,
+    allow_incompatible: bool = False,
+) -> GenerationServiceContainer:
+    """Build the service container the managed MCP runtime serves one generation from.
+
+    Module-level rather than a closure inside `_serve` so the composition it performs is
+    directly testable. That matters: the generation reaching `build_application` here is
+    load-bearing, and when it did not, every durable verification admitted through the
+    connector was stamped with generation 0, never claimable by a worker running the real
+    generation, and terminalized ~30s later as OPERATION_GENERATION_STALE.
+    """
+    candidates = (store.activation_target(), store.active())
+    selected = next(
+        (item for item in candidates if item is not None and item.generation == generation),
+        None,
+    )
+    if selected is None:
+        selected = next(
+            (item for item in store.history() if item.generation == generation),
+            None,
+        )
+    if selected is None:
+        raise ConfigError(f"Unknown configuration generation: {generation}")
+    if (
+        getattr(selected, "delta", CapabilityDeltaKind.EQUIVALENT)
+        is CapabilityDeltaKind.INCOMPATIBLE
+        and not allow_incompatible
+    ):
+        raise ConfigError(
+            "HOT_RELOAD_RESTART_REQUIRED: incompatible generation requires supervisor restart"
+        )
+    config = load_config(store.resolved_path(generation))
+    gate = build_operation_gate()
+    # `config_generation` is not optional context: it is stamped into every durable work
+    # item this process admits, and the execution worker claims only items matching its own
+    # generation. Omitting it left this container at the default 0 while the worker ran the
+    # real generation, so nothing the connector admitted could ever run.
+    app = build_application(
+        config, overrides=AdapterOverrides(gate=gate), config_generation=generation
+    )
+    service = CodingService(config, application=app)
+
+    def dispose() -> None:
+        gate.fail_closed(
+            reason=f"generation {generation} retired",
+            correlation_id=f"retired-{generation}",
+        )
+
+    repositories = service.repo_list(synthetic=True).get("repositories", [])
+    repository_ids = frozenset(
+        str(item["repo_id"])
+        for item in repositories
+        if isinstance(item, dict) and "repo_id" in item
+    )
+    return GenerationServiceContainer(
+        generation=generation,
+        service=service,
+        gate=gate,
+        repository_ids=repository_ids,
+        dispose=dispose,
+    )
+
+
 def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     from ..mcp.grace import FORGE_V1_IDENTITY, create_grace_server
     from ..mcp.server import (
@@ -1914,49 +1988,8 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     def build_container(
         generation: int, *, allow_incompatible: bool = False
     ) -> GenerationServiceContainer:
-        candidates = (store.activation_target(), store.active())
-        selected = next(
-            (item for item in candidates if item is not None and item.generation == generation),
-            None,
-        )
-        if selected is None:
-            selected = next(
-                (item for item in store.history() if item.generation == generation),
-                None,
-            )
-        if selected is None:
-            raise ConfigError(f"Unknown configuration generation: {generation}")
-        if (
-            getattr(selected, "delta", CapabilityDeltaKind.EQUIVALENT)
-            is CapabilityDeltaKind.INCOMPATIBLE
-            and not allow_incompatible
-        ):
-            raise ConfigError(
-                "HOT_RELOAD_RESTART_REQUIRED: incompatible generation requires supervisor restart"
-            )
-        config = load_config(store.resolved_path(generation))
-        gate = build_operation_gate()
-        app = build_application(config, overrides=AdapterOverrides(gate=gate))
-        service = CodingService(config, application=app)
-
-        def dispose() -> None:
-            gate.fail_closed(
-                reason=f"generation {generation} retired",
-                correlation_id=f"retired-{generation}",
-            )
-
-        repositories = service.repo_list(synthetic=True).get("repositories", [])
-        repository_ids = frozenset(
-            str(item["repo_id"])
-            for item in repositories
-            if isinstance(item, dict) and "repo_id" in item
-        )
-        return GenerationServiceContainer(
-            generation=generation,
-            service=service,
-            gate=gate,
-            repository_ids=repository_ids,
-            dispose=dispose,
+        return build_generation_service_container(
+            store, generation, allow_incompatible=allow_incompatible
         )
 
     initial = build_container(initial_generation.generation, allow_incompatible=True)

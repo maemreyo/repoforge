@@ -25,6 +25,7 @@ from ...ports import (
     ReleaseBuilder,
     ReleaseInstaller,
     ReleaseObserver,
+    ReleaseProcessInspector,
     ReleaseSmokeTester,
     ReleaseStore,
     RuntimeHealthProbe,
@@ -56,6 +57,8 @@ class UpgradeResult:
     activation_receipt: str | None = None
     rediscovery_required: bool = False
     pruned: tuple[str, ...] = ()
+    # Releases retention wanted to remove but a live process is still executing from.
+    retained_for_live_process: tuple[str, ...] = ()
     detail: str = ""
     observed_sha: str | None = None
     converged: bool = False
@@ -84,6 +87,7 @@ class UpgradeResult:
             "activation_receipt": self.activation_receipt,
             "client_rediscovery_required": self.rediscovery_required,
             "pruned_releases": list(self.pruned),
+            "retained_for_live_process": list(self.retained_for_live_process),
             "path_launcher_status": self.path_launcher_status,
             "path_launcher_detail": self.path_launcher_detail,
             "rollback_command": rollback,
@@ -115,6 +119,7 @@ class UpgradeService:
         health_failure_threshold: int = DEFAULT_HEALTH_FAILURE_THRESHOLD,
         locks: LockManager | None = None,
         lock_timeout_seconds: float = 900.0,
+        release_processes: ReleaseProcessInspector | None = None,
     ) -> None:
         self._store = store
         self._inspector = inspector
@@ -131,6 +136,7 @@ class UpgradeService:
         self._failure_threshold = max(1, health_failure_threshold)
         self._locks = locks
         self._lock_timeout = lock_timeout_seconds
+        self._release_processes = release_processes
 
     @contextmanager
     def _activation_lock(self) -> Iterator[None]:
@@ -516,7 +522,7 @@ class UpgradeService:
         receipt = self._write_receipt(receipt)
         self._store.end_activation()
         path_status, path_detail = self._install_path_launcher_best_effort()
-        pruned = self._store.prune(keep=keep_releases)
+        pruned, retained_by_process = self._prune_without_evicting_live_code(keep_releases)
         return UpgradeResult(
             status="activated",
             candidate_sha=commit_sha,
@@ -527,6 +533,7 @@ class UpgradeService:
             activation_receipt=receipt.receipt_id,
             rediscovery_required=rediscovery_required,
             pruned=tuple(pruned),
+            retained_for_live_process=retained_by_process,
             observed_sha=observed_sha,
             converged=True,
             stage=ActivationStage.HEALTH_VERIFIED.value,
@@ -534,6 +541,36 @@ class UpgradeService:
             path_launcher_detail=path_detail,
             detail=detail,
         )
+
+    def _prune_without_evicting_live_code(
+        self, keep_releases: int
+    ) -> tuple[list[str], tuple[str, ...]]:
+        """Prune retention-eligible releases, except any a live process is executing from.
+
+        Retention decides from `current`, `previous`, and recency, none of which says
+        anything about what is *running*. Deleting a release out from under a live process
+        leaves it executing code that no longer exists on disk: it cannot be restarted, its
+        identity cannot be resolved back to a release, and it can still write shared durable
+        state from a version the installation no longer has.
+
+        Best-effort by design: this runs after the activation is already verified, so an
+        unreadable process table degrades to "prune nothing" rather than failing a
+        successful activation. Never to "prune everything".
+        """
+        if self._release_processes is None:
+            return self._store.prune(keep=keep_releases), ()
+        try:
+            held = frozenset(
+                process.commit_sha
+                for process in self._release_processes.list_processes()
+                if process.release_installed
+            )
+        except (OSError, ConfigError):
+            # The process table could not be read, so nothing can be proven unused.
+            return [], ()
+        candidates = set(self._store.retention_candidates(keep=keep_releases))
+        pruned = self._store.prune(keep=keep_releases, protect=held)
+        return pruned, tuple(sorted(candidates & held))
 
     def _install_path_launcher_best_effort(self) -> tuple[str, str]:
         """Provision the PATH launcher, reporting failure instead of raising.
