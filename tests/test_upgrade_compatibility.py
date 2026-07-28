@@ -85,10 +85,19 @@ def test_startup_survives_a_populated_previous_release_state_root(tmp_path: Path
         _seed(env, store_dir, record_id[:-1] + f"{index}", LEGACY_RECORD)
 
     service = CodingService(load_config(env.config_path))
-    report = service.doctor()
 
-    assert report["ok"] is True
-    assert report["summary"]["errors"] == 0
+    # Control-plane reads that actually scan the seeded stores. Deliberately not
+    # `doctor()["ok"]`: that aggregates host tooling checks -- git, gh, node --
+    # and would make this assert whatever the runner happens to have installed
+    # rather than whether legacy records are survivable.
+    assert service.operation_list()["operations"] == []
+    assert service.repo_list()["repositories"]
+
+    # The records are skipped, not deleted. Removing durable state a caller never
+    # asked to remove would be a worse failure than refusing to read it.
+    for store_dir, record_id in STARTUP_SWEPT_STORES:
+        root = load_config(env.config_path).server.state_root / store_dir
+        assert (root / f"{record_id}.json").exists()
 
 
 def test_the_gate_fails_when_a_swept_store_is_fatal(
