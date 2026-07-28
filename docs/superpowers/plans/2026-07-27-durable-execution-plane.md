@@ -104,14 +104,14 @@ Recorded during implementation; each is a deliberate choice, not an omission.
   "may", and no acceptance criterion depends on it. Recovery requeues only work that never
   started a child and orphans everything ambiguous, which satisfies "a lost lease before
   child spawn requeues automatically" and "ambiguous mutating work never auto-retries".
-- **`workspace_status` on a workspace with a running command is still serialized** behind
-  that workspace's lock (~61s, measured). `operation` get/list/cancel are responsive, which
-  is what durable execution changed; the status read blocked the same way before this work,
-  because any execution holds the workspace lock for its whole duration.
-  `tests/test_control_plane_responsiveness.py` therefore measures `workspace_status` against
-  an idle bystander workspace and documents the gap in place. Making a same-workspace status
-  read responsive needs its own decision about what a status read means mid-mutation, plus
-  an additive contract field; it is tracked separately, not silently redefined here.
+- **`workspace_status` on a workspace with a running command was still serialized** behind
+  that workspace's lock (~61s, measured). It was deferred out of this plan and fixed
+  separately, because it needed its own decision about what a status read means mid-mutation
+  plus an additive contract field: a status read now waits at most
+  `server.status_read_lock_timeout_seconds` and reports `read_consistency` as `locked` or
+  `concurrent_write`, and an unsynchronized read never writes its fingerprint back to the
+  shared cache. `tests/test_control_plane_responsiveness.py` covers both the idle-bystander
+  and busy-workspace reads.
 
 ---
 
@@ -682,9 +682,9 @@ tests/test_phase6_operational_hardening.py
 Expected: all pass; while the blocked-command test runs, `operation get` and `workspace_status` respond within two seconds.
 
 Result: 127 passed. `operation` get/list and cancellation answer in milliseconds while a
-child is genuinely blocked. `workspace_status` is measured against an idle bystander
-workspace: a status read of the *executing* workspace still serializes behind that
-workspace's lock, unchanged by this work and recorded under Deviations above.
+child is genuinely blocked. A status read of the *executing* workspace serialized behind
+that workspace's lock at the time this ran; it was fixed in a follow-up commit and both
+the idle-bystander and busy-workspace reads are now covered -- see Deviations above.
 
 - [x] **Step 2: Run format, lint, typing and generated checks**
 
@@ -720,12 +720,13 @@ worktree; the durable path itself is proven by `tests/test_control_plane_respons
 which admits real work, executes it in a worker, and asserts the terminal result reference
 and `evidence_complete`.
 
-- [ ] **Step 4: Commit the exact verified tree**
+- [x] **Step 4: Commit the exact verified tree**
 
 ```bash
 git add docs/superpowers/plans/2026-07-27-durable-execution-plane.md
 git commit -m "docs(operations): record durable execution verification"
 ```
 
-Left unchecked deliberately: the working tree is verified but uncommitted, and committing
-is the operator's call.
+Result: committed as `feat(operations): make verification durable, restart-safe work (#232)`
+on `ai/epic-232-control-plane-truth-hardening-7d3cf72699`, then merged with the remote
+branch and pushed to PR #250. The responsive-status follow-up landed on top.
