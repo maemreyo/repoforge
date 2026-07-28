@@ -377,9 +377,15 @@ def recover_operation_work(
                     continue
                 raise
             continue
+        # Only work from an OLDER generation is unrunnable. A `!=` test also failed work
+        # from a NEWER one, which is the normal state for a few seconds during a hot reload:
+        # the request side swaps to the new generation and admits against it before the
+        # supervisor has replaced this worker. That work is perfectly good -- it is simply
+        # not this worker's to claim, and the replacement worker will take it -- so failing
+        # it destroyed valid work and reported the operator's own config change as an error.
         if (
             expected_config_generation is not None
-            and item.request.config_generation != expected_config_generation
+            and item.request.config_generation < expected_config_generation
         ):
             try:
                 detail = (
