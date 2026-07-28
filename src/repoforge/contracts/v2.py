@@ -2009,12 +2009,26 @@ class RuntimeActivationEvidenceView(StrictModel):
     activated_process_identity: Sha256 | None = None
     runtime_phase: ShortText | None = None
     error_code: ShortText | None = None
-    #: `matches` when the receipt's activated identity is the identity the live
-    #: process advertises. `diverged` when they disagree -- the activation did not
-    #: end where it claimed. `unverifiable` when there is no receipt, or it never
-    #: recorded an activated identity, so nothing can be checked either way; that
-    #: is reported rather than defaulted to success.
+    #: `matches` when the live runtime serves the configuration generation this
+    #: receipt activated. `diverged` when it serves a different one -- the activation
+    #: did not end where it claimed, or something else took over since. `unverifiable`
+    #: when no generation was recorded or none is observable, so nothing can be
+    #: checked either way; that is reported rather than defaulted to success.
+    #:
+    #: Deliberately NOT a comparison of process identity or tool-surface hash. Both
+    #: describe one process instance and one release, so both change legitimately --
+    #: on a watchdog restart, or after a later release activation -- and comparing
+    #: them reported a healthy converged installation as diverged, which is worse
+    #: than reporting nothing. Those changes are facts, not verdicts, so they are
+    #: reported separately below.
     agreement: Literal["matches", "diverged", "unverifiable"]
+    #: True when the live process is not the instance the receipt recorded, i.e. the
+    #: runtime has been restarted since. Normal after a watchdog restart or a later
+    #: activation; None when either identity is unknown.
+    process_restarted_since_activation: bool | None = None
+    #: True when the live tool surface differs from the one recorded, which is what a
+    #: release upgrade after this activation looks like. None when either is unknown.
+    tool_surface_changed_since_activation: bool | None = None
 
 
 class ConfigProjectionView(StrictModel):
