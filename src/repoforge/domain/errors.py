@@ -126,6 +126,8 @@ class ErrorCode(str, Enum):
     ADHOC_RUNNER_NOT_ALLOWED = "ADHOC_RUNNER_NOT_ALLOWED"
     ADHOC_ARGV_INVALID = "ADHOC_ARGV_INVALID"
     ADHOC_COMMAND_FORBIDDEN = "ADHOC_COMMAND_FORBIDDEN"
+    PROFILE_NOT_MODEL_INVOCABLE = "PROFILE_NOT_MODEL_INVOCABLE"
+    PROFILE_RERUN_TOO_SOON = "PROFILE_RERUN_TOO_SOON"
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +368,8 @@ def operation_error_from_exception(
         ErrorCode.ADHOC_COMMAND_FORBIDDEN: "The ad-hoc command is an irreversible or history-rewriting form that RepoForge blocks; use the reviewed typed tools instead.",
         ErrorCode.EXECUTION_POLICY_UNSUPPORTED: "The selected execution backend cannot truthfully satisfy a required execution policy.",
         ErrorCode.EXECUTION_ENVIRONMENT_DRIFT: "The execution environment identity changed across a reviewed session or commit gate.",
+        ErrorCode.PROFILE_NOT_MODEL_INVOCABLE: "The reviewed configuration reserves this profile for the operator and CI, because it is expensive enough that the decision to run it is not the model's to make.",
+        ErrorCode.PROFILE_RERUN_TOO_SOON: "This profile ran against the same workspace snapshot too recently; the reviewed configuration bounds how often it may repeat.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

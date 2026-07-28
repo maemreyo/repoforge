@@ -32,6 +32,25 @@ path = "/absolute/path/to/repository"
 # verification = false
 # commands = [["pnpm", "run", "debug:server"]]
 
+# An authoritative gate is expensive enough that the decision to run it is the operator's,
+# not the model's. `model_invocable = false` keeps the profile available to you and to CI
+# while refusing a model-initiated run at the boundary, and `min_interval_seconds` puts a
+# floor under `force_rerun`, which legitimately exists for external changes and is also what
+# turns a long gate into something repeatable at will. Give the model a cheap profile to use
+# instead -- a scoped, affected-tests run answers in minutes rather than half an hour.
+# [repo.policy_patch.profiles.gate]
+# description = "Authoritative production gate: full suite with coverage, build, wheel check"
+# verification = true
+# timeout_seconds = 1800
+# model_invocable = false
+# min_interval_seconds = 900
+# commands = [["scripts/verify-production.sh", "--allow-dirty"]]
+# [repo.policy_patch.profiles.dev]
+# description = "Affected tests only, no coverage: the profile a model should reach for"
+# verification = true
+# timeout_seconds = 600
+# commands = [["uv", "run", "python", "scripts/select_affected_tests.py", "--run"]]
+
 # Generated paths name an approved regeneration command. Refresh conflict evidence points agents
 # at this command instead of encouraging hand-merges.
 # [[repositories.example-repository.generated_paths]]

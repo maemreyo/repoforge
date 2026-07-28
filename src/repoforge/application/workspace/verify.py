@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from ...domain.diagnostics import DiagnosticExpectation, DiagnosticFailureClass
 from ...domain.errors import (
+    CommandError,
     ConfigError,
     ErrorCode,
     RepoForgeError,
@@ -26,6 +28,7 @@ from ...domain.operation_work import OperationWorkRequest
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ...domain.redaction import sanitize_persisted_data
 from ...domain.verification import VerificationIntent
+from ..audit_context import current_audit_attribution
 from ..context import ApplicationContext
 from ..dto import to_data
 from ..file_transactions import open_file_transaction
@@ -353,6 +356,72 @@ class WorkspaceVerifier:
         self._admission = admission
         self._operations = operations
 
+    def _refuse_rerun_too_soon(self, workspace_id: str, profile_name: str) -> None:
+        """Bound how often a model may repeat an expensive profile on one workspace.
+
+        Receipt reuse already covers an unchanged tree, but `force_rerun` exists so an
+        external change can be re-verified WITHOUT the tree changing -- and that same flag
+        turns a 30-minute gate into something repeatable at will. This is the floor under it,
+        expressed in the reviewed configuration. Operator and CI runs are never bounded:
+        they have weighed the cost.
+        """
+        if current_audit_attribution().origin != "model":
+            return
+        _record, repo, _path = self.ctx.workspace(workspace_id)
+        profile = repo.profiles.get(profile_name)
+        if profile is None or profile.min_interval_seconds <= 0:
+            return
+        try:
+            cutoff = (
+                datetime.fromisoformat(self.ctx.clock.now_iso())
+                - timedelta(seconds=profile.min_interval_seconds)
+            ).isoformat()
+        except ValueError:
+            # An unreadable clock is not a reason to refuse expensive-but-wanted work.
+            return
+        for task in self._operations.list_records(max_records=200).records:
+            if task.workspace_id != workspace_id or task.kind != "workspace_run_profile":
+                continue
+            if task.state not in TERMINAL_OPERATION_STATES or task.updated_at <= cutoff:
+                continue
+            raise CommandError(
+                f"PROFILE_RERUN_TOO_SOON: profile {profile_name!r} ran on this workspace "
+                f"less than {profile.min_interval_seconds}s ago "
+                f"(operation {task.operation_id}).",
+                code=ErrorCode.PROFILE_RERUN_TOO_SOON,
+                retryable=False,
+                safe_next_action=(
+                    f"Read the result of {task.operation_id} instead of re-running it, or "
+                    "ask the operator to run it if an external condition changed."
+                ),
+            )
+
+    def _refuse_reserved_profile(self, workspace_id: str, profile_name: str) -> None:
+        """Refuse a model-initiated run of a profile the reviewed configuration reserves.
+
+        An authoritative gate can cost half an hour of machine time. A model cannot weigh
+        that, and on this installation one started the 30-minute `full` gate to sanity-check
+        an unrelated runtime fix -- a reasonable-looking call, and the wrong one. Putting the
+        judgement in the reviewed configuration makes it the operator's, enforceable, and
+        auditable; an instruction to the agent would have been none of those.
+        """
+        if current_audit_attribution().origin != "model":
+            return
+        _record, repo, _path = self.ctx.workspace(workspace_id)
+        profile = repo.profiles.get(profile_name)
+        if profile is None or profile.model_invocable:
+            return
+        raise CommandError(
+            f"PROFILE_NOT_MODEL_INVOCABLE: profile {profile_name!r} is reserved for the "
+            "operator and CI by the reviewed configuration.",
+            code=ErrorCode.PROFILE_NOT_MODEL_INVOCABLE,
+            retryable=False,
+            safe_next_action=(
+                "Use a profile the configuration exposes to the model, or ask the operator "
+                f"to run {profile_name!r} out of band."
+            ),
+        )
+
     def _wait_for_operation(
         self,
         operation_id: str,
@@ -610,6 +679,11 @@ class WorkspaceVerifier:
             if isinstance(diagnostic_result, WorkspaceRunDiagnosticBackgroundResult):
                 result = self._project_operation(result, durable_task)
         elif selected_mode == "profile":
+            # Enforced HERE, on the model-facing side of the durable boundary. The runner
+            # executes later in the worker process, whose attribution is background_worker,
+            # so a guard placed there would never see the model that asked for the run.
+            self._refuse_reserved_profile(command.workspace_id, profile_name or final_profile)
+            self._refuse_rerun_too_soon(command.workspace_id, profile_name or final_profile)
             admitted = self._admission.admit(
                 OperationWorkRequest.profile(
                     workspace_id=command.workspace_id,
