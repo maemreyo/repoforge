@@ -160,26 +160,162 @@ def test_a_slow_client_is_bounded_rather_than_waited_on_forever(tmp_path: Path) 
         server.close()
 
 
-def test_concurrent_clients_are_all_answered(tmp_path: Path) -> None:
-    """Ten clients at once, none starved: the queue drains rather than stalls."""
+def test_no_client_is_starved_when_several_arrive_at_once(tmp_path: Path) -> None:
+    """Several clients at once: the queue drains rather than stalling on the first.
+
+    Deliberately generous with time and modest in count. The property under test is
+    starvation -- a client that is never answered -- not latency: the server serves
+    sequentially by design, and this suite runs on machines where a concurrent build can
+    take most of the CPU. An earlier version used ten clients and a 15s budget, and failed
+    exactly that way while an unrelated 25-minute verification saturated the machine.
+    """
     server = _server(tmp_path)
     path = resolve_unix_socket_path(tmp_path / "control.sock")
-    replies: list[dict[str, object] | None] = []
+    answered: list[bool] = []
     lock = threading.Lock()
 
     def ask() -> None:
-        reply = _ping(path, timeout=15.0)
+        reply = _ping(path, timeout=45.0)
         with lock:
-            replies.append(reply)
+            answered.append(reply is not None and reply["ok"] is True)
 
     try:
-        threads = [threading.Thread(target=ask) for _ in range(10)]
+        threads = [threading.Thread(target=ask) for _ in range(5)]
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=20.0)
+            thread.join(timeout=60.0)
 
-        assert len(replies) == 10
-        assert all(reply is not None and reply["ok"] is True for reply in replies)
+        assert len(answered) == 5, f"only {len(answered)} of 5 clients returned at all"
+        assert all(answered), f"{answered.count(False)} of 5 clients were never answered"
     finally:
         server.close()
+
+
+# ---------------- health must not claim healthy without a control plane (#322)
+
+
+def test_a_stopped_control_server_reports_that_it_is_not_serving(tmp_path: Path) -> None:
+    """The liveness the health record needs, at the boundary that owns it."""
+    server = _server(tmp_path)
+    try:
+        assert server.is_serving() is True
+        assert "accepting" in server.serving_diagnostic()
+    finally:
+        server.close()
+
+    assert server.is_serving() is False
+    assert server.serving_diagnostic() != ""
+
+
+def test_a_never_started_server_is_not_serving(tmp_path: Path) -> None:
+    server = UnixRuntimeControlServer(tmp_path / "unused.sock")
+
+    assert server.is_serving() is False
+    assert "never started" in server.serving_diagnostic()
+
+
+def test_a_dead_serve_thread_is_reported_rather_than_assumed_alive(tmp_path: Path) -> None:
+    """The state the live incident was in: process alive, control plane gone.
+
+    Simulated by stopping the loop from underneath, because after this change no peer can
+    kill it. What matters is that liveness is *observed* rather than inferred from the
+    process still running -- the health record is written by a loop that survives this one.
+    """
+    server = _server(tmp_path)
+    try:
+        thread = server._thread
+        assert thread is not None
+        server._stop.set()
+        thread.join(timeout=5.0)
+
+        assert thread.is_alive() is False
+        assert server.is_serving() is False
+        assert server.serving_diagnostic() != "control socket is accepting requests"
+    finally:
+        server.close()
+
+
+def test_runtime_health_fails_when_the_control_plane_is_not_serving(tmp_path: Path) -> None:
+    """A supervisor must not publish `healthy` while its control plane is gone.
+
+    This is the state the live incident was in: the process alive, the watchdog loop still
+    recording `phase: healthy`, and every read that needed the control socket timing out.
+    The health record is written by a loop that survives the control loop, so the fact has
+    to be observed rather than inferred from the process still running.
+    """
+    from repoforge.application.runtime.supervisor import RuntimeSupervisor
+    from repoforge.domain.runtime import ChildProcess
+    from repoforge.domain.runtime import ControlResponse as _Response
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    class _DeadControl:
+        def start(self, handler: object) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def is_serving(self) -> bool:
+            return False
+
+        def serving_diagnostic(self) -> str:
+            return "control server thread is no longer running"
+
+    class _Mcp:
+        def request(self, request: object, *, timeout_seconds: float = 10.0) -> _Response:
+            return _Response(1, True, "c" * 24, "healthy")
+
+    class _Tunnel:
+        def is_alive(self, child: object) -> bool:
+            return True
+
+    class _Store:
+        def read(self) -> None:
+            return None
+
+        def write(self, record: object) -> None:
+            return None
+
+        def clear(self, *, expected_pid: int | None = None) -> None:
+            return None
+
+    class _Configs:
+        def active(self) -> None:
+            return None
+
+        def clear_activation_target(self, *, expected_generation: int | None = None) -> None:
+            return None
+
+    class _Locks:
+        def lock(self, name: str, **kwargs: object) -> contextlib.AbstractContextManager[None]:
+            return contextlib.nullcontext()
+
+        def path_for(self, name: str) -> Path:
+            return tmp_path / name
+
+    class _Processes:
+        def identity(self, pid: int) -> str:
+            return "f" * 64
+
+    supervisor = RuntimeSupervisor(
+        store=_Store(),  # type: ignore[arg-type]
+        configs=_Configs(),  # type: ignore[arg-type]
+        locks=_Locks(),  # type: ignore[arg-type]
+        control=_DeadControl(),  # type: ignore[arg-type]
+        mcp_control=_Mcp(),  # type: ignore[arg-type]
+        tunnel=_Tunnel(),  # type: ignore[arg-type]
+        profile_store=None,  # type: ignore[arg-type]
+        clock=FixedClock("2026-07-28T00:00:00+00:00"),
+        ids=SequenceIdGenerator(("health",)),
+        processes=_Processes(),  # type: ignore[arg-type]
+        mcp_runtime_path=tmp_path / "runtime.json",
+        log_path=tmp_path / "runtime.log",
+    )
+
+    healthy, checks = supervisor._observe_health(1, ChildProcess(222, "f" * 64, "now"))
+
+    named = {name: (ok, detail) for name, ok, detail in checks}
+    assert named["control_plane"][0] is False
+    assert "no longer running" in named["control_plane"][1]
+    assert healthy is False, "a runtime with no control plane reported itself healthy"

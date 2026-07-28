@@ -504,6 +504,12 @@ def test_supervisor_commits_active_generation_only_after_health(tmp_path: Path) 
         def close(self):
             pass
 
+        def is_serving(self) -> bool:
+            return True
+
+        def serving_diagnostic(self) -> str:
+            return "fake control server"
+
     class Mcp:
         def __init__(self):
             self.on_health = lambda: None
@@ -637,6 +643,12 @@ def test_supervisor_health_command_fails_when_child_is_not_healthy() -> None:
         def close(self):
             pass
 
+        def is_serving(self) -> bool:
+            return True
+
+        def serving_diagnostic(self) -> str:
+            return "fake control server"
+
     class Never:
         def request(self, request, *, timeout_seconds=10.0):
             del request, timeout_seconds
@@ -717,6 +729,12 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
 
         def close(self):
             pass
+
+        def is_serving(self) -> bool:
+            return True
+
+        def serving_diagnostic(self) -> str:
+            return "fake control server"
 
     class Processes:
         def identity(self, pid: int) -> str | None:

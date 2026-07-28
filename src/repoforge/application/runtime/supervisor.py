@@ -260,6 +260,14 @@ class RuntimeSupervisor:
         self, generation: int, child: ChildProcess
     ) -> tuple[bool, tuple[tuple[str, bool, str], ...]]:
         checks = list(self._tunnel_health(child))
+        # First, because a runtime that cannot answer control requests is not healthy no
+        # matter what else is true. This record is written by the watchdog loop, which
+        # survives the control loop, so without this check a supervisor whose control plane
+        # had died kept publishing `phase: healthy` while every read needing the socket
+        # timed out -- and the recovery commands, which go through that same socket, could
+        # not run either (#322).
+        serving = self._control.is_serving()
+        checks.append(HealthCheck("control_plane", serving, self._control.serving_diagnostic()))
         if self._execution_worker is not None:
             worker_alive = bool(
                 self._execution_child and self._execution_worker.is_alive(self._execution_child)

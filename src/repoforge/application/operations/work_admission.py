@@ -49,6 +49,16 @@ class DurableWorkAdmission:
                     "process."
                 ),
             )
+        # Single-flight: identical work already in flight is JOINED, not duplicated. Two
+        # runs of the same profile against the same exact snapshot cannot reach different
+        # answers, and they would contend for the same workspace lock anyway -- the second
+        # would only wait and burn a worker slot. Returning the live operation is also more
+        # useful to the caller: it hands back the operation actually producing the answer.
+        # `full`-class verification is 25 minutes here, so an accidental repeat is expensive
+        # enough that this is a correctness concern rather than a nicety.
+        existing = self._in_flight_match(request)
+        if existing is not None:
+            return existing
         operation_id = f"op-{self._operations.ctx.ids.new_hex(24)}"
         now = self._operations.ctx.clock.now_iso()
         # The operation record is written FIRST, and the work item -- the thing a worker
@@ -92,6 +102,29 @@ class DurableWorkAdmission:
             )
             raise
         return operation
+
+    def _in_flight_match(self, request: OperationWorkRequest) -> OperationTask | None:
+        """Return a non-terminal operation already running EXACTLY this request, if any.
+
+        Identity is the whole request, fingerprint included: a changed tree is different
+        work and must run. A queue item whose operation is terminal or unreadable is not a
+        match -- recovery owns that, and joining it would hand back a finished answer for
+        work the caller believes is starting.
+        """
+        try:
+            page = self._queue.list_records(max_records=2_000)
+        except RepoForgeError:
+            return None
+        for item in page.records:
+            if item.request != request:
+                continue
+            try:
+                operation = self._operations.status(item.operation_id)
+            except RepoForgeError:
+                continue
+            if operation.state not in TERMINAL_OPERATION_STATES:
+                return operation
+        return None
 
     def cancel(self, operation_id: str) -> OperationTask:
         operation = self._operations.status(operation_id)

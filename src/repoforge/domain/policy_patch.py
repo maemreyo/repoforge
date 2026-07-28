@@ -132,6 +132,11 @@ class ProfilePatch:
     working_directory: str | None = None
     steps: tuple[VerificationStep, ...] = ()
     baseline_policy: HygieneBaselinePolicy = HygieneBaselinePolicy.STRICT_CLEAN
+    #: Reserve an expensive profile for the operator and CI. A durable patch is where this
+    #: belongs: on a real installation the profiles a model can reach come from the patch,
+    #: not from the source config, so a policy the patch cannot express is unreachable.
+    model_invocable: bool = True
+    min_interval_seconds: int = 0
 
     def __post_init__(self) -> None:
         _safe_name(self.name, "profile name")
@@ -208,6 +213,10 @@ class ProfilePatch:
             ]
         if self.baseline_policy is not HygieneBaselinePolicy.STRICT_CLEAN:
             table["baseline_policy"] = self.baseline_policy.value
+        if not self.model_invocable:
+            table["model_invocable"] = False
+        if self.min_interval_seconds:
+            table["min_interval_seconds"] = self.min_interval_seconds
         return table
 
     @classmethod
@@ -224,6 +233,8 @@ class ProfilePatch:
                 "working_directory",
                 "steps",
                 "baseline_policy",
+                "model_invocable",
+                "min_interval_seconds",
             }
         )
         if unknown:
@@ -265,8 +276,22 @@ class ProfilePatch:
             )
         except ValueError as exc:
             raise PolicyPatchError(f"profile {name}.baseline_policy is invalid") from exc
+        model_invocable = raw.get("model_invocable", True)
+        if not isinstance(model_invocable, bool):
+            raise PolicyPatchError(f"profile {name}.model_invocable must be a boolean")
+        min_interval = raw.get("min_interval_seconds", 0)
+        if (
+            not isinstance(min_interval, int)
+            or isinstance(min_interval, bool)
+            or not 0 <= min_interval <= 24 * 60 * 60
+        ):
+            raise PolicyPatchError(
+                f"profile {name}.min_interval_seconds must be an integer between 0 and 86400"
+            )
         return cls(
             name=name,
+            model_invocable=model_invocable,
+            min_interval_seconds=min_interval,
             description=str(raw.get("description", "")),
             commands=commands,
             verification=verification,
