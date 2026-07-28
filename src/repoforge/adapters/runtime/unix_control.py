@@ -136,10 +136,37 @@ class UnixRuntimeControlServer:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._client_failures = 0
+        self._stopped_reason: str | None = None
 
     @property
     def bound_path(self) -> Path:
         return self._bound_path
+
+    def is_serving(self) -> bool:
+        """Is the accept loop still running?
+
+        The health record is written by a different loop than the one that serves control
+        requests, so without this a runtime whose control plane had ended kept reporting
+        `phase: healthy` -- every durable fact insisting nothing was wrong while every read
+        that needed the socket timed out. That gap cost more diagnosis time than the
+        original defect did.
+        """
+        return bool(
+            self._socket is not None
+            and self._thread is not None
+            and self._thread.is_alive()
+            and not self._stop.is_set()
+        )
+
+    def serving_diagnostic(self) -> str:
+        """Why the control plane is not serving, for the health check's detail."""
+        if self.is_serving():
+            return "control socket is accepting requests"
+        if self._socket is None:
+            return "control server was never started"
+        if self._stop.is_set():
+            return "control server was asked to stop"
+        return self._stopped_reason or "control server thread is no longer running"
 
     def start(self, handler: Callable[[ControlRequest], ControlResponse]) -> None:
         if self._socket is not None:
@@ -204,7 +231,11 @@ class UnixRuntimeControlServer:
                     connection, _ = listener.accept()
                 except TimeoutError:
                     continue
-                except OSError:
+                except OSError as exc:
+                    # Recorded, not swallowed: this ends the control plane, and a runtime
+                    # whose control plane has ended must be able to say so (#322).
+                    if not self._stop.is_set():
+                        self._stopped_reason = f"accept failed: {type(exc).__name__}"
                     break
                 # NOTHING a peer does may end this loop. The previous version let
                 # `sendall` to a closed peer raise out of `serve`, which killed the thread

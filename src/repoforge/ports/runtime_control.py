@@ -18,6 +18,16 @@ class RuntimeControlClient(Protocol):
 class RuntimeControlServer(Protocol):
     def start(self, handler: Callable[[ControlRequest], ControlResponse]) -> None: ...
     def close(self) -> None: ...
+    def is_serving(self) -> bool:
+        """Whether control requests are still being accepted.
+
+        Part of the boundary because runtime health has to report it: the health record is
+        written by a loop that can outlive the one serving control requests, so a runtime
+        could otherwise claim `healthy` with no control plane at all (#322).
+        """
+        ...
+
+    def serving_diagnostic(self) -> str: ...
 
 
 class RuntimeStore(Protocol):
