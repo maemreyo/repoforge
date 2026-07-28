@@ -366,7 +366,11 @@ def test_serve_control_handler_covers_health_drain_resume_and_fail_closed(
     monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
     monkeypatch.setattr(cli, "load_config", lambda path: object())
     monkeypatch.setattr(cli, "build_operation_gate", lambda: gate)
-    monkeypatch.setattr(cli, "build_application", lambda config, overrides: object())
+    # `**kwargs` on purpose: this stub stands in for a composition whose keyword
+    # arguments are load-bearing elsewhere (config_generation), and a stub that
+    # pins today's exact signature fails the moment one is added -- which is how a
+    # correct fix to that composition first showed up as a red test here.
+    monkeypatch.setattr(cli, "build_application", lambda config, **kwargs: object())
     monkeypatch.setattr(cli, "CodingService", lambda config, application: Service())
     monkeypatch.setattr(cli, "build_runtime_control_server", lambda path: Control())
     monkeypatch.setattr(
