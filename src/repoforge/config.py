@@ -251,6 +251,29 @@ def _expand_path(value: str, *, base_dir: Path) -> Path:
     return path.resolve()
 
 
+def declared_state_root(config_path: str | Path) -> Path | None:
+    """Read only ``[server].state_root`` from a config source, or None if unset.
+
+    Deliberately not `load_config`: the state root decides WHERE this config's immutable
+    generations live, so it has to be readable before any generation exists and without
+    the whole document having to validate. An unreadable or malformed file returns None,
+    leaving the caller on its default rather than failing a path computation.
+    """
+    path = Path(config_path).expanduser().resolve()
+    try:
+        with path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    server = raw.get("server")
+    if not isinstance(server, dict):
+        return None
+    value = server.get("state_root")
+    if not isinstance(value, str) or not value:
+        return None
+    return _expand_path(value, base_dir=path.parent)
+
+
 def _expect_mapping(value: Any, context: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError(f"{context} must be a TOML table")

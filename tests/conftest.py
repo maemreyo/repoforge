@@ -37,6 +37,13 @@ _PROTECTED_REAL_PATHS = (
     _REAL_HOME / ".local" / "share" / "repoforge" / "previous",
     _REAL_HOME / ".local" / "share" / "repoforge" / "runtime",
     _REAL_HOME / "Library" / "LaunchAgents" / "dev.repoforge.supervisor.plist",
+    # The state ROOT itself is deliberately not listed: the live runtime rewrites the audit
+    # log, metrics and operation records continuously, so its fingerprint would flip no
+    # matter what the suite did. This subdirectory is different -- it gains an entry only
+    # when something resolves a NEW config path against the real state root, which is
+    # exactly the leak that accumulated 640 directories of test residue (#318). Comparing
+    # the entry listing catches that without descending into anything the runtime mutates.
+    _REAL_HOME / ".local" / "state" / "repoforge" / "config-locks",
 )
 
 
