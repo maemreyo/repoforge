@@ -21,6 +21,7 @@ from ..ports import (
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
+    CommitIdentityGateway,
     ExecutableLocator,
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
@@ -235,6 +236,7 @@ class ApplicationContext:
     ids: IdGenerator
     executables: ExecutableLocator
     execution: ExecutionCoordinator
+    commit_identities: CommitIdentityGateway | None = None
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None

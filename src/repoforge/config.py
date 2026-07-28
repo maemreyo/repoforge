@@ -16,6 +16,7 @@ from .domain.command_source import (
     derive_command_source_paths,
     validate_command_source_paths,
 )
+from .domain.commit_identity import CommitIdentityPolicy, CommitSigningMode
 from .domain.diagnostics import (
     DiagnosticMutability,
     DiagnosticNetworkPolicy,
@@ -36,6 +37,7 @@ from .domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from .domain.mutation_policy import MUTATION_OPS, validate_allowed_mutation_ops
 from .domain.provider_config import load_provider_manifests
 from .domain.provider_manifest import ProviderManifest
+from .domain.repository_identity import ActorClass
 from .domain.resource_budget import (
     DEFAULT_RESOURCE_BUDGET,
     RESOURCE_BUDGET_FIELDS,
@@ -200,6 +202,7 @@ class RepositoryConfig:
     ticket_graph: GitHubTicketGraphConfig | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
     issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
+    commit_identity: CommitIdentityPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -865,6 +868,70 @@ def _load_risk_policy(
         raise ConfigError(f"repositories.{repo_id}.risk is invalid: {exc}") from exc
 
 
+def _load_commit_identity(value: object, repo_id: str) -> CommitIdentityPolicy | None:
+    if value is None:
+        return None
+    context = f"repositories.{repo_id}.commit_identity"
+    table = _expect_mapping(value, context)
+    required = {
+        "profile_id",
+        "actor_class",
+        "author_name",
+        "author_email",
+        "committer_name",
+        "committer_email",
+    }
+    allowed = {
+        *required,
+        "signing_mode",
+        "signer_fingerprint",
+        "signing_key_reference",
+        "represented_actor_id",
+        "delegation_approval_id",
+    }
+    unknown = sorted(set(table).difference(allowed))
+    if unknown:
+        raise ConfigError(f"{context} contains unsupported fields: {unknown}")
+    missing = sorted(required.difference(table))
+    if missing:
+        raise ConfigError(f"{context} is missing required fields: {', '.join(missing)}")
+
+    def optional(name: str) -> str | None:
+        raw = table.get(name)
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            raise ConfigError(f"{context}.{name} must be a string")
+        return raw
+
+    def required_string(name: str) -> str:
+        raw = table[name]
+        if not isinstance(raw, str):
+            raise ConfigError(f"{context}.{name} must be a string")
+        return raw
+
+    signing_mode_raw = table.get("signing_mode", CommitSigningMode.UNSIGNED_ATTESTED.value)
+    if not isinstance(signing_mode_raw, str):
+        raise ConfigError(f"{context}.signing_mode must be a string")
+
+    try:
+        return CommitIdentityPolicy(
+            profile_id=required_string("profile_id"),
+            actor_class=ActorClass(required_string("actor_class")),
+            author_name=required_string("author_name"),
+            author_email=required_string("author_email"),
+            committer_name=required_string("committer_name"),
+            committer_email=required_string("committer_email"),
+            signing_mode=CommitSigningMode(signing_mode_raw),
+            signer_fingerprint=optional("signer_fingerprint"),
+            signing_key_reference=optional("signing_key_reference"),
+            represented_actor_id=optional("represented_actor_id"),
+            delegation_approval_id=optional("delegation_approval_id"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{context} is invalid: {exc}") from exc
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     config_value: str | Path = path or os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
     config_path = Path(config_value).expanduser().resolve()
@@ -1053,6 +1120,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         diagnostics = _load_diagnostics(repo_raw.get("diagnostics"), repo_id)
         formatters = _load_formatters(repo_raw.get("formatters"), repo_id)
         ticket_graph = _load_github_ticket_graph(repo_raw.get("ticket_graph"), repo_id)
+        commit_identity = _load_commit_identity(repo_raw.get("commit_identity"), repo_id)
         try:
             generated_paths = parse_generated_paths(
                 repo_raw.get("generated_paths"),
@@ -1200,6 +1268,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ticket_graph=ticket_graph,
             generated_paths=generated_paths,
             issue_writes=issue_writes,
+            commit_identity=commit_identity,
         )
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(

@@ -48,6 +48,16 @@ Binding is single-assignment: retrying the same decision is idempotent, while a 
 
 Every external write revalidates the exact operation ID, context digest, target kind/ID, requested capability, lease state and expiry. Nested repositories never inherit the primary lease. Revocation may select one lease or profile, expiry changes only elapsed active leases, and refresh is accepted only when profile, provider, repository, target, actor, opaque reference, config/policy revisions and safe provider metadata remain identical. A missing or unavailable sidecar denies writes rather than falling back to ambient identity.
 
+## Worktree-safe commit identity
+
+Workspace creation resolves one explicit `CommitIdentityPolicy` and stores it with a digest-only snapshot of identity-, signing-, credential-, transport-, and remote-sensitive local/worktree Git configuration. A legacy installation may import the current author and committer once during creation, but later commits never re-read ambient identity as a fallback. Missing or malformed pinned policy fails before staging.
+
+`GitCommitIdentityGateway` runs ordinary commits, reviewed base-refresh merge commits, and evidence collection with an exact process environment. Author and committer variables are injected per operation, `user.useConfigOnly` is forced, interactive credential lookup and SSH-agent inheritance are removed, and direct signing uses only the reviewed key reference and expected fingerprint. It never writes shared or worktree Git configuration and never rewrites a remote. The generic Git repository port exposes no ambient commit or merge-commit operation, so future workflows cannot bypass this governance boundary accidentally.
+
+Before `git add`, the gateway recomputes the configuration snapshot. Shared/local or worktree-specific drift fails closed. Multi-valued helper chains are represented by an ordered aggregate digest, so helper order and additions are detectable without persisting helper bodies. Two linked worktrees can therefore commit concurrently with different policies without changing one another's attribution, signing, or transport behaviour.
+
+Commit evidence records author, committer, actor class, signing mode, signer fingerprint or attestation digest, and the configuration snapshot digest. Delegated-human evidence additionally retains the safe represented-actor and approval IDs. Raw key material and key references are excluded from audit payloads.
+
 ## Evidence semantics
 
 - `verified_actor` proves the observed API or provider actor only for the named surface.

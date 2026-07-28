@@ -12,6 +12,7 @@ from ...domain.workspace import (
 from ..context import ApplicationContext
 from ..fingerprint_cache import prime_fingerprint
 from .base_status import collect_workspace_base_status
+from .commit_identity import require_pinned_commit_identity
 from .refresh_preview import refresh_binding, require_refresh_snapshot
 
 
@@ -59,6 +60,10 @@ class WorkspaceRefresher:
             preview_target = refresh_preview_target(command.preview_id)
         except ValueError as exc:
             raise _stale_refresh("preview id is invalid") from exc
+        audit_details: dict[str, object] = {
+            "workspace_id": command.workspace_id,
+            "target_base_sha": preview_target,
+        }
 
         def operation() -> WorkspaceRefreshResult:
             with self.ctx.locks.lock(command.workspace_id):
@@ -108,8 +113,10 @@ class WorkspaceRefresher:
                 if binding.preview_id() != command.preview_id:
                     raise _stale_refresh("reviewed merge evidence changed")
 
-                merged = self.ctx.git.merge_no_ff(path, repo, preview_target)
+                pinned_identity = require_pinned_commit_identity(self.ctx, record)
+                merged = self.ctx.git.begin_merge_no_ff(path, repo, preview_target)
                 if merged.status == "conflict":
+                    self.ctx.git.reset_hard(path, old_head)
                     recovered_fingerprint = prime_fingerprint(
                         self.ctx.fingerprint_cache,
                         command.workspace_id,
@@ -141,16 +148,42 @@ class WorkspaceRefresher:
                         recovered_fingerprint,
                     )
 
+                new_head = old_head
+                refresh_status = merged.status
+                identity_evidence: dict[str, object] | None = None
+                if merged.status != "current":
+                    try:
+                        managed = pinned_identity.gateway.commit_merge(
+                            path,
+                            pinned_identity.policy,
+                            expected_config_digest=pinned_identity.config_digest,
+                        )
+                    except Exception:
+                        self.ctx.git.reset_hard(path, old_head)
+                        _ = prime_fingerprint(
+                            self.ctx.fingerprint_cache,
+                            command.workspace_id,
+                            self.ctx.git,
+                            path,
+                        )
+                        raise
+                    new_head = managed.head_sha
+                    refresh_status = "refreshed"
+                    identity_evidence = managed.evidence.safe_payload()
+
                 invalidated = invalidate_workspace_refresh_receipts(record)
                 record.metadata["workspace_base_sha"] = preview_target
                 record.metadata["last_refresh_target_sha"] = preview_target
                 record.metadata["last_refresh_at"] = self.ctx.clock.now_iso()
-                if merged.head_sha != old_head:
-                    record.metadata["refresh_commit_sha"] = merged.head_sha
+                if new_head != old_head:
+                    record.metadata["refresh_commit_sha"] = new_head
+                if identity_evidence is not None:
+                    record.metadata["last_commit_identity_evidence"] = identity_evidence
+                    audit_details["commit_identity"] = identity_evidence
                 try:
                     self.ctx.store.save(record)
                 except Exception as exc:
-                    if merged.head_sha != old_head:
+                    if new_head != old_head:
                         try:
                             self.ctx.git.reset_hard(path, old_head)
                             _ = prime_fingerprint(
@@ -176,28 +209,21 @@ class WorkspaceRefresher:
                 ).fingerprint
                 return WorkspaceRefreshResult(
                     command.workspace_id,
-                    merged.status,
+                    refresh_status,
                     record.base,
                     preview_target,
                     old_head,
-                    merged.head_sha,
+                    new_head,
                     [],
                     list(invalidated),
                     True,
                     False,
                     (
                         "Run exact-tree verification, then workspace_commit to approve the refresh commit."
-                        if merged.head_sha != old_head
+                        if new_head != old_head
                         else "The reviewed base was already integrated; re-run verification before publishing."
                     ),
                     final_fingerprint,
                 )
 
-        return self.ctx.audited(
-            "workspace_refresh",
-            {
-                "workspace_id": command.workspace_id,
-                "target_base_sha": preview_target,
-            },
-            operation,
-        )
+        return self.ctx.audited("workspace_refresh", audit_details, operation)

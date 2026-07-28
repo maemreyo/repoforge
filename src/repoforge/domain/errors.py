@@ -138,6 +138,11 @@ class ErrorCode(str, Enum):
     OPERATION_IDENTITY_NOT_FOUND = "OPERATION_IDENTITY_NOT_FOUND"
     OPERATION_IDENTITY_MISMATCH = "OPERATION_IDENTITY_MISMATCH"
     OPERATION_IDENTITY_STALE = "OPERATION_IDENTITY_STALE"
+    COMMIT_IDENTITY_UNRESOLVED = "COMMIT_IDENTITY_UNRESOLVED"
+    COMMIT_IDENTITY_CONFIG_DRIFT = "COMMIT_IDENTITY_CONFIG_DRIFT"
+    COMMIT_IDENTITY_MISMATCH = "COMMIT_IDENTITY_MISMATCH"
+    COMMIT_SIGNING_FAILED = "COMMIT_SIGNING_FAILED"
+    DELEGATION_APPROVAL_REQUIRED = "DELEGATION_APPROVAL_REQUIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +386,11 @@ def operation_error_from_exception(
         ErrorCode.OPERATION_IDENTITY_NOT_FOUND: "The durable operation has no repository identity sidecar to inspect, resume, or authorize.",
         ErrorCode.OPERATION_IDENTITY_MISMATCH: "The supplied operation, context digest, target, or capability does not match the original identity decision.",
         ErrorCode.OPERATION_IDENTITY_STALE: "The operation identity sidecar changed during a compare-and-swap lifecycle update.",
+        ErrorCode.COMMIT_IDENTITY_UNRESOLVED: "The workspace has no valid pinned author, committer, signing, and configuration identity decision.",
+        ErrorCode.COMMIT_IDENTITY_CONFIG_DRIFT: "Identity-, signing-, credential-, transport-, or remote-sensitive Git configuration changed after workspace creation.",
+        ErrorCode.COMMIT_IDENTITY_MISMATCH: "The observed commit author or committer does not match the workspace-pinned policy.",
+        ErrorCode.COMMIT_SIGNING_FAILED: "The commit signature state or signer fingerprint does not match the reviewed signing policy.",
+        ErrorCode.DELEGATION_APPROVAL_REQUIRED: "A delegated-human commit lacks the represented actor and explicit approval evidence required by policy.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

@@ -40,7 +40,7 @@ from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSyste
 from .adapters.filesystem.receipt_transaction_factory import (
     ReceiptJournaledFileTransactionFactory,
 )
-from .adapters.git import GitCliRepository
+from .adapters.git import GitCliRepository, GitCommitIdentityGateway
 from .adapters.github import (
     CommandGitHubCapabilityProbe,
     CommandGitHubTicketGraphGateway,
@@ -160,6 +160,7 @@ from .ports import (
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
+    CommitIdentityGateway,
     ConfigurationStore,
     ExecutableLocator,
     ExecutionEnvironmentPort,
@@ -227,6 +228,7 @@ class AdapterOverrides:
     filesystem: FileSystem | None = None
     file_transactions: FileTransactionFactory | None = None
     git: GitRepository | None = None
+    commit_identities: CommitIdentityGateway | None = None
     github: PullRequestGateway | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
@@ -672,6 +674,7 @@ def build_application(
     filesystem = o.filesystem or LocalFileSystem()
     file_transactions = o.file_transactions or JournaledFileTransactionFactory()
     git = o.git or GitCliRepository(command, config.server)
+    commit_identities = o.commit_identities or GitCommitIdentityGateway(command)
     default_github = GhCliGateway(command, config.server)
     github = o.github or default_github
     issue_mutations = o.issue_mutations or default_github
@@ -747,6 +750,7 @@ def build_application(
         commands=command,
         git=git,
         github=github,
+        commit_identities=commit_identities,
         filesystem=filesystem,
         file_transactions=file_transactions,
         store=store,

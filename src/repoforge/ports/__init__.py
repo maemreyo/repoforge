@@ -24,6 +24,7 @@ from .capabilities import ExecutableLocator
 from .clock import Clock
 from .code_intelligence import CodeIntelligenceProvider
 from .command import CommandExecutor, CommandResult
+from .commit_identity import CommitIdentityGateway
 from .configuration import ConfigurationStore
 from .execution_environment import (
     ApprovedExecution,
@@ -128,6 +129,7 @@ __all__ = [
     "CodeIntelligenceProvider",
     "CommandExecutor",
     "CommandResult",
+    "CommitIdentityGateway",
     "ConfigurationStore",
     "DevConfigProvisioner",
     "DiscoveryRequest",

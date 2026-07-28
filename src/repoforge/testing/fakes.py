@@ -125,6 +125,30 @@ class ScriptedCommandExecutor:
             raise response
         return response(argv) if callable(response) else response
 
+    def run_isolated(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str],
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> CommandResult:
+        del environment, secrets
+        return self.run(
+            argv,
+            cwd=cwd,
+            input_text=input_text,
+            timeout=timeout,
+            check=check,
+            output_limit=output_limit,
+            cancel_token=cancel_token,
+        )
+
     def run_bytes(
         self, argv: Sequence[str], *, cwd: Path, timeout: int | None = None, max_bytes: int
     ) -> bytes:

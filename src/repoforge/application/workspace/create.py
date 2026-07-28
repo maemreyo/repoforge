@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
-from ...domain.errors import SecurityError, WorkspaceError
+from ...domain.errors import ErrorCode, SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
 from ...domain.policy import slugify, validate_adopted_branch, validate_branch
 from ...domain.workspace import WorkspaceRecord, normalize_issue_ids
@@ -158,36 +158,51 @@ class WorkspaceCreator:
                 if adopt
                 else self.ctx.git.create_worktree(repo, destination, branch, base)
             )
-            metadata: dict[str, object] = {
-                "repository_policy_snapshot": repository_policy_snapshot(repo),
-                "workspace_base_sha": head,
-            }
-            if adopt:
-                # Durable, because removal has to know: deleting an adopted branch
-                # would destroy work this workspace did not create.
-                metadata["adopted_branch"] = True
-            if issue_ids:
-                metadata["issue_ids"] = list(issue_ids)
-            if key_hash:
-                metadata["workspace_create_idempotency"] = key_hash
-            record = WorkspaceRecord(
-                workspace_id,
-                repo.repo_id,
-                str(destination),
-                branch,
-                base,
-                repo.remote,
-                self.ctx.clock.now_iso(),
-                metadata=metadata,
-            )
             try:
+                identity_gateway = self.ctx.commit_identities
+                if identity_gateway is None:
+                    raise WorkspaceError(
+                        "Commit identity gateway is unavailable; workspace identity cannot be pinned",
+                        code=ErrorCode.COMMIT_IDENTITY_UNRESOLVED,
+                    )
+                commit_identity = identity_gateway.resolve_policy(
+                    destination,
+                    repo.commit_identity,
+                )
+                commit_config = identity_gateway.config_snapshot(destination)
+                metadata: dict[str, object] = {
+                    "repository_policy_snapshot": repository_policy_snapshot(repo),
+                    "workspace_base_sha": head,
+                    "commit_identity_policy": commit_identity.durable_payload(),
+                    "commit_identity_config_digest": commit_config.digest,
+                    "commit_identity_config_snapshot": commit_config.safe_payload(),
+                }
+                if adopt:
+                    # Durable, because removal has to know: deleting an adopted branch
+                    # would destroy work this workspace did not create.
+                    metadata["adopted_branch"] = True
+                if issue_ids:
+                    metadata["issue_ids"] = list(issue_ids)
+                if key_hash:
+                    metadata["workspace_create_idempotency"] = key_hash
+                record = WorkspaceRecord(
+                    workspace_id,
+                    repo.repo_id,
+                    str(destination),
+                    branch,
+                    base,
+                    repo.remote,
+                    self.ctx.clock.now_iso(),
+                    metadata=metadata,
+                )
                 self.ctx.store.save(record)
             except Exception as exc:
                 try:
-                    self.ctx.git.remove_worktree(repo, destination, branch, True)
+                    self.ctx.git.remove_worktree(repo, destination, branch, not bool(adopt))
                 except Exception as cleanup_exc:
                     raise WorkspaceError(
-                        f"Workspace registry save failed and compensation failed: {cleanup_exc}"
+                        "Workspace identity initialization or registry save failed and "
+                        f"compensation failed: {cleanup_exc}"
                     ) from exc
                 raise
             return WorkspaceCreateResult(
