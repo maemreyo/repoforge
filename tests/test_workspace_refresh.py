@@ -1667,3 +1667,124 @@ def test_refresh_rejects_a_workspace_registered_on_a_protected_branch(
             str(before["workspace_fingerprint"]),
         )
     assert not (workspace_path / "upstream.txt").exists()
+
+
+def _conflicted_preview(forge_env: ForgeEnvironment, task: str) -> tuple[str, dict, dict]:
+    """One workspace with a genuine hello.txt conflict, plus its reviewed preview."""
+    service = forge_env.service
+    workspace_id = str(service.workspace_create("demo", task)["workspace_id"])
+    # The enrolled profile asserts hello.txt starts with "changed".
+    _commit_workspace_hello(forge_env, workspace_id, "changed: kept local side\n")
+    _push_upstream_file(
+        forge_env,
+        "hello.txt",
+        "changed: kept upstream side\n",
+        f"conflicting upstream change for {task}",
+    )
+    status = service.workspace_status(workspace_id)
+    preview = service.workspace_refresh_v2(
+        workspace_id,
+        action="preview",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+    )
+    return workspace_id, dict(status), dict(preview)
+
+
+def test_v2_refresh_strategy_ours_keeps_the_local_side_whole(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """ "Keep mine" should not require echoing the whole file back.
+
+    The content read is taken from the commit the plan is bound to, not from the
+    preview's conflict evidence -- that evidence is clipped to a byte budget and
+    would write a silently truncated file.
+    """
+    service = forge_env.service
+    workspace_id, status, preview = _conflicted_preview(forge_env, "strategy ours")
+
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[{"path": "hello.txt", "strategy": "ours"}],
+    )
+
+    workspace_path = Path(str(service.workspace_status(workspace_id)["path"]))
+    assert applied["result"] == "applied"
+    assert (workspace_path / "hello.txt").read_text(
+        encoding="utf-8"
+    ) == "changed: kept local side\n"
+
+
+def test_v2_refresh_strategy_theirs_keeps_the_incoming_side_whole(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id, status, preview = _conflicted_preview(forge_env, "strategy theirs")
+
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[{"path": "hello.txt", "strategy": "theirs"}],
+    )
+
+    workspace_path = Path(str(service.workspace_status(workspace_id)["path"]))
+    assert applied["result"] == "applied"
+    assert (workspace_path / "hello.txt").read_text(
+        encoding="utf-8"
+    ) == "changed: kept upstream side\n"
+
+
+def test_v2_refresh_refuses_a_resolution_stating_two_intentions(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """A strategy plus a body is two intentions; guessing one is an unreviewed write."""
+    service = forge_env.service
+    workspace_id, status, preview = _conflicted_preview(forge_env, "strategy conflict")
+
+    with pytest.raises(WorkspaceError, match="must not carry content"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(status["head_sha"]),
+            expected_fingerprint=str(status["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.txt", "strategy": "ours", "content": "something else\n"}],
+        )
+
+    with pytest.raises(WorkspaceError, match="requires content"):
+        service.workspace_refresh_v2(
+            workspace_id,
+            action="apply",
+            expected_head_sha=str(status["head_sha"]),
+            expected_fingerprint=str(status["workspace_fingerprint"]),
+            plan_token=str(preview["plan_token"]),
+            resolutions=[{"path": "hello.txt"}],
+        )
+
+
+def test_v2_refresh_legacy_content_resolution_is_unchanged(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Callers that never send a strategy must behave exactly as before."""
+    service = forge_env.service
+    workspace_id, status, preview = _conflicted_preview(forge_env, "legacy content")
+
+    applied = service.workspace_refresh_v2(
+        workspace_id,
+        action="apply",
+        expected_head_sha=str(status["head_sha"]),
+        expected_fingerprint=str(status["workspace_fingerprint"]),
+        plan_token=str(preview["plan_token"]),
+        resolutions=[{"path": "hello.txt", "content": "changed: hand merged\n"}],
+    )
+
+    workspace_path = Path(str(service.workspace_status(workspace_id)["path"]))
+    assert applied["result"] == "applied"
+    assert (workspace_path / "hello.txt").read_text(encoding="utf-8") == "changed: hand merged\n"

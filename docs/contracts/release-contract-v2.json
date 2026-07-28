@@ -89,8 +89,8 @@
       "tool_surface_hash": "a35cf906a086c19e7235b638266e65f7a45c94626984d12816b6a6215f9258b7"
     },
     "identity": "forge_v2",
-    "input_contract_digest": "8449f80ee442d6ea4e83d1b4f9aaea248c55a9a3574cbe0813b20aa29f4ef5fd",
-    "output_contract_digest": "6d00650efe4d96c3db76e14b565371ffac1285a5c645872ef08f26e7939061c1",
+    "input_contract_digest": "fc23049827ff22c514dc729de58e3eee62da11449b456e4c9ecfb0888b585a10",
+    "output_contract_digest": "7c250ad5e758254789a2e5a8ddd1b6d6ab8f5070a7610abeebaa22260d34f20d",
     "retired_identity": "forge_v1",
     "server_instructions_sha256": "791fa8003ef1ba06c3cc45debf727b7cb84020c5634b2fc8f15bf668b34d1999",
     "tool_contract": {
@@ -103,7 +103,7 @@
     "tool_count": 28,
     "tool_hashes": {
       "config_inspect": "3e740a40ab9b6ae84406e88b187d173fdd134f17a3444e0bf4db3d0dc0496757",
-      "operation": "cf1d9b5364eef1a66a024664d640e5a061a0330d9db132482adeee45136dc925",
+      "operation": "122c9904a3372ca3e2a2c2196248fa72b5ec2696c3dd323639ccc156ac445830",
       "repo_history": "4e171873fa10040fc7d1a14ecbb85bcd09e07d5d50e6329acba482893abb7c1d",
       "repo_issue": "9c1518ef53be3d7fe536695f81a0b8e54b3ba15e61b6ff2ad6ca41f26c861d04",
       "repo_list": "5d9d4fe4a548fae173c73f94963de73ae91ab47369e77873b4080e4da36cf8f4",
@@ -124,7 +124,7 @@
       "workspace_pr_evidence": "3db4e5ce731c6464550366ed8ddfeb793c56d851b2e474ca9be0a9215a37919f",
       "workspace_push": "60017d7416a38ae9abf35f03449c2a4889bce453c66d6d7da979c3e60bc30632",
       "workspace_read": "375a7cc7f2dfce3d9c00b99db19e88c3813e812e75b29466c1497afc5a89d76e",
-      "workspace_refresh": "73b827a754d4efb01fe1800945443ffe1b76b5327fd558f52aab1a40bd0a94ca",
+      "workspace_refresh": "fe2da6a6f623c6cd6819a9e3bd6d59ab23f0070c757840c1c81b6121373086a7",
       "workspace_remove": "44817605f61fe2f17d1112f3106a078a13c282ce64cbf81722ed6d8ac7f588f0",
       "workspace_search": "e67ddb4d8d49223d9dc593e20951d7119564e24cd4c60f31ed439546751ae6bc",
       "workspace_status": "622bfa2e863a00c767508ce1bf80c8f0f88fd8ff0aa2d679762be79929134656",
@@ -161,8 +161,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "d9432c1011bd4448aacfa590a357e1d29bab994717f0a9d6d99699ec875b5e69",
-    "tool_surface_hash": "1c6cd215b4f5a3493283fb310697a07ba1d1902714243636ffab078872f59844"
+    "tool_schema_bundle_sha256": "b67f4a8eaed5abfaa99383e55a8576b37e236c2686108f04b4579a77e301b159",
+    "tool_surface_hash": "5e60886f4ff173231826cd5a645c373cbb159c7a634fa966fcd2d61abc3644d4"
   },
   "package_version": "2.2.0",
   "runtime": {
