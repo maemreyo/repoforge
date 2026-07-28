@@ -8,6 +8,7 @@ and which launchd label the registrar and kickstarter are actually handed.
 from __future__ import annotations
 
 import argparse
+import importlib
 from pathlib import Path
 
 import pytest
@@ -134,3 +135,70 @@ def test_version_switch_fails_closed_and_leaves_current_untouched(
 
     assert exit_code != 0
     assert not (release_root / "current").exists()
+
+
+def test_upgrade_reconcile_is_wired_to_the_service(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#304: an activation that reached its target needs a command that terminalizes it.
+
+    The forward path only exists if the CLI actually offers it, so this pins the
+    subcommand and its dispatch rather than the service behaviour (covered in
+    tests/test_upgrade_service.py).
+    """
+    import json
+
+    from repoforge.application.activation.upgrade import UpgradeResult
+
+    # `from ... import main` on the package yields the FUNCTION, so reach the module.
+    cli_module = importlib.import_module("repoforge.interfaces.cli.main")
+
+    calls: list[str] = []
+
+    class _Service:
+        def reconcile(self) -> UpgradeResult:
+            calls.append("reconcile")
+            return UpgradeResult(
+                status="reconciled",
+                candidate_sha="aaa1111",
+                build_fingerprint="a" * 64,
+                tool_surface_hash="b" * 64,
+                active_sha="aaa1111",
+                activation_receipt="act-20260728-006",
+                converged=True,
+                detail="Reconciled an unterminalized activation",
+            )
+
+    monkeypatch.setattr(cli_module, "_build_upgrade_service", lambda args: _Service())
+
+    assert cli_module.main(["upgrade", "reconcile"]) == 0
+    assert calls == ["reconcile"]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "reconciled"
+    assert payload["activation_receipt"] == "act-20260728-006"
+
+
+def test_an_upgrade_that_ended_in_a_rollback_does_not_exit_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--watch` can end in an auto-rollback: exiting 0 told automation it succeeded."""
+    from repoforge.application.activation.upgrade import UpgradeResult
+
+    # `from ... import main` on the package yields the FUNCTION, so reach the module.
+    cli_module = importlib.import_module("repoforge.interfaces.cli.main")
+
+    class _Service:
+        def upgrade(self, worktree, **kwargs) -> UpgradeResult:
+            return UpgradeResult(
+                status="rolled_back",
+                candidate_sha="bbb2222",
+                build_fingerprint="a" * 64,
+                tool_surface_hash="b" * 64,
+                active_sha="aaa1111",
+                detail="Auto-rollback: candidate unhealthy within the window",
+            )
+
+    monkeypatch.setattr(cli_module, "_build_upgrade_service", lambda args: _Service())
+
+    assert cli_module.main(["upgrade", "--activate", "--watch"]) == 1
+    capsys.readouterr()

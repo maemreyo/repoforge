@@ -45,6 +45,7 @@ help:  # Show available commands without changing local or runtime state
 	  '  make runtimes          Show every release and runtime, and how to switch' \
 	  '  make switch REF=x      Activate an installed release by branch or short sha' \
 	  '  make rollback          Return to the previous release via its receipt' \
+	  '  make reconcile         Terminalize an activation that reached its target' \
 	  '  make restart-agent     Restart the OS-resident supervisor in place' \
 	  '' \
 	  '  Unmanaged runtime (no agent installed):' \
@@ -215,6 +216,10 @@ switch:  # Activate an ALREADY-INSTALLED release: make switch REF=<branch|sha-pr
 rollback:  # Return to the previous release using the newest activation receipt
 	@set -eu; \
 		rf upgrade rollback
+
+reconcile:  # Terminalize an activation that reached its target but wrote no receipt
+	@set -eu; \
+		rf upgrade reconcile
 
 restart-agent:  # Restart the OS-resident supervisor without changing the active release
 	@set -eu; \

@@ -1715,6 +1715,10 @@ def _runtime_inventory_command(args: argparse.Namespace) -> int:
 
 def _upgrade_command(args: argparse.Namespace) -> int:
     service = _build_upgrade_service(args)
+    if getattr(args, "upgrade_command", None) == "reconcile":
+        result = service.reconcile()
+        _json(result.as_dict())
+        return 0
     if getattr(args, "upgrade_command", None) == "rollback":
         receipt = args.receipt
         if receipt is not None:
@@ -1737,7 +1741,9 @@ def _upgrade_command(args: argparse.Namespace) -> int:
         health_interval_seconds=args.health_interval,
     )
     _json(result.as_dict())
-    return 0
+    # Fail closed. `--watch` can end in an auto-rollback -- including one that did not
+    # itself converge -- and exiting 0 for that told automation the upgrade succeeded.
+    return 0 if result.status in {"activated", "staged"} else 1
 
 
 def _dev_runtime_command(args: argparse.Namespace) -> int:
@@ -2305,6 +2311,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Roll back even when `current` no longer matches the receipt's target.",
+    )
+    # No --release-root here: `upgrade` already defines it, and re-declaring it on a
+    # subparser would reset the parent's value to None when it is passed before the
+    # subcommand.
+    upgrade_sub.add_parser(
+        "reconcile",
+        help=(
+            "Terminalize an activation that reached its target but wrote no receipt, "
+            "instead of rolling a healthy runtime backwards."
+        ),
     )
     dev_runtime = commands.add_parser("dev-runtime")
     dev_runtime_sub = dev_runtime.add_subparsers(dest="dev_runtime_command", required=True)

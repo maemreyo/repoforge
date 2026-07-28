@@ -91,6 +91,14 @@ def build_version_status(
         "activation_receipt": latest.receipt_id if latest is not None else None,
         "activation_receipt_outcome": latest.outcome.value if latest is not None else None,
         "incomplete_activation": in_flight,
+        # Whether that unfinished activation can be terminalized as it stands, so
+        # automation reads the same fact the prose next-action states.
+        "incomplete_activation_reconcilable": bool(
+            in_flight is not None
+            and converged
+            and observed_sha is not None
+            and in_flight.get("to_sha") == observed_sha
+        ),
         "receipt_history_degraded": history.degraded,
         "unreadable_receipts": list(history.unreadable),
         "client_rediscovery_required": rediscovery_required,
@@ -143,10 +151,24 @@ def _safe_next_action(
     in_flight: dict[str, object] | None = None,
 ) -> str:
     if in_flight is not None:
+        # Never advise re-running: the activation guard refuses that, so the two surfaces
+        # would be telling the operator to do mutually exclusive things. What the next
+        # action IS depends on whether the unfinished activation actually reached its
+        # target -- if it did, rolling back would demote a healthy runtime, and the only
+        # correct move is to terminalize the receipt.
+        if converged and observed_sha is not None and in_flight.get("to_sha") == observed_sha:
+            return (
+                "An activation reached its target but wrote no terminal receipt: the "
+                f"runtime is serving {observed_sha} in phase {phase!r}. Run "
+                "`rf upgrade reconcile` to terminalize it; do NOT roll back, that would "
+                "move a healthy runtime off the release it is correctly serving."
+            )
         return (
             "An activation did not finish: a previous attempt reached stage "
             f"{in_flight.get('stage')!r} targeting {in_flight.get('to_sha')} without "
-            "writing a terminal receipt. Re-run the activation or roll back."
+            "writing a terminal receipt, and the runtime is not verifiably serving it "
+            f"(observed {observed_sha}, phase {phase!r}). Run `rf upgrade reconcile` to "
+            "inspect and terminalize it, or `rf upgrade rollback` to return."
         )
     if unreadable_newest_receipt:
         return (

@@ -233,7 +233,9 @@ class SupervisorRestarter:
       to be gone by identity instead.
     * When the supervisor is registered with launchd, spawning our own detached process
       would take it out of the OS manager's ownership. If a kickstarter is available we
-      restart the registered job instead.
+      restart the registered job instead -- but only after draining the incumbent by
+      identity, because the process holding the runtime lock is not always the one
+      launchd owns, and a kickstart that races it starts a second live supervisor.
     """
 
     def __init__(
@@ -271,6 +273,21 @@ class SupervisorRestarter:
         # Prefer the OS process manager so an upgrade never orphans the supervisor from
         # launchd. `kickstart -k` stops and restarts the registered job in one step.
         if self._kickstarter is not None and self._kickstarter.available():
+            # Drain the incumbent FIRST, by identity. `kickstart -k` only replaces the
+            # process launchd itself owns, so a supervisor started outside launchd -- a
+            # manual `rf start`, or a leftover from an earlier release -- survives it and
+            # keeps holding `runtime-single-instance`. The incoming process then dies on
+            # that lock and an otherwise fine activation is reported as a failure. Observed
+            # on a real activation: two supervisors alive at once, one per release.
+            stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
+            if not stopped:
+                return RestartOutcome(
+                    ok=False,
+                    detail=(
+                        "could not stop the outgoing supervisor, so an OS-managed "
+                        f"replacement would race it for the runtime lock: {stop_detail}"
+                    ),
+                )
             outcome = self._kickstarter.kickstart()
             if not outcome.ok:
                 return outcome
