@@ -40,6 +40,14 @@ HTTPS transport clears the complete helper chain, enables `credential.useHttpPat
 
 `GitTransportEvidence` records the stable repository ID, profile ID, provider host, access level, transport kind, credential fingerprint, remote-URL digest and observed ref SHA. Successful access remains `unobservable` for the human/API actor; it never upgrades transport proof into actor proof.
 
+## Durable operation identity lifecycle
+
+`JsonOperationIdentityStore` persists one private CAS sidecar per durable operation. The record contains the immutable `OperationIdentityContext`, one capability request for every target-bound lease, the context ID/digest used by handoff references, superseded lease IDs, and lifecycle timestamps. It contains only opaque references, stable IDs, revisions, digests and safe provider metadata.
+
+Binding is single-assignment: retrying the same decision is idempotent, while a different profile, target, capability request or context digest fails with `OPERATION_IDENTITY_MISMATCH`. `OperationIdentityReference` is propagated into TaskCapsule v3 resume projections and operation-worker bindings; records written before those additive fields still decode with no identity reference.
+
+Every external write revalidates the exact operation ID, context digest, target kind/ID, requested capability, lease state and expiry. Nested repositories never inherit the primary lease. Revocation may select one lease or profile, expiry changes only elapsed active leases, and refresh is accepted only when profile, provider, repository, target, actor, opaque reference, config/policy revisions and safe provider metadata remain identical. A missing or unavailable sidecar denies writes rather than falling back to ambient identity.
+
 ## Evidence semantics
 
 - `verified_actor` proves the observed API or provider actor only for the named surface.

@@ -17,9 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .errors import ErrorCode, RepoForgeError
+from .operation_identity import OperationIdentityReference
 from .operation_task import validate_operation_id
 
-OPERATION_WORKER_BINDING_SCHEMA_VERSION = 2
+OPERATION_WORKER_BINDING_SCHEMA_VERSION = 3
 
 _MAX_START_TOKEN = 128
 
@@ -43,6 +44,8 @@ class OperationWorkerBinding:
     server_start_token: str | None
     created_at: str
     owner_generation: int | None = None
+    identity_context_id: str | None = None
+    identity_context_digest: str | None = None
 
 
 def _error(message: str) -> RepoForgeError:
@@ -77,6 +80,16 @@ def validate_operation_worker_binding(binding: OperationWorkerBinding) -> Operat
     _start_token(binding.server_start_token, "server_start_token")
     if binding.owner_generation is not None:
         _positive_pid(binding.owner_generation, "owner_generation")
+    if (binding.identity_context_id is None) != (binding.identity_context_digest is None):
+        raise _error("identity context id and digest must be set or cleared together")
+    if binding.identity_context_id is not None and binding.identity_context_digest is not None:
+        try:
+            OperationIdentityReference(
+                binding.identity_context_id,
+                binding.identity_context_digest,
+            )
+        except ValueError as exc:
+            raise _error("worker binding identity context reference is invalid") from exc
     if (
         not isinstance(binding.created_at, str)
         or not binding.created_at
@@ -97,6 +110,8 @@ def worker_binding_payload(binding: OperationWorkerBinding) -> dict[str, object]
         "server_start_token": binding.server_start_token,
         "created_at": binding.created_at,
         "owner_generation": binding.owner_generation,
+        "identity_context_id": binding.identity_context_id,
+        "identity_context_digest": binding.identity_context_digest,
     }
 
 
@@ -116,9 +131,12 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
         "server_start_token",
         "created_at",
     }
-    # owner_generation is a v2 addition: absent in pre-v2 records (read back as None),
-    # present (possibly null) in v2 records. Any other key is a schema mismatch.
-    allowed = required | {"owner_generation"}
+    # Additive optional fields remain absent in older records and decode as None.
+    allowed = required | {
+        "owner_generation",
+        "identity_context_id",
+        "identity_context_digest",
+    }
     if not required.issubset(payload) or (set(payload) - allowed):
         raise _error("worker binding payload fields do not match the schema")
     child_start = payload["child_start_token"]
@@ -136,5 +154,15 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
         server_start_token=None if server_start is None else str(server_start),
         created_at=str(payload["created_at"]),
         owner_generation=owner_generation,
+        identity_context_id=(
+            None
+            if payload.get("identity_context_id") is None
+            else str(payload["identity_context_id"])
+        ),
+        identity_context_digest=(
+            None
+            if payload.get("identity_context_digest") is None
+            else str(payload["identity_context_digest"])
+        ),
     )
     return validate_operation_worker_binding(binding)

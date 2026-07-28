@@ -39,6 +39,7 @@ from ..ports import (
     LockManager,
     MetricsSink,
     OperationGate,
+    OperationIdentityStore,
     OperationResultStore,
     OperationStore,
     ProcessReaper,
@@ -237,6 +238,7 @@ class ApplicationContext:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
+    operation_identities: OperationIdentityStore | None = None
     operation_result_store: OperationResultStore | None = None
     fingerprint_cache: FingerprintCache | None = None
     provider_registry: ProviderRegistry | None = None

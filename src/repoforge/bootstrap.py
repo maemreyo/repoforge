@@ -64,6 +64,7 @@ from .adapters.persistence import (
     JsonIdempotencyStore,
     JsonIterationCache,
     JsonOnboardingStore,
+    JsonOperationIdentityStore,
     JsonOperationResultStore,
     JsonOperationStore,
     JsonPrCheckWatchStore,
@@ -181,6 +182,7 @@ from .ports import (
     OnboardingEnvironment,
     OnboardingStore,
     OperationGate,
+    OperationIdentityStore,
     OperationResultStore,
     OperationStore,
     PrCheckWatchStore,
@@ -233,6 +235,7 @@ class AdapterOverrides:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operations: OperationStore | None = None
+    operation_identities: OperationIdentityStore | None = None
     operation_results: OperationResultStore | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
@@ -713,6 +716,10 @@ def build_application(
         config.server.state_root, locks
     )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    operation_identities = o.operation_identities or JsonOperationIdentityStore(
+        config.server.state_root,
+        locks,
+    )
     worker_bindings = o.worker_bindings or JsonWorkerBindingStore(config.server.state_root, locks)
     reaper = o.reaper or OsProcessReaper()
     operation_result_store = o.operation_results or JsonOperationResultStore(
@@ -756,6 +763,7 @@ def build_application(
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,
+        operation_identities=operation_identities,
         operation_result_store=operation_result_store,
         github_read_cache=github_read_cache,
         hygiene=hygiene,

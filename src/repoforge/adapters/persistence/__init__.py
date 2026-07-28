@@ -8,6 +8,7 @@ from .json_hygiene_cache import JsonHygieneBaselineCache
 from .json_idempotency_store import JsonIdempotencyStore
 from .json_iteration_cache import JsonIterationCache
 from .json_onboarding_store import JsonOnboardingStore
+from .json_operation_identity_store import JsonOperationIdentityStore
 from .json_operation_result_store import JsonOperationResultStore
 from .json_operation_store import JsonOperationStore
 from .json_pr_check_watch_store import JsonPrCheckWatchStore
@@ -30,6 +31,7 @@ __all__ = [
     "JsonIdempotencyStore",
     "JsonIterationCache",
     "JsonOnboardingStore",
+    "JsonOperationIdentityStore",
     "JsonOperationResultStore",
     "JsonOperationStore",
     "JsonPrCheckWatchStore",

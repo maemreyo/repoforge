@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ...domain.durable_state import Revision, StateEnvelope, StatePage
+from ...domain.operation_identity import OperationIdentityReference, bind_task_identity
 from ...domain.task_capsule import TaskCapsule, TaskState, transition_task
 from ...ports.clock import Clock
 from ...ports.ids import IdGenerator
@@ -57,6 +58,25 @@ class TaskCapsuleService:
         if current is None:
             raise ValueError(f"Unknown task: {task_id}")
         updated = transition_task(current.value, state, updated_at=self._clock.now_iso())
+        return self._store.save(updated, expected_revision=expected_revision)
+
+    def bind_identity(
+        self,
+        task_id: str,
+        reference: OperationIdentityReference,
+        *,
+        expected_revision: Revision,
+    ) -> StateEnvelope[TaskCapsule]:
+        current = self._store.read(task_id)
+        if current is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        updated = bind_task_identity(
+            current.value,
+            reference,
+            updated_at=self._clock.now_iso(),
+        )
+        if updated == current.value:
+            return current
         return self._store.save(updated, expected_revision=expected_revision)
 
     def list_records(self, *, max_records: int = 100) -> StatePage[TaskCapsule]:

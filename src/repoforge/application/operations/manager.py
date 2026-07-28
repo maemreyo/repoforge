@@ -290,6 +290,9 @@ class OperationManager:
             if self.ctx.operation_result_store is not None:
                 with contextlib.suppress(RepoForgeError):
                     self.ctx.operation_result_store.delete(operation_id)
+            if self.ctx.operation_identities is not None:
+                with contextlib.suppress(RepoForgeError):
+                    self.ctx.operation_identities.delete(operation_id)
 
         self.ctx.audited(
             "operation_delete",

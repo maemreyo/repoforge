@@ -79,6 +79,7 @@ from .metrics import MetricsSink
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
 from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
+from .operation_identity_store import OperationIdentityStore
 from .operation_result_store import OperationResultStore
 from .operation_store import OperationRecordPage, OperationStore
 from .operator_io import OperatorIO
@@ -176,6 +177,7 @@ __all__ = [
     "OnboardingEnvironment",
     "OnboardingStore",
     "OperationGate",
+    "OperationIdentityStore",
     "OperationRecordPage",
     "OperationResultStore",
     "OperationStore",

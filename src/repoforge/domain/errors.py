@@ -135,6 +135,9 @@ class ErrorCode(str, Enum):
     GIT_TRANSPORT_IDENTITY_MISMATCH = "GIT_TRANSPORT_IDENTITY_MISMATCH"
     GIT_TRANSPORT_AUTHENTICATION_FAILED = "GIT_TRANSPORT_AUTHENTICATION_FAILED"
     CREDENTIAL_INTERACTION_REQUIRED = "CREDENTIAL_INTERACTION_REQUIRED"
+    OPERATION_IDENTITY_NOT_FOUND = "OPERATION_IDENTITY_NOT_FOUND"
+    OPERATION_IDENTITY_MISMATCH = "OPERATION_IDENTITY_MISMATCH"
+    OPERATION_IDENTITY_STALE = "OPERATION_IDENTITY_STALE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +378,9 @@ def operation_error_from_exception(
         ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH: "The Git transport context does not match the reviewed profile and stable repository target.",
         ErrorCode.GIT_TRANSPORT_AUTHENTICATION_FAILED: "The pinned Git transport identity could not authenticate and no ambient fallback was attempted.",
         ErrorCode.CREDENTIAL_INTERACTION_REQUIRED: "Git requested an interactive credential prompt, which durable and background operations prohibit.",
+        ErrorCode.OPERATION_IDENTITY_NOT_FOUND: "The durable operation has no repository identity sidecar to inspect, resume, or authorize.",
+        ErrorCode.OPERATION_IDENTITY_MISMATCH: "The supplied operation, context digest, target, or capability does not match the original identity decision.",
+        ErrorCode.OPERATION_IDENTITY_STALE: "The operation identity sidecar changed during a compare-and-swap lifecycle update.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,
