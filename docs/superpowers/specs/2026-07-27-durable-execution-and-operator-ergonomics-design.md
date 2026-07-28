@@ -103,6 +103,14 @@ The managed runtime starts a dedicated execution worker loop separately from MCP
 
 The MCP process performs validation and persistence only. It never owns a command thread or an unpersisted callable. A slow command therefore cannot starve tool dispatch.
 
+### Responsive status reads
+
+Moving the command off the request thread is not sufficient on its own: the worker holds the workspace lock for the whole command, so any status read of *that* workspace would still serialize behind it. Status reads therefore take a bounded lease rather than the plain lock. They wait `server.status_read_lock_timeout_seconds` (default `0.5`), and on expiry read anyway and label the result.
+
+The response carries an additive `read_consistency` field. `locked` is the unchanged exclusive read. `concurrent_write` means the workspace lock was held elsewhere: each returned fact was true when it was sampled, but the facts are not guaranteed to describe one instant, and the caller must not treat the fingerprint as an exact-state binding for a mutation. An unsynchronized read is also forbidden from writing back to shared state — in particular it never populates the fingerprint cache, because fingerprint and validity token are sampled at different instants and a concurrently written tree could produce a pair that later looks valid while describing a tree that never existed.
+
+A consistent lock-free snapshot was rejected: a worktree being written by a running command has no consistent snapshot to read short of copying it, so labelling the read honestly is the truthful option rather than the weaker one.
+
 ### Foreground compatibility
 
 `background=true` returns after durable admission.
@@ -215,7 +223,8 @@ Within existing `workspace_pr`, add reviewed `ready` and `merge` actions only if
 
 ### Execution plane
 
-- A ten-minute verification does not delay `operation`, `workspace_status`, logs or cancellation calls.
+- A ten-minute verification does not delay `operation`, logs or cancellation calls.
+- A ten-minute verification does not delay `workspace_status`, including status of the workspace being verified. A status read waits at most `server.status_read_lock_timeout_seconds` (default `0.5`) for the workspace lock; if the running command still holds it, the read proceeds without the lock and reports `read_consistency="concurrent_write"` instead of `"locked"`. An unsynchronized read never writes a fingerprint back to the shared cache.
 - Disconnecting the client does not stop execution or lose the terminal verdict.
 - A queued job survives runtime restart and executes once.
 - Two workers cannot execute the same attempt.

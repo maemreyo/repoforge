@@ -835,6 +835,13 @@ class WorkspaceStatusSection(str, Enum):
     HYGIENE = "hygiene"
 
 
+class StatusReadConsistency(str, Enum):
+    """Whether a status read held the workspace lock or read alongside a running command."""
+
+    LOCKED = "locked"
+    CONCURRENT_WRITE = "concurrent_write"
+
+
 class StatusSectionEvidence(StrictModel):
     section: WorkspaceStatusSection
     freshness: Freshness
@@ -859,6 +866,7 @@ class WorkspaceStatusOutput(ToolResponse):
     sections: tuple[StatusSectionEvidence, ...] = Field(default=(), max_length=3)
     fingerprint_source: Literal["cache", "scan"]
     truncated: bool = False
+    read_consistency: StatusReadConsistency = StatusReadConsistency.LOCKED
 
 
 class WorkspaceFormatChangedInput(StrictModel):

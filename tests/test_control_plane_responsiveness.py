@@ -13,6 +13,9 @@ import json
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from conftest import ForgeEnvironment, create_forge_environment
@@ -25,6 +28,7 @@ from repoforge.application.workspace.run_diagnostic import WorkspaceDiagnosticRu
 from repoforge.application.workspace.run_profile import WorkspaceProfileRunner
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
+from repoforge.domain.operation_worker import OperationWorkerBinding
 from repoforge.testing.fakes import ManualBackgroundTaskRunner
 
 _CONTROL_PLANE_BUDGET_SECONDS = 2.0
@@ -86,8 +90,22 @@ def _worker_loop(config_path: Path) -> tuple[OperationWorkLoop, CodingService]:
     return loop, service
 
 
-def test_blocked_verification_does_not_block_the_control_plane(tmp_path) -> None:
-    """Catch a regression that puts a repository command back on the request path."""
+@dataclass(frozen=True, slots=True)
+class BlockedVerification:
+    """One claimed, genuinely blocked verification and the request side that must stay live."""
+
+    request_side: CodingService
+    worker_side: CodingService
+    workspace_id: str
+    idle_workspace_id: str
+    operation_id: str
+    binding: OperationWorkerBinding
+    legacy_background: ManualBackgroundTaskRunner
+
+
+@contextmanager
+def _blocked_verification(tmp_path: Path) -> Iterator[BlockedVerification]:
+    """Run a verification whose child cannot exit, and whose workspace lock is therefore held."""
     env = create_forge_environment(tmp_path)
     release = tmp_path / "release-blocked-command"
     _add_blocked_profile(env, release)
@@ -101,20 +119,13 @@ def test_blocked_verification_does_not_block_the_control_plane(tmp_path) -> None
         ),
     )
     workspace_id = request_side.workspace_create("demo", "blocked control plane")["workspace_id"]
-    # `workspace_status` is measured against a second workspace on purpose. Any
-    # execution holds its own workspace lock for its whole duration, so a status
-    # read of *that* workspace serializes behind it by design -- unchanged by
-    # durable execution, and not what this regression is about. What must never
-    # come back is one blocked command stalling the control plane as a whole.
     idle_workspace_id = request_side.workspace_create("demo", "idle bystander")["workspace_id"]
-
-    dispatched = request_side.workspace_verify(
+    operation_id = request_side.workspace_verify(
         workspace_id,
         mode="profile",
         profile_name="blocked",
         background=True,
-    )
-    operation_id = dispatched["operation"]["operation_id"]
+    )["operation"]["operation_id"]
 
     loop, worker_side = _worker_loop(env.config_path)
     claimed: list[bool] = []
@@ -127,28 +138,18 @@ def test_blocked_verification_does_not_block_the_control_plane(tmp_path) -> None
     try:
         bindings = worker_side.application.context.worker_bindings
         assert bindings is not None
-        # Proof the blocked child exists before the control plane is measured.
+        # A bound child proves the worker already holds the workspace lock: it is taken before
+        # the command is spawned. Everything measured below therefore races a real lock holder.
         binding = _poll(lambda: bindings.get(operation_id))
-
-        started = time.monotonic()
-        operation = request_side.operation("get", operation_id=operation_id)["operation"]
-        listed = request_side.operation_list(state="running")
-        status = request_side.workspace_status(idle_workspace_id)
-        elapsed = time.monotonic() - started
-
-        assert elapsed < _CONTROL_PLANE_BUDGET_SECONDS
-        assert operation["state"] == "running"
-        assert operation["heartbeat_at"] is not None
-        assert any(item["operation_id"] == operation_id for item in listed["operations"])
-        assert status["workspace_id"] == idle_workspace_id
-        # The command runs in the worker, never in the process that took the request.
-        assert binding.server_pid != 0
-        assert legacy_background.keys == ()
-
-        cancel_started = time.monotonic()
-        cancelled = request_side.operation_cancel(operation_id)
-        assert time.monotonic() - cancel_started < _CONTROL_PLANE_BUDGET_SECONDS
-        assert cancelled["cancellation_requested"] is True
+        yield BlockedVerification(
+            request_side,
+            worker_side,
+            workspace_id,
+            idle_workspace_id,
+            operation_id,
+            binding,
+            legacy_background,
+        )
     finally:
         release.write_text("go", encoding="utf-8")
         loop.request_stop()
@@ -156,9 +157,65 @@ def test_blocked_verification_does_not_block_the_control_plane(tmp_path) -> None
 
     assert not worker.is_alive()
     assert claimed == [True]
-    terminal = request_side.operation("get", operation_id=operation_id)["operation"]
+
+
+def test_blocked_verification_does_not_block_the_control_plane(tmp_path) -> None:
+    """Catch a regression that puts a repository command back on the request path."""
+    with _blocked_verification(tmp_path) as blocked:
+        request_side = blocked.request_side
+        operation_id = blocked.operation_id
+
+        started = time.monotonic()
+        operation = request_side.operation("get", operation_id=operation_id)["operation"]
+        listed = request_side.operation_list(state="running")
+        status = request_side.workspace_status(blocked.idle_workspace_id)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < _CONTROL_PLANE_BUDGET_SECONDS
+        assert operation["state"] == "running"
+        assert operation["heartbeat_at"] is not None
+        assert any(item["operation_id"] == operation_id for item in listed["operations"])
+        assert status["workspace_id"] == blocked.idle_workspace_id
+        # An untouched workspace is still read under its lock, so nothing degraded silently.
+        assert status["read_consistency"] == "locked"
+        # The command runs in the worker, never in the process that took the request.
+        assert blocked.binding.server_pid != 0
+        assert blocked.legacy_background.keys == ()
+
+        cancel_started = time.monotonic()
+        cancelled = request_side.operation_cancel(operation_id)
+        assert time.monotonic() - cancel_started < _CONTROL_PLANE_BUDGET_SECONDS
+        assert cancelled["cancellation_requested"] is True
+
+    terminal = blocked.request_side.operation("get", operation_id=operation_id)["operation"]
     assert terminal["state"] in {"cancelled", "succeeded"}
     assert terminal["phase"] in {"cancelled", "succeeded"}
+
+
+def test_status_of_the_busy_workspace_answers_promptly_and_says_it_was_unsynchronized(
+    tmp_path,
+) -> None:
+    """The workspace under verification must answer too -- honestly, not eventually."""
+    with _blocked_verification(tmp_path) as blocked:
+        request_side = blocked.request_side
+        busy_workspace_id = blocked.workspace_id
+
+        legacy_started = time.monotonic()
+        legacy = request_side.workspace_status(busy_workspace_id)
+        legacy_elapsed = time.monotonic() - legacy_started
+
+        v2_started = time.monotonic()
+        v2 = request_side.workspace_status_v2(busy_workspace_id, sections=("local",))
+        v2_elapsed = time.monotonic() - v2_started
+
+        assert legacy_elapsed < _CONTROL_PLANE_BUDGET_SECONDS
+        assert v2_elapsed < _CONTROL_PLANE_BUDGET_SECONDS
+        assert legacy["workspace_id"] == busy_workspace_id
+        assert v2["workspace_id"] == busy_workspace_id
+        # The read happened alongside the command instead of waiting it out, and says so.
+        assert legacy["read_consistency"] == "concurrent_write"
+        assert v2["read_consistency"] == "concurrent_write"
+        assert legacy["head_sha"] == v2["head_sha"]
 
 
 def test_queued_work_survives_a_request_process_restart_and_runs_once(tmp_path) -> None:

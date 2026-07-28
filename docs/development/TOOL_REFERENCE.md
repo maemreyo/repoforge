@@ -83,6 +83,13 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 
 `workspace_refresh.action` is `preview` or `apply`. Apply requires exact preview/base/workspace bindings and explicit conflict resolutions where necessary.
 
+#### Status reads during a running command
+
+`workspace_status` never waits out a running verification. It waits at most `server.status_read_lock_timeout_seconds` (default `0.5`) for the workspace lock and then answers regardless, reporting which happened in `read_consistency`:
+
+- `locked` — the read held the workspace lock and is exclusive of RepoForge writers. This is the normal case and the previous behavior.
+- `concurrent_write` — a command was running in that workspace and kept the lock. Every returned fact was true when sampled, but the facts are not guaranteed to describe one instant, and `workspace_fingerprint` must not be used as the exact-state binding for `workspace_mutate` or `workspace_commit`. Read status again after the operation reaches a terminal state to get a `locked` read.
+
 #### Summary-first diff review
 
 Start with the cheap default summary:

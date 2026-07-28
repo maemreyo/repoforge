@@ -91,7 +91,15 @@ def read_fingerprint(
     workspace_id: str,
     git: GitRepository,
     path: Path,
+    *,
+    persist: bool = True,
 ) -> FingerprintLookup:
+    """Read the workspace fingerprint, caching it only when the caller holds the workspace lock.
+
+    A caller that reads without the lock must pass ``persist=False``: the fingerprint and its
+    validity token are sampled at two different instants, so a tree being written concurrently
+    can produce a pair that would later look valid while describing a tree that never existed.
+    """
     started = time.monotonic()
     existing = cache.get(workspace_id) if cache is not None else None
     if existing is not None and compute_validity_token(git, path) == existing.validity_token:
@@ -100,10 +108,10 @@ def read_fingerprint(
             "cache_hit",
             round((time.monotonic() - started) * 1000, 3),
         )
-    if cache is not None:
+    if cache is not None and persist:
         cache.invalidate(workspace_id)
     fingerprint = git.fingerprint(path)
-    if cache is not None:
+    if cache is not None and persist:
         cache.set(workspace_id, fingerprint, compute_validity_token(git, path))
     return FingerprintLookup(
         fingerprint,

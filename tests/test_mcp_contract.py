@@ -139,6 +139,8 @@ async def test_representative_v2_tools_execute_through_protocol(
         assert status.isError is False
         assert status.structuredContent is not None
         V2_TOOL_SPECS["workspace_status"].validate_output(status.structuredContent)
+        # An uncontended workspace still reports an exclusive read over the protocol.
+        assert status.structuredContent["read_consistency"] == "locked"
 
 
 @pytest.mark.anyio

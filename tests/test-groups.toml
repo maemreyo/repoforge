@@ -79,6 +79,7 @@ source_globs = [
   "src/repoforge/application/workspace/retrieval.py",
   "src/repoforge/application/workspace/search.py",
   "src/repoforge/application/workspace/status.py",
+  "src/repoforge/application/workspace/status_read.py",
   "src/repoforge/application/workspace/tree.py",
   "src/repoforge/domain/assessment.py",
   "src/repoforge/domain/filesystem_transaction.py",

@@ -223,6 +223,32 @@ def test_no_regression_hygiene_receipt_requires_clean_changed_paths() -> None:
     )
 
 
+def test_status_read_lock_timeout_defaults_and_validates(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config = tmp_path / "config.toml"
+    body = f"""[server]
+workspace_root = "{tmp_path / "workspaces"}"
+state_root = "{tmp_path / "state"}"
+
+[repositories.demo]
+path = "{repo}"
+"""
+    config.write_text(body, encoding="utf-8")
+    assert load_config(config).server.status_read_lock_timeout_seconds == 0.5
+
+    tuned = body.replace(
+        "[repositories.demo]", "status_read_lock_timeout_seconds = 2.5\n\n[repositories.demo]"
+    )
+    config.write_text(tuned, encoding="utf-8")
+    assert load_config(config).server.status_read_lock_timeout_seconds == 2.5
+
+    config.write_text(tuned.replace("2.5", "-1"), encoding="utf-8")
+    with pytest.raises(ConfigError, match="status_read_lock_timeout_seconds"):
+        load_config(config)
+
+
 def test_unsafe_remote_name_is_rejected(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

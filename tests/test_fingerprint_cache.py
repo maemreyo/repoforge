@@ -5,6 +5,7 @@ from pathlib import Path
 
 from conftest import create_forge_environment
 
+from repoforge.application.fingerprint_cache import read_fingerprint
 from repoforge.application.service import CodingService
 from repoforge.config import load_config
 from repoforge.ports.command import CommandExecutor, CommandResult
@@ -115,6 +116,29 @@ def test_workspace_status_recomputes_when_spaced_untracked_file_changes_outside_
 
     assert after["workspace_fingerprint"] != before["workspace_fingerprint"]
     assert executor.full_fingerprint_scans == 2
+
+
+def test_lock_free_fingerprint_read_never_writes_the_shared_cache(tmp_path: Path) -> None:
+    """A read taken without the workspace lock must not publish a fingerprint others trust."""
+    service, _ = _service_with_counting_executor(tmp_path)
+    created = service.workspace_create("demo", "fingerprint-cache-unlocked")
+    workspace_id = created["workspace_id"]
+    context = service.application.context
+    service.workspace_status(workspace_id)
+    cached = context.fingerprint_cache.get(workspace_id)
+    assert cached is not None
+    Path(created["path"]).joinpath("external.txt").write_text("written by a running command\n")
+
+    lookup = read_fingerprint(
+        context.fingerprint_cache,
+        workspace_id,
+        context.git,
+        Path(created["path"]),
+        persist=False,
+    )
+
+    assert lookup.fingerprint != cached.fingerprint
+    assert context.fingerprint_cache.get(workspace_id) == cached
 
 
 def test_apply_patch_primes_cached_post_mutation_fingerprint(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from .format_changed import WorkspaceChangedFormatter, WorkspaceFormatChangedCom
 from .hygiene_status import WorkspaceHygieneStatusCommand, WorkspaceHygieneStatusReader
 from .remove import WorkspaceRemoveCommand, WorkspaceRemover
 from .status import WorkspaceStatusCommand, WorkspaceStatusReader
+from .status_read import LOCKED, ReadConsistency, status_read_lease
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +280,7 @@ class WorkspaceStatusV2Result:
     sections: tuple[StatusSectionV2, ...]
     fingerprint_source: str
     truncated: bool
+    read_consistency: ReadConsistency = LOCKED
 
 
 class WorkspaceStatusV2:
@@ -303,13 +305,14 @@ class WorkspaceStatusV2:
         }
 
         def operation() -> WorkspaceStatusV2Result:
-            with self.ctx.locks.lock(command.workspace_id):
+            with status_read_lease(self.ctx, command.workspace_id) as consistency:
                 fresh_record = self.ctx.store.load(command.workspace_id)
                 lookup = read_fingerprint(
                     self.ctx.fingerprint_cache,
                     command.workspace_id,
                     self.ctx.git,
                     workspace,
+                    persist=consistency == LOCKED,
                 )
                 head = self.ctx.git.head_sha(workspace)
                 clean = not bool(self.ctx.git.status_porcelain(workspace).strip())
@@ -434,6 +437,7 @@ class WorkspaceStatusV2:
                     {
                         "fingerprint_source": lookup.source,
                         "truncated": truncated,
+                        "read_consistency": consistency,
                     }
                 )
                 return WorkspaceStatusV2Result(
@@ -448,6 +452,7 @@ class WorkspaceStatusV2:
                     bounded,
                     "cache" if lookup.source == "cache_hit" else "scan",
                     truncated,
+                    consistency,
                 )
 
         return self.ctx.audited("workspace_status", details, operation, mutating=False)
