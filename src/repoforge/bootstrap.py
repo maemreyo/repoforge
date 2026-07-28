@@ -71,6 +71,7 @@ from .adapters.persistence import (
     JsonOnboardingStore,
     JsonOperationResultStore,
     JsonOperationStore,
+    JsonOperationWorkQueue,
     JsonPrCheckWatchStore,
     JsonRuntimeActivationStore,
     JsonTaskStore,
@@ -85,6 +86,7 @@ from .adapters.runtime import (
     InProcessOperationGate,
     JsonRuntimeStore,
     JsonTunnelProfileStore,
+    SubprocessExecutionWorker,
     SubprocessRuntimeLauncher,
     SystemProcessInspector,
     TunnelCliClient,
@@ -144,7 +146,11 @@ from .application.onboarding.coordinator import OnboardingCoordinator
 from .application.onboarding.discover import OnboardingDiscoveryService
 from .application.onboarding.planner import OnboardingPlanner
 from .application.onboarding.preflight import OnboardingPreflightService
-from .application.operations import OperationManager, recover_operations
+from .application.operations import (
+    OperationManager,
+    recover_operation_work,
+    recover_operations,
+)
 from .application.outcome_reconciliation import (
     OutcomeReceiptReconciler,
     RuntimeActivationReconciler,
@@ -200,6 +206,7 @@ from .ports import (
     OperationGate,
     OperationResultStore,
     OperationStore,
+    OperationWorkQueue,
     PrCheckWatchStore,
     ProcessInspector,
     ProcessReaper,
@@ -251,6 +258,7 @@ class AdapterOverrides:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operations: OperationStore | None = None
+    operation_work_queue: OperationWorkQueue | None = None
     operation_results: OperationResultStore | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
@@ -694,7 +702,8 @@ def _background_operation_liveness(
     """Return direct worker liveness when the operation owns a workspace lock."""
 
     if (
-        task.kind not in {"workspace_run_profile", "workspace_run_adhoc"}
+        task.kind
+        not in {"workspace_run_profile", "workspace_run_adhoc", "workspace_run_diagnostic"}
         or task.workspace_id is None
     ):
         return None
@@ -745,7 +754,10 @@ def write_private_file(path: Path, data: bytes, *, mode: int = 0o600) -> None:
 
 
 def build_application(
-    config: AppConfig, *, overrides: AdapterOverrides | None = None
+    config: AppConfig,
+    *,
+    overrides: AdapterOverrides | None = None,
+    config_generation: int = 0,
 ) -> Application:
     o = overrides or AdapterOverrides()
     config.server.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -814,6 +826,10 @@ def build_application(
         config.server.state_root
     )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    operation_work_queue = o.operation_work_queue or JsonOperationWorkQueue(
+        config.server.state_root,
+        locks,
+    )
     worker_bindings = o.worker_bindings or JsonWorkerBindingStore(config.server.state_root, locks)
     reaper = o.reaper or OsProcessReaper()
     operation_result_store = o.operation_results or JsonOperationResultStore(
@@ -864,6 +880,7 @@ def build_application(
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,
+        operation_work_queue=operation_work_queue,
         operation_result_store=operation_result_store,
         github_read_cache=github_read_cache,
         hygiene=hygiene,
@@ -885,6 +902,7 @@ def build_application(
         failure_output_artifacts=failure_output_artifacts,
         worker_bindings=worker_bindings,
         reaper=reaper,
+        config_generation=config_generation,
     )
     operations = OperationManager(context)
     processes = build_process_inspector()
@@ -911,12 +929,29 @@ def build_application(
         stale_after_seconds=config.server.idempotency_stale_seconds,
         resumable_actions=frozenset({"issue_graph_publication"}),
     )
+    # Durable work is reconciled first: its sidecar carries the exact evidence
+    # (lease, ownership, whether a child was ever spawned) needed to tell work that
+    # can be requeued from work whose outcome is ambiguous. Only afterwards does the
+    # generic sweep judge whatever is still marked running, so a claim that crashed
+    # before spawning is requeued rather than orphaned on a guess.
+    recover_operation_work(
+        operations,
+        operation_work_queue,
+        now=clock.now_iso(),
+        expected_config_generation=config_generation or None,
+        worker_bindings=worker_bindings,
+        reaper=reaper,
+    )
     recover_operations(
         operations,
         now=clock.now_iso(),
         running_stale_seconds=config.server.idempotency_stale_seconds,
         resumable_kinds=frozenset(
-            {"pr_check_watch", "runtime_activation", "issue_graph_publication"}
+            {
+                "pr_check_watch",
+                "runtime_activation",
+                "issue_graph_publication",
+            }
         ),
         running_liveness=lambda task: _background_operation_liveness(
             task,
@@ -1007,6 +1042,47 @@ def _agent_secret_from_file() -> dict[str, str]:
     return {AGENT_SECRET_KEY: secret}
 
 
+def run_execution_worker(config_path: Path, *, generation: int) -> int:
+    """Run the generation-bound durable execution loop in its own process."""
+    import signal
+    import threading
+
+    from .application.operations.work_executor import VerificationWorkHandlers
+    from .application.operations.work_loop import OperationWorkLoop
+    from .application.workspace.run_adhoc import WorkspaceAdhocRunner
+    from .application.workspace.run_diagnostic import WorkspaceDiagnosticRunner
+    from .application.workspace.run_profile import WorkspaceProfileRunner
+
+    if generation <= 0:
+        raise ConfigError("Execution worker generation must be positive")
+    config_path = config_path.expanduser().resolve()
+    configs = build_configuration_store(config_path)
+    resolved_path = configs.resolved_path(generation)
+    config = load_config(resolved_path)
+    application = build_application(config, config_generation=generation)
+    handlers = VerificationWorkHandlers(
+        WorkspaceProfileRunner(application.context),
+        WorkspaceAdhocRunner(application.context),
+        WorkspaceDiagnosticRunner(application.context),
+    )
+    loop = OperationWorkLoop(application.context, application.operations, handlers)
+    stop = threading.Event()
+    previous_handlers: dict[signal.Signals, object] = {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        stop.set()
+        loop.request_stop()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous_handlers[signal.Signals(signum)] = signal.signal(signum, request_stop)
+    try:
+        loop.run_until_stopped(stop)
+        return 0
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)  # type: ignore[arg-type]
+
+
 def run_runtime_worker(
     config_path: Path,
     *,
@@ -1080,6 +1156,9 @@ def run_runtime_worker(
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "NO_PROXY",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "REPOFORGE_RUNNING_RELEASE_SHA",
         AGENT_SECRET_KEY,
     )
     environment = {key: os.environ[key] for key in inherited_keys if key in os.environ}
@@ -1103,6 +1182,8 @@ def run_runtime_worker(
         processes=build_process_inspector(),
         mcp_runtime_path=root / "runtime.json",
         log_path=root / "managed-runtime.log",
+        execution_worker=SubprocessExecutionWorker(config_path),
+        execution_worker_log_path=root / "execution-worker.log",
     )
     return supervisor.run(
         generation=target.generation,

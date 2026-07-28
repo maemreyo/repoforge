@@ -8,8 +8,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ...domain.errors import ErrorCode, RepoForgeError
-from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState, OperationTask
+from ...domain.operation_task import (
+    TERMINAL_OPERATION_STATES,
+    OperationRetryability,
+    OperationState,
+    OperationTask,
+)
+from ...domain.operation_work import OperationWorkItem, OperationWorkState, requeue_unstarted_work
 from ...domain.operation_worker import OperationWorkerBinding
+from ...ports.operation_work_queue import OperationWorkQueue
 from ...ports.process_reaper import ProcessReaper
 from ...ports.worker_binding_store import WorkerBindingStore
 from .manager import OperationManager
@@ -31,6 +38,19 @@ class OperationRecoveryReport:
     retained_for_receipt: int
     operation_record_inconsistencies: int
     legacy_operation_records: int
+    scan_truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OperationWorkRecoveryReport:
+    scanned: int
+    requeued: int
+    orphaned: int
+    missing_work: int
+    orphan_work: int
+    stale_generation: int
+    cancelled: int
+    conflicts: int
     scan_truncated: bool
 
 
@@ -101,19 +121,30 @@ def reap_running_background(
     resumable_kinds: frozenset[str] = frozenset(),
     worker_bindings: WorkerBindingStore | None = None,
     reaper: ProcessReaper | None = None,
+    work_queue: OperationWorkQueue | None = None,
 ) -> int:
-    """Reap + orphan every RUNNING non-resumable background op right now.
+    """Reap + orphan every RUNNING background op this process still owns.
 
     Used at graceful runtime shutdown so a detached child cannot outlive the
-    process. Best-effort and idempotent: already-terminal ops are skipped and a
-    stale conflict on one record never stops the sweep. Returns how many ops were
-    transitioned to orphaned.
+    process. Work with a durable sidecar is skipped: a separate execution worker
+    owns that child and outlives this process, so reaping it here would kill a
+    live run and orphan a perfectly recoverable operation. Everything else --
+    including an in-process background run whose child dies with this process --
+    is still reaped here. Best-effort and idempotent: already-terminal ops are
+    skipped and a stale conflict on one record never stops the sweep. Returns how
+    many ops were transitioned to orphaned.
     """
     transitioned = 0
     page = manager.list_records(max_records=2_000)
     for task in page.records:
         if task.state is not OperationState.RUNNING or task.kind in resumable_kinds:
             continue
+        if work_queue is not None:
+            owned_elsewhere = False
+            with contextlib.suppress(RepoForgeError):
+                owned_elsewhere = work_queue.read(task.operation_id) is not None
+            if owned_elsewhere:
+                continue
         detail, _ = _reap_and_describe(
             task.operation_id,
             worker_bindings=worker_bindings,
@@ -203,6 +234,7 @@ def recover_operations(
                 continue
             if (
                 task.state is OperationState.RUNNING
+                and task.kind not in resumable_kinds
                 and task.lease_expires_at is not None
                 and _timestamp(task.lease_expires_at) <= now_dt
             ):
@@ -265,4 +297,201 @@ def recover_operations(
         operation_record_inconsistencies=operation_record_inconsistencies,
         legacy_operation_records=legacy_operation_records,
         scan_truncated=page.scan_truncated,
+    )
+
+
+def _contain_work_child(
+    item: OperationWorkItem,
+    *,
+    worker_bindings: WorkerBindingStore | None,
+    reaper: ProcessReaper | None,
+) -> tuple[OperationWorkerBinding | None, str]:
+    if worker_bindings is None or reaper is None:
+        return None, "durable child containment is not configured"
+    binding = worker_bindings.get(item.operation_id)
+    if binding is None:
+        return None, "no durable child identity is available"
+    if binding.owner_id is not None and binding.owner_id != item.owner_id:
+        return None, "child binding owner does not match the claimed work owner"
+    if binding.attempt is not None and binding.attempt != item.attempt:
+        return None, "child binding attempt does not match the claimed work attempt"
+    outcome = reaper.reap(binding)
+    if not outcome.reaped or outcome.still_alive:
+        return None, outcome.detail
+    return binding, outcome.detail
+
+
+def recover_operation_work(
+    manager: OperationManager,
+    queue: OperationWorkQueue,
+    *,
+    now: str,
+    expected_config_generation: int | None = None,
+    worker_bindings: WorkerBindingStore | None = None,
+    reaper: ProcessReaper | None = None,
+) -> OperationWorkRecoveryReport:
+    """Reconcile durable operation records with their private work sidecars."""
+    now_dt = _timestamp(now)
+    work_page = queue.list_records(max_records=2_000)
+    operation_page = manager.list_records(max_records=2_000)
+    operations = {task.operation_id: task for task in operation_page.records}
+    work_ids = {item.operation_id for item in work_page.records}
+    requeued = 0
+    orphaned = 0
+    missing_work = 0
+    orphan_work = 0
+    stale_generation = 0
+    cancelled = 0
+    conflicts = 0
+
+    for item in work_page.records:
+        operation = operations.get(item.operation_id)
+        if operation is None or operation.state in TERMINAL_OPERATION_STATES:
+            queue.delete(item.operation_id)
+            orphan_work += 1
+            continue
+        if operation.cancellation_requested_at is not None:
+            contained_binding = None
+            if item.child_started:
+                contained_binding, _detail = _contain_work_child(
+                    item,
+                    worker_bindings=worker_bindings,
+                    reaper=reaper,
+                )
+                if contained_binding is None:
+                    conflicts += 1
+                    continue
+            try:
+                manager.cancelled(
+                    item.operation_id,
+                    owner_id=operation.owner_id,
+                    now=now,
+                )
+                queue.delete(item.operation_id)
+                if contained_binding is not None and worker_bindings is not None:
+                    worker_bindings.delete_if_unchanged(contained_binding)
+                cancelled += 1
+            except RepoForgeError as exc:
+                if exc.code in {ErrorCode.OPERATION_STALE, ErrorCode.STATE_STALE}:
+                    conflicts += 1
+                    continue
+                raise
+            continue
+        if (
+            expected_config_generation is not None
+            and item.request.config_generation != expected_config_generation
+        ):
+            try:
+                detail = (
+                    "Durable work was admitted for config generation "
+                    f"{item.request.config_generation}, but the active worker is generation "
+                    f"{expected_config_generation}."
+                )
+                contained_binding = None
+                if operation.state is OperationState.RUNNING:
+                    if item.child_started:
+                        contained_binding, _containment_detail = _contain_work_child(
+                            item,
+                            worker_bindings=worker_bindings,
+                            reaper=reaper,
+                        )
+                        if contained_binding is None:
+                            conflicts += 1
+                            continue
+                    manager.orphan(
+                        item.operation_id,
+                        error_code="OPERATION_GENERATION_STALE",
+                        error_message=detail,
+                        now=now,
+                    )
+                else:
+                    manager.fail(
+                        item.operation_id,
+                        error_code="OPERATION_GENERATION_STALE",
+                        error_message=detail,
+                        retryability=OperationRetryability.MANUAL,
+                        now=now,
+                    )
+                queue.delete(item.operation_id)
+                if contained_binding is not None and worker_bindings is not None:
+                    worker_bindings.delete_if_unchanged(contained_binding)
+                stale_generation += 1
+            except RepoForgeError as exc:
+                if exc.code in {ErrorCode.OPERATION_STALE, ErrorCode.STATE_STALE}:
+                    conflicts += 1
+                    continue
+                raise
+            continue
+        if (
+            item.state is OperationWorkState.CLAIMED
+            and item.lease_expires_at is not None
+            and _timestamp(item.lease_expires_at) <= now_dt
+        ):
+            try:
+                if item.child_started:
+                    contained_binding, _containment_detail = _contain_work_child(
+                        item,
+                        worker_bindings=worker_bindings,
+                        reaper=reaper,
+                    )
+                    if contained_binding is None:
+                        conflicts += 1
+                        continue
+                    manager.orphan(
+                        item.operation_id,
+                        error_code="OPERATION_WORKER_LOST",
+                        error_message="Durable worker lease expired after the child process started.",
+                        now=now,
+                    )
+                    queue.delete(item.operation_id)
+                    if worker_bindings is not None:
+                        worker_bindings.delete_if_unchanged(contained_binding)
+                    orphaned += 1
+                else:
+                    queued = requeue_unstarted_work(item, now=now)
+                    queue.save(queued, expected_updated_at=item.updated_at)
+                    if operation.state is OperationState.RUNNING:
+                        manager.requeue(item.operation_id, now=now)
+                    requeued += 1
+            except RepoForgeError as exc:
+                if exc.code in {ErrorCode.OPERATION_STALE, ErrorCode.STATE_STALE}:
+                    conflicts += 1
+                    continue
+                raise
+
+    durable_kinds = frozenset(
+        {"workspace_run_profile", "workspace_run_adhoc", "workspace_run_diagnostic"}
+    )
+    # Only an operation still waiting to be claimed proves its sidecar is required:
+    # admission writes the work item before the operation record, so a queued
+    # operation without one crashed mid-admission and can never be claimed. A
+    # RUNNING record is deliberately excluded -- it is either owned by a live
+    # worker that will terminalize it, or already covered by lease-expiry and
+    # worker-loss recovery, which carry the exact evidence for that failure.
+    for operation in operation_page.records:
+        if (
+            operation.kind in durable_kinds
+            and operation.state is OperationState.PENDING
+            and operation.phase == "queued"
+            and operation.operation_id not in work_ids
+        ):
+            manager.fail(
+                operation.operation_id,
+                error_code="OPERATION_WORK_MISSING",
+                error_message="Durable operation has no recoverable work sidecar.",
+                retryability=OperationRetryability.MANUAL,
+                now=now,
+            )
+            missing_work += 1
+
+    return OperationWorkRecoveryReport(
+        scanned=len(work_page.records),
+        requeued=requeued,
+        orphaned=orphaned,
+        missing_work=missing_work,
+        orphan_work=orphan_work,
+        stale_generation=stale_generation,
+        cancelled=cancelled,
+        conflicts=conflicts,
+        scan_truncated=work_page.scan_truncated or operation_page.scan_truncated,
     )

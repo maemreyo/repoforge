@@ -14,6 +14,7 @@ from .json_iteration_cache import JsonIterationCache
 from .json_onboarding_store import JsonOnboardingStore
 from .json_operation_result_store import JsonOperationResultStore
 from .json_operation_store import JsonOperationStore
+from .json_operation_work_queue import JsonOperationWorkQueue
 from .json_pr_check_watch_store import JsonPrCheckWatchStore
 from .json_runtime_activation_store import JsonRuntimeActivationStore
 from .json_task_store import JsonTaskStore
@@ -40,6 +41,7 @@ __all__ = [
     "JsonOnboardingStore",
     "JsonOperationResultStore",
     "JsonOperationStore",
+    "JsonOperationWorkQueue",
     "JsonPrCheckWatchStore",
     "JsonRuntimeActivationStore",
     "JsonTaskStore",

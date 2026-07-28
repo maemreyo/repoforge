@@ -113,6 +113,7 @@ class OperationTask:
     record_consistency: str = "consistent"
     record_diagnostics: tuple[str, ...] = ()
     schema_version: int = OPERATION_SCHEMA_VERSION
+    attempt: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +312,8 @@ def validate_operation_task(task: OperationTask) -> OperationTask:
             code=ErrorCode.OPERATION_SCHEMA_UNSUPPORTED,
         )
     validate_operation_id(task.operation_id)
+    if not isinstance(task.attempt, int) or isinstance(task.attempt, bool) or task.attempt < 0:
+        raise _error("attempt must be a non-negative integer")
     _bounded(task.kind, "kind", limit=64, pattern=_SAFE_KIND)
     _bounded(task.phase, "phase", limit=64, pattern=_SAFE_PHASE)
     _validate_progress(task.progress_current, task.progress_total)
@@ -491,12 +494,36 @@ def transition_operation(
     return validate_operation_task(updated)
 
 
+def requeue_operation(task: OperationTask, *, now: str) -> OperationTask:
+    """Return expired, unstarted running work to an observable pending queue state."""
+    validate_operation_task(task)
+    if task.state is not OperationState.RUNNING:
+        raise _error(
+            "Only running operations can be requeued",
+            code=ErrorCode.OPERATION_TRANSITION_INVALID,
+        )
+    updated = replace(
+        task,
+        state=OperationState.PENDING,
+        phase="queued",
+        owner_id=None,
+        lease_expires_at=None,
+        progress_message="Recovered after worker loss before child start",
+        error_code=None,
+        error_message=None,
+        retryability=OperationRetryability.AUTOMATIC,
+        updated_at=next_operation_timestamp(task.updated_at, now),
+    )
+    return validate_operation_task(updated)
+
+
 def claim_operation_ownership(
     task: OperationTask,
     *,
     owner_id: str,
     lease_expires_at: str,
     now: str,
+    attempt: int | None = None,
 ) -> OperationTask:
     """Acquire or take over an expired lease for one running operation."""
     validate_operation_task(task)
@@ -506,6 +533,13 @@ def claim_operation_ownership(
             code=ErrorCode.OPERATION_TRANSITION_INVALID,
         )
     safe_owner = str(_bounded(owner_id, "owner_id", limit=128, pattern=_SAFE_ID))
+    resolved_attempt = task.attempt if attempt is None else attempt
+    if (
+        not isinstance(resolved_attempt, int)
+        or isinstance(resolved_attempt, bool)
+        or resolved_attempt < task.attempt
+    ):
+        raise _error("attempt must be a non-decreasing integer")
     now_dt = _parse_timestamp(now, "now")
     lease_dt = _parse_timestamp(lease_expires_at, "lease_expires_at")
     if lease_dt <= now_dt:
@@ -524,6 +558,7 @@ def claim_operation_ownership(
         task,
         owner_id=safe_owner,
         lease_expires_at=lease_dt.isoformat(),
+        attempt=resolved_attempt,
         updated_at=next_operation_timestamp(task.updated_at, now),
     )
     return validate_operation_task(updated)

@@ -308,6 +308,10 @@ class OperationEvidence(StrictModel):
     kind: str = Field(min_length=1, max_length=120)
     state: OperationState
     phase: str = Field(min_length=1, max_length=120)
+    attempt: int = Field(default=0, ge=0)
+    heartbeat_at: str | None = Field(default=None, max_length=80)
+    heartbeat_age_seconds: float | None = Field(default=None, ge=0.0)
+    evidence_complete: bool = False
     progress_current: int | None = Field(default=None, ge=0)
     progress_total: int | None = Field(default=None, ge=0)
     progress_unit: str | None = Field(default=None, max_length=64)

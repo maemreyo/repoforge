@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from ...domain.operation_task import OperationTask
+from ...domain.operation_task import OperationState, OperationTask
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,10 @@ class OperationSummary:
     kind: str
     state: str
     phase: str
+    attempt: int
+    heartbeat_at: str | None
+    heartbeat_age_seconds: float | None
+    evidence_complete: bool
     progress: OperationProgressView
     task_id: str | None
     workspace_id: str | None
@@ -60,6 +65,10 @@ class OperationStatusView:
     kind: str
     state: str
     phase: str
+    attempt: int
+    heartbeat_at: str | None
+    heartbeat_age_seconds: float | None
+    evidence_complete: bool
     progress: OperationProgressView
     task_id: str | None
     workspace_id: str | None
@@ -85,12 +94,59 @@ class OperationStatusView:
     record_diagnostics: tuple[str, ...]
 
 
-def operation_summary(task: OperationTask) -> OperationSummary:
+def operation_observability(
+    task: OperationTask,
+    *,
+    now: str,
+    result_checked: bool = False,
+    result_available: bool = False,
+) -> tuple[int, str | None, float | None, bool]:
+    """Project persisted liveness and terminal-evidence truth without guessing."""
+    heartbeat_at = task.updated_at if task.state is OperationState.RUNNING else None
+    heartbeat_age_seconds = None
+    if heartbeat_at is not None:
+        heartbeat_age_seconds = round(
+            max(
+                0.0,
+                (
+                    datetime.fromisoformat(now) - datetime.fromisoformat(heartbeat_at)
+                ).total_seconds(),
+            ),
+            3,
+        )
+    evidence_complete = False
+    if task.state is OperationState.SUCCEEDED:
+        evidence_complete = bool(
+            task.result_reference is not None and result_checked and result_available
+        )
+    elif task.state is OperationState.CANCELLED:
+        evidence_complete = True
+    elif task.state in {
+        OperationState.FAILED,
+        OperationState.EXPIRED,
+        OperationState.ORPHANED,
+    }:
+        evidence_complete = task.error_code is not None
+    return task.attempt, heartbeat_at, heartbeat_age_seconds, evidence_complete
+
+
+def operation_summary(
+    task: OperationTask,
+    *,
+    attempt: int | None = None,
+    heartbeat_at: str | None = None,
+    heartbeat_age_seconds: float | None = None,
+    evidence_complete: bool = False,
+) -> OperationSummary:
     return OperationSummary(
         operation_id=task.operation_id,
         kind=task.kind,
         state=task.state.value,
         phase=task.phase,
+        attempt=task.attempt if attempt is None else attempt,
+        heartbeat_at=heartbeat_at,
+        heartbeat_age_seconds=heartbeat_age_seconds,
+        evidence_complete=evidence_complete,
         progress=OperationProgressView(
             task.progress_current,
             task.progress_total,
@@ -139,8 +195,18 @@ def operation_status_view(
     result_checked: bool = True,
     receipt_checked: bool = True,
     receipt_available: bool = False,
+    attempt: int = 0,
+    heartbeat_at: str | None = None,
+    heartbeat_age_seconds: float | None = None,
+    evidence_complete: bool = False,
 ) -> OperationStatusView:
-    summary = operation_summary(task)
+    summary = operation_summary(
+        task,
+        attempt=attempt,
+        heartbeat_at=heartbeat_at,
+        heartbeat_age_seconds=heartbeat_age_seconds,
+        evidence_complete=evidence_complete,
+    )
     result_reference_status = (
         "not_applicable"
         if summary.result_reference is None
@@ -172,6 +238,10 @@ def operation_status_view(
         kind=summary.kind,
         state=summary.state,
         phase=summary.phase,
+        attempt=summary.attempt,
+        heartbeat_at=summary.heartbeat_at,
+        heartbeat_age_seconds=summary.heartbeat_age_seconds,
+        evidence_complete=summary.evidence_complete,
         progress=summary.progress,
         task_id=summary.task_id,
         workspace_id=summary.workspace_id,

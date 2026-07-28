@@ -61,7 +61,6 @@ class WorkspaceRemover:
                             "The workspace, its worktree, and the workspace registry were not modified.",
                         ),
                     )
-                boundary.begin()
                 # An adopted branch predates this workspace and belongs to the operator, so
                 # removing the workspace must never delete it: that would destroy work this
                 # workspace did not create, and unlike everything else here it is not
@@ -81,6 +80,11 @@ class WorkspaceRemover:
                             "not modified.",
                         ),
                     )
+                # Declared here, not before the checks above: everything up to this point
+                # is a pure refusal that leaves the worktree, branch and registry exactly
+                # as they were, and reporting those as an effect of unknown outcome would
+                # tell an operator to go inspect state that was never touched.
+                boundary.begin()
                 deleted = self.ctx.git.remove_worktree(repo, path, record.branch, delete_branch)
                 authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, deleted)
                 boundary.record_result(authoritative_result)

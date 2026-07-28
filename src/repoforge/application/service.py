@@ -25,6 +25,7 @@ from .operations.composite import OperationCommand, OperationCoordinator
 from .operations.list import OperationListCommand, OperationLister
 from .operations.recovery import reap_running_background
 from .operations.status import OperationStatusCommand, OperationStatusReader
+from .operations.work_admission import DurableWorkAdmission
 from .read_batch import FileReadRequest
 from .repository.commit_read import (
     RepositoryCommitReadCommand,
@@ -342,7 +343,13 @@ class CodingService:
         ctx = self.application.context
         self._operation_status = OperationStatusReader(self.operations)
         self._operation_list = OperationLister(self.operations)
-        self._operation_cancel = OperationCancellationRequester(self.operations)
+        self._operation_cancel = OperationCancellationRequester(
+            self.operations,
+            ctx.operation_work_queue,
+            ctx.worker_bindings,
+            ctx.reaper,
+            request_live_cancel=self._request_live_operation_cancel,
+        )
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
         self._repo_context = RepositoryContextReader(ctx)
@@ -426,14 +433,18 @@ class CodingService:
             lister=self._operation_list,
             cancel=self._operation_cancel,
             failure_evidence=self._execution_failure_evidence,
-            request_live_cancel=self._request_live_operation_cancel,
         )
+        if ctx.operation_work_queue is None:
+            raise RuntimeError("Durable operation work queue is not configured")
+        self._work_admission = DurableWorkAdmission(self.operations, ctx.operation_work_queue)
         self._verify = WorkspaceVerifier(
             ctx,
             assessment=self._assessment,
             profile=self._profile,
             diagnostic=self._diagnostic,
             adhoc=self._adhoc,
+            admission=self._work_admission,
+            operations=self.operations,
         )
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
@@ -505,8 +516,10 @@ class CodingService:
 
         Closes the window in which a background child process group (started in
         its own session) would otherwise outlive this process until the next
-        start's recovery sweep. Resumable kinds (pr_check_watch) are left alone
-        -- they are re-driven on restart. Best-effort; never raises.
+        start's recovery sweep. Resumable kinds are left alone and re-driven
+        after restart, as is any operation with a durable work sidecar -- that
+        child belongs to the execution worker, which outlives this process.
+        Best-effort; never raises.
         """
         ctx = self.application.context
         try:
@@ -517,6 +530,7 @@ class CodingService:
                 resumable_kinds=frozenset({"pr_check_watch"}),
                 worker_bindings=ctx.worker_bindings,
                 reaper=ctx.reaper,
+                work_queue=ctx.operation_work_queue,
             )
         except Exception:
             return 0
@@ -1371,15 +1385,15 @@ class CodingService:
         return _result(
             self._diagnostic.execute(
                 WorkspaceRunDiagnosticCommand(
-                    workspace_id,
-                    diagnostic_id,
-                    selector,
-                    expected_fingerprint,
-                    intent,
-                    expectation,
-                    expected_failure_class,
-                    selector2,
-                    force_rerun,
+                    workspace_id=workspace_id,
+                    diagnostic_id=diagnostic_id,
+                    selector=selector,
+                    expected_fingerprint=expected_fingerprint,
+                    intent=intent,
+                    expectation=expectation,
+                    expected_failure_class=expected_failure_class,
+                    selector2=selector2,
+                    force_rerun=force_rerun,
                 )
             )
         )

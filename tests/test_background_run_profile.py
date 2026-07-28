@@ -885,9 +885,15 @@ def test_background_cancellation_kills_the_process_group_releases_the_lock_and_l
     started = service.workspace_run_profile(workspace_id, "slow", background=True)
     operation_id = started["operation_id"]
 
-    # Wait for the operation to actually be running before requesting cancellation.
+    # This test is about killing a live process group, so wait for proof that the
+    # child exists rather than sleeping and hoping: the durable worker binding is
+    # written the moment the "python3 -c time.sleep(5)" subprocess is bound. A
+    # timed guess lets a loaded machine cancel before the first spawn, which is a
+    # different (also supported) path with no process group to kill.
+    bindings = service.application.context.worker_bindings
+    assert bindings is not None
     _poll(lambda: service.operation_status(operation_id)["state"] == "running")
-    time.sleep(0.3)  # let the "python3 -c time.sleep(5)" subprocess actually start
+    _poll(lambda: bindings.get(operation_id) is not None)
 
     cancel_result = service.operation_cancel(operation_id)
     assert cancel_result["cancellation_requested"] is True

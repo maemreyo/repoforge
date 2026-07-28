@@ -368,3 +368,36 @@ def test_service_reap_background_workers(forge_env: ForgeEnvironment) -> None:
     assert service.reap_background_workers(reason="runtime shutdown") == 1
     assert service.reap_background_workers(reason="runtime shutdown") == 0
     assert manager.status(running.operation_id).state is OperationState.ORPHANED
+
+
+def test_service_shutdown_leaves_work_owned_by_the_execution_worker(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Killing a live worker's child at MCP shutdown would orphan recoverable work."""
+    from repoforge.domain.operation_work import OperationWorkRequest, new_work_item
+
+    service = forge_env.service
+    manager = service.operations
+    queue = service.application.context.operation_work_queue
+    assert queue is not None
+    running = manager.create(kind="workspace_run_profile", phase="running", cancel_supported=True)
+    manager.start(running.operation_id)
+    queue.create(
+        new_work_item(
+            operation_id=running.operation_id,
+            request=OperationWorkRequest.profile(
+                workspace_id="workspace-1",
+                profile_name="quick",
+                expected_head_sha="a" * 40,
+                expected_fingerprint="b" * 64,
+                config_generation=1,
+            ),
+            now=service.application.context.clock.now_iso(),
+        )
+    )
+    service.application.context.worker_bindings.put(
+        _binding(operation_id=running.operation_id, child_pid=44444)
+    )
+
+    assert service.reap_background_workers(reason="runtime shutdown") == 0
+    assert manager.status(running.operation_id).state is OperationState.RUNNING

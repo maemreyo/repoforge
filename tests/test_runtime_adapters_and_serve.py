@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from repoforge.adapters.filesystem.local import LocalFileSystem
+from repoforge.adapters.runtime.execution_worker import SubprocessExecutionWorker
 from repoforge.adapters.runtime.launcher import SubprocessRuntimeLauncher
 from repoforge.adapters.runtime.profile_store import JsonTunnelProfileStore
 from repoforge.adapters.runtime.state_store import JsonRuntimeStore
@@ -244,6 +245,61 @@ def test_runtime_launcher_foreground_background_and_identity_guard(
     monkeypatch.setattr(module, "process_identity", lambda pid: next(values, None))
     monkeypatch.setattr(module.os, "killpg", lambda pid, sig: None)
     assert launcher.force_stop(record, grace_seconds=0.01) is True
+
+
+def test_execution_worker_adapter_launches_exact_generation_in_own_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("repoforge.adapters.runtime.execution_worker")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class FakePopen:
+        pid = 456
+
+        def poll(self):
+            return None
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return FakePopen()
+
+    monkeypatch.setattr(module.subprocess, "Popen", popen)
+    monkeypatch.setattr(module, "process_identity", lambda pid: "d" * 64 if pid == 456 else None)
+    worker = SubprocessExecutionWorker(tmp_path / "config.toml")
+
+    child = worker.start(
+        12,
+        env={"PATH": "/usr/bin"},
+        log_path=tmp_path / "execution-worker.log",
+        correlation_id="corr-1",
+    )
+
+    assert child.pid == 456
+    assert calls[0][0][-4:] == ["--config", str(tmp_path / "config.toml"), "--generation", "12"]
+    assert calls[0][1]["start_new_session"] is True
+    assert calls[0][1]["env"] == {"PATH": "/usr/bin"}
+    assert worker.is_alive(child) is True
+
+
+def test_execution_worker_cli_binds_exact_config_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("repoforge.interfaces.runtime.execution_worker")
+    captured: dict[str, object] = {}
+
+    def run(config_path, *, generation):
+        captured.update(config_path=config_path, generation=generation)
+        return 7
+
+    monkeypatch.setattr(module, "run_execution_worker", run)
+
+    assert module.main(["--config", str(tmp_path / "config.toml"), "--generation", "12"]) == 7
+    assert captured == {
+        "config_path": tmp_path / "config.toml",
+        "generation": 12,
+    }
 
 
 def test_serve_control_handler_covers_health_drain_resume_and_fail_closed(

@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import ForgeEnvironment, create_forge_environment, git
+from conftest import ForgeEnvironment, create_forge_environment, durable_worker, git
 
 from repoforge.application.service import _result
 from repoforge.application.workspace.edit import FileEdit, TextEdit
@@ -822,7 +822,10 @@ def test_run_profile_default_and_workspace_verify_profile_share_execution_contra
         )
 
     canonical = service.workspace_run_profile(profile_workspace)
-    consolidated = service.workspace_verify(verify_workspace, mode="profile")
+    # `workspace_verify` admits durable work, so the parity check needs a worker to
+    # claim it; the direct runner call above still executes in this process.
+    with durable_worker(service):
+        consolidated = service.workspace_verify(verify_workspace, mode="profile")
 
     assert canonical["used_default"] is True
     assert canonical["repo_id"] == "demo"

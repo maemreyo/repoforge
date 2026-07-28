@@ -43,6 +43,7 @@ from ..ports import (
     OperationGate,
     OperationResultStore,
     OperationStore,
+    OperationWorkQueue,
     ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
@@ -239,6 +240,7 @@ class ApplicationContext:
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
+    operation_work_queue: OperationWorkQueue | None = None
     operation_result_store: OperationResultStore | None = None
     fingerprint_cache: FingerprintCache | None = None
     provider_registry: ProviderRegistry | None = None
@@ -260,6 +262,7 @@ class ApplicationContext:
     failure_output_artifacts: FailureOutputArtifactStore | None = None
     worker_bindings: WorkerBindingStore | None = None
     reaper: ProcessReaper | None = None
+    config_generation: int = 0
 
     def now_epoch(self) -> float:
         try:

@@ -1,15 +1,17 @@
 import contextlib
 import hashlib
+import os
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
 from ...domain.operation_task import OperationRetryability, OperationState
+from ...domain.operation_worker import OperationWorkerBinding
 from ...domain.policy import normalize_relative_path
 from ...domain.retry_guidance import (
     NOT_FOUND_CODES,
@@ -152,8 +154,10 @@ class WorkspaceRunProfileCommand:
     background: bool = False
     force_rerun: bool = False
     expected_fingerprint: str | None = None
+    expected_head_sha: str | None = None
     cancellation_token: CancellationToken | None = None
     before_command: Callable[[], None] | None = None
+    progress_callback: _ProgressCallback | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +266,40 @@ class WorkspaceProfileRunner:
         with self._cancel_tokens_lock:
             self._cancel_tokens.pop(operation_id, None)
 
+    def _persist_worker_binding(self, operation_id: str, child_pid: int) -> None:
+        """Durably record the spawned child so a later process can reap/cancel it.
+
+        A background command's subprocess uses ``start_new_session=True`` so its
+        pgid equals its own pid. Runs on the executor thread the moment the child
+        is bound; any failure here must never disturb the run itself.
+        """
+        bindings = self.ctx.worker_bindings
+        if bindings is None:
+            return
+        reaper = self.ctx.reaper
+        child_token = reaper.read_start_token(child_pid) if reaper is not None else None
+        server_pid = os.getpid()
+        server_token = reaper.read_start_token(server_pid) if reaper is not None else None
+        with contextlib.suppress(Exception):
+            bindings.put(
+                OperationWorkerBinding(
+                    operation_id=operation_id,
+                    child_pid=child_pid,
+                    child_pgid=child_pid,
+                    child_start_token=child_token,
+                    server_pid=server_pid,
+                    server_start_token=server_token,
+                    created_at=self.ctx.clock.now_iso(),
+                )
+            )
+
+    def _delete_worker_binding(self, operation_id: str) -> None:
+        bindings = self.ctx.worker_bindings
+        if bindings is None:
+            return
+        with contextlib.suppress(Exception):
+            bindings.delete(operation_id)
+
     def request_live_cancel(self, operation_id: str) -> bool:
         """Signal the process group of a live background run; a no-op if none is bound."""
         with self._cancel_tokens_lock:
@@ -282,6 +320,29 @@ class WorkspaceProfileRunner:
             ):
                 return task.operation_id
         return None
+
+    def execute_claimed(
+        self,
+        c: WorkspaceRunProfileCommand,
+        *,
+        cancellation_token: CancellationToken,
+        progress: _ProgressCallback,
+    ) -> WorkspaceRunProfileResult:
+        """Execute already-claimed work synchronously without recursive admission."""
+        result = self.execute(
+            replace(
+                c,
+                background=False,
+                cancellation_token=cancellation_token,
+                progress_callback=progress,
+            )
+        )
+        if not isinstance(result, WorkspaceRunProfileResult):
+            raise RepoForgeError(
+                "Claimed profile execution returned a background operation",
+                code=ErrorCode.INTERNAL_ERROR,
+            )
+        return result
 
     def execute(
         self, c: WorkspaceRunProfileCommand
@@ -323,6 +384,11 @@ class WorkspaceProfileRunner:
                 self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, path
             )
             before_fingerprint = before.fingerprint
+            current_head_sha = self.ctx.git.head_sha(path).lower()
+            if c.expected_head_sha is not None and c.expected_head_sha.lower() != current_head_sha:
+                raise WorkspaceError(
+                    "Workspace HEAD changed since the verification work was admitted"
+                )
             if c.expected_fingerprint is not None and c.expected_fingerprint != before_fingerprint:
                 raise WorkspaceError("Workspace changed since the verification plan was reviewed")
             stage_telemetry: list[tuple[float, float]] = []
@@ -831,7 +897,7 @@ class WorkspaceProfileRunner:
 
             def op() -> WorkspaceRunProfileResult:
                 with self.ctx.locks.lock(c.workspace_id):
-                    return run_body(c.cancellation_token, c.before_command, None)
+                    return run_body(c.cancellation_token, c.before_command, c.progress_callback)
 
             return self.ctx.audited(
                 "workspace_run_profile",
@@ -944,13 +1010,19 @@ class WorkspaceProfileRunner:
             raise
 
         operation_id = task.operation_id
-        cancel_token = CancellationToken()
+        cancel_token = CancellationToken(
+            on_bind=lambda child_pid: self._persist_worker_binding(operation_id, child_pid)
+        )
         self._register_cancel_token(operation_id, cancel_token)
 
         def on_before_command() -> None:
             current = operations.status(operation_id)
             if current.cancellation_requested_at is not None:
                 cancel_token.cancel()
+                # Cancellation observed between commands never reaches the
+                # command-failure recorder, so stamp the audit trail here; an
+                # operator must not read a cancellation as a plain failure.
+                audit_details["cancelled"] = True
                 raise RepoForgeError(
                     "Background profile run was cancelled before the next command started",
                     code=ErrorCode.COMMAND_FAILED,
@@ -1067,6 +1139,7 @@ class WorkspaceProfileRunner:
                 self._unregister_cancel_token(operation_id)
                 lock_cm.__exit__(None, None, None)
             finish_terminal(failure, result)
+            self._delete_worker_binding(operation_id)
 
         try:
             scheduled = background_tasks.submit(operation_id, run)

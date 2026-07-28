@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -57,6 +57,7 @@ class WorkspaceRunAdhocCommand:
     expected_fingerprint: str | None = None
     expected_head_sha: str | None = None
     mutability: str = "read_only"
+    cancellation_token: CancellationToken | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +197,24 @@ class WorkspaceAdhocRunner:
         self.background_tasks = background_tasks
         self._cancel_tokens: dict[str, CancellationToken] = {}
         self._cancel_tokens_lock = threading.Lock()
+
+    def execute_claimed(
+        self,
+        c: WorkspaceRunAdhocCommand,
+        *,
+        cancellation_token: CancellationToken,
+        progress: Callable[[str, int, int, str, str], None],
+    ) -> WorkspaceRunAdhocResult:
+        """Execute already-claimed ad-hoc work without recursive admission."""
+        progress("running", 0, 1, "commands", "running reviewed ad-hoc command")
+        result = self.execute(replace(c, background=False, cancellation_token=cancellation_token))
+        if not isinstance(result, WorkspaceRunAdhocResult):
+            raise RepoForgeError(
+                "Claimed ad-hoc execution returned a background operation",
+                code=ErrorCode.INTERNAL_ERROR,
+            )
+        progress("running", 1, 1, "commands", "completed reviewed ad-hoc command")
+        return result
 
     def execute(
         self, c: WorkspaceRunAdhocCommand
@@ -437,7 +456,11 @@ class WorkspaceAdhocRunner:
                 )
 
         if not c.background:
-            return self.ctx.audited(_KIND, audit_details, lambda: run_body(None, False))
+            return self.ctx.audited(
+                _KIND,
+                audit_details,
+                lambda: run_body(c.cancellation_token, False),
+            )
 
         return self._start_background(c, run_body, audit_details)
 
@@ -507,10 +530,12 @@ class WorkspaceAdhocRunner:
             binding = bindings.get(operation_id)
         if binding is None:
             return False
+        outcome = None
         with contextlib.suppress(Exception):
-            reaper.reap(binding)
-        self._delete_worker_binding(operation_id)
-        return True
+            outcome = reaper.reap(binding)
+        if outcome is not None and not outcome.still_alive:
+            bindings.delete_if_unchanged(binding)
+        return outcome is not None
 
     def _start_background(
         self,

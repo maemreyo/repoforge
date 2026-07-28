@@ -166,10 +166,11 @@ class JsonOperationStore:
             "record_diagnostics",
         }
         current_fields = previous_current_fields | {"owner_id", "lease_expires_at"}
+        current_fields_with_attempt = current_fields | {"attempt"}
         expected_field_sets = (
             (legacy_fields,)
             if version == LEGACY_OPERATION_SCHEMA_VERSION
-            else (previous_current_fields, current_fields)
+            else (previous_current_fields, current_fields, current_fields_with_attempt)
         )
         if set(raw) not in expected_field_sets:
             raise JsonOperationStore._error(
@@ -229,6 +230,7 @@ class JsonOperationStore:
                     tuple(raw["record_diagnostics"]) if version == OPERATION_SCHEMA_VERSION else ()
                 ),
                 schema_version=OPERATION_SCHEMA_VERSION,
+                attempt=raw.get("attempt", 0),
             )
             return normalize_loaded_operation(task, source_schema_version=version)
         except (KeyError, TypeError, ValueError, RepoForgeError) as exc:

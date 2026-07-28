@@ -136,9 +136,10 @@ def parse_runtime_event(line: str) -> ParsedRuntimeEvent:
         )
 
     structured = raw.get("schema_version") == 1
-    timestamp, timestamp_state = _timestamp(
-        raw.get("observed_at") if structured else raw.get("timestamp")
-    )
+    timestamp_value = raw.get("observed_at") if structured else raw.get("timestamp")
+    if not structured and timestamp_value is None:
+        timestamp_value = raw.get("time")
+    timestamp, timestamp_state = _timestamp(timestamp_value)
     message_value = raw.get("message")
     if not isinstance(message_value, str):
         message_value = raw.get("msg")

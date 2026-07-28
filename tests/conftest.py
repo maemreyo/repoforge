@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import hashlib
 import json
 import os
@@ -120,6 +121,93 @@ def execution_coordinator_for_tests() -> ExecutionCoordinator:
     """Provide required deterministic execution wiring to non-execution unit fixtures."""
 
     return ExecutionCoordinator(NativeReviewedAdapter(ScriptedCommandExecutor()))
+
+
+class StubWorkHandlers:
+    """Record each claimed work item and answer with a caller-supplied result.
+
+    `workspace_verify` admits durable work instead of calling a runner, so a test
+    that used to monkeypatch `WorkspaceProfileRunner.execute` now substitutes the
+    worker's handler. `claimed` holds the exact `OperationWorkItem`, whose
+    `request` is the reviewed command the old assertions inspected.
+    """
+
+    def __init__(self, results: dict[str, object]) -> None:
+        self._results = results
+        self.claimed: list[object] = []
+
+    def execute(self, item, *, cancellation_token, progress):
+        del cancellation_token, progress
+        self.claimed.append(item)
+        kind = item.request.kind
+        result = self._results.get(kind)
+        if result is None:
+            raise AssertionError(f"durable work of kind {kind!r} must not run in this test")
+        return result(item) if callable(result) else result
+
+
+@contextlib.contextmanager
+def durable_worker(
+    service: CodingService,
+    *,
+    handlers: object | None = None,
+    profile: object | None = None,
+    diagnostic: object | None = None,
+    adhoc: object | None = None,
+) -> Iterator[object]:
+    """Run one durable execution worker in a thread for the body of the block.
+
+    A foreground `workspace_verify` bounded-waits on its operation, so something
+    must claim the work for the call to return a terminal result. With no
+    arguments the worker executes with the production runners against this
+    service's own configuration; pass per-kind results or callables to stand in
+    for the command instead. The worker is always stopped and joined on exit.
+    """
+
+    from repoforge.application.operations.work_executor import VerificationWorkHandlers
+    from repoforge.application.operations.work_loop import OperationWorkLoop
+    from repoforge.application.workspace.run_adhoc import WorkspaceAdhocRunner
+    from repoforge.application.workspace.run_diagnostic import WorkspaceDiagnosticRunner
+    from repoforge.application.workspace.run_profile import WorkspaceProfileRunner
+
+    stubbed = {
+        key: value
+        for key, value in (("profile", profile), ("diagnostic", diagnostic), ("adhoc", adhoc))
+        if value is not None
+    }
+    if handlers is None:
+        context = service.application.context
+        handlers = (
+            StubWorkHandlers(stubbed)
+            if stubbed
+            else VerificationWorkHandlers(
+                WorkspaceProfileRunner(context),
+                WorkspaceAdhocRunner(context),
+                WorkspaceDiagnosticRunner(context),
+            )
+        )
+    loop = OperationWorkLoop(
+        service.application.context,
+        service.application.operations,
+        handlers,
+        idle_poll_seconds=0.01,
+        heartbeat_interval_seconds=0.5,
+        recovery_interval_seconds=3_600.0,
+    )
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=lambda: loop.run_until_stopped(stop),
+        name="test-durable-worker",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield handlers
+    finally:
+        stop.set()
+        loop.request_stop()
+        thread.join(timeout=60)
+        assert not thread.is_alive(), "the durable test worker did not stop"
 
 
 _TEMPLATE_LOCK = threading.Lock()

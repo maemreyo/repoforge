@@ -66,6 +66,7 @@ class WorkspaceRunDiagnosticCommand:
     diagnostic_id: str
     selector: SelectorInput = None
     expected_fingerprint: str | None = None
+    expected_head_sha: str | None = None
     intent: VerificationIntent | str | None = None
     expectation: DiagnosticExpectation | str | None = None
     expected_failure_class: DiagnosticFailureClass | str | None = None
@@ -74,6 +75,13 @@ class WorkspaceRunDiagnosticCommand:
     rerun_failed: bool = False
     cancellation_token: CancellationToken | None = None
     before_command: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRunDiagnosticBackgroundResult:
+    operation_id: str
+    phase: str
+    safe_next_action: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +226,34 @@ class WorkspaceDiagnosticRunner:
     def __init__(self, ctx: ApplicationContext):
         self.ctx = ctx
 
+    def execute_claimed(
+        self,
+        command: WorkspaceRunDiagnosticCommand,
+        *,
+        cancellation_token: CancellationToken,
+        progress: Callable[[str, int, int, str, str], None],
+    ) -> WorkspaceRunDiagnosticResult:
+        delegated = replace(
+            command,
+            cancellation_token=cancellation_token,
+            before_command=lambda: progress(
+                "running",
+                0,
+                1,
+                "diagnostics",
+                f"Running diagnostic {command.diagnostic_id}",
+            ),
+        )
+        result = self.execute(delegated)
+        progress(
+            "running",
+            1,
+            1,
+            "diagnostics",
+            f"Completed diagnostic {command.diagnostic_id}",
+        )
+        return result
+
     def execute(self, command: WorkspaceRunDiagnosticCommand) -> WorkspaceRunDiagnosticResult:
         _, repo, _ = self.ctx.workspace(command.workspace_id)
         profile = _profile(repo, command.diagnostic_id)
@@ -256,6 +292,14 @@ class WorkspaceDiagnosticRunner:
                     locked_workspace,
                 )
                 before_fingerprint = before.fingerprint
+                head_sha = self.ctx.git.head_sha(locked_workspace)
+                if command.expected_head_sha is not None and command.expected_head_sha != head_sha:
+                    raise _diagnostic_error(
+                        "Workspace HEAD changed since the diagnostic request was reviewed: "
+                        f"expected {command.expected_head_sha}, current {head_sha}",
+                        ErrorCode.DIAGNOSTIC_STALE_WORKSPACE,
+                        retryable=True,
+                    )
                 audit_details.update(
                     {
                         "fingerprint_source": before.source,

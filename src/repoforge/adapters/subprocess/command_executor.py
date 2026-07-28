@@ -6,6 +6,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,29 @@ from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ..persistence.failure_output_artifact_store import persist_failure_output
 from .process_tree import inspect_descendants, kill_identity, wait_identities_gone
+
+_LAUNCH_EXEC_NOT_FOUND = "__REPOFORGE_LAUNCH_EXEC_NOT_FOUND__"
+_LAUNCH_GATE_SCRIPT = """\
+import os
+import sys
+
+gate_fd = int(sys.argv[1])
+try:
+    released = os.read(gate_fd, 1)
+finally:
+    os.close(gate_fd)
+if released != b"1":
+    os._exit(125)
+argv = sys.argv[2:]
+try:
+    os.execvpe(argv[0], argv, os.environ)
+except FileNotFoundError:
+    os.write(2, b"__REPOFORGE_LAUNCH_EXEC_NOT_FOUND__\\n")
+    os._exit(127)
+except OSError as exc:
+    os.write(2, ("__REPOFORGE_LAUNCH_EXEC_FAILED__:" + str(exc) + "\\n").encode("utf-8", "replace"))
+    os._exit(126)
+"""
 
 
 class SubprocessCommandExecutor:
@@ -85,9 +109,24 @@ class SubprocessCommandExecutor:
         extra_env: Mapping[str, str] | None,
         cancel_token: CancellationToken | None = None,
     ) -> tuple[subprocess.Popen[Any], tuple[str | bytes, str | bytes]]:
+        gate_read: int | None = None
+        gate_write: int | None = None
+        popen_argv = list(argv)
+        pass_fds: tuple[int, ...] = ()
+        if cancel_token is not None:
+            cancel_token.before_spawn()
+            gate_read, gate_write = os.pipe()
+            popen_argv = [
+                sys.executable,
+                "-c",
+                _LAUNCH_GATE_SCRIPT,
+                str(gate_read),
+                *argv,
+            ]
+            pass_fds = (gate_read,)
         try:
             process = subprocess.Popen(
-                list(argv),
+                popen_argv,
                 cwd=cwd,
                 env=self.environment(extra_env),
                 stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
@@ -97,24 +136,53 @@ class SubprocessCommandExecutor:
                 encoding="utf-8" if text else None,
                 errors="replace" if text else None,
                 start_new_session=True,
+                pass_fds=pass_fds,
             )
-        except FileNotFoundError as exc:
-            raise CommandError(
-                f"Executable not found: {argv[0]}",
-                code=ErrorCode.NOT_FOUND,
-                details={
-                    "executable": argv[0],
-                    **self._unstarted_failure_details(argv),
-                },
-            ) from exc
         except OSError as exc:
+            if gate_write is not None:
+                with contextlib.suppress(OSError):
+                    os.close(gate_write)
+                gate_write = None
+            if isinstance(exc, FileNotFoundError) and cancel_token is None:
+                raise CommandError(
+                    f"Executable not found: {argv[0]}",
+                    code=ErrorCode.NOT_FOUND,
+                    details={
+                        "executable": argv[0],
+                        **self._unstarted_failure_details(argv),
+                    },
+                ) from exc
+            message = (
+                f"Cannot start gated command {' '.join(argv)}: {exc}"
+                if cancel_token is not None
+                else f"Cannot execute {' '.join(argv)}: {exc}"
+            )
             raise CommandError(
-                f"Cannot execute {' '.join(argv)}: {exc}",
+                message,
                 code=ErrorCode.COMMAND_FAILED,
                 details=self._unstarted_failure_details(argv),
             ) from exc
+        finally:
+            if gate_read is not None:
+                with contextlib.suppress(OSError):
+                    os.close(gate_read)
         if cancel_token is not None:
-            cancel_token.bind(process)
+            assert gate_write is not None
+            try:
+                cancel_token.bind(process)
+            except Exception:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=2)
+                cancel_token.release()
+                raise
+            else:
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    os.write(gate_write, b"1")
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(gate_write)
         try:
             try:
                 return (process, process.communicate(input_data, timeout=timeout))
@@ -256,6 +324,15 @@ class SubprocessCommandExecutor:
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise CommandError("Text command returned binary output")
+        if process.returncode == 127 and _LAUNCH_EXEC_NOT_FOUND in stderr:
+            raise CommandError(
+                f"Executable not found: {argv[0]}",
+                code=ErrorCode.NOT_FOUND,
+                details={
+                    "executable": argv[0],
+                    **self._unstarted_failure_details(argv),
+                },
+            )
         returncode = process.returncode or 0
         full_output = "\n".join(part for part in (stdout, stderr) if part)
         extraction = extract_failure(argv, full_output, returncode=returncode)

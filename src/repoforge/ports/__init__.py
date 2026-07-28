@@ -37,6 +37,7 @@ from .execution_environment import (
 )
 from .execution_plan_store import ExecutionPlanAcceptanceStore, ExecutionPlanStore
 from .execution_receipt_store import ExecutionReceiptStore
+from .execution_worker import ExecutionWorkerClient
 from .failure_evidence_store import FailureEvidencePage, FailureEvidenceStore
 from .failure_output_artifact_store import FailureOutputArtifact, FailureOutputArtifactStore
 from .file_transactions import FileTransaction, FileTransactionFactory
@@ -76,6 +77,7 @@ from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
 from .operation_result_store import OperationResultStore
 from .operation_store import OperationRecordPage, OperationStore
+from .operation_work_queue import OperationWorkPage, OperationWorkQueue
 from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
@@ -134,6 +136,7 @@ __all__ = [
     "ExecutionReceipt",
     "ExecutionReceiptStore",
     "ExecutionRequest",
+    "ExecutionWorkerClient",
     "FailureEvidencePage",
     "FailureEvidenceStore",
     "FailureOutputArtifact",
@@ -172,6 +175,8 @@ __all__ = [
     "OperationRecordPage",
     "OperationResultStore",
     "OperationStore",
+    "OperationWorkPage",
+    "OperationWorkQueue",
     "OperatorIO",
     "PrCheckWatchPage",
     "PrCheckWatchStore",

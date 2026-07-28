@@ -15,6 +15,7 @@ from ...domain.operation_task import (
     new_operation_task,
     renew_operation_ownership,
     request_operation_cancellation,
+    requeue_operation,
     require_operation_owner,
     transition_operation,
     update_operation_progress,
@@ -54,6 +55,7 @@ class OperationManager:
     def create(
         self,
         *,
+        operation_id: str | None = None,
         kind: str,
         phase: str,
         cancel_supported: bool,
@@ -63,7 +65,7 @@ class OperationManager:
         expires_at: str | None = None,
         now: str | None = None,
     ) -> OperationTask:
-        operation_id = f"op-{self.ctx.ids.new_hex(24)}"
+        operation_id = operation_id or f"op-{self.ctx.ids.new_hex(24)}"
         task = new_operation_task(
             operation_id=operation_id,
             kind=kind,
@@ -101,10 +103,16 @@ class OperationManager:
         retryability: OperationRetryability = OperationRetryability.NONE,
         owner_id: str | None = None,
         lease_expires_at: str | None = None,
+        attempt: int | None = None,
         bypass_ownership: bool = False,
     ) -> OperationTask:
         current = self.status(operation_id)
         transition_now = self._now(now)
+        if new_state is OperationState.SUCCEEDED and current.cancellation_requested_at is not None:
+            raise RepoForgeError(
+                "Operation cannot succeed after cancellation was requested",
+                code=ErrorCode.OPERATION_TRANSITION_INVALID,
+            )
         if new_state is not OperationState.RUNNING:
             if lease_expires_at is not None:
                 raise RepoForgeError(
@@ -136,6 +144,7 @@ class OperationManager:
                 owner_id=owner_id,
                 lease_expires_at=lease_expires_at,
                 now=transition_now,
+                attempt=attempt,
             )
         if updated == current:
             return current
@@ -164,6 +173,7 @@ class OperationManager:
         receipt_id: str | None = None,
         owner_id: str | None = None,
         lease_expires_at: str | None = None,
+        attempt: int | None = None,
         now: str | None = None,
     ) -> OperationTask:
         return self._save_transition(
@@ -173,6 +183,7 @@ class OperationManager:
             receipt_id=receipt_id,
             owner_id=owner_id,
             lease_expires_at=lease_expires_at,
+            attempt=attempt,
         )
 
     def succeed(
@@ -348,6 +359,23 @@ class OperationManager:
                 "kind": existing.kind,
                 "owner_id": updated.owner_id,
                 "lease_expires_at": updated.lease_expires_at,
+                "updated_at": updated.updated_at,
+            },
+            lambda: self.store.save(updated, expected_updated_at=existing.updated_at),
+            mutating=True,
+        )
+
+    def requeue(self, operation_id: str, *, now: str | None = None) -> OperationTask:
+        existing = self.status(operation_id)
+        updated = requeue_operation(existing, now=self._now(now))
+        return self.ctx.audited(
+            "operation_requeue",
+            {
+                "operation_id": operation_id,
+                "kind": existing.kind,
+                "previous_state": existing.state.value,
+                "new_state": updated.state.value,
+                "phase": updated.phase,
                 "updated_at": updated.updated_at,
             },
             lambda: self.store.save(updated, expected_updated_at=existing.updated_at),
