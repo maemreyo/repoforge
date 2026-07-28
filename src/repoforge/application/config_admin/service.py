@@ -47,6 +47,7 @@ from ...domain.policy_patch import (
 )
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode
+from ...domain.runtime_activation import RuntimeActivationReceipt
 from ...domain.runtime_contract import RuntimeContractIdentity
 from ...domain.runtime_events import parse_runtime_event
 from ...ports.clock import Clock
@@ -176,6 +177,7 @@ class ConfigAdminService:
         reload_runtime: Callable[[int], dict[str, Any]] | None = None,
         read_runtime_status: Callable[[], dict[str, object]] | None = None,
         contract_identity_provider: Callable[[], RuntimeContractIdentity] | None = None,
+        latest_activation_receipt: Callable[[], RuntimeActivationReceipt | None] | None = None,
     ) -> None:
         self._store = store
         self._proposals = proposals
@@ -191,6 +193,7 @@ class ConfigAdminService:
         self._reload_runtime = reload_runtime
         self._read_runtime_status = read_runtime_status
         self._contract_identity_provider = contract_identity_provider
+        self._latest_activation_receipt = latest_activation_receipt
 
     # -- reads ---------------------------------------------------------------
 
@@ -541,6 +544,7 @@ class ConfigAdminService:
             "repo_facts": facts,
             "repository_projections": repository_projections,
             "contract_identity": contract_identity,
+            "activation_evidence": self._activation_evidence(contract_identity),
             "config_projection": {
                 "source_digest": source_digest,
                 "accepted_source_digest": current.source_sha256,
@@ -550,6 +554,66 @@ class ConfigAdminService:
                 "drift_state": drift_state,
                 "safe_reconciliation_action": safe_reconciliation_action,
             },
+        }
+
+    def _activation_evidence(
+        self, contract_identity: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Report the persisted activation receipt, and whether the runtime matches it.
+
+        Read from the durable receipt rather than from whatever the activation
+        command returned, because the command's own report is the one account
+        that cannot corroborate itself.
+        """
+        if self._latest_activation_receipt is None:
+            return None
+        try:
+            receipt = self._latest_activation_receipt()
+        except RepoForgeError:
+            return None
+        if receipt is None:
+            return None
+        activated = receipt.active_identity
+        agreement = "unverifiable"
+        if activated is not None and contract_identity is not None:
+            observed = (
+                activated.runtime_active_generation,
+                activated.tool_surface_hash,
+                activated.process_identity,
+            )
+            # Only compared when the receipt actually recorded each fact; a
+            # missing fact leaves the verdict unverifiable rather than quietly
+            # counting as a match.
+            if all(item is not None for item in observed):
+                agreement = (
+                    "matches"
+                    if observed
+                    == (
+                        contract_identity.get("active_generation"),
+                        contract_identity.get("tool_surface_hash"),
+                        contract_identity.get("process_start_identity"),
+                    )
+                    else "diverged"
+                )
+        return {
+            "receipt_id": receipt.receipt_id,
+            "classification": receipt.classification.value,
+            "target_generation": receipt.target_generation,
+            "accepted_at": receipt.accepted_at,
+            "updated_at": receipt.updated_at,
+            "effect_boundary_crossed": receipt.effect_boundary_crossed,
+            "activated_generation": (
+                activated.runtime_active_generation if activated is not None else None
+            ),
+            "activated_tool_surface_hash": (
+                activated.tool_surface_hash if activated is not None else None
+            ),
+            "activated_process_identity": (
+                activated.process_identity if activated is not None else None
+            ),
+            "runtime_phase": activated.runtime_phase if activated is not None else None,
+            "error_code": receipt.error_code,
+            "agreement": agreement,
         }
 
     @staticmethod

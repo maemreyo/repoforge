@@ -299,12 +299,20 @@ class JsonOperationStore:
             pattern="op-*.json", max_records=max_records
         )
         records: list[OperationTask] = []
+        unreadable: list[str] = []
         for operation_id in operation_ids:
-            record = self.read(operation_id)
+            # Same rule as every other durable sweep: report what cannot be
+            # decoded and return the rest. `read()` stays strict. Startup scans
+            # this store, so raising would let one stale record stop the runtime.
+            try:
+                record = self.read(operation_id)
+            except RepoForgeError:
+                unreadable.append(operation_id)
+                continue
             if record is not None:
                 records.append(record)
         records.sort(key=lambda item: (item.updated_at, item.operation_id), reverse=True)
-        return OperationRecordPage(tuple(records), scan_truncated)
+        return OperationRecordPage(tuple(records), scan_truncated, tuple(sorted(unreadable)))
 
     def delete(self, operation_id: str) -> None:
         safe_id = validate_operation_id(operation_id)

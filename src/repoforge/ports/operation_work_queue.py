@@ -12,6 +12,8 @@ from ..domain.operation_work import OperationWorkItem
 class OperationWorkPage:
     records: tuple[OperationWorkItem, ...]
     scan_truncated: bool
+    #: Operation ids whose work envelope could not be decoded.
+    unreadable_operation_ids: tuple[str, ...] = ()
 
 
 class OperationWorkQueue(Protocol):

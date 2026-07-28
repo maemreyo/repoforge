@@ -1987,6 +1987,36 @@ class RuntimeContractIdentityView(StrictModel):
     process_start_identity: Sha256
 
 
+class RuntimeActivationEvidenceView(StrictModel):
+    """What the durable activation receipt says, read back independently.
+
+    An activation command reports its own outcome. That report is the one thing
+    that cannot corroborate itself: a release has already been observed claiming
+    `converged: true` minutes before its runtime turned out to be unusable. These
+    facts come from the persisted receipt instead, and `agreement` compares them
+    against the identity the live process actually advertises -- so a caller can
+    tell a genuinely converged activation from one that only said so.
+    """
+
+    receipt_id: Identifier
+    classification: ShortText
+    target_generation: int = Field(ge=1)
+    accepted_at: str = Field(min_length=1, max_length=80)
+    updated_at: str = Field(min_length=1, max_length=80)
+    effect_boundary_crossed: bool
+    activated_generation: int | None = Field(default=None, ge=1)
+    activated_tool_surface_hash: Sha256 | None = None
+    activated_process_identity: Sha256 | None = None
+    runtime_phase: ShortText | None = None
+    error_code: ShortText | None = None
+    #: `matches` when the receipt's activated identity is the identity the live
+    #: process advertises. `diverged` when they disagree -- the activation did not
+    #: end where it claimed. `unverifiable` when there is no receipt, or it never
+    #: recorded an activated identity, so nothing can be checked either way; that
+    #: is reported rather than defaulted to success.
+    agreement: Literal["matches", "diverged", "unverifiable"]
+
+
 class ConfigProjectionView(StrictModel):
     source_digest: Sha256
     accepted_source_digest: Sha256
@@ -2040,6 +2070,7 @@ class ConfigInspectOutput(ToolResponse):
     )
     contract_identity: RuntimeContractIdentityView | None = None
     config_projection: ConfigProjectionView | None = None
+    activation_evidence: RuntimeActivationEvidenceView | None = None
 
 
 class RuntimeLogSource(str, Enum):
