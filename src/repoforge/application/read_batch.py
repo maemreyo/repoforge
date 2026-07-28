@@ -38,6 +38,7 @@ class ReadFileResult:
     end_line: int
     content: str
     truncated: bool
+    truncation_reason: str | None
     omitted_line_range: tuple[int, int] | None
     next_cursor: str | None
 
@@ -72,13 +73,13 @@ Loader = Callable[[str], LoadedTextFile]
 def validate_requests(requests: tuple[FileReadRequest, ...]) -> None:
     if not requests or len(requests) > _MAX_FILES:
         raise WorkspaceError(f"files must contain between 1 and {_MAX_FILES} entries")
-    seen: set[str] = set()
+    # Several ranges of one file are allowed: reading two functions out of the
+    # same module is one intent, and forcing it into two calls doubled the reads
+    # for no safety gain. Each entry is positional, and the resume cursor already
+    # binds every entry's path *and* line range, so duplicates stay unambiguous.
     for index, request in enumerate(requests):
         if not request.path:
             raise WorkspaceError(f"files[{index}].path must be non-empty")
-        if request.path in seen:
-            raise WorkspaceError(f"duplicate path in files: {request.path}")
-        seen.add(request.path)
         if request.start_line < 1:
             raise WorkspaceError(f"files[{index}].start_line must be at least 1")
         if request.end_line < request.start_line:
@@ -305,6 +306,16 @@ def execute_batch_read(
             request,
             truncated_file,
         )
+        # Two different stops, two different reactions. The page ran out of
+        # serialized bytes -> resume with next_cursor. The file simply has fewer
+        # lines than were asked for -> widen the range, because no cursor will
+        # ever produce the missing lines.
+        source_limited = request.end_line > total_lines
+        truncation_reason = (
+            "result_transport_budget"
+            if truncated_file
+            else ("source_limit" if source_limited else None)
+        )
         files.append(
             ReadFileResult(
                 path=loaded.path,
@@ -315,6 +326,7 @@ def execute_batch_read(
                 end_line=end_line,
                 content=chunk,
                 truncated=truncated_file,
+                truncation_reason=truncation_reason,
                 omitted_line_range=omitted,
                 next_cursor=next_cursor if truncated_file else None,
             )

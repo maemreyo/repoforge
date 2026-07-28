@@ -148,17 +148,61 @@ def test_repo_read_is_snapshot_bound_and_never_returns_host_paths(
     assert len(_audit_events(forge_env.root, "repo_read")) == 1
 
 
-def test_read_rejects_duplicate_paths_and_invalid_ranges(
+def test_read_returns_several_ranges_of_one_file_in_one_call(
     forge_env: ForgeEnvironment,
 ) -> None:
+    """Reading two regions of one module is one intent, not two calls.
+
+    Requesting the same path twice used to be refused outright, which doubled
+    the reads an agent needed for no safety gain. Each entry is positional and
+    the resume cursor binds every entry's path and line range, so the two
+    windows stay unambiguous.
+    """
     service = forge_env.service
     workspace_id = service.workspace_create("demo", "v2 read validation")["workspace_id"]
+    root = Path(service.workspace_status(workspace_id)["path"])
+    (root / "module.py").write_text(
+        "\n".join(f"line {number}" for number in range(1, 7)) + "\n", encoding="utf-8"
+    )
 
-    with pytest.raises(WorkspaceError, match="duplicate path"):
-        service.workspace_read(
-            workspace_id,
-            [FileReadRequest("hello.txt"), FileReadRequest("hello.txt", 2, 3)],
-        )
+    result = service.workspace_read(
+        workspace_id,
+        [FileReadRequest("module.py", 1, 2), FileReadRequest("module.py", 5, 6)],
+    )
+
+    assert [item["path"] for item in result["files"]] == ["module.py", "module.py"]
+    assert result["files"][0]["content"] == "1: line 1\n2: line 2"
+    assert result["files"][1]["content"] == "5: line 5\n6: line 6"
+    assert result["succeeded"] == 2
+    assert all(item["truncation_reason"] is None for item in result["files"])
+
+
+def test_read_names_why_a_window_stopped_short(forge_env: ForgeEnvironment) -> None:
+    """`source_limit` and `result_transport_budget` call for opposite reactions.
+
+    One means widen the range because the file has no more lines; the other
+    means fetch the next page. A bare `truncated` boolean cannot tell an agent
+    which, so it retries the wrong way.
+    """
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 truncation reason")["workspace_id"]
+
+    # The default window asks for 500 lines; hello.txt has three.
+    beyond_end = service.workspace_read(workspace_id, [FileReadRequest("hello.txt")])["files"][0]
+    assert beyond_end["truncated"] is False
+    assert beyond_end["truncation_reason"] == "source_limit"
+    assert beyond_end["next_cursor"] is None
+
+    within_file = service.workspace_read(workspace_id, [FileReadRequest("hello.txt", 1, 1)])[
+        "files"
+    ][0]
+    assert within_file["truncation_reason"] is None
+
+
+def test_read_rejects_invalid_ranges(forge_env: ForgeEnvironment) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 read range validation")["workspace_id"]
+
     with pytest.raises(WorkspaceError, match="end_line"):
         service.workspace_read(
             workspace_id,
