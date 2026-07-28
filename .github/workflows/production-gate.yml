@@ -55,6 +55,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: selecting affected tests diffs against the base branch, and a
+          # shallow clone has no merge base to diff from.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
@@ -62,7 +66,22 @@ jobs:
       - run: uv sync --extra dev --frozen
       - name: Guided onboarding real-Git regressions
         run: uv run pytest tests/test_onboarding_real_git.py tests/test_repository_discovery.py
-      - run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
+      # A pull request runs only the tests its own changes can affect. The selector fails
+      # closed: an always-wide path, a package module missing from the coverage map, or any
+      # unmapped path escalates to the whole suite, so a narrow run is only ever a run it
+      # could justify. Coverage is deliberately not enforced here -- a subset cannot meet a
+      # whole-repository threshold, and pretending otherwise would make the number a lie.
+      - name: Affected tests (pull request)
+        if: github.event_name == 'pull_request'
+        run: |
+          uv run python scripts/select_affected_tests.py \
+            --run --base "origin/${{ github.base_ref }}"
+      # Every push to a protected branch still runs everything with coverage. This is what
+      # keeps the narrow PR run honest: a cross-module regression a stale coverage map failed
+      # to select is caught here, before it can be built into a release.
+      - name: Full suite with coverage (push)
+        if: github.event_name != 'pull_request'
+        run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
 
   # A release gate that no unit test can replace: it performs a REAL `rf upgrade
   # --activate` (real wheel build, real per-release venv, real smoke, real supervisor
