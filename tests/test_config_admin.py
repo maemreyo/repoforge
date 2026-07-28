@@ -1500,6 +1500,7 @@ def _activation_receipt(
     generation: int,
     tool_surface_hash: str,
     process_identity: str | None,
+    runtime_generation: int | None = -1,
 ):
     from repoforge.domain.runtime_activation import (
         RuntimeActivationClassification,
@@ -1511,7 +1512,7 @@ def _activation_receipt(
         config_generation=generation,
         source_sha256="a" * 64,
         resolved_sha256="b" * 64,
-        runtime_active_generation=generation,
+        runtime_active_generation=(generation if runtime_generation == -1 else runtime_generation),
         process_identity=process_identity,
         tool_surface_hash=tool_surface_hash,
         runtime_phase="healthy",
@@ -1564,21 +1565,73 @@ def test_config_inspect_corroborates_activation_against_the_live_identity(
 def test_config_inspect_reports_an_activation_that_did_not_end_where_it_claimed(
     tmp_path: Path,
 ) -> None:
-    """The case worth catching: the receipt and the running process disagree."""
+    """The case worth catching: the runtime serves a different generation than the
+    receipt activated. Not a different process instance, and not a different release --
+    both of those change legitimately (#314)."""
     identity = _identity()
     admin = _admin(
         tmp_path,
         contract_identity=identity,
         latest_activation_receipt=_activation_receipt(
             generation=identity.active_generation,
-            tool_surface_hash="f" * 64,
+            tool_surface_hash=identity.tool_surface_hash,
             process_identity=identity.process_start_identity,
+            runtime_generation=identity.active_generation + 1,
         ),
     )
 
     evidence = admin.config_inspect_v2()["activation_evidence"]
 
     assert evidence["agreement"] == "diverged"
+
+
+def test_a_restart_since_activation_is_a_fact_not_a_divergence(tmp_path: Path) -> None:
+    """#314: the live installation reported `diverged` while perfectly healthy.
+
+    The receipt records the identity of one process instance and one release. A watchdog
+    restart changes the first and a later release activation changes the second, so
+    comparing them called a converged runtime a failed activation -- and it cost real time
+    while triaging an unrelated fault. Both changes are reported, as facts.
+    """
+    identity = _identity()
+    admin = _admin(
+        tmp_path,
+        contract_identity=identity,
+        latest_activation_receipt=_activation_receipt(
+            generation=identity.active_generation,
+            # What the receipt captured before the release upgrade and the restart;
+            # the live identity is `_identity()`'s surface "b"*64 / process "e"*64.
+            tool_surface_hash="f" * 64,
+            process_identity="9" * 64,
+        ),
+    )
+
+    evidence = admin.config_inspect_v2()["activation_evidence"]
+
+    assert evidence["agreement"] == "matches", "same generation is still the same activation"
+    assert evidence["process_restarted_since_activation"] is True
+    assert evidence["tool_surface_changed_since_activation"] is True
+
+
+def test_an_untouched_runtime_reports_no_restart_and_no_surface_change(
+    tmp_path: Path,
+) -> None:
+    identity = _identity()
+    admin = _admin(
+        tmp_path,
+        contract_identity=identity,
+        latest_activation_receipt=_activation_receipt(
+            generation=identity.active_generation,
+            tool_surface_hash=identity.tool_surface_hash,
+            process_identity=identity.process_start_identity,
+        ),
+    )
+
+    evidence = admin.config_inspect_v2()["activation_evidence"]
+
+    assert evidence["agreement"] == "matches"
+    assert evidence["process_restarted_since_activation"] is False
+    assert evidence["tool_surface_changed_since_activation"] is False
 
 
 def test_config_inspect_says_unverifiable_rather_than_assuming_success(
@@ -1597,10 +1650,14 @@ def test_config_inspect_says_unverifiable_rather_than_assuming_success(
             generation=identity.active_generation,
             tool_surface_hash=identity.tool_surface_hash,
             process_identity=None,
+            runtime_generation=None,
         ),
     )
 
-    assert admin.config_inspect_v2()["activation_evidence"]["agreement"] == "unverifiable"
+    evidence = admin.config_inspect_v2()["activation_evidence"]
+    assert evidence["agreement"] == "unverifiable"
+    # An unknown process identity is reported as unknown, never as "did not change".
+    assert evidence["process_restarted_since_activation"] is None
     # No receipt store wired at all is reported as absent, not as agreement.
     assert (
         _admin(tmp_path, contract_identity=identity).config_inspect_v2()["activation_evidence"]
