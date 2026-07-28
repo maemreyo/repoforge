@@ -1344,8 +1344,11 @@ def test_v2_runtime_log_cursor_fails_closed_when_audit_snapshot_changes(tmp_path
 
 
 def _cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(cli, "_state_root", lambda: tmp_path / "state")
-    monkeypatch.setattr(cli, "_locks", lambda: FcntlLockManager(tmp_path / "locks"))
+    # `*_` so the stub does not pin an exact arity: `_state_root` takes the config path
+    # it is resolving for, and a stub that only accepts today's signature turns a
+    # correct change to that resolution into a red test here.
+    monkeypatch.setattr(cli, "_state_root", lambda *_: tmp_path / "state")
+    monkeypatch.setattr(cli, "_locks", lambda *_: FcntlLockManager(tmp_path / "locks"))
 
 
 def test_cli_approve_accepts_pending_expansion(

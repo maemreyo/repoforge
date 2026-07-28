@@ -106,7 +106,7 @@ from ...bootstrap import (
     write_private_file,
     write_runtime_state,
 )
-from ...config import DEFAULT_CONFIG_PATH, load_config
+from ...config import DEFAULT_CONFIG_PATH, declared_state_root, load_config
 from ...contracts.registry import validate_generated_contract_identity
 from ...domain.activation import AGENT_SECRET_KEY
 from ...domain.approval import ApprovalStatus, decide_approval
@@ -182,20 +182,52 @@ def _error_code(exc: BaseException) -> str:
     return str(enum_value if enum_value is not None else value or "OPERATION_FAILED")
 
 
-def _state_root() -> Path:
-    return default_state_root()
+def _state_root(config_path: Path | None = None) -> Path:
+    """Resolve the state root for one config, honoring what that config declares.
+
+    This ignored `[server].state_root` entirely and always answered with the default, so
+    every config whose state root lives elsewhere still had its generations, locks,
+    diagnostics and runtime log written into the DEFAULT root. That is how 640 stale
+    directories accumulated under a developer's real state root from test runs whose own
+    state root was a temp directory (#318): the leak was invisible because everything
+    *else* those runs did stayed in the temp directory.
+
+    Compatibility: an installation created while this was ignored has its generations
+    under the default root, so switching to a declared root would present as "No accepted
+    configuration generation" and silently re-import. When the declared root holds nothing
+    for this config but the default root does, the default keeps winning.
+    """
+    default = default_state_root()
+    if config_path is None:
+        return default
+    declared = declared_state_root(config_path)
+    if declared is None or declared == default:
+        return default
+    if _config_lock_root(config_path, declared).exists():
+        return declared
+    if _config_lock_root(config_path, default).exists():
+        return default
+    return declared
 
 
-def _locks() -> LockManager:
-    return build_lock_manager(_state_root())
+def _config_lock_root(config_path: Path, state_root: Path) -> Path:
+    """Where this config's per-config state would live under ``state_root``."""
+    return resolve_repoforge_paths(config_path, state_root=state_root).generation_root.parent
+
+
+def _locks(config_path: Path | None = None) -> LockManager:
+    return build_lock_manager(_state_root(config_path))
 
 
 def _store(config_path: Path) -> ConfigurationStore:
-    return build_configuration_store(config_path, state_root=_state_root(), locks=_locks())
+    state_root = _state_root(config_path)
+    return build_configuration_store(
+        config_path, state_root=state_root, locks=build_lock_manager(state_root)
+    )
 
 
 def _resolved_paths(config_path: Path) -> dict[str, dict[str, object]]:
-    return resolve_repoforge_paths(config_path, state_root=_state_root()).payload()
+    return resolve_repoforge_paths(config_path, state_root=_state_root(config_path)).payload()
 
 
 def _files_written(config_path: Path, store: ConfigurationStore) -> list[str]:
@@ -1508,7 +1540,7 @@ def _runtime_command(args: argparse.Namespace) -> int:
             raise ConfigError("No accepted configuration generation")
         launcher = build_runtime_launcher()
         runtime_environment = _runtime_environment(args)
-        with _locks().lock(
+        with _locks(config_path).lock(
             "runtime-start-claim",
             timeout_seconds=0,
             metadata={"operation": "runtime-start"},

@@ -277,7 +277,10 @@ def test_cli_approval_fallback_lists_approves_and_rejects(
     rejected_id = "apr-" + "2" * 24
     create_request(approved_id)
     create_request(rejected_id)
-    monkeypatch.setattr(cli, "_state_root", lambda: tmp_path / "cli-state")
+    # `*_` so the stub does not pin an exact arity: `_state_root` takes the config path
+    # it is resolving for, and a stub that only accepts today's signature turns a
+    # correct change to that resolution into a red test here.
+    monkeypatch.setattr(cli, "_state_root", lambda *_: tmp_path / "cli-state")
     monkeypatch.setattr(
         cli,
         "system_clock",
