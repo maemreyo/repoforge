@@ -32,6 +32,14 @@ Autonomous GitHub writes prefer repository-selected App installation tokens. The
 
 `github_api_auth_lease` copies only the token digest, actor ID, installation/repository metadata, revisions and opaque reference into `AuthLease`; raw API material never enters leases or receipts.
 
+## Git transport identities
+
+`GitTransportRouter` validates the operation-scoped profile, stable repository target, provider host and read/write ceiling before starting Git. SSH transport supplies one absolute identity-file reference through an exact `GIT_SSH_COMMAND` with `IdentitiesOnly=yes`, `IdentityAgent=none`, `BatchMode=yes` and no user SSH config. Ambient agents and alternate keys cannot participate.
+
+HTTPS transport clears the complete helper chain, enables `credential.useHttpPath`, disables terminal and credential-manager interaction, and installs one operation-scoped helper that reads the selected ephemeral token from a reviewed environment key. Tokens are never embedded in remote URLs, argv, helper text, output or receipts. A failed transport makes one attempt and never retries through an ambient personal helper.
+
+`GitTransportEvidence` records the stable repository ID, profile ID, provider host, access level, transport kind, credential fingerprint, remote-URL digest and observed ref SHA. Successful access remains `unobservable` for the human/API actor; it never upgrades transport proof into actor proof.
+
 ## Evidence semantics
 
 - `verified_actor` proves the observed API or provider actor only for the named surface.

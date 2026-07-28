@@ -131,6 +131,10 @@ class ErrorCode(str, Enum):
     GITHUB_INSTALLATION_APPROVAL_REQUIRED = "GITHUB_INSTALLATION_APPROVAL_REQUIRED"
     GITHUB_TOKEN_REVOKED = "GITHUB_TOKEN_REVOKED"
     GITHUB_PROVIDER_UNAVAILABLE = "GITHUB_PROVIDER_UNAVAILABLE"
+    GIT_TRANSPORT_HOST_MISMATCH = "GIT_TRANSPORT_HOST_MISMATCH"
+    GIT_TRANSPORT_IDENTITY_MISMATCH = "GIT_TRANSPORT_IDENTITY_MISMATCH"
+    GIT_TRANSPORT_AUTHENTICATION_FAILED = "GIT_TRANSPORT_AUTHENTICATION_FAILED"
+    CREDENTIAL_INTERACTION_REQUIRED = "CREDENTIAL_INTERACTION_REQUIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +371,10 @@ def operation_error_from_exception(
         ErrorCode.GITHUB_INSTALLATION_APPROVAL_REQUIRED: "The selected GitHub App installation requires organization approval before use.",
         ErrorCode.GITHUB_TOKEN_REVOKED: "The selected GitHub API token or installation grant was revoked.",
         ErrorCode.GITHUB_PROVIDER_UNAVAILABLE: "GitHub token issuance or live identity verification was unavailable.",
+        ErrorCode.GIT_TRANSPORT_HOST_MISMATCH: "The Git remote host or URL scheme does not match the reviewed repository transport binding.",
+        ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH: "The Git transport context does not match the reviewed profile and stable repository target.",
+        ErrorCode.GIT_TRANSPORT_AUTHENTICATION_FAILED: "The pinned Git transport identity could not authenticate and no ambient fallback was attempted.",
+        ErrorCode.CREDENTIAL_INTERACTION_REQUIRED: "Git requested an interactive credential prompt, which durable and background operations prohibit.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

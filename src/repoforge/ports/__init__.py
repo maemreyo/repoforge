@@ -47,6 +47,7 @@ from .git import (
     GitSnapshotBlob,
     ResolvedRepositoryRef,
 )
+from .git_transport import GitTransportGateway
 from .github import (
     GitHubActionsJob,
     GitHubActionsStep,
@@ -159,6 +160,7 @@ __all__ = [
     "GitMergeResult",
     "GitRepository",
     "GitSnapshotBlob",
+    "GitTransportGateway",
     "HealthSample",
     "HygieneBaselineCache",
     "HygieneCacheKey",

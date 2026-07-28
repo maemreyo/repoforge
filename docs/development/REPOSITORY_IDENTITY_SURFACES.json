@@ -47,6 +47,15 @@
       "planned_owner": "#289"
     },
     {
+      "path": "src/repoforge/adapters/git/transport.py",
+      "executables": ["git", "ssh", "credential helper callback"],
+      "surfaces": ["git_fetch", "git_push", "transport_access_proof"],
+      "credential_inputs": ["pinned SSH identity-file reference", "operation-scoped ephemeral HTTPS token"],
+      "target_inputs": ["provider host", "stable repository ID", "explicit remote URL", "reviewed refspec"],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#289"
+    },
+    {
       "path": "src/repoforge/adapters/github/api_identity.py",
       "executables": ["gh"],
       "surfaces": ["github_api", "repository_binding", "operation_identity"],
