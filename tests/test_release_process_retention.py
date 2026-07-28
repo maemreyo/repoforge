@@ -254,50 +254,61 @@ def test_an_unreadable_process_table_prunes_nothing(tmp_path: Path) -> None:
 # ------------------------------------------------------- the real process inspector
 
 
-def test_the_inspector_finds_a_real_process_running_from_a_release(tmp_path: Path) -> None:
-    """Uses a REAL child process executing a real interpreter copied into the release tree.
+def test_the_inspector_finds_a_real_process_running_from_a_release() -> None:
+    """A REAL child process, the real process table, and real ancestry.
 
-    A hardlink/copy of the interpreter is what makes this honest: identity comes from the
-    executable path, and `uv venv --relocatable` symlinks `venv/bin/python` out of the
-    release, so a resolved path would lose exactly the identity being asserted.
+    The interpreter used is this test's own, with the release root pointed at the directory
+    that contains it, so the executable really does live under the root being scanned.
+
+    Two rejected approaches, both of which failed for platform reasons worth recording:
+    copying a system binary into a fake release tree is SIGKILLed on macOS because the copy
+    breaks its code signature, and hardlinking an interpreter into one leaves it unable to
+    locate its stdlib on Linux. Neither failure had anything to do with the code under test.
     """
-    releases = tmp_path / "releases"
-    release_bin = releases / "1111aaa" / "venv" / "bin"
-    release_bin.mkdir(parents=True)
-    interpreter = release_bin / "python"
-    try:
-        os.link(sys.executable, interpreter)
-    except OSError:
-        import shutil
-
-        shutil.copy2(sys.executable, interpreter)
+    executable = Path(sys.executable).resolve()
+    releases = executable.parents[2]  # <root>/<release>/bin/python
+    expected_release = executable.parents[1].name
 
     child = subprocess.Popen(
-        [str(interpreter), "-c", "import time; time.sleep(30)"],
+        [str(executable), "-c", "import time; time.sleep(30)"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     try:
         inspector = SystemReleaseProcessInspector(releases)
-        deadline = time.monotonic() + 10.0
-        found: tuple[ReleaseProcess, ...] = ()
-        while time.monotonic() < deadline:
-            found = inspector.list_processes()
-            if found:
-                break
-            time.sleep(0.1)
+        deadline = time.monotonic() + 15.0
+        mine: ReleaseProcess | None = None
+        while time.monotonic() < deadline and mine is None:
+            mine = next(
+                (process for process in inspector.list_processes() if process.pid == child.pid),
+                None,
+            )
+            if mine is None:
+                time.sleep(0.1)
 
-        assert [process.pid for process in found] == [child.pid]
-        assert found[0].commit_sha == "1111aaa"
-        assert found[0].release_installed is True
-        # This test process is its parent, so it IS supervised by us -- and the chain
-        # reaches further up, which is what makes transitive supervision checkable.
-        assert found[0].supervised_by(os.getpid()) is True
-        assert found[0].ancestor_pids[0] == os.getpid()
-        assert found[0].supervised_by(999_999) is False
+        assert mine is not None, (
+            f"child {child.pid} (exit={child.poll()}) was not found under {releases}; "
+            f"inspector saw {[(p.pid, p.executable) for p in inspector.list_processes()][:5]}"
+        )
+        assert mine.commit_sha == expected_release
+        assert mine.release_installed is True
+        assert mine.executable.startswith(str(releases))
+        # This test process spawned it, so it IS supervised by us -- and the chain reaches
+        # further up, which is what makes transitive supervision checkable.
+        assert mine.supervised_by(os.getpid()) is True
+        assert mine.ancestor_pids[0] == os.getpid()
+        assert mine.supervised_by(999_999) is False
     finally:
         child.terminate()
-        child.wait(timeout=10)
+        child.wait(timeout=15)
+
+
+def test_the_inspector_never_reports_itself() -> None:
+    """The scanning process is excluded, or every prune would protect its own release."""
+    executable = Path(sys.executable).resolve()
+    found = SystemReleaseProcessInspector(executable.parents[2]).list_processes()
+
+    assert os.getpid() not in [process.pid for process in found]
 
 
 def test_the_inspector_reports_a_process_whose_release_was_removed(tmp_path: Path) -> None:
