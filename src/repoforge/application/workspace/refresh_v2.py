@@ -64,7 +64,8 @@ def _changed_line_count(before: str, after: str) -> int:
 @dataclass(frozen=True, slots=True)
 class RefreshResolution:
     path: str
-    content: str
+    content: str | None = None
+    strategy: str = "content"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1257,8 +1258,65 @@ class WorkspaceRefreshV2:
         ).hexdigest()
         return f"refresh-v2:{plan.target_base_sha}:{plan.plan_hash}:{binding}"
 
-    @staticmethod
+    def _resolution_content(
+        self,
+        resolution: RefreshResolution,
+        *,
+        path: str,
+        plan: _RefreshPlan,
+        repo: Any,
+        workspace: Path,
+    ) -> str:
+        """Turn one reviewed resolution into the exact text to write.
+
+        `content` is the caller's own text. `ours` and `theirs` are read back from
+        the commits the plan is bound to -- HEAD and the target base -- rather
+        than from the preview's conflict evidence, which is clipped to a byte
+        budget and reports `content_truncated` when it is. Reusing that clipped
+        text would write a silently truncated file, which is worse than refusing
+        the resolution: the caller asked to keep one side whole.
+        """
+        if resolution.strategy == "content":
+            if resolution.content is None:
+                raise WorkspaceError(
+                    f"Refresh resolution strategy 'content' requires content: {path}"
+                )
+            return resolution.content
+        if resolution.content is not None:
+            # Refused rather than ignored: a caller that sent both has two
+            # different intentions in one entry, and guessing which one wins is
+            # how a reviewed resolution turns into an unreviewed write.
+            raise WorkspaceError(
+                f"Refresh resolution strategy {resolution.strategy!r} must not carry content: "
+                f"{path}"
+            )
+        if resolution.strategy not in {"ours", "theirs"}:
+            raise WorkspaceError(
+                f"Unsupported refresh resolution strategy {resolution.strategy!r}: {path}"
+            )
+        snapshot = plan.head_sha if resolution.strategy == "ours" else plan.target_base_sha
+        try:
+            blob = self.ctx.git.read_snapshot_blob(workspace, repo, snapshot, path)
+        except RepoForgeError as exc:
+            if exc.code is ErrorCode.NOT_FOUND:
+                raise WorkspaceError(
+                    f"Refresh resolution strategy {resolution.strategy!r} has no content at "
+                    f"{snapshot}: {path}"
+                ) from exc
+            raise
+        if b"\x00" in blob.data:
+            raise SecurityError(
+                f"Refresh resolution strategy {resolution.strategy!r} target is binary: {path}"
+            )
+        try:
+            return blob.data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SecurityError(
+                f"Refresh resolution strategy {resolution.strategy!r} target is not UTF-8: {path}"
+            ) from exc
+
     def _validate_resolutions(
+        self,
         plan: _RefreshPlan,
         resolutions: tuple[RefreshResolution, ...],
         repo: Any,
@@ -1273,9 +1331,12 @@ class WorkspaceRefreshV2:
             target = resolve_workspace_path(workspace, path, repo)
             if path in provided:
                 raise WorkspaceError(f"Provide exactly one resolution for conflict path: {path}")
-            if "\x00" in resolution.content:
+            content = self._resolution_content(
+                resolution, path=path, plan=plan, repo=repo, workspace=workspace
+            )
+            if "\x00" in content:
                 raise SecurityError(f"Refresh resolution contains NUL bytes: {path}")
-            encoded = resolution.content.encode("utf-8")
+            encoded = content.encode("utf-8")
             if len(encoded) > min(repo.max_total_changed_bytes, _MAX_RESOLUTION_BYTES):
                 raise WorkspaceError(f"Refresh resolution exceeds the per-file byte limit: {path}")
             before = ""
@@ -1289,8 +1350,8 @@ class WorkspaceRefreshV2:
                         f"Refresh resolution target must be UTF-8 text: {path}"
                     ) from exc
             resulting_bytes += len(encoded)
-            changed_lines += _changed_line_count(before, resolution.content)
-            provided[path] = resolution.content
+            changed_lines += _changed_line_count(before, content)
+            provided[path] = content
         if set(provided) != expected:
             missing = sorted(expected - set(provided))
             extra = sorted(set(provided) - expected)

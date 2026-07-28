@@ -1334,7 +1334,12 @@ class CodingService:
         resolutions: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         normalized = tuple(
-            RefreshResolution(item["path"], item["content"]) for item in (resolutions or [])
+            RefreshResolution(
+                item["path"],
+                item.get("content"),
+                item.get("strategy", "content"),
+            )
+            for item in (resolutions or [])
         )
         return _result(
             self._refresh_v2.execute(

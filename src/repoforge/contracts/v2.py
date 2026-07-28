@@ -746,7 +746,16 @@ class RefreshAction(str, Enum):
 
 class RefreshResolution(StrictModel):
     path: RelativePath
-    content: str = Field(max_length=2_000_000)
+    #: `content` writes the text supplied here. `ours` and `theirs` keep one side
+    #: of the conflict whole, read back from the commits the plan is bound to --
+    #: so a caller no longer has to echo an entire file to say "keep mine". The
+    #: conflict evidence in a preview is clipped to a byte budget and cannot be
+    #: used for that, which is exactly why these strategies exist.
+    strategy: Literal["content", "ours", "theirs"] = "content"
+    #: Required for `content`, and refused for the others: an entry carrying both
+    #: a strategy and a body states two different intentions, and picking one is
+    #: how a reviewed resolution becomes an unreviewed write.
+    content: str | None = Field(default=None, max_length=2_000_000)
 
 
 class RefreshConflictEvidence(StrictModel):
