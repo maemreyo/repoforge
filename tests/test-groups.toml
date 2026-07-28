@@ -166,6 +166,7 @@ source_globs = [
   "src/repoforge/ports/worker_binding_store.py",
 ]
 test_files = [
+  "tests/test_control_plane_resilience.py",
   "tests/test_control_plane_responsiveness.py",
   "tests/test_durable_state.py",
   "tests/test_upgrade_compatibility.py",
