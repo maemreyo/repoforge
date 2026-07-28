@@ -13,7 +13,8 @@ from typing import Any, NoReturn
 
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
-from ...domain.policy import assert_path_allowed, resolve_workspace_path
+from ...domain.policy import assert_path_allowed, normalize_relative_path, resolve_workspace_path
+from ...domain.workspace import is_commit_sha
 from ...ports.command import CommandExecutor, CommandResult
 from ...ports.git import (
     GitActorIdentity,
@@ -21,12 +22,14 @@ from ...ports.git import (
     GitChangedFileEvidence,
     GitCommitEvidence,
     GitComparisonEvidence,
+    GitDiffSummary,
     GitMergePreview,
     GitMergeResult,
     GitSearchLocation,
     GitSnapshotBlob,
     ResolvedRepositoryRef,
 )
+from .diff_summary import parse_diff_summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,18 +360,36 @@ class GitCliRepository:
         ).stdout.strip()
 
     @staticmethod
-    def _bounded_policy_paths(raw_paths: list[str], repo: RepositoryConfig) -> list[str]:
-        paths: list[str] = []
+    def _partition_policy_paths(
+        raw_paths: list[str], repo: RepositoryConfig
+    ) -> tuple[list[str], list[str]]:
+        allowed: list[str] = []
+        denied: list[str] = []
         for raw in raw_paths:
             if not raw:
                 continue
+            normalized = normalize_relative_path(raw)
             try:
-                normalized = assert_path_allowed(raw, repo)
+                assert_path_allowed(normalized, repo)
             except SecurityError:
+                if normalized not in denied:
+                    denied.append(normalized)
                 continue
-            if normalized not in paths:
-                paths.append(normalized)
-        return sorted(paths)
+            if normalized not in allowed:
+                allowed.append(normalized)
+        return sorted(allowed), sorted(denied)
+
+    @classmethod
+    def _bounded_policy_paths(cls, raw_paths: list[str], repo: RepositoryConfig) -> list[str]:
+        allowed, _ = cls._partition_policy_paths(raw_paths, repo)
+        return allowed
+
+    @staticmethod
+    def _raise_denied_merge_conflicts(denied: list[str]) -> None:
+        if denied:
+            raise SecurityError(
+                "Workspace refresh conflicts touch denied repository paths: " + ", ".join(denied)
+            )
 
     def changed_paths_between(
         self,
@@ -412,7 +433,8 @@ class GitCliRepository:
         if not fields or not fields[0]:
             raise CommandError("Git returned an invalid merge preview")
         raw_paths = [field for field in fields[1:] if field] if result.returncode == 1 else []
-        conflicts = self._bounded_policy_paths(raw_paths, repo)
+        conflicts, denied = self._partition_policy_paths(raw_paths, repo)
+        self._raise_denied_merge_conflicts(denied)
         return GitMergePreview(target_sha, merge_base, tuple(conflicts), False)
 
     def merge_no_ff(self, path: Path, repo: RepositoryConfig, target_sha: str) -> GitMergeResult:
@@ -477,9 +499,8 @@ class GitCliRepository:
             max_bytes=self.server.max_fingerprint_bytes,
         ).decode("utf-8", errors="strict")
         raw_paths = [item for item in raw.split("\x00") if item]
-        conflicts = self._bounded_policy_paths(raw_paths, repo)
-        if raw_paths and not conflicts:
-            raise SecurityError("Workspace refresh conflicts touch only denied repository paths")
+        conflicts, denied = self._partition_policy_paths(raw_paths, repo)
+        self._raise_denied_merge_conflicts(denied)
         return tuple(conflicts)
 
     def stage_paths(
@@ -1596,6 +1617,54 @@ class GitCliRepository:
             True,
         )
 
+    def diff_summary(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        *,
+        staged: bool,
+    ) -> tuple[GitDiffSummary, ...]:
+        self.changed_paths(path, repo)
+        base = ["git", "diff", "--no-ext-diff"]
+        if staged:
+            base.append("--cached")
+        else:
+            base.append("HEAD")
+        name_status = self._executor.run_bytes(
+            [*base, "--name-status", "-z", "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        )
+        numstat = self._executor.run_bytes(
+            [*base, "--numstat", "-z", "--"],
+            cwd=path,
+            max_bytes=self.server.max_fingerprint_bytes,
+        )
+        summaries = list(parse_diff_summary(name_status, numstat))
+        for item in summaries:
+            assert_path_allowed(item.path, repo)
+
+        if not staged:
+            existing = {item.path for item in summaries}
+            for relative in self.untracked_paths(path, repo):
+                if relative in existing:
+                    continue
+                unresolved = path / relative
+                if unresolved.is_symlink():
+                    raise SecurityError(f"Changed symlinks are not allowed: {relative}")
+                candidate = resolve_workspace_path(path, relative, repo)
+                if not candidate.is_file():
+                    continue
+                if candidate.stat().st_size > self.server.max_file_bytes:
+                    raise SecurityError(f"Diff target exceeds max_file_bytes: {relative}")
+                data = candidate.read_bytes()
+                additions = 0
+                if b"\x00" not in data:
+                    additions = data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
+                summaries.append(GitDiffSummary(relative, "added", additions, 0))
+
+        return tuple(sorted(summaries, key=lambda item: item.path))
+
     def diff(self, path: Path, repo: RepositoryConfig, *, staged: bool) -> dict[str, Any]:
         changed = self.changed_paths(path, repo)
         stat_args = ["git", "diff", "--no-ext-diff", "--stat"]
@@ -1684,9 +1753,14 @@ class GitCliRepository:
     def create_worktree(
         self, repo: RepositoryConfig, destination: Path, branch: str, base: str
     ) -> str:
-        if repo.fetch_before_workspace:
+        exact_commit = is_commit_sha(base)
+        if repo.fetch_before_workspace and not exact_commit:
             self._executor.run(["git", "fetch", "--prune", repo.remote, base], cwd=repo.path)
-        base_ref = base if (repo.read_only or not repo.publish_enabled) else f"{repo.remote}/{base}"
+        base_ref = (
+            base
+            if exact_commit or repo.read_only or not repo.publish_enabled
+            else f"{repo.remote}/{base}"
+        )
         self._executor.run(
             [
                 "git",
@@ -1754,6 +1828,21 @@ class GitCliRepository:
         if delete_branch:
             self._executor.run(["git", "branch", "-D", branch], cwd=repo.path)
         return delete_branch
+
+    def local_branch_exists(self, repo: RepositoryConfig, branch: str) -> bool:
+        result = self._executor.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=repo.path,
+            check=False,
+            output_limit=256,
+        )
+        return result.returncode == 0
+
+    def delete_local_branch(self, repo: RepositoryConfig, branch: str) -> bool:
+        if not self.local_branch_exists(repo, branch):
+            return False
+        self._executor.run(["git", "branch", "-D", branch], cwd=repo.path)
+        return True
 
     def commit(self, path: Path, message: str) -> tuple[str, str]:
         try:

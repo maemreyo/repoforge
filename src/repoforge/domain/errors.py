@@ -9,11 +9,14 @@ from enum import Enum
 class ErrorCode(str, Enum):
     CONFIG_INVALID = "CONFIG_INVALID"
     CONFIG_STALE = "CONFIG_STALE"
+    CLIENT_CONTRACT_STALE = "CLIENT_CONTRACT_STALE"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     INPUT_REQUIRED = "INPUT_REQUIRED"
     SECURITY_POLICY_VIOLATION = "SECURITY_POLICY_VIOLATION"
     COMMAND_FAILED = "COMMAND_FAILED"
     COMMAND_TIMEOUT = "COMMAND_TIMEOUT"
+    SEARCH_DEADLINE_EXCEEDED = "SEARCH_DEADLINE_EXCEEDED"
+    RESULT_TRANSPORT_BUDGET_EXCEEDED = "RESULT_TRANSPORT_BUDGET_EXCEEDED"
     EXECUTION_POLICY_UNSUPPORTED = "EXECUTION_POLICY_UNSUPPORTED"
     EXECUTION_ENVIRONMENT_DRIFT = "EXECUTION_ENVIRONMENT_DRIFT"
     WORKSPACE_INVALID = "WORKSPACE_INVALID"
@@ -27,15 +30,22 @@ class ErrorCode(str, Enum):
     PATCH_CONTEXT_AMBIGUOUS = "PATCH_CONTEXT_AMBIGUOUS"
     PATCH_APPLY_FAILED = "PATCH_APPLY_FAILED"
     STALE_STATE = "STALE_STATE"
+    PR_REMOTE_VERSION_STALE = "PR_REMOTE_VERSION_STALE"
+    PR_REMOTE_VERSION_INCOMPLETE = "PR_REMOTE_VERSION_INCOMPLETE"
     LOCK_TIMEOUT = "LOCK_TIMEOUT"
     RUNTIME_UNAVAILABLE = "RUNTIME_UNAVAILABLE"
     RUNTIME_RELOADING = "RUNTIME_RELOADING"
+    RECONNECT_REQUIRED = "RECONNECT_REQUIRED"
     RUNTIME_FAIL_CLOSED = "RUNTIME_FAIL_CLOSED"
     ALREADY_RUNNING = "ALREADY_RUNNING"
     ALREADY_EXISTS = "ALREADY_EXISTS"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
     IDEMPOTENCY_UNCERTAIN = "IDEMPOTENCY_UNCERTAIN"
+    FAILED_BEFORE_EFFECT = "FAILED_BEFORE_EFFECT"
+    FAILED_AFTER_EFFECT = "FAILED_AFTER_EFFECT"
+    EFFECT_ROLLED_BACK = "EFFECT_ROLLED_BACK"
+    EFFECT_OUTCOME_UNKNOWN = "EFFECT_OUTCOME_UNKNOWN"
     STATE_PERSISTENCE_FAILED = "STATE_PERSISTENCE_FAILED"
     STATE_INVALID = "STATE_INVALID"
     STATE_NOT_FOUND = "STATE_NOT_FOUND"
@@ -68,6 +78,7 @@ class ErrorCode(str, Enum):
     REPOSITORY_HISTORY_INCOMPLETE = "REPOSITORY_HISTORY_INCOMPLETE"
     REPOSITORY_EVIDENCE_LIMIT_INVALID = "REPOSITORY_EVIDENCE_LIMIT_INVALID"
     REPOSITORY_EVIDENCE_PARSE_FAILED = "REPOSITORY_EVIDENCE_PARSE_FAILED"
+    TICKET_GRAPH_PROVIDER_UNAVAILABLE = "TICKET_GRAPH_PROVIDER_UNAVAILABLE"
     CHECK_SELECTOR_INVALID = "CHECK_SELECTOR_INVALID"
     CHECK_EVIDENCE_STALE = "CHECK_EVIDENCE_STALE"
     CHECK_EVIDENCE_UNAVAILABLE = "CHECK_EVIDENCE_UNAVAILABLE"
@@ -130,6 +141,7 @@ class OperationError:
 
 
 _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
+    ("CLIENT_CONTRACT_STALE", ErrorCode.CLIENT_CONTRACT_STALE, False),
     ("DISCOVERY_ROOT_NOT_FOUND", ErrorCode.DISCOVERY_ROOT_NOT_FOUND, False),
     ("DISCOVERY_PERMISSION_DENIED", ErrorCode.DISCOVERY_PERMISSION_DENIED, False),
     ("DUPLICATE_REPOSITORY_ID", ErrorCode.DUPLICATE_REPOSITORY_ID, False),
@@ -148,8 +160,12 @@ _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
     ("STALE_CONFIG", ErrorCode.CONFIG_STALE, True),
     ("STALE_ACTIVE", ErrorCode.CONFIG_STALE, True),
     ("STALE_ACTIVATION", ErrorCode.CONFIG_STALE, True),
+    ("PR_REMOTE_VERSION_STALE", ErrorCode.PR_REMOTE_VERSION_STALE, False),
+    ("PR_REMOTE_VERSION_INCOMPLETE", ErrorCode.PR_REMOTE_VERSION_INCOMPLETE, False),
+    ("TICKET_GRAPH_PROVIDER_UNAVAILABLE", ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE, True),
     ("STALE_", ErrorCode.STALE_STATE, True),
     ("LOCK_TIMEOUT", ErrorCode.LOCK_TIMEOUT, True),
+    ("RECONNECT_REQUIRED", ErrorCode.RECONNECT_REQUIRED, False),
     ("RUNTIME_RELOADING", ErrorCode.RUNTIME_RELOADING, True),
     ("RUNTIME_FAIL_CLOSED", ErrorCode.RUNTIME_FAIL_CLOSED, False),
     ("RESTRICTIVE_ACTIVATION_FAILED", ErrorCode.RUNTIME_FAIL_CLOSED, False),
@@ -162,7 +178,17 @@ _PREFIX_CODES: tuple[tuple[str, ErrorCode, bool], ...] = (
     ("IDEMPOTENCY_CONFLICT", ErrorCode.IDEMPOTENCY_CONFLICT, False),
     ("IDEMPOTENCY_IN_PROGRESS", ErrorCode.IDEMPOTENCY_IN_PROGRESS, True),
     ("IDEMPOTENCY_UNCERTAIN", ErrorCode.IDEMPOTENCY_UNCERTAIN, False),
+    ("FAILED_BEFORE_EFFECT", ErrorCode.FAILED_BEFORE_EFFECT, True),
+    ("FAILED_AFTER_EFFECT", ErrorCode.FAILED_AFTER_EFFECT, False),
+    ("EFFECT_ROLLED_BACK", ErrorCode.EFFECT_ROLLED_BACK, True),
+    ("EFFECT_OUTCOME_UNKNOWN", ErrorCode.EFFECT_OUTCOME_UNKNOWN, False),
     ("STATE_PERSISTENCE_FAILED", ErrorCode.STATE_PERSISTENCE_FAILED, True),
+    ("SEARCH_DEADLINE_EXCEEDED", ErrorCode.SEARCH_DEADLINE_EXCEEDED, True),
+    (
+        "RESULT_TRANSPORT_BUDGET_EXCEEDED",
+        ErrorCode.RESULT_TRANSPORT_BUDGET_EXCEEDED,
+        False,
+    ),
     ("COMMAND_TIMEOUT", ErrorCode.COMMAND_TIMEOUT, True),
 )
 
@@ -252,6 +278,7 @@ def operation_error_from_exception(
         else "Correct the reported invariant or provide the required explicit approval."
     )
     why = {
+        ErrorCode.CLIENT_CONTRACT_STALE: "The client session is bound to a different reviewed runtime contract identity.",
         ErrorCode.CONFIG_STALE: "Another writer changed the reviewed configuration first.",
         ErrorCode.STALE_STATE: "The optimistic-lock snapshot no longer matches current state.",
         ErrorCode.APPROVAL_REQUIRED: "The operation would widen capability without matching approval.",
@@ -301,6 +328,10 @@ def operation_error_from_exception(
         ErrorCode.OPERATION_CORRUPT: "The persisted operation record is malformed, unsafe, or inconsistent with its identity.",
         ErrorCode.OPERATION_SCHEMA_UNSUPPORTED: "The operation record uses a schema version this RepoForge build cannot safely interpret.",
         ErrorCode.OPERATION_TRANSITION_INVALID: "The requested state transition is not allowed by the durable operation state machine.",
+        ErrorCode.FAILED_BEFORE_EFFECT: "The operation failed before crossing its authoritative effect boundary.",
+        ErrorCode.FAILED_AFTER_EFFECT: "The operation crossed its effect boundary and preserved an authoritative durable result before later finalization failed.",
+        ErrorCode.EFFECT_ROLLED_BACK: "The operation crossed its effect boundary, then verified compensation restored the prior state.",
+        ErrorCode.EFFECT_OUTCOME_UNKNOWN: "The operation crossed its effect boundary without enough authoritative evidence to classify the final state safely.",
         ErrorCode.STALE_ASSESSMENT_SNAPSHOT: "The workspace, configuration, or policy identity changed while evidence was being collected.",
         ErrorCode.ASSESSMENT_COMPONENT_UNAVAILABLE: "A bounded assessment provider could not return trustworthy evidence for the captured snapshot.",
         ErrorCode.ASSESSMENT_INVALID: "The assessment model violates snapshot identity, coverage, ordering, or bound invariants.",

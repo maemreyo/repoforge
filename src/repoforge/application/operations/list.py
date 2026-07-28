@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import OperationState
-from .dto import OperationSummary, operation_summary
+from .dto import OperationSummary, operation_observability, operation_summary
 from .manager import OperationManager
 
 _SCOPE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -90,8 +90,30 @@ class OperationLister:
             selected = records[start : start + limit]
             has_more = start + len(selected) < len(records)
             next_cursor = selected[-1].operation_id if selected and has_more else None
+            result_store = self.operations.ctx.operation_result_store
+            now = self.operations.ctx.clock.now_iso()
+            summaries: list[OperationSummary] = []
+            for task in selected:
+                result = result_store.read(task.operation_id) if result_store is not None else None
+                attempt, heartbeat_at, heartbeat_age_seconds, evidence_complete = (
+                    operation_observability(
+                        task,
+                        now=now,
+                        result_checked=result_store is not None,
+                        result_available=result is not None,
+                    )
+                )
+                summaries.append(
+                    operation_summary(
+                        task,
+                        attempt=attempt,
+                        heartbeat_at=heartbeat_at,
+                        heartbeat_age_seconds=heartbeat_age_seconds,
+                        evidence_complete=evidence_complete,
+                    )
+                )
             return OperationListResult(
-                operations=[operation_summary(task) for task in selected],
+                operations=summaries,
                 next_cursor=next_cursor,
                 scan_truncated=page.scan_truncated,
                 scope=command.scope,

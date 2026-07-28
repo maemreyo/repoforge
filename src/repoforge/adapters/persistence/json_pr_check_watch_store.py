@@ -45,6 +45,8 @@ _EXPECTED_FIELDS = {
     "pr_number",
     "pushed_sha",
     "workspace_fingerprint",
+    "remote_version",
+    "stability_version",
     "until",
     "include_failure_evidence",
     "timeout_seconds",
@@ -159,7 +161,7 @@ class JsonPrCheckWatchStore:
             )
         if set(raw) != _EXPECTED_FIELDS:
             raise JsonPrCheckWatchStore._error(
-                "PR check watch fields do not match schema version 1",
+                f"PR check watch fields do not match schema version {PR_CHECK_WATCH_SCHEMA_VERSION}",
                 code=ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT,
             )
         if raw.get("operation_id") != expected_operation_id:
@@ -175,6 +177,8 @@ class JsonPrCheckWatchStore:
                 pr_number=raw["pr_number"],
                 pushed_sha=str(raw["pushed_sha"]),
                 workspace_fingerprint=str(raw["workspace_fingerprint"]),
+                remote_version=str(raw["remote_version"]),
+                stability_version=str(raw["stability_version"]),
                 until=PrCheckWatchUntil(raw["until"]),
                 include_failure_evidence=raw["include_failure_evidence"],
                 timeout_seconds=raw["timeout_seconds"],

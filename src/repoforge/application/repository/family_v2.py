@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ...domain.errors import ConfigError
+from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.repository_selection import select_repository
 from ...domain.tickets import TicketNode
 from ..context import ApplicationContext
@@ -19,6 +19,7 @@ from .issue_graph import (
     RepositoryIssueGraphReader,
     node_payload,
 )
+from .issue_graph_workflow import IssueGraphWorkflowResult, IssueGraphWorkflowService
 from .issue_mutation_v2 import (
     RepositoryIssueMutationCommand,
     RepositoryIssueMutatorV2,
@@ -229,6 +230,8 @@ class RepositoryIssueV2Command:
     link_type: str | None = None
     idempotency_key: str | None = None
     approval_request_id: str | None = None
+    manage: dict[str, object] | None = None
+    runtime_identity: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +264,9 @@ class RepositoryIssueV2Result:
     truncated: bool
     next_cursor: str | None
     mutation: IssueMutationEvidenceV2 | None = None
+    workflow: IssueGraphWorkflowResult | None = None
     capability_coverage: tuple[CapabilityCoverageV2, ...] = ()
+    graph_unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,19 +612,54 @@ class RepositoryPrReadV2:
 class RepositoryIssueV2:
     _READ_MODES = frozenset({"read", "spec", "graph", "next"})
     _WRITE_MODES = frozenset({"comment", "close", "reopen", "link", "create"})
-    _MODES = _READ_MODES | _WRITE_MODES
+    _MODES = _READ_MODES | _WRITE_MODES | {"manage"}
 
-    def __init__(self, ctx: ApplicationContext) -> None:
+    def __init__(self, ctx: ApplicationContext, workflow: IssueGraphWorkflowService) -> None:
         self.ctx = ctx
         self._spec = RepositoryIssueSpecReader(ctx)
         self._graph = RepositoryIssueGraphReader(ctx)
         self._next = RepositoryIssueNextReader(ctx)
         self._mutator = RepositoryIssueMutatorV2(ctx)
+        self._workflow = workflow
 
     def execute(self, command: RepositoryIssueV2Command) -> RepositoryIssueV2Result:
         if command.mode not in self._MODES:
             raise ValueError(
-                "mode must be one of: read, spec, graph, next, comment, close, reopen, link, create"
+                "mode must be one of: read, spec, graph, next, comment, close, reopen, link, create, manage"
+            )
+        if command.mode == "manage":
+            if command.manage is None:
+                raise ValueError("repo_issue manage requires a manage payload")
+            manage_action = str(command.manage.get("action", ""))
+            workflow = self.ctx.audited(
+                "repo_issue_manage",
+                {
+                    "repo_id": command.repo_id,
+                    "action": manage_action,
+                },
+                lambda: self._workflow.execute(
+                    command.repo_id,
+                    command.manage or {},
+                    command.runtime_identity,
+                ),
+                mutating=manage_action != "status",
+            )
+            return RepositoryIssueV2Result(
+                "ok",
+                f"Issue graph workflow {workflow.action}: {workflow.state}",
+                None,
+                command.repo_id,
+                command.mode,
+                "not_requested",
+                None,
+                (),
+                (),
+                (),
+                workflow.recovery_action,
+                False,
+                None,
+                None,
+                workflow,
             )
         if command.mode in self._WRITE_MODES:
             mutation = self._mutator.execute(
@@ -723,16 +763,36 @@ class RepositoryIssueV2:
                 capability_coverage=_capability_coverage(raw.capability_coverage),
             )
         if command.mode == "graph":
-            raw_graph = self._graph.compute(
-                RepositoryIssueGraphCommand(
-                    command.repo_id,
-                    command.root_issue,
-                    command.status,
-                    command.priority,
-                    command.initiative,
-                    command.fresh,
+            try:
+                raw_graph = self._graph.compute(
+                    RepositoryIssueGraphCommand(
+                        command.repo_id,
+                        command.root_issue,
+                        command.status,
+                        command.priority,
+                        command.initiative,
+                        command.fresh,
+                    )
                 )
-            )
+            except RepoForgeError as exc:
+                if exc.code is not ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE:
+                    raise
+                return RepositoryIssueV2Result(
+                    "ok",
+                    "Ticket graph provider is unavailable",
+                    None,
+                    command.repo_id,
+                    command.mode,
+                    "graph_unavailable",
+                    None,
+                    (),
+                    (),
+                    (),
+                    "Repair or restore the GitHub ticket-graph provider, then retry with fresh=true.",
+                    False,
+                    None,
+                    graph_unavailable_reason="provider_unavailable",
+                )
             if not raw_graph.valid and any(
                 item.get("code") == "GRAPH_NOT_CONFIGURED" for item in raw_graph.diagnostics
             ):
@@ -755,6 +815,7 @@ class RepositoryIssueV2:
                     ),
                     False,
                     None,
+                    graph_unavailable_reason="configuration_unavailable",
                 )
             nodes = tuple(_graph_node(item) for item in raw_graph.nodes)
             page = paginate(
@@ -797,15 +858,36 @@ class RepositoryIssueV2:
                 capability_coverage=_capability_coverage(
                     raw_graph.coverage.get("capabilities", [])
                 ),
+                graph_unavailable_reason=(None if raw_graph.valid else "evidence_incomplete"),
             )
-        raw_next = self._next.compute(
-            RepositoryIssueNextCommand(
+        try:
+            raw_next = self._next.compute(
+                RepositoryIssueNextCommand(
+                    command.repo_id,
+                    command.root_issue,
+                    command.limit,
+                    fresh=command.fresh,
+                )
+            )
+        except RepoForgeError as exc:
+            if exc.code is not ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE:
+                raise
+            return RepositoryIssueV2Result(
+                "ok",
+                "Ticket graph provider is unavailable",
+                None,
                 command.repo_id,
-                command.root_issue,
-                command.limit,
-                fresh=command.fresh,
+                command.mode,
+                "graph_unavailable",
+                None,
+                (),
+                (),
+                (),
+                "Repair or restore the GitHub ticket-graph provider, then retry with fresh=true.",
+                False,
+                None,
+                graph_unavailable_reason="provider_unavailable",
             )
-        )
         if any(item.get("code") == "GRAPH_NOT_CONFIGURED" for item in raw_next.diagnostics):
             return RepositoryIssueV2Result(
                 "ok",
@@ -821,6 +903,7 @@ class RepositoryIssueV2:
                 "Configure the GitHub-native ticket graph root, then retry.",
                 False,
                 None,
+                graph_unavailable_reason="configuration_unavailable",
             )
         selected = tuple(_graph_node(item) for item in raw_next.tickets)
         drift = tuple(
@@ -846,18 +929,26 @@ class RepositoryIssueV2:
             False,
             None,
             capability_coverage=_capability_coverage(raw_next.capability_coverage),
+            graph_unavailable_reason=None if raw_next.valid else "evidence_incomplete",
         )
 
 
 class RepositoryTaskContextV2:
-    _SECTIONS = frozenset({"repository", "status", "ticket", "workspace", "recent_commits"})
+    _SECTIONS = frozenset(
+        {"repository", "status", "ticket", "ticket_workflow", "workspace", "recent_commits"}
+    )
 
-    def __init__(self, ctx: ApplicationContext) -> None:
+    def __init__(
+        self,
+        ctx: ApplicationContext,
+        issue_graph_workflow: IssueGraphWorkflowService | None = None,
+    ) -> None:
         self.ctx = ctx
         self._status = RepositoryStatusReader(ctx)
         self._spec = RepositoryIssueSpecReader(ctx)
         self._workspace = WorkspaceStatusReader(ctx)
         self._recent = RecentCommitsReader(ctx)
+        self._issue_graph_workflow = issue_graph_workflow
 
     def execute(
         self,
@@ -945,6 +1036,43 @@ class RepositoryTaskContextV2:
                                 "drift_codes",
                                 _json_value([item.get("code") for item in spec.drift]),
                             ),
+                        ),
+                    )
+                )
+            elif name == "ticket_workflow":
+                if self._issue_graph_workflow is None:
+                    sections.append(ContextSectionV2(name, "unavailable", False, False, ()))
+                    continue
+                workflow = self._issue_graph_workflow.latest_facts(command.repo_id)
+                fact_keys = (
+                    "action",
+                    "state",
+                    "proposal_id",
+                    "proposal_hash",
+                    "plan_id",
+                    "effect_plan_hash",
+                    "approval_request_id",
+                    "approval_status",
+                    "publication_id",
+                    "publication_state",
+                    "operation_id",
+                    "receipt_id",
+                    "result_reference",
+                    "retry_at",
+                    "complete",
+                    "external_writes",
+                    "recovery_action",
+                )
+                sections.append(
+                    ContextSectionV2(
+                        name,
+                        "local",
+                        workflow.get("_evidence_complete") is True,
+                        workflow.get("_evidence_truncated") is True,
+                        tuple(
+                            Fact(key, _json_value(workflow[key]))
+                            for key in fact_keys
+                            if workflow.get(key) is not None
                         ),
                     )
                 )

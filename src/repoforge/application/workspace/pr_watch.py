@@ -21,6 +21,10 @@ from ...domain.pr_check_watch import (
     new_pr_check_watch,
     update_pr_check_watch,
 )
+from ...domain.pr_remote_version import (
+    build_pr_remote_version,
+    pr_remote_version_recovery_details,
+)
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.pr_check_watch_store import PrCheckWatchStore
 from ...ports.sleeper import Sleeper
@@ -39,6 +43,7 @@ class WorkspacePrWatchCommand:
     until: str = PrCheckWatchUntil.ALL_COMPLETED.value
     timeout_seconds: int = 900
     include_failure_evidence: bool = True
+    expected_remote_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +136,7 @@ class PrCheckWatchCoordinator:
             "until": until.value,
             "timeout_seconds": timeout,
             "include_failure_evidence": command.include_failure_evidence,
+            "expected_remote_version": command.expected_remote_version is not None,
         }
 
         def op() -> WorkspacePrWatchResult:
@@ -157,6 +163,26 @@ class PrCheckWatchCoordinator:
                         "Pull-request head does not match the exact pushed workspace commit",
                         code=ErrorCode.PR_CHECK_WATCH_STALE,
                     )
+                version = build_pr_remote_version(pr, repo_id=fresh.repo_id)
+                if (
+                    command.expected_remote_version is not None
+                    and command.expected_remote_version != version.token
+                ):
+                    raise RepoForgeError(
+                        "PR_REMOTE_VERSION_STALE: pull request changed before watch creation",
+                        code=ErrorCode.PR_REMOTE_VERSION_STALE,
+                        retryable=False,
+                        safe_next_action=(
+                            "Read workspace_pr_evidence overview and start a new watch with its "
+                            "remote_version."
+                        ),
+                        unchanged_state=("No PR check watch was created.",),
+                        details=pr_remote_version_recovery_details(
+                            command.expected_remote_version,
+                            version,
+                            pr,
+                        ),
+                    )
                 now = self.ctx.clock.now_iso()
                 deadline = self._deadline(now, timeout)
                 task = self.operations.create(
@@ -167,6 +193,7 @@ class PrCheckWatchCoordinator:
                     snapshot_binding=OperationSnapshotBinding(
                         head_sha=head,
                         workspace_fingerprint=fingerprint,
+                        evidence_snapshot_id=version.token,
                     ),
                     expires_at=deadline,
                     now=now,
@@ -181,6 +208,8 @@ class PrCheckWatchCoordinator:
                     pr_number=pr_number,
                     pushed_sha=pushed,
                     workspace_fingerprint=fingerprint,
+                    remote_version=version.token,
+                    stability_version=version.stability_version,
                     until=until,
                     include_failure_evidence=command.include_failure_evidence,
                     timeout_seconds=timeout,
@@ -315,7 +344,22 @@ class PrCheckWatchCoordinator:
                 "Pull-request identity changed during PR check watch",
                 code=ErrorCode.PR_CHECK_WATCH_STALE,
             )
+        version = build_pr_remote_version(pr, repo_id=record.repo_id)
+        if version.stability_version != watch.stability_version:
+            raise RepoForgeError(
+                "Pull-request metadata or conversation changed during PR check watch",
+                code=ErrorCode.PR_CHECK_WATCH_STALE,
+                retryable=False,
+                safe_next_action=(
+                    "Read workspace_pr_evidence and start a new version-bound watch after reviewing "
+                    "the remote drift."
+                ),
+                unchanged_state=("The existing watch remains bound to its original PR version.",),
+            )
         return path, pr
+
+    def assert_current_identity(self, watch: PrCheckWatch) -> None:
+        self._identity(watch)
 
     def _failure_references(
         self,

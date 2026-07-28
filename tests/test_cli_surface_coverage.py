@@ -8,8 +8,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from conftest import create_forge_environment
 
+from repoforge.adapters.persistence import JsonApprovalPayloadStore, JsonApprovalStore
 from repoforge.application.configuration.source import SourceConfiguration, SourceRepository
+from repoforge.domain.approval import (
+    ApprovalBinding,
+    ApprovalRequest,
+    ApprovalStatus,
+    ApprovalSubject,
+)
 from repoforge.domain.config_generation import CapabilityDeltaKind, ConfigGeneration
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.runtime import ControlResponse, RuntimePhase, RuntimeRecord
@@ -232,6 +240,90 @@ def test_main_dispatches_all_command_families(
     stats_payload = json.loads(capsys.readouterr().out)
     assert stats_payload["path"].endswith("operation-metrics.json")
     assert stats_payload["operations"] == []
+
+
+def test_cli_approval_fallback_lists_approves_and_rejects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    environment = create_forge_environment(tmp_path)
+    state_root = environment.service.config.server.state_root
+    locks = cli.build_lock_manager(state_root)
+    approvals = JsonApprovalStore(state_root, locks)
+    payloads = JsonApprovalPayloadStore(state_root, locks)
+
+    def create_request(request_id: str) -> None:
+        payload = {"kind": "issue_graph_publication", "request_id": request_id}
+        digest = payloads.save(request_id, payload)
+        approvals.create(
+            ApprovalRequest(
+                request_id,
+                "issue_graph_publication",
+                ApprovalSubject(
+                    "issue_graph_publication",
+                    "demo",
+                    "Approve governed issue graph publication",
+                    "external_write",
+                ),
+                ApprovalBinding("igplan-" + request_id[-24:], digest, 1, "a" * 64),
+                "Operator approval is required.",
+                "2026-07-23T00:00:00+00:00",
+                None,
+            )
+        )
+
+    approved_id = "apr-" + "1" * 24
+    rejected_id = "apr-" + "2" * 24
+    create_request(approved_id)
+    create_request(rejected_id)
+    monkeypatch.setattr(cli, "_state_root", lambda: tmp_path / "cli-state")
+    monkeypatch.setattr(
+        cli,
+        "system_clock",
+        lambda: SimpleNamespace(now_iso=lambda: "2026-07-23T01:00:00+00:00"),
+    )
+
+    config_path = str(environment.config_path)
+    assert cli.main(["--config", config_path, "approval", "list"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [item["request_id"] for item in listed["approvals"]] == [approved_id, rejected_id]
+
+    assert (
+        cli.main(
+            [
+                "--config",
+                config_path,
+                "approval",
+                "approve",
+                approved_id,
+                "--actor",
+                "operator",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["approval"]["status"] == "accepted"
+    assert approvals.read(approved_id).value.status is ApprovalStatus.ACCEPTED  # type: ignore[union-attr]
+    assert payloads.read(approved_id) is not None
+
+    assert (
+        cli.main(
+            [
+                "--config",
+                config_path,
+                "approval",
+                "reject",
+                rejected_id,
+                "--actor",
+                "operator",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["approval"]["status"] == "declined"
+    assert approvals.read(rejected_id).value.status is ApprovalStatus.DECLINED  # type: ignore[union-attr]
+    assert payloads.read(rejected_id) is not None
 
 
 def test_audit_min_bytes_filters_events_by_result_bytes(

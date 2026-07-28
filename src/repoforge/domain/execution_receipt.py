@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any, NoReturn
@@ -13,6 +14,7 @@ from typing import Any, NoReturn
 from .errors import ErrorCode, RepoForgeError
 
 EXECUTION_RECEIPT_SCHEMA_VERSION = 2
+EFFECT_RECEIPT_SCHEMA_VERSION = 1
 _RECEIPT_ID = re.compile(r"^receipt-[0-9a-f]{24}$")
 _OPERATION_ID = re.compile(r"^op-[0-9a-f]{24}$")
 _PLAN_ID = re.compile(r"^plan-[0-9a-f]{24}$")
@@ -32,6 +34,67 @@ class StageCacheStatus(str, Enum):
     NOT_CACHEABLE = "not_cacheable"
     MISS = "miss"
     HIT = "hit"
+
+
+class EffectReceiptState(str, Enum):
+    ACCEPTED = "accepted"
+    APPLYING = "applying"
+    APPLIED_UNVALIDATED = "applied_unvalidated"
+    APPLIED_VALIDATED = "applied_validated"
+    ROLLED_BACK = "rolled_back"
+    FAILED_BEFORE_EFFECT = "failed_before_effect"
+    FAILED_AFTER_EFFECT = "failed_after_effect"
+    UNKNOWN = "unknown"
+
+
+_EFFECT_TRANSITIONS: dict[EffectReceiptState, frozenset[EffectReceiptState]] = {
+    EffectReceiptState.ACCEPTED: frozenset(
+        {
+            EffectReceiptState.APPLYING,
+            EffectReceiptState.FAILED_BEFORE_EFFECT,
+            EffectReceiptState.UNKNOWN,
+        }
+    ),
+    EffectReceiptState.APPLYING: frozenset(
+        {
+            EffectReceiptState.APPLIED_UNVALIDATED,
+            EffectReceiptState.ROLLED_BACK,
+            EffectReceiptState.FAILED_BEFORE_EFFECT,
+            EffectReceiptState.FAILED_AFTER_EFFECT,
+            EffectReceiptState.UNKNOWN,
+        }
+    ),
+    EffectReceiptState.APPLIED_UNVALIDATED: frozenset(
+        {
+            EffectReceiptState.APPLIED_VALIDATED,
+            EffectReceiptState.FAILED_AFTER_EFFECT,
+            EffectReceiptState.ROLLED_BACK,
+            EffectReceiptState.UNKNOWN,
+        }
+    ),
+}
+
+EffectIdentity = tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EffectReceipt:
+    receipt_id: str
+    operation_id: str
+    action: str
+    idempotency_key_hash: str | None
+    request_fingerprint: str
+    state: EffectReceiptState
+    accepted_at: str
+    updated_at: str
+    correlation_id: str
+    pre_identity: EffectIdentity = ()
+    post_identity: EffectIdentity = ()
+    effect_boundary_crossed: bool = False
+    result_reference: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    schema_version: int = EFFECT_RECEIPT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,3 +533,258 @@ def stage_receipt_from_payload(payload: dict[str, Any]) -> StageReceipt:
         schema_version=schema_version,
     )
     return validate_stage_receipt(receipt)
+
+
+def _effect_timestamp(value: str, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise RepoForgeError(
+            f"Effect receipt {field} is not an ISO timestamp",
+            code=ErrorCode.STATE_INVALID,
+        ) from exc
+    if parsed.tzinfo is None:
+        _invalid(f"Effect receipt {field} must include a timezone offset")
+    return parsed
+
+
+def _effect_optional(value: str | None, field: str, *, limit: int = 2_000) -> str | None:
+    if value is None:
+        return None
+    if (
+        not value
+        or len(value) > limit
+        or any(ord(character) < 32 and character not in "\n\t" for character in value)
+    ):
+        _invalid(f"Effect receipt {field} is invalid")
+    return value
+
+
+def normalize_effect_identity(value: Mapping[str, Any] | None) -> EffectIdentity:
+    if value is None:
+        return ()
+    if len(value) > 20:
+        _invalid("Effect identity exceeds the 20-field limit")
+    normalized: list[tuple[str, str]] = []
+    for key, raw in sorted(value.items()):
+        if _SAFE_ID.fullmatch(key) is None:
+            _invalid("Effect identity key is invalid")
+        if not isinstance(raw, (str, int, bool)):
+            _invalid("Effect identity value must be a scalar")
+        rendered = str(raw).lower() if isinstance(raw, bool) else str(raw)
+        if (
+            not rendered
+            or len(rendered) > 512
+            or any(ord(character) < 32 for character in rendered)
+        ):
+            _invalid("Effect identity value is invalid")
+        normalized.append((key, rendered))
+    return tuple(normalized)
+
+
+def _validate_effect_identity(value: EffectIdentity, field: str) -> None:
+    try:
+        rendered = dict(value)
+    except (TypeError, ValueError) as exc:
+        raise RepoForgeError(
+            f"Effect receipt {field} is invalid",
+            code=ErrorCode.STATE_INVALID,
+        ) from exc
+    if len(rendered) != len(value) or value != normalize_effect_identity(rendered):
+        _invalid(f"Effect receipt {field} is not canonical")
+
+
+def validate_effect_receipt(receipt: EffectReceipt) -> EffectReceipt:
+    if receipt.schema_version != EFFECT_RECEIPT_SCHEMA_VERSION:
+        _invalid("Effect receipt schema version is unsupported")
+    if _RECEIPT_ID.fullmatch(receipt.receipt_id) is None:
+        _invalid("Effect receipt id is invalid")
+    if _OPERATION_ID.fullmatch(receipt.operation_id) is None:
+        _invalid("Effect receipt operation id is invalid")
+    if _SAFE_ID.fullmatch(receipt.action) is None:
+        _invalid("Effect receipt action is invalid")
+    if (
+        receipt.idempotency_key_hash is not None
+        and _SHA64.fullmatch(receipt.idempotency_key_hash) is None
+    ):
+        _invalid("Effect receipt idempotency key hash is invalid")
+    if _SHA64.fullmatch(receipt.request_fingerprint) is None:
+        _invalid("Effect receipt request fingerprint is invalid")
+    if _SAFE_ID.fullmatch(receipt.correlation_id) is None:
+        _invalid("Effect receipt correlation id is invalid")
+    if not isinstance(receipt.effect_boundary_crossed, bool):
+        _invalid("Effect receipt boundary flag is invalid")
+    _validate_effect_identity(receipt.pre_identity, "pre_identity")
+    _validate_effect_identity(receipt.post_identity, "post_identity")
+    accepted = _effect_timestamp(receipt.accepted_at, "accepted_at")
+    updated = _effect_timestamp(receipt.updated_at, "updated_at")
+    if updated < accepted:
+        _invalid("Effect receipt updated_at precedes accepted_at")
+    result_reference = _effect_optional(receipt.result_reference, "result_reference", limit=256)
+    error_code = _effect_optional(receipt.error_code, "error_code", limit=128)
+    error_message = _effect_optional(receipt.error_message, "error_message")
+    if receipt.state in {
+        EffectReceiptState.ACCEPTED,
+        EffectReceiptState.APPLYING,
+    } and any(value is not None for value in (result_reference, error_code, error_message)):
+        _invalid("Non-terminal effect receipt cannot contain terminal evidence")
+    if receipt.state in {
+        EffectReceiptState.APPLIED_UNVALIDATED,
+        EffectReceiptState.APPLIED_VALIDATED,
+    } and (result_reference is None or error_code is not None):
+        _invalid("Applied effect receipt requires a result reference and no error")
+    if receipt.state is EffectReceiptState.FAILED_BEFORE_EFFECT and (
+        result_reference is not None or error_code is None or receipt.effect_boundary_crossed
+    ):
+        _invalid("Failed-before-effect receipt requires error evidence without a result")
+    if receipt.state is EffectReceiptState.FAILED_AFTER_EFFECT and (
+        result_reference is None or error_code is None or not receipt.effect_boundary_crossed
+    ):
+        _invalid("Failed-after-effect receipt requires result and error evidence")
+    if receipt.state is EffectReceiptState.ROLLED_BACK and (
+        error_code is None or not receipt.effect_boundary_crossed
+    ):
+        _invalid("Rolled-back effect receipt requires boundary and compensation evidence")
+    if receipt.state is EffectReceiptState.UNKNOWN and error_code is None:
+        _invalid("Unknown effect receipt requires typed error evidence")
+    return receipt
+
+
+def create_effect_receipt(
+    *,
+    receipt_id: str,
+    operation_id: str,
+    action: str,
+    idempotency_key_hash: str | None,
+    request_fingerprint: str,
+    accepted_at: str,
+    correlation_id: str,
+    pre_identity: Mapping[str, Any] | None = None,
+) -> EffectReceipt:
+    return validate_effect_receipt(
+        EffectReceipt(
+            receipt_id=receipt_id,
+            operation_id=operation_id,
+            action=action,
+            idempotency_key_hash=idempotency_key_hash,
+            request_fingerprint=request_fingerprint,
+            state=EffectReceiptState.ACCEPTED,
+            accepted_at=accepted_at,
+            updated_at=accepted_at,
+            correlation_id=correlation_id,
+            pre_identity=normalize_effect_identity(pre_identity),
+        )
+    )
+
+
+def transition_effect_receipt(
+    receipt: EffectReceipt,
+    new_state: EffectReceiptState,
+    *,
+    now: str,
+    result_reference: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    effect_boundary_crossed: bool | None = None,
+    post_identity: Mapping[str, Any] | None = None,
+) -> EffectReceipt:
+    validate_effect_receipt(receipt)
+    if new_state is receipt.state:
+        return receipt
+    if new_state not in _EFFECT_TRANSITIONS.get(receipt.state, frozenset()):
+        _invalid(
+            f"Effect receipt transition is not allowed: {receipt.state.value} -> {new_state.value}"
+        )
+    updated = replace(
+        receipt,
+        state=new_state,
+        updated_at=now,
+        result_reference=result_reference,
+        error_code=error_code,
+        error_message=error_message,
+        effect_boundary_crossed=(
+            receipt.effect_boundary_crossed
+            if effect_boundary_crossed is None
+            else effect_boundary_crossed
+        ),
+        post_identity=(
+            receipt.post_identity
+            if post_identity is None
+            else normalize_effect_identity(post_identity)
+        ),
+    )
+    return validate_effect_receipt(updated)
+
+
+def effect_receipt_payload(receipt: EffectReceipt) -> dict[str, object]:
+    validate_effect_receipt(receipt)
+    return {
+        "accepted_at": receipt.accepted_at,
+        "action": receipt.action,
+        "correlation_id": receipt.correlation_id,
+        "error_code": receipt.error_code,
+        "error_message": receipt.error_message,
+        "effect_boundary_crossed": receipt.effect_boundary_crossed,
+        "idempotency_key_hash": receipt.idempotency_key_hash,
+        "operation_id": receipt.operation_id,
+        "post_identity": dict(receipt.post_identity),
+        "pre_identity": dict(receipt.pre_identity),
+        "receipt_id": receipt.receipt_id,
+        "request_fingerprint": receipt.request_fingerprint,
+        "result_reference": receipt.result_reference,
+        "schema_version": receipt.schema_version,
+        "state": receipt.state.value,
+        "updated_at": receipt.updated_at,
+    }
+
+
+def effect_receipt_from_payload(payload: dict[str, Any]) -> EffectReceipt:
+    schema_version = payload.get("schema_version")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        _invalid("Effect receipt schema payload is invalid")
+    try:
+        state = EffectReceiptState(str(payload.get("state", "")))
+    except ValueError as exc:
+        raise RepoForgeError(
+            "Effect receipt state payload is invalid",
+            code=ErrorCode.STATE_INVALID,
+        ) from exc
+    boundary_crossed = payload.get("effect_boundary_crossed", False)
+    if not isinstance(boundary_crossed, bool):
+        _invalid("Effect receipt boundary payload is invalid")
+    pre_identity = payload.get("pre_identity", {})
+    post_identity = payload.get("post_identity", {})
+    if not isinstance(pre_identity, dict) or not isinstance(post_identity, dict):
+        _invalid("Effect receipt identity payload is invalid")
+    return validate_effect_receipt(
+        EffectReceipt(
+            receipt_id=str(payload.get("receipt_id", "")),
+            operation_id=str(payload.get("operation_id", "")),
+            action=str(payload.get("action", "")),
+            idempotency_key_hash=(
+                str(payload["idempotency_key_hash"])
+                if payload.get("idempotency_key_hash") is not None
+                else None
+            ),
+            request_fingerprint=str(payload.get("request_fingerprint", "")),
+            state=state,
+            accepted_at=str(payload.get("accepted_at", "")),
+            updated_at=str(payload.get("updated_at", "")),
+            correlation_id=str(payload.get("correlation_id", "")),
+            pre_identity=normalize_effect_identity(pre_identity),
+            post_identity=normalize_effect_identity(post_identity),
+            effect_boundary_crossed=boundary_crossed,
+            result_reference=(
+                str(payload["result_reference"])
+                if payload.get("result_reference") is not None
+                else None
+            ),
+            error_code=(
+                str(payload["error_code"]) if payload.get("error_code") is not None else None
+            ),
+            error_message=(
+                str(payload["error_message"]) if payload.get("error_message") is not None else None
+            ),
+            schema_version=schema_version,
+        )
+    )

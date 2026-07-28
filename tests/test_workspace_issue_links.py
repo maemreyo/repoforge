@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 from conftest import ForgeEnvironment
 
+from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import ConfigError, WorkspaceError
+from repoforge.domain.workspace import MAX_ISSUE_IDS
 
 
 def test_workspace_create_links_issue_ids(forge_env: ForgeEnvironment) -> None:
@@ -43,10 +45,21 @@ def test_workspace_list_reports_dirty_state(forge_env: ForgeEnvironment) -> None
     assert entry["dirty"] is True
 
 
-def test_workspace_create_rejects_too_many_issue_ids(forge_env: ForgeEnvironment) -> None:
+def test_workspace_create_issue_id_bound_matches_the_public_contract(
+    forge_env: ForgeEnvironment,
+) -> None:
     service = forge_env.service
-    too_many = tuple(str(i) for i in range(17))
-    with pytest.raises(WorkspaceError, match="at most 16 entries"):
+    issue_ids_schema = V2_TOOL_SPECS["workspace_create"].input_model.model_json_schema()[
+        "properties"
+    ]["issue_ids"]
+    assert issue_ids_schema["maxItems"] == MAX_ISSUE_IDS == 100
+
+    accepted = tuple(str(i) for i in range(100))
+    created = service.workspace_create("demo", "full issue stack", None, None, accepted)
+    assert created["issue_ids"] == list(accepted)
+
+    too_many = tuple(str(i) for i in range(101))
+    with pytest.raises(WorkspaceError, match="at most 100 entries"):
         service.workspace_create("demo", "too many issues", None, None, too_many)
 
 

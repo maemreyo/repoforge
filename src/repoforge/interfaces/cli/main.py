@@ -69,6 +69,8 @@ from ...application.verification_detection import VerificationProfileDetector
 from ...bootstrap import (
     AdapterOverrides,
     build_application,
+    build_approval_payload_store,
+    build_approval_store,
     build_configuration_store,
     build_dev_runtime_service,
     build_lock_manager,
@@ -78,6 +80,7 @@ from ...bootstrap import (
     build_release_observer,
     build_release_store,
     build_repository_probe,
+    build_runtime_activation_journal,
     build_runtime_control_client,
     build_runtime_control_server,
     build_runtime_launcher,
@@ -93,6 +96,7 @@ from ...bootstrap import (
     read_audit_events,
     read_audit_events_since,
     read_runtime_log,
+    read_runtime_log_page,
     runtime_log_files,
     summarize_command_source_stats,
     summarize_operation_metrics,
@@ -101,7 +105,9 @@ from ...bootstrap import (
     write_runtime_state,
 )
 from ...config import DEFAULT_CONFIG_PATH, load_config
+from ...contracts.registry import validate_generated_contract_identity
 from ...domain.activation import AGENT_SECRET_KEY
+from ...domain.approval import ApprovalStatus, decide_approval
 from ...domain.config_generation import (
     ApprovalEvent,
     CapabilityDeltaKind,
@@ -119,9 +125,16 @@ from ...domain.errors import (
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
+from ...domain.runtime_contract import RuntimeContractIdentity
 from ...domain.runtime_health import RuntimeIdentity, assess_runtime_health
 from ...domain.user_paths import default_release_root, resolve_release_root
-from ...ports import ConfigurationStore, LockManager, RepositoryProbe
+from ...ports import (
+    ApprovalPayloadStore,
+    ApprovalStore,
+    ConfigurationStore,
+    LockManager,
+    RepositoryProbe,
+)
 from ...ports.activation import SupervisorKickstarter
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
@@ -377,6 +390,95 @@ def _config_set(config_path: Path, args: argparse.Namespace) -> int:
 def _pending_store(config_path: Path) -> PendingPolicyChangeStore:
     store = _ensure_generation(config_path)
     return build_pending_policy_change_store(store.root, locks=build_lock_manager(store.root))
+
+
+def _approval_stores(
+    config_path: Path,
+) -> tuple[ApprovalStore, ApprovalPayloadStore]:
+    store = _ensure_generation(config_path)
+    generation = store.active() or store.current()
+    resolved_path = (
+        store.resolved_path(generation.generation) if generation is not None else config_path
+    )
+    runtime_state_root = load_config(resolved_path).server.state_root
+    locks = build_lock_manager(runtime_state_root)
+    return (
+        build_approval_store(runtime_state_root, locks=locks),
+        build_approval_payload_store(runtime_state_root, locks=locks),
+    )
+
+
+def _approval_list(config_path: Path, status: str | None) -> int:
+    approvals, _ = _approval_stores(config_path)
+    selected_status = ApprovalStatus(status) if status is not None else None
+    page = approvals.list_records(max_records=200)
+    records = sorted(
+        (
+            envelope.value
+            for envelope in page.records
+            if selected_status is None or envelope.value.status is selected_status
+        ),
+        key=lambda request: (request.created_at, request.request_id),
+    )
+    _json(
+        {
+            "status": "ok",
+            "approvals": [request.summary() for request in records],
+            "truncated": page.scan_truncated,
+            "safe_next_action": (
+                "Review an exact request, then run `rf approval approve <request_id>` or "
+                "`rf approval reject <request_id>`."
+                if records
+                else "No matching approval requests were found."
+            ),
+        }
+    )
+    return 0
+
+
+def _approval_decide(
+    config_path: Path,
+    request_id: str,
+    status: ApprovalStatus,
+    *,
+    actor: str | None,
+    reason: str | None,
+) -> int:
+    approvals, payloads = _approval_stores(config_path)
+    envelope = approvals.read(request_id)
+    if envelope is None:
+        raise ConfigError(f"Unknown approval request: {request_id}")
+    request = envelope.value
+    payload = payloads.read(request_id)
+    if payload is None or payloads.digest(payload) != request.binding.payload_digest:
+        raise ConfigError("Approval payload is missing or does not match the exact request binding")
+    operator = actor or os.environ.get("USER", "local-operator")
+    decision_reason = reason or (
+        "Operator approved the exact bound request."
+        if status is ApprovalStatus.ACCEPTED
+        else "Operator rejected the exact bound request."
+    )
+    decided = decide_approval(
+        request,
+        status,
+        actor=operator,
+        decided_at=system_clock().now_iso(),
+        reason=decision_reason,
+    )
+    saved = approvals.save(decided, expected_revision=envelope.revision)
+    _json(
+        {
+            "status": "ok",
+            "approval": saved.value.summary(),
+            "payload_retained": True,
+            "safe_next_action": (
+                "Retry the exact bound operation with this approval_request_id."
+                if status is ApprovalStatus.ACCEPTED
+                else "Create a new proposal if the rejected operation is still required."
+            ),
+        }
+    )
+    return 0
 
 
 def _config_pending(config_path: Path) -> int:
@@ -992,6 +1094,8 @@ def _activate(
         ids=id_generator(),
         clock=system_clock(),
         config_path=config_path,
+        validate_contract_artifacts=validate_generated_contract_identity,
+        activation_journal=build_runtime_activation_journal(store.root),
     )
     return asdict(
         activator.activate(
@@ -1469,6 +1573,8 @@ def _runtime_command(args: argparse.Namespace) -> int:
             ids=id_generator(),
             clock=system_clock(),
             config_path=config_path,
+            validate_contract_artifacts=validate_generated_contract_identity,
+            activation_journal=build_runtime_activation_journal(store.root),
         )
         _json(asdict(activator.activate(target, extra_env=_runtime_environment(args))))
         return 0
@@ -1778,7 +1884,12 @@ def _runtime_agent_command(args: argparse.Namespace) -> int:
 
 def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     from ..mcp.grace import FORGE_V1_IDENTITY, create_grace_server
-    from ..mcp.server import FORGE_V2_IDENTITY, create_server, tool_surface_hash
+    from ..mcp.server import (
+        FORGE_V2_IDENTITY,
+        build_runtime_contract_identity,
+        create_server,
+        tool_surface_hash,
+    )
 
     if connector_identity == FORGE_V1_IDENTITY:
         create_grace_server().run(transport="stdio")
@@ -1786,6 +1897,7 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     if connector_identity != FORGE_V2_IDENTITY:
         raise ConfigError(f"Unknown connector identity: {connector_identity}")
 
+    validate_generated_contract_identity()
     store = _ensure_generation(config_path)
     initial_generation = store.activation_target() or store.active() or store.current()
     if initial_generation is None:
@@ -1843,12 +1955,17 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     # The initial process startup performs the same self-check as a hot-reload candidate.
     initial.service.repo_list(synthetic=True)
     router = AtomicServiceRouter(initial)
+
+    def contract_identity_provider() -> RuntimeContractIdentity:
+        return build_runtime_contract_identity(router.active_generation)
+
     reloader = HotReloadCoordinator(
         router=router,
         build_candidate=lambda generation: build_container(generation),
         commit_activation=lambda generation, expected: store.activate(
             generation, expected_active=expected
         ),
+        contract_identity_provider=build_runtime_contract_identity,
     )
     _, _, mcp_socket = _runtime_paths(store)
     runtime_state_path = store.root / "runtime.json"
@@ -1907,8 +2024,10 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
         reload_runtime=reload_in_process,
         read_audit=read_audit_events,
         read_log=read_runtime_log,
+        read_log_page=read_runtime_log_page,
         read_audit_page=read_audit_event_page,
         read_runtime_status=lambda: _runtime_status(store),
+        contract_identity_provider=contract_identity_provider,
     )
 
     def _reap_inflight_background() -> None:
@@ -1928,7 +2047,11 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
     with contextlib.suppress(ValueError):  # signal.signal only works on the main thread
         signal.signal(signal.SIGTERM, _terminate)
     try:
-        create_server(router=router, admin=admin).run(transport="stdio")
+        create_server(
+            router=router,
+            admin=admin,
+            contract_identity_provider=contract_identity_provider,
+        ).run(transport="stdio")
     finally:
         _reap_inflight_background()
         with contextlib.suppress(ValueError):
@@ -1950,7 +2073,7 @@ def _webhook_serve(config_path: Path) -> int:
     config = load_config(store.resolved_path(generation.generation))
     if not config.server.github_webhook_enabled:
         raise ConfigError("GitHub webhook ingress is disabled in the reviewed configuration")
-    secret = os.environ.get(config.server.github_webhook_secret_env)
+    secret = os.environ.get(config.server.github_webhook_secret_env, "")
     if not secret:
         raise ConfigError(
             f"GitHub webhook secret environment variable {config.server.github_webhook_secret_env} is missing"
@@ -2178,6 +2301,18 @@ def build_parser() -> argparse.ArgumentParser:
     dev_promote.add_argument("--from-worktree", dest="from_worktree", default=".")
     dev_promote.add_argument("--keep", type=int, default=DEFAULT_KEEP_RELEASES)
     dev_promote.add_argument("--release-root", dest="release_root", default=None)
+    approval = commands.add_parser("approval", help="Review exact-bound operator approvals")
+    approval_sub = approval.add_subparsers(dest="approval_command", required=True)
+    approval_list = approval_sub.add_parser("list")
+    approval_list.add_argument(
+        "--status",
+        choices=[item.value for item in ApprovalStatus],
+    )
+    for decision in ("approve", "reject"):
+        item = approval_sub.add_parser(decision)
+        item.add_argument("request_id")
+        item.add_argument("--actor")
+        item.add_argument("--reason")
     config = commands.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("path")
@@ -2326,6 +2461,20 @@ def main(argv: list[str] | None = None) -> int:
             if args.runtime_command in {"install-agent", "uninstall-agent", "agent-status"}:
                 return _runtime_agent_command(args)
             return _runtime_command(args)
+        if args.command == "approval":
+            if args.approval_command == "list":
+                return _approval_list(config_path, args.status)
+            return _approval_decide(
+                config_path,
+                args.request_id,
+                (
+                    ApprovalStatus.ACCEPTED
+                    if args.approval_command == "approve"
+                    else ApprovalStatus.DECLINED
+                ),
+                actor=args.actor,
+                reason=args.reason,
+            )
         if args.command == "version":
             return _version_command(args)
         if args.command == "upgrade":

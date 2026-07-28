@@ -299,6 +299,24 @@ class JsonStateRepository(Generic[T]):
             self._write(path, data)
         return envelope
 
+    def create_or_read_equal(self, record_id: str, value: T) -> StateEnvelope[T]:
+        """Atomically create a record or return its equal durable envelope."""
+
+        safe_id = self._record_id(record_id)
+        path = self._path(safe_id)
+        envelope = StateEnvelope(safe_id, self._codec.schema_version, Revision(1), value)
+        data = self._encode(envelope)
+        with self._files.locked(safe_id, operation="create_or_read_equal"):
+            current = self.read(safe_id)
+            if current is not None:
+                if current.value == value:
+                    return current
+                raise self._error(
+                    f"State record already exists: {safe_id}", ErrorCode.ALREADY_EXISTS
+                )
+            self._write(path, data)
+        return envelope
+
     def read(self, record_id: str) -> StateEnvelope[T] | None:
         safe_id = self._record_id(record_id)
         data = self._files.read_bytes(safe_id)

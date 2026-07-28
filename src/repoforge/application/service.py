@@ -6,7 +6,7 @@ from typing import Any
 
 from ..bootstrap import AdapterOverrides, Application, build_application
 from ..config import AppConfig
-from ..domain.egress import EgressDestination, sanitize_egress_data
+from ..domain.egress import EgressDestination, EgressPolicy, sanitize_egress_data
 from ..domain.ticket_sync import TicketProjectOwnerType
 from ..ports import (
     AuditSink,
@@ -25,6 +25,7 @@ from .operations.composite import OperationCommand, OperationCoordinator
 from .operations.list import OperationListCommand, OperationLister
 from .operations.recovery import reap_running_background
 from .operations.status import OperationStatusCommand, OperationStatusReader
+from .operations.work_admission import DurableWorkAdmission
 from .read_batch import FileReadRequest
 from .repository.commit_read import (
     RepositoryCommitReadCommand,
@@ -51,6 +52,7 @@ from .repository.family_v2 import (
 from .repository.file_read import RepositoryFileReadCommand, RepositoryFileReader
 from .repository.files_read import RepositoryFilesReadCommand, RepositoryFilesReader
 from .repository.issue_graph import RepositoryIssueGraphCommand, RepositoryIssueGraphReader
+from .repository.issue_graph_workflow import IssueGraphWorkflowService
 from .repository.issue_next import RepositoryIssueNextCommand, RepositoryIssueNextReader
 from .repository.issue_read import IssueReadCommand, IssueReader
 from .repository.issue_spec import RepositoryIssueSpecCommand, RepositoryIssueSpecReader
@@ -267,7 +269,17 @@ def _workspace_verify_plan_envelope(
     }
 
 
-def _result(value: object) -> dict[str, Any]:
+_READ_EGRESS_POLICY = EgressPolicy(
+    max_output_chars=120_000,
+    max_output_lines=20_000,
+)
+
+
+def _result(
+    value: object,
+    *,
+    egress_policy: EgressPolicy | None = None,
+) -> dict[str, Any]:
     data = to_data(value)
     if not isinstance(data, dict):
         raise TypeError("Application result must serialize to an object")
@@ -277,7 +289,11 @@ def _result(value: object) -> dict[str, Any]:
     else:
         data.pop("payload", None)
         payload = data
-    sanitized = sanitize_egress_data(payload, destination=EgressDestination.MODEL)
+    sanitized = sanitize_egress_data(
+        payload,
+        destination=EgressDestination.MODEL,
+        policy=egress_policy,
+    )
     if not isinstance(sanitized, dict):
         raise TypeError("Sanitized application result must remain an object")
     return sanitized
@@ -327,7 +343,13 @@ class CodingService:
         ctx = self.application.context
         self._operation_status = OperationStatusReader(self.operations)
         self._operation_list = OperationLister(self.operations)
-        self._operation_cancel = OperationCancellationRequester(self.operations)
+        self._operation_cancel = OperationCancellationRequester(
+            self.operations,
+            ctx.operation_work_queue,
+            ctx.worker_bindings,
+            ctx.reaper,
+            request_live_cancel=self._request_live_operation_cancel,
+        )
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
         self._repo_context = RepositoryContextReader(ctx)
@@ -335,9 +357,16 @@ class CodingService:
         self._repo_compare = RepositoryComparer(ctx)
         self._repo_history_v2 = RepositoryHistoryV2(ctx)
         self._repo_list_v2 = RepositoryListV2(ctx)
-        self._repo_issue_v2 = RepositoryIssueV2(ctx)
+        self._issue_graph_workflow = IssueGraphWorkflowService(
+            ctx,
+            self.operations,
+            self.application.issue_graph_proposals,
+            self.application.issue_graph_publications,
+            self.application.background_tasks,
+        )
+        self._repo_issue_v2 = RepositoryIssueV2(ctx, self._issue_graph_workflow)
         self._repo_pr_v2 = RepositoryPrReadV2(ctx)
-        self._task_context_v2 = RepositoryTaskContextV2(ctx)
+        self._task_context_v2 = RepositoryTaskContextV2(ctx, self._issue_graph_workflow)
         self._repo_tree = RepositoryTreeReader(ctx)
         self._repo_read = RepositoryFileReader(ctx)
         self._repo_reads = RepositoryFilesReader(ctx)
@@ -404,14 +433,18 @@ class CodingService:
             lister=self._operation_list,
             cancel=self._operation_cancel,
             failure_evidence=self._execution_failure_evidence,
-            request_live_cancel=self._request_live_operation_cancel,
         )
+        if ctx.operation_work_queue is None:
+            raise RuntimeError("Durable operation work queue is not configured")
+        self._work_admission = DurableWorkAdmission(self.operations, ctx.operation_work_queue)
         self._verify = WorkspaceVerifier(
             ctx,
             assessment=self._assessment,
             profile=self._profile,
             diagnostic=self._diagnostic,
             adhoc=self._adhoc,
+            admission=self._work_admission,
+            operations=self.operations,
         )
         self._commit = WorkspaceCommitter(ctx)
         self._push = WorkspacePusher(ctx)
@@ -483,8 +516,10 @@ class CodingService:
 
         Closes the window in which a background child process group (started in
         its own session) would otherwise outlive this process until the next
-        start's recovery sweep. Resumable kinds (pr_check_watch) are left alone
-        -- they are re-driven on restart. Best-effort; never raises.
+        start's recovery sweep. Resumable kinds are left alone and re-driven
+        after restart, as is any operation with a durable work sidecar -- that
+        child belongs to the execution worker, which outlives this process.
+        Best-effort; never raises.
         """
         ctx = self.application.context
         try:
@@ -495,6 +530,7 @@ class CodingService:
                 resumable_kinds=frozenset({"pr_check_watch"}),
                 worker_bindings=ctx.worker_bindings,
                 reaper=ctx.reaper,
+                work_queue=ctx.operation_work_queue,
             )
         except Exception:
             return 0
@@ -638,7 +674,8 @@ class CodingService:
         return _result(
             self._repo_read_v2.execute(
                 RepositoryReadCommand(repo_id, tuple(files), ref, byte_budget, cursor)
-            )
+            ),
+            egress_policy=_READ_EGRESS_POLICY,
         )
 
     def repo_search(
@@ -815,6 +852,8 @@ class CodingService:
         link_type: str | None = None,
         idempotency_key: str | None = None,
         approval_request_id: str | None = None,
+        manage: dict[str, object] | None = None,
+        runtime_identity: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._repo_issue_v2.execute(
@@ -836,9 +875,28 @@ class CodingService:
                     link_type=link_type,
                     idempotency_key=idempotency_key,
                     approval_request_id=approval_request_id,
+                    manage=manage,
+                    runtime_identity=runtime_identity,
                 )
             )
         )
+
+    def repo_issue_manage_approval(
+        self,
+        approval_request_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        request = self._issue_graph_workflow.accept_exact_approval(
+            approval_request_id,
+            actor=actor,
+            reason=reason,
+        )
+        return {
+            "summary": f"Accepted issue graph approval {request.request_id}",
+            "approval": request.summary(),
+        }
 
     def repo_pr_read(self, repo_id: str, pr_number: int, fresh: bool = False) -> dict[str, Any]:
         return _result(self._repo_pr.execute(PullRequestReadCommand(repo_id, pr_number, fresh)))
@@ -1058,7 +1116,8 @@ class CodingService:
         return _result(
             self._read_v2.execute(
                 WorkspaceReadCommand(workspace_id, tuple(files), byte_budget, cursor)
-            )
+            ),
+            egress_policy=_READ_EGRESS_POLICY,
         )
 
     def workspace_search(
@@ -1129,18 +1188,19 @@ class CodingService:
         max_files: int = 20,
         byte_budget: int = 120_000,
         cursor: str | None = None,
+        *,
         include_hunks: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._workspace_retrieval.diff(
                 WorkspaceDiffV2Command(
-                    workspace_id,
-                    staged,
-                    path_glob,
-                    max_files,
-                    byte_budget,
-                    cursor,
-                    include_hunks,
+                    workspace_id=workspace_id,
+                    staged=staged,
+                    path_glob=path_glob,
+                    max_files=max_files,
+                    byte_budget=byte_budget,
+                    cursor=cursor,
+                    include_hunks=include_hunks,
                 )
             )
         )
@@ -1325,15 +1385,15 @@ class CodingService:
         return _result(
             self._diagnostic.execute(
                 WorkspaceRunDiagnosticCommand(
-                    workspace_id,
-                    diagnostic_id,
-                    selector,
-                    expected_fingerprint,
-                    intent,
-                    expectation,
-                    expected_failure_class,
-                    selector2,
-                    force_rerun,
+                    workspace_id=workspace_id,
+                    diagnostic_id=diagnostic_id,
+                    selector=selector,
+                    expected_fingerprint=expected_fingerprint,
+                    intent=intent,
+                    expectation=expectation,
+                    expected_failure_class=expected_failure_class,
+                    selector2=selector2,
+                    force_rerun=force_rerun,
                 )
             )
         )
@@ -1581,6 +1641,8 @@ class CodingService:
         until: str = "all_completed",
         timeout_seconds: int = 900,
         event_cursor: str | None = None,
+        issue_dispositions: tuple[dict[str, object], ...] = (),
+        apply_closures: bool = False,
     ) -> dict[str, Any]:
         return _result(
             self._pr.execute(
@@ -1596,6 +1658,8 @@ class CodingService:
                     until=until,
                     timeout_seconds=timeout_seconds,
                     event_cursor=event_cursor,
+                    issue_dispositions=issue_dispositions,
+                    apply_closures=apply_closures,
                 )
             )
         )

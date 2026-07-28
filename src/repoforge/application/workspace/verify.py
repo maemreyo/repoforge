@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ...domain.diagnostics import DiagnosticExpectation, DiagnosticFailureClass
-from ...domain.errors import ConfigError, ErrorCode, SecurityError, WorkspaceError
+from ...domain.errors import (
+    ConfigError,
+    ErrorCode,
+    RepoForgeError,
+    SecurityError,
+    WorkspaceError,
+)
 from ...domain.filesystem_transaction import CreateFile, TransactionPlan, WriteFile
+from ...domain.operation_task import (
+    TERMINAL_OPERATION_STATES,
+    OperationRetryability,
+    OperationState,
+    OperationTask,
+)
+from ...domain.operation_work import OperationWorkRequest
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ...domain.redaction import sanitize_persisted_data
 from ...domain.verification import VerificationIntent
@@ -16,23 +30,23 @@ from ..context import ApplicationContext
 from ..dto import to_data
 from ..file_transactions import open_file_transaction
 from ..fingerprint_cache import prime_fingerprint
+from ..operations.manager import OperationManager
+from ..operations.work_admission import DurableWorkAdmission
 from .assessment import WorkspaceAssessmentCommand, WorkspaceAssessmentReader
 from .diagnostic_selector import SelectorInput
 from .run_adhoc import (
     WorkspaceAdhocRunner,
     WorkspaceRunAdhocBackgroundResult,
-    WorkspaceRunAdhocCommand,
     WorkspaceRunAdhocResult,
 )
 from .run_diagnostic import (
     WorkspaceDiagnosticRunner,
-    WorkspaceRunDiagnosticCommand,
+    WorkspaceRunDiagnosticBackgroundResult,
     WorkspaceRunDiagnosticResult,
 )
 from .run_profile import (
     WorkspaceProfileRunner,
     WorkspaceRunProfileBackgroundResult,
-    WorkspaceRunProfileCommand,
     WorkspaceRunProfileResult,
 )
 
@@ -40,6 +54,8 @@ VerifyMode = Literal["plan", "auto", "diagnostic", "profile", "adhoc"]
 VerifyRerun = Literal["failed"]
 _HIGH_CONFIDENCE = 95
 _MAX_ARTIFACT_BYTES = 120_000
+_FOREGROUND_WAIT_SECONDS = 25.0
+_FOREGROUND_POLL_SECONDS = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +108,11 @@ class WorkspaceVerifyResult:
     execution_evidence: dict[str, object] | None = None
     failed_selectors: list[str] = field(default_factory=list)
     output_artifact_reference: str | None = None
+    failure_provider: str | None = None
+    selector_coverage: str = "not_applicable"
+    selectors_unavailable_reason: str | None = None
+    failure_locations: list[dict[str, object]] = field(default_factory=list)
+    output_artifact_status: str = "not_applicable"
     failure_expectation: str | None = None
     failure_chain_id: str | None = None
     rerun_of_selectors: list[str] = field(default_factory=list)
@@ -137,6 +158,13 @@ def _assessment_projection(assessment: Any) -> tuple[dict[str, object], dict[str
         "uncertainties": list(assessment.uncertainties),
         "refresh_required": refresh_required,
         "behind_base": behind_base,
+        "base_freshness": {
+            "status": assessment.base_freshness.status.value,
+            "coverage": assessment.base_freshness.coverage.value,
+            "value": dict(base) if base else None,
+            "error_code": assessment.base_freshness.error_code,
+            "safe_fallback": assessment.base_freshness.safe_fallback,
+        },
         "provider": impact_evidence,
         "final_profile": recommendation.final_profile,
         "manual_review_required": recommendation.manual_review_required,
@@ -169,6 +197,18 @@ def _staleness_warning(assessment: Any) -> str | None:
     value = assessment.base_freshness.value
     if not bool(value.get("refresh_required", False)):
         return None
+    warning = value.get("warning")
+    if not isinstance(warning, str):
+        warning = value.get("preflight_warning")
+    recommended = value.get("recommended_action")
+    invalidated = value.get("expected_evidence_invalidation")
+    if isinstance(warning, str):
+        suffix = ""
+        if isinstance(recommended, str):
+            suffix += f" Recommended action: {recommended}."
+        if isinstance(invalidated, list) and invalidated:
+            suffix += " Expected invalidation: " + ", ".join(map(str, invalidated)) + "."
+        return warning + suffix
     behind = value.get("behind_base", 0)
     if isinstance(behind, int) and not isinstance(behind, bool) and behind > 0:
         return (
@@ -224,6 +264,21 @@ def _auto_target(assessment: Any) -> tuple[str, list[str], str] | None:
     if reasons:
         routing_reason += f" {reasons[0]}"
     return diagnostic, sorted(selectors), routing_reason
+
+
+def _selector_tuple(raw: SelectorInput) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(raw)
+
+
+def _enum_value(raw: object) -> str | None:
+    if raw is None:
+        return None
+    value = getattr(raw, "value", raw)
+    return str(value)
 
 
 def _command_evidence(raw: dict[str, object]) -> dict[str, object]:
@@ -287,12 +342,104 @@ class WorkspaceVerifier:
         profile: WorkspaceProfileRunner,
         diagnostic: WorkspaceDiagnosticRunner,
         adhoc: WorkspaceAdhocRunner,
+        admission: DurableWorkAdmission,
+        operations: OperationManager,
     ) -> None:
         self.ctx = ctx
         self._assessment = assessment
         self._profile = profile
         self._diagnostic = diagnostic
         self._adhoc = adhoc
+        self._admission = admission
+        self._operations = operations
+
+    def _wait_for_operation(
+        self,
+        operation_id: str,
+    ) -> tuple[OperationTask, dict[str, Any] | None]:
+        deadline = time.monotonic() + _FOREGROUND_WAIT_SECONDS
+        task = self._operations.status(operation_id)
+        while task.state not in TERMINAL_OPERATION_STATES and time.monotonic() < deadline:
+            time.sleep(_FOREGROUND_POLL_SECONDS)
+            task = self._operations.status(operation_id)
+        result = None
+        if task.state is OperationState.SUCCEEDED and self.ctx.operation_result_store is not None:
+            result = self.ctx.operation_result_store.read(operation_id)
+        self._raise_terminal_failure(task)
+        return task, result
+
+    @staticmethod
+    def _raise_terminal_failure(task: OperationTask) -> None:
+        """Surface a durable execution failure to the caller that waited for it.
+
+        Making execution durable moved the command off the request thread; it did
+        not turn a refusal into a verdict. A caller that waited for this operation
+        would otherwise receive `outcome="failed"` with the exact reason -- the
+        typed code and message -- reachable only through a second call, so the
+        terminal failure is re-raised here with its evidence intact.
+        """
+        if task.state not in {
+            OperationState.FAILED,
+            OperationState.ORPHANED,
+            OperationState.CANCELLED,
+        }:
+            return
+        try:
+            code = ErrorCode(str(task.error_code))
+        except ValueError:
+            code = (
+                ErrorCode.COMMAND_FAILED
+                if task.state is OperationState.CANCELLED
+                else ErrorCode.INTERNAL_ERROR
+            )
+        message = task.error_message or (
+            f"Durable verification operation {task.operation_id} {task.state.value}"
+        )
+        raise RepoForgeError(
+            message,
+            code=code,
+            retryable=task.retryability is OperationRetryability.AUTOMATIC,
+            safe_next_action=(f"Read operation {task.operation_id} for the full durable evidence."),
+            details={
+                "operation_id": task.operation_id,
+                "operation_state": task.state.value,
+                "operation_phase": task.phase,
+                "attempt": task.attempt,
+            },
+        )
+
+    @staticmethod
+    def _operation_projection(task: OperationTask) -> dict[str, object]:
+        return {
+            "operation_id": task.operation_id,
+            "kind": task.kind,
+            "state": task.state.value,
+            "phase": task.phase,
+            "progress_current": task.progress_current,
+            "progress_total": task.progress_total,
+            "cancellation_reason": (
+                "cancelled" if task.state is OperationState.CANCELLED else None
+            ),
+            "poll_after_seconds": (None if task.state in TERMINAL_OPERATION_STATES else 1.0),
+        }
+
+    def _project_operation(
+        self,
+        result: WorkspaceVerifyResult,
+        task: OperationTask,
+    ) -> WorkspaceVerifyResult:
+        terminal = task.state in TERMINAL_OPERATION_STATES
+        return replace(
+            result,
+            summary=(
+                f"Durable verification operation {task.operation_id} {task.state.value}"
+                if terminal
+                else "Durable verification is queued or running"
+            ),
+            operation=self._operation_projection(task),
+            outcome=task.state.value if terminal else "running",
+            satisfies_commit_gate=False,
+        )
 
     def execute(self, command: WorkspaceVerifyCommand) -> WorkspaceVerifyResult:
         audit_details: dict[str, object] = {
@@ -413,20 +560,42 @@ class WorkspaceVerifier:
         if selected_mode == "diagnostic":
             if not diagnostic_id:
                 raise ConfigError("diagnostic mode requires diagnostic_id")
-            diagnostic_result = self._diagnostic.execute(
-                WorkspaceRunDiagnosticCommand(
+            admitted = self._admission.admit(
+                OperationWorkRequest.diagnostic(
                     workspace_id=command.workspace_id,
                     diagnostic_id=diagnostic_id,
-                    selector=selector,
-                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
-                    intent=command.intent,
-                    expectation=command.expectation,
-                    expected_failure_class=command.expected_failure_class,
-                    selector2=command.selector2,
+                    selector=_selector_tuple(selector),
+                    selector2=_selector_tuple(command.selector2),
+                    intent=_enum_value(command.intent),
+                    expectation=_enum_value(command.expectation),
+                    expected_failure_class=_enum_value(command.expected_failure_class),
                     force_rerun=command.force_rerun,
                     rerun_failed=command.rerun == "failed",
-                )
+                    expected_head_sha=assessment.snapshot.head_sha,
+                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
+                    config_generation=self.ctx.config_generation,
+                ),
+                operation_kind="workspace_run_diagnostic",
             )
+            durable_task = admitted
+            diagnostic_stored_result: dict[str, Any] | None = None
+            if not command.background:
+                durable_task, diagnostic_stored_result = self._wait_for_operation(
+                    admitted.operation_id
+                )
+            if (
+                durable_task.state is OperationState.SUCCEEDED
+                and diagnostic_stored_result is not None
+            ):
+                diagnostic_result: (
+                    WorkspaceRunDiagnosticResult | WorkspaceRunDiagnosticBackgroundResult
+                ) = WorkspaceRunDiagnosticResult(**diagnostic_stored_result)
+            else:
+                diagnostic_result = WorkspaceRunDiagnosticBackgroundResult(
+                    operation_id=admitted.operation_id,
+                    phase=durable_task.phase,
+                    safe_next_action="Poll operation status until the durable worker completes.",
+                )
             result = self._from_diagnostic(
                 command,
                 diagnostic_result,
@@ -435,17 +604,38 @@ class WorkspaceVerifier:
                 impact_evidence,
                 recommendations,
                 warning,
+                head_sha=assessment.snapshot.head_sha,
+                workspace_fingerprint=assessment.snapshot.workspace_fingerprint,
             )
+            if isinstance(diagnostic_result, WorkspaceRunDiagnosticBackgroundResult):
+                result = self._project_operation(result, durable_task)
         elif selected_mode == "profile":
-            profile_result = self._profile.execute(
-                WorkspaceRunProfileCommand(
-                    command.workspace_id,
-                    profile_name,
-                    command.background,
-                    command.force_rerun,
-                    assessment.snapshot.workspace_fingerprint,
-                )
+            admitted = self._admission.admit(
+                OperationWorkRequest.profile(
+                    workspace_id=command.workspace_id,
+                    profile_name=profile_name or final_profile,
+                    expected_head_sha=assessment.snapshot.head_sha,
+                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
+                    config_generation=self.ctx.config_generation,
+                ),
+                operation_kind="workspace_run_profile",
             )
+            durable_task = admitted
+            profile_stored_result: dict[str, Any] | None = None
+            if not command.background:
+                durable_task, profile_stored_result = self._wait_for_operation(
+                    admitted.operation_id
+                )
+            if durable_task.state is OperationState.SUCCEEDED and profile_stored_result is not None:
+                profile_result: WorkspaceRunProfileResult | WorkspaceRunProfileBackgroundResult = (
+                    WorkspaceRunProfileResult(**profile_stored_result)
+                )
+            else:
+                profile_result = WorkspaceRunProfileBackgroundResult(
+                    operation_id=admitted.operation_id,
+                    phase=durable_task.phase,
+                    safe_next_action="Poll operation status until the durable worker completes.",
+                )
             result = self._from_profile(
                 command,
                 profile_result,
@@ -458,20 +648,37 @@ class WorkspaceVerifier:
                 workspace_fingerprint=assessment.snapshot.workspace_fingerprint,
                 fallback_full=fallback_full,
             )
+            if isinstance(profile_result, WorkspaceRunProfileBackgroundResult):
+                result = self._project_operation(result, durable_task)
         else:
             if command.argv is None:
                 raise ConfigError("adhoc mode requires argv")
-            adhoc_result = self._adhoc.execute(
-                WorkspaceRunAdhocCommand(
-                    command.workspace_id,
-                    command.argv,
+            admitted = self._admission.admit(
+                OperationWorkRequest.adhoc(
+                    workspace_id=command.workspace_id,
+                    argv=command.argv,
                     working_directory=command.working_directory,
-                    background=command.background,
-                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
-                    expected_head_sha=assessment.snapshot.head_sha,
                     mutability=command.mutability,
-                )
+                    expected_head_sha=assessment.snapshot.head_sha,
+                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
+                    config_generation=self.ctx.config_generation,
+                ),
+                operation_kind="workspace_run_adhoc",
             )
+            durable_task = admitted
+            adhoc_stored_result: dict[str, Any] | None = None
+            if not command.background:
+                durable_task, adhoc_stored_result = self._wait_for_operation(admitted.operation_id)
+            if durable_task.state is OperationState.SUCCEEDED and adhoc_stored_result is not None:
+                adhoc_result: WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult = (
+                    WorkspaceRunAdhocResult(**adhoc_stored_result)
+                )
+            else:
+                adhoc_result = WorkspaceRunAdhocBackgroundResult(
+                    operation_id=admitted.operation_id,
+                    phase=durable_task.phase,
+                    safe_next_action="Poll operation status until the durable worker completes.",
+                )
             result = self._from_adhoc(
                 command,
                 adhoc_result,
@@ -483,21 +690,67 @@ class WorkspaceVerifier:
                 head_sha=assessment.snapshot.head_sha,
                 workspace_fingerprint=assessment.snapshot.workspace_fingerprint,
             )
+            if isinstance(adhoc_result, WorkspaceRunAdhocBackgroundResult):
+                result = self._project_operation(result, durable_task)
 
         if command.artifact_output_path is not None:
+            if result.outcome == "running":
+                return replace(result, output_artifact_status="source_unavailable")
             return self._persist_artifact(result, command.artifact_output_path)
+        if result.outcome == "passed" and command.mode in {"auto", "profile"}:
+            record = self.ctx.store.load(command.workspace_id)
+            if "last_recreate_verify_selector" in record.metadata:
+                record.metadata.pop("last_recreate_verify_selector", None)
+                self.ctx.store.save(record)
         return result
 
     def _from_diagnostic(
         self,
         command: WorkspaceVerifyCommand,
-        delegated: WorkspaceRunDiagnosticResult,
+        delegated: WorkspaceRunDiagnosticResult | WorkspaceRunDiagnosticBackgroundResult,
         reason: str,
         assessment: dict[str, object],
         impact: dict[str, object] | None,
         recommendations: list[dict[str, object]],
         warning: str | None,
+        *,
+        head_sha: str,
+        workspace_fingerprint: str,
     ) -> WorkspaceVerifyResult:
+        if isinstance(delegated, WorkspaceRunDiagnosticBackgroundResult):
+            return WorkspaceVerifyResult(
+                summary="Workspace diagnostic is queued or running",
+                workspace_id=command.workspace_id,
+                requested_mode=command.mode,
+                selected_mode="diagnostic",
+                routing_reason=reason,
+                impact_evidence=impact,
+                assessment=assessment,
+                recommendations=recommendations,
+                staleness_warning=warning,
+                operation={
+                    "operation_id": delegated.operation_id,
+                    "kind": "workspace_run_diagnostic",
+                    "state": "pending" if delegated.phase == "queued" else "running",
+                    "phase": delegated.phase,
+                    "progress_current": None,
+                    "progress_total": None,
+                    "cancellation_reason": None,
+                    "poll_after_seconds": 1.0,
+                },
+                commands=[],
+                steps=[],
+                failed_step=None,
+                failure_domain=None,
+                business_tests_ran=False,
+                valid_tdd_red_evidence=False,
+                failure_reused=False,
+                artifact_paths=[],
+                outcome="running",
+                satisfies_commit_gate=False,
+                head_sha=head_sha,
+                workspace_fingerprint=workspace_fingerprint,
+            )
         command_raw = {
             "argv": delegated.argv,
             "returncode": delegated.returncode,
@@ -530,6 +783,11 @@ class WorkspaceVerifier:
             execution_evidence=delegated.execution_evidence,
             failed_selectors=delegated.failed_selectors,
             output_artifact_reference=delegated.output_artifact_reference,
+            failure_provider=delegated.failure_provider,
+            selector_coverage=delegated.selector_coverage,
+            selectors_unavailable_reason=delegated.selectors_unavailable_reason,
+            failure_locations=delegated.failure_locations,
+            output_artifact_status=delegated.output_artifact_status,
             failure_expectation=delegated.failure_expectation,
             failure_chain_id=delegated.failure_chain_id,
             rerun_of_selectors=delegated.rerun_of_selectors,
@@ -563,7 +821,7 @@ class WorkspaceVerifier:
                 operation={
                     "operation_id": delegated.operation_id,
                     "kind": "workspace_run_profile",
-                    "state": "running",
+                    "state": "pending" if delegated.phase == "queued" else "running",
                     "phase": delegated.phase,
                     "progress_current": None,
                     "progress_total": None,
@@ -636,7 +894,7 @@ class WorkspaceVerifier:
                 operation={
                     "operation_id": delegated.operation_id,
                     "kind": "workspace_run_adhoc",
-                    "state": "running",
+                    "state": "pending" if delegated.phase == "queued" else "running",
                     "phase": delegated.phase,
                     "progress_current": None,
                     "progress_total": None,

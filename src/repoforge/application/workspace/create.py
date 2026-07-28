@@ -9,6 +9,7 @@ from ...domain.policy import slugify, validate_adopted_branch, validate_branch
 from ...domain.workspace import WorkspaceRecord, normalize_issue_ids
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
+from ..idempotency import IdempotencyEffectBoundary
 from .removal_safety import build_stale_workspaces_nudge
 
 
@@ -102,6 +103,7 @@ class WorkspaceCreator:
             if repo.read_only
             else "Inspect files, make changes, run a verification profile, then review the diff."
         )
+        boundary = IdempotencyEffectBoundary()
 
         def reconcile() -> WorkspaceCreateResult | None:
             if key_hash is None:
@@ -153,6 +155,9 @@ class WorkspaceCreator:
                         "The source repository and existing registered workspaces remain unchanged.",
                     ),
                 )
+            # Both intents kept: the effect boundary opens BEFORE any worktree exists
+            # (#234), and which worktree call runs depends on adoption (#281).
+            boundary.begin()
             head = (
                 self.ctx.git.adopt_worktree(repo, destination, branch)
                 if adopt
@@ -161,6 +166,7 @@ class WorkspaceCreator:
             metadata: dict[str, object] = {
                 "repository_policy_snapshot": repository_policy_snapshot(repo),
                 "workspace_base_sha": head,
+                "task_slug": c.task_slug,
             }
             if adopt:
                 # Durable, because removal has to know: deleting an adopted branch
@@ -189,6 +195,7 @@ class WorkspaceCreator:
                     raise WorkspaceError(
                         f"Workspace registry save failed and compensation failed: {cleanup_exc}"
                     ) from exc
+                boundary.rollback()
                 raise
             return WorkspaceCreateResult(
                 workspace_id,
@@ -226,6 +233,7 @@ class WorkspaceCreator:
                 },
                 serialize=to_data,
                 deserialize=lambda value: WorkspaceCreateResult(**value),
+                effect_boundary=boundary,
             ),
         )
         # Computed fresh on every call (even an idempotent cache hit) since workspace

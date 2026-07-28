@@ -1,7 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from ...domain.errors import WorkspaceError
 from ..context import ApplicationContext
+from ..idempotency import IdempotencyEffectBoundary
+from ..outcome_receipts import execute_with_outcome_receipt
 from .removal_safety import unpushed_commit_count
 
 
@@ -25,6 +27,11 @@ class WorkspaceRemover:
 
     def execute(self, c: WorkspaceRemoveCommand) -> WorkspaceRemoveResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
+        audit_details = {
+            "workspace_id": c.workspace_id,
+            "delete_local_branch": c.delete_local_branch,
+        }
+        boundary = IdempotencyEffectBoundary()
 
         def op() -> WorkspaceRemoveResult:
             with self.ctx.locks.lock(c.workspace_id):
@@ -58,6 +65,10 @@ class WorkspaceRemover:
                 # removing the workspace must never delete it: that would destroy work this
                 # workspace did not create, and unlike everything else here it is not
                 # recoverable from the registry.
+                #
+                # This refusal deliberately runs BEFORE `boundary.begin()`: the boundary
+                # means "an effect may have happened", so opening it and then raising would
+                # write a receipt claiming a started effect for a call that touched nothing.
                 delete_branch = c.delete_local_branch and not record.metadata.get("adopted_branch")
                 if c.delete_local_branch and not delete_branch:
                     raise WorkspaceError(
@@ -73,15 +84,23 @@ class WorkspaceRemover:
                             "not modified.",
                         ),
                     )
+                # Declared here, not before the checks above: everything up to this point
+                # is a pure refusal that leaves the worktree, branch and registry exactly
+                # as they were, and reporting those as an effect of unknown outcome would
+                # tell an operator to go inspect state that was never touched.
+                boundary.begin()
                 deleted = self.ctx.git.remove_worktree(repo, path, record.branch, delete_branch)
+                authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, deleted)
+                boundary.record_result(authoritative_result)
                 self.ctx.store.delete(c.workspace_id)
-                return WorkspaceRemoveResult(c.workspace_id, True, deleted)
+                return authoritative_result
 
-        return self.ctx.audited(
+        return execute_with_outcome_receipt(
+            self.ctx,
             "workspace_remove",
-            {
-                "workspace_id": c.workspace_id,
-                "delete_local_branch": c.delete_local_branch,
-            },
+            asdict(c),
             op,
+            details=audit_details,
+            serialize=asdict,
+            effect_boundary=boundary,
         )

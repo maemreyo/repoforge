@@ -663,7 +663,7 @@ def test_no_op_mutate_still_reports_syntax_for_reviewed_virtual_file(
     assert result["syntax_diagnostics"]["analyzed_paths"] == []
 
 
-def test_keyed_mutate_replays_identical_syntax_evidence_and_reads_v1_receipt(
+def test_keyed_mutate_replays_freshness_and_reads_v2_and_v1_receipts(
     forge_env: ForgeEnvironment,
 ) -> None:
     service = forge_env.service
@@ -686,11 +686,25 @@ def test_keyed_mutate_replays_identical_syntax_evidence_and_reads_v1_receipt(
     )
 
     assert replay["syntax_diagnostics"] == first["syntax_diagnostics"]
+    assert replay["freshness_preflight"] == first["freshness_preflight"]
     root = Path(service.workspace_status(workspace_id)["path"])
     receipt = next(
         (root.parent / ".repoforge-transaction-receipts").rglob("workspace_mutate-*.json")
     )
     payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    payload["result"].pop("freshness_preflight")
+    receipt.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    v2 = service.workspace_mutate(
+        workspace_id,
+        [operation],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        idempotency_key=key,
+    )
+    assert v2["syntax_diagnostics"] == first["syntax_diagnostics"]
+    assert v2["freshness_preflight"] is None
+
     payload["schema_version"] = 1
     payload["result"].pop("syntax_diagnostics")
     receipt.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")

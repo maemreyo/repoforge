@@ -9,7 +9,10 @@ filesystem path as a repository identity: only repo_id, display_name, and remote
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from enum import Enum
 
 from ..config import RepositoryConfig
@@ -45,6 +48,42 @@ class RepositorySelection:
             "candidates": [candidate.as_dict() for candidate in self.candidates],
             "guidance": self.guidance,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RepositorySelectionPin:
+    """One session-local selection bound to reviewed capability state."""
+
+    repo_selection_id: str
+    repo_id: str
+    selection_generation: int
+    capability_digest: str
+    expires_at_epoch: float
+
+    def is_expired(self, *, now_epoch: float) -> bool:
+        return now_epoch >= self.expires_at_epoch
+
+    def as_public_dict(self) -> dict[str, object]:
+        expires_at = datetime.fromtimestamp(self.expires_at_epoch, tz=timezone.utc)
+        return {
+            "repo_selection_id": self.repo_selection_id,
+            "repo_id": self.repo_id,
+            "selection_generation": self.selection_generation,
+            "capability_digest": self.capability_digest,
+            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+        }
+
+
+def repository_capability_digest(repo: RepositoryConfig) -> str:
+    """Hash the selected repository's exact reviewed capability projection."""
+
+    projection = json.dumps(
+        asdict(repo),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode()
+    return hashlib.sha256(projection).hexdigest()
 
 
 _NO_MATCH_GUIDANCE = (

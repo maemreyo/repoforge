@@ -18,6 +18,7 @@ class IssueWriteOperation(str, Enum):
     REOPEN = "reopen"
     LINK = "link"
     CREATE = "create"
+    UPDATE = "update"
 
 
 class IssueLinkType(str, Enum):
@@ -92,6 +93,7 @@ class IssueWritePolicy:
 
     enabled_ops: tuple[str, ...] = (IssueWriteOperation.COMMENT.value,)
     approval_required_ops: tuple[str, ...] = ()
+    operation_semantics_version: int = 1
     max_writes_per_call: int = 2
     max_writes_per_window: int = 20
     window_seconds: int = 3_600
@@ -113,6 +115,17 @@ class IssueWritePolicy:
             )
         object.__setattr__(self, "enabled_ops", enabled)
         object.__setattr__(self, "approval_required_ops", approval)
+        object.__setattr__(
+            self,
+            "operation_semantics_version",
+            _bounded_int(
+                self.operation_semantics_version,
+                "issue_writes.operation_semantics_version",
+                default=1,
+                minimum=1,
+                maximum=2,
+            ),
+        )
         object.__setattr__(
             self,
             "max_writes_per_call",
@@ -174,6 +187,7 @@ class IssueWritePolicy:
         allowed = {
             "enabled_ops",
             "approval_required_ops",
+            "operation_semantics_version",
             "max_writes_per_call",
             "max_writes_per_window",
             "window_seconds",
@@ -194,6 +208,13 @@ class IssueWritePolicy:
                     raw.get("approval_required_ops"),
                     f"{context}.approval_required_ops",
                     default=(),
+                ),
+                operation_semantics_version=_bounded_int(
+                    raw.get("operation_semantics_version"),
+                    f"{context}.operation_semantics_version",
+                    default=1,
+                    minimum=1,
+                    maximum=2,
                 ),
                 max_writes_per_call=_bounded_int(
                     raw.get("max_writes_per_call"),
@@ -236,6 +257,7 @@ class IssueWritePolicy:
         return {
             "enabled_ops": list(self.enabled_ops),
             "approval_required_ops": list(self.approval_required_ops),
+            "operation_semantics_version": self.operation_semantics_version,
             "max_writes_per_call": self.max_writes_per_call,
             "max_writes_per_window": self.max_writes_per_window,
             "window_seconds": self.window_seconds,
@@ -248,6 +270,17 @@ class IssueWritePolicy:
 
     def requires_approval(self, operation: str) -> bool:
         return operation in self.approval_required_ops
+
+    def _effect_authority(self, operation: str) -> str:
+        if self.operation_semantics_version == 1 and operation == IssueWriteOperation.UPDATE.value:
+            return IssueWriteOperation.CREATE.value
+        return operation
+
+    def allows_effect(self, operation: str) -> bool:
+        return self.allows(self._effect_authority(operation))
+
+    def requires_effect_approval(self, operation: str) -> bool:
+        return self.requires_approval(self._effect_authority(operation))
 
     def render_create_body(self, *, body: str, evidence_ref: str) -> str:
         return self.create_body_template.format(body=body, evidence_ref=evidence_ref)

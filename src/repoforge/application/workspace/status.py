@@ -6,6 +6,7 @@ from ...config import RepositoryConfig
 from ...domain.workspace import WorkspaceRecord
 from ..context import ApplicationContext
 from ..fingerprint_cache import read_fingerprint
+from .status_read import LOCKED, ReadConsistency, status_read_lease
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,7 @@ class WorkspaceStatusResult:
     last_verification: dict[str, Any] | None
     issue_ids: list[str]
     failure_evidence_ids: list[str]
+    read_consistency: ReadConsistency = LOCKED
 
 
 class WorkspaceStatusReader:
@@ -58,12 +60,13 @@ class WorkspaceStatusReader:
         path: Path,
         audit_details: dict[str, object] | None,
     ) -> WorkspaceStatusResult:
-        with self.ctx.locks.lock(c.workspace_id):
+        with status_read_lease(self.ctx, c.workspace_id) as consistency:
             lookup = read_fingerprint(
                 self.ctx.fingerprint_cache,
                 c.workspace_id,
                 self.ctx.git,
                 path,
+                persist=consistency == LOCKED,
             )
             fp = lookup.fingerprint
             if audit_details is not None:
@@ -71,6 +74,7 @@ class WorkspaceStatusReader:
                     {
                         "fingerprint_source": lookup.source,
                         "fingerprint_duration_ms": lookup.duration_ms,
+                        "read_consistency": consistency,
                     }
                 )
             last = (
@@ -102,4 +106,5 @@ class WorkspaceStatusReader:
                     for item in record.metadata.get("failure_evidence_ids", ())
                     if isinstance(item, str)
                 ][-20:],
+                consistency,
             )

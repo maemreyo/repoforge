@@ -111,24 +111,35 @@ def _bounded_ps(argv: list[str]) -> str | None:
 
 
 def _parse_ps_line(line: str) -> ProcessIdentity | None:
-    parts = line.strip().split(maxsplit=2)
-    if len(parts) != 3:
+    """Parse one `state pid ppid lstart` row, treating a zombie as not live.
+
+    `lstart` contains spaces, so the fixed-width fields are read from the left
+    and the remainder is the start token. A zombie has already stopped executing
+    and only awaits a `wait()` from its parent, so it is reported as gone --
+    matching how the Linux `/proc` reader rejects state `Z`.
+    """
+
+    parts = line.strip().split(maxsplit=3)
+    if len(parts) != 4:
+        return None
+    state = parts[0]
+    if state.startswith("Z"):
         return None
     try:
-        pid = int(parts[0])
-        ppid = int(parts[1])
+        pid = int(parts[1])
+        ppid = int(parts[2])
     except ValueError:
         return None
-    if pid <= 0 or ppid < 0 or not parts[2]:
+    if pid <= 0 or ppid < 0 or not parts[3]:
         return None
-    return ProcessIdentity(pid=pid, ppid=ppid, start_token=parts[2])
+    return ProcessIdentity(pid=pid, ppid=ppid, start_token=parts[3])
 
 
 def _read_ps_identities(pid: int | None = None) -> tuple[ProcessIdentity, ...] | None:
     argv = ["ps"]
     if pid is not None:
         argv.extend(["-p", str(pid)])
-    argv.extend(["-o", "pid=,ppid=,lstart="])
+    argv.extend(["-o", "state=,pid=,ppid=,lstart="])
     output = _bounded_ps(argv)
     if output is None:
         return None
@@ -140,6 +151,67 @@ def _read_ps_identities(pid: int | None = None) -> tuple[ProcessIdentity, ...] |
         if len(identities) > _MAX_PROCESSES:
             return None
     return tuple(identities)
+
+
+def _linux_group_has_live_member(pgid: int) -> bool | None:
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    value = Path(f"/proc/{entry.name}/stat").read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    continue
+                name_end = value.rfind(")")
+                if name_end <= 0:
+                    continue
+                fields = value[name_end + 1 :].split()
+                try:
+                    if fields[0] == "Z":
+                        continue
+                    if int(fields[2]) == pgid:
+                        return True
+                except (IndexError, ValueError):
+                    continue
+    except OSError:
+        return None
+    return False
+
+
+def _ps_group_has_live_member(pgid: int) -> bool | None:
+    # `-A` is required: a bare `ps` lists only processes sharing this controlling
+    # terminal, which would report a live detached group as empty.
+    output = _bounded_ps(["ps", "-A", "-o", "state=,pgid="])
+    if output is None:
+        return None
+    for line in output.splitlines():
+        parts = line.strip().split()
+        if len(parts) != 2 or parts[0].startswith("Z"):
+            continue
+        try:
+            if int(parts[1]) == pgid:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def group_has_live_member(pgid: int) -> bool | None:
+    """Report whether any process in `pgid` is still executing.
+
+    Returns `None` when the host cannot be inspected, so callers can fall back to
+    a signal-based probe instead of treating an unknown group as contained.
+    A group whose only remaining members are zombies is reported as not live:
+    `killpg(pgid, 0)` still succeeds for a zombie, so the raw signal probe alone
+    cannot tell a stopped-but-unreaped child from one that survived a kill.
+    """
+
+    if pgid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        return _linux_group_has_live_member(pgid)
+    return _ps_group_has_live_member(pgid)
 
 
 def read_identity(pid: int) -> ProcessIdentity | None:

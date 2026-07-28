@@ -383,3 +383,128 @@ def test_metrics_file_without_result_bytes_fields_loads_and_accumulates_and_sinc
     assert windowed_rows[0]["count"] == 2
     assert windowed_rows[0]["result_bytes_avg"] == 200.0
     assert windowed_rows[0]["result_bytes_max"] == 200
+
+
+class _CompactionClock:
+    def __init__(self) -> None:
+        self._tick = 0
+
+    def now_iso(self) -> str:
+        self._tick += 1
+        return f"2026-07-21T08:{self._tick // 60:02d}:{self._tick % 60:02d}+00:00"
+
+
+def _compaction_details(index: int) -> dict[str, object]:
+    return {
+        "correlation_id": f"corr-{index}",
+        "correlation_hash": f"hashed-corr-{index}",
+        "duration_ms": float(index),
+        "result_bytes": 1024,
+        "is_mutating": False,
+        "origin": "model",
+        "session_hash": "4f8c1a4f8c1a4f8c1a4f8c1a",
+        "repo_count": 4,
+        "selection_outcome": "exact_match",
+        "repo_id": "repoforge",
+    }
+
+
+def test_identical_repo_list_successes_are_compacted_by_at_least_95_percent(
+    tmp_path: Path,
+) -> None:
+    sink = JsonlAuditSink(tmp_path, _CompactionClock())
+
+    for index in range(200):
+        sink.record("repo_list", success=True, details=_compaction_details(index))
+
+    events = [json.loads(line) for line in sink.path.read_text(encoding="utf-8").splitlines()]
+    assert len(events) <= 10
+    summaries = [event for event in events if event["details"].get("audit_summary") is True]
+    assert summaries
+    assert sum(int(event["details"]["suppressed_count"]) for event in summaries) >= 175
+    assert all(event["details"]["origin"] == "model" for event in summaries)
+    assert all(
+        event["details"]["session_hash"] == "4f8c1a4f8c1a4f8c1a4f8c1a" for event in summaries
+    )
+    assert all("correlation_id" not in event["details"] for event in summaries)
+    assert all("correlation_hash" not in event["details"] for event in summaries)
+
+
+def test_repo_list_failures_and_state_changes_are_never_suppressed(tmp_path: Path) -> None:
+    sink = JsonlAuditSink(tmp_path, _CompactionClock())
+    for index in range(60):
+        sink.record("repo_list", success=True, details=_compaction_details(index))
+
+    changed = _compaction_details(61)
+    changed["selection_outcome"] = "input_required"
+    sink.record("repo_list", success=True, details=changed)
+
+    failed = _compaction_details(62)
+    failed["error_code"] = "SECURITY_POLICY_VIOLATION"
+    sink.record("repo_list", success=False, details=failed)
+
+    events = [json.loads(line) for line in sink.path.read_text(encoding="utf-8").splitlines()]
+    failures = [event for event in events if event["success"] is False]
+    assert len(failures) == 1
+    assert failures[0]["details"]["error_code"] == "SECURITY_POLICY_VIOLATION"
+    assert any(
+        event["details"].get("selection_outcome") == "input_required"
+        and event["details"].get("audit_summary") is not True
+        for event in events
+    )
+
+
+def test_repo_list_compaction_summaries_survive_rotation_and_bounded_reads(
+    tmp_path: Path,
+) -> None:
+    sink = JsonlAuditSink(
+        tmp_path,
+        _CompactionClock(),
+        max_bytes=1_400,
+        backup_count=2,
+    )
+    for index in range(200):
+        sink.record("repo_list", success=True, details=_compaction_details(index))
+
+    assert sink.path.with_suffix(".jsonl.1").is_file()
+    events = read_audit_events(sink.path, limit=200, action="repo_list")
+    assert events
+    assert any(event["details"].get("audit_summary") is True for event in events)
+    assert all(event["details"].get("origin") == "model" for event in events)
+
+
+def test_operation_metrics_are_segmented_by_origin(tmp_path: Path) -> None:
+    metrics = JsonMetricsSink(
+        tmp_path,
+        InMemoryLockManager(),
+        FixedClock("2026-07-21T00:00:00+00:00"),
+    )
+
+    metrics.record(
+        "repo_list",
+        success=True,
+        duration_ms=1.0,
+        error_code=None,
+        origin="model",
+    )
+    metrics.record(
+        "repo_list",
+        success=True,
+        duration_ms=2.0,
+        error_code=None,
+        origin="connector",
+    )
+    metrics.record(
+        "repo_list",
+        success=False,
+        duration_ms=3.0,
+        error_code="COMMAND_FAILED",
+        origin="model",
+    )
+
+    assert metrics.snapshot()["calls_by_origin"] == {
+        "repo_list": {
+            "connector": {"count": 1, "failures": 0},
+            "model": {"count": 2, "failures": 1},
+        }
+    }

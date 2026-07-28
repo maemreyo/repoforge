@@ -631,6 +631,24 @@ def _safe_identity_field(key: str, value: str) -> bool:
     )
 
 
+def entropy_exempt_field(key: str, value: str) -> bool:
+    """Whether this field name and value shape excuse the generic high-entropy heuristic.
+
+    Shared so that every sanitizer answers identically for the same field. A
+    RepoForge-generated `workspace_id` is not a secret, but its random hex suffix
+    can cross the entropy threshold, so a sanitizer that ignores the field name
+    redacts it only sometimes -- which is worse than always: the audit trail
+    silently loses the identifier that says which workspace an event belongs to,
+    and only for some of the ids.
+
+    This never excuses a high-confidence secret-pattern match; callers must apply
+    it only when every finding is the generic entropy heuristic.
+    """
+
+    normalized = _normalized_key(key)
+    return _safe_identity_field(normalized, value) or _structured_path_field(normalized, value)
+
+
 def _structured_path_field(key: str, value: str) -> bool:
     return (
         (key == "path" or key.endswith(("_path", "_paths")))
@@ -728,7 +746,7 @@ def sanitize_egress_data(
         if (
             evaluation.findings
             and all(item.category == "high_entropy" for item in evaluation.findings)
-            and (_safe_identity_field(_key, value) or _structured_path_field(_key, value))
+            and entropy_exempt_field(_key, value)
         ):
             return value
         return (

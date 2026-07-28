@@ -7,13 +7,14 @@ import json
 import os
 import subprocess
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..domain.errors import ErrorCode, RepoForgeError
+from ..domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ..domain.operation_task import OperationTask
 from ..domain.operation_worker import (
     OperationWorkerBinding,
@@ -216,13 +217,18 @@ class InMemoryLockManager:
         metadata: dict[str, str] | None = None,
     ) -> Iterator[None]:
         del metadata
+        # Mirror the fcntl manager: a bounded wait that expires raises LOCK_TIMEOUT, so callers
+        # can branch on the same typed error in tests as in production.
+        deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
         with self._condition:
-            if name in self._held and timeout_seconds == 0:
-                raise RuntimeError(f"lock already held: {name}")
             while name in self._held:
-                self._condition.wait(timeout=timeout_seconds)
-                if name in self._held and timeout_seconds is not None:
-                    raise RuntimeError(f"lock timeout: {name}")
+                if deadline is None:
+                    self._condition.wait(timeout=0.05)
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConfigError(f"LOCK_TIMEOUT: could not acquire {name!r}")
+                self._condition.wait(timeout=remaining)
             self._held.add(name)
         try:
             yield

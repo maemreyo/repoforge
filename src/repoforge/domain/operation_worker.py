@@ -43,6 +43,8 @@ class OperationWorkerBinding:
     server_start_token: str | None
     created_at: str
     owner_generation: int | None = None
+    owner_id: str | None = None
+    attempt: int | None = None
 
 
 def _error(message: str) -> RepoForgeError:
@@ -77,6 +79,15 @@ def validate_operation_worker_binding(binding: OperationWorkerBinding) -> Operat
     _start_token(binding.server_start_token, "server_start_token")
     if binding.owner_generation is not None:
         _positive_pid(binding.owner_generation, "owner_generation")
+    if binding.owner_id is not None and (
+        not isinstance(binding.owner_id, str)
+        or not binding.owner_id
+        or len(binding.owner_id) > 128
+        or any(ord(character) < 32 for character in binding.owner_id)
+    ):
+        raise _error("owner_id is invalid or exceeds 128 characters")
+    if binding.attempt is not None:
+        _positive_pid(binding.attempt, "attempt")
     if (
         not isinstance(binding.created_at, str)
         or not binding.created_at
@@ -97,6 +108,8 @@ def worker_binding_payload(binding: OperationWorkerBinding) -> dict[str, object]
         "server_start_token": binding.server_start_token,
         "created_at": binding.created_at,
         "owner_generation": binding.owner_generation,
+        "owner_id": binding.owner_id,
+        "attempt": binding.attempt,
     }
 
 
@@ -118,12 +131,14 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
     }
     # owner_generation is a v2 addition: absent in pre-v2 records (read back as None),
     # present (possibly null) in v2 records. Any other key is a schema mismatch.
-    allowed = required | {"owner_generation"}
+    allowed = required | {"owner_generation", "owner_id", "attempt"}
     if not required.issubset(payload) or (set(payload) - allowed):
         raise _error("worker binding payload fields do not match the schema")
     child_start = payload["child_start_token"]
     server_start = payload["server_start_token"]
     owner_generation_raw = payload.get("owner_generation")
+    owner_id_raw = payload.get("owner_id")
+    attempt_raw = payload.get("attempt")
     owner_generation = (
         None if owner_generation_raw is None else _as_int(owner_generation_raw, "owner_generation")
     )
@@ -136,5 +151,7 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
         server_start_token=None if server_start is None else str(server_start),
         created_at=str(payload["created_at"]),
         owner_generation=owner_generation,
+        owner_id=None if owner_id_raw is None else str(owner_id_raw),
+        attempt=None if attempt_raw is None else _as_int(attempt_raw, "attempt"),
     )
     return validate_operation_worker_binding(binding)

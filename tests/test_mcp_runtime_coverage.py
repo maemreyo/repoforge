@@ -19,9 +19,11 @@ from repoforge.adapters.runtime.local_runtime import (
     write_managed_runtime,
     write_runtime_state,
 )
+from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import ConfigError
 from repoforge.interfaces.mcp.server import (
     FORGE_V2_IDENTITY,
+    _dispatch_kwargs,
     create_server,
     tool_surface_hash,
 )
@@ -38,6 +40,14 @@ def test_mcp_server_registration_executes_complete_tool_surface() -> None:
     server = create_server(service=FakeService())  # type: ignore[arg-type]
     assert server.name == FORGE_V2_IDENTITY == "forge_v2"
     assert len(tool_surface_hash()) == 64
+
+
+def test_runtime_dispatch_forwards_workspace_diff_detail_mode() -> None:
+    model = V2_TOOL_SPECS["workspace_diff"].validate_input(
+        {"workspace_id": "demo", "include_hunks": True}
+    )
+
+    assert _dispatch_kwargs("workspace_diff", model)["include_hunks"] is True
 
 
 def test_runtime_state_lifecycle_and_validation(tmp_path: Path) -> None:

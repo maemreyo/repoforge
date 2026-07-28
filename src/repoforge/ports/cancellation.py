@@ -26,11 +26,36 @@ class _KillableProcess(Protocol):
 class CancellationToken:
     """Thread-safe handoff letting one external thread terminate a bound process group."""
 
-    def __init__(self, *, on_bind: Callable[[int], None] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        on_spawn: Callable[[], None] | None = None,
+        raise_on_spawn_error: bool = False,
+        on_bind: Callable[[int], None] | None = None,
+        raise_on_bind_error: bool = False,
+    ) -> None:
         self._lock = threading.Lock()
         self._process: _KillableProcess | None = None
         self._cancelled = threading.Event()
+        self._on_spawn = on_spawn
+        self._raise_on_spawn_error = raise_on_spawn_error
         self._on_bind = on_bind
+        self._raise_on_bind_error = raise_on_bind_error
+
+    def before_spawn(self) -> None:
+        """Cross the durable spawn boundary before a subprocess is created.
+
+        A strict observer failure propagates so callers fail closed without
+        creating a child whose existence recovery cannot prove.
+        """
+        observer = self._on_spawn
+        if observer is None:
+            return
+        if self._raise_on_spawn_error:
+            observer()
+        else:
+            with contextlib.suppress(Exception):
+                observer()
 
     def bind(self, process: _KillableProcess) -> None:
         """Register the live process this token can terminate.
@@ -45,8 +70,11 @@ class CancellationToken:
             already_requested = self._cancelled.is_set()
             observer = self._on_bind
         if observer is not None:
-            with contextlib.suppress(Exception):
+            if self._raise_on_bind_error:
                 observer(process.pid)
+            else:
+                with contextlib.suppress(Exception):
+                    observer(process.pid)
         if already_requested:
             self._terminate(process)
 

@@ -10,13 +10,15 @@ from enum import Enum
 from .errors import ErrorCode, RepoForgeError
 from .operation_task import next_operation_timestamp, validate_operation_id
 
-PR_CHECK_WATCH_SCHEMA_VERSION = 1
+PR_CHECK_WATCH_SCHEMA_VERSION = 2
 _MAX_CHECKS = 200
 _MAX_FAILURE_REFERENCES = 20
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
 _SHA64 = re.compile(r"^[a-f0-9]{64}$")
+_REMOTE_VERSION = re.compile(r"^prv2:[a-f0-9]{64}$")
+_STABILITY_VERSION = re.compile(r"^prm2:[a-f0-9]{64}$")
 _SELECTOR = re.compile(r"^check-run:[1-9][0-9]{0,19}$")
 _SAFE_ERROR = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
@@ -54,6 +56,8 @@ class PrCheckWatch:
     pr_number: int
     pushed_sha: str
     workspace_fingerprint: str
+    remote_version: str
+    stability_version: str
     until: PrCheckWatchUntil
     include_failure_evidence: bool
     timeout_seconds: int
@@ -139,6 +143,8 @@ def validate_pr_check_watch(watch: PrCheckWatch) -> PrCheckWatch:
     _bounded_int(watch.pr_number, "pr_number", minimum=1, maximum=2_147_483_647)
     _safe_string(watch.pushed_sha, "pushed_sha", _SHA40)
     _safe_string(watch.workspace_fingerprint, "workspace_fingerprint", _SHA64)
+    _safe_string(watch.remote_version, "remote_version", _REMOTE_VERSION)
+    _safe_string(watch.stability_version, "stability_version", _STABILITY_VERSION)
     if not isinstance(watch.until, PrCheckWatchUntil):
         raise _error("until is invalid")
     if not isinstance(watch.include_failure_evidence, bool):
@@ -211,6 +217,8 @@ def new_pr_check_watch(
     pr_number: int,
     pushed_sha: str,
     workspace_fingerprint: str,
+    remote_version: str,
+    stability_version: str,
     until: PrCheckWatchUntil,
     include_failure_evidence: bool,
     timeout_seconds: int,
@@ -225,6 +233,8 @@ def new_pr_check_watch(
             pr_number=pr_number,
             pushed_sha=pushed_sha,
             workspace_fingerprint=workspace_fingerprint,
+            remote_version=remote_version,
+            stability_version=stability_version,
             until=until,
             include_failure_evidence=include_failure_evidence,
             timeout_seconds=timeout_seconds,

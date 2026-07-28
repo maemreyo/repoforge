@@ -114,12 +114,29 @@ throwaway repository enrolled under a short `repo_id` and perform this sequence 
 3. `workspace_create` with a unique task slug.
 4. `workspace_status` for local/base/hygiene sections.
 5. `workspace_mutate` in dry-run mode, then apply with one idempotency key.
-6. `workspace_diff` and `workspace_verify` mode `plan`.
-7. A narrow `workspace_verify` diagnostic or auto run.
-8. The required final `workspace_verify` profile.
-9. `workspace_commit` only on the exact verified fingerprint.
-10. `workspace_push` to the local bare remote.
-11. `workspace_remove` after the worktree is clean.
+6. Call `workspace_diff` in default summary mode, select the files that need patch review, then call
+   it again with `include_hunks=true`, a narrow `path_glob`, and a small `max_files`.
+7. Call `workspace_verify` mode `plan`.
+8. A narrow `workspace_verify` diagnostic or auto run.
+9. The required final `workspace_verify` profile.
+10. `workspace_commit` only on the exact verified fingerprint.
+11. `workspace_push` to the local bare remote.
+12. `workspace_remove` after the worktree is clean.
+
+Use these two diff requests in sequence:
+
+```json
+{"workspace_id":"demo-workspace"}
+```
+
+```json
+{
+  "workspace_id":"demo-workspace",
+  "include_hunks":true,
+  "path_glob":"src/repoforge/application/workspace/retrieval.py",
+  "max_files":1
+}
+```
 
 Acceptance criteria:
 
@@ -145,7 +162,8 @@ For the active server:
 4. Call representative reads: `repo_list`, `repo_task_context`, `repo_read`, `repo_search`,
    `repo_tree`, and `repo_issue`.
 5. Create a smoke workspace and call `workspace_status`, `workspace_read`, `workspace_tree`, and
-   `workspace_diff`.
+   `workspace_diff`; confirm the default has empty hunks, then repeat with `include_hunks=true` and a
+   narrow `path_glob` to confirm structured hunks.
 6. Call `workspace_mutate` dry-run with valid and invalid operations.
 7. Call `workspace_verify` mode `plan`; confirm it runs no subprocess.
 8. Submit undeclared fields and out-of-bound values; confirm one typed, redacted error envelope.

@@ -22,6 +22,7 @@ from repoforge.application.workspace.hygiene_common import select_policy_paths
 from repoforge.config import ServerConfig, load_config
 from repoforge.domain.config_generation import CapabilityDeltaKind, classify_capability_delta
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError
+from repoforge.domain.execution_receipt import EffectReceiptState
 from repoforge.domain.hygiene import (
     FormatterPolicy,
     HygieneFinding,
@@ -570,6 +571,18 @@ def test_workspace_format_changed_mutates_only_selected_changed_paths_and_invali
     assert forge_env.service.state.load(workspace_id).last_verification is None
     assert Path(created["path"]).joinpath("hello.txt").read_text() == "formatted\n"
     assert Path(created["path"]).joinpath("unchanged.txt").read_text() == "needs-format\n"
+    receipts = forge_env.service.application.context.effect_receipts
+    assert receipts is not None
+    matches = [
+        envelope.value
+        for envelope in receipts.list_all().records
+        if envelope.value.action == "workspace_format_changed"
+        and dict(envelope.value.pre_identity).get("workspace_id") == workspace_id
+    ]
+    assert len(matches) == 1
+    assert matches[0].state is EffectReceiptState.APPLIED_VALIDATED
+    assert matches[0].effect_boundary_crossed is True
+    assert dict(matches[0].post_identity)["workspace_fingerprint"] == result["fingerprint_after"]
 
     events = [
         json.loads(line)
@@ -675,11 +688,19 @@ def test_workspace_format_changed_detects_unexpected_formatter_mutation(
     )
     forge_env.service.state.save(record)
 
-    with pytest.raises(SecurityError, match="outside"):
+    with pytest.raises(ConfigError) as unknown:
         forge_env.service.workspace_format_changed(
             workspace_id,
             status["workspace_fingerprint"],
         )
 
+    assert unknown.value.code is ErrorCode.EFFECT_OUTCOME_UNKNOWN
+    assert unknown.value.retryable is False
+    assert unknown.value.details["effect_boundary_crossed"] is True
+    assert str(unknown.value.details["operation_id"]).startswith("op-")
+    assert str(unknown.value.details["receipt_id"]).startswith("receipt-")
+    assert unknown.value.details["original_error_type"] == "SecurityError"
+    assert unknown.value.details["unexpected_path_count"] == 1
+    assert len(str(unknown.value.details["unexpected_paths_digest"])) == 64
     assert forge_env.service.state.load(workspace_id).last_verification is None
     assert Path(created["path"]).joinpath("README.md").read_text() == "unexpected"

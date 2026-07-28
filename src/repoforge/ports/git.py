@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from ..config import ProfileConfig, RepositoryConfig
 from .command import CommandExecutor, CommandResult
+
+
+@dataclass(frozen=True, slots=True)
+class GitDiffSummary:
+    path: str
+    status: Literal["added", "modified", "deleted", "renamed"]
+    additions: int
+    deletions: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +278,14 @@ class GitRepository(Protocol):
 
     def diff(self, path: Path, repo: RepositoryConfig, *, staged: bool) -> dict[str, Any]: ...
 
+    def diff_summary(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        *,
+        staged: bool,
+    ) -> tuple[GitDiffSummary, ...]: ...
+
     def run_profile(
         self, path: Path, profile: ProfileConfig
     ) -> tuple[list[CommandResult], str, dict[str, Any]]: ...
@@ -289,6 +305,10 @@ class GitRepository(Protocol):
     def remove_worktree(
         self, repo: RepositoryConfig, path: Path, branch: str, delete_branch: bool
     ) -> bool: ...
+
+    def local_branch_exists(self, repo: RepositoryConfig, branch: str) -> bool: ...
+
+    def delete_local_branch(self, repo: RepositoryConfig, branch: str) -> bool: ...
 
     def commit(self, path: Path, message: str) -> tuple[str, str]: ...
 

@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,8 +13,10 @@ import pytest
 from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 
+import repoforge.domain.operation_task as operation_task_module
 from repoforge.adapters.persistence.json_operation_result_store import JsonOperationResultStore
 from repoforge.adapters.persistence.json_operation_store import JsonOperationStore
+from repoforge.application.operations.dto import operation_summary
 from repoforge.application.operations.recovery import recover_operations
 from repoforge.application.service import CodingService
 from repoforge.config import load_config
@@ -27,6 +30,7 @@ from repoforge.domain.operation_task import (
     transition_operation,
     update_operation_progress,
 )
+from repoforge.domain.operations import hash_idempotency_key
 from repoforge.interfaces.mcp.server import create_server
 from repoforge.testing.fakes import FixedClock, InMemoryLockManager, InMemoryOperationStore
 
@@ -57,7 +61,7 @@ def _task(
 
 def test_operation_domain_models_every_transition_and_progress_rule() -> None:
     pending = _task()
-    assert pending.schema_version == OPERATION_SCHEMA_VERSION == 1
+    assert pending.schema_version == OPERATION_SCHEMA_VERSION == 2
     assert pending.state is OperationState.PENDING
     assert pending.progress_current == 0
     assert pending.snapshot_binding is not None
@@ -315,7 +319,7 @@ def test_json_operation_store_rejects_corruption_future_schema_and_identity_mism
         store.read(task.operation_id)
     assert boolean_schema.value.code is ErrorCode.OPERATION_SCHEMA_UNSUPPORTED
 
-    payload["schema_version"] = 1
+    payload["schema_version"] = OPERATION_SCHEMA_VERSION
     payload["operation_id"] = "op-000000000000000000000002"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RepoForgeError) as mismatch:
@@ -541,11 +545,7 @@ def test_operation_wait_timeout_returns_typed_current_evidence(
     assert 0.9 <= elapsed < 2.0
     assert result["changed_since"] is False
     assert result["timed_out"] is True
-    operation = result["operation"]
-    assert operation["operation_id"] == task.operation_id
-    assert operation["terminal"] is False
-    assert operation["updated_at"] == running.updated_at
-    assert 0.1 <= operation["suggested_poll_after_s"] <= 60.0
+    assert result["operation"] is None
 
 
 def test_operation_wait_returns_terminal_state_without_sleeping(
@@ -618,6 +618,27 @@ def test_restart_recovery_orphans_running_expires_due_and_prunes_old_terminal(
     # Building a fresh service is restart-safe and does not resurrect terminal state.
     restarted = CodingService(load_config(forge_env.config_path))
     assert restarted.operation_status(running.operation_id)["state"] == "orphaned"
+
+
+def test_restart_recovery_uses_direct_liveness_before_stale_age(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    alive = manager.create(kind="workspace_run_profile", phase="running", cancel_supported=True)
+    alive = manager.start(alive.operation_id)
+    dead = manager.create(kind="workspace_run_profile", phase="running", cancel_supported=True)
+    dead = manager.start(dead.operation_id)
+
+    report = recover_operations(
+        manager,
+        now=dead.updated_at,
+        running_stale_seconds=900,
+        running_liveness=lambda task: task.operation_id == alive.operation_id,
+    )
+
+    assert report.orphaned == 1
+    assert manager.status(alive.operation_id).state is OperationState.RUNNING
+    assert manager.status(dead.operation_id).state is OperationState.ORPHANED
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -920,3 +941,471 @@ def test_v2_operation_composite_rejects_invalid_direct_actions_with_typed_error(
         forge_env.service.operation(action="delete")
 
     assert invalid.value.code is ErrorCode.OPERATION_INVALID
+
+
+def test_terminal_success_completes_known_progress_and_phase() -> None:
+    pending = _task()
+    running = transition_operation(
+        pending,
+        OperationState.RUNNING,
+        now="2026-07-21T00:00:01+00:00",
+    )
+    progressed = update_operation_progress(
+        running,
+        phase="testing",
+        current=2,
+        total=5,
+        unit="tests",
+        message="Running tests",
+        now="2026-07-21T00:00:02+00:00",
+    )
+
+    succeeded = transition_operation(
+        progressed,
+        OperationState.SUCCEEDED,
+        now="2026-07-21T00:00:03+00:00",
+        result_reference="result-1",
+    )
+
+    assert succeeded.phase == "succeeded"
+    assert succeeded.progress_current == 5
+    assert succeeded.progress_total == 5
+    assert succeeded.progress_message == "Completed"
+    assert succeeded.record_provenance == "current"
+    assert succeeded.record_consistency == "consistent"
+    assert succeeded.record_diagnostics == ()
+
+
+def test_legacy_v1_record_migrates_without_fabricating_progress(tmp_path: Path) -> None:
+    store = JsonOperationStore(tmp_path, InMemoryLockManager())
+    operation_id = "op-000000000000000000000002"
+    raw = {
+        "operation_id": operation_id,
+        "kind": "verification",
+        "state": "succeeded",
+        "phase": "queued",
+        "progress_current": 0,
+        "progress_total": 5,
+        "progress_unit": "tests",
+        "progress_message": "Queued",
+        "task_id": None,
+        "workspace_id": None,
+        "snapshot_binding": None,
+        "result_reference": "result-legacy",
+        "error_code": None,
+        "error_message": None,
+        "retryability": "none",
+        "cancel_supported": True,
+        "cancellation_requested_at": None,
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "updated_at": "2026-07-20T00:00:01+00:00",
+        "expires_at": None,
+        "schema_version": 1,
+    }
+    (store.root / f"{operation_id}.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    migrated = store.read(operation_id)
+
+    assert migrated is not None
+    assert migrated.schema_version == OPERATION_SCHEMA_VERSION == 2
+    assert migrated.state is OperationState.SUCCEEDED
+    assert migrated.phase == "succeeded"
+    assert migrated.progress_current == 0
+    assert migrated.progress_total == 5
+    assert migrated.record_provenance == "legacy_migrated"
+    assert migrated.record_consistency == "record_inconsistent"
+    assert "terminal_phase_mismatch" in migrated.record_diagnostics
+    assert "terminal_progress_incomplete" in migrated.record_diagnostics
+
+    public = operation_summary(migrated)
+    assert public.schema_version == 2
+    assert public.record_provenance == "legacy_migrated"
+    assert public.record_consistency == "record_inconsistent"
+    assert "terminal_progress_incomplete" in public.record_diagnostics
+
+
+def test_legacy_inconsistent_record_remains_listable(tmp_path: Path) -> None:
+    store = JsonOperationStore(tmp_path, InMemoryLockManager())
+    operation_id = "op-000000000000000000000003"
+    raw = {
+        "operation_id": operation_id,
+        "kind": "verification",
+        "state": "succeeded",
+        "phase": "running",
+        "progress_current": 0,
+        "progress_total": 3,
+        "progress_unit": "steps",
+        "progress_message": "Still running",
+        "task_id": None,
+        "workspace_id": None,
+        "snapshot_binding": None,
+        "result_reference": "result-legacy",
+        "error_code": None,
+        "error_message": None,
+        "retryability": "none",
+        "cancel_supported": False,
+        "cancellation_requested_at": None,
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "updated_at": "2026-07-20T00:00:01+00:00",
+        "expires_at": None,
+        "schema_version": 1,
+    }
+    (store.root / f"{operation_id}.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    page = store.list_records(max_records=10)
+
+    assert len(page.records) == 1
+    assert page.records[0].record_consistency == "record_inconsistent"
+
+
+def test_operation_status_reports_result_reference_integrity(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    pending = manager.create(kind="verification", phase="queued", cancel_supported=False)
+    manager.start(pending.operation_id)
+    result_reference = f"operation-result:{pending.operation_id}"
+    manager.succeed(pending.operation_id, result_reference=result_reference)
+
+    missing = forge_env.service.operation(action="get", operation_id=pending.operation_id)
+
+    assert missing["operation"]["result_reference_status"] == "missing"
+    assert missing["operation"]["record_consistency"] == "record_inconsistent"
+    assert "missing_result_reference_payload" in missing["operation"]["record_diagnostics"]
+
+    result_store = forge_env.service.application.context.operation_result_store
+    assert result_store is not None
+    result_store.save(pending.operation_id, {"value": "durable"})
+    available = forge_env.service.operation(action="get", operation_id=pending.operation_id)
+
+    assert available["operation"]["result_reference_status"] == "available"
+    assert available["operation"]["record_consistency"] == "consistent"
+    listed = forge_env.service.operation(action="list", limit=20)
+    listed_item = next(
+        item for item in listed["operations"] if item["operation_id"] == pending.operation_id
+    )
+    assert listed_item["result_reference_status"] == "not_checked"
+
+
+def test_restart_recovery_counts_missing_result_references(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    pending = manager.create(kind="verification", phase="queued", cancel_supported=False)
+    manager.start(pending.operation_id)
+    manager.succeed(
+        pending.operation_id,
+        result_reference=f"operation-result:{pending.operation_id}",
+    )
+
+    report = recover_operations(
+        manager,
+        now=forge_env.service.application.context.clock.now_iso(),
+        retention_seconds=7 * 24 * 60 * 60,
+    )
+
+    assert report.missing_result_references == 1
+
+
+def test_operation_status_reports_missing_receipt_reference(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    pending = manager.create(kind="verification", phase="queued", cancel_supported=False)
+    manager.start(pending.operation_id)
+    result_store = forge_env.service.application.context.operation_result_store
+    assert result_store is not None
+    result_store.save(pending.operation_id, {"value": "durable"})
+    receipt_id = "receipt-" + "a" * 24
+    manager.succeed(
+        pending.operation_id,
+        result_reference=f"operation-result:{pending.operation_id}",
+        receipt_id=receipt_id,
+    )
+
+    missing = forge_env.service.operation(action="get", operation_id=pending.operation_id)
+
+    assert missing["operation"]["result_reference_status"] == "available"
+    assert missing["operation"]["receipt_id"] == receipt_id
+    assert missing["operation"]["receipt_status"] == "missing"
+    assert missing["operation"]["record_consistency"] == "record_inconsistent"
+    assert "missing_receipt_reference" in missing["operation"]["record_diagnostics"]
+
+    report = recover_operations(
+        manager,
+        now=forge_env.service.application.context.clock.now_iso(),
+        retention_seconds=7 * 24 * 60 * 60,
+    )
+    assert report.missing_receipt_references == 1
+
+
+def test_retention_deletes_unbound_result_and_preserves_receipt_anchor(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    result_store = forge_env.service.application.context.operation_result_store
+    assert result_store is not None
+
+    unbound = manager.create(kind="verification", phase="queued", cancel_supported=False)
+    manager.start(unbound.operation_id)
+    result_store.save(unbound.operation_id, {"value": "temporary"})
+    unbound = manager.succeed(
+        unbound.operation_id,
+        result_reference=f"operation-result:{unbound.operation_id}",
+    )
+    future = (datetime.fromisoformat(unbound.updated_at) + timedelta(seconds=1)).isoformat()
+
+    pruned = recover_operations(manager, now=future, retention_seconds=0)
+
+    assert pruned.deleted == 1
+    assert result_store.read(unbound.operation_id) is None
+    with pytest.raises(RepoForgeError) as missing:
+        manager.status(unbound.operation_id)
+    assert missing.value.code is ErrorCode.OPERATION_NOT_FOUND
+
+    workspace_id = forge_env.service.workspace_create("demo", "retained receipt anchor")[
+        "workspace_id"
+    ]
+    forge_env.service.workspace_write_file(
+        workspace_id,
+        "retained.txt",
+        "retained\n",
+        "<new>",
+        idempotency_key="retained-receipt-anchor-0001",
+    )
+    receipts = forge_env.service.application.context.effect_receipts
+    assert receipts is not None
+    receipt = (
+        receipts.list_for_idempotency(
+            "workspace_write_file",
+            hash_idempotency_key("retained-receipt-anchor-0001"),
+        )
+        .records[0]
+        .value
+    )
+    bound = manager.status(receipt.operation_id)
+    later = (datetime.fromisoformat(bound.updated_at) + timedelta(seconds=1)).isoformat()
+
+    retained = recover_operations(manager, now=later, retention_seconds=0)
+
+    assert retained.retained_for_receipt == 1
+    assert manager.status(receipt.operation_id).receipt_id == receipt.receipt_id
+    assert result_store.read(receipt.operation_id) is not None
+
+
+def test_progress_terminal_cas_consistency(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    task = manager.create(kind="verification", phase="queued", cancel_supported=False)
+    manager.start(task.operation_id)
+    manager.progress(
+        task.operation_id,
+        phase="testing",
+        current=0,
+        total=2,
+        unit="tests",
+        message="Starting tests",
+    )
+    barrier = threading.Barrier(2)
+    errors: list[RepoForgeError] = []
+
+    def progress() -> None:
+        barrier.wait(timeout=2)
+        try:
+            manager.progress(
+                task.operation_id,
+                phase="testing",
+                current=1,
+                total=2,
+                unit="tests",
+                message="One test complete",
+            )
+        except RepoForgeError as exc:
+            errors.append(exc)
+
+    def succeed() -> None:
+        barrier.wait(timeout=2)
+        try:
+            manager.succeed(task.operation_id, result_reference="verification:complete")
+        except RepoForgeError as exc:
+            errors.append(exc)
+
+    workers = [threading.Thread(target=progress), threading.Thread(target=succeed)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    current = manager.status(task.operation_id)
+    if current.state is not OperationState.SUCCEEDED:
+        current = manager.succeed(task.operation_id, result_reference="verification:complete")
+
+    assert current.state is OperationState.SUCCEEDED
+    assert current.phase == "succeeded"
+    assert current.progress_current == current.progress_total == 2
+    assert current.progress_message == "Completed"
+    assert current.record_consistency == "consistent"
+    assert all(error.code is ErrorCode.OPERATION_STALE for error in errors)
+
+
+def test_recovery_reports_legacy_and_inconsistent_record_metrics(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    store = manager.store
+    assert isinstance(store, JsonOperationStore)
+    operation_id = "op-000000000000000000000004"
+    raw = {
+        "operation_id": operation_id,
+        "kind": "verification",
+        "state": "succeeded",
+        "phase": "queued",
+        "progress_current": 0,
+        "progress_total": 2,
+        "progress_unit": "tests",
+        "progress_message": "Queued",
+        "task_id": None,
+        "workspace_id": None,
+        "snapshot_binding": None,
+        "result_reference": "result-legacy",
+        "error_code": None,
+        "error_message": None,
+        "retryability": "none",
+        "cancel_supported": False,
+        "cancellation_requested_at": None,
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "updated_at": "2026-07-20T00:00:01+00:00",
+        "expires_at": None,
+        "schema_version": 1,
+    }
+    (store.root / f"{operation_id}.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    report = recover_operations(
+        manager,
+        now="2026-07-21T00:00:00+00:00",
+        retention_seconds=7 * 24 * 60 * 60,
+    )
+
+    assert report.legacy_operation_records == 1
+    assert report.operation_record_inconsistencies == 1
+    assert report.missing_result_references == 1
+
+
+def test_operation_ownership_lease_rejects_competing_worker_and_clears_on_terminal() -> None:
+    pending = _task()
+    running = operation_task_module.claim_operation_ownership(
+        transition_operation(
+            pending,
+            OperationState.RUNNING,
+            now="2026-07-14T00:00:01+00:00",
+        ),
+        owner_id="worker-primary",
+        lease_expires_at="2026-07-14T00:01:01+00:00",
+        now="2026-07-14T00:00:01+00:00",
+    )
+
+    with pytest.raises(RepoForgeError) as competing:
+        operation_task_module.renew_operation_ownership(
+            running,
+            owner_id="worker-competing",
+            lease_expires_at="2026-07-14T00:02:01+00:00",
+            now="2026-07-14T00:00:31+00:00",
+        )
+
+    assert competing.value.code is ErrorCode.OPERATION_STALE
+
+    terminal = transition_operation(
+        running,
+        OperationState.SUCCEEDED,
+        result_reference="result-owned",
+        now="2026-07-14T00:00:45+00:00",
+    )
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+
+
+def test_leased_operation_progress_requires_the_current_owner(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    pending = manager.create(kind="verification", phase="queued", cancel_supported=True)
+    started_at = pending.updated_at
+    lease_expires_at = (datetime.fromisoformat(started_at) + timedelta(minutes=5)).isoformat()
+    running = manager.start(
+        pending.operation_id,
+        owner_id="worker-primary",
+        lease_expires_at=lease_expires_at,
+        now=started_at,
+    )
+
+    with pytest.raises(RepoForgeError) as stale:
+        manager.progress(
+            running.operation_id,
+            phase="running",
+            current=1,
+            total=2,
+            owner_id="worker-competing",
+        )
+
+    assert stale.value.code is ErrorCode.OPERATION_STALE
+    progressed = manager.progress(
+        running.operation_id,
+        phase="running",
+        current=1,
+        total=2,
+        owner_id="worker-primary",
+    )
+    assert progressed.progress_current == 1
+    assert progressed.owner_id == "worker-primary"
+
+    public = forge_env.service.operation(action="get", operation_id=running.operation_id)
+    assert public["operation"]["owner_id"] == "worker-primary"
+    assert public["operation"]["lease_expires_at"] == lease_expires_at
+
+    with pytest.raises(RepoForgeError) as terminal_stale:
+        manager.succeed(
+            running.operation_id,
+            result_reference="verification:complete",
+            owner_id="worker-competing",
+        )
+    assert terminal_stale.value.code is ErrorCode.OPERATION_STALE
+
+    succeeded = manager.succeed(
+        running.operation_id,
+        result_reference="verification:complete",
+        owner_id="worker-primary",
+    )
+    assert succeeded.state is OperationState.SUCCEEDED
+    assert succeeded.owner_id is None
+    assert succeeded.lease_expires_at is None
+
+
+def test_recovery_orphans_an_expired_operation_ownership_lease(
+    forge_env: ForgeEnvironment,
+) -> None:
+    manager = forge_env.service.operations
+    pending = manager.create(kind="verification", phase="queued", cancel_supported=True)
+    started_at = pending.updated_at
+    lease_expires_at = (datetime.fromisoformat(started_at) + timedelta(seconds=10)).isoformat()
+    recovery_at = (datetime.fromisoformat(started_at) + timedelta(seconds=11)).isoformat()
+    running = manager.start(
+        pending.operation_id,
+        owner_id="worker-primary",
+        lease_expires_at=lease_expires_at,
+        now=started_at,
+    )
+
+    report = recover_operations(
+        manager,
+        now=recovery_at,
+        running_stale_seconds=3600,
+        running_liveness=lambda _task: True,
+    )
+
+    recovered = manager.status(running.operation_id)
+    assert report.orphaned == 1
+    assert recovered.state is OperationState.ORPHANED
+    assert recovered.error_code == "OPERATION_OWNERSHIP_EXPIRED"
+    assert recovered.owner_id is None
+    assert recovered.lease_expires_at is None

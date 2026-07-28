@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from ...domain.operation_task import OperationTask
+from ...domain.operation_task import OperationState, OperationTask
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,11 +31,18 @@ class OperationSummary:
     kind: str
     state: str
     phase: str
+    attempt: int
+    heartbeat_at: str | None
+    heartbeat_age_seconds: float | None
+    evidence_complete: bool
     progress: OperationProgressView
     task_id: str | None
     workspace_id: str | None
     snapshot_binding: OperationSnapshotView | None
     result_reference: str | None
+    result_reference_status: str
+    receipt_id: str | None
+    receipt_status: str
     error_code: str | None
     error_message: str | None
     retryability: str
@@ -43,6 +51,12 @@ class OperationSummary:
     created_at: str
     updated_at: str
     expires_at: str | None
+    owner_id: str | None
+    lease_expires_at: str | None
+    schema_version: int
+    record_provenance: str
+    record_consistency: str
+    record_diagnostics: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,11 +65,18 @@ class OperationStatusView:
     kind: str
     state: str
     phase: str
+    attempt: int
+    heartbeat_at: str | None
+    heartbeat_age_seconds: float | None
+    evidence_complete: bool
     progress: OperationProgressView
     task_id: str | None
     workspace_id: str | None
     snapshot_binding: OperationSnapshotView | None
     result_reference: str | None
+    result_reference_status: str
+    receipt_id: str | None
+    receipt_status: str
     result: dict[str, Any] | None
     error_code: str | None
     error_message: str | None
@@ -65,14 +86,67 @@ class OperationStatusView:
     created_at: str
     updated_at: str
     expires_at: str | None
+    owner_id: str | None
+    lease_expires_at: str | None
+    schema_version: int
+    record_provenance: str
+    record_consistency: str
+    record_diagnostics: tuple[str, ...]
 
 
-def operation_summary(task: OperationTask) -> OperationSummary:
+def operation_observability(
+    task: OperationTask,
+    *,
+    now: str,
+    result_checked: bool = False,
+    result_available: bool = False,
+) -> tuple[int, str | None, float | None, bool]:
+    """Project persisted liveness and terminal-evidence truth without guessing."""
+    heartbeat_at = task.updated_at if task.state is OperationState.RUNNING else None
+    heartbeat_age_seconds = None
+    if heartbeat_at is not None:
+        heartbeat_age_seconds = round(
+            max(
+                0.0,
+                (
+                    datetime.fromisoformat(now) - datetime.fromisoformat(heartbeat_at)
+                ).total_seconds(),
+            ),
+            3,
+        )
+    evidence_complete = False
+    if task.state is OperationState.SUCCEEDED:
+        evidence_complete = bool(
+            task.result_reference is not None and result_checked and result_available
+        )
+    elif task.state is OperationState.CANCELLED:
+        evidence_complete = True
+    elif task.state in {
+        OperationState.FAILED,
+        OperationState.EXPIRED,
+        OperationState.ORPHANED,
+    }:
+        evidence_complete = task.error_code is not None
+    return task.attempt, heartbeat_at, heartbeat_age_seconds, evidence_complete
+
+
+def operation_summary(
+    task: OperationTask,
+    *,
+    attempt: int | None = None,
+    heartbeat_at: str | None = None,
+    heartbeat_age_seconds: float | None = None,
+    evidence_complete: bool = False,
+) -> OperationSummary:
     return OperationSummary(
         operation_id=task.operation_id,
         kind=task.kind,
         state=task.state.value,
         phase=task.phase,
+        attempt=task.attempt if attempt is None else attempt,
+        heartbeat_at=heartbeat_at,
+        heartbeat_age_seconds=heartbeat_age_seconds,
+        evidence_complete=evidence_complete,
         progress=OperationProgressView(
             task.progress_current,
             task.progress_total,
@@ -92,6 +166,11 @@ def operation_summary(task: OperationTask) -> OperationSummary:
             else None
         ),
         result_reference=task.result_reference,
+        result_reference_status=(
+            "not_applicable" if task.result_reference is None else "not_checked"
+        ),
+        receipt_id=task.receipt_id,
+        receipt_status="not_applicable" if task.receipt_id is None else "not_checked",
         error_code=task.error_code,
         error_message=task.error_message,
         retryability=task.retryability.value,
@@ -100,24 +179,77 @@ def operation_summary(task: OperationTask) -> OperationSummary:
         created_at=task.created_at,
         updated_at=task.updated_at,
         expires_at=task.expires_at,
+        owner_id=task.owner_id,
+        lease_expires_at=task.lease_expires_at,
+        schema_version=task.schema_version,
+        record_provenance=task.record_provenance,
+        record_consistency=task.record_consistency,
+        record_diagnostics=task.record_diagnostics,
     )
 
 
 def operation_status_view(
     task: OperationTask,
     result: dict[str, Any] | None,
+    *,
+    result_checked: bool = True,
+    receipt_checked: bool = True,
+    receipt_available: bool = False,
+    attempt: int = 0,
+    heartbeat_at: str | None = None,
+    heartbeat_age_seconds: float | None = None,
+    evidence_complete: bool = False,
 ) -> OperationStatusView:
-    summary = operation_summary(task)
+    summary = operation_summary(
+        task,
+        attempt=attempt,
+        heartbeat_at=heartbeat_at,
+        heartbeat_age_seconds=heartbeat_age_seconds,
+        evidence_complete=evidence_complete,
+    )
+    result_reference_status = (
+        "not_applicable"
+        if summary.result_reference is None
+        else "not_checked"
+        if not result_checked
+        else "available"
+        if result is not None
+        else "missing"
+    )
+    receipt_status = (
+        "not_applicable"
+        if summary.receipt_id is None
+        else "not_checked"
+        if not receipt_checked
+        else "available"
+        if receipt_available
+        else "missing"
+    )
+    diagnostics = summary.record_diagnostics
+    consistency = summary.record_consistency
+    if result_reference_status == "missing":
+        diagnostics = tuple(sorted(set(diagnostics) | {"missing_result_reference_payload"}))
+        consistency = "record_inconsistent"
+    if receipt_status == "missing":
+        diagnostics = tuple(sorted(set(diagnostics) | {"missing_receipt_reference"}))
+        consistency = "record_inconsistent"
     return OperationStatusView(
         operation_id=summary.operation_id,
         kind=summary.kind,
         state=summary.state,
         phase=summary.phase,
+        attempt=summary.attempt,
+        heartbeat_at=summary.heartbeat_at,
+        heartbeat_age_seconds=summary.heartbeat_age_seconds,
+        evidence_complete=summary.evidence_complete,
         progress=summary.progress,
         task_id=summary.task_id,
         workspace_id=summary.workspace_id,
         snapshot_binding=summary.snapshot_binding,
         result_reference=summary.result_reference,
+        result_reference_status=result_reference_status,
+        receipt_id=summary.receipt_id,
+        receipt_status=receipt_status,
         result=result,
         error_code=summary.error_code,
         error_message=summary.error_message,
@@ -127,4 +259,10 @@ def operation_status_view(
         created_at=summary.created_at,
         updated_at=summary.updated_at,
         expires_at=summary.expires_at,
+        owner_id=summary.owner_id,
+        lease_expires_at=summary.lease_expires_at,
+        schema_version=summary.schema_version,
+        record_provenance=summary.record_provenance,
+        record_consistency=consistency,
+        record_diagnostics=diagnostics,
     )
