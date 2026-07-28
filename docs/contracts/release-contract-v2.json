@@ -90,7 +90,7 @@
     },
     "identity": "forge_v2",
     "input_contract_digest": "fc23049827ff22c514dc729de58e3eee62da11449b456e4c9ecfb0888b585a10",
-    "output_contract_digest": "4c072c217648efdd63d5d7bc6b405fa7f7e40d0d3d9e655e405a9f01afcf52aa",
+    "output_contract_digest": "394610bd336bfadb4030b4450cadddda458372b66ee44a70db905dbf6ad2b082",
     "retired_identity": "forge_v1",
     "server_instructions_sha256": "791fa8003ef1ba06c3cc45debf727b7cb84020c5634b2fc8f15bf668b34d1999",
     "tool_contract": {
@@ -102,7 +102,7 @@
     },
     "tool_count": 28,
     "tool_hashes": {
-      "config_inspect": "3000434369cd22eee5ebdeac8d29692244afe803f53528272199059611ba4bdb",
+      "config_inspect": "cece16bacd6fdd24c93b8d631174f5121f53c4f3b10d210707d01f36552c4700",
       "operation": "122c9904a3372ca3e2a2c2196248fa72b5ec2696c3dd323639ccc156ac445830",
       "repo_history": "4e171873fa10040fc7d1a14ecbb85bcd09e07d5d50e6329acba482893abb7c1d",
       "repo_issue": "9c1518ef53be3d7fe536695f81a0b8e54b3ba15e61b6ff2ad6ca41f26c861d04",
@@ -161,8 +161,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "3697737c1630af01b9c5ad5a8295465b84c3ebee41081dbbe558074d0609e21f",
-    "tool_surface_hash": "8e6f4a56bcb7d1ea007c9952a9cfe851aa076ce4083ab902360788bc035950ce"
+    "tool_schema_bundle_sha256": "d4609c9100e8c8f354fd240d991850f1b3d60529f9443797c7148c149f0381b4",
+    "tool_surface_hash": "6079b006c9089ae69b0301788c00a43bd38acd0f38c34a43679ad6869bf90217"
   },
   "package_version": "2.2.0",
   "runtime": {
