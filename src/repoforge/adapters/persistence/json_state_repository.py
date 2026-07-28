@@ -400,12 +400,22 @@ class JsonStateRepository(Generic[T]):
             raise self._error("max_records must be between 1 and 2000", ErrorCode.STATE_INVALID)
         record_ids, scan_truncated = self._files.list_ids(pattern="*.json", max_records=max_records)
         records: list[StateEnvelope[T]] = []
+        unreadable: list[str] = []
         for record_id in record_ids:
-            item = self.read(record_id)
+            # A sweep survives one bad record; `read()` of one exact id stays
+            # strict, because a caller asking for that record has to hear that it
+            # is unusable. Startup sweeps every store, so a raise here turns a
+            # single file written by an older release into a runtime that cannot
+            # start at all.
+            try:
+                item = self.read(record_id)
+            except RepoForgeError:
+                unreadable.append(record_id)
+                continue
             if item is not None:
                 records.append(item)
         records.sort(key=lambda item: (item.revision.value, item.record_id), reverse=True)
-        return StatePage(tuple(records), scan_truncated)
+        return StatePage(tuple(records), scan_truncated, tuple(sorted(unreadable)))
 
     def delete(self, record_id: str) -> None:
         safe_id = self._record_id(record_id)

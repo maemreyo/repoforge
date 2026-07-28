@@ -123,7 +123,7 @@ class JsonOperationWorkQueue:
     def list_records(self, *, max_records: int) -> OperationWorkPage:
         page = self._records.list_records(max_records=max_records)
         records = tuple(envelope.value for envelope in page.records)
-        return OperationWorkPage(records, page.scan_truncated)
+        return OperationWorkPage(records, page.scan_truncated, page.unreadable_record_ids)
 
     def delete(self, operation_id: str) -> None:
         self._records.delete(operation_id)
