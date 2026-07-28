@@ -23,6 +23,10 @@ class StateEnvelope(Generic[T]):
 class StatePage(Generic[T]):
     records: tuple[StateEnvelope[T], ...]
     scan_truncated: bool
+    #: Record ids the scan could not decode -- written by an older schema, or
+    #: corrupt. A sweep reports them and returns the rest; startup runs such a
+    #: sweep, so raising instead would let one stale file stop every process.
+    unreadable_record_ids: tuple[str, ...] = ()
 
 
 class StateCodec(Protocol[T]):

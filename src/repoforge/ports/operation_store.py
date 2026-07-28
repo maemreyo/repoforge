@@ -12,6 +12,9 @@ from ..domain.operation_task import OperationTask
 class OperationRecordPage:
     records: tuple[OperationTask, ...]
     scan_truncated: bool
+    #: Operation ids the scan could not decode. Reported rather than raised, so a
+    #: record written by an older release cannot stop a startup sweep.
+    unreadable_operation_ids: tuple[str, ...] = ()
 
 
 class OperationStore(Protocol):

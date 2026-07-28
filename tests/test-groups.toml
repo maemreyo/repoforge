@@ -168,6 +168,7 @@ source_globs = [
 test_files = [
   "tests/test_control_plane_responsiveness.py",
   "tests/test_durable_state.py",
+  "tests/test_upgrade_compatibility.py",
   "tests/test_durable_verification_dispatch.py",
   "tests/test_evidence_artifacts.py",
   "tests/test_evidence_model.py",
@@ -502,6 +503,7 @@ test_files = [
   "tests/test_audit_cursor.py",
   "tests/test_background_run_profile.py",
   "tests/test_ci_failure_evidence.py",
+  "tests/test_upgrade_compatibility.py",
   "tests/test_code_intelligence_integration.py",
   "tests/test_command_source_integrity.py",
   "tests/test_control_plane_responsiveness.py",
