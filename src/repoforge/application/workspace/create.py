@@ -155,6 +155,8 @@ class WorkspaceCreator:
                         "The source repository and existing registered workspaces remain unchanged.",
                     ),
                 )
+            # Both intents kept: the effect boundary opens BEFORE any worktree exists
+            # (#234), and which worktree call runs depends on adoption (#281).
             boundary.begin()
             head = (
                 self.ctx.git.adopt_worktree(repo, destination, branch)

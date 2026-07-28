@@ -65,6 +65,10 @@ class WorkspaceRemover:
                 # removing the workspace must never delete it: that would destroy work this
                 # workspace did not create, and unlike everything else here it is not
                 # recoverable from the registry.
+                #
+                # This refusal deliberately runs BEFORE `boundary.begin()`: the boundary
+                # means "an effect may have happened", so opening it and then raising would
+                # write a receipt claiming a started effect for a call that touched nothing.
                 delete_branch = c.delete_local_branch and not record.metadata.get("adopted_branch")
                 if c.delete_local_branch and not delete_branch:
                     raise WorkspaceError(
