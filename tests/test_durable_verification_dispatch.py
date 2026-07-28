@@ -218,3 +218,147 @@ def test_public_cancel_terminalizes_queued_work_and_is_idempotent(tmp_path) -> N
     queue = application.context.operation_work_queue
     assert queue is not None
     assert queue.read(operation_id) is None
+
+
+# ---------------- admission ordering and worker-loop survival (#307)
+
+
+def test_the_operation_record_is_durable_before_the_work_item_exists(tmp_path) -> None:
+    """#307: a claimable work item whose operation record cannot be read kills the worker.
+
+    Claiming calls `OperationManager.start`, which READS the operation record, so the
+    record must be durable before the item becomes claimable. This asserts the write
+    order at the store level -- the moment a work item exists, the record it refers to is
+    already readable.
+    """
+    from repoforge.application.operations.work_admission import DurableWorkAdmission
+
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path))
+    queue = JsonOperationWorkQueue(
+        application.context.config.server.state_root,
+        application.context.locks,
+    )
+    observed: list[tuple[str, bool]] = []
+    real_create = queue.create
+
+    def recording_create(work):
+        # At the instant the item becomes visible, is its operation record readable?
+        readable = application.context.operation_store.read(work.operation_id) is not None
+        observed.append((work.operation_id, readable))
+        return real_create(work)
+
+    queue.create = recording_create  # type: ignore[method-assign]
+    admission = DurableWorkAdmission(application.operations, queue)
+
+    operation = admission.admit(
+        OperationWorkRequest.profile(
+            workspace_id="workspace-1",
+            profile_name="full",
+            expected_head_sha="a" * 40,
+            expected_fingerprint="b" * 64,
+            config_generation=12,
+        ),
+        operation_kind="workspace_run_profile",
+    )
+
+    assert observed == [(operation.operation_id, True)]
+
+
+def test_a_failed_queue_write_terminalizes_the_operation_it_created(tmp_path) -> None:
+    """The caller holds the operation_id, so it must resolve to a record saying why
+    nothing will run -- never to a pending operation no worker can ever claim."""
+    import pytest
+
+    from repoforge.application.operations.work_admission import DurableWorkAdmission
+    from repoforge.domain.operation_task import OperationRetryability
+
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path))
+    queue = JsonOperationWorkQueue(
+        application.context.config.server.state_root,
+        application.context.locks,
+    )
+
+    def failing_create(work):
+        raise OSError("state root is read-only")
+
+    queue.create = failing_create  # type: ignore[method-assign]
+    admission = DurableWorkAdmission(application.operations, queue)
+
+    with pytest.raises(OSError):
+        admission.admit(
+            OperationWorkRequest.profile(
+                workspace_id="workspace-1",
+                profile_name="full",
+                expected_head_sha="a" * 40,
+                expected_fingerprint="b" * 64,
+                config_generation=12,
+            ),
+            operation_kind="workspace_run_profile",
+        )
+
+    records = application.operations.list_records(max_records=10).records
+    assert len(records) == 1
+    failed = records[0]
+    assert failed.state is OperationState.FAILED
+    assert failed.error_code == "OPERATION_WORK_ADMISSION_FAILED"
+    assert failed.retryability is OperationRetryability.MANUAL
+
+
+def test_recovery_does_not_fail_an_admission_that_is_still_in_flight(tmp_path) -> None:
+    """Recovery runs concurrently with admission. "Record present, item absent" is the
+    normal state between admission's two writes, so failing it would destroy live work."""
+    from repoforge.application.operations.recovery import recover_operation_work
+
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path))
+    queue = JsonOperationWorkQueue(
+        application.context.config.server.state_root,
+        application.context.locks,
+    )
+    # Exactly the mid-admission state: the record exists, the work item does not yet.
+    operation = application.operations.create(
+        kind="workspace_run_profile",
+        phase="queued",
+        cancel_supported=True,
+        now="2026-07-28T10:00:00+00:00",
+    )
+
+    report = recover_operation_work(
+        application.operations,
+        queue,
+        now="2026-07-28T10:00:10+00:00",  # 10s later: inside the admission window
+    )
+
+    assert report.missing_work == 0
+    assert application.operations.status(operation.operation_id).state is OperationState.PENDING
+
+
+def test_recovery_still_fails_an_admission_that_really_crashed(tmp_path) -> None:
+    """Past the window, a queued operation with no work item can never be claimed."""
+    from repoforge.application.operations.recovery import recover_operation_work
+
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path))
+    queue = JsonOperationWorkQueue(
+        application.context.config.server.state_root,
+        application.context.locks,
+    )
+    operation = application.operations.create(
+        kind="workspace_run_profile",
+        phase="queued",
+        cancel_supported=True,
+        now="2026-07-28T10:00:00+00:00",
+    )
+
+    report = recover_operation_work(
+        application.operations,
+        queue,
+        now="2026-07-28T10:05:00+00:00",  # well past the window
+    )
+
+    assert report.missing_work == 1
+    terminal = application.operations.status(operation.operation_id)
+    assert terminal.state is OperationState.FAILED
+    assert terminal.error_code == "OPERATION_WORK_MISSING"

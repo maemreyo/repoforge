@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
@@ -107,18 +108,41 @@ class OperationWorkLoop:
         next_recovery_at = time.monotonic()
         while not self._stop.is_set() and not external_stop.is_set():
             monotonic_now = time.monotonic()
-            if monotonic_now >= next_recovery_at:
-                recover_operation_work(
-                    self._operations,
-                    self._queue,
-                    now=self._ctx.clock.now_iso(),
-                    expected_config_generation=self._ctx.config_generation or None,
-                    worker_bindings=self._worker_bindings,
-                    reaper=self._reaper,
-                )
-                next_recovery_at = monotonic_now + self._recovery_interval_seconds
-            if not self.run_once():
+            # One iteration must not be able to end the loop. This thread IS durable
+            # execution: when it dies nothing drains the queue, and the only evidence was
+            # a pytest thread-exception warning -- in production, silence. So an
+            # unexpected failure is recorded and the loop backs off and continues.
+            try:
+                if monotonic_now >= next_recovery_at:
+                    recover_operation_work(
+                        self._operations,
+                        self._queue,
+                        now=self._ctx.clock.now_iso(),
+                        expected_config_generation=self._ctx.config_generation or None,
+                        worker_bindings=self._worker_bindings,
+                        reaper=self._reaper,
+                    )
+                    next_recovery_at = monotonic_now + self._recovery_interval_seconds
+                if not self.run_once():
+                    self._stop.wait(self._idle_poll_seconds)
+            except Exception as exc:
+                self._report_iteration_failure(exc)
                 self._stop.wait(self._idle_poll_seconds)
+
+    def _report_iteration_failure(self, exc: Exception) -> None:
+        """Audit an iteration that failed, never re-raising into the loop."""
+        with contextlib.suppress(Exception):
+            self._ctx.audited(
+                "operation_work_loop_iteration_failed",
+                {
+                    "owner_id": self._owner_id,
+                    "error_code": _error_code(exc).value,
+                    "error_type": type(exc).__name__,
+                },
+                lambda: None,
+                mutating=False,
+                synthetic=True,
+            )
 
     def run_once(self) -> bool:
         claim_now = self._ctx.clock.now_iso()
@@ -134,13 +158,36 @@ class OperationWorkLoop:
             return False
 
         operation_id = item.operation_id
-        self._operations.start(
-            operation_id,
-            owner_id=self._owner_id,
-            lease_expires_at=lease_expires_at,
-            attempt=item.attempt,
-            now=claim_now,
-        )
+        try:
+            self._operations.start(
+                operation_id,
+                owner_id=self._owner_id,
+                lease_expires_at=lease_expires_at,
+                attempt=item.attempt,
+                now=claim_now,
+            )
+        except RepoForgeError as exc:
+            if exc.code is not ErrorCode.OPERATION_NOT_FOUND:
+                raise
+            # A claimed item whose operation record cannot be read is unexecutable: there
+            # is nothing to transition, report progress against, or terminalize. Discard
+            # the sidecar and keep serving the queue. Letting this raise killed the whole
+            # worker thread, so one unreadable record stopped ALL durable execution -- the
+            # queue kept filling and nothing drained it.
+            self._queue.delete(operation_id)
+            self._ctx.audited(
+                "operation_work_unexecutable",
+                {
+                    "operation_id": operation_id,
+                    "owner_id": self._owner_id,
+                    "error_code": ErrorCode.OPERATION_NOT_FOUND.value,
+                    "detail": "claimed work had no readable operation record; sidecar discarded",
+                },
+                lambda: None,
+                mutating=True,
+                synthetic=True,
+            )
+            return True
         state_lock = threading.Lock()
 
         def cross_spawn_boundary() -> None:

@@ -432,7 +432,15 @@ def test_recovery_terminalizes_queued_work_from_a_stale_generation(tmp_path) -> 
 
 
 def test_queued_operation_without_its_work_sidecar_fails_closed(tmp_path) -> None:
-    """A crash between the two admission writes must not strand an unclaimable job."""
+    """A crash between the two admission writes must not strand an unclaimable job.
+
+    Recovery waits out a bounded admission window first (#307): "record present, item
+    absent" is also the normal state for the microseconds between admission's two writes,
+    so this asserts the state PAST that window -- which is where every real recovery pass
+    sees a crashed admission, since recovery runs on a 30s interval.
+    """
+    from datetime import datetime, timedelta
+
     from repoforge.application.operations.recovery import recover_operation_work
     from repoforge.application.operations.work_admission import DurableWorkAdmission
     from repoforge.domain.operation_task import OperationState
@@ -456,7 +464,9 @@ def test_queued_operation_without_its_work_sidecar_fails_closed(tmp_path) -> Non
     report = recover_operation_work(
         application.operations,
         queue,
-        now=application.context.clock.now_iso(),
+        now=(
+            datetime.fromisoformat(application.context.clock.now_iso()) + timedelta(minutes=5)
+        ).isoformat(),
     )
 
     terminal = application.operations.status(operation.operation_id)
@@ -883,3 +893,60 @@ def test_reaper_preserves_leaderless_group_without_identity_proof(tmp_path) -> N
     finally:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(leader.pid, signal.SIGKILL)
+
+
+def test_one_unexecutable_item_does_not_stop_the_worker(tmp_path) -> None:
+    """#307: an unreadable operation record must cost one item, not durable execution.
+
+    The claim path reads the operation record. When that read raised, it propagated out of
+    `run_once` and killed the worker THREAD -- so the queue kept filling and nothing
+    drained it, with a pytest thread-exception warning as the only evidence (in production,
+    silence). The bad item is discarded and the next one still runs.
+    """
+    from repoforge.application.operations.work_admission import DurableWorkAdmission
+    from repoforge.application.operations.work_loop import OperationWorkLoop
+    from repoforge.domain.operation_task import OperationState
+
+    class SuccessfulHandlers:
+        def execute(self, item, *, cancellation_token, progress):
+            return {"workspace_id": item.request.workspace_id, "ok": True}
+
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path))
+    queue = application.context.operation_work_queue
+    assert queue is not None
+    admission = DurableWorkAdmission(application.operations, queue)
+
+    def _admit(profile: str, head: str):
+        return admission.admit(
+            OperationWorkRequest.profile(
+                workspace_id="workspace-1",
+                profile_name=profile,
+                expected_head_sha=head * 40,
+                expected_fingerprint="b" * 64,
+                config_generation=12,
+            ),
+            operation_kind="workspace_run_profile",
+        )
+
+    broken = _admit("quick", "a")
+    healthy = _admit("full", "c")
+    # Destroy only the first item's operation record, leaving its claimable sidecar.
+    application.context.operation_store.delete(broken.operation_id)
+    assert queue.read(broken.operation_id) is not None
+
+    worker = OperationWorkLoop(
+        application.context,
+        application.operations,
+        SuccessfulHandlers(),
+        owner_id="worker-test",
+    )
+
+    # The unexecutable item is consumed and reported, not raised.
+    assert worker.run_once() is True
+    assert queue.read(broken.operation_id) is None
+
+    # The loop is still serving: the next item runs to a terminal success.
+    assert worker.run_once() is True
+    assert application.operations.status(healthy.operation_id).state is OperationState.SUCCEEDED
+    assert worker.run_once() is False
