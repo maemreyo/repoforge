@@ -89,8 +89,8 @@
       "tool_surface_hash": "a35cf906a086c19e7235b638266e65f7a45c94626984d12816b6a6215f9258b7"
     },
     "identity": "forge_v2",
-    "input_contract_digest": "8449f80ee442d6ea4e83d1b4f9aaea248c55a9a3574cbe0813b20aa29f4ef5fd",
-    "output_contract_digest": "d081233fc8f9c856ac0014996b3aa9e2176b7d5a18505e1fc5e6a29231d87633",
+    "input_contract_digest": "fc23049827ff22c514dc729de58e3eee62da11449b456e4c9ecfb0888b585a10",
+    "output_contract_digest": "c24b6fade33856909c884768ce8c372deb811f07f2d3ee322821bf820642cb02",
     "retired_identity": "forge_v1",
     "server_instructions_sha256": "791fa8003ef1ba06c3cc45debf727b7cb84020c5634b2fc8f15bf668b34d1999",
     "tool_contract": {
@@ -102,14 +102,14 @@
     },
     "tool_count": 28,
     "tool_hashes": {
-      "config_inspect": "949d1d11a6f61d0063530aa0278478e96e3a7b299711a2a0657657b4cff8d968",
-      "operation": "3c65b06c610fbd447c75597598d6c22143ed27e9478c12f35d012c77c9b4967f",
+      "config_inspect": "62d11dd711e38868725a298efe7d0636d0848dc25a5a3bc9d78c85f090932f4f",
+      "operation": "b413a3f6ece24431d7ca5fd2673907c605ed50272c3971dcc2a61c7e7fa15a25",
       "repo_history": "870e5e20ab1d5a9bc4168d3a2e0d24b65c94e088ccefba2b598b84d541940bba",
       "repo_issue": "b40386d44938d01c0b7ade9b353cc448c286dd7c5431bd668d0044a425dbe793",
       "repo_list": "ed9b4324152ff36e012866255fb716ff12e1cfe6bbaf3491f0bf9fa4bdf329f9",
       "repo_policy": "5f4b1ea5f788084832eff6f31ce062fd5d0d4ad422617cc841c6dc4642dcf091",
       "repo_pr_read": "8a3acb9a68501c886d2867135bbd765f691d443da28c5b8f4392f33e943d4e2d",
-      "repo_read": "775f0d2a2a462562f6f1b6f01332d51688f6ec2dfce632b77286d67ccc2d0de0",
+      "repo_read": "21fc16e8956cbf72d76382f8bb2597302516ebea26a78bcb3c5044656f0e0aa1",
       "repo_search": "1dee61ae299b580929d889cd8d51864d9bbf707f0ecd525937b923a5f1ea69a3",
       "repo_task_context": "a36c3457d26a646676a2a278d833fd3e2d5173f90a11079c99ed233558ebbac2",
       "repo_tree": "33f45b1fe5fcfc05ef9ffd052b965eb64dc0dc5b14bdca5defe5228b61d9aa4b",
@@ -123,8 +123,8 @@
       "workspace_pr": "7ff1fd5bf223ef3df675feade2cde8df38f16dedc547ac523ec82be2b501791e",
       "workspace_pr_evidence": "242b3bff81387a0d120d496f186314c9f923434fc6fb521d2ebb618affae8e4b",
       "workspace_push": "7569033e789a5d34908a758e03c34bb3c5a920c7525a91b4120111977604e23b",
-      "workspace_read": "d6d01e82e8a215a5aa298fc0122b96a2d433023a6b9cc657ae3949663863e4f4",
-      "workspace_refresh": "778d7353e9a30cf6ee4d3166fceefadca801ff22875034d7c378f5a3b2e7a6e3",
+      "workspace_read": "042d7de49f3ed150f3fdac28032c7171edd8e7622d03271e7421b7f8eb040a46",
+      "workspace_refresh": "964aa79a659deac268a40af355dd892b252b8d73dce01408c0c7212c35641e31",
       "workspace_remove": "947cedc4a317ddde64a19b55d4884e1548a51d4265531361bdb61692c0443ef2",
       "workspace_search": "6e40523d59687b5994487b17b28ffeae3ebcfdbbcfdf192c39d6c467d54a9365",
       "workspace_status": "184599e7c0eaa2078056746134fe027ac14c103418a2f3b1bcfa3d763b0174b8",
@@ -161,8 +161,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "40a976bb438ff890f5a9a78577406401c24c8d15a3705b229bc79c471529ccdb",
-    "tool_surface_hash": "9965bada429fc12d38e41681a1ce59784de19e078f93c2033bb0fe20dc04c1c6"
+    "tool_schema_bundle_sha256": "fa8ff203abf80c6145cf23a8fccadda4f536faea0ce41a8c8481da30e26aa61f",
+    "tool_surface_hash": "184cf4b8f049cb36a83fb0c5aae21b6d0818a7054d546b47f3898b0c64ad52b7"
   },
   "package_version": "2.2.0",
   "runtime": {

@@ -440,6 +440,7 @@ def _admin(
     reload_calls: list[int] | None = None,
     runtime_status: dict[str, object] | None = None,
     contract_identity: RuntimeContractIdentity | None = None,
+    latest_activation_receipt: object | None = None,
     ticket_graph: SourceTicketGraph | None = None,
     preserve_ticket_graph_in_resolved: bool = False,
 ) -> ConfigAdminService:
@@ -488,6 +489,8 @@ def _admin(
     identity_options: dict[str, Any] = {}
     if contract_identity is not None:
         identity_options["contract_identity_provider"] = lambda: contract_identity
+    if latest_activation_receipt is not None:
+        identity_options["latest_activation_receipt"] = lambda: latest_activation_receipt
     return ConfigAdminService(
         store=store,
         proposals=RepositoryProposalService(_FakeProbe(repo_root)),
@@ -1477,3 +1480,129 @@ async def test_config_admin_tools_round_trip_through_protocol(tmp_path: Path) ->
 
         logs = await session.call_tool("runtime_logs_read", {"source": "runtime", "limit": 5})
         assert logs.isError is False
+
+
+def _identity() -> RuntimeContractIdentity:
+    return RuntimeContractIdentity(
+        server_build_sha="a" * 64,
+        server_version="2.2.0",
+        active_generation=1,
+        tool_surface_hash="b" * 64,
+        input_contract_digest="c" * 64,
+        output_contract_digest="d" * 64,
+        runtime_protocol_version=1,
+        process_start_identity="e" * 64,
+    )
+
+
+def _activation_receipt(
+    *,
+    generation: int,
+    tool_surface_hash: str,
+    process_identity: str | None,
+):
+    from repoforge.domain.runtime_activation import (
+        RuntimeActivationClassification,
+        RuntimeActivationIdentity,
+        RuntimeActivationReceipt,
+    )
+
+    identity = RuntimeActivationIdentity(
+        config_generation=generation,
+        source_sha256="a" * 64,
+        resolved_sha256="b" * 64,
+        runtime_active_generation=generation,
+        process_identity=process_identity,
+        tool_surface_hash=tool_surface_hash,
+        runtime_phase="healthy",
+    )
+    return RuntimeActivationReceipt(
+        receipt_id="receipt-" + "1" * 24,
+        operation_id="op-" + "2" * 24,
+        classification=RuntimeActivationClassification.HOT_RELOAD,
+        target_generation=generation,
+        accepted_identity=identity,
+        previous_identity=None,
+        active_identity=identity,
+        continuation_reference=None,
+        correlation_id="c" * 24,
+        effect_boundary_crossed=True,
+        accepted_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def test_config_inspect_corroborates_activation_against_the_live_identity(
+    tmp_path: Path,
+) -> None:
+    """An activation command's own report cannot corroborate itself.
+
+    A release has already been observed reporting `converged: true` minutes
+    before its runtime turned out to be unusable, so `config_inspect` reads the
+    persisted receipt and compares it against the identity the live process
+    advertises.
+    """
+    identity = _identity()
+    admin = _admin(
+        tmp_path,
+        contract_identity=identity,
+        latest_activation_receipt=_activation_receipt(
+            generation=identity.active_generation,
+            tool_surface_hash=identity.tool_surface_hash,
+            process_identity=identity.process_start_identity,
+        ),
+    )
+
+    evidence = admin.config_inspect_v2()["activation_evidence"]
+
+    assert evidence["agreement"] == "matches"
+    assert evidence["receipt_id"] == "receipt-" + "1" * 24
+    assert evidence["activated_tool_surface_hash"] == identity.tool_surface_hash
+    assert evidence["effect_boundary_crossed"] is True
+
+
+def test_config_inspect_reports_an_activation_that_did_not_end_where_it_claimed(
+    tmp_path: Path,
+) -> None:
+    """The case worth catching: the receipt and the running process disagree."""
+    identity = _identity()
+    admin = _admin(
+        tmp_path,
+        contract_identity=identity,
+        latest_activation_receipt=_activation_receipt(
+            generation=identity.active_generation,
+            tool_surface_hash="f" * 64,
+            process_identity=identity.process_start_identity,
+        ),
+    )
+
+    evidence = admin.config_inspect_v2()["activation_evidence"]
+
+    assert evidence["agreement"] == "diverged"
+
+
+def test_config_inspect_says_unverifiable_rather_than_assuming_success(
+    tmp_path: Path,
+) -> None:
+    """A receipt that never recorded an activated identity proves nothing.
+
+    Reporting `matches` here would manufacture agreement out of missing data,
+    which is the failure mode this field exists to prevent.
+    """
+    identity = _identity()
+    admin = _admin(
+        tmp_path,
+        contract_identity=identity,
+        latest_activation_receipt=_activation_receipt(
+            generation=identity.active_generation,
+            tool_surface_hash=identity.tool_surface_hash,
+            process_identity=None,
+        ),
+    )
+
+    assert admin.config_inspect_v2()["activation_evidence"]["agreement"] == "unverifiable"
+    # No receipt store wired at all is reported as absent, not as agreement.
+    assert (
+        _admin(tmp_path, contract_identity=identity).config_inspect_v2()["activation_evidence"]
+        is None
+    )
