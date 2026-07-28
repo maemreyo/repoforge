@@ -9,7 +9,7 @@ steps all run against the candidate itself.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,7 @@ DEFAULT_HEALTH_INTERVAL_SECONDS = 5.0
 # A single failed sample is a blip; rollback needs sustained failure.
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 3
 _RECEIPT_ID_ATTEMPTS = 8
+RECONCILE_COMMAND = "rf upgrade reconcile"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +66,9 @@ class UpgradeResult:
     def as_dict(self) -> dict[str, Any]:
         rollback = (
             f"rf upgrade rollback {self.activation_receipt}"
-            if self.activation_receipt and self.status == "activated"
+            # A reconciled activation ends with an ordinary activation receipt, so it is
+            # reversible in exactly the same way.
+            if self.activation_receipt and self.status in {"activated", "reconciled"}
             else None
         )
         return {
@@ -176,17 +179,7 @@ class UpgradeService:
         health_window_seconds: float,
         health_interval_seconds: float,
     ) -> UpgradeResult:
-        # Fail closed on an earlier activation that never terminalized. Re-running would
-        # overwrite `previous` and delete the only evidence of the last-known-good release,
-        # so the operator must reconcile first -- "just re-run it" is not safe advice here.
-        in_flight = self._store.read_in_flight_activation()
-        if in_flight is not None:
-            raise ConfigError(
-                "ACTIVATION_RECONCILIATION_REQUIRED: an earlier activation reached stage "
-                f"{in_flight.get('stage')!r} targeting {in_flight.get('to_sha')} without "
-                "writing a terminal receipt. Inspect `rf version status` and reconcile it "
-                "before starting another activation."
-            )
+        self._require_no_unreconciled_activation(action="starting another activation")
 
         state = self._inspector.inspect(worktree)
         if not state.clean:
@@ -253,6 +246,136 @@ class UpgradeService:
             activated,
             window_seconds=health_window_seconds,
             interval_seconds=health_interval_seconds,
+        )
+
+    # -- reconciliation of an unterminalized activation ----------------------
+
+    def reconcile(self) -> UpgradeResult:
+        """Terminalize an activation that reached its target but wrote no receipt.
+
+        An activation can die between the symlink swap and its receipt -- the process is
+        replacing its own runtime, so it can be killed at exactly that point -- while the
+        runtime still converges onto the target by following the switched symlink. The
+        deployment is then correct and healthy, but the journal is non-terminal, which
+        blocks every later activation. Rollback is not the answer to that state: it would
+        move a healthy runtime OFF the release it is correctly serving. This is the
+        forward path, and it terminalizes only what it can prove.
+        """
+        with self._activation_lock():
+            in_flight = self._store.read_in_flight_activation()
+            if in_flight is None:
+                current = self._store.current_sha()
+                return UpgradeResult(
+                    status="nothing_to_reconcile",
+                    candidate_sha=current or "",
+                    build_fingerprint="",
+                    tool_surface_hash="",
+                    active_sha=current,
+                    detail="No activation is in flight; there is nothing to reconcile.",
+                )
+            reconciled = self._reconcile_converged(in_flight)
+            if reconciled is not None:
+                return reconciled
+            raise ConfigError(
+                "ACTIVATION_NOT_RECONCILABLE: "
+                f"{self._unreconciled_detail(in_flight)}. An activation may only be "
+                "terminalized as activated when the live runtime is observed serving its "
+                "target and health-verified, so fix the runtime and re-run this command, "
+                f"or run `rf upgrade rollback` to return to {self._store.previous_sha()} "
+                "and record that outcome instead."
+            )
+
+    def _require_no_unreconciled_activation(self, *, action: str) -> None:
+        """Fail closed on an unterminalized activation -- unless it demonstrably won.
+
+        Re-running blindly would overwrite `previous` and delete the only evidence of the
+        last-known-good release, so "just re-run it" is not safe advice. But refusing
+        outright was a dead end: the guard rejected a re-run while the only other advice
+        on offer was a rollback that would demote a healthy runtime. So the journal is
+        reconciled first when the runtime is provably serving its target, and only a state
+        that cannot be proven is refused -- with the command that resolves it.
+        """
+        in_flight = self._store.read_in_flight_activation()
+        if in_flight is None:
+            return
+        if self._reconcile_converged(in_flight) is not None:
+            return
+        raise ConfigError(
+            "ACTIVATION_RECONCILIATION_REQUIRED: "
+            f"{self._unreconciled_detail(in_flight)}. Run `{RECONCILE_COMMAND}` to "
+            f"terminalize it, or `rf upgrade rollback` to return to "
+            f"{self._store.previous_sha()}, before {action}."
+        )
+
+    def _unreconciled_detail(self, in_flight: dict[str, object]) -> str:
+        return (
+            f"an earlier activation reached stage {in_flight.get('stage')!r} targeting "
+            f"{in_flight.get('to_sha')} without writing a terminal receipt, and the live "
+            f"runtime is not verifiably serving it (`current` points at "
+            f"{self._store.current_sha()})"
+        )
+
+    def _reconcile_converged(self, in_flight: dict[str, object]) -> UpgradeResult | None:
+        """Write the terminal receipt for a journal whose target is live and healthy.
+
+        Returns ``None`` -- changing nothing -- when that cannot be proven, so every
+        caller can treat a ``None`` as "this state still needs a human decision".
+        """
+        to_sha = in_flight.get("to_sha")
+        from_sha = in_flight.get("from_sha")
+        if not isinstance(to_sha, str) or to_sha != self._store.current_sha():
+            return None
+        manifest = self._store.read_manifest(to_sha)
+        if manifest is None:
+            return None
+        converged, observed_sha, verify_detail = self._verify_serving(to_sha, attempts=1)
+        if not converged:
+            return None
+        previous_manifest = (
+            self._store.read_manifest(from_sha) if isinstance(from_sha, str) else None
+        )
+        rediscovery_required = (
+            previous_manifest is not None
+            and previous_manifest.tool_surface_hash != manifest.tool_surface_hash
+        )
+        detail = f"Reconciled an unterminalized activation: {verify_detail}"
+        receipt = ActivationReceipt(
+            receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
+            from_sha=from_sha if isinstance(from_sha, str) else None,
+            to_sha=to_sha,
+            from_fingerprint=previous_manifest.build_fingerprint if previous_manifest else None,
+            to_fingerprint=manifest.build_fingerprint,
+            tool_surface_hash=manifest.tool_surface_hash,
+            rediscovery_required=rediscovery_required,
+            outcome=ActivationOutcome.ACTIVATED,
+            activated_at=self._clock.now_iso(),
+            detail=detail,
+            stage=ActivationStage.HEALTH_VERIFIED,
+            observed_sha=observed_sha,
+            converged=True,
+        )
+        # Keep the id the journal already published, so the receipt an operator was told
+        # to look for is the receipt that exists. An unusable or taken id falls back to a
+        # freshly allocated one rather than failing the reconciliation.
+        journal_receipt_id = in_flight.get("receipt_id")
+        if isinstance(journal_receipt_id, str):
+            with suppress(ValueError):
+                receipt = replace(receipt, receipt_id=journal_receipt_id)
+        receipt = self._write_receipt(receipt)
+        self._store.end_activation()
+        return UpgradeResult(
+            status="reconciled",
+            candidate_sha=to_sha,
+            build_fingerprint=manifest.build_fingerprint,
+            tool_surface_hash=manifest.tool_surface_hash,
+            previous_sha=from_sha if isinstance(from_sha, str) else None,
+            active_sha=to_sha,
+            activation_receipt=receipt.receipt_id,
+            rediscovery_required=rediscovery_required,
+            observed_sha=observed_sha,
+            converged=True,
+            stage=ActivationStage.HEALTH_VERIFIED.value,
+            detail=detail,
         )
 
     def _watch_or_rollback(
@@ -428,11 +551,18 @@ class UpgradeService:
             return "skipped", "This release store does not manage a PATH launcher."
         return "installed", str(installed)
 
-    def _verify_serving(self, expected_sha: str) -> tuple[bool, str | None, str]:
-        """Poll until the live runtime is observed serving ``expected_sha`` and healthy."""
+    def _verify_serving(
+        self, expected_sha: str, *, attempts: int | None = None
+    ) -> tuple[bool, str | None, str]:
+        """Poll until the live runtime is observed serving ``expected_sha`` and healthy.
+
+        ``attempts`` bounds the poll for callers that are inspecting an existing state
+        rather than waiting for a restart: reconciliation must answer now, not spend the
+        full convergence budget waiting for a runtime nobody just replaced.
+        """
         observed_sha: str | None = None
         detail = "runtime never reported a release"
-        for attempt in range(self._converge_attempts):
+        for attempt in range(max(1, attempts) if attempts is not None else self._converge_attempts):
             if attempt and self._sleeper is not None:
                 self._sleeper.sleep(self._converge_interval)
             observation = self._observer.observe()
@@ -490,9 +620,34 @@ class UpgradeService:
                 f"ACTIVATION_FAILED: {detail}. No previous release exists to roll back to; "
                 f"receipt {failed_receipt.receipt_id}."
             )
-        rolled_back = self._rollback_locked(
-            receipt_id=failed_receipt.receipt_id, expected_current=manifest.commit_sha
-        )
+        # The unwind must not be able to fail quietly. Two things can go wrong and both
+        # used to be reported as a successful rollback: `_rollback_locked` can raise before
+        # it touches anything (a pruned or unreadable target), and it can complete as
+        # `rollback_failed` when the restored release never converges -- in which case
+        # `active_sha` is None and the old message read "Rolled back to None".
+        try:
+            rolled_back = self._rollback_locked(
+                receipt_id=failed_receipt.receipt_id, expected_current=manifest.commit_sha
+            )
+        except ConfigError as exc:
+            raise ConfigError(
+                f"ACTIVATION_FAILED_ROLLBACK_FAILED: {detail}. The rollback to "
+                f"{previous_sha} could not be attempted ({exc}), so `current` still points "
+                f"at {self._store.current_sha()} (failed receipt "
+                f"{failed_receipt.receipt_id}). Repair or reinstall {previous_sha} and run "
+                f"`rf upgrade rollback`, or `rf version switch` to a release that is "
+                "installed; `rf version status` reports what the runtime is serving now."
+            ) from exc
+        if rolled_back.status != "rolled_back":
+            raise ConfigError(
+                f"ACTIVATION_FAILED_ROLLBACK_FAILED: {detail}. The rollback to "
+                f"{previous_sha} did not converge either ({rolled_back.detail}), so no "
+                f"release is verified as serving (failed receipt "
+                f"{failed_receipt.receipt_id}, rollback receipt "
+                f"{rolled_back.activation_receipt}). Inspect `rf version status` and "
+                "`rf runtime status`, then `rf runtime restart` to adopt "
+                f"{previous_sha}, or `rf version switch` to a known-good release."
+            )
         raise ConfigError(
             f"ACTIVATION_FAILED_ROLLED_BACK: {detail}. Rolled back to {rolled_back.active_sha} "
             f"(failed receipt {failed_receipt.receipt_id}, "
@@ -515,14 +670,7 @@ class UpgradeService:
         activation: nothing about it may be less verified than one.
         """
         with self._activation_lock():
-            in_flight = self._store.read_in_flight_activation()
-            if in_flight is not None:
-                raise ConfigError(
-                    "ACTIVATION_RECONCILIATION_REQUIRED: an earlier activation reached "
-                    f"stage {in_flight.get('stage')!r} targeting {in_flight.get('to_sha')} "
-                    "without writing a terminal receipt. Inspect `rf version status` and "
-                    "reconcile it before switching."
-                )
+            self._require_no_unreconciled_activation(action="switching")
             manifest = resolve_release(self._store, selector)
             if not self._store.release_path(manifest.commit_sha).is_dir():
                 raise ConfigError(

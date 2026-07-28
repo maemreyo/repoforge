@@ -21,7 +21,9 @@
 # breaking every activation because venv console scripts hard-code the interpreter path;
 # runtime identity being underivable from `sys.executable` (relocatable venvs symlink out
 # of the release tree); and the captured release identity dropped again when the inner CLI
-# spawned the worker.
+# spawned the worker. It also asserts the supervisor handoff itself: the single-instance
+# lock is sampled continuously across the second activation, so two supervisors alive at
+# once -- the #304 failure -- fails the gate instead of merely failing an activation.
 #
 # Usage: scripts/live-activation-sandbox.sh [--keep]
 set -euo pipefail
@@ -216,6 +218,57 @@ raise SystemExit(f"stub: unsupported argv {argv}")
 STUB
 chmod +x "$SANDBOX/bin/tunnel-client"
 
+# --------------------------------------------------------------------------- lock probe
+# Reports which LIVE processes hold `runtime-single-instance`, so the handoff assertion is
+# about real file locks rather than about a pid written into a file. Read-only: it never
+# opens the lock for writing and never takes it.
+cat > "$SANDBOX/lock-probe.py" <<'PROBE'
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+path = sys.argv[1]
+target = os.path.realpath(path)
+recorded = None
+try:
+    with open(path, encoding="utf-8") as handle:
+        payload = json.loads(handle.read() or "{}")
+    recorded = payload.get("pid") if isinstance(payload, dict) else None
+except (OSError, ValueError):
+    recorded = None
+
+holders: set[int] = set()
+tool = "none"
+if os.path.isdir("/proc"):
+    tool = "proc"
+    for entry in glob.glob("/proc/[0-9]*/fd/*"):
+        try:
+            if os.path.realpath(entry) == target:
+                holders.add(int(entry.split("/")[2]))
+        except (OSError, ValueError):
+            continue
+elif shutil.which("lsof"):
+    tool = "lsof"
+    completed = subprocess.run(
+        ["lsof", "-t", "--", target], capture_output=True, text=True, check=False
+    )
+    holders = {int(line) for line in completed.stdout.split() if line.isdigit()}
+print(
+    json.dumps(
+        {
+            "exists": os.path.exists(path),
+            "recorded_pid": recorded if isinstance(recorded, int) else None,
+            "holders": sorted(holders),
+            "tool": tool,
+        },
+        sort_keys=True,
+    )
+)
+PROBE
+
 # ------------------------------------------------------------------ clean source worktree
 # `rf upgrade` refuses a dirty worktree, so build from a pristine clone of HEAD.
 say "Cloning HEAD into the sandbox (a clean worktree is required)"
@@ -350,10 +403,77 @@ printf 'second candidate\n' >> "$CLONE/README.md"
 git -C "$CLONE" -c user.email=s@x -c user.name=s commit --quiet -am "second candidate"
 SECOND_SHA="$(git -C "$CLONE" rev-parse HEAD)"
 ok "second candidate at ${SECOND_SHA:0:12}"
+# Sample the single-instance lock ACROSS the handoff (#304). Two supervisors alive at once
+# -- one per release -- is what made a real activation fail: the incoming process died on
+# this lock while the outgoing one still held it. A gate that only inspects the end state
+# cannot see that, so sample continuously while the transition is happening.
+LOCK_FILE="$HOME/.local/state/repoforge/locks/runtime-single-instance.lock"
+LOCK_SAMPLES="$SANDBOX/lock-samples.jsonl"
+: > "$LOCK_SAMPLES"
+(
+  while :; do
+    python3 "$SANDBOX/lock-probe.py" "$LOCK_FILE" >> "$LOCK_SAMPLES" 2>/dev/null || true
+    sleep 0.2
+  done
+) &
+SAMPLER_PID=$!
 set +e
 "${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3 | tee "$SANDBOX/upgrade2.json"
 UPGRADE2_EXIT=${PIPESTATUS[0]}
 set -e
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
+python3 "$SANDBOX/lock-probe.py" "$LOCK_FILE" > "$SANDBOX/lock-final.json" 2>/dev/null || true
+
+say "Handoff: exactly one supervisor may hold runtime-single-instance (#304)"
+set +e
+python3 - "$LOCK_SAMPLES" "$SANDBOX/lock-final.json" <<'LOCKASSERT'
+import json
+import sys
+
+samples_path, final_path = sys.argv[1:3]
+samples = []
+with open(samples_path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if line:
+            try:
+                samples.append(json.loads(line))
+            except ValueError:
+                pass
+with open(final_path, encoding="utf-8") as handle:
+    final = json.load(handle)
+
+tool = final.get("tool")
+if tool == "none":
+    # Never silently pass: say plainly which assertion could not be made.
+    print("  ! neither /proc nor lsof is available; holder assertions were SKIPPED")
+    if final.get("recorded_pid") is None:
+        raise SystemExit("the lock records no holder after the handoff")
+    raise SystemExit(0)
+
+contended = [s for s in samples if len(s.get("holders") or []) > 1]
+if contended:
+    print("\033[31m✗ two supervisors held the runtime lock during the handoff:\033[0m")
+    for sample in contended[:5]:
+        print(f"    - {sample}")
+    raise SystemExit(1)
+
+holders = final.get("holders") or []
+if len(holders) != 1:
+    raise SystemExit(f"expected exactly one lock holder after the handoff, got {holders}")
+if final.get("recorded_pid") != holders[0]:
+    raise SystemExit(
+        f"the lock records pid {final.get('recorded_pid')} but {holders[0]} holds it"
+    )
+print(
+    f"\033[32m✓ one holder throughout ({len(samples)} samples via {tool}); "
+    f"pid {holders[0]} holds and records the lock\033[0m"
+)
+LOCKASSERT
+LOCK_ASSERT_EXIT=$?
+set -e
+[[ "$LOCK_ASSERT_EXIT" == "0" ]] || fail "the supervisor handoff violated single-instance"
 set +e
 "${RF[@]}" version status > "$SANDBOX/status2.json"
 STATUS2_EXIT=$?

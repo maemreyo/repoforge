@@ -355,3 +355,83 @@ def test_a_relocatable_venv_symlink_is_never_used_to_infer_identity(tmp_path: Pa
     assert observer.observe().running_release_sha is None
     # The supporting-evidence helper does NOT resolve, so it still recognises the release.
     assert observer.release_of_executable(str(executable)) == "aaa1111"
+
+
+# ------------------------------- handoff: never two live supervisors (#304)
+
+
+def test_the_incumbent_is_drained_before_the_os_manager_is_kickstarted(
+    tmp_path: Path,
+) -> None:
+    """`kickstart -k` only replaces the process launchd owns.
+
+    A supervisor started outside launchd -- a manual `rf start`, or a leftover from an
+    earlier release -- survives it and keeps holding `runtime-single-instance`, so the
+    incoming process dies on that lock and a healthy activation is reported as a failure.
+    Draining by identity first is what makes the handoff single-instance.
+    """
+    events: list[str] = []
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+
+    class _RecordingControl(_Control):
+        def request(self, request, *, timeout_seconds: float = 10.0):
+            events.append("shutdown")
+            return super().request(request, timeout_seconds=timeout_seconds)
+
+    class _Kickstarter:
+        def available(self) -> bool:
+            return True
+
+        def kickstart(self) -> RestartOutcome:
+            events.append("kickstart")
+            store.write(_record(phase=RuntimePhase.HEALTHY, pid=7777, identity=_IDENTITY_NEW))
+            return RestartOutcome(ok=True, detail="kickstarted")
+
+    outcome = _restarter(
+        store,
+        _RecordingControl(store),
+        _RecordingLauncher(store),
+        tmp_path,
+        kickstarter=_Kickstarter(),
+    ).restart()
+
+    assert outcome.ok is True, outcome.detail
+    assert events == ["shutdown", "kickstart"], "the incumbent must be gone before kickstart"
+
+
+def test_an_undrainable_incumbent_is_never_kickstarted_into_a_race(tmp_path: Path) -> None:
+    """If the outgoing supervisor cannot be stopped, starting a second one is worse than
+    reporting the failure: that is the state the single-instance lock exists to prevent."""
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+
+    class _DeafControl:
+        """SHUTDOWN is acknowledged but the process never leaves."""
+
+        def request(self, request, *, timeout_seconds: float = 10.0):
+            return ControlResponse(1, True, request.correlation_id, "ignored")
+
+    class _Kickstarter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def available(self) -> bool:
+            return True
+
+        def kickstart(self) -> RestartOutcome:
+            self.calls += 1
+            return RestartOutcome(ok=True, detail="kickstarted")
+
+    kickstarter = _Kickstarter()
+    outcome = _restarter(
+        store,
+        _DeafControl(),
+        _RecordingLauncher(store),  # force_stop() returns False: the process stays
+        tmp_path,
+        kickstarter=kickstarter,
+    ).restart()
+
+    assert outcome.ok is False
+    assert "race" in outcome.detail
+    assert kickstarter.calls == 0

@@ -658,3 +658,167 @@ def test_a_removed_release_is_simply_not_selectable(tmp_path: Path) -> None:
         second.switch("1111aaa")
     # `current` must be untouched by a refused switch.
     assert store.current_sha() == "2222bbb"
+
+
+# ------- unterminalized activations: forward path and honest unwind (#304)
+
+
+def test_a_succeeded_activation_can_be_terminalized_without_rolling_back(
+    tmp_path: Path,
+) -> None:
+    """The exact state #304 was reported from: `current` switched, runtime converged on
+    the target, no terminal receipt. Rolling back would demote a healthy runtime, so
+    reconciliation is the forward path -- and it must produce a real ACTIVATED receipt."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    # Simulate the crash: the activation swapped `current` and the runtime adopted it,
+    # but the process died before writing its receipt.
+    store.begin_activation(receipt_id="act-20260725-900", from_sha="1111aaa", to_sha="2222bbb")
+    store.record_activation_stage("symlink_switched")
+
+    result = second.reconcile()
+
+    assert result.status == "reconciled"
+    assert result.active_sha == "2222bbb"
+    assert result.converged is True
+    # The receipt keeps the id the journal published, so the operator finds what they were told.
+    assert result.activation_receipt == "act-20260725-900"
+    receipt = store.read_receipt("act-20260725-900")
+    assert receipt is not None
+    assert receipt.outcome.value == "activated"
+    assert receipt.stage.value == "health_verified"
+    assert receipt.from_sha == "1111aaa"
+    # The journal is terminal, so the runtime is unchanged and activations are unblocked.
+    assert store.read_in_flight_activation() is None
+    assert store.current_sha() == "2222bbb"
+
+
+def test_reconciliation_unblocks_the_next_activation(tmp_path: Path) -> None:
+    """The guard must not deadlock: a provably converged journal is terminalized in place
+    rather than refusing a re-run while the only alternative demotes a healthy runtime."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    store.begin_activation(receipt_id="act-20260725-901", from_sha=None, to_sha="1111aaa")
+    store.record_activation_stage("symlink_switched")
+
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    result = second.upgrade(tmp_path, activate=True)
+
+    assert result.status == "activated"
+    assert store.current_sha() == "2222bbb"
+    # The stale journal was closed with its own receipt, not silently discarded.
+    reconciled = store.read_receipt("act-20260725-901")
+    assert reconciled is not None
+    assert reconciled.outcome.value == "activated"
+    assert reconciled.to_sha == "1111aaa"
+
+
+def test_reconcile_refuses_a_target_the_runtime_is_not_serving(tmp_path: Path) -> None:
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    # A journal whose target is NOT what `current` points at cannot be terminalized.
+    store.begin_activation(receipt_id="act-20260725-902", from_sha="2222bbb", to_sha="1111aaa")
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECONCILABLE"):
+        second.reconcile()
+    assert store.read_in_flight_activation() is not None
+    assert store.current_sha() == "2222bbb"
+
+
+def test_reconcile_refuses_when_the_runtime_is_unhealthy(tmp_path: Path) -> None:
+    """Convergence is observed AND health-verified; a sick runtime is not an activation."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    store.begin_activation(receipt_id="act-20260725-903", from_sha=None, to_sha="1111aaa")
+
+    unhealthy = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="1111aaa", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(store),
+        clock=_Clock(),
+        health_probe=_HealthProbe([HealthSample(healthy=False, detail="tunnel down")]),
+        converge_attempts=1,
+        converge_interval_seconds=0,
+    )
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECONCILABLE"):
+        unhealthy.reconcile()
+    assert store.read_in_flight_activation() is not None
+
+
+def test_reconcile_is_a_no_op_when_nothing_is_in_flight(tmp_path: Path) -> None:
+    service, _, restarter = _service(tmp_path, head="1111aaa")
+    service.upgrade(tmp_path, activate=True)
+    restarts_before = restarter.calls
+
+    result = service.reconcile()
+
+    assert result.status == "nothing_to_reconcile"
+    assert result.active_sha == "1111aaa"
+    assert restarter.calls == restarts_before
+
+
+def test_a_failed_activation_whose_rollback_also_fails_says_so(tmp_path: Path) -> None:
+    """#304 defect 2: an unwind that did not converge must never be reported as a
+    rollback, and the operator must be told what state the runtime is actually in."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+
+    class _NeverServing:
+        """A runtime that publishes no release identity at all: nothing can converge."""
+
+        def observe(self) -> ObservedRuntime:
+            return ObservedRuntime(running_release_sha=None, phase="failed", pid=None)
+
+    stuck = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(ok=False),
+        observer=_NeverServing(),
+        clock=_Clock(),
+        converge_attempts=1,
+        converge_interval_seconds=0,
+    )
+    with pytest.raises(ConfigError, match="ACTIVATION_FAILED_ROLLBACK_FAILED") as raised:
+        stuck.upgrade(tmp_path, activate=True)
+
+    message = str(raised.value)
+    assert "did not converge either" in message
+    # Both dispositions are durable, and neither claims success.
+    outcomes = sorted(r.outcome.value for r in store.list_receipts())
+    assert "failed" in outcomes
+    assert "rollback_failed" in outcomes
+    assert store.read_in_flight_activation() is None
+
+
+def test_a_rollback_target_that_cannot_be_verified_is_reported_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """The unwind raised before touching anything (a pruned target). The activation must
+    still end in a terminal receipt plus an actionable error -- never a claimed rollback."""
+    import shutil
+
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store, restarter=_Restarter(ok=False))
+    # Destroy the only rollback target after it became `previous`.
+    shutil.rmtree(store.release_path("1111aaa"))
+
+    with pytest.raises(ConfigError, match="ACTIVATION_FAILED_ROLLBACK_FAILED") as raised:
+        second.upgrade(tmp_path, activate=True)
+
+    message = str(raised.value)
+    assert "ROLLBACK_TARGET_UNUSABLE" in message
+    assert "rf version status" in message
+    assert [r.outcome.value for r in store.list_receipts()].count("failed") == 1
+    assert store.read_in_flight_activation() is None
