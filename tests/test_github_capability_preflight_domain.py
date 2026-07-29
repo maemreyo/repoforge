@@ -181,3 +181,87 @@ def test_authorization_accepts_only_reports_with_proven_available_results() -> N
 
     assert failure.value.code is ErrorCode.GITHUB_API_PERMISSION_DENIED
     assert failure.value.unchanged_state == ("No GitHub external write was admitted.",)
+
+
+@pytest.mark.parametrize(
+    ("state", "category", "code_value", "retryable"),
+    [
+        (
+            GitHubCapabilityEvidenceState.LIKELY_POLICY_DENIED,
+            "token_approval",
+            "GITHUB_TOKEN_APPROVAL_REQUIRED",
+            False,
+        ),
+        (
+            GitHubCapabilityEvidenceState.LIKELY_POLICY_DENIED,
+            "ruleset",
+            "GITHUB_RULESET_POLICY_DENIED",
+            False,
+        ),
+        (
+            GitHubCapabilityEvidenceState.LIKELY_POLICY_DENIED,
+            "workflow_policy",
+            "GITHUB_WORKFLOW_POLICY_DENIED",
+            False,
+        ),
+        (
+            GitHubCapabilityEvidenceState.LIKELY_POLICY_DENIED,
+            "network_policy",
+            "GITHUB_NETWORK_POLICY_DENIED",
+            False,
+        ),
+        (
+            GitHubCapabilityEvidenceState.UNOBSERVABLE,
+            "enterprise_evidence",
+            "GITHUB_ENTERPRISE_EVIDENCE_UNOBSERVABLE",
+            False,
+        ),
+        (
+            GitHubCapabilityEvidenceState.PROVIDER_UNAVAILABLE,
+            "provider",
+            "GITHUB_PROVIDER_UNAVAILABLE",
+            True,
+        ),
+    ],
+)
+def test_typed_enterprise_failures_have_narrow_non_escalating_recovery(
+    state: GitHubCapabilityEvidenceState,
+    category: str,
+    code_value: str,
+    retryable: bool,
+) -> None:
+    code = ErrorCode(code_value)
+    request = _request(
+        capabilities=(GitHubOperationCapability.PULL_REQUESTS_WRITE,),
+        permissions=("pull_requests:write",),
+    )
+    report = GitHubCapabilityPreflightReport.build(
+        request,
+        (
+            GitHubCapabilityResult(
+                capability=GitHubOperationCapability.PULL_REQUESTS_WRITE,
+                state=state,
+                reason_code=category,
+                detail_digest="d" * 64,
+                error_code=code,
+                policy_category=category,
+            ),
+        ),
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        authorize_github_capabilities(report)
+
+    assert failure.value.code is code
+    assert failure.value.retryable is retryable
+    assert failure.value.details == {
+        "capability_id": "github.pull_requests.write",
+        "repository_id": "123456",
+        "installation_id": "installation-84",
+        "evidence_state": state.value,
+        "policy_category": category,
+    }
+    recovery = (failure.value.safe_next_action or "").lower()
+    assert "switch profile" not in recovery
+    assert "broader token" not in recovery
+    assert "admin token" not in recovery
