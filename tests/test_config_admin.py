@@ -443,6 +443,7 @@ def _admin(
     latest_activation_receipt: object | None = None,
     ticket_graph: SourceTicketGraph | None = None,
     preserve_ticket_graph_in_resolved: bool = False,
+    runtime_record: object | None = None,
 ) -> ConfigAdminService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -507,6 +508,7 @@ def _admin(
         read_audit_page=read_audit_event_page,
         reload_runtime=reload_runtime,
         read_runtime_status=(lambda: dict(runtime_status)) if runtime_status is not None else None,
+        runtime_record_provider=((lambda: runtime_record) if runtime_record is not None else None),
         **identity_options,
     )
 
@@ -1666,3 +1668,83 @@ def test_config_inspect_says_unverifiable_rather_than_assuming_success(
         _admin(tmp_path, contract_identity=identity).config_inspect_v2()["activation_evidence"]
         is None
     )
+
+
+# ------------------- what an agent can see about runtime health (config_inspect_v2)
+
+
+def _health_record(**overrides: object):
+    from repoforge.domain.runtime import RuntimePhase, RuntimeRecord
+
+    defaults: dict[str, object] = {
+        "protocol_version": 1,
+        "phase": RuntimePhase.HEALTHY,
+        "pid": 100,
+        "process_identity": "a" * 64,
+        "active_generation": 1,
+        "accepted_generation": 1,
+        "tunnel_profile": "repoforge",
+        "tunnel_profile_fingerprint": "b" * 64,
+        "tool_surface_hash": "c" * 64,
+        "started_at": NOW,
+        "updated_at": NOW,
+        "correlation_id": "d" * 24,
+        "child_pid": 200,
+        "child_process_identity": "e" * 64,
+        "health": (("control_plane", True, "control socket is accepting requests"),),
+        "health_observed_at": NOW,
+    }
+    defaults.update(overrides)
+    return RuntimeRecord(**defaults)  # type: ignore[arg-type]
+
+
+def test_agent_facing_inspect_reports_live_runtime_health(tmp_path: Path) -> None:
+    """The CLI saw runtime health and the agent did not.
+
+    `config_inspect_v2` -- what the MCP tool calls -- carried only
+    `activation_evidence.runtime_phase`, a word captured in a receipt when a release was
+    activated. It said `healthy` throughout the 2026-07-28 incident, hours after the fact,
+    while the connector was torn down twice.
+    """
+    admin = _admin(tmp_path, runtime_record=_health_record())
+
+    health = admin.config_inspect_v2()["runtime_health"]
+
+    assert health["phase"] == "healthy"
+    assert health["checks"] == [
+        {"name": "control_plane", "ok": True, "detail": "control socket is accepting requests"}
+    ]
+    assert health["observed_age_seconds"] == 0.0
+
+
+def test_agent_facing_inspect_ages_the_health_observation(tmp_path: Path) -> None:
+    """The field that separates `healthy and quiet` from `the watchdog stopped`.
+
+    The watchdog writes only on change, so the phase alone cannot express the difference.
+    """
+    stale = "2026-07-15T00:00:00+00:00"  # a day before the fixed clock
+    admin = _admin(tmp_path, runtime_record=_health_record(health_observed_at=stale))
+
+    health = admin.config_inspect_v2()["runtime_health"]
+
+    assert health["observed_at"] == stale
+    assert health["observed_age_seconds"] == 86_400.0
+
+
+def test_agent_facing_inspect_reports_restart_evidence(tmp_path: Path) -> None:
+    """`restart_count` resets after a stable interval; these do not."""
+    admin = _admin(
+        tmp_path,
+        runtime_record=_health_record(
+            restart_count=0, restarts_total=2, last_restart_at="2026-07-28T17:15:55+00:00"
+        ),
+    )
+
+    health = admin.config_inspect_v2()["runtime_health"]
+
+    assert health["restarts_total"] == 2
+    assert health["last_restart_at"] == "2026-07-28T17:15:55+00:00"
+
+
+def test_agent_facing_inspect_omits_health_when_no_runtime_record_exists(tmp_path: Path) -> None:
+    assert _admin(tmp_path).config_inspect_v2()["runtime_health"] is None

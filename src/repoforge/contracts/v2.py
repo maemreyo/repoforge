@@ -1987,6 +1987,40 @@ class RuntimeContractIdentityView(StrictModel):
     process_start_identity: Sha256
 
 
+class RuntimeHealthCheckView(StrictModel):
+    """One named runtime health component and why it holds or does not."""
+
+    name: ShortText
+    ok: bool
+    detail: ShortText
+
+
+class RuntimeHealthView(StrictModel):
+    """What the supervisor observes about the runtime NOW, not at activation.
+
+    `RuntimeActivationEvidenceView.runtime_phase` is a word captured in a receipt when a
+    release was activated; it can be hours old and it said `healthy` throughout the
+    2026-07-28 incident, during which the connector was torn down twice. A caller asking
+    whether the runtime is well needs the record the watchdog maintains, and needs to know
+    how old that record is: the watchdog writes only on change, so `healthy` with no
+    timestamp cannot be told apart from a watchdog that stopped running. `observed_age_seconds`
+    is that distinction, and it is the field to read first.
+
+    `restarts_total` and `last_restart_at` are evidence rather than policy -- unlike
+    `restart_count`, which the restart policy resets after a stable interval, so an outage
+    disappears from it sixty seconds later.
+    """
+
+    phase: ShortText
+    observed_at: str | None = Field(default=None, min_length=1, max_length=80)
+    observed_age_seconds: float | None = Field(default=None, ge=0.0)
+    checks: tuple[RuntimeHealthCheckView, ...] = Field(default=(), max_length=50)
+    restarts_total: int = Field(default=0, ge=0)
+    last_restart_at: str | None = Field(default=None, min_length=1, max_length=80)
+    consecutive_health_failures: int = Field(default=0, ge=0)
+    last_error_code: ShortText | None = None
+
+
 class RuntimeActivationEvidenceView(StrictModel):
     """What the durable activation receipt says, read back independently.
 
@@ -2085,6 +2119,7 @@ class ConfigInspectOutput(ToolResponse):
     contract_identity: RuntimeContractIdentityView | None = None
     config_projection: ConfigProjectionView | None = None
     activation_evidence: RuntimeActivationEvidenceView | None = None
+    runtime_health: RuntimeHealthView | None = None
 
 
 class RuntimeLogSource(str, Enum):
