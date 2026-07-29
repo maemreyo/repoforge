@@ -306,28 +306,102 @@ def test_coverage_map_conftest_change_adds_consumers() -> None:
 # ------------------------- pull-request-time coverage-map freshness
 
 
-def test_map_freshness_passes_when_changed_modules_are_mapped() -> None:
-    manifest = _coverage_manifest()
-
-    assert selector.check_map_freshness(manifest, ["src/repoforge/adapters/git/cli.py"]) == 0
-
-
-def test_map_freshness_fails_on_a_package_module_missing_from_the_map() -> None:
-    """An unmapped module makes the selector fail closed, so every later change to it
-    runs the whole suite. That is the rot this catches while it is still a pull request."""
-    manifest = _coverage_manifest()
-
-    assert selector.check_map_freshness(manifest, ["src/repoforge/brand_new.py"]) == 1
+def _tree(tmp_path: Path, **modules: str) -> Path:
+    """Materialise package modules so the check can read what it is judging."""
+    for relative, source in modules.items():
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    return tmp_path
 
 
-def test_map_freshness_ignores_paths_the_map_never_covers() -> None:
-    """The map is source-to-test; docs, tests and data are selected by other rules."""
-    manifest = _coverage_manifest()
+_REAL_BODY = "def run() -> int:\n    return 1\n"
+
+
+def test_map_freshness_passes_when_changed_modules_are_mapped(tmp_path: Path) -> None:
+    root = _tree(tmp_path, **{"src/repoforge/adapters/git/cli.py": _REAL_BODY})
 
     assert (
         selector.check_map_freshness(
-            manifest,
-            ["docs/guide.md", "tests/test_new.py", "pyproject.toml", "src/repoforge/notes.txt"],
+            _coverage_manifest(), ["src/repoforge/adapters/git/cli.py"], root
         )
         == 0
     )
+
+
+def test_map_freshness_fails_on_a_package_module_missing_from_the_map(tmp_path: Path) -> None:
+    """An unmapped module makes the selector fail closed, so every later change to it
+    runs the whole suite. That is the rot this catches while it is still a pull request."""
+    root = _tree(tmp_path, **{"src/repoforge/brand_new.py": _REAL_BODY})
+
+    assert (
+        selector.check_map_freshness(_coverage_manifest(), ["src/repoforge/brand_new.py"], root)
+        == 1
+    )
+
+
+def test_map_freshness_ignores_paths_the_map_never_covers(tmp_path: Path) -> None:
+    """The map is source-to-test; docs, tests and data are selected by other rules."""
+    root = _tree(tmp_path, **{"docs/guide.md": "x", "tests/test_new.py": "x"})
+
+    assert (
+        selector.check_map_freshness(
+            _coverage_manifest(),
+            ["docs/guide.md", "tests/test_new.py", "pyproject.toml", "src/repoforge/notes.txt"],
+            root,
+        )
+        == 0
+    )
+
+
+def test_map_freshness_does_not_demand_the_impossible(tmp_path: Path) -> None:
+    """A Protocol can never be mapped, so rejecting it would send the author to run
+    `make test-map`, which cannot fix it. This is the case the first version got wrong."""
+    root = _tree(
+        tmp_path,
+        **{"src/repoforge/ports/store.py": "class S:\n    def read(self) -> str: ...\n"},
+    )
+
+    assert (
+        selector.check_map_freshness(_coverage_manifest(), ["src/repoforge/ports/store.py"], root)
+        == 0
+    )
+
+
+def test_a_protocol_module_is_not_treated_as_a_stale_map_entry() -> None:
+    """Only executed function-body lines carry a per-test context, so a Protocol whose
+    methods are all `...` can never appear in the map. Demanding it made the gate tell
+    authors to run `make test-map`, which cannot fix those files -- 15 of the 16 it
+    rejected on the identity branch were exactly this."""
+    protocol = (
+        "from typing import Protocol\n\n\nclass Store(Protocol):\n"
+        "    def read(self) -> str: ...\n"
+        "    def write(self, value: str) -> None: ...\n"
+    )
+
+    assert selector.is_mappable_module(protocol, "src/repoforge/ports/store.py") is False
+
+
+def test_a_constants_module_is_not_treated_as_a_stale_map_entry() -> None:
+    constants = 'IDENTITY = {"contract_version": 2}\n'
+
+    assert selector.is_mappable_module(constants, "src/repoforge/contracts/generated.py") is False
+
+
+def test_a_package_init_is_not_treated_as_a_stale_map_entry() -> None:
+    """Zero of the mapped files are `__init__.py`: where one carries code it is a lazy
+    `__getattr__` production never reaches, because modules import submodules directly."""
+    lazy_init = (
+        "from importlib import import_module\n"
+        "from typing import Any\n\n\n"
+        "def __getattr__(name: str) -> Any:\n"
+        "    return getattr(import_module('.errors', __name__), name)\n"
+    )
+
+    assert selector.is_mappable_module(lazy_init, "src/repoforge/domain/__init__.py") is False
+
+
+def test_a_module_with_real_function_bodies_is_mappable() -> None:
+    module = "def add(a: int, b: int) -> int:\n    return a + b\n"
+
+    assert selector.is_mappable_module(module, "src/repoforge/domain/math.py") is True

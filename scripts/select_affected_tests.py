@@ -26,6 +26,7 @@ Regenerate with ``make test-map`` after material source/test changes.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -212,32 +213,85 @@ def _actual_conftest_consumers(tests_dir: Path) -> set[str]:
     return consumers
 
 
-def check_map_freshness(manifest: Manifest, changed_paths: Sequence[str]) -> int:
-    """Fail when a changed package module is absent from the coverage map.
+def is_mappable_module(source: str, path: str = "") -> bool:
+    """Can coverage ever attribute a test to this module?
+
+    Only executed *function-body* lines carry a per-test context, so a module whose
+    functions are all `...`/`pass`/docstring -- every `ports/` Protocol -- and one with no
+    functions at all -- `__init__.py`, generated constants -- can never appear in the map
+    no matter how many tests import it.
+
+    This distinction is the difference between a useful gate and a broken one. Without it
+    the check told the author to run `make test-map`, which cannot fix those files: on the
+    identity branch 15 of the 16 it rejected were Protocols and `__init__.py`, and no
+    amount of regeneration would have satisfied it.
+    """
+    # A package `__init__.py` is a re-export surface. Where it does carry code it is a lazy
+    # `__getattr__` production never reaches, because modules import submodules directly.
+    # Not a convention call: zero of the 343 mapped files are `__init__.py`.
+    if path.endswith("__init__.py"):
+        return False
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    functions = [
+        node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if not functions:
+        return False
+    return any(
+        not (
+            isinstance(statement, ast.Pass)
+            or (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant))
+        )
+        for function in functions
+        for statement in function.body
+    )
+
+
+def check_map_freshness(manifest: Manifest, changed_paths: Sequence[str], root: Path) -> int:
+    """Fail when a changed package module could be in the coverage map but is not.
 
     This is the pull-request half of the map's staleness gate. Rebuilding the map needs a
     full recording run, so the authoritative check is push-only -- but by then the stale
     entry is already on `main`. This one is static: it reads the diff and the map, runs no
     tests, and answers in under a second.
 
-    An unmapped package module is not merely untidy. The selector fails closed on it, so
-    every later change touching that file runs the whole suite; 170 such files had
-    accumulated when nothing was watching, and five of the last eight commits ran
-    everything as a result.
+    An unmapped module is not merely untidy. The selector fails closed on it, so every
+    later change touching that file runs the whole suite; 170 such files accumulated when
+    nothing was watching, and five of the last eight commits ran everything as a result.
+
+    What it must NOT do is demand the impossible: see `is_mappable_module`.
     """
-    unmapped = sorted(
-        path
-        for path in changed_paths
-        if path.startswith(_PACKAGE_SRC_PREFIX)
-        and path.endswith(".py")
-        and path not in manifest.coverage_map
-    )
+    unmapped: list[str] = []
+    unmappable: list[str] = []
+    for path in sorted(set(changed_paths)):
+        if not path.startswith(_PACKAGE_SRC_PREFIX) or not path.endswith(".py"):
+            continue
+        if path in manifest.coverage_map:
+            continue
+        source_path = root / path
+        if not source_path.exists():
+            continue  # deleted in this change; the map is corrected by the next rebuild
+        try:
+            source = source_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        (unmapped if is_mappable_module(source, path) else unmappable).append(path)
+
+    if unmappable:
+        print(
+            f"[select-affected-tests] {len(unmappable)} changed module(s) cannot be mapped at "
+            "all (no executed function bodies: Protocol, __init__, constants) -- not a "
+            "staleness signal"
+        )
     if not unmapped:
-        print("[select-affected-tests] every changed package module is in the coverage map")
+        print("[select-affected-tests] every mappable changed module is in the coverage map")
         return 0
     print(
-        f"[select-affected-tests] {len(unmapped)} changed package module(s) are missing from "
-        "the coverage map, so every later change to them will run the whole suite:",
+        f"[select-affected-tests] {len(unmapped)} changed module(s) have executable bodies but "
+        "are missing from the coverage map, so every later change to them runs the whole suite:",
         file=sys.stderr,
     )
     for path in unmapped:
@@ -594,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_map_freshness:
         root = Path.cwd()
         changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
-        return check_map_freshness(manifest, changed)
+        return check_map_freshness(manifest, changed, root)
 
     root = Path.cwd()
     if args.full:

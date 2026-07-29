@@ -345,7 +345,18 @@ if [[ -z "$TOKEN" ]]; then
   printf '%s\n' "$SETUP_OUT" | head -40
   fail "rf setup did not offer an approval token (see output above)"
 fi
-"${SETUP[@]}" --approve "$TOKEN" >/dev/null || fail "rf setup --approve failed"
+# Keep the output. `>/dev/null` here discarded the only description of the failure, so a
+# red gate said `rf setup --approve failed` and nothing else -- the token-probe branch
+# above already prints what it saw, and this one has to as well or the difference between
+# "approval was refused" and "enrollment broke" is invisible from CI alone.
+set +e
+APPROVE_OUT="$("${SETUP[@]}" --approve "$TOKEN" 2>&1)"
+APPROVE_EXIT=$?
+set -e
+if [[ $APPROVE_EXIT -ne 0 ]]; then
+  printf '%s\n' "$APPROVE_OUT" | head -60
+  fail "rf setup --approve failed (exit $APPROVE_EXIT; see output above)"
+fi
 RESOLVED="$(find "$HOME/.local/state/repoforge" -name resolved.toml | head -1)"
 [[ -n "$RESOLVED" ]] && grep -q '^\[repositories' "$RESOLVED" \
   || fail "the resolved generation has no [repositories] table"
