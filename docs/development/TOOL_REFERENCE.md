@@ -143,6 +143,14 @@ Because `workspace_mutate` can delete or restore content, its tool-wide MCP anno
 - `profile` runs a reviewed repository profile;
 - `adhoc` accepts only allowlisted runners under relaxed policy.
 
+`mode = "adhoc"` returns an `adhoc_evidence` section, absent for every other mode. It carries the runner's own policy facts: the declared `mutability`, the inferred `command_class`, `content_inspected`, `fingerprint_changed`, `read_only_violation`, the bounded `changed_paths`, and `network_policy`.
+
+`content_inspected` is the field to read first, because RepoForge content-inspects `git` argv only. A `git` run is checked before any process starts: force, mirror, and delete pushes, history rewrites, `reflog expire`, `update-ref -d`, `clean --force`, and every `--exec` form are refused with `ADHOC_COMMAND_FORBIDDEN`, and a mutating form additionally requires `mutability = "workspace"` with both `expected_head_sha` and `expected_fingerprint`. Every other runner is opaque: `command_class` is `null`, `content_inspected` is `false`, and those guards never ran.
+
+That distinction matters most when an operator adds a shell (`bash`, `sh`) to `repositories.<id>.adhoc_runners`. Nothing blocks it, and it is the direct way to give an agent pipes, `&&`, and globbing — but `["bash", "-c", "git push --force …"]` is a shell invocation, not a git one, so the git argv guards do not apply to what the shell then runs. Under an opaque runner the remaining protections are the exact-state lock, the fingerprint comparison, and `read_only_violation`. A multi-line program is better placed in a file the runner reads: argv elements reject newlines, and a script committed to the workspace stays visible in `workspace_diff` and inside the fingerprint.
+
+`read_only_violation` is true when a command classified or declared read-only nonetheless changed the workspace fingerprint. It means the run's own account of what it touched is unreliable: re-read `workspace_status` rather than trusting the classification.
+
 Diagnostic failures publish up to 100 complete structured pytest node IDs even when their bounded excerpt truncates. A truncated failed command also returns a content-addressed `failure-output:<sha256>` reference backed by a private 0600 artifact. `rerun = "failed"` is valid only with explicit diagnostic mode and a diagnostic ID; it restores the exact last failure set, forces real execution instead of deterministic failure replay, keeps the same `failure_chain_id`, and refuses with typed stale-workspace evidence when the fingerprint changed. `failure_expectation` distinguishes valid expected TDD RED evidence from unexpected failures in audit and tool output.
 
 Only a successful verification-enabled profile on the exact current fingerprint satisfies the commit gate. A low-confidence or unavailable code-intelligence provider broadens verification; it never narrows a safety gate.

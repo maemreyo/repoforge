@@ -110,6 +110,12 @@ class WorkspaceVerifyResult:
     head_sha: str
     workspace_fingerprint: str
     execution_evidence: dict[str, object] | None = None
+    # Set only for mode=adhoc. Carries the two facts the ad-hoc runner computes that no
+    # other section can express: whether RepoForge inspected the command's content at
+    # all, and whether a command declared read-only actually moved the tree. Both are
+    # load-bearing for an opaque runner (a shell, `uv`, `python3`), where the git argv
+    # guards never ran and the fingerprint is the only behavioural check left.
+    adhoc_evidence: dict[str, object] | None = None
     # What the caller should do when the call returns before the work is done -- the
     # exact `operation` wait for a background run. Set only then; a finished verify
     # answers with its outcome.
@@ -305,6 +311,27 @@ def _command_evidence(raw: dict[str, object]) -> dict[str, object]:
         "returncode": returncode,
         "duration_ms": float(duration),
         "output_excerpt": bound_command_excerpt(excerpt, 12_000),
+    }
+
+
+def _adhoc_evidence(result: WorkspaceRunAdhocResult) -> dict[str, object]:
+    """Project the ad-hoc runner's own policy facts onto the verify surface.
+
+    ``command_class`` is ``None`` exactly when RepoForge did not inspect the command's
+    content -- every runner other than ``git``, a shell included. Publishing that as
+    ``content_inspected`` keeps the caller from reading the git argv guards as though
+    they had applied to a ``bash -c`` line they never saw.
+    """
+    return {
+        "mutability": result.mutability,
+        "command_class": result.command_class,
+        "content_inspected": result.command_class is not None,
+        "fingerprint_changed": result.fingerprint_changed,
+        "read_only_violation": result.read_only_violation,
+        "changed_paths": list(result.changed_paths),
+        "changed_paths_truncated": result.changed_paths_truncated,
+        "network_policy": result.network_policy,
+        "verification_invalidated": result.verification_invalidated,
     }
 
 
@@ -1051,6 +1078,7 @@ class WorkspaceVerifier:
             head_sha=delegated.head_sha,
             workspace_fingerprint=delegated.fingerprint_after,
             execution_evidence=delegated.execution_evidence,
+            adhoc_evidence=_adhoc_evidence(delegated),
         )
 
     def _persist_artifact(
