@@ -342,3 +342,55 @@ class TestLostResponseRecovery:
         assert result["changed"] is True
         paths = [operation["path"] for operation in result["operations"]]
         assert paths == ["landed.txt"]
+
+
+class TestReasoningTravelsWithTheSchema:
+    """A `#:` comment is invisible to a caller, and that has already cost real time.
+
+    Twice now an agent has read `tool_surface_changed_since_activation=true` -- normal
+    after a release upgrade -- as proof of a diverged installation, because the sentence
+    saying so lived in a Sphinx-style source comment that never reaches the emitted
+    schema. Issue #314 was the first time. Pydantic only publishes `Field(description=)`,
+    so a field whose semantics are non-obvious has to carry one.
+    """
+
+    @staticmethod
+    def _fields_documented_only_by_source_comments() -> list[tuple[str, str]]:
+        import re
+        from pathlib import Path
+
+        found: list[tuple[str, str]] = []
+        root = Path(__file__).resolve().parent.parent / "src" / "repoforge" / "contracts"
+        for module in ("v2.py", "common.py"):
+            lines = (root / module).read_text(encoding="utf-8").split("\n")
+            commented = False
+            for line in lines:
+                if re.match(r"^\s+#:", line):
+                    commented = True
+                    continue
+                if commented:
+                    match = re.match(r"^\s+([a-z_][a-z0-9_]*)\s*:", line)
+                    if match:
+                        found.append((module, match.group(1)))
+                    commented = False
+        return found
+
+    def test_no_contract_field_is_documented_only_by_a_source_comment(self) -> None:
+        assert self._fields_documented_only_by_source_comments() == []
+
+    def test_the_activation_evidence_facts_say_they_are_not_faults(self) -> None:
+        """The exact three fields that produced the false divergence report."""
+        from repoforge.contracts.v2 import RuntimeActivationEvidenceView
+
+        schema = RuntimeActivationEvidenceView.model_json_schema()["properties"]
+
+        verdict = schema["agreement"]["description"]
+        assert "configuration generation only" in verdict
+
+        for name in (
+            "process_restarted_since_activation",
+            "tool_surface_changed_since_activation",
+        ):
+            description = schema[name]["description"]
+            assert "fact, not a fault" in description, name
+            assert "agreement" in description, name
