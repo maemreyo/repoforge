@@ -195,6 +195,24 @@ Re-sending the mutation instead risks applying it twice; the exact-state precond
 a refusal is not evidence about the first. Read the operation. When a response *is* received, its
 `outcome` carries the `operation_id` and `receipt_id` for exactly this purpose -- record them.
 
+#### Waiting without polling
+
+`wait` takes `until`, and the choice decides how many round trips a long operation costs:
+
+- `until="terminal"` returns only when the operation finishes. A timeout is the ordinary outcome
+  for a long gate, so the response still carries current state, `suggested_poll_after_s`, and an
+  ETA when available — call again with the same arguments. Use this whenever the only question is
+  the outcome.
+- `until="progress"` (default, unchanged) returns on the next durable progress delta. Background
+  profile execution emits one at each step start and completion, so an eight-step gate wakes the
+  caller sixteen times. Use it only when intermediate steps change what you do next.
+
+`timeout_seconds` accepts 1–300. The ceiling is set by the client, not by RepoForge: a held request
+dies with the connector. Progress notifications keep the open request alive while work continues,
+and `since_updated_at` makes a dropped wait resumable, so a re-issued `wait` never loses its place.
+Spinning on `action="get"` is always the wrong shape — it burns a round trip per sample and learns
+nothing `wait` would not have delivered.
+
 A wait response sets `changed_since=true` when durable progress advanced, or returns terminal evidence immediately. A bounded timeout sets `timed_out=true` while still returning the complete slim current operation evidence and pacing hint; it never returns an empty payload. Background profile execution emits one progress update at each step start and completion, not per test, so `updated_at` acts as a liveness heartbeat without unbounded write volume.
 
 Operational and configuration tools never grant authority based on a model or client declaration. Expansion approval tokens remain outside the conversation.

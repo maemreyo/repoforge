@@ -1935,7 +1935,17 @@ class OperationInput(StrictModel):
     cursor: Cursor | None = None
     failure_id: Identifier | None = None
     since_updated_at: str | None = Field(default=None, max_length=80)
-    timeout_seconds: int | None = Field(default=None, ge=1, le=60)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+    until: Literal["progress", "terminal"] = Field(
+        default="progress",
+        description=(
+            "What ends the wait. 'progress' returns on the next durable progress delta -- "
+            "one per step start and completion -- so a multi-step gate wakes the caller "
+            "many times. 'terminal' returns only when the operation finishes, or on "
+            "timeout with the current evidence and a pacing hint; prefer it when the only "
+            "question is the outcome."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> OperationInput:
@@ -1956,6 +1966,8 @@ class OperationInput(StrictModel):
             raise ValueError(
                 "since_updated_at and timeout_seconds are only valid for operation wait"
             )
+        if self.action is not OperationAction.WAIT and self.until != "progress":
+            raise ValueError("until is only valid for operation wait")
         if self.action is OperationAction.FAILURE_EVIDENCE and self.failure_id is None:
             raise ValueError("operation failure_evidence requires failure_id")
         if self.action is not OperationAction.FAILURE_EVIDENCE and self.failure_id is not None:

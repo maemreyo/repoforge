@@ -664,7 +664,13 @@ class WorkspaceVerifier:
                 diagnostic_result = WorkspaceRunDiagnosticBackgroundResult(
                     operation_id=admitted.operation_id,
                     phase=durable_task.phase,
-                    safe_next_action="Poll operation status until the durable worker completes.",
+                    safe_next_action=(
+                        "Wait for operation "
+                        f"{admitted.operation_id} with until='terminal' and the largest "
+                        "timeout_seconds you can afford; re-issue the same wait on a "
+                        "timeout. Do not spin on operation get -- progress mode wakes "
+                        "you once per step and tells you nothing extra."
+                    ),
                 )
             result = self._from_diagnostic(
                 command,
@@ -709,7 +715,13 @@ class WorkspaceVerifier:
                 profile_result = WorkspaceRunProfileBackgroundResult(
                     operation_id=admitted.operation_id,
                     phase=durable_task.phase,
-                    safe_next_action="Poll operation status until the durable worker completes.",
+                    safe_next_action=(
+                        "Wait for operation "
+                        f"{admitted.operation_id} with until='terminal' and the largest "
+                        "timeout_seconds you can afford; re-issue the same wait on a "
+                        "timeout. Do not spin on operation get -- progress mode wakes "
+                        "you once per step and tells you nothing extra."
+                    ),
                 )
             result = self._from_profile(
                 command,
@@ -752,7 +764,13 @@ class WorkspaceVerifier:
                 adhoc_result = WorkspaceRunAdhocBackgroundResult(
                     operation_id=admitted.operation_id,
                     phase=durable_task.phase,
-                    safe_next_action="Poll operation status until the durable worker completes.",
+                    safe_next_action=(
+                        "Wait for operation "
+                        f"{admitted.operation_id} with until='terminal' and the largest "
+                        "timeout_seconds you can afford; re-issue the same wait on a "
+                        "timeout. Do not spin on operation get -- progress mode wakes "
+                        "you once per step and tells you nothing extra."
+                    ),
                 )
             result = self._from_adhoc(
                 command,

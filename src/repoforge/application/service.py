@@ -493,6 +493,7 @@ class CodingService:
         failure_id: str | None = None,
         since_updated_at: str | None = None,
         timeout_seconds: int | None = None,
+        until: str = "progress",
     ) -> dict[str, Any]:
         return _result(
             self._operation.execute(
@@ -507,6 +508,7 @@ class CodingService:
                     failure_id=failure_id,
                     since_updated_at=since_updated_at,
                     timeout_seconds=timeout_seconds,
+                    until=until,
                 )
             )
         )

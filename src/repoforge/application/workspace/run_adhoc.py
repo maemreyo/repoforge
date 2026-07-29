@@ -106,6 +106,22 @@ _GATE_GUIDANCE = (
 )
 
 
+_MAX_ADHOC_TIMEOUT_SECONDS = 3_600
+
+
+def _adhoc_timeout_remedy(budget_seconds: int) -> str:
+    """Name the budget that expired, and the two legitimate ways past it."""
+    return (
+        f"The ad-hoc budget for this repository is {budget_seconds}s "
+        "(repositories.<id>.adhoc_timeout_seconds), not a platform limit: an operator can raise it "
+        f"to {_MAX_ADHOC_TIMEOUT_SECONDS}s. A long job that is already reviewed and named -- a full "
+        "test recording, a coverage build -- belongs in a reviewed profile with its own "
+        "timeout_seconds instead of the ad-hoc runner, which keeps one documented command as its "
+        "own reproducible generator. Do not split the job into hand-written chunks to fit the "
+        "budget: the output stops being reproducible by the command that is supposed to produce it."
+    )
+
+
 def _strict_mode_error(repo_id: str) -> RepoForgeError:
     return RepoForgeError(
         f"Repository {repo_id!r} is enrolled in strict execution mode; the ad-hoc runner is disabled",
@@ -274,6 +290,13 @@ class WorkspaceAdhocRunner:
             audit_details["exit_code"] = exc.details.get("exit_code")
             if exc.details.get("cancelled"):
                 audit_details["cancelled"] = True
+            if exc.code is ErrorCode.COMMAND_TIMEOUT and not exc.safe_next_action:
+                # The executor knows only the number of seconds it waited. Which reviewed
+                # budget that number came from -- and that it is an operator-adjustable
+                # field rather than a platform limit -- is known here, and withholding it
+                # is what makes an agent invent a chunked workaround for a job that simply
+                # needed a bigger budget or a profile of its own.
+                exc.safe_next_action = _adhoc_timeout_remedy(repo.adhoc_timeout_seconds)
 
         def run_body(
             cancel_token: CancellationToken | None,

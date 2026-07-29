@@ -10,9 +10,11 @@ re-run -- for a reason that was not the agent's mistake:
 * an undeclared generated path failed the refresh transaction without naming the
   declaration that would fix it;
 * the repository context listed profiles the model is not allowed to invoke without
-  marking which ones those are.
+  marking which ones those are;
+* a command timeout named neither the budget that expired nor the config field that
+  sets it, so the caller hand-rolled a workaround instead of asking for more time.
 
-The last class covers the one finding that turned out to be a documentation gap rather
+The recovery class covers the one finding that turned out to be a documentation gap rather
 than a missing capability: a mutation whose response is lost to a dead connection is
 still recoverable, and these tests pin that so it stays true.
 """
@@ -26,6 +28,7 @@ from conftest import ForgeEnvironment
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from repoforge.application.workspace.mutate import CreateMutation
+from repoforge.application.workspace.run_adhoc import _adhoc_timeout_remedy
 from repoforge.contracts import v2 as v2_contracts
 from repoforge.contracts.v2 import WorkspaceVerifyInput
 from repoforge.domain.adhoc import (
@@ -155,6 +158,30 @@ class TestAdhocArgvErrorNamesTheViolation:
     def test_a_valid_argv_still_passes(self) -> None:
         argv = ("python3", "-c", "print(1)")
         assert validate_adhoc_argv(argv, ("python3",)) == argv
+
+
+class TestTimeoutRemedyNamesTheBudget:
+    """A timeout that hides which budget expired invites a hand-rolled workaround.
+
+    A real session hit the ad-hoc budget on a full coverage recording and responded by
+    writing a temporary chunking helper into the repository, producing a generated
+    artifact its own documented generator could no longer reproduce. The budget is an
+    operator-adjustable config field, and saying so is the whole fix.
+    """
+
+    def test_the_remedy_names_the_budget_the_field_and_the_ceiling(self) -> None:
+        remedy = _adhoc_timeout_remedy(600)
+
+        assert "600s" in remedy
+        assert "adhoc_timeout_seconds" in remedy
+        assert "3600s" in remedy
+
+    def test_the_remedy_offers_a_profile_and_refuses_hand_chunking(self) -> None:
+        remedy = _adhoc_timeout_remedy(300)
+
+        assert "profile" in remedy
+        assert "reproducible" in remedy
+        assert "chunk" in remedy
 
 
 class TestLostResponseRecovery:

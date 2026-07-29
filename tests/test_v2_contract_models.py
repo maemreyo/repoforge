@@ -137,12 +137,22 @@ def test_operation_wait_contract_bounds_timeout_and_cursor_fields() -> None:
     assert validated.action.value == "wait"
     assert validated.timeout_seconds == 30
 
+    # The cap is 300, not 60: one call has to be able to cover a long gate, or the caller
+    # is forced back into the per-step round trips `until="terminal"` exists to remove.
+    assert model(action="wait", operation_id=operation_id, timeout_seconds=300)
     with pytest.raises(ValidationError):
-        model(action="wait", operation_id=operation_id, timeout_seconds=61)
+        model(action="wait", operation_id=operation_id, timeout_seconds=301)
     with pytest.raises(ValidationError):
         model(action="get", operation_id=operation_id, timeout_seconds=30)
     with pytest.raises(ValidationError):
         model(action="list", since_updated_at="2026-07-19T00:00:00+00:00")
+
+    assert model(action="wait", operation_id=operation_id).until == "progress"
+    assert model(action="wait", operation_id=operation_id, until="terminal").until == "terminal"
+    with pytest.raises(ValidationError):
+        model(action="wait", operation_id=operation_id, until="whenever")
+    with pytest.raises(ValidationError):
+        model(action="get", operation_id=operation_id, until="terminal")
 
     output_fields = set(spec.output_model.model_fields)
     assert {"changed_since", "timed_out"} <= output_fields
