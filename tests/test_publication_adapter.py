@@ -363,8 +363,7 @@ def test_revalidate_detects_pushurl_drift_before_effect() -> None:
     intent = _push_intent()
     preflight = adapter.inspect(_ROOT, intent)
     adapter._commands = _commands(  # type: ignore[attr-defined]
-        push_urls=("personal:project.git",),
-        rewrites=("url.git@github.com:personal/.pushInsteadOf personal:",),
+        push_urls=("git@github.com:personal/project.git",),
     )
 
     with pytest.raises(RepoForgeError) as failure:
