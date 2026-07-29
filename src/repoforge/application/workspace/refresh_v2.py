@@ -1560,21 +1560,27 @@ class WorkspaceRefreshV2:
                 "its declared outputs before refreshing again."
             )
         command = " ".join(commands[0]) if commands else "<regeneration command>"
-        repo_id = getattr(repo, "repo_id", "<repo-id>")
-        blocks = "\n".join(
-            f'[[repositories.{repo_id}.generated_paths]]\nglob = "{path}"\n'
-            f"regeneration_command = {list(commands[0]) if commands else []!r}"
-            for path in undeclared
+        argv = list(commands[0]) if commands else []
+        declared = tuple(
+            rule.glob for rule in getattr(repo, "generated_paths", ()) if rule.glob is not None
         )
+        # The declaration is a REPLACEMENT list, so a caller sending only the missing path
+        # would silently drop the rules already in force. Spell out the whole set.
+        wanted = tuple(sorted({*declared, *undeclared}))
         return (
             f"`{command}` also writes {', '.join(undeclared)}, which this repository does not "
             "declare generated, so the refresh transaction cannot attribute the write to the "
             "reviewed regeneration. Either the command should not be writing it -- fix the "
-            "command -- or the repository should declare it. Do not hand-edit or hand-compute the "
-            "artifact to get past this. Declaring it is an operator config change (`rf config "
-            "edit`, `rf repo refresh <id> --accept`, `rf runtime reload`), not one the model "
-            f"applies on its own authority:\n{blocks}\n"
-            "Once the new generation is active, re-run workspace_refresh preview."
+            "command -- or the repository should declare it. Do not hand-edit or hand-compute "
+            "the artifact to get past this.\n"
+            "To declare it, preview a policy change with repo_policy (action='preview', "
+            f"repo_id={getattr(repo, 'repo_id', '<repo-id>')!r}) whose generated_paths lists "
+            "EVERY rule this repository should have, not just the missing one -- the field "
+            f"replaces the set rather than adding to it: {wanted} each with "
+            f"regeneration_command={argv}. Then apply with the returned preview_token. "
+            "Broadening policy is an expansion, so the result is pending_approval and the "
+            "operator approves it in the terminal; the model never grants it. Once the new "
+            "generation is active, re-run workspace_refresh preview."
         )
 
     @staticmethod

@@ -103,7 +103,7 @@
     "tool_count": 28,
     "tool_hashes": {
       "config_inspect": "a94e9a605ec09615e3c9c21b92865a872422928bbd4fc6cbbf72aae718052462",
-      "operation": "d55c4c7cf40cea8fe9a4d35ec63ca2f0550dbc64a35819e370f37ee1a00f6995",
+      "operation": "f724f0ae4931e930e9e36f81bd0ff6742751c1a0b7c2eaacb6fef056210a8344",
       "repo_history": "11c4843a675851fa34a26fe781c66904ca73fc20a6ef06a14bb739b441b4c5b5",
       "repo_issue": "3ca3b70c06e216628ad145d8f30660f8ec085f81caa96c14aa23ae0ad3620c89",
       "repo_list": "14a7957f623766f4fbac258d99a205ee7def00b59bcdb5561bff9e3ef75bd276",
@@ -162,7 +162,7 @@
       "runtime_logs_read"
     ],
     "tool_schema_bundle_sha256": "ae1b26c80e444976df695cb5c20289bbdab20a772703e3dbf60164a5cd6a2df8",
-    "tool_surface_hash": "30017674d9da7377c1638beb7707f8d16d1cf6e03ba76add6da375903bc1afec"
+    "tool_surface_hash": "9f281904cea6fa0c2f95dc5f47067a60da247f415c0cce522eb9c24e0ed598b7"
   },
   "package_version": "2.2.0",
   "runtime": {

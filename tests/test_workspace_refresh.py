@@ -1125,15 +1125,17 @@ def test_v2_refresh_rejects_generator_side_effects_and_rolls_back(
             resolutions=[],
         )
 
-    # A bare refusal here is what pushed a real agent into hand-computing the artifact
-    # the guard protects: the only legitimate way forward is an operator config change,
-    # so the refusal has to name it and say whose call it is.
+    # A bare refusal here is what pushed a real agent into hand-computing the artifact the
+    # guard protects. The remedy has to name the real mechanism -- repo_policy, whose
+    # generated_paths REPLACES the set -- and say that approving it is the operator's call.
     remedy = caught.value.safe_next_action or ""
     assert "README.md" in remedy
-    assert "[[repositories.demo.generated_paths]]" in remedy
-    assert 'glob = "README.md"' in remedy
+    assert "repo_policy" in remedy
+    assert "'demo'" in remedy
+    assert "replaces the set" in remedy
+    assert "hello.txt" in remedy, "the rules already in force must be listed too"
     assert "python3" in remedy
-    assert "rf config edit" in remedy
+    assert "pending_approval" in remedy
     assert "hand-edit" in remedy
 
     restored = service.workspace_status(workspace_id)
