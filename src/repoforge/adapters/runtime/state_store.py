@@ -110,6 +110,14 @@ class JsonRuntimeStore:
                     else None
                 ),
                 consecutive_health_failures=int(raw.get("consecutive_health_failures", 0)),
+                # Read what the writer writes. Omitting these defaulted `restarts_total` to
+                # 0 on every read while `restart_count` came back as written, so a record
+                # saved after even one restart could not be decoded into a valid object and
+                # the runtime refused to start.
+                restarts_total=int(raw.get("restarts_total", 0)),
+                last_restart_at=(
+                    str(raw["last_restart_at"]) if raw.get("last_restart_at") is not None else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"Invalid runtime state fields in {self.path}: {exc}") from exc

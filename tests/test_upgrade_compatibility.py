@@ -132,3 +132,87 @@ def test_the_gate_fails_when_a_swept_store_is_fatal(
         build_application(load_config(env.config_path))
 
     assert regression.value.code is ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT
+
+
+def test_a_record_written_after_a_restart_survives_the_round_trip(tmp_path: Path) -> None:
+    """Write, read back, and get a usable record -- the layer that took the runtime down.
+
+    `restarts_total` and `last_restart_at` were added to the dataclass and to the
+    supervisor's writer, but not to the decoder. Every read therefore defaulted
+    `restarts_total` to 0 while `restart_count` came back as written, and an invariant
+    requiring the first to be at least the second then rejected the record. The runtime
+    refused to start, `rf` itself ran the same broken decoder, and no release could be
+    rolled back to because they all carried it.
+
+    Nothing caught it: the tests built `RuntimeRecord` directly, and the upgrade gate seeds
+    records that cannot be DECODED -- this one decoded into an invalid object instead.
+    """
+    from repoforge.bootstrap import build_runtime_store
+    from repoforge.domain.runtime import RuntimePhase, RuntimeRecord
+
+    store = build_runtime_store(tmp_path / "runtime.json")
+    written = RuntimeRecord(
+        protocol_version=1,
+        phase=RuntimePhase.DEGRADED,
+        pid=None,
+        process_identity=None,
+        active_generation=None,
+        accepted_generation=4,
+        tunnel_profile="repoforge",
+        tunnel_profile_fingerprint="b" * 64,
+        tool_surface_hash="c" * 64,
+        started_at=None,
+        updated_at="2026-07-29T09:26:42+00:00",
+        correlation_id="d" * 24,
+        restart_count=1,
+        restarts_total=3,
+        last_restart_at="2026-07-29T09:26:21+00:00",
+    )
+    store.write(written)
+
+    read_back = store.read()
+
+    assert read_back is not None
+    assert read_back.restart_count == 1
+    assert read_back.restarts_total == 3
+    assert read_back.last_restart_at == "2026-07-29T09:26:21+00:00"
+
+
+def test_a_record_predating_the_restart_evidence_fields_still_decodes(tmp_path: Path) -> None:
+    """An upgrade must not be able to make an existing installation unstartable.
+
+    A record written before these fields existed has no `restarts_total`, so it decodes as
+    0 next to whatever `restart_count` it carried. That is honest -- nothing was counting
+    then -- and refusing it strands the runtime with no release to roll back to.
+    """
+    import json
+
+    from repoforge.bootstrap import build_runtime_store
+
+    path = tmp_path / "runtime.json"
+    path.write_text(
+        json.dumps(
+            {
+                "protocol_version": 1,
+                "phase": "degraded",
+                "pid": None,
+                "process_identity": None,
+                "active_generation": None,
+                "accepted_generation": 4,
+                "tunnel_profile": "repoforge",
+                "tunnel_profile_fingerprint": "b" * 64,
+                "tool_surface_hash": "c" * 64,
+                "started_at": None,
+                "updated_at": "2026-07-29T09:26:42+00:00",
+                "correlation_id": "d" * 24,
+                "restart_count": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = build_runtime_store(path).read()
+
+    assert record is not None
+    assert record.restart_count == 2
+    assert record.restarts_total == 0
