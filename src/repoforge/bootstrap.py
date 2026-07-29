@@ -235,6 +235,7 @@ from .ports import (
     TunnelProfileStore,
     WorkerBindingStore,
     WorkflowRecordingStore,
+    WorkspacePublicationService,
     WorkspaceStore,
 )
 from .ports.external_mutation_ledger import ExternalMutationLedger
@@ -297,6 +298,7 @@ class AdapterOverrides:
     reaper: ProcessReaper | None = None
     issue_graph_proposals: IssueGraphProposalStore | None = None
     issue_graph_publications: IssueGraphPublicationStore | None = None
+    publications: WorkspacePublicationService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -940,6 +942,7 @@ def build_application(
         failure_output_artifacts=failure_output_artifacts,
         worker_bindings=worker_bindings,
         reaper=reaper,
+        publications=o.publications,
         config_generation=config_generation,
     )
     operations = OperationManager(context)

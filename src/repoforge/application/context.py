@@ -53,6 +53,7 @@ from ..ports import (
     TicketGraphGateway,
     TicketProjectGateway,
     WorkerBindingStore,
+    WorkspacePublicationService,
     WorkspaceStore,
 )
 from .audit_context import current_audit_attribution
@@ -272,6 +273,7 @@ class ApplicationContext:
     failure_output_artifacts: FailureOutputArtifactStore | None = None
     worker_bindings: WorkerBindingStore | None = None
     reaper: ProcessReaper | None = None
+    publications: WorkspacePublicationService | None = None
     config_generation: int = 0
 
     def now_epoch(self) -> float:

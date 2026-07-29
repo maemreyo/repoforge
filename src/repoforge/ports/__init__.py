@@ -132,6 +132,13 @@ from .workflow_replay import (
     WorkflowReplayDecision,
     WorkflowReplayObservation,
 )
+from .workspace_publication import (
+    WorkspaceDraftPrPublication,
+    WorkspaceDraftPrPublicationEffect,
+    WorkspacePublicationService,
+    WorkspacePushPublication,
+    WorkspacePushPublicationEffect,
+)
 from .workspace_store import WorkspaceStore
 
 __all__ = [
@@ -259,6 +266,11 @@ __all__ = [
     "WorkflowReplayDecision",
     "WorkflowReplayObservation",
     "WorkflowRetentionReport",
+    "WorkspaceDraftPrPublication",
+    "WorkspaceDraftPrPublicationEffect",
+    "WorkspacePublicationService",
+    "WorkspacePushPublication",
+    "WorkspacePushPublicationEffect",
     "WorkspaceStore",
     "WorktreeInspector",
     "WorktreeState",
