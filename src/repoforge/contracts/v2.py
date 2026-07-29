@@ -1448,6 +1448,35 @@ class FailureLocationEvidence(StrictModel):
     code: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class AdhocEvidence(StrictModel):
+    """Policy facts for a `mode="adhoc"` run, absent for every other mode.
+
+    `content_inspected` is the field that keeps this surface honest: RepoForge
+    content-inspects `git` argv only, so any other runner -- a shell above all -- runs
+    without the guards that block force pushes and history rewrites. When it is false,
+    the exact-state lock and `read_only_violation` are the whole safety story.
+    """
+
+    mutability: Literal["read_only", "workspace"]
+    command_class: Literal["read_only", "mutating"] | None = None
+    content_inspected: bool
+    fingerprint_changed: bool
+    read_only_violation: bool = Field(
+        description=(
+            "True when a command that was classified or declared read-only nonetheless "
+            "changed the workspace fingerprint. Treat the run's own claim about what it "
+            "touched as unreliable and re-read workspace_status."
+        )
+    )
+    # A plain bounded string, not RelativePath: these paths come from parsing git status
+    # output, and one unusual shape (a quoted rename, a non-UTF-8 name) must not cost the
+    # caller the entire verify response.
+    changed_paths: tuple[str, ...] = Field(default=(), max_length=200)
+    changed_paths_truncated: bool = False
+    network_policy: Literal["advisory_local_only"]
+    verification_invalidated: bool = False
+
+
 class WorkspaceVerifyOutput(ToolResponse):
     workspace_id: Identifier
     requested_mode: VerifyMode
@@ -1482,6 +1511,7 @@ class WorkspaceVerifyOutput(ToolResponse):
     workspace_fingerprint: Sha256
     plan: ExecutionPlanEvidence | None = None
     execution_evidence: ExecutionEvidenceModel | None = None
+    adhoc_evidence: AdhocEvidence | None = None
     failed_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
     output_artifact_reference: str | None = Field(
         default=None,
