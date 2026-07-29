@@ -30,6 +30,17 @@ _REAL_HOME = Path(os.environ.get("HOME", "~")).expanduser()
 # provisioned the PATH launcher unconditionally left `~/.local/bin/rf` exec-ing a deleted
 # pytest tmpdir, which broke the `rf` command on a developer machine until it was repaired
 # by hand. Tests must redirect HOME (or grant an explicit path) instead.
+TEST_CONFIG_GENERATION = 1
+"""The configuration generation every test environment serves.
+
+Positive on purpose. In production the serving process always knows its generation and
+stamps it into durable work; a fixture at the default 0 made the suite agree with itself
+while disagreeing with production -- request side and worker side both 0, so the generation
+filter always matched and nothing could be unclaimable. That is exactly why #313 (request
+side 0, worker side 12) was invisible here.
+"""
+
+
 _PROTECTED_REAL_PATHS = (
     _REAL_HOME / ".local" / "bin" / "rf",
     _REAL_HOME / ".local" / "share" / "repoforge" / "bin",
@@ -37,6 +48,13 @@ _PROTECTED_REAL_PATHS = (
     _REAL_HOME / ".local" / "share" / "repoforge" / "previous",
     _REAL_HOME / ".local" / "share" / "repoforge" / "runtime",
     _REAL_HOME / "Library" / "LaunchAgents" / "dev.repoforge.supervisor.plist",
+    # The state ROOT itself is deliberately not listed: the live runtime rewrites the audit
+    # log, metrics and operation records continuously, so its fingerprint would flip no
+    # matter what the suite did. This subdirectory is different -- it gains an entry only
+    # when something resolves a NEW config path against the real state root, which is
+    # exactly the leak that accumulated 640 directories of test residue (#318). Comparing
+    # the entry listing catches that without descending into anything the runtime mutates.
+    _REAL_HOME / ".local" / "state" / "repoforge" / "config-locks",
 )
 
 
@@ -618,11 +636,18 @@ parser = "ruff_format"
         encoding="utf-8",
     )
     config = load_config(config_path)
-    if clock is None:
-        service = CodingService(config)
-    else:
-        application = build_application(config, overrides=AdapterOverrides(clock=clock))
-        service = CodingService(config, application=application)
+    # A positive generation, because in production the serving process ALWAYS knows the
+    # generation it serves, and durable work is stamped with it. A fixture that built at
+    # the default 0 made every test agree with itself while disagreeing with production:
+    # both the request side and the worker side ran at 0, so the generation filter matched
+    # and nothing was ever unclaimable. That is precisely why #313 -- request side 0,
+    # worker side 12 -- was invisible to this suite.
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(clock=clock) if clock is not None else None,
+        config_generation=TEST_CONFIG_GENERATION,
+    )
+    service = CodingService(config, application=application)
     return ForgeEnvironment(
         root=tmp_path,
         remote=remote,

@@ -89,6 +89,12 @@ class _Server:
     def close(self) -> None:
         return None
 
+    def is_serving(self) -> bool:
+        return True
+
+    def serving_diagnostic(self) -> str:
+        return "fake control server"
+
 
 class _Mcp:
     """Answers HEALTH, then asks the supervisor to stop so `run` returns."""

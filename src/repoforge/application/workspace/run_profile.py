@@ -10,7 +10,10 @@ from datetime import datetime, timedelta
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
-from ...domain.operation_task import OperationRetryability, OperationState
+from ...domain.operation_task import (
+    OperationRetryability,
+    OperationState,
+)
 from ...domain.operation_worker import OperationWorkerBinding
 from ...domain.policy import normalize_relative_path
 from ...domain.retry_guidance import (

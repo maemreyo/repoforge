@@ -34,8 +34,8 @@ echo "[integrity] check formatting, lint, and types"
 uv run ruff format --check src tests scripts
 uv run ruff check src tests scripts
 uv run mypy --strict --cache-dir "$TMP_ROOT/mypy-cache" src/repoforge
-echo "[integrity] run deterministic pytest shards and combine branch coverage"
-uv run python scripts/run_test_shards.py --coverage-dir "$TMP_ROOT/coverage-data"
+echo "[integrity] run the pytest suite in lanes and combine branch coverage"
+uv run python scripts/run_test_suite.py --coverage-dir "$TMP_ROOT/coverage-data"
 
 echo "[integrity] build source and wheel distributions"
 uv build --out-dir "$TMP_ROOT/dist"

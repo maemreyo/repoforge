@@ -16,7 +16,11 @@ if TYPE_CHECKING:
     from .application.activation.dev_runtime import DevRuntimeService
     from .application.activation.handoff import GenerationHandoffReconciler
     from .application.activation.upgrade import UpgradeService
-    from .ports.activation import ReleaseObserver, SupervisorKickstarter
+    from .ports.activation import (
+        ReleaseObserver,
+        ReleaseProcessInspector,
+        SupervisorKickstarter,
+    )
     from .ports.process_supervisor import ProcessSupervisorRegistrar
 
 from .adapters.audit import JsonlAuditSink as JsonlAuditSink
@@ -516,6 +520,7 @@ def build_upgrade_service(
     extra_env: dict[str, str] | None = None,
     kickstarter: SupervisorKickstarter | None = None,
     manage_path_launcher: bool = False,
+    inspect_release_processes: bool = False,
 ) -> UpgradeService:
     from .adapters.activation.build import (
         GitWorktreeInspector,
@@ -560,7 +565,21 @@ def build_upgrade_service(
         health_probe=SupervisorHealthProbe(control_client, correlation_id=correlation_id),
         sleeper=sleeper,
         locks=build_lock_manager(store.root / "runtime"),
+        # Retention decides from pointers and recency, which says nothing about what is
+        # running, so prune consults the process table before deleting a release tree.
+        release_processes=(
+            build_release_process_inspector(release_root=release_root)
+            if inspect_release_processes
+            else None
+        ),
     )
+
+
+def build_release_process_inspector(*, release_root: Path | None) -> ReleaseProcessInspector:
+    """Inspect which live processes execute from this release root."""
+    from .adapters.activation.release_processes import SystemReleaseProcessInspector
+
+    return SystemReleaseProcessInspector(build_release_store(release_root).root / "releases")
 
 
 def build_release_observer(

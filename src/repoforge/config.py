@@ -148,6 +148,16 @@ class ProfileConfig:
     command_source_paths: tuple[str, ...] = ()
     steps: tuple[VerificationStep, ...] = ()
     baseline_policy: HygieneBaselinePolicy = HygieneBaselinePolicy.STRICT_CLEAN
+    #: Whether a connected model may start this profile at all. An authoritative gate can
+    #: cost half an hour, which the model has no way to weigh and no reason to repeat; set
+    #: this False and the profile stays available to the operator and CI while the model is
+    #: refused at the boundary. Default True so existing configurations do not change.
+    model_invocable: bool = True
+    #: Minimum seconds between runs of this profile against the SAME workspace snapshot.
+    #: 0 disables it. Aimed at the case a receipt cannot cover: `force_rerun` legitimately
+    #: exists for external conditions changing without the tree changing, and that is also
+    #: the flag that turns an expensive gate into something repeatable at will.
+    min_interval_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -252,6 +262,29 @@ def _expand_path(value: str, *, base_dir: Path) -> Path:
     if not path.is_absolute():
         path = base_dir / path
     return path.resolve()
+
+
+def declared_state_root(config_path: str | Path) -> Path | None:
+    """Read only ``[server].state_root`` from a config source, or None if unset.
+
+    Deliberately not `load_config`: the state root decides WHERE this config's immutable
+    generations live, so it has to be readable before any generation exists and without
+    the whole document having to validate. An unreadable or malformed file returns None,
+    leaving the caller on its default rather than failing a path computation.
+    """
+    path = Path(config_path).expanduser().resolve()
+    try:
+        with path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    server = raw.get("server")
+    if not isinstance(server, dict):
+        return None
+    value = server.get("state_root")
+    if not isinstance(value, str) or not value:
+        return None
+    return _expand_path(value, base_dir=path.parent)
 
 
 def _expect_mapping(value: Any, context: str) -> dict[str, Any]:
@@ -491,6 +524,16 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
             declared_source_paths or derive_command_source_paths(tuple(commands)),
             command_source_context,
         )
+        model_invocable = profile.get("model_invocable", True)
+        if not isinstance(model_invocable, bool):
+            raise ConfigError(f"profile {repo_id}.{name}.model_invocable must be a boolean")
+        min_interval_seconds = _bounded_int(
+            profile.get("min_interval_seconds"),
+            0,
+            0,
+            24 * 60 * 60,
+            f"repositories.{repo_id}.profiles.{name}.min_interval_seconds",
+        )
         profiles[name] = ProfileConfig(
             name=name,
             description=description,
@@ -501,6 +544,8 @@ def _load_profiles(raw: Any, repo_id: str) -> dict[str, ProfileConfig]:
             command_source_paths=command_source_paths,
             steps=tuple(steps),
             baseline_policy=baseline_policy,
+            model_invocable=model_invocable,
+            min_interval_seconds=min_interval_seconds,
         )
     return profiles
 

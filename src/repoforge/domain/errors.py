@@ -154,6 +154,8 @@ class ErrorCode(str, Enum):
     COMMIT_IDENTITY_MISMATCH = "COMMIT_IDENTITY_MISMATCH"
     COMMIT_SIGNING_FAILED = "COMMIT_SIGNING_FAILED"
     DELEGATION_APPROVAL_REQUIRED = "DELEGATION_APPROVAL_REQUIRED"
+    PROFILE_NOT_MODEL_INVOCABLE = "PROFILE_NOT_MODEL_INVOCABLE"
+    PROFILE_RERUN_TOO_SOON = "PROFILE_RERUN_TOO_SOON"
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,6 +424,8 @@ def operation_error_from_exception(
         ErrorCode.COMMIT_IDENTITY_MISMATCH: "The observed commit author or committer does not match the workspace-pinned policy.",
         ErrorCode.COMMIT_SIGNING_FAILED: "The commit signature state or signer fingerprint does not match the reviewed signing policy.",
         ErrorCode.DELEGATION_APPROVAL_REQUIRED: "A delegated-human commit lacks the represented actor and explicit approval evidence required by policy.",
+        ErrorCode.PROFILE_NOT_MODEL_INVOCABLE: "The reviewed configuration reserves this profile for the operator and CI, because it is expensive enough that the decision to run it is not the model's to make.",
+        ErrorCode.PROFILE_RERUN_TOO_SOON: "This profile ran against the same workspace snapshot too recently; the reviewed configuration bounds how often it may repeat.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

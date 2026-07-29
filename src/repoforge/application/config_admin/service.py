@@ -157,6 +157,17 @@ class ProfileDefinition:
     working_directory: str | None = None
 
 
+def _changed_since(recorded: str | None, observed: str | None) -> bool | None:
+    """Whether a recorded identity differs from the live one, or None if unknowable.
+
+    None is not False: "we cannot tell" and "it did not change" lead to different operator
+    decisions, and collapsing them is how a report starts lying quietly.
+    """
+    if recorded is None or observed is None:
+        return None
+    return recorded != observed
+
+
 class ConfigAdminService:
     """Bounded configuration inspection, log reads, and gated policy mutation."""
 
@@ -574,27 +585,28 @@ class ConfigAdminService:
         if receipt is None:
             return None
         activated = receipt.active_identity
+        live = contract_identity or {}
         agreement = "unverifiable"
-        if activated is not None and contract_identity is not None:
-            observed = (
-                activated.runtime_active_generation,
-                activated.tool_surface_hash,
-                activated.process_identity,
-            )
-            # Only compared when the receipt actually recorded each fact; a
-            # missing fact leaves the verdict unverifiable rather than quietly
-            # counting as a match.
-            if all(item is not None for item in observed):
-                agreement = (
-                    "matches"
-                    if observed
-                    == (
-                        contract_identity.get("active_generation"),
-                        contract_identity.get("tool_surface_hash"),
-                        contract_identity.get("process_start_identity"),
-                    )
-                    else "diverged"
-                )
+        # The verdict is about the CONFIGURATION GENERATION the runtime serves, which is
+        # what the activation actually decided and the only recorded fact that survives a
+        # restart. Comparing process identity and tool-surface hash as well reported a
+        # healthy converged installation as `diverged` after an ordinary watchdog restart
+        # and after a later release upgrade -- observed on a live installation, where it
+        # also cost real time while triaging an unrelated fault (#314). Those two changes
+        # are still reported, as facts rather than as a verdict.
+        if activated is not None:
+            recorded_generation = activated.runtime_active_generation
+            observed_generation = live.get("active_generation")
+            if recorded_generation is not None and observed_generation is not None:
+                agreement = "matches" if recorded_generation == observed_generation else "diverged"
+        process_restarted = _changed_since(
+            activated.process_identity if activated is not None else None,
+            live.get("process_start_identity"),
+        )
+        surface_changed = _changed_since(
+            activated.tool_surface_hash if activated is not None else None,
+            live.get("tool_surface_hash"),
+        )
         return {
             "receipt_id": receipt.receipt_id,
             "classification": receipt.classification.value,
@@ -614,6 +626,8 @@ class ConfigAdminService:
             "runtime_phase": activated.runtime_phase if activated is not None else None,
             "error_code": receipt.error_code,
             "agreement": agreement,
+            "process_restarted_since_activation": process_restarted,
+            "tool_surface_changed_since_activation": surface_changed,
         }
 
     @staticmethod

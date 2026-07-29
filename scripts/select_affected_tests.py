@@ -14,11 +14,13 @@ Two selection strategies, in order of precision:
 Both strategies fail closed: an always-wide path (build/verification config), a
 package module missing from the coverage map (new/uncovered), or any path with
 no mapping at all escalates to the full suite -- this tool never silently
-narrows a run it cannot justify. Safety does not depend on the map being fresh:
-the authoritative gate (production-gate.yml) runs the full suite regardless, so
-a stale map can only make a *local* ``test-affected`` run less precise, never
-let a real failure through. Regenerate with ``make test-map`` after material
-source/test changes.
+narrows a run it cannot justify.
+
+This selection is load-bearing in CI: production-gate.yml uses it for pull
+requests, and runs the full suite with coverage on every push to a protected
+branch. So a stale map can make a PR run less precise, while the push-to-`main`
+run is what still catches a cross-module regression before it reaches a release.
+Regenerate with ``make test-map`` after material source/test changes.
 """
 
 from __future__ import annotations
@@ -59,7 +61,7 @@ ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
     "Makefile",
     "tests/test-groups.toml",
     "scripts/select_affected_tests.py",
-    "scripts/run_test_shards.py",
+    "scripts/run_test_suite.py",
     "scripts/verify-production.sh",
     ".github/workflows/**",
 )
@@ -102,7 +104,7 @@ class Manifest:
         """Test files owned by a `parallel = false` group.
 
         These carry a known worker-contention risk under xdist (see the
-        `run_test_shards.py` serial-lane comment) and must run outside any
+        `run_test_suite.py` serial-lane comment) and must run outside any
         `-n` invocation, never mixed into the same pytest process as the
         parallel lane.
         """
@@ -208,6 +210,43 @@ def _actual_conftest_consumers(tests_dir: Path) -> set[str]:
         if _CONFTEST_SYMBOL_RE.search(text):
             consumers.add(f"tests/{path.name}")
     return consumers
+
+
+def check_map_freshness(manifest: Manifest, changed_paths: Sequence[str]) -> int:
+    """Fail when a changed package module is absent from the coverage map.
+
+    This is the pull-request half of the map's staleness gate. Rebuilding the map needs a
+    full recording run, so the authoritative check is push-only -- but by then the stale
+    entry is already on `main`. This one is static: it reads the diff and the map, runs no
+    tests, and answers in under a second.
+
+    An unmapped package module is not merely untidy. The selector fails closed on it, so
+    every later change touching that file runs the whole suite; 170 such files had
+    accumulated when nothing was watching, and five of the last eight commits ran
+    everything as a result.
+    """
+    unmapped = sorted(
+        path
+        for path in changed_paths
+        if path.startswith(_PACKAGE_SRC_PREFIX)
+        and path.endswith(".py")
+        and path not in manifest.coverage_map
+    )
+    if not unmapped:
+        print("[select-affected-tests] every changed package module is in the coverage map")
+        return 0
+    print(
+        f"[select-affected-tests] {len(unmapped)} changed package module(s) are missing from "
+        "the coverage map, so every later change to them will run the whole suite:",
+        file=sys.stderr,
+    )
+    for path in unmapped:
+        print(f"    {path}", file=sys.stderr)
+    print(
+        "[select-affected-tests] run `make test-map` and commit tests/coverage-map.json",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def check_completeness(manifest: Manifest, tests_dir: Path = DEFAULT_TESTS_DIR) -> list[str]:
@@ -443,7 +482,7 @@ def _run_in_lanes(root: Path, files: Sequence[str], manifest: Manifest) -> int:
     Files owned by a `parallel = false` group carry a known worker-contention
     risk under xdist (see Group.serial_files) and must never share a pytest
     process with `-n`. They run first, alone; the rest run under `-n 3`.
-    Mirrors the split `run_test_shards.py` already does for `make check`.
+    Mirrors the split `run_test_suite.py` already does for `make check`.
     """
     serial_files = manifest.serial_files()
     serial = sorted(f for f in files if f in serial_files)
@@ -511,6 +550,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--tests-dir", type=Path, default=DEFAULT_TESTS_DIR)
     parser.add_argument("--check-completeness", action="store_true")
+    parser.add_argument(
+        "--check-map-freshness",
+        action="store_true",
+        help=(
+            "Fail when a changed package module is missing from the coverage map. "
+            "Static: reads the diff and the map, runs no tests."
+        ),
+    )
     parser.add_argument("--base", default="main", help="Base ref for git diff (default: main)")
     parser.add_argument(
         "--path",
@@ -544,6 +591,11 @@ def main(argv: list[str] | None = None) -> int:
         print("[select-affected-tests] manifest is complete")
         return 0
 
+    if args.check_map_freshness:
+        root = Path.cwd()
+        changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
+        return check_map_freshness(manifest, changed)
+
     root = Path.cwd()
     if args.full:
         selection = _all_files_selection(manifest)
@@ -556,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         # Coverage-gated authoritative runs belong to `make test`; this tool's
         # job is fast affected-test feedback, split into a serial lane (files
         # from `parallel = false` groups) and an xdist lane, same split
-        # `run_test_shards.py` already uses for `make check`.
+        # `run_test_suite.py` already uses for `make check`.
         return _run_in_lanes(root, selection.selected_files, manifest)
     return 0
 

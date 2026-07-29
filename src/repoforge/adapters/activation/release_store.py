@@ -592,10 +592,11 @@ class RuntimeReleaseStore:
 
     # -- retention ----------------------------------------------------------
 
-    def prune(self, *, keep: int) -> list[str]:
-        """Remove old releases, retaining `current`, `previous`, and the newest ``keep``.
+    def retention_candidates(self, *, keep: int) -> list[str]:
+        """Releases retention would remove: not `current`/`previous`, not the newest ``keep``.
 
-        Returns the commit shas that were removed.
+        Separate from `prune` so a caller can ask what retention *wants* to delete without
+        deleting it -- and so the rule itself lives in exactly one place.
         """
         if keep < 0:
             raise ConfigError("RETENTION_INVALID: keep must be >= 0")
@@ -605,9 +606,21 @@ class RuntimeReleaseStore:
                 protected.add(pinned)
         ordered = [manifest.commit_sha for manifest in self.list_releases()]
         protected.update(ordered[:keep])
+        return [sha for sha in self.installed_shas() if sha not in protected]
+
+    def prune(self, *, keep: int, protect: frozenset[str] = frozenset()) -> list[str]:
+        """Remove old releases, retaining `current`, `previous`, and the newest ``keep``.
+
+        ``protect`` pins additional releases the caller knows must survive -- releases a
+        live process is still executing from. Retention decides from pointers and recency,
+        which says nothing about what is running, so that judgement belongs to the caller
+        and is passed in rather than guessed at here.
+
+        Returns the commit shas that were removed.
+        """
         removed: list[str] = []
-        for sha in self.installed_shas():
-            if sha in protected:
+        for sha in self.retention_candidates(keep=keep):
+            if sha in protect:
                 continue
             _remove_tree(self.release_path(sha))
             removed.append(sha)

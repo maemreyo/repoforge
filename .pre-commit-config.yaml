@@ -15,6 +15,16 @@ repos:
 
   - repo: local
     hooks:
+      # Not restricted to `types: [python]`: the marker that reached `main` was in
+      # Markdown, which no other hook here looks at.
+      - id: conflict-markers
+        name: conflict markers
+        entry: python3 scripts/check_conflict_markers.py
+        language: system
+        pass_filenames: false
+
+  - repo: local
+    hooks:
       - id: mypy
         name: mypy
         entry: uv run mypy

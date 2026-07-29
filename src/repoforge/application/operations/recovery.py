@@ -21,6 +21,13 @@ from ...ports.process_reaper import ProcessReaper
 from ...ports.worker_binding_store import WorkerBindingStore
 from .manager import OperationManager
 
+# How long "operation record present, work item absent" is read as an admission still in
+# progress rather than as a crashed one. Admission performs two durable writes in a fixed
+# order, and this bounds the window between them; it is generously wider than that window
+# because the cost of waiting one recovery pass is nothing, while failing a live admission
+# loses real work.
+_ADMISSION_GRACE_SECONDS = 60
+
 RunningLivenessProbe = Callable[[OperationTask], bool | None]
 
 
@@ -59,6 +66,20 @@ def _timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("operation timestamp must include a timezone")
     return parsed
+
+
+def _admission_window_elapsed(created_at: str, now: datetime) -> bool:
+    """Has an operation existed long enough that a missing work item means it crashed?
+
+    Fails closed on an unreadable timestamp: a record whose age cannot be established is
+    not treated as an in-flight admission, because that would make it un-recoverable
+    forever.
+    """
+    try:
+        created = _timestamp(created_at)
+    except ValueError:
+        return True
+    return now - created >= timedelta(seconds=_ADMISSION_GRACE_SECONDS)
 
 
 def _reap_and_describe(
@@ -377,9 +398,15 @@ def recover_operation_work(
                     continue
                 raise
             continue
+        # Only work from an OLDER generation is unrunnable. A `!=` test also failed work
+        # from a NEWER one, which is the normal state for a few seconds during a hot reload:
+        # the request side swaps to the new generation and admits against it before the
+        # supervisor has replaced this worker. That work is perfectly good -- it is simply
+        # not this worker's to claim, and the replacement worker will take it -- so failing
+        # it destroyed valid work and reported the operator's own config change as an error.
         if (
             expected_config_generation is not None
-            and item.request.config_generation != expected_config_generation
+            and item.request.config_generation < expected_config_generation
         ):
             try:
                 detail = (
@@ -462,18 +489,25 @@ def recover_operation_work(
     durable_kinds = frozenset(
         {"workspace_run_profile", "workspace_run_adhoc", "workspace_run_diagnostic"}
     )
-    # Only an operation still waiting to be claimed proves its sidecar is required:
-    # admission writes the work item before the operation record, so a queued
-    # operation without one crashed mid-admission and can never be claimed. A
-    # RUNNING record is deliberately excluded -- it is either owned by a live
-    # worker that will terminalize it, or already covered by lease-expiry and
-    # worker-loss recovery, which carry the exact evidence for that failure.
+    # Only an operation still waiting to be claimed proves its sidecar is required: a
+    # queued operation without one can never be claimed. A RUNNING record is deliberately
+    # excluded -- it is either owned by a live worker that will terminalize it, or already
+    # covered by lease-expiry and worker-loss recovery, which carry the exact evidence for
+    # that failure.
+    #
+    # The grace window is required, not defensive padding. Admission writes the operation
+    # record before the work item (so a claimable item always has a readable record), which
+    # means "record present, item absent" is the NORMAL state for the microseconds between
+    # those two writes. Without the window a recovery pass landing inside it would fail a
+    # perfectly good admission. Bounded by `created_at`, so it is decided by durable state
+    # and an injected `now` rather than by wall-clock luck.
     for operation in operation_page.records:
         if (
             operation.kind in durable_kinds
             and operation.state is OperationState.PENDING
             and operation.phase == "queued"
             and operation.operation_id not in work_ids
+            and _admission_window_elapsed(operation.created_at, now_dt)
         ):
             manager.fail(
                 operation.operation_id,

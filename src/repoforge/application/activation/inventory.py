@@ -12,7 +12,7 @@ or clock access and the CLI owns all the best-effort probing.
 
 from __future__ import annotations
 
-from ...ports.activation import ObservedRuntime
+from ...ports.activation import ObservedRuntime, ReleaseProcess
 from ...ports.process_supervisor import RegistrarStatus
 from .selection import ReleaseChoice
 
@@ -24,6 +24,7 @@ def build_runtime_inventory(
     agent: RegistrarStatus | None,
     agent_secret_usable: bool,
     dev_runtimes: list[dict[str, object]],
+    release_processes: tuple[ReleaseProcess, ...] = (),
 ) -> dict[str, object]:
     """Return the ``rf runtime ls`` payload."""
     current = next((choice for choice in releases if choice.is_current), None)
@@ -35,6 +36,16 @@ def build_runtime_inventory(
     observed_choice = next(
         (choice for choice in releases if choice.commit_sha == observed_sha), None
     )
+    # Processes nothing supervises any more. Reported here because this is the command
+    # someone runs when they have lost track of what is running, and `ps` is the only other
+    # place they were visible. Decided by ancestry from the LIVE supervisor, never by
+    # `ppid == 1`: launchd is pid 1 on macOS, so the healthy production supervisor has
+    # ppid 1 and a parent-id check reported it as abandoned.
+    orphans = [
+        process
+        for process in release_processes
+        if not process.supervised_by(observed.pid if observed is not None else None)
+    ]
     running_dev = [
         runtime for runtime in dev_runtimes if runtime.get("phase") not in {"stopped", None}
     ]
@@ -64,13 +75,18 @@ def build_runtime_inventory(
             else None
         ),
         "releases": [choice.as_dict() for choice in releases],
+        "orphan_processes": [process.as_dict() for process in orphans],
         "dev_runtimes": dev_runtimes,
         "counts": {
             "releases": len(releases),
             "dev_runtimes": len(dev_runtimes),
             "dev_runtimes_running": len(running_dev),
+            "orphan_processes": len(orphans),
+            "orphan_processes_on_removed_releases": len(
+                [process for process in orphans if not process.release_installed]
+            ),
         },
-        "safe_next_action": _next_action(current, releases, running_dev),
+        "safe_next_action": _next_action(current, releases, running_dev, orphans),
     }
 
 
@@ -78,11 +94,26 @@ def _next_action(
     current: ReleaseChoice | None,
     releases: list[ReleaseChoice],
     running_dev: list[dict[str, object]],
+    orphans: list[ReleaseProcess],
 ) -> str:
     if not releases:
         return "No release is installed yet. Run `rf upgrade --from-worktree . --activate`."
     if current is None:
         return "No release is active. Run `rf version switch <branch>` to activate one."
+    if orphans:
+        # Named before the dev-runtime note: a process running code that is no longer
+        # installed is a worse state than an extra dev runtime, and it is not something
+        # RepoForge terminates on the operator's behalf.
+        removed = [process for process in orphans if not process.release_installed]
+        pids = ", ".join(str(process.pid) for process in orphans)
+        detail = (
+            f"{len(removed)} of them run a release that is no longer installed. " if removed else ""
+        )
+        return (
+            f"{len(orphans)} release process(es) are supervised by nothing (pid {pids}). "
+            f"{detail}Stop them yourself once you are sure they are idle; RepoForge "
+            "never terminates a process it does not own."
+        )
     if running_dev:
         names = ", ".join(str(runtime.get("name")) for runtime in running_dev)
         return f"Dev runtimes running alongside production: {names}."

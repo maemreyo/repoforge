@@ -5,7 +5,7 @@ from __future__ import annotations
 CONTRACT_IDENTITY: dict[str, object] = {
     "contract_version": 2,
     "input_contract_digest": "fc23049827ff22c514dc729de58e3eee62da11449b456e4c9ecfb0888b585a10",
-    "output_contract_digest": "c24b6fade33856909c884768ce8c372deb811f07f2d3ee322821bf820642cb02",
+    "output_contract_digest": "1c36c7ef6cf0ac8b2c4610afc4a32224e0a0f861cdea2b681779b17b5c9922d2",
     "tool_count": 28,
-    "tool_schema_bundle_digest": "fa8ff203abf80c6145cf23a8fccadda4f536faea0ce41a8c8481da30e26aa61f",
+    "tool_schema_bundle_digest": "503f0d7fa13117772e0599de620561aca6ecf9bf2cabdc1d8199956a46da7cb9",
 }

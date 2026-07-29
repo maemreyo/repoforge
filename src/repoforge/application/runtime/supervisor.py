@@ -198,6 +198,8 @@ class RuntimeSupervisor:
         error: str | None = None,
         health: tuple[tuple[str, bool, str], ...] = (),
         consecutive_health_failures: int = 0,
+        restarts_total: int = 0,
+        last_restart_at: str | None = None,
     ) -> RuntimeRecord:
         pid = os.getpid()
         identity = self._processes.identity(pid)
@@ -230,6 +232,8 @@ class RuntimeSupervisor:
             running_release_sha=os.environ.get("REPOFORGE_RUNNING_RELEASE_SHA") or None,
             health_observed_at=now if health else None,
             consecutive_health_failures=consecutive_health_failures,
+            restarts_total=restarts_total,
+            last_restart_at=last_restart_at,
         )
 
     def _tunnel_health(self, child: ChildProcess) -> tuple[HealthCheck, ...]:
@@ -260,6 +264,14 @@ class RuntimeSupervisor:
         self, generation: int, child: ChildProcess
     ) -> tuple[bool, tuple[tuple[str, bool, str], ...]]:
         checks = list(self._tunnel_health(child))
+        # First, because a runtime that cannot answer control requests is not healthy no
+        # matter what else is true. This record is written by the watchdog loop, which
+        # survives the control loop, so without this check a supervisor whose control plane
+        # had died kept publishing `phase: healthy` while every read needing the socket
+        # timed out -- and the recovery commands, which go through that same socket, could
+        # not run either (#322).
+        serving = self._control.is_serving()
+        checks.append(HealthCheck("control_plane", serving, self._control.serving_diagnostic()))
         if self._execution_worker is not None:
             worker_alive = bool(
                 self._execution_child and self._execution_worker.is_alive(self._execution_child)
@@ -443,6 +455,14 @@ class RuntimeSupervisor:
             for signum in (signal.SIGTERM, signal.SIGINT):
                 previous_handlers[signal.Signals(signum)] = signal.signal(signum, stop_handler)
             restart_count = 0
+            # Carried across supervisor lifetimes: a supervisor that itself restarted would
+            # otherwise republish `0 restarts` and erase the history an operator is reading
+            # the record to find.
+            prior_record = self._store.read()
+            restarts_total = prior_record.restarts_total if prior_record is not None else 0
+            last_restart_at: str | None = (
+                prior_record.last_restart_at if prior_record is not None else None
+            )
             try:
                 try:
                     initialize_profile = self._profile_store.fingerprint() != profile.fingerprint
@@ -506,6 +526,8 @@ class RuntimeSupervisor:
                             correlation_id=correlation_id,
                             child=None,
                             restart_count=restart_count,
+                            restarts_total=restarts_total,
+                            last_restart_at=last_restart_at,
                         )
                     )
                     try:
@@ -517,6 +539,10 @@ class RuntimeSupervisor:
                         )
                     except Exception as exc:
                         restart_count += 1
+                        # Evidence, not policy: unlike restart_count these are never reset,
+                        # so an outage is still visible once health settles again.
+                        restarts_total += 1
+                        last_restart_at = self._clock.now_iso()
                         if restart_count > self._max_restarts:
                             self._store.write(
                                 self._record(
@@ -528,6 +554,8 @@ class RuntimeSupervisor:
                                     correlation_id=correlation_id,
                                     child=None,
                                     restart_count=restart_count,
+                                    restarts_total=restarts_total,
+                                    last_restart_at=last_restart_at,
                                     error_code="TUNNEL_START_FAILED",
                                     error=redact_text(f"{type(exc).__name__}: {exc}"),
                                 )
@@ -542,6 +570,10 @@ class RuntimeSupervisor:
                         self._tunnel.terminate(child, grace_seconds=3)
                         self._child = None
                         restart_count += 1
+                        # Evidence, not policy: unlike restart_count these are never reset,
+                        # so an outage is still visible once health settles again.
+                        restarts_total += 1
+                        last_restart_at = self._clock.now_iso()
                         if restart_count > self._max_restarts:
                             self._store.write(
                                 self._record(
@@ -553,6 +585,8 @@ class RuntimeSupervisor:
                                     correlation_id=correlation_id,
                                     child=None,
                                     restart_count=restart_count,
+                                    restarts_total=restarts_total,
+                                    last_restart_at=last_restart_at,
                                     error_code="STARTUP_HEALTH_FAILED",
                                     error="Tunnel/MCP did not become healthy",
                                     health=health,
@@ -583,6 +617,8 @@ class RuntimeSupervisor:
                                 correlation_id=correlation_id,
                                 child=None,
                                 restart_count=restart_count,
+                                restarts_total=restarts_total,
+                                last_restart_at=last_restart_at,
                                 error_code="ACTIVE_POINTER_COMMIT_FAILED",
                                 error=redact_text(f"{type(exc).__name__}: {exc}"),
                                 health=health,
@@ -600,6 +636,8 @@ class RuntimeSupervisor:
                             correlation_id=correlation_id,
                             child=child,
                             restart_count=restart_count,
+                            restarts_total=restarts_total,
+                            last_restart_at=last_restart_at,
                             health=health,
                         )
                     )
@@ -633,6 +671,8 @@ class RuntimeSupervisor:
                                         active_generation=generation,
                                         accepted_generation=generation,
                                         restart_count=restart_count,
+                                        restarts_total=restarts_total,
+                                        last_restart_at=last_restart_at,
                                         health=observed_health,
                                         health_observed_at=self._clock.now_iso(),
                                         consecutive_health_failures=0,
@@ -666,6 +706,10 @@ class RuntimeSupervisor:
                     self._child = None
                     generation = self._adopt_committed_runtime_generation(generation)
                     restart_count += 1
+                    # Evidence, not policy: unlike restart_count these are never reset,
+                    # so an outage is still visible once health settles again.
+                    restarts_total += 1
+                    last_restart_at = self._clock.now_iso()
                     if restart_count > self._max_restarts:
                         self._store.write(
                             self._record(
@@ -677,6 +721,8 @@ class RuntimeSupervisor:
                                 correlation_id=correlation_id,
                                 child=None,
                                 restart_count=restart_count,
+                                restarts_total=restarts_total,
+                                last_restart_at=last_restart_at,
                                 error_code="RESTART_LIMIT",
                                 error="Tunnel child exceeded bounded restart policy",
                             )
@@ -701,6 +747,8 @@ class RuntimeSupervisor:
                                 correlation_id=correlation_id,
                                 child=None,
                                 restart_count=restart_count,
+                                restarts_total=restarts_total,
+                                last_restart_at=last_restart_at,
                                 error_code="NON_RETRYABLE_DOCTOR_FAILURE",
                                 error=redact_text(doctor_detail),
                             )
@@ -768,6 +816,8 @@ class RuntimeSupervisor:
                             correlation_id=correlation_id,
                             child=None,
                             restart_count=restart_count,
+                            restarts_total=restarts_total,
+                            last_restart_at=last_restart_at,
                             error_code="SUPERVISOR_FAILURE",
                             error=redact_text(f"{type(exc).__name__}: {exc}"),
                         )

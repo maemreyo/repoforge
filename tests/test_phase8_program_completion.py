@@ -75,7 +75,7 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
         "ruff format --check src tests",
         "ruff check src tests",
         "mypy --strict src/repoforge",
-        "pytest --timeout=60 --cov=repoforge --cov-branch",
+        "pytest --cov=repoforge --cov-branch",
         "test_onboarding_real_git.py",
         "scripts/check_release_contracts.py",
         "uv build",
@@ -83,6 +83,12 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
     ):
         assert command in workflow
     assert "macos-latest" in workflow
+    # The coverage map decides how narrow a pull-request run may be, and nothing watched
+    # it: it went eight days without a rebuild and sent five of eight commits to the whole
+    # suite. The check is push-only because recording it needs a full run, so the
+    # aggregator has to accept `skipped` on a pull request without accepting it on push.
+    assert "make test-map-check" in workflow
+    assert "needs.coverage-map.result" in workflow
     wheel_verifier = (ROOT / "scripts/verify-wheel-install.sh").read_text(encoding="utf-8")
     assert "scripts/verify-wheel-e2e.py" in wheel_verifier
     assert 'contract["mcp"]["identity"] == "forge_v2"' in wheel_verifier
@@ -93,17 +99,21 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
 
 def test_production_verifier_reports_head_and_refuses_dirty_tracked_tree() -> None:
     script = (ROOT / "scripts/verify-production.sh").read_text(encoding="utf-8")
-    shard_runner = (ROOT / "scripts/run_test_shards.py").read_text(encoding="utf-8")
+    suite_runner = (ROOT / "scripts/run_test_suite.py").read_text(encoding="utf-8")
     assert "git rev-parse HEAD" in script
     assert "check_release_contracts.py" in script
     assert "verify-wheel-install.sh" in script
     assert "git status --porcelain --untracked-files=normal" in script
     assert "PYTHONDONTWRITEBYTECODE=1" in script
-    assert "run_test_shards.py" in script
-    assert "COVERAGE_FILE" in shard_runner
-    assert '"-p"' in shard_runner and '"no:cacheprovider"' in shard_runner
-    assert '"--timeout=60"' in shard_runner
-    assert '"combine"' in shard_runner and '"--fail-under=80"' in shard_runner
+    assert "run_test_suite.py" in script
+    assert "COVERAGE_FILE" in suite_runner
+    assert '"-p"' in suite_runner and '"no:cacheprovider"' in suite_runner
+    # The runner must not pin its own pytest timeout. pyproject sets 120 to clear the app's
+    # own git subprocess budget; a lower ceiling here kills healthy-but-slow git calls under
+    # this runner's contention, which is the inversion 546cf52 removed from pyproject.
+    assert "--timeout=" not in suite_runner
+    assert 'COVERAGE_FLOOR = "80"' in suite_runner
+    assert '"combine"' in suite_runner
     assert script.count("git status --porcelain --untracked-files=normal") >= 2
 
 

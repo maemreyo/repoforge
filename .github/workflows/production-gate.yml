@@ -55,6 +55,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: selecting affected tests diffs against the base branch, and a
+          # shallow clone has no merge base to diff from.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
@@ -62,7 +66,50 @@ jobs:
       - run: uv sync --extra dev --frozen
       - name: Guided onboarding real-Git regressions
         run: uv run pytest tests/test_onboarding_real_git.py tests/test_repository_discovery.py
-      - run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
+      # A pull request runs only the tests its own changes can affect. The selector fails
+      # closed: an always-wide path, a package module missing from the coverage map, or any
+      # unmapped path escalates to the whole suite, so a narrow run is only ever a run it
+      # could justify. Coverage is deliberately not enforced here -- a subset cannot meet a
+      # whole-repository threshold, and pretending otherwise would make the number a lie.
+      # Static, sub-second: reads the diff and the map, runs nothing. The authoritative
+      # map check needs a full recording run and so is push-only -- by which point a stale
+      # entry is already on main. This catches the common case (a new module nobody
+      # remapped) while it is still a pull request.
+      - name: Coverage map covers the changed modules (pull request)
+        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: |
+          uv run python scripts/select_affected_tests.py \
+            --check-map-freshness --base "origin/${{ github.base_ref }}"
+      - name: Affected tests (pull request)
+        if: github.event_name == 'pull_request'
+        run: |
+          uv run python scripts/select_affected_tests.py \
+            --run --base "origin/${{ github.base_ref }}"
+      # Every push to a protected branch still runs everything with coverage. This is what
+      # keeps the narrow PR run honest: a cross-module regression a stale coverage map failed
+      # to select is caught here, before it can be built into a release.
+      - name: Full suite with coverage (push)
+        if: github.event_name != 'pull_request'
+        run: uv run pytest --cov=repoforge --cov-branch --cov-report=term-missing
+
+  # The coverage map decides how narrow a pull-request run may be, and nothing was
+  # watching it: it went eight days without a rebuild, accumulated 170 unmapped source
+  # files, and quietly sent five of eight commits to the whole suite -- the behaviour it
+  # exists to avoid. Recording it needs a full run, so this stays off the pull-request
+  # path and off the matrix: one runner, on push, after the map can no longer be fixed
+  # by review alone.
+  coverage-map:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - name: Coverage map is current
+        run: make test-map-check
 
   # A release gate that no unit test can replace: it performs a REAL `rf upgrade
   # --activate` (real wheel build, real per-release venv, real smoke, real supervisor
@@ -112,7 +159,7 @@ jobs:
   # Branch protection should require `production-gate` and nothing else.
   production-gate:
     if: always()
-    needs: [static-contracts, tests, live-activation, package]
+    needs: [static-contracts, tests, coverage-map, live-activation, package]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate job to have succeeded
@@ -129,4 +176,16 @@ jobs:
             printf '%-18s %s\n' "$name" "$result"
             [ "$result" = success ] || status=1
           done
+          # Recording the coverage map needs a full run, so it is a push-only job and is
+          # legitimately `skipped` on a pull request. Accepting only `success` here would
+          # fail every pull request; accepting anything would let a stale map through on
+          # push. Both states are named, so a new one is a failure rather than a silent pass.
+          map='${{ needs.coverage-map.result }}'
+          printf '%-18s %s\n' coverage-map "$map"
+          case "$map" in
+            success) ;;
+            skipped)
+              [ '${{ github.event_name }}' = pull_request ] || status=1 ;;
+            *) status=1 ;;
+          esac
           exit "$status"
