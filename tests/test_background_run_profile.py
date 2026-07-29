@@ -480,6 +480,14 @@ def test_background_profile_emits_observable_per_step_progress(
     assert observed["updated_at"] != observed["created_at"]
     first_step_update = observed["updated_at"]
 
+    # The step-start message must name the stage too, not only the heartbeat that follows
+    # it 30s later. Only the heartbeat was pinned, so a first pass at this fixed one
+    # emitter and left the other reporting `running unknown` for a step whose reviewed id
+    # is `sync` -- visible only by running a real profile against the live runtime.
+    step_start_message = observed["progress"]["message"]
+    assert isinstance(step_start_message, str)
+    assert step_start_message == "running tests [business_tests] (step 2/2)"
+
     def same_step_heartbeat() -> dict[str, object] | None:
         status = second_step_running()
         if status is not None and status["updated_at"] != first_step_update:
