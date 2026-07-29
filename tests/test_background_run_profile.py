@@ -484,9 +484,12 @@ def test_background_profile_emits_observable_per_step_progress(
     # it 30s later. Only the heartbeat was pinned, so a first pass at this fixed one
     # emitter and left the other reporting `running unknown` for a step whose reviewed id
     # is `sync` -- visible only by running a real profile against the live runtime.
-    step_start_message = observed["progress"]["message"]
-    assert isinstance(step_start_message, str)
-    assert step_start_message == "running tests [business_tests] (step 2/2)"
+    # Whichever emitter produced the message currently on the record -- the step-start one
+    # or a heartbeat that has already fired -- it must name the stage. Asserting the exact
+    # step-start string races the heartbeat: it held on macOS and failed on ubuntu.
+    step_message = observed["progress"]["message"]
+    assert isinstance(step_message, str)
+    assert step_message.startswith("running tests [business_tests] (step 2/2")
 
     def same_step_heartbeat() -> dict[str, object] | None:
         status = second_step_running()
