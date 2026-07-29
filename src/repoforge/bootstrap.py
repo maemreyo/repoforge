@@ -1165,7 +1165,7 @@ def run_runtime_worker(
         tunnel_executable,
         tunnel_version,
         mcp_argv,
-        runtime_config.server.tunnel_mcp_connection_max_ttl_seconds,
+        source.mcp_connection_max_ttl_seconds,
     )
     inherited_keys = (
         "HOME",

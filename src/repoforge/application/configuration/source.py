@@ -241,6 +241,12 @@ class SourceConfiguration:
     tunnel_id: str | None
     profile: str
     repositories: tuple[SourceRepository, ...]
+    #: Lifetime tunnel-client gives one MCP transport connection, in seconds. Lives beside
+    #: the other connection parameters rather than under `[server]`, because `[server]` is
+    #: read once at setup and then frozen -- deliberately, since it carries capability
+    #: grants like `allowed_environment` -- while these are re-read from source on every
+    #: runtime start. `None` passes nothing and leaves the tunnel's own default in force.
+    mcp_connection_max_ttl_seconds: int | None = None
 
 
 def parse_source(text: str) -> SourceConfiguration:
@@ -248,12 +254,20 @@ def parse_source(text: str) -> SourceConfiguration:
     if not isinstance(raw, dict):
         raise ValueError("Configuration must be a TOML table")
     tunnel = raw.get("tunnel")
+    mcp_connection_max_ttl_seconds: int | None = None
     if tunnel is None:
         tunnel_id: str | None = None
         profile = "repoforge"
     elif isinstance(tunnel, dict) and isinstance(tunnel.get("id"), str):
         tunnel_id = str(tunnel["id"])
         profile = str(tunnel.get("profile", "repoforge"))
+        raw_ttl = tunnel.get("mcp_connection_max_ttl_seconds")
+        if raw_ttl is not None:
+            if not isinstance(raw_ttl, int) or isinstance(raw_ttl, bool) or raw_ttl <= 0:
+                raise ValueError(
+                    "[tunnel].mcp_connection_max_ttl_seconds must be a positive integer"
+                )
+            mcp_connection_max_ttl_seconds = raw_ttl
     else:
         raise ValueError("[tunnel].id must be a string when tunnel configuration is present")
     repos = raw.get("repo")
@@ -347,7 +361,7 @@ def parse_source(text: str) -> SourceConfiguration:
         raise ValueError(
             f"repositories contains metadata for unknown repository ids: {unknown_metadata}"
         )
-    return SourceConfiguration(tunnel_id, profile, tuple(result))
+    return SourceConfiguration(tunnel_id, profile, tuple(result), mcp_connection_max_ttl_seconds)
 
 
 def _toml_value(value: Any) -> str:
