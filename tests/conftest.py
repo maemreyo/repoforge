@@ -19,7 +19,7 @@ from repoforge.adapters.execution.native import NativeReviewedAdapter
 from repoforge.application.execution.coordinator import ExecutionCoordinator
 from repoforge.application.service import CodingService
 from repoforge.bootstrap import AdapterOverrides, build_application
-from repoforge.config import load_config
+from repoforge.config import AppConfig, load_config
 from repoforge.domain.errors import CommandError
 from repoforge.domain.mutation_policy import MUTATION_OPS
 from repoforge.ports.clock import Clock
@@ -665,6 +665,22 @@ raise SystemExit(2)
     script.chmod(0o755)
 
 
+def build_test_service(config: AppConfig, *, clock: Clock | None = None) -> CodingService:
+    """Compose explicit fixture publication effects without changing production defaults."""
+
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(clock=clock) if clock is not None else None,
+        config_generation=TEST_CONFIG_GENERATION,
+    )
+    object.__setattr__(
+        application.context,
+        "publications",
+        _FixtureWorkspacePublicationService(application.context),
+    )
+    return CodingService(config, application=application)
+
+
 def create_forge_environment(
     tmp_path: Path,
     *,
@@ -755,17 +771,7 @@ parser = "ruff_format"
     # both the request side and the worker side ran at 0, so the generation filter matched
     # and nothing was ever unclaimable. That is precisely why #313 -- request side 0,
     # worker side 12 -- was invisible to this suite.
-    application = build_application(
-        config,
-        overrides=AdapterOverrides(clock=clock) if clock is not None else None,
-        config_generation=TEST_CONFIG_GENERATION,
-    )
-    object.__setattr__(
-        application.context,
-        "publications",
-        _FixtureWorkspacePublicationService(application.context),
-    )
-    service = CodingService(config, application=application)
+    service = build_test_service(config, clock=clock)
     return ForgeEnvironment(
         root=tmp_path,
         remote=remote,

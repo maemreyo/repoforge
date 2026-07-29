@@ -5,8 +5,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import build_test_service
 
-from repoforge.application.service import CodingService
 from repoforge.config import load_config
 from repoforge.domain.errors import CommandError
 
@@ -56,7 +56,7 @@ commands = [["python", "-c", "from pathlib import Path; assert Path('hello.txt')
         encoding="utf-8",
     )
 
-    service = CodingService(load_config(config_path))
+    service = build_test_service(load_config(config_path))
     created = service.workspace_create("demo", "change hello")
     workspace_id = created["workspace_id"]
     current = service.workspace_read_file(workspace_id, "hello.txt")
@@ -113,7 +113,7 @@ denied_paths = [".git/**", ".env"]
 """,
         encoding="utf-8",
     )
-    service = CodingService(load_config(config_path))
+    service = build_test_service(load_config(config_path))
     created = service.workspace_create("demo", "patch test")
     workspace_id = created["workspace_id"]
     service.workspace_write_file(workspace_id, "new.txt", "new file\n", "<new>")
@@ -212,7 +212,7 @@ commands = [
         encoding="utf-8",
     )
 
-    service = CodingService(load_config(config_path))
+    service = build_test_service(load_config(config_path))
     created = service.workspace_create("demo", "run broken profile")
     workspace_id = created["workspace_id"]
 

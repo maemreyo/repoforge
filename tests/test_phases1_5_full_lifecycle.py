@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from conftest import build_test_service
+
 from repoforge.application.service import CodingService
 from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.config import load_config
@@ -166,7 +168,7 @@ commands = [["python3", "-c", "from pathlib import Path; assert Path('hello.txt'
     )
     old_path = os.environ.get("PATH", "")
     os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
-    return Environment(remote, source, config_path, CodingService(load_config(config_path)))
+    return Environment(remote, source, config_path, build_test_service(load_config(config_path)))
 
 
 def test_complete_service_lifecycle_and_adapters(tmp_path: Path) -> None:
@@ -238,22 +240,26 @@ def test_complete_service_lifecycle_and_adapters(tmp_path: Path) -> None:
     committed = service.workspace_commit(workspace_id, "Improve developer experience")
     pushed = service.workspace_push(workspace_id, idempotency_key="push-workspace-0001")
     assert pushed["head_sha"] == committed["head_sha"]
-    assert service.workspace_push(workspace_id, idempotency_key="push-workspace-0001") == pushed
+    replay = service.workspace_push(workspace_id, idempotency_key="push-workspace-0001")
+    assert replay["pushed"] is False
+    assert replay["head_sha"] == pushed["head_sha"]
+    assert replay["remote_head_after"] == pushed["remote_head_after"]
     pr = service.workspace_create_draft_pr(
         workspace_id,
         "Improve developer experience",
         "## Summary\n\nSafer workflow.",
         idempotency_key="create-pr-00000001",
     )
-    assert (
-        service.workspace_create_draft_pr(
-            workspace_id,
-            "Improve developer experience",
-            "## Summary\n\nSafer workflow.",
-            idempotency_key="create-pr-00000001",
-        )
-        == pr
+    pr_replay = service.workspace_create_draft_pr(
+        workspace_id,
+        "Improve developer experience",
+        "## Summary\n\nSafer workflow.",
+        idempotency_key="create-pr-00000001",
     )
+    assert pr_replay["already_existed"] is True
+    assert pr_replay["url"] == pr["url"]
+    assert pr_replay["branch"] == pr["branch"]
+    assert pr_replay["base"] == pr["base"]
     assert pr["draft"] is True and pr["labels"] == ["agent"]
     assert (
         service.workspace_update_draft_pr(

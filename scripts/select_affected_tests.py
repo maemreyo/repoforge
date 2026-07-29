@@ -72,7 +72,7 @@ CONFTEST_PATH = "tests/conftest.py"
 # Any export from tests/conftest.py that a test file might reference. Kept in
 # sync with the checked-in `conftest_consumers` list by --check-completeness.
 _CONFTEST_SYMBOL_RE = re.compile(
-    r"\b(forge_env|create_forge_environment|ForgeEnvironment|execution_coordinator_for_tests)\b"
+    r"\b(forge_env|create_forge_environment|ForgeEnvironment|execution_coordinator_for_tests|build_test_service)\b"
 )
 
 

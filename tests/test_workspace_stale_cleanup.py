@@ -12,10 +12,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import ForgeEnvironment, create_forge_environment
+from conftest import ForgeEnvironment, build_test_service, create_forge_environment
 
 from repoforge.application.service import CodingService
-from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.execution_receipt import EffectReceiptState
@@ -44,8 +43,7 @@ def _set_stale_workspace_fields(
 
 def _clocked_service(env: ForgeEnvironment, clock: FixedClock) -> CodingService:
     config = load_config(env.config_path)
-    application = build_application(config, overrides=AdapterOverrides(clock=clock))
-    return CodingService(config, application=application)
+    return build_test_service(config, clock=clock)
 
 
 # ---------------------------------------------------------------------------

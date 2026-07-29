@@ -538,7 +538,7 @@ test_files = [
 
 # Test files that reference tests/conftest.py's shared git/workspace fixture
 # machinery (the `forge_env` fixture, `ForgeEnvironment`, `create_forge_environment`,
-# or `execution_coordinator_for_tests`). A change to tests/conftest.py is scoped to
+# `build_test_service`, or `execution_coordinator_for_tests`). A change to tests/conftest.py is scoped to
 # exactly this list (deduplicated with safety_bundle) instead of the full suite.
 # `select_affected_tests.py --check-completeness` re-derives this set from source
 # and fails closed if it has drifted, so it stays trustworthy as tests are added.
@@ -562,6 +562,7 @@ test_files = [
   "tests/test_fingerprint_cache.py",
   "tests/test_git_diff_summary.py",
   "tests/test_github_read_cache.py",
+  "tests/test_integration.py",
   "tests/test_mcp_contract.py",
   "tests/test_mcp_contract_v2.py",
   "tests/test_mcp_payload_v2.py",
@@ -580,6 +581,8 @@ test_files = [
   "tests/test_phase6_operational_hardening.py",
   "tests/test_phase7_atomic_hot_reload.py",
   "tests/test_phases1_4_production_hardening.py",
+  "tests/test_phases1_4_real_git_integration.py",
+  "tests/test_phases1_5_full_lifecycle.py",
   "tests/test_plan_execution.py",
   "tests/test_pr_check_watch.py",
   "tests/test_repo_issue_graph_tools.py",
