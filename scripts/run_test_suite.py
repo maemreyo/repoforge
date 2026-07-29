@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import tomllib
+import tomli as tomllib  # stdlib `tomllib` is 3.11+; this package supports 3.10.
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import select_affected_tests as selector
