@@ -53,6 +53,7 @@ def _error(
     *,
     required: bool = False,
     details: dict[str, object] | None = None,
+    safe_next_action: str = "Use a selector that matches the diagnostic's reviewed selector schema.",
 ) -> RepoForgeError:
     return RepoForgeError(
         message,
@@ -62,7 +63,7 @@ def _error(
             else ErrorCode.DIAGNOSTIC_SELECTOR_INVALID
         ),
         unchanged_state=("The workspace and diagnostic configuration were not modified.",),
-        safe_next_action="Use a selector that matches the diagnostic's reviewed selector schema.",
+        safe_next_action=safe_next_action,
         details=details,
     )
 
@@ -201,6 +202,14 @@ def _resolve_values(
         raise _error(
             f"Diagnostic selector '{selector.name}' accepts at most {selector.max_values} value(s), "
             f"got {len(values)}",
+            # Naming the limit without naming the shape leaves the caller guessing whether
+            # the run is possible at all. Separate runs are supported and keep each
+            # failure attributable to its own selector.
+            safe_next_action=(
+                f"This diagnostic takes at most {selector.max_values} selector value(s) per run. "
+                f"Split the {len(values)} values across that many runs -- one operation each, "
+                "which also keeps every failure attributable to its own selector."
+            ),
             details=_selector_details(selector, received_values=len(values)),
         )
     return tuple(

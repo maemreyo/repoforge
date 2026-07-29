@@ -126,6 +126,40 @@ def test_a_reserved_profile_is_refused_for_the_model(tmp_path: Path) -> None:
     assert "operator" in str(raised.value.safe_next_action or "")
 
 
+def test_a_reserved_profile_is_discoverable_before_the_call(tmp_path: Path) -> None:
+    """The refusal above is correct but arrives too late to be free.
+
+    An agent reading the repository surface sees a flat list of profile names, so the only
+    way to learn that one is reserved is to spend a call on it. Both discovery surfaces
+    must say so up front: `repo_list` per profile, `repo_task_context` as a named set.
+    """
+    from repoforge.application.service import CodingService
+    from repoforge.config import ProfileConfig
+
+    env = create_forge_environment(tmp_path)
+    config = load_config(env.config_path)
+    service = CodingService(
+        config,
+        application=build_application(config, config_generation=TEST_CONFIG_GENERATION),
+    )
+    service.config.repositories["demo"].profiles["gate"] = ProfileConfig(
+        name="gate",
+        description="authoritative gate",
+        commands=(("python3", "-c", "print('gate')"),),
+        verification=True,
+        model_invocable=False,
+    )
+
+    listed = service.repo_list()
+    profiles = listed["repositories"][0]["profiles"]
+    assert profiles["gate"]["model_invocable"] is False
+    assert profiles["quick"]["model_invocable"] is True
+
+    repository = service.repo_task_context("demo")["repository"]
+    assert repository["operator_only_profiles"] == ["gate"]
+    assert "gate" in repository["profiles"]
+
+
 def test_the_operator_can_still_run_a_reserved_profile(tmp_path: Path) -> None:
     """Reserving a profile from the model must not take it away from the operator."""
     from repoforge.application.service import CodingService

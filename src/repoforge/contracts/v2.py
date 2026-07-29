@@ -1346,6 +1346,15 @@ _SelectorItem = Annotated[str, Field(min_length=1, max_length=4096)]
 _SelectorItems = Annotated[tuple[_SelectorItem, ...], Field(max_length=100)]
 _Selector = _SelectorItem | _SelectorItems
 
+# An ad-hoc argv is bounded far more tightly than a selector, and the schema must say
+# so: advertising a selector's 100x4096 here let a caller build a request the schema
+# accepted and `domain.adhoc` then rejected, which reads as an arbitrary failure. These
+# must equal MAX_ADHOC_ARGV_ELEMENTS and MAX_ADHOC_ARGV_ELEMENT_LENGTH; the contracts
+# package deliberately imports no domain module, so a test pins the two together.
+_MAX_ADHOC_ARGV_ELEMENTS = 32
+_MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
+_AdhocArgvItem = Annotated[str, Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENT_LENGTH)]
+
 
 class WorkspaceVerifyInput(StrictModel):
     workspace_id: Identifier
@@ -1354,7 +1363,9 @@ class WorkspaceVerifyInput(StrictModel):
     selector: _Selector | None = None
     selector2: _Selector | None = None
     profile_name: Identifier | None = None
-    argv: tuple[_SelectorItem, ...] | None = Field(default=None, max_length=100)
+    argv: tuple[_AdhocArgvItem, ...] | None = Field(
+        default=None, max_length=_MAX_ADHOC_ARGV_ELEMENTS
+    )
     working_directory: RelativePath | None = None
     expected_fingerprint: Sha256 | None = None
     expected_head_sha: GitObjectId | None = None

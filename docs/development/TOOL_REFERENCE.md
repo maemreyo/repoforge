@@ -178,6 +178,23 @@ idempotent for the same inputs.
 
 `workspace_verify.mode = "plan"` additionally supports a plan lifecycle for structured multi-stage work: `plan_action = "create"` compiles reviewed profiles/diagnostics into a deterministic typed DAG and returns an immutable plan for operator review; `"accept"` admits it after revalidating every binding; `"execute"` runs it through either iteration stages or the final full boundary, returning a durable operation reference immediately (poll with `operation`). Every completed stage writes a private, bounded, content-addressed schema-v2 receipt carrying environment identity schema version and requested/effective policy hashes. A read-only iteration stage may reuse a private content-addressed schema-v2 cache entry only when workspace/input, stage definition, target identity, environment/toolchain, requested/effective policy, lockfiles, configuration, policy, and dependency receipts remain compatible; mutating and final-verification stages are always non-cacheable. A compatible legacy schema-v1 entry explains an `environment_identity_schema_changed` miss but can never grant a hit. Only the accepted plan's final verification-enabled stage can populate `last_verification`.
 
+#### Recovering a call whose response was lost
+
+A dropped connection, a 502, or a terminated session between effect and response leaves the caller
+without its result -- not without its effect. Every mutating call is a durable operation, so the
+answer to "did my write land?" is a read, never a blind retry:
+
+1. `operation` with `action="list"` and `scope="workspace:<workspace_id>"` lists that workspace's
+   operations. `kind` is the tool name (`workspace_mutate`, `workspace_commit`, ...), and `state`
+   says whether it reached a terminal state.
+2. `operation` with `action="get"` and that `operation_id` returns the durable result the lost
+   response would have carried, including exactly which paths changed.
+
+Re-sending the mutation instead risks applying it twice; the exact-state preconditions
+(`expected_workspace_fingerprint`, `expected_head_sha`) will usually refuse the second attempt, but
+a refusal is not evidence about the first. Read the operation. When a response *is* received, its
+`outcome` carries the `operation_id` and `receipt_id` for exactly this purpose -- record them.
+
 A wait response sets `changed_since=true` when durable progress advanced, or returns terminal evidence immediately. A bounded timeout sets `timed_out=true` while still returning the complete slim current operation evidence and pacing hint; it never returns an empty payload. Background profile execution emits one progress update at each step start and completion, not per test, so `updated_at` acts as a liveness heartbeat without unbounded write volume.
 
 Operational and configuration tools never grant authority based on a model or client declaration. Expansion approval tokens remain outside the conversation.
