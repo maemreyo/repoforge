@@ -7,6 +7,14 @@ version = 2
 [tunnel]
 id = "tunnel_replace_me"
 profile = "repoforge"
+# tunnel-client recycles the MCP transport on its own schedule -- 10 minutes at the time of
+# writing -- and on expiry shuts the client down rather than reconnecting the stdio child.
+# Each teardown is a window where the connector answers 502 and any synchronous call in
+# flight is lost; durable work survives, because an operation is admitted before the call
+# returns and an identical retry joins the run already going. Raising this makes the recycle
+# rarer, it does not remove it. It lives here rather than under [server] because [server] is
+# read once at setup and then frozen; these are re-read from source on every runtime start.
+# mcp_connection_max_ttl_seconds = 3600
 
 [[repo]]
 id = "example-repository"
@@ -18,17 +26,6 @@ path = "/absolute/path/to/repository"
 # policy_template = "strict"
 # decisions = []
 # policy_overrides = []
-
-# tunnel-client recycles the MCP transport connection on its own schedule -- 10 minutes at
-# the time of writing -- and on expiry it shuts the client down rather than reconnecting the
-# stdio child. Each teardown is a window where the connector answers 502 and any synchronous
-# call in flight is lost; durable work survives, because an operation is admitted before the
-# call returns and an identical retry joins the run already going. Raising this makes the
-# recycle rarer. It does not remove it, and the shutdown-instead-of-reconnect behaviour is
-# the tunnel's, not RepoForge's. Unset -- the default -- passes nothing and leaves the
-# tunnel's own value in force.
-# [server]
-# tunnel_mcp_connection_max_ttl_seconds = 3600
 
 # Reviewed policy customizations (custom profiles, diagnostics, formatters) live in a
 # durable per-repository patch that survives `rf repo refresh`. The `repo_policy`
