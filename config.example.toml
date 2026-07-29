@@ -50,11 +50,12 @@ path = "/absolute/path/to/repository"
 # runs everything a change can break -- contracts, corpora and control-plane fault gates,
 # lint, strict types, and the whole test suite -- and leaves the branch-coverage floor, the
 # builds and the installed-wheel smoke to the release gate and to CI, which already run them
-# on every push. Keeping those out is what separates roughly twelve minutes from thirty.
+# on every push. Time it on your own machine before choosing `timeout_seconds`: this suite is
+# git-subprocess-bound, so it is far more sensitive to what else is running than to core count.
 # [repo.policy_patch.profiles.verify]
 # description = "Everything a change can break; no coverage floor, build, or wheel smoke"
 # verification = true
-# timeout_seconds = 1200
+# timeout_seconds = 1800
 # commands = [["scripts/verify-change.sh"]]
 # [repo.policy_patch.profiles.dev]
 # description = "Affected tests only, no coverage: the profile a model should reach for"
