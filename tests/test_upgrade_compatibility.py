@@ -8,10 +8,29 @@ PR_CHECK_WATCH_SCHEMA_VERSION to 2 left already-stored v1 records undecodable,
 `resume_active()` -> `build_application()`. Ten CI checks were green, including
 `production-gate` and `live-activation`, because both also start from nothing.
 
-These tests boot against a populated state root instead. The rule they encode:
-**no durable store may make a single unreadable record fatal to process
+These tests boot against a populated state root instead. Two rules:
+
+**1. No durable store may make a single unreadable record fatal to process
 startup.** A scan reports what it cannot decode; a direct read of one exact
 record stays strict.
+
+**2. A record this release writes, it must read back equal.** Unreadable was
+only half the failure mode. On 2026-07-29 a record that decoded *fine* and then
+failed its own `__post_init__` took the runtime down: `restarts_total` and
+`last_restart_at` reached the dataclass and the writer but not the decoder, so
+every read defaulted `restarts_total` to 0 next to a `restart_count` that came
+back as written, and the invariant relating them rejected the record. Rule 1
+did not catch it because the seeded record here is *undecodable* -- a schema
+version this release does not know -- which is a different path entirely.
+
+Rule 2 is enforced generically, over every durable record type, in
+`tests/test_durable_record_round_trip.py`. What lives here is the startup half:
+a record that decodes into an invalid object must not be fatal either.
+
+`managed-runtime-v3.json` is covered by both. It was absent from this gate while
+gating startup harder than anything in `STARTUP_SWEPT_STORES` -- `build_application`
+reads it through `RuntimeActivationReconciler`, and `rf` runs the active release's
+code, so a release that cannot read it cannot be used to fix itself.
 """
 
 from __future__ import annotations
@@ -43,6 +62,36 @@ STARTUP_SWEPT_STORES: tuple[tuple[str, str], ...] = (
 #: A record shaped like something an older release wrote: a schema version this
 #: release does not know, and none of the fields it since made required.
 LEGACY_RECORD = {"schema_version": 1, "state": "running"}
+
+#: The runtime record is a single file at the state root rather than a collection,
+#: so it needs its own seeding path. `build_application` reads it through
+#: `RuntimeActivationReconciler`, which is why it belongs in a startup gate at all.
+RUNTIME_RECORD_FILENAME = "managed-runtime-v3.json"
+
+#: Fields the current decoder requires, with values it accepts. A case below then
+#: breaks exactly one of them, so each proves one failure mode rather than a mix.
+_DECODABLE_RUNTIME_RECORD: dict[str, object] = {
+    "protocol_version": 1,
+    "phase": "degraded",
+    "pid": None,
+    "process_identity": None,
+    "active_generation": None,
+    "accepted_generation": 4,
+    "tunnel_profile": "repoforge",
+    "tunnel_profile_fingerprint": "b" * 64,
+    "tool_surface_hash": "c" * 64,
+    "started_at": None,
+    "updated_at": "2026-07-29T09:26:42+00:00",
+    "correlation_id": "d" * 24,
+}
+
+
+def _seed_runtime_record(env: ForgeEnvironment, payload: dict[str, object]) -> Path:
+    root = load_config(env.config_path).server.state_root
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / RUNTIME_RECORD_FILENAME
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def _seed(env: ForgeEnvironment, store_dir: str, record_id: str, payload: dict) -> Path:
@@ -100,6 +149,47 @@ def test_startup_survives_a_populated_previous_release_state_root(tmp_path: Path
         assert (root / f"{record_id}.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("case", "payload"),
+    [
+        # Rule 1, on the store this gate was missing: a record written by a release
+        # whose shape this one does not know.
+        ("undecodable", LEGACY_RECORD),
+        # Rule 2's startup half, and the exact 2026-07-29 shape: every field the
+        # decoder needs is present and well typed, and the object it builds is still
+        # rejected -- here by the positive-generation invariant.
+        ("decodes_into_an_invalid_object", {**_DECODABLE_RUNTIME_RECORD, "accepted_generation": 0}),
+        # The same class reached the other way: a field the decoder reads, holding a
+        # value it cannot convert.
+        (
+            "decodable_field_with_an_impossible_value",
+            {**_DECODABLE_RUNTIME_RECORD, "restart_count": -1},
+        ),
+    ],
+)
+def test_startup_survives_a_runtime_record_it_cannot_use(
+    tmp_path: Path, case: str, payload: dict[str, object]
+) -> None:
+    """A runtime record this release cannot use must not stop the runtime from starting.
+
+    This is the store the 2026-07-29 outage went through, and the one with no way out
+    when it fails: `rf` runs the active release's code, so the tool an operator would
+    reach for to fix a bad record runs the same decoder that is rejecting it, and every
+    release carrying the defect is equally unusable. There is no rollback target.
+
+    Failing here means an upgrade can strand an installation with no local recovery.
+    """
+    env = create_forge_environment(tmp_path)
+    seeded = _seed_runtime_record(env, payload)
+
+    application = build_application(load_config(env.config_path))
+
+    assert application.context is not None, f"a {case} runtime record was fatal to startup"
+    # Skipped, not deleted: this record is the only evidence of what the last runtime
+    # was doing, and discarding it to make startup succeed would destroy the diagnosis.
+    assert seeded.exists()
+
+
 def test_the_gate_fails_when_a_swept_store_is_fatal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -132,6 +222,31 @@ def test_the_gate_fails_when_a_swept_store_is_fatal(
         build_application(load_config(env.config_path))
 
     assert regression.value.code is ErrorCode.PR_CHECK_WATCH_STATE_CORRUPT
+
+
+def test_the_gate_fails_when_the_runtime_record_read_is_strict_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prove the runtime-record cases above are actually reaching that read.
+
+    They would pass just as quietly if startup had stopped reading the record at all,
+    or if the seeded file landed somewhere nothing looks. Putting the strict read back
+    has to make startup fail: that is what shows the tolerance in
+    `_active_runtime_for_reconciliation` is the only reason it does not.
+    """
+    from repoforge import bootstrap
+    from repoforge.domain.errors import ConfigError
+
+    env = create_forge_environment(tmp_path)
+    _seed_runtime_record(env, {**_DECODABLE_RUNTIME_RECORD, "accepted_generation": 0})
+    monkeypatch.setattr(
+        bootstrap,
+        "_active_runtime_for_reconciliation",
+        lambda path: bootstrap.build_runtime_store(path).read(),
+    )
+
+    with pytest.raises(ConfigError, match="Invalid runtime state fields"):
+        build_application(load_config(env.config_path))
 
 
 def test_a_record_written_after_a_restart_survives_the_round_trip(tmp_path: Path) -> None:

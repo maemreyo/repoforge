@@ -34,6 +34,7 @@
   ],
   "src/repoforge/adapters/audit/jsonl.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
     "tests/test_background_run_profile.py",
@@ -110,6 +111,7 @@
   ],
   "src/repoforge/adapters/background.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -267,6 +269,7 @@
   ],
   "src/repoforge/adapters/execution/native.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -422,6 +425,7 @@
     "tests/test_workspace_refresh.py"
   ],
   "src/repoforge/adapters/filesystem/transaction.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_journaled_filesystem_transaction.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_workspace_assessment.py",
@@ -430,6 +434,7 @@
   ],
   "src/repoforge/adapters/git/cli.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -502,6 +507,7 @@
   ],
   "src/repoforge/adapters/github/capability_probe.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -569,6 +575,7 @@
   ],
   "src/repoforge/adapters/github/gh_cli.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -637,6 +644,7 @@
   ],
   "src/repoforge/adapters/github/ticket_graph.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -705,6 +713,7 @@
   ],
   "src/repoforge/adapters/github/ticket_project.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -772,6 +781,7 @@
   ],
   "src/repoforge/adapters/hygiene/command.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -838,6 +848,7 @@
   ],
   "src/repoforge/adapters/locking/fcntl.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
@@ -916,6 +927,7 @@
   ],
   "src/repoforge/adapters/observability/json_metrics.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
     "tests/test_background_run_profile.py",
@@ -989,6 +1001,7 @@
   ],
   "src/repoforge/adapters/persistence/failure_output_artifact_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1061,6 +1074,7 @@
   ],
   "src/repoforge/adapters/persistence/json_approval_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1070,6 +1084,7 @@
     "tests/test_config_admin.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1129,6 +1144,7 @@
   ],
   "src/repoforge/adapters/persistence/json_effect_receipt_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1137,6 +1153,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1199,6 +1216,7 @@
   ],
   "src/repoforge/adapters/persistence/json_execution_plan_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1207,6 +1225,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1265,6 +1284,7 @@
   ],
   "src/repoforge/adapters/persistence/json_execution_receipt_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1273,6 +1293,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1331,6 +1352,7 @@
   ],
   "src/repoforge/adapters/persistence/json_external_mutation_ledger.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1397,6 +1419,7 @@
   ],
   "src/repoforge/adapters/persistence/json_failure_evidence_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1405,6 +1428,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1463,6 +1487,7 @@
   ],
   "src/repoforge/adapters/persistence/json_github_read_cache.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1529,6 +1554,7 @@
   ],
   "src/repoforge/adapters/persistence/json_hygiene_cache.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1595,6 +1621,7 @@
   ],
   "src/repoforge/adapters/persistence/json_idempotency_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1662,6 +1689,7 @@
   ],
   "src/repoforge/adapters/persistence/json_issue_graph_proposal_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1670,6 +1698,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1729,6 +1758,7 @@
   ],
   "src/repoforge/adapters/persistence/json_issue_graph_publication_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1737,6 +1767,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1795,6 +1826,7 @@
   ],
   "src/repoforge/adapters/persistence/json_iteration_cache.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1803,6 +1835,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -1865,6 +1898,7 @@
   ],
   "src/repoforge/adapters/persistence/json_operation_result_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -1932,6 +1966,7 @@
   ],
   "src/repoforge/adapters/persistence/json_operation_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
@@ -2002,6 +2037,7 @@
   ],
   "src/repoforge/adapters/persistence/json_operation_work_queue.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2010,6 +2046,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -2069,6 +2106,7 @@
   ],
   "src/repoforge/adapters/persistence/json_pr_check_watch_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2135,6 +2173,7 @@
   ],
   "src/repoforge/adapters/persistence/json_runtime_activation_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2144,6 +2183,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -2210,6 +2250,7 @@
   ],
   "src/repoforge/adapters/persistence/json_state_repository.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
@@ -2221,6 +2262,7 @@
     "tests/test_config_admin.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_state.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
@@ -2285,11 +2327,13 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/adapters/persistence/json_task_store.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_state.py",
     "tests/test_task_capsule_v2_persistence.py"
   ],
   "src/repoforge/adapters/persistence/json_worker_binding_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2298,6 +2342,7 @@
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -2356,6 +2401,7 @@
   ],
   "src/repoforge/adapters/persistence/json_workflow_recording_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2422,6 +2468,7 @@
   ],
   "src/repoforge/adapters/persistence/json_workspace_store.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2488,6 +2535,7 @@
   ],
   "src/repoforge/adapters/provider/config_registry.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2576,6 +2624,7 @@
   ],
   "src/repoforge/adapters/runtime/operation_gate.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
@@ -2655,6 +2704,7 @@
     "tests/test_activation_process_ownership.py",
     "tests/test_activation_restart_semantics.py",
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
@@ -2666,6 +2716,7 @@
     "tests/test_config_admin.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -2727,6 +2778,7 @@
   ],
   "src/repoforge/adapters/runtime/tunnel_cli.py": [
     "tests/test_bootstrap_factories.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase7_regressions.py",
     "tests/test_runtime_adapters_and_serve.py"
@@ -2742,6 +2794,7 @@
   ],
   "src/repoforge/adapters/subprocess/command_executor.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
@@ -2812,6 +2865,7 @@
   ],
   "src/repoforge/adapters/subprocess/os_process_reaper.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -2890,6 +2944,7 @@
   ],
   "src/repoforge/adapters/system.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
     "tests/test_background_run_profile.py",
@@ -3001,6 +3056,7 @@
   ],
   "src/repoforge/application/audit_context.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3074,6 +3130,7 @@
   ],
   "src/repoforge/application/code_intelligence.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3162,11 +3219,13 @@
     "tests/test_onboarding_coordinator.py",
     "tests/test_onboarding_planner.py",
     "tests/test_onboarding_real_git.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase8_program_completion.py",
     "tests/test_phases1_4_production_hardening.py"
   ],
   "src/repoforge/application/context.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3237,6 +3296,7 @@
   ],
   "src/repoforge/application/dto.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3301,6 +3361,7 @@
   ],
   "src/repoforge/application/effect_identity.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_command_source_integrity.py",
     "tests/test_integration.py",
@@ -3328,6 +3389,7 @@
   ],
   "src/repoforge/application/execution/coordinator.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3425,6 +3487,7 @@
   ],
   "src/repoforge/application/extended_context.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -3472,6 +3535,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/file_transactions.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_workspace_assessment.py",
     "tests/test_workspace_mutate.py",
@@ -3479,6 +3543,7 @@
   ],
   "src/repoforge/application/fingerprint_cache.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3545,6 +3610,7 @@
   ],
   "src/repoforge/application/idempotency.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -3595,6 +3661,7 @@
   ],
   "src/repoforge/application/nudges.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3697,6 +3764,7 @@
   ],
   "src/repoforge/application/operations/cancel.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3762,6 +3830,7 @@
   ],
   "src/repoforge/application/operations/composite.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3826,6 +3895,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/operations/dto.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_durable_verification_dispatch.py",
@@ -3843,6 +3913,7 @@
   ],
   "src/repoforge/application/operations/list.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3908,6 +3979,7 @@
   ],
   "src/repoforge/application/operations/manager.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -3975,6 +4047,7 @@
   ],
   "src/repoforge/application/operations/recovery.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4041,6 +4114,7 @@
   ],
   "src/repoforge/application/operations/status.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4106,6 +4180,7 @@
   ],
   "src/repoforge/application/operations/work_admission.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4186,6 +4261,7 @@
   ],
   "src/repoforge/application/outcome_context.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_command_source_integrity.py",
     "tests/test_config_admin.py",
@@ -4222,6 +4298,7 @@
   ],
   "src/repoforge/application/outcome_receipts.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_command_source_integrity.py",
     "tests/test_integration.py",
@@ -4241,6 +4318,7 @@
   ],
   "src/repoforge/application/outcome_reconciliation.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4307,6 +4385,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/profile_drift.py": [
+    "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_phases1_5_full_lifecycle.py",
@@ -4322,6 +4401,7 @@
   ],
   "src/repoforge/application/repository/commit_read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4387,6 +4467,7 @@
   ],
   "src/repoforge/application/repository/compare.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4452,6 +4533,7 @@
   ],
   "src/repoforge/application/repository/context.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4517,6 +4599,7 @@
   ],
   "src/repoforge/application/repository/doctor.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4583,6 +4666,7 @@
   ],
   "src/repoforge/application/repository/family_v2.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4648,6 +4732,7 @@
   ],
   "src/repoforge/application/repository/file_read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4713,6 +4798,7 @@
   ],
   "src/repoforge/application/repository/files_read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4778,6 +4864,7 @@
   ],
   "src/repoforge/application/repository/issue_graph.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4843,6 +4930,7 @@
   ],
   "src/repoforge/application/repository/issue_graph_proposal.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4914,6 +5002,7 @@
   ],
   "src/repoforge/application/repository/issue_graph_workflow.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -4979,6 +5068,7 @@
   ],
   "src/repoforge/application/repository/issue_mutation_v2.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5044,6 +5134,7 @@
   ],
   "src/repoforge/application/repository/issue_next.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5109,6 +5200,7 @@
   ],
   "src/repoforge/application/repository/issue_read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5174,6 +5266,7 @@
   ],
   "src/repoforge/application/repository/issue_spec.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5239,6 +5332,7 @@
   ],
   "src/repoforge/application/repository/list.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5304,6 +5398,7 @@
   ],
   "src/repoforge/application/repository/pr_read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5369,6 +5464,7 @@
   ],
   "src/repoforge/application/repository/read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5434,6 +5530,7 @@
   ],
   "src/repoforge/application/repository/recent_commits.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5499,6 +5596,7 @@
   ],
   "src/repoforge/application/repository/retrieval.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5564,6 +5662,7 @@
   ],
   "src/repoforge/application/repository/search.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5629,6 +5728,7 @@
   ],
   "src/repoforge/application/repository/status.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5694,6 +5794,7 @@
   ],
   "src/repoforge/application/repository/task_context.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5759,6 +5860,7 @@
   ],
   "src/repoforge/application/repository/tree.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5852,6 +5954,7 @@
   ],
   "src/repoforge/application/runtime/activation_journal.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -5932,6 +6035,7 @@
   ],
   "src/repoforge/application/service.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6012,6 +6116,7 @@
   ],
   "src/repoforge/application/syntax_diagnostics.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6094,6 +6199,7 @@
   ],
   "src/repoforge/application/tickets/project_sync.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6165,6 +6271,7 @@
   "src/repoforge/application/verification_detection.py": [
     "tests/test_cli_command_bodies.py",
     "tests/test_config_admin.py",
+    "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_phases1_5_full_lifecycle.py",
@@ -6202,6 +6309,7 @@
   ],
   "src/repoforge/application/workflow/recorder.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6268,6 +6376,7 @@
   ],
   "src/repoforge/application/workflow/replay.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6334,6 +6443,7 @@
   ],
   "src/repoforge/application/workspace/apply_patch.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6399,6 +6509,7 @@
   ],
   "src/repoforge/application/workspace/assessment.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6464,6 +6575,7 @@
   ],
   "src/repoforge/application/workspace/base_status.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6529,6 +6641,7 @@
   ],
   "src/repoforge/application/workspace/commit.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6594,6 +6707,7 @@
   ],
   "src/repoforge/application/workspace/create.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6660,6 +6774,7 @@
   ],
   "src/repoforge/application/workspace/create_draft_pr.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6735,6 +6850,7 @@
   ],
   "src/repoforge/application/workspace/diff.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6800,6 +6916,7 @@
   ],
   "src/repoforge/application/workspace/edit.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6865,6 +6982,7 @@
   ],
   "src/repoforge/application/workspace/execute_plan.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6930,6 +7048,7 @@
   ],
   "src/repoforge/application/workspace/execution_plan.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -6995,6 +7114,7 @@
   ],
   "src/repoforge/application/workspace/failure_intelligence.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7060,6 +7180,7 @@
   ],
   "src/repoforge/application/workspace/family_v2.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7125,6 +7246,7 @@
   ],
   "src/repoforge/application/workspace/file_read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7190,6 +7312,7 @@
   ],
   "src/repoforge/application/workspace/file_write.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7255,6 +7378,7 @@
   ],
   "src/repoforge/application/workspace/files_read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7320,6 +7444,7 @@
   ],
   "src/repoforge/application/workspace/format_changed.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7390,6 +7515,7 @@
   ],
   "src/repoforge/application/workspace/hygiene_status.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7455,6 +7581,7 @@
   ],
   "src/repoforge/application/workspace/list.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7523,6 +7650,7 @@
   ],
   "src/repoforge/application/workspace/mutate_enhanced.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7595,6 +7723,7 @@
   ],
   "src/repoforge/application/workspace/pr.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7666,6 +7795,7 @@
   ],
   "src/repoforge/application/workspace/pr_check_details.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7737,6 +7867,7 @@
   ],
   "src/repoforge/application/workspace/pr_checks.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7802,6 +7933,7 @@
   ],
   "src/repoforge/application/workspace/pr_evidence.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7867,6 +7999,7 @@
   ],
   "src/repoforge/application/workspace/pr_failure_evidence.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7932,6 +8065,7 @@
   ],
   "src/repoforge/application/workspace/pr_status.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -7997,6 +8131,7 @@
   ],
   "src/repoforge/application/workspace/pr_watch.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8063,6 +8198,7 @@
   ],
   "src/repoforge/application/workspace/push.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8128,6 +8264,7 @@
   ],
   "src/repoforge/application/workspace/read.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8193,6 +8330,7 @@
   ],
   "src/repoforge/application/workspace/refresh.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8258,6 +8396,7 @@
   ],
   "src/repoforge/application/workspace/refresh_preview.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8323,6 +8462,7 @@
   ],
   "src/repoforge/application/workspace/refresh_v2.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8388,6 +8528,7 @@
   ],
   "src/repoforge/application/workspace/removal_safety.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -8436,6 +8577,7 @@
   ],
   "src/repoforge/application/workspace/remove.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8501,6 +8643,7 @@
   ],
   "src/repoforge/application/workspace/restore_paths.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8566,6 +8709,7 @@
   ],
   "src/repoforge/application/workspace/retrieval.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8646,6 +8790,7 @@
   ],
   "src/repoforge/application/workspace/run_adhoc.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8711,6 +8856,7 @@
   ],
   "src/repoforge/application/workspace/run_diagnostic.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8776,6 +8922,7 @@
   ],
   "src/repoforge/application/workspace/run_profile.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8841,6 +8988,7 @@
   ],
   "src/repoforge/application/workspace/search.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8906,6 +9054,7 @@
   ],
   "src/repoforge/application/workspace/status.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -8970,6 +9119,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/workspace/status_read.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_code_intelligence_integration.py",
     "tests/test_command_source_integrity.py",
@@ -9007,6 +9157,7 @@
   ],
   "src/repoforge/application/workspace/tree.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -9072,6 +9223,7 @@
   ],
   "src/repoforge/application/workspace/update_draft_pr.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -9137,6 +9289,7 @@
   ],
   "src/repoforge/application/workspace/verify.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -9214,6 +9367,7 @@
   ],
   "src/repoforge/bootstrap.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
@@ -9229,6 +9383,7 @@
     "tests/test_configuration_paths.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
@@ -9292,6 +9447,7 @@
   ],
   "src/repoforge/config.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -9371,10 +9527,12 @@
     "tests/test_v2_schema_golden.py"
   ],
   "src/repoforge/contracts/common.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py"
   ],
   "src/repoforge/contracts/registry.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
@@ -9404,6 +9562,7 @@
     "tests/test_workspace_refresh.py"
   ],
   "src/repoforge/contracts/v2.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_config_admin.py",
     "tests/test_failure_intelligence.py",
     "tests/test_issue_graph_workflow.py",
@@ -9428,6 +9587,7 @@
   "src/repoforge/domain/adhoc.py": [
     "tests/test_adhoc_command_guard.py",
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -9503,6 +9663,7 @@
   "src/repoforge/domain/approval.py": [
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_issue_graph_workflow.py",
     "tests/test_service_tools.py"
   ],
@@ -9556,6 +9717,7 @@
   ],
   "src/repoforge/domain/command_source.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -9659,6 +9821,7 @@
   ],
   "src/repoforge/domain/diagnostics.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -9719,6 +9882,7 @@
   ],
   "src/repoforge/domain/egress.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
     "tests/test_background_run_profile.py",
@@ -9736,6 +9900,7 @@
     "tests/test_control_plane_resilience.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_evidence_artifacts.py",
     "tests/test_evidence_model.py",
@@ -9810,6 +9975,7 @@
     "tests/test_activation_restart_semantics.py",
     "tests/test_adhoc_command_guard.py",
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
     "tests/test_background_run_profile.py",
@@ -9938,6 +10104,13 @@
   "src/repoforge/domain/evidence_artifact.py": [
     "tests/test_evidence_artifacts.py"
   ],
+  "src/repoforge/domain/excerpts.py": [
+    "tests/test_agent_surface_friction.py",
+    "tests/test_expensive_profile_guards.py",
+    "tests/test_service_tools.py",
+    "tests/test_workspace_assessment.py",
+    "tests/test_workspace_diagnostics.py"
+  ],
   "src/repoforge/domain/execution_environment.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_background_run_profile.py",
@@ -9966,6 +10139,7 @@
     "tests/test_workspace_refresh.py"
   ],
   "src/repoforge/domain/execution_plan.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_execution_plans.py",
     "tests/test_failure_intelligence.py",
     "tests/test_plan_execution.py",
@@ -9973,8 +10147,10 @@
   ],
   "src/repoforge/domain/execution_receipt.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_command_source_integrity.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_failure_intelligence.py",
     "tests/test_integration.py",
     "tests/test_issue_graph_publication.py",
@@ -10009,6 +10185,7 @@
   ],
   "src/repoforge/domain/failure_artifacts.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -10062,11 +10239,13 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/failure_intelligence.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_failure_intelligence.py",
     "tests/test_plan_execution.py"
   ],
   "src/repoforge/domain/generated_paths.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -10105,6 +10284,7 @@
     "tests/test_operation_worker_binding.py",
     "tests/test_optimistic_lock_tokens.py",
     "tests/test_outcome_records.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase8_program_completion.py",
     "tests/test_phases1_4_production_hardening.py",
@@ -10148,6 +10328,7 @@
   ],
   "src/repoforge/domain/hygiene.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -10207,18 +10388,21 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/issue_graph_proposal.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_issue_graph_proposals.py",
     "tests/test_issue_graph_publication.py",
     "tests/test_issue_graph_publication_executor.py",
     "tests/test_issue_graph_workflow.py"
   ],
   "src/repoforge/domain/issue_graph_publication.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_issue_graph_publication.py",
     "tests/test_issue_graph_publication_executor.py",
     "tests/test_issue_graph_workflow.py"
   ],
   "src/repoforge/domain/issue_writes.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -10259,6 +10443,7 @@
     "tests/test_operation_worker_binding.py",
     "tests/test_optimistic_lock_tokens.py",
     "tests/test_outcome_records.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase5_failure_harness.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase7_atomic_hot_reload.py",
@@ -10301,6 +10486,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/latency.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_config_admin.py",
     "tests/test_failure_intelligence.py",
     "tests/test_issue_graph_workflow.py",
@@ -10317,6 +10503,7 @@
   ],
   "src/repoforge/domain/mutation_policy.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -10401,10 +10588,12 @@
   ],
   "src/repoforge/domain/operation_task.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_command_source_integrity.py",
     "tests/test_control_plane_responsiveness.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
@@ -10448,6 +10637,7 @@
   ],
   "src/repoforge/domain/operation_work.py": [
     "tests/test_control_plane_responsiveness.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_operation_execution_worker.py",
@@ -10461,6 +10651,7 @@
   "src/repoforge/domain/operation_worker.py": [
     "tests/test_background_run_profile.py",
     "tests/test_control_plane_responsiveness.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_generation_handoff.py",
     "tests/test_operation_execution_worker.py",
@@ -10471,6 +10662,7 @@
   ],
   "src/repoforge/domain/operations.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -10487,6 +10679,7 @@
     "tests/test_mcp_contract_v2.py",
     "tests/test_mutation_idempotency.py",
     "tests/test_onboarding_real_git.py",
+    "tests/test_operation_execution_worker.py",
     "tests/test_operation_tasks.py",
     "tests/test_optimistic_lock_tokens.py",
     "tests/test_outcome_records.py",
@@ -10531,6 +10724,7 @@
   ],
   "src/repoforge/domain/policy.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -10594,6 +10788,7 @@
     "tests/test_onboarding_coordinator.py",
     "tests/test_onboarding_planner.py",
     "tests/test_onboarding_real_git.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase8_program_completion.py",
     "tests/test_phases1_4_production_hardening.py"
   ],
@@ -10609,6 +10804,7 @@
     "tests/test_v2_shipping.py"
   ],
   "src/repoforge/domain/profile_drift.py": [
+    "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_phases1_5_full_lifecycle.py",
@@ -10618,6 +10814,7 @@
   ],
   "src/repoforge/domain/provider_config.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -10710,6 +10907,7 @@
   ],
   "src/repoforge/domain/redaction.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
     "tests/test_background_run_profile.py",
@@ -10727,6 +10925,7 @@
     "tests/test_control_plane_resilience.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_evidence_artifacts.py",
     "tests/test_evidence_model.py",
@@ -10804,6 +11003,7 @@
   ],
   "src/repoforge/domain/repository_selection.py": [
     "tests/test_audit_cursor.py",
+    "tests/test_expensive_profile_guards.py",
     "tests/test_issue_graph_workflow.py",
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py",
@@ -10856,6 +11056,7 @@
   ],
   "src/repoforge/domain/risk.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -10946,7 +11147,9 @@
     "tests/test_activation_restart_semantics.py",
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py",
+    "tests/test_config_admin.py",
     "tests/test_control_plane_resilience.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_phase4_runtime_control.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase7_atomic_hot_reload.py",
@@ -10954,12 +11157,15 @@
     "tests/test_phases1_4_production_hardening.py",
     "tests/test_runtime_adapters_and_serve.py",
     "tests/test_supervisor_handoff_lock.py",
-    "tests/test_tunnel_seam_swap.py"
+    "tests/test_tunnel_seam_swap.py",
+    "tests/test_upgrade_compatibility.py"
   ],
   "src/repoforge/domain/runtime_activation.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_phase7_atomic_hot_reload.py"
   ],
   "src/repoforge/domain/runtime_contract.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_config_admin.py",
     "tests/test_failure_intelligence.py",
     "tests/test_issue_graph_workflow.py",
@@ -10998,12 +11204,14 @@
     "tests/test_task_capsule_v2_persistence.py"
   ],
   "src/repoforge/domain/syntax_diagnostics.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_syntax_diagnostics.py",
     "tests/test_workspace_mutate.py",
     "tests/test_workspace_refresh.py"
   ],
   "src/repoforge/domain/task_capsule.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_state.py",
     "tests/test_task_capsule_v2.py",
     "tests/test_task_capsule_v2_persistence.py"
@@ -11064,12 +11272,14 @@
     "tests/test_workspace_risk.py"
   ],
   "src/repoforge/domain/verification_dag.py": [
+    "tests/test_durable_record_round_trip.py",
     "tests/test_failure_intelligence.py",
     "tests/test_plan_execution.py",
     "tests/test_verification_dag_cache.py"
   ],
   "src/repoforge/domain/verification_steps.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -11137,12 +11347,14 @@
   ],
   "src/repoforge/domain/versioning.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_command_source_integrity.py",
     "tests/test_config_admin.py",
     "tests/test_control_plane_responsiveness.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_state.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_execution_plans.py",
@@ -11188,6 +11400,7 @@
   ],
   "src/repoforge/domain/workspace.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -11235,6 +11448,7 @@
   ],
   "src/repoforge/domain/workspace_removal.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -11351,6 +11565,7 @@
     "tests/test_phase8_program_completion.py"
   ],
   "src/repoforge/interfaces/mcp/payload.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_config_admin.py",
     "tests/test_failure_intelligence.py",
     "tests/test_issue_graph_workflow.py",
@@ -11368,6 +11583,7 @@
     "tests/test_operation_progress_wait.py"
   ],
   "src/repoforge/interfaces/mcp/server.py": [
+    "tests/test_agent_surface_friction.py",
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
@@ -11415,6 +11631,7 @@
   ],
   "src/repoforge/ports/command.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_agent_surface_friction.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -11498,6 +11715,7 @@
     "tests/test_config_admin.py",
     "tests/test_control_plane_resilience.py",
     "tests/test_control_plane_responsiveness.py",
+    "tests/test_durable_record_round_trip.py",
     "tests/test_durable_state.py",
     "tests/test_durable_verification_dispatch.py",
     "tests/test_evidence_model.py",

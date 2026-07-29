@@ -31,6 +31,7 @@ source_globs = [
   "docs/contracts/**",
 ]
 test_files = [
+  "tests/test_agent_surface_friction.py",
   "tests/test_client_capabilities.py",
   "tests/test_mcp_contract.py",
   "tests/test_mcp_contract_v2.py",
@@ -168,6 +169,7 @@ source_globs = [
 test_files = [
   "tests/test_control_plane_resilience.py",
   "tests/test_control_plane_responsiveness.py",
+  "tests/test_durable_record_round_trip.py",
   "tests/test_durable_state.py",
   "tests/test_upgrade_compatibility.py",
   "tests/test_durable_verification_dispatch.py",
@@ -509,6 +511,7 @@ test_files = [
 [conftest_consumers]
 test_files = [
   "tests/test_adoption_nudges.py",
+  "tests/test_agent_surface_friction.py",
   "tests/test_audit_cursor.py",
   "tests/test_background_run_profile.py",
   "tests/test_ci_failure_evidence.py",
