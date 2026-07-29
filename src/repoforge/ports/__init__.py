@@ -94,6 +94,16 @@ from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
 from .process_reaper import ProcessReaper, ReapOutcome
 from .provider_registry import ProviderRegistry
+from .publication import (
+    GitHubPublicationGateway,
+    PublicationAuthorization,
+    PublicationAuthorizationGateway,
+    PublicationEffect,
+    PublicationGateway,
+    PublicationRepositoryMetadata,
+    PublicationRepositoryResolver,
+    PullRequestPublication,
+)
 from .repository_auth_material import RepositoryAuthMaterialProvider
 from .repository_binding_store import RepositoryBindingStore
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
@@ -169,6 +179,7 @@ __all__ = [
     "GitHubCheckAnnotation",
     "GitHubCheckRun",
     "GitHubJobLog",
+    "GitHubPublicationGateway",
     "GitHubReadCache",
     "GitMergePreview",
     "GitMergeResult",
@@ -203,7 +214,14 @@ __all__ = [
     "ProcessInspector",
     "ProcessReaper",
     "ProviderRegistry",
+    "PublicationAuthorization",
+    "PublicationAuthorizationGateway",
+    "PublicationEffect",
+    "PublicationGateway",
+    "PublicationRepositoryMetadata",
+    "PublicationRepositoryResolver",
     "PullRequestGateway",
+    "PullRequestPublication",
     "ReapOutcome",
     "ReleaseBuilder",
     "ReleaseInstaller",

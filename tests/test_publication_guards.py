@@ -21,6 +21,8 @@ from repoforge.domain.repository_identity import (
 )
 
 _publication = import_module("repoforge.domain.publication")
+_publication_adapter = import_module("repoforge.adapters.publication")
+_publication_port = import_module("repoforge.ports.publication")
 PublicationEvidence = _publication.PublicationEvidence
 RemoteTopology = _publication.RemoteTopology
 RepositoryEndpoint = _publication.RepositoryEndpoint
