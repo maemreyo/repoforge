@@ -90,7 +90,7 @@
     },
     "identity": "forge_v2",
     "input_contract_digest": "828612e48396514177d6c1fa609c75647255e01c16bf78abb0f1c792d906ed0b",
-    "output_contract_digest": "b7bd49dfebf32a59538a7763bac55d200ac66f44c2b4c3a924222017722c5802",
+    "output_contract_digest": "216680b3cd80d78c08a8e393e88382c270a01ae97f73f31f97c4b792d0dd923d",
     "retired_identity": "forge_v1",
     "server_instructions_sha256": "791fa8003ef1ba06c3cc45debf727b7cb84020c5634b2fc8f15bf668b34d1999",
     "tool_contract": {
@@ -106,7 +106,7 @@
       "operation": "3f43a985b39569c88e2e9174868e9b5ad3c4dd9a58b0d4582ba7fd6c3a5912d1",
       "repo_history": "11c4843a675851fa34a26fe781c66904ca73fc20a6ef06a14bb739b441b4c5b5",
       "repo_issue": "3ca3b70c06e216628ad145d8f30660f8ec085f81caa96c14aa23ae0ad3620c89",
-      "repo_list": "09db7a4729c9088f813227e9df25eed7959c6a158d15004abdd0da84f77d464f",
+      "repo_list": "14a7957f623766f4fbac258d99a205ee7def00b59bcdb5561bff9e3ef75bd276",
       "repo_policy": "e1cec96567066d49f807eb6e6b1b990660693b60d92e565e8ea7949c715983cd",
       "repo_pr_read": "d42ea7494c2f07bc1e0c5b46111899722e350b1325da0c31c33cab351a35ca0f",
       "repo_read": "617d3daea810ac4c93d8c81906be1feef25dc339220c9ccc828d4042964f892e",
@@ -129,7 +129,7 @@
       "workspace_search": "3b4b0a8eeb3a2d810d59c9c0f07b58c9645efd0ce9d2800b0abfa9563c63963e",
       "workspace_status": "f88df7a4b18a5d5d8eecbcbe54d5145fd3bd0859a602db3e2b10714ff9f1949e",
       "workspace_tree": "ebbefb47dc798cf34f356393d11b0d0068e6de8e6f972a1b7bc9ebc4d6f1dc47",
-      "workspace_verify": "acd53e1a27ea1d6c83f8ffd8f5bc16cacb8f7a564d1a717b6fa011c42b0d5c08"
+      "workspace_verify": "4331c44df903e5d189422e6371244b81398b4a04d933518a98f0f8f03fe07740"
     },
     "tool_names": [
       "repo_task_context",
@@ -161,8 +161,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "a1a8a106e89a94bf119b1ade8c74f000c372cb89376f1ef94a076b7b4ca6d2cd",
-    "tool_surface_hash": "53656b56a9e1704cb7d90b15a310f35d50f48abb0ce0220bf53f2689cc0d8df7"
+    "tool_schema_bundle_sha256": "d70b2c8f405df7c471a24f7765cd6b3f1e61838bb8213f657836b0ea7db31671",
+    "tool_surface_hash": "6156f4232d968c5f28a280deccc16a109bb90565646730134fe168194c8d2c7d"
   },
   "package_version": "2.2.0",
   "runtime": {

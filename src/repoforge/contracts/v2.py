@@ -1449,6 +1449,16 @@ class WorkspaceVerifyOutput(ToolResponse):
     assessment: WorkspaceVerifyAssessment | None = None
     recommendations: tuple[VerifyRecommendationEvidence, ...] = Field(default=(), max_length=32)
     staleness_warning: str | None = Field(default=None, max_length=1000)
+    next_action: str | None = Field(
+        default=None,
+        max_length=1000,
+        description=(
+            "What to do with this response when it did not finish the work -- above all, "
+            "the exact `operation` wait to issue for a background run. Present whenever "
+            "the run continues after the call returns; null for a completed verify, "
+            "whose outcome is the answer."
+        ),
+    )
     operation: OperationEvidence | None = None
     commands: tuple[CommandEvidence, ...] = Field(default=(), max_length=100)
     steps: tuple[VerifyStepEvidence, ...] = Field(default=(), max_length=100)

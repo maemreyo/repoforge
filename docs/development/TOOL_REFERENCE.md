@@ -41,8 +41,8 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 
 | Tool | Purpose |
 | --- | --- |
-| `repo_list` | List bounded reviewed repositories, default refs, and capabilities. |
-| `repo_task_context` | Assemble bounded repository, status, ticket, workspace, and recent-commit sections in one call. |
+| `repo_list` | List bounded reviewed repositories, default refs, capabilities, and which verification profiles a model may start (`model_invocable_profiles`) versus which the reviewed configuration reserves for the operator (`operator_only_profiles`). |
+| `repo_task_context` | Assemble bounded repository, status, ticket, workspace, and recent-commit sections in one call. The `repository` section carries `model_invocable_profiles` and `operator_only_profiles`. |
 | `repo_read` | Read up to 20 UTF-8 files from one immutable snapshot with independent ranges, one global byte budget, and resumable cursors. |
 | `repo_search` | Search literal text, reviewed regular expressions, or file names in one immutable snapshot. |
 | `repo_tree` | List a bounded snapshot tree, optionally below one subtree. |

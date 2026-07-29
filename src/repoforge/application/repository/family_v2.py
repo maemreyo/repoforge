@@ -90,6 +90,8 @@ class CompactRepository:
     repo_id: str
     capabilities: tuple[str, ...]
     default_ref: str
+    model_invocable_profiles: tuple[str, ...] = ()
+    operator_only_profiles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,7 +514,25 @@ class RepositoryListV2:
                 if any(profile.verification for profile in repo.profiles.values()):
                     capabilities.append("verify")
                 repositories.append(
-                    CompactRepository(repo.repo_id, tuple(capabilities), repo.default_base)
+                    CompactRepository(
+                        repo.repo_id,
+                        tuple(capabilities),
+                        repo.default_base,
+                        model_invocable_profiles=tuple(
+                            sorted(
+                                name
+                                for name, profile in repo.profiles.items()
+                                if profile.model_invocable
+                            )
+                        ),
+                        operator_only_profiles=tuple(
+                            sorted(
+                                name
+                                for name, profile in repo.profiles.items()
+                                if not profile.model_invocable
+                            )
+                        ),
+                    )
                 )
             page = paginate(
                 repositories,
@@ -996,6 +1016,30 @@ class RepositoryTaskContextV2:
                             Fact("display_name", repo.display_name or repo.repo_id),
                             Fact("default_ref", repo.default_base),
                             Fact("capabilities", _json_value(capabilities)),
+                            # `verify` in capabilities does not say which profile a model
+                            # may start, and this repository's default verification
+                            # profile can itself be operator-only -- so a caller taking
+                            # the default gets refused. Name both sets here.
+                            Fact(
+                                "model_invocable_profiles",
+                                _json_value(
+                                    sorted(
+                                        name
+                                        for name, profile in repo.profiles.items()
+                                        if profile.model_invocable
+                                    )
+                                ),
+                            ),
+                            Fact(
+                                "operator_only_profiles",
+                                _json_value(
+                                    sorted(
+                                        name
+                                        for name, profile in repo.profiles.items()
+                                        if not profile.model_invocable
+                                    )
+                                ),
+                            ),
                         ),
                     )
                 )
