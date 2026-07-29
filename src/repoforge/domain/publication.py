@@ -94,6 +94,21 @@ def _publication_error(code: ErrorCode, message: str) -> RepoForgeError:
     )
 
 
+def _require_exact_managed_ref(value: str, field: str) -> None:
+    """Reject revision expressions and broad or deleting refspec components."""
+
+    if (
+        value in {"HEAD", "--all", "--mirror"}
+        or value.startswith("-")
+        or not value.startswith(("refs/heads/", "refs/tags/"))
+        or any(marker in value for marker in ("*", "?", "[", ":", "^", "~"))
+    ):
+        raise _publication_error(
+            ErrorCode.PUBLICATION_TARGET_MISMATCH,
+            f"{field} must be one exact managed branch or tag ref.",
+        )
+
+
 def _digest(payload: object) -> str:
     encoded = json.dumps(
         payload,
@@ -346,6 +361,13 @@ def _source_and_destination(
 def _require_topology(intent: PublicationIntent, evidence: PublicationEvidence) -> None:
     preflight = evidence.preflight_topology
     observed = evidence.observed_topology
+    for field, value in (
+        ("intent.source_ref", intent.source_ref),
+        ("intent.destination_ref", intent.destination_ref),
+        ("observed.source_ref", observed.source_ref),
+        ("observed.destination_ref", observed.destination_ref),
+    ):
+        _require_exact_managed_ref(value, field)
     if preflight.rewrite_digest != observed.rewrite_digest:
         raise _publication_error(
             ErrorCode.REMOTE_REWRITE_DETECTED,
@@ -447,6 +469,11 @@ def _require_versions(intent: PublicationIntent, evidence: PublicationEvidence) 
         raise _publication_error(
             ErrorCode.STALE_STATE,
             "The publication source commit changed after intent review.",
+        )
+    if intent.expected_tree_sha is None or intent.expected_tree_sha != evidence.observed_tree_sha:
+        raise _publication_error(
+            ErrorCode.STALE_STATE,
+            "The publication source tree changed after intent review.",
         )
     if evidence.expected_capability_digest != evidence.observed_capability_digest:
         raise _publication_error(

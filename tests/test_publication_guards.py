@@ -30,6 +30,7 @@ _OPERATION_ID = "op-" + "1" * 24
 _PUBLICATION_ID = "publication-" + "2" * 24
 _COMMIT_SHA = "3" * 40
 _TREE_SHA = "4" * 40
+_OTHER_TREE_SHA = "f" * 40
 _CONFIG = "5" * 64
 _POLICY = "6" * 64
 _TOPOLOGY_URL = "7" * 64
@@ -165,6 +166,7 @@ def _intent(
     source_repository_id: str = "123456",
     destination_repository_id: str = "123456",
     approval_id: str | None = None,
+    expected_tree_sha: str = _TREE_SHA,
 ) -> PublicationIntent:
     return PublicationIntent(
         publication_id=_PUBLICATION_ID,
@@ -176,6 +178,7 @@ def _intent(
         source_ref="refs/heads/ai/epic-284-publication",
         destination_ref="refs/heads/ai/epic-284-publication",
         expected_commit_sha=_COMMIT_SHA,
+        expected_tree_sha=expected_tree_sha,
         cross_boundary_approval_id=approval_id,
     )
 
@@ -289,6 +292,42 @@ def test_wrong_source_sha_permission_and_remote_version_fail_closed() -> None:
         with pytest.raises(RepoForgeError) as failure:
             review_publication(_intent(), evidence)
         assert failure.value.code is code
+
+
+def test_wrong_source_tree_sha_fails_closed() -> None:
+    with pytest.raises(RepoForgeError) as failure:
+        review_publication(_intent(), _evidence(tree_sha=_OTHER_TREE_SHA))
+    assert failure.value.code is ErrorCode.STALE_STATE
+
+
+@pytest.mark.parametrize(
+    ("source_ref", "destination_ref"),
+    [
+        ("HEAD", "refs/heads/main"),
+        ("refs/heads/main", "HEAD"),
+        ("refs/heads/*", "refs/heads/main"),
+        ("refs/heads/main", "refs/heads/*"),
+        ("--all", "refs/heads/main"),
+        ("--mirror", "refs/heads/main"),
+        ("refs/heads/main", ":refs/heads/main"),
+    ],
+)
+def test_ambiguous_or_non_exact_managed_refspec_is_rejected(
+    source_ref: str,
+    destination_ref: str,
+) -> None:
+    intent = replace(
+        _intent(),
+        source_ref=source_ref,
+        destination_ref=destination_ref,
+    )
+    topology = replace(
+        _topology(),
+        source_ref=source_ref,
+        destination_ref=destination_ref,
+    )
+    with pytest.raises((RepoForgeError, ValueError)):
+        review_publication(intent, _evidence(preflight=topology, observed=topology))
 
 
 def test_expired_or_mismatched_lease_cannot_be_consumed() -> None:

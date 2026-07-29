@@ -418,6 +418,7 @@ class PublicationIntent:
     source_ref: str
     destination_ref: str
     expected_commit_sha: str
+    expected_tree_sha: str | None = None
     base_ref: str | None = None
     head_ref: str | None = None
     cross_boundary_approval_id: str | None = None
@@ -435,6 +436,8 @@ class PublicationIntent:
         _git_ref(self.base_ref, "base_ref")
         _git_ref(self.head_ref, "head_ref")
         _sha40(self.expected_commit_sha, "expected_commit_sha")
+        if self.expected_tree_sha is not None:
+            _sha40(self.expected_tree_sha, "expected_tree_sha")
         _optional_safe_id(self.cross_boundary_approval_id, "cross_boundary_approval_id")
         if (
             self.source_repository_id != self.destination_repository_id
@@ -464,6 +467,7 @@ class PublicationIntent:
             "base_ref": self.base_ref,
             "head_ref": self.head_ref,
             "expected_commit_sha": self.expected_commit_sha,
+            "expected_tree_sha": self.expected_tree_sha,
             "cross_boundary_approval_id": self.cross_boundary_approval_id,
         }
 
