@@ -413,13 +413,17 @@ class WorkspaceProfileRunner:
                     return
                 ordinal = step_index + 1
                 total = len(steps)
+                # Same shape as the heartbeat: the reviewed step id names the stage, the
+                # kind classifies it. Reporting only the kind made step `sync` read as
+                # "running unknown" -- observed on the live runtime.
                 kind = verification_step.kind.value
+                label = f"{verification_step.step_id} [{kind}]"
                 if completed:
                     assert duration_ms is not None
-                    message = f"completed {kind} (step {ordinal}/{total}, {duration_ms:.3f} ms)"
+                    message = f"completed {label} (step {ordinal}/{total}, {duration_ms:.3f} ms)"
                     current = ordinal
                 else:
-                    message = f"running {kind} (step {ordinal}/{total})"
+                    message = f"running {label} (step {ordinal}/{total})"
                     current = step_index
                 on_progress("running", current, total, "steps", message)
 
