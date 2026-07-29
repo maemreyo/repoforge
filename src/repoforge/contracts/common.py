@@ -286,6 +286,12 @@ class RepositorySummary(StrictModel):
     repo_id: RepoId
     capabilities: tuple[str, ...] = Field(default=(), max_length=100)
     default_ref: GitRef
+    # `capabilities` says a repository can be verified; it does not say which profiles a
+    # model is allowed to start. Without these, the only way to discover that a profile
+    # is reserved for the operator is to spend a call and read
+    # PROFILE_NOT_MODEL_INVOCABLE back.
+    model_invocable_profiles: tuple[str, ...] = Field(default=(), max_length=100)
+    operator_only_profiles: tuple[str, ...] = Field(default=(), max_length=100)
 
 
 class WorkspaceSummary(StrictModel):

@@ -21,6 +21,7 @@ still recoverable, and these tests pin that so it stays true.
 
 from __future__ import annotations
 
+from dataclasses import replace as replace_dataclass
 from typing import Any
 
 import pytest
@@ -158,6 +159,95 @@ class TestAdhocArgvErrorNamesTheViolation:
     def test_a_valid_argv_still_passes(self) -> None:
         argv = ("python3", "-c", "print(1)")
         assert validate_adhoc_argv(argv, ("python3",)) == argv
+
+
+class TestFieldsActuallyReachTheToolSurface:
+    """Every assertion here goes through a real MCP session, on purpose.
+
+    Three fixes in this area were verified at the service layer and shipped green
+    while being invisible to a caller: `repo_list` projects `RepositorySummary`,
+    which never carried profile data; the v2 `repo_task_context` repository section
+    is built from its own Facts and never reads `RepositoryContextResult`; and the
+    poll-to-wait guidance was set on a background result whose field the verify
+    output does not have. A service-level test cannot catch any of those.
+    """
+
+    @staticmethod
+    def _reserve_full_profile(service: Any) -> None:
+        from repoforge.config import ProfileConfig
+
+        profiles = service.config.repositories["demo"].profiles
+        profiles["full"] = replace_dataclass(profiles["full"], model_invocable=False)
+        assert isinstance(profiles["full"], ProfileConfig)
+
+    @pytest.mark.anyio
+    async def test_repo_list_reports_which_profiles_the_model_may_invoke(
+        self, forge_env: ForgeEnvironment
+    ) -> None:
+        self._reserve_full_profile(forge_env.service)
+        server = create_server(service=forge_env.service)
+
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool("repo_list", {"detail": True})
+
+        assert result.isError is False
+        assert result.structuredContent is not None
+        entry = next(
+            item for item in result.structuredContent["repositories"] if item["repo_id"] == "demo"
+        )
+        assert entry["operator_only_profiles"] == ["full"]
+        assert "quick" in entry["model_invocable_profiles"]
+        assert "full" not in entry["model_invocable_profiles"]
+
+    @pytest.mark.anyio
+    async def test_repo_task_context_repository_section_names_reserved_profiles(
+        self, forge_env: ForgeEnvironment
+    ) -> None:
+        self._reserve_full_profile(forge_env.service)
+        server = create_server(service=forge_env.service)
+
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool(
+                "repo_task_context", {"repo_id": "demo", "sections": ["repository"]}
+            )
+
+        assert result.isError is False
+        assert result.structuredContent is not None
+        section = next(
+            item for item in result.structuredContent["sections"] if item["name"] == "repository"
+        )
+        facts = {fact["key"]: fact["value"] for fact in section["facts"]}
+        assert "operator_only_profiles" in facts
+        assert "full" in facts["operator_only_profiles"]
+        assert "quick" in facts["model_invocable_profiles"]
+
+    @pytest.mark.anyio
+    async def test_background_verify_tells_the_caller_to_wait_not_to_poll(
+        self, forge_env: ForgeEnvironment
+    ) -> None:
+        """The anti-polling fix is worthless if the caller never sees it."""
+        service = forge_env.service
+        workspace_id = str(service.workspace_create("demo", "background guidance")["workspace_id"])
+        server = create_server(service=service)
+
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool(
+                "workspace_verify",
+                {
+                    "workspace_id": workspace_id,
+                    "mode": "profile",
+                    "profile_name": "quick",
+                    "background": True,
+                },
+            )
+
+        assert result.isError is False
+        assert result.structuredContent is not None
+        next_action = result.structuredContent["next_action"]
+        assert next_action is not None
+        assert "until='terminal'" in next_action
+        assert "operation" in next_action
+        assert "Poll operation status" not in next_action
 
 
 class TestTimeoutRemedyNamesTheBudget:

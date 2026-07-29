@@ -155,7 +155,13 @@ Every tool change must include all of the following:
 6. Stable structured output with actionable error messages.
 7. Positive unit coverage.
 8. Negative and stale-state coverage.
-9. MCP protocol-level coverage through an actual client session.
+9. MCP protocol-level coverage through an actual client session. This applies to **adding a
+   field to an existing tool**, not only to adding a tool. A service-level assertion proves
+   nothing about the surface: `repo_list` projects `RepositorySummary`, the v2
+   `repo_task_context` repository section is built from its own `Fact` list, and
+   `workspace_verify` drops any field its output model does not declare. Three fixes have
+   already shipped green and invisible this way. If the point of a change is that a caller can
+   see something, the test must read it back through `create_connected_server_and_client_session`.
 10. Documentation updates in `docs/development/TOOL_REFERENCE.md`.
 11. Golden-prompt updates when discovery or tool selection can change.
 

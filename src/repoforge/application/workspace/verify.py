@@ -110,6 +110,10 @@ class WorkspaceVerifyResult:
     head_sha: str
     workspace_fingerprint: str
     execution_evidence: dict[str, object] | None = None
+    # What the caller should do when the call returns before the work is done -- the
+    # exact `operation` wait for a background run. Set only then; a finished verify
+    # answers with its outcome.
+    next_action: str | None = None
     failed_selectors: list[str] = field(default_factory=list)
     output_artifact_reference: str | None = None
     failure_provider: str | None = None
@@ -813,6 +817,7 @@ class WorkspaceVerifier:
         if isinstance(delegated, WorkspaceRunDiagnosticBackgroundResult):
             return WorkspaceVerifyResult(
                 summary="Workspace diagnostic is queued or running",
+                next_action=delegated.safe_next_action,
                 workspace_id=command.workspace_id,
                 requested_mode=command.mode,
                 selected_mode="diagnostic",
@@ -903,6 +908,7 @@ class WorkspaceVerifier:
         if isinstance(delegated, WorkspaceRunProfileBackgroundResult):
             return WorkspaceVerifyResult(
                 summary="Workspace verification profile is running",
+                next_action=delegated.safe_next_action,
                 workspace_id=command.workspace_id,
                 requested_mode=command.mode,
                 selected_mode="profile",
@@ -976,6 +982,7 @@ class WorkspaceVerifier:
         if isinstance(delegated, WorkspaceRunAdhocBackgroundResult):
             return WorkspaceVerifyResult(
                 summary="Ad-hoc verification evidence is running",
+                next_action=delegated.safe_next_action,
                 workspace_id=command.workspace_id,
                 requested_mode=command.mode,
                 selected_mode="adhoc",
