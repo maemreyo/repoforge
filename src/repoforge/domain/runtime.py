@@ -190,6 +190,10 @@ class RuntimeRecord:
     # twice in twelve minutes and the durable record afterwards said `healthy, 0 restarts`,
     # which is what sent diagnosis to the raw tunnel log. These two are evidence, not
     # policy: nothing resets them for the life of the record.
+    #: Deliberately NOT constrained to be >= `restart_count`. A record written before these
+    #: fields existed decodes with `restarts_total = 0` and whatever `restart_count` it had,
+    #: and refusing that record makes the runtime unstartable after an upgrade -- observed.
+    #: `0` on an older record is honest: nothing was counting then.
     restarts_total: int = 0
     last_restart_at: str | None = None
 
@@ -214,7 +218,6 @@ class RuntimeRecord:
             self.restart_count < 0
             or self.consecutive_health_failures < 0
             or self.restarts_total < 0
-            or self.restarts_total < self.restart_count
             or not self.updated_at
             or not self.correlation_id
         ):

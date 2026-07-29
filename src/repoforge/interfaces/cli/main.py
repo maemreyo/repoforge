@@ -2112,6 +2112,7 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
         read_log_page=read_runtime_log_page,
         read_audit_page=read_audit_event_page,
         read_runtime_status=lambda: _runtime_status(store),
+        runtime_record_provider=lambda: build_runtime_store(_runtime_paths(store)[0]).read(),
         contract_identity_provider=contract_identity_provider,
         latest_activation_receipt=_latest_activation_receipt,
     )

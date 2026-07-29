@@ -28,8 +28,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from repoforge.adapters.runtime.unix_control import (
     UnixRuntimeControlServer,
     resolve_unix_socket_path,
@@ -367,23 +365,33 @@ def test_restart_evidence_survives_the_stability_reset_that_clears_restart_count
     assert settled.last_restart_at == "2026-07-28T17:15:55+00:00"
 
 
-def test_a_record_cannot_claim_more_current_restarts_than_it_ever_had() -> None:
+def test_a_record_from_before_the_evidence_fields_is_accepted_as_is() -> None:
+    """`restarts_total` is deliberately NOT required to be at least `restart_count`.
+
+    That invariant looked reasonable and made the runtime unstartable: a record written
+    before these fields existed decodes with `restarts_total = 0` beside whatever
+    `restart_count` it carried, and rejecting it left no release to roll back to, because
+    every release since the field landed shared the decoder. `0` there is honest -- nothing
+    was counting then -- so the record is accepted and says so.
+    """
     from repoforge.domain.runtime import RuntimePhase, RuntimeRecord
 
-    with pytest.raises(ValueError):
-        RuntimeRecord(
-            protocol_version=1,
-            phase=RuntimePhase.DEGRADED,
-            pid=None,
-            process_identity=None,
-            active_generation=None,
-            accepted_generation=12,
-            tunnel_profile="repoforge",
-            tunnel_profile_fingerprint="b" * 64,
-            tool_surface_hash="c" * 64,
-            started_at=None,
-            updated_at="2026-07-28T17:17:18+00:00",
-            correlation_id="d" * 24,
-            restart_count=3,
-            restarts_total=1,
-        )
+    record = RuntimeRecord(
+        protocol_version=1,
+        phase=RuntimePhase.DEGRADED,
+        pid=None,
+        process_identity=None,
+        active_generation=None,
+        accepted_generation=12,
+        tunnel_profile="repoforge",
+        tunnel_profile_fingerprint="b" * 64,
+        tool_surface_hash="c" * 64,
+        started_at=None,
+        updated_at="2026-07-28T17:17:18+00:00",
+        correlation_id="d" * 24,
+        restart_count=3,
+        restarts_total=0,
+    )
+
+    assert record.restart_count == 3
+    assert record.restarts_total == 0
