@@ -89,6 +89,14 @@ class DraftPullRequestCreator:
                 already_existed=effect.reconciled,
             )
             fresh.metadata["pr_url"] = effect.url
+            fresh.metadata["last_pr_publication"] = {
+                "publication_id": effect.publication_id,
+                "operation_id": effect.operation_id,
+                "receipt_id": effect.receipt_id,
+                "result_reference": effect.result_reference,
+                "reconciled": effect.reconciled,
+                "completed_at": self.ctx.clock.now_iso(),
+            }
             try:
                 self.ctx.store.save(fresh)
             except Exception as exc:

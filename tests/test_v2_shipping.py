@@ -149,6 +149,15 @@ def test_workspace_pr_requires_complete_issue_dispositions_and_preserves_managed
     assert created["issue_completion"]["intent_complete"] is True
     assert created["issue_completion"]["closes"] == [180]
     assert created["issue_completion"]["advances"] == [181]
+    assert created["operation"]["kind"] == "repository_publication"
+    assert created["operation"]["state"] == "succeeded"
+    assert created["operation"]["terminal"] is True
+    assert created["operation"]["receipt_status"] == "available"
+    assert created["operation"]["result_reference_status"] == "available"
+    assert created["operation"]["receipt_id"].startswith("receipt-")
+    assert created["operation"]["result_reference"] == (
+        f"operation-result:{created['operation']['operation_id']}"
+    )
 
     state = json.loads(forge_env.gh_state.read_text(encoding="utf-8"))
     branch = forge_env.service.workspace_status(workspace_id)["branch"]

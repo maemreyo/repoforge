@@ -148,6 +148,58 @@ def _operation_evidence(summary: object, *, poll_after_seconds: float) -> dict[s
     }
 
 
+def _publication_operation_evidence(record: WorkspaceRecord) -> dict[str, object]:
+    raw = record.metadata.get("last_pr_publication")
+    if not isinstance(raw, dict):
+        raise RepoForgeError(
+            "Draft pull request completed without durable publication evidence",
+            code=ErrorCode.STATE_INVALID,
+            unchanged_state=("The pull request remains unchanged on GitHub.",),
+        )
+    required = {
+        key: raw.get(key)
+        for key in (
+            "publication_id",
+            "operation_id",
+            "receipt_id",
+            "result_reference",
+            "completed_at",
+        )
+    }
+    if not all(isinstance(value, str) and value for value in required.values()):
+        raise RepoForgeError(
+            "Stored draft pull-request publication evidence is malformed",
+            code=ErrorCode.STATE_INVALID,
+            unchanged_state=("The pull request remains unchanged on GitHub.",),
+        )
+    operation_id = str(required["operation_id"])
+    receipt_id = str(required["receipt_id"])
+    result_reference = str(required["result_reference"])
+    completed_at = str(required["completed_at"])
+    return {
+        "operation_id": operation_id,
+        "kind": "repository_publication",
+        "state": "succeeded",
+        "phase": "completed",
+        "attempt": 1,
+        "heartbeat_at": completed_at,
+        "evidence_complete": True,
+        "progress_current": 1,
+        "progress_total": 1,
+        "progress_unit": "effect",
+        "workspace_id": record.workspace_id,
+        "result_reference": result_reference,
+        "result_reference_status": "available",
+        "receipt_id": receipt_id,
+        "receipt_status": "available",
+        "retryability": "none",
+        "terminal": True,
+        "poll_after_seconds": 0.1,
+        "suggested_poll_after_s": 0.1,
+        "updated_at": completed_at,
+    }
+
+
 def _event_cursor(operation_id: str, updated_at: str, outcome: str) -> str:
     digest = hashlib.sha256(f"{operation_id}\0{updated_at}\0{outcome}".encode()).hexdigest()
     return f"pr-watch:{operation_id}:{digest}"
@@ -325,7 +377,7 @@ class WorkspacePrCoordinator:
                 action=command.action,
                 pull_request=_pull_request(payload, base_ref=record.base),
                 comment=None,
-                operation=None,
+                operation=_publication_operation_evidence(record),
                 remote_version=version.token,
                 event_cursor=None,
                 terminal_reason=None,

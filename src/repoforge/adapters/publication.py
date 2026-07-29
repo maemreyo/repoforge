@@ -393,6 +393,8 @@ class PublicationAdapter:
                 publication_id=reviewed.publication_id,
                 base_repository_id=current.base.repository_id,
                 head_repository_id=current.head.repository_id,
+                base_repository=current.base.canonical_name,
+                head_repository=current.head.canonical_name,
                 base_ref=base_ref,
                 head_ref=head_ref,
                 expected_commit_sha=reviewed.commit_sha,

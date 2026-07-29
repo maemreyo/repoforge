@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import RepositoryConfig
 from .issue_mutation import RemoteComment
 
 
@@ -75,17 +74,6 @@ class PullRequestGateway(Protocol):
     def pr_read(self, cwd: Path, pr_number: int) -> dict[str, Any]: ...
 
     def find_pr(self, cwd: Path, branch: str) -> dict[str, Any] | None: ...
-
-    def create_draft(
-        self,
-        cwd: Path,
-        repo: RepositoryConfig,
-        *,
-        branch: str,
-        base: str,
-        title: str,
-        body: str,
-    ) -> str: ...
 
     def update(
         self, cwd: Path, branch: str, *, title: str | None, body: str | None

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from repoforge.adapters.github.gh_cli import GhCliGateway
 from repoforge.adapters.publication import PublicationAdapter
+from repoforge.config import ServerConfig
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.git_transport_identity import (
     GitTransportAccess,
@@ -160,6 +163,65 @@ class FakeGitHubPublication:
     def find_pull_request(self, **kwargs: object) -> PublicationEffect | None:
         self.find_calls.append(dict(kwargs))
         return self.found
+
+
+class IsolatedGitHubCommands:
+    def __init__(self, results: list[CommandResult]) -> None:
+        self.results = results
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, *_args: object, **_kwargs: object) -> CommandResult:
+        raise AssertionError("publication must not use ambient gh execution")
+
+    def run_isolated(self, argv: list[str], **kwargs: object) -> CommandResult:
+        self.calls.append({"argv": tuple(argv), **kwargs})
+        if not self.results:
+            raise AssertionError(f"unhandled isolated command: {argv}")
+        return self.results.pop(0)
+
+
+def _github_auth_context(repository_id: str = "111") -> ProcessAuthContext:
+    canary = "publication-credential-canary"
+    return ProcessAuthContext(
+        profile_id="company-app",
+        material_id="material-company-app",
+        target_kind=AuthTargetKind.REPOSITORY,
+        target_id=repository_id,
+        environment=(("GH_TOKEN", canary), ("GH_HOST", "github.com")),
+        _secret_values=(canary,),
+    )
+
+
+def _pull_request_payload(
+    *,
+    publication_id: str = "publication-pr",
+    head_sha: str = _COMMIT,
+) -> dict[str, object]:
+    return {
+        "id": 9001,
+        "number": 42,
+        "html_url": "https://github.com/company/project/pull/42",
+        "body": f"Exact intent\n\n<!-- repoforge-publication:{publication_id} -->",
+        "head": {
+            "sha": head_sha,
+            "ref": "ai/publication",
+            "repo": {"id": 222, "full_name": "personal/project"},
+        },
+        "base": {
+            "ref": "main",
+            "repo": {"id": 111, "full_name": "company/project"},
+        },
+    }
+
+
+def _gh_publication_gateway(result_payload: object) -> tuple[GhCliGateway, IsolatedGitHubCommands]:
+    commands = IsolatedGitHubCommands(
+        [CommandResult(("gh", "api"), str(_ROOT), 0, json.dumps(result_payload), "")]
+    )
+    return (
+        GhCliGateway(commands, ServerConfig(Path("/workspaces"), Path("/state"))),
+        commands,
+    )
 
 
 def _metadata(
@@ -497,3 +559,81 @@ def test_reconcile_does_not_accept_a_different_commit() -> None:
         )
         is None
     )
+
+
+def test_gh_cli_create_pull_request_uses_explicit_repositories_and_isolated_auth() -> None:
+    gateway, commands = _gh_publication_gateway(_pull_request_payload())
+    auth_context = _github_auth_context()
+
+    effect = gateway.create_pull_request(
+        cwd=_ROOT,
+        publication_id="publication-pr",
+        base_repository_id="111",
+        head_repository_id="222",
+        base_repository="github.com/company/project",
+        head_repository="github.com/personal/project",
+        base_ref="refs/heads/main",
+        head_ref="refs/heads/ai/publication",
+        expected_commit_sha=_COMMIT,
+        title="Guard publication",
+        body="Exact intent",
+        auth_context=auth_context,
+    )
+
+    assert effect.external_id == "pr-42"
+    assert effect.destination_repository_id == "111"
+    assert effect.commit_sha == _COMMIT
+    assert commands.calls[0]["environment"] == auth_context.environment_dict()
+    assert commands.calls[0]["secrets"] == auth_context.secret_values
+    argv = commands.calls[0]["argv"]
+    assert "repos/company/project/pulls" in argv
+    assert "repo" not in argv
+    request = json.loads(str(commands.calls[0]["input_text"]))
+    assert request["base"] == "main"
+    assert request["head"] == "personal:ai/publication"
+    assert request["draft"] is True
+    assert "<!-- repoforge-publication:publication-pr -->" in request["body"]
+
+
+def test_gh_cli_find_pull_request_requires_exact_marker_refs_sha_and_repository_ids() -> None:
+    gateway, commands = _gh_publication_gateway([_pull_request_payload()])
+    auth_context = _github_auth_context()
+
+    effect = gateway.find_pull_request(
+        cwd=_ROOT,
+        publication_id="publication-pr",
+        base_repository_id="111",
+        head_repository_id="222",
+        base_repository="github.com/company/project",
+        head_repository="github.com/personal/project",
+        base_ref="refs/heads/main",
+        head_ref="refs/heads/ai/publication",
+        expected_commit_sha=_COMMIT,
+        auth_context=auth_context,
+    )
+
+    assert effect is not None and effect.reconciled is True
+    assert "repos/company/project/pulls?" in commands.calls[0]["argv"][-1]
+    assert commands.calls[0]["environment"] == auth_context.environment_dict()
+
+
+def test_gh_cli_pull_request_response_identity_mismatch_fails_closed() -> None:
+    gateway, _commands = _gh_publication_gateway(_pull_request_payload(head_sha="f" * 40))
+
+    with pytest.raises(RepoForgeError) as failure:
+        gateway.create_pull_request(
+            cwd=_ROOT,
+            publication_id="publication-pr",
+            base_repository_id="111",
+            head_repository_id="222",
+            base_repository="github.com/company/project",
+            head_repository="github.com/personal/project",
+            base_ref="refs/heads/main",
+            head_ref="refs/heads/ai/publication",
+            expected_commit_sha=_COMMIT,
+            title="Guard publication",
+            body="Exact intent",
+            auth_context=_github_auth_context(),
+        )
+
+    assert failure.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH

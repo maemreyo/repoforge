@@ -179,6 +179,8 @@ class GitHubPublicationGateway(Protocol):
         publication_id: str,
         base_repository_id: str,
         head_repository_id: str,
+        base_repository: str,
+        head_repository: str,
         base_ref: str,
         head_ref: str,
         expected_commit_sha: str,
