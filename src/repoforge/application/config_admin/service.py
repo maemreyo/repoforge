@@ -19,6 +19,7 @@ Gating contract (enforced twice — here for UX, and independently by
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -47,6 +48,7 @@ from ...domain.policy_patch import (
 )
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode
+from ...domain.runtime import RuntimeRecord
 from ...domain.runtime_activation import RuntimeActivationReceipt
 from ...domain.runtime_contract import RuntimeContractIdentity
 from ...domain.runtime_events import parse_runtime_event
@@ -189,6 +191,7 @@ class ConfigAdminService:
         read_runtime_status: Callable[[], dict[str, object]] | None = None,
         contract_identity_provider: Callable[[], RuntimeContractIdentity] | None = None,
         latest_activation_receipt: Callable[[], RuntimeActivationReceipt | None] | None = None,
+        runtime_record_provider: Callable[[], RuntimeRecord | None] | None = None,
     ) -> None:
         self._store = store
         self._proposals = proposals
@@ -205,6 +208,7 @@ class ConfigAdminService:
         self._read_runtime_status = read_runtime_status
         self._contract_identity_provider = contract_identity_provider
         self._latest_activation_receipt = latest_activation_receipt
+        self._runtime_record_provider = runtime_record_provider
 
     # -- reads ---------------------------------------------------------------
 
@@ -556,6 +560,7 @@ class ConfigAdminService:
             "repository_projections": repository_projections,
             "contract_identity": contract_identity,
             "activation_evidence": self._activation_evidence(contract_identity),
+            "runtime_health": self._runtime_health(),
             "config_projection": {
                 "source_digest": source_digest,
                 "accepted_source_digest": current.source_sha256,
@@ -565,6 +570,44 @@ class ConfigAdminService:
                 "drift_state": drift_state,
                 "safe_reconciliation_action": safe_reconciliation_action,
             },
+        }
+
+    def _runtime_health(self) -> dict[str, Any] | None:
+        """Report what the watchdog observes NOW, from the durable record only.
+
+        Deliberately not the live control-plane probe the CLI uses. That probe needs the
+        control socket, and a runtime whose control plane has died is exactly when a caller
+        most needs an answer -- it would block or time out at the worst moment. The record
+        is written by the watchdog and readable regardless.
+
+        `observed_age_seconds` is the field to read first: the watchdog writes only on
+        change, so `phase: healthy` with no age cannot be told apart from a watchdog that
+        stopped running an hour ago. That ambiguity is what made the 2026-07-28 incident
+        read as a state fault.
+        """
+        if self._runtime_record_provider is None:
+            return None
+        record = self._runtime_record_provider()
+        if record is None:
+            return None
+        age: float | None = None
+        observed_at = record.health_observed_at
+        if observed_at:
+            with contextlib.suppress(ValueError):
+                observed = datetime.fromisoformat(observed_at)
+                now = datetime.fromisoformat(self._clock.now_iso())
+                age = max(0.0, (now - observed).total_seconds())
+        return {
+            "phase": record.phase.value,
+            "observed_at": observed_at,
+            "observed_age_seconds": age,
+            "checks": [
+                {"name": name, "ok": ok, "detail": detail} for name, ok, detail in record.health
+            ],
+            "restarts_total": record.restarts_total,
+            "last_restart_at": record.last_restart_at,
+            "consecutive_health_failures": record.consecutive_health_failures,
+            "last_error_code": record.last_error_code,
         }
 
     def _activation_evidence(
