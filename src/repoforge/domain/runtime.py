@@ -80,6 +80,11 @@ class TunnelProfile:
     executable: str
     executable_version: str
     mcp_argv: tuple[str, ...]
+    #: Lifetime tunnel-client gives one MCP transport connection. `None` passes nothing and
+    #: leaves the tunnel's own default in force, which is what every existing installation
+    #: gets. Raising it makes the recycle rarer; it does not remove it, because the client
+    #: shuts itself down on expiry rather than reconnecting the stdio child.
+    mcp_connection_max_ttl_seconds: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -89,6 +94,10 @@ class TunnelProfile:
             or not self.executable_version
             or not self.mcp_argv
             or not all(self.mcp_argv)
+            or (
+                self.mcp_connection_max_ttl_seconds is not None
+                and self.mcp_connection_max_ttl_seconds <= 0
+            )
         ):
             raise ValueError(
                 "Tunnel profile requires a hashed id, executable identity and MCP argv"
@@ -103,6 +112,7 @@ class TunnelProfile:
                 "executable": self.executable,
                 "executable_version": self.executable_version,
                 "mcp_argv": self.mcp_argv,
+                "mcp_connection_max_ttl_seconds": self.mcp_connection_max_ttl_seconds,
             },
             sort_keys=True,
             separators=(",", ":"),

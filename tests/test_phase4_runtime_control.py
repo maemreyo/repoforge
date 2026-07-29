@@ -881,3 +881,51 @@ def test_execution_worker_restarts_when_generation_changes_or_process_dies(tmp_p
 
     assert worker.started == [12, 13, 13]
     assert worker.terminated == [first_pid]
+
+
+# ------------------------------- tunnel MCP connection lifetime (configurable, opt-in)
+
+
+def test_run_argv_omits_the_ttl_flag_by_default() -> None:
+    """The default must change nothing. tunnel-client recycles the MCP transport on its own
+    schedule (10m at the time of writing) and shuts the client down on expiry rather than
+    reconnecting, so every expiry is a window where the connector answers 502. That is
+    worth being able to tune, but choosing a value for every installation is not ours."""
+    from repoforge.adapters.runtime.tunnel_cli import _run_argv
+    from repoforge.domain.runtime import TunnelProfile
+
+    profile = TunnelProfile("a" * 64, "repoforge", "tunnel-client", "1.0", ("rf", "serve"))
+
+    assert _run_argv("tunnel-client", profile) == [
+        "tunnel-client",
+        "run",
+        "--profile",
+        "repoforge",
+    ]
+
+
+def test_run_argv_passes_a_configured_ttl_as_a_duration() -> None:
+    from repoforge.adapters.runtime.tunnel_cli import _run_argv
+    from repoforge.domain.runtime import TunnelProfile
+
+    profile = TunnelProfile("a" * 64, "repoforge", "tunnel-client", "1.0", ("rf", "serve"), 3_600)
+
+    assert _run_argv("tunnel-client", profile)[-1] == "--mcp.connection-max-ttl=3600s"
+
+
+def test_the_ttl_participates_in_the_profile_fingerprint() -> None:
+    """Changing it must re-initialise the tunnel profile, or the running client keeps the
+    old lifetime while the reviewed configuration claims the new one."""
+    from repoforge.domain.runtime import TunnelProfile
+
+    base = TunnelProfile("a" * 64, "repoforge", "tunnel-client", "1.0", ("rf", "serve"))
+    tuned = TunnelProfile("a" * 64, "repoforge", "tunnel-client", "1.0", ("rf", "serve"), 3_600)
+
+    assert base.fingerprint != tuned.fingerprint
+
+
+def test_a_non_positive_ttl_is_refused() -> None:
+    from repoforge.domain.runtime import TunnelProfile
+
+    with pytest.raises(ValueError):
+        TunnelProfile("a" * 64, "repoforge", "tunnel-client", "1.0", ("rf", "serve"), 0)

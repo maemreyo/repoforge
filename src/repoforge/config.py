@@ -238,6 +238,12 @@ class ServerConfig:
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
     github_read_cache_ttl_seconds: int = 120
+    # Lifetime tunnel-client gives one MCP transport connection. `None` -- the default --
+    # passes nothing and leaves the tunnel's own value in force, so no existing
+    # installation changes behaviour. Setting it makes the recycle rarer; it cannot remove
+    # it, because on expiry the client shuts itself down instead of reconnecting the stdio
+    # child, and every one of those teardowns is a window where the connector answers 502.
+    tunnel_mcp_connection_max_ttl_seconds: int | None = None
     github_webhook_enabled: bool = False
     github_webhook_bind: str = "127.0.0.1"
     github_webhook_port: int = 8766
@@ -1020,6 +1026,15 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             0.0,
             30 * 24 * 3_600.0,
             "server.stale_workspace_min_age_seconds",
+        ),
+        tunnel_mcp_connection_max_ttl_seconds=(
+            None
+            if server_raw.get("tunnel_mcp_connection_max_ttl_seconds") is None
+            else _positive_int(
+                server_raw.get("tunnel_mcp_connection_max_ttl_seconds"),
+                600,
+                "server.tunnel_mcp_connection_max_ttl_seconds",
+            )
         ),
         github_read_cache_ttl_seconds=_bounded_int(
             server_raw.get("github_read_cache_ttl_seconds"),
