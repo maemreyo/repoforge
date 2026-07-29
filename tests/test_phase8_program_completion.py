@@ -83,6 +83,12 @@ def test_production_ci_covers_supported_python_and_required_gates() -> None:
     ):
         assert command in workflow
     assert "macos-latest" in workflow
+    # The coverage map decides how narrow a pull-request run may be, and nothing watched
+    # it: it went eight days without a rebuild and sent five of eight commits to the whole
+    # suite. The check is push-only because recording it needs a full run, so the
+    # aggregator has to accept `skipped` on a pull request without accepting it on push.
+    assert "make test-map-check" in workflow
+    assert "needs.coverage-map.result" in workflow
     wheel_verifier = (ROOT / "scripts/verify-wheel-install.sh").read_text(encoding="utf-8")
     assert "scripts/verify-wheel-e2e.py" in wheel_verifier
     assert 'contract["mcp"]["identity"] == "forge_v2"' in wheel_verifier
