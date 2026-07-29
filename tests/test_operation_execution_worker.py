@@ -11,6 +11,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+import pytest
 from conftest import create_forge_environment
 
 from repoforge.application.fingerprint_cache import read_fingerprint
@@ -19,6 +20,7 @@ from repoforge.application.workspace.run_adhoc import WorkspaceAdhocRunner
 from repoforge.application.workspace.run_profile import WorkspaceProfileRunner
 from repoforge.bootstrap import build_application
 from repoforge.config import load_config
+from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.operation_work import OperationWorkRequest, new_work_item
 from repoforge.ports.cancellation import CancellationToken
 
@@ -950,3 +952,79 @@ def test_one_unexecutable_item_does_not_stop_the_worker(tmp_path) -> None:
     assert worker.run_once() is True
     assert application.operations.status(healthy.operation_id).state is OperationState.SUCCEEDED
     assert worker.run_once() is False
+
+
+def test_cancel_survives_a_heartbeat_landing_between_its_read_and_its_write(tmp_path) -> None:
+    """A heartbeat must not defeat a cancel that asked for no optimistic concurrency.
+
+    `request_cancel` reads the operation, decides, then saves with a compare-and-set
+    against what it read. A running worker's heartbeat moves `updated_at` without changing
+    anything the decision consumes, so it could lose that CAS and fail OPERATION_STALE --
+    observed in CI on timestamps 60ms apart. The caller passed no `expected_updated_at`,
+    so it asserted nothing and should not be told its assertion failed.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    from repoforge.domain.operation_task import next_operation_timestamp
+
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path), config_generation=1)
+    operation = application.operations.create(
+        kind="workspace_run_profile", phase="queued", cancel_supported=True
+    )
+    application.operations.start(operation.operation_id)
+
+    inner = application.operations.store
+    beats: list[str] = []
+
+    class _HeartbeatOnFirstSave:
+        """Emit exactly one heartbeat immediately before the first save reaches the store."""
+
+        def __getattr__(self, name: str):
+            return getattr(inner, name)
+
+        def save(self, task, *, expected_updated_at=None):
+            if not beats:
+                current = inner.read(task.operation_id)
+                bumped = dataclass_replace(
+                    current,
+                    updated_at=next_operation_timestamp(
+                        current.updated_at, application.context.clock.now_iso()
+                    ),
+                )
+                inner.save(bumped, expected_updated_at=current.updated_at)
+                beats.append(bumped.updated_at)
+            return inner.save(task, expected_updated_at=expected_updated_at)
+
+    application.operations.store = _HeartbeatOnFirstSave()  # type: ignore[assignment]
+
+    decision = application.operations.request_cancel(operation.operation_id)
+
+    assert beats, "the test did not actually inject a heartbeat"
+    assert decision.cancellation_requested is True
+    assert application.operations.status(operation.operation_id).cancellation_requested_at
+
+
+def test_cancel_still_reports_stale_when_the_caller_pinned_a_version(tmp_path) -> None:
+    """The retry must not swallow a real conflict.
+
+    A caller that supplies `expected_updated_at` is asserting something about the record.
+    If the record moved, that assertion failed and the caller has to see it -- retrying
+    silently against a newer version would answer a question it did not ask.
+    """
+    env = create_forge_environment(tmp_path)
+    application = build_application(load_config(env.config_path), config_generation=1)
+    operation = application.operations.create(
+        kind="workspace_run_profile", phase="queued", cancel_supported=True
+    )
+    started = application.operations.start(operation.operation_id)
+
+    with pytest.raises(RepoForgeError) as caught:
+        application.operations.request_cancel(
+            operation.operation_id,
+            expected_updated_at="2000-01-01T00:00:00+00:00",
+        )
+
+    assert caught.value.code is ErrorCode.OPERATION_STALE
+    assert started.updated_at in str(caught.value)
+    assert application.operations.status(operation.operation_id).cancellation_requested_at is None

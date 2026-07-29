@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from functools import partial
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import (
@@ -22,6 +23,11 @@ from ...domain.operation_task import (
 )
 from ...ports.operation_store import OperationRecordPage
 from ..context import ApplicationContext
+
+# Bounded, because a cancel that keeps losing to heartbeats has to surface rather than spin.
+# The window is one read plus one write against a heartbeat that lands every few hundred
+# milliseconds, so losing it three times running means something other than a heartbeat.
+_CANCEL_CAS_ATTEMPTS = 3
 
 
 class OperationManager:
@@ -389,39 +395,59 @@ class OperationManager:
         expected_updated_at: str | None = None,
         now: str | None = None,
     ) -> OperationCancellationDecision:
-        existing = self.status(operation_id)
-        if expected_updated_at is not None and existing.updated_at != expected_updated_at:
-            raise RepoForgeError(
-                f"Operation changed since {expected_updated_at}; current updated_at is {existing.updated_at}",
-                code=ErrorCode.OPERATION_STALE,
-                retryable=True,
-                safe_next_action="Read operation_status and retry cancellation against the refreshed updated_at.",
+        # A caller that pins `expected_updated_at` is asserting something about the record
+        # and must see a mismatch. A caller that does not is asserting nothing -- but this
+        # read-modify-write still needs a compare-and-set so a concurrent state transition
+        # cannot be overwritten, and that CAS is defeated by a running worker's heartbeat,
+        # which moves `updated_at` without changing anything the decision reads. Observed
+        # in CI: a cancel failed OPERATION_STALE on timestamps 60ms apart, with a 0.5s
+        # heartbeat interval. Re-read and recompute instead; `request_operation_cancellation`
+        # is pure and re-evaluates terminality, so a retry cannot cancel something that
+        # finished in the meantime.
+        attempts = 1 if expected_updated_at is not None else _CANCEL_CAS_ATTEMPTS
+        last_stale: RepoForgeError | None = None
+        for remaining in range(attempts, 0, -1):
+            existing = self.status(operation_id)
+            if expected_updated_at is not None and existing.updated_at != expected_updated_at:
+                raise RepoForgeError(
+                    f"Operation changed since {expected_updated_at}; current updated_at is {existing.updated_at}",
+                    code=ErrorCode.OPERATION_STALE,
+                    retryable=True,
+                    safe_next_action="Read operation_status and retry cancellation against the refreshed updated_at.",
+                )
+            decision = request_operation_cancellation(existing, now=self._now(now))
+            if decision.task == existing:
+                return decision
+            # `partial`, not a lambda: it binds the values now, so a retry cannot save the
+            # task from a previous iteration regardless of when `audited` invokes it.
+            requested = decision.task
+            seen_at = existing.updated_at
+            try:
+                saved = self.ctx.audited(
+                    "operation_cancel",
+                    {
+                        "operation_id": operation_id,
+                        "kind": existing.kind,
+                        "state": existing.state.value,
+                        "cancellation_requested_at": requested.cancellation_requested_at,
+                        "updated_at": requested.updated_at,
+                    },
+                    partial(self.store.save, requested, expected_updated_at=seen_at),
+                    mutating=True,
+                )
+            except RepoForgeError as exc:
+                if getattr(exc, "code", None) is not ErrorCode.OPERATION_STALE or remaining == 1:
+                    raise
+                last_stale = exc
+                continue
+            return OperationCancellationDecision(
+                saved,
+                decision.cancellation_requested,
+                decision.already_requested,
+                decision.already_terminal,
+                decision.cancel_supported,
             )
-        decision = request_operation_cancellation(existing, now=self._now(now))
-        if decision.task == existing:
-            return decision
-        saved = self.ctx.audited(
-            "operation_cancel",
-            {
-                "operation_id": operation_id,
-                "kind": existing.kind,
-                "state": existing.state.value,
-                "cancellation_requested_at": decision.task.cancellation_requested_at,
-                "updated_at": decision.task.updated_at,
-            },
-            lambda: self.store.save(
-                decision.task,
-                expected_updated_at=existing.updated_at,
-            ),
-            mutating=True,
-        )
-        return OperationCancellationDecision(
-            saved,
-            decision.cancellation_requested,
-            decision.already_requested,
-            decision.already_terminal,
-            decision.cancel_supported,
-        )
+        raise last_stale if last_stale is not None else RuntimeError("unreachable")
 
     def delete(self, operation_id: str) -> None:
         existing = self.status(operation_id)
