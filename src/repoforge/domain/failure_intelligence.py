@@ -82,6 +82,7 @@ class RecoveryActionKind(str, Enum):
     WORKSPACE_REFRESH = "workspace_refresh"
     WORKSPACE_MUTATE = "workspace_mutate"
     CONFIG_INSPECT = "config_inspect"
+    RUNTIME_LOGS_READ = "runtime_logs_read"
 
 
 _KINDS_REQUIRING_WORKSPACE_ID = frozenset(
@@ -118,6 +119,10 @@ class RecoveryAction:
     action: str | None = None
     expected_head_sha: str | None = None
     expected_workspace_fingerprint: str | None = None
+    # `RuntimeLogsReadInput.artifact_reference`, carrying the content-addressed handle for
+    # the failing command's complete stdout and stderr.
+    artifact_reference: str | None = None
+    source: str | None = None
 
     def __post_init__(self) -> None:
         _safe_text(self.precondition, "recovery action precondition", 500)
@@ -169,6 +174,20 @@ class RecoveryAction:
             _invalid(
                 "mode, plan_action, diagnostic_id, profile_name, and plan_through are only "
                 "valid for workspace_verify recovery actions"
+            )
+        artifact_only = (self.artifact_reference, self.source)
+        if self.kind is RecoveryActionKind.RUNTIME_LOGS_READ:
+            if self.artifact_reference is None or self.source != "failure_artifact":
+                _invalid(
+                    "runtime_logs_read recovery action requires artifact_reference and "
+                    "source='failure_artifact'"
+                )
+            if _FAILURE_OUTPUT_REFERENCE.fullmatch(self.artifact_reference) is None:
+                _invalid("Recovery action artifact_reference is invalid")
+        elif any(value is not None for value in artifact_only):
+            _invalid(
+                "artifact_reference and source are only valid for runtime_logs_read "
+                "recovery actions"
             )
         if self.kind is RecoveryActionKind.WORKSPACE_VERIFY:
             if self.mode is None:
@@ -261,6 +280,11 @@ class RecoveryAction:
                 "operations": [{"op": "restore", "paths": list(self.relative_paths)}],
                 "expected_head_sha": self.expected_head_sha,
                 "expected_workspace_fingerprint": self.expected_workspace_fingerprint,
+            }
+        if self.kind is RecoveryActionKind.RUNTIME_LOGS_READ:
+            return {
+                "source": self.source,
+                "artifact_reference": self.artifact_reference,
             }
         raise AssertionError(f"Unhandled recovery action kind: {self.kind.value}")
 
@@ -647,6 +671,27 @@ def _action(kind: RecoveryActionKind, precondition: str, **kwargs: object) -> Re
     return RecoveryAction(kind=kind, precondition=precondition, **kwargs)  # type: ignore[arg-type]
 
 
+def _unextracted_output_action(observation: FailureObservation) -> RecoveryAction | None:
+    """Name the full persisted output when no failing selector could be extracted.
+
+    ``None`` when selectors were extracted normally, or when no artifact was recorded --
+    an action pointing at output that cannot be retrieved would be worse than none.
+    """
+    reason = observation.details.get("selectors_unavailable_reason")
+    if not isinstance(reason, str) or not reason:
+        return None
+    reference = observation.details.get("output_artifact_reference")
+    if not isinstance(reference, str) or _FAILURE_OUTPUT_REFERENCE.fullmatch(reference) is None:
+        return None
+    return _action(
+        RecoveryActionKind.RUNTIME_LOGS_READ,
+        f"No failing selector could be extracted ({reason}), and the command's complete "
+        "stdout and stderr were persisted for this failure.",
+        artifact_reference=reference,
+        source="failure_artifact",
+    )
+
+
 def _actions(
     observation: FailureObservation, failure_class: FailureClass
 ) -> tuple[RecoveryAction, ...]:
@@ -706,6 +751,13 @@ def _actions(
         FailureClass.BUILD_FAILURE,
         FailureClass.FLAKY_SUSPECTED,
     }:
+        # Selectors are the normal way to name what failed. When extraction could not
+        # produce any, the complete output was still persisted, and reading it is the
+        # cheapest honest next step -- so it leads, ahead of re-running the profile. A
+        # caller with no route to that output re-runs the suite to guess instead.
+        read_output = _unextracted_output_action(observation)
+        if read_output is not None:
+            return (read_output, profile, status)
         return (profile, status, plan)
     if failure_class in {FailureClass.NETWORK_FAILURE, FailureClass.PROVIDER_FAILURE}:
         return (operation, status, config)
@@ -1043,6 +1095,12 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
                     or arguments.get("expected_fingerprint") is not None
                     else None
                 ),
+                artifact_reference=(
+                    str(arguments["artifact_reference"])
+                    if arguments.get("artifact_reference") is not None
+                    else None
+                ),
+                source=(str(arguments["source"]) if arguments.get("source") is not None else None),
             )
         )
     evidence = FailureEvidence(

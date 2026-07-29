@@ -143,6 +143,61 @@ def test_representative_failures_classify_deterministically(
     )
 
 
+def test_a_failure_without_selectors_leads_with_the_persisted_output() -> None:
+    """An empty selector list is not the absence of a failure.
+
+    A real session hit a gate failure whose extraction produced no selectors, ran the
+    same command standalone, saw it pass, and called the failure transient -- while the
+    command's complete output sat persisted and addressable the whole time. The recovery
+    evidence now names that read first, ahead of re-running anything.
+    """
+    reference = "failure-output:" + "f" * 64
+    observation = _observation(
+        failure_domain="business_tests",
+        details={
+            "selectors_unavailable_reason": "output_unrecognized",
+            "output_artifact_reference": reference,
+        },
+    )
+
+    classification = classify_failure(observation)
+
+    first = classification.safe_actions[0]
+    assert first.kind is RecoveryActionKind.RUNTIME_LOGS_READ
+    assert first.payload()["arguments"] == {
+        "source": "failure_artifact",
+        "artifact_reference": reference,
+    }
+    assert "output_unrecognized" in first.precondition
+
+
+def test_extracted_selectors_do_not_add_an_output_read_action() -> None:
+    """When extraction worked, the selectors are the better evidence; adding a raw-output
+    read would just be noise ahead of the profile re-run."""
+    observation = _observation(
+        failure_domain="business_tests",
+        details={"output_artifact_reference": "failure-output:" + "a" * 64},
+    )
+
+    classification = classify_failure(observation)
+
+    kinds = [action.kind for action in classification.safe_actions]
+    assert RecoveryActionKind.RUNTIME_LOGS_READ not in kinds
+
+
+def test_an_unretrievable_output_reference_yields_no_read_action() -> None:
+    """An action pointing at output that cannot be fetched is worse than no action."""
+    observation = _observation(
+        failure_domain="business_tests",
+        details={"selectors_unavailable_reason": "artifact_unavailable"},
+    )
+
+    classification = classify_failure(observation)
+
+    kinds = [action.kind for action in classification.safe_actions]
+    assert RecoveryActionKind.RUNTIME_LOGS_READ not in kinds
+
+
 def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -> None:
     """Every recovery action's kind must be one of the 28 currently-callable
     Forge v2 tools -- not a retired v1 tool name a client cannot execute.
@@ -174,6 +229,13 @@ def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -
         },
         {"error_code": ErrorCode.CODE_INTELLIGENCE_UNAVAILABLE.value},
         {"message": "opaque executor failure 77"},
+        {
+            "failure_domain": "business_tests",
+            "details": {
+                "selectors_unavailable_reason": "output_unrecognized",
+                "output_artifact_reference": "failure-output:" + "e" * 64,
+            },
+        },
     ):
         observation = _observation(**overrides)
         classification = classify_failure(observation)
