@@ -29,6 +29,18 @@ _HEALTH_RESPONSE_LIMIT = 64 * 1024
 _RESPONSE_FAILURE_THRESHOLD = 2
 
 
+def _run_argv(executable: str, profile: TunnelProfile) -> list[str]:
+    """Build the `tunnel-client run` argv for one reviewed profile.
+
+    The TTL flag is omitted entirely when the profile does not set one, so the tunnel's own
+    default stays in force and no existing installation changes behaviour by upgrading.
+    """
+    argv = [executable, "run", "--profile", profile.profile]
+    if profile.mcp_connection_max_ttl_seconds is not None:
+        argv.append(f"--mcp.connection-max-ttl={profile.mcp_connection_max_ttl_seconds}s")
+    return argv
+
+
 class TunnelCliClient:
     def __init__(
         self,
@@ -387,7 +399,7 @@ class TunnelCliClient:
             self._rotate_log(log_path)
         try:
             process = subprocess.Popen(
-                [self.executable, "run", "--profile", profile.profile],
+                _run_argv(self.executable, profile),
                 env=env,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
