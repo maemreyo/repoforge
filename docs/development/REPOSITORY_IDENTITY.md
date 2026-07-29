@@ -40,6 +40,16 @@ HTTPS transport clears the complete helper chain, enables `credential.useHttpPat
 
 `GitTransportEvidence` records the stable repository ID, profile ID, provider host, access level, transport kind, credential fingerprint, remote-URL digest and observed ref SHA. Successful access remains `unobservable` for the human/API actor; it never upgrades transport proof into actor proof.
 
+## Exact publication effects
+
+`PublicationIntent` is the complete authority for one external publication. It pins stable source and destination repository IDs, exact source and destination refs, the reviewed commit and tree object IDs, the remote name, publication kind and any explicit cross-boundary approval. An idempotency key can replay only this exact intent; it cannot authorize a changed repository, ref, object or approval boundary.
+
+Before an effect, `PublicationAdapter` inspects fetch URLs, push URLs and ordered `insteadOf`/`pushInsteadOf` rewrites, resolves every effective target to stable repository metadata and rejects ambiguous or multiple push repositories. Write-time revalidation repeats topology and authorization checks against the reviewed snapshot, including lease state, capability and permission digests, remote version and boundary approval. Git publication emits one exact `source_ref:destination_ref` refspec only; broad, forced, mirrored, deletion and all-ref publication forms are denied.
+
+Pull-request creation and reconciliation use explicit canonical base and head repositories, stable repository IDs, exact base/head refs and the expected head commit. `GhCliGateway` runs these publication calls through the operation-scoped isolated process environment rather than a cwd-derived repository slug or globally active `gh` account. Creation writes a bounded publication marker; reconciliation accepts a result only when the marker, both repositories, both refs and the exact commit all match. Missing proof remains unknown/manual and is never converted into a blind retry.
+
+Workspace push and draft-PR call sites require `WorkspacePublicationService`; an unresolved service fails closed before an external effect. The coordinator creates the durable operation first, binds identity, acquires the write lease, revalidates immediately before the effect boundary and records the operation, receipt and result reference. Workspace metadata retains only safe publication IDs, reconciliation state and timestamps; PR content, credentials and process environments are not persisted.
+
 ## Durable operation identity lifecycle
 
 `JsonOperationIdentityStore` persists one private CAS sidecar per durable operation. The record contains the immutable `OperationIdentityContext`, one capability request for every target-bound lease, the context ID/digest used by handoff references, superseded lease IDs, and lifecycle timestamps. It contains only opaque references, stable IDs, revisions, digests and safe provider metadata.

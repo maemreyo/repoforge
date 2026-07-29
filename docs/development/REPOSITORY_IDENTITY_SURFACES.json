@@ -200,20 +200,25 @@
       "surfaces": [
         "github_api",
         "pull_request",
+        "publication_reconciliation",
         "release",
         "check_runs"
       ],
       "credential_inputs": [
-        "globally active gh account",
-        "inherited GitHub environment"
+        "operation-scoped isolated GitHub API auth for exact publication",
+        "globally active gh account for legacy non-publication methods",
+        "inherited GitHub environment for legacy non-publication methods"
       ],
       "target_inputs": [
-        "cwd-derived repository slug",
-        "branch",
-        "API endpoint"
+        "stable base and head repository IDs for exact publication",
+        "explicit canonical base and head repositories",
+        "exact base and head refs",
+        "expected head commit and publication marker",
+        "cwd-derived repository slug for legacy non-publication methods",
+        "branch and API endpoint for legacy non-publication methods"
       ],
       "current_risk": "ambient_or_implicit",
-      "planned_owner": "#288"
+      "planned_owner": "#288/#292"
     },
     {
       "path": "src/repoforge/adapters/github/ticket_graph.py",
@@ -336,6 +341,32 @@
       ],
       "current_risk": "ambient_or_implicit",
       "planned_owner": "#286"
+    },
+    {
+      "path": "src/repoforge/adapters/publication.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "remote_topology",
+        "git_push",
+        "pull_request",
+        "publication_reconciliation"
+      ],
+      "credential_inputs": [
+        "none for read-only Git topology inspection",
+        "operation-scoped Git transport spec and process auth context for push effects",
+        "operation-scoped isolated GitHub API auth delegated to the publication gateway"
+      ],
+      "target_inputs": [
+        "stable source and destination repository IDs",
+        "reviewed remote URL and ordered rewrite configuration",
+        "exact source, destination, base and head refs",
+        "expected commit and tree object IDs",
+        "explicit cross-boundary approval"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#292"
     },
     {
       "path": "src/repoforge/adapters/runtime/execution_worker.py",

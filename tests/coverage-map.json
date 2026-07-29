@@ -693,6 +693,7 @@
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
     "tests/test_provider_config.py",
+    "tests/test_publication_adapter.py",
     "tests/test_repo_issue_graph_tools.py",
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
@@ -2834,6 +2835,9 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/adapters/publication.py": [
+    "tests/test_publication_adapter.py"
+  ],
   "src/repoforge/adapters/repository/discovery.py": [
     "tests/test_onboarding_real_git.py",
     "tests/test_repository_discovery.py"
@@ -3012,6 +3016,7 @@
   ],
   "src/repoforge/adapters/runtime/tunnel_cli.py": [
     "tests/test_bootstrap_factories.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase7_regressions.py",
     "tests/test_runtime_adapters_and_serve.py"
@@ -3459,6 +3464,7 @@
     "tests/test_onboarding_coordinator.py",
     "tests/test_onboarding_planner.py",
     "tests/test_onboarding_real_git.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase8_program_completion.py",
     "tests/test_phases1_4_production_hardening.py"
   ],
@@ -3877,6 +3883,7 @@
     "tests/test_phases1_5_full_lifecycle.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_publication_guards.py",
     "tests/test_repo_task_context.py",
     "tests/test_retry_guidance.py",
     "tests/test_service_tools.py",
@@ -4628,6 +4635,9 @@
     "tests/test_service_tools.py",
     "tests/test_verification_detection.py",
     "tests/test_workspace_diagnostics.py"
+  ],
+  "src/repoforge/application/publication.py": [
+    "tests/test_publication_guards.py"
   ],
   "src/repoforge/application/read_batch.py": [
     "tests/test_mcp_contract.py",
@@ -8396,6 +8406,18 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/application/workspace/publication.py": [
+    "tests/test_adoption_nudges.py",
+    "tests/test_ci_failure_evidence.py",
+    "tests/test_integration.py",
+    "tests/test_phases1_4_real_git_integration.py",
+    "tests/test_phases1_5_full_lifecycle.py",
+    "tests/test_pr_check_watch.py",
+    "tests/test_service_tools.py",
+    "tests/test_v2_shipping.py",
+    "tests/test_workspace_refresh.py",
+    "tests/test_workspace_stale_cleanup.py"
+  ],
   "src/repoforge/application/workspace/push.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
@@ -10270,6 +10292,8 @@
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
     "tests/test_provider_config.py",
+    "tests/test_publication_adapter.py",
+    "tests/test_publication_guards.py",
     "tests/test_release_selection.py",
     "tests/test_release_store.py",
     "tests/test_repo_issue_graph_tools.py",
@@ -10502,6 +10526,7 @@
     "tests/test_operation_worker_binding.py",
     "tests/test_optimistic_lock_tokens.py",
     "tests/test_outcome_records.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase8_program_completion.py",
     "tests/test_phases1_4_production_hardening.py",
@@ -10541,7 +10566,9 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/git_transport_identity.py": [
-    "tests/test_git_transport_identity.py"
+    "tests/test_git_transport_identity.py",
+    "tests/test_publication_adapter.py",
+    "tests/test_publication_guards.py"
   ],
   "src/repoforge/domain/github_api_identity.py": [
     "tests/test_github_api_identity.py"
@@ -10662,6 +10689,7 @@
     "tests/test_operation_worker_binding.py",
     "tests/test_optimistic_lock_tokens.py",
     "tests/test_outcome_records.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase5_failure_harness.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase7_atomic_hot_reload.py",
@@ -10803,7 +10831,8 @@
     "tests/test_onboarding_session_store.py"
   ],
   "src/repoforge/domain/operation_identity.py": [
-    "tests/test_operation_identity_leases.py"
+    "tests/test_operation_identity_leases.py",
+    "tests/test_publication_guards.py"
   ],
   "src/repoforge/domain/operation_task.py": [
     "tests/test_adoption_nudges.py",
@@ -10895,6 +10924,7 @@
     "tests/test_mcp_contract_v2.py",
     "tests/test_mutation_idempotency.py",
     "tests/test_onboarding_real_git.py",
+    "tests/test_operation_execution_worker.py",
     "tests/test_operation_tasks.py",
     "tests/test_optimistic_lock_tokens.py",
     "tests/test_outcome_records.py",
@@ -10907,6 +10937,7 @@
     "tests/test_phases1_5_full_lifecycle.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_publication_guards.py",
     "tests/test_repo_issue_graph_tools.py",
     "tests/test_repo_task_context.py",
     "tests/test_repository_commit_evidence.py",
@@ -11002,6 +11033,7 @@
     "tests/test_onboarding_coordinator.py",
     "tests/test_onboarding_planner.py",
     "tests/test_onboarding_real_git.py",
+    "tests/test_phase4_runtime_control.py",
     "tests/test_phase8_program_completion.py",
     "tests/test_phases1_4_production_hardening.py"
   ],
@@ -11102,6 +11134,10 @@
     "tests/test_provider_config.py",
     "tests/test_provider_manifest.py",
     "tests/test_provider_registry.py"
+  ],
+  "src/repoforge/domain/publication.py": [
+    "tests/test_publication_adapter.py",
+    "tests/test_publication_guards.py"
   ],
   "src/repoforge/domain/publishing.py": [
     "tests/test_adoption_nudges.py",
@@ -11210,11 +11246,14 @@
   "src/repoforge/domain/repository_auth_broker.py": [
     "tests/test_git_transport_identity.py",
     "tests/test_github_api_identity.py",
+    "tests/test_publication_adapter.py",
     "tests/test_repository_identity_contracts.py"
   ],
   "src/repoforge/domain/repository_identity.py": [
     "tests/test_github_api_identity.py",
     "tests/test_operation_identity_leases.py",
+    "tests/test_publication_adapter.py",
+    "tests/test_publication_guards.py",
     "tests/test_repository_identity_contracts.py"
   ],
   "src/repoforge/domain/repository_identity_resolution.py": [
@@ -11362,6 +11401,7 @@
     "tests/test_rules_engine_domain.py",
     "tests/test_rules_loader.py",
     "tests/test_rules_validators.py",
+    "tests/test_skills_scaffold.py",
     "tests/test_task_capsule_v2.py",
     "tests/test_task_capsule_v2_persistence.py"
   ],
@@ -11370,6 +11410,7 @@
     "tests/test_activation_restart_semantics.py",
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py",
+    "tests/test_config_admin.py",
     "tests/test_control_plane_resilience.py",
     "tests/test_phase4_runtime_control.py",
     "tests/test_phase6_operational_hardening.py",
@@ -11378,7 +11419,8 @@
     "tests/test_phases1_4_production_hardening.py",
     "tests/test_runtime_adapters_and_serve.py",
     "tests/test_supervisor_handoff_lock.py",
-    "tests/test_tunnel_seam_swap.py"
+    "tests/test_tunnel_seam_swap.py",
+    "tests/test_upgrade_compatibility.py"
   ],
   "src/repoforge/domain/runtime_activation.py": [
     "tests/test_phase7_atomic_hot_reload.py"
@@ -11920,6 +11962,19 @@
   ],
   "src/repoforge/ports/progress_reporter.py": [
     "tests/test_operation_progress_wait.py"
+  ],
+  "src/repoforge/ports/publication.py": [
+    "tests/test_publication_adapter.py",
+    "tests/test_publication_guards.py"
+  ],
+  "src/repoforge/ports/workspace_publication.py": [
+    "tests/test_adoption_nudges.py",
+    "tests/test_ci_failure_evidence.py",
+    "tests/test_pr_check_watch.py",
+    "tests/test_service_tools.py",
+    "tests/test_v2_shipping.py",
+    "tests/test_workspace_refresh.py",
+    "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/testing/auth_fakes.py": [
     "tests/test_repository_identity_contracts.py"
