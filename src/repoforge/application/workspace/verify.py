@@ -670,10 +670,12 @@ class WorkspaceVerifier:
                     phase=durable_task.phase,
                     safe_next_action=(
                         "Wait for operation "
-                        f"{admitted.operation_id} with until='terminal' and the largest "
-                        "timeout_seconds you can afford; re-issue the same wait on a "
-                        "timeout. Do not spin on operation get -- progress mode wakes "
-                        "you once per step and tells you nothing extra."
+                        f"{admitted.operation_id} with until='terminal' and "
+                        "timeout_seconds=60, re-issuing the same call while it times out. "
+                        "60 is the safe default: some clients block a tool call held much "
+                        "longer, and a blocked call costs a whole turn while a re-issued "
+                        "wait costs nothing. Do not spin on operation get -- progress mode "
+                        "wakes you once per step and tells you nothing extra."
                     ),
                 )
             result = self._from_diagnostic(
@@ -721,10 +723,12 @@ class WorkspaceVerifier:
                     phase=durable_task.phase,
                     safe_next_action=(
                         "Wait for operation "
-                        f"{admitted.operation_id} with until='terminal' and the largest "
-                        "timeout_seconds you can afford; re-issue the same wait on a "
-                        "timeout. Do not spin on operation get -- progress mode wakes "
-                        "you once per step and tells you nothing extra."
+                        f"{admitted.operation_id} with until='terminal' and "
+                        "timeout_seconds=60, re-issuing the same call while it times out. "
+                        "60 is the safe default: some clients block a tool call held much "
+                        "longer, and a blocked call costs a whole turn while a re-issued "
+                        "wait costs nothing. Do not spin on operation get -- progress mode "
+                        "wakes you once per step and tells you nothing extra."
                     ),
                 )
             result = self._from_profile(
@@ -770,10 +774,12 @@ class WorkspaceVerifier:
                     phase=durable_task.phase,
                     safe_next_action=(
                         "Wait for operation "
-                        f"{admitted.operation_id} with until='terminal' and the largest "
-                        "timeout_seconds you can afford; re-issue the same wait on a "
-                        "timeout. Do not spin on operation get -- progress mode wakes "
-                        "you once per step and tells you nothing extra."
+                        f"{admitted.operation_id} with until='terminal' and "
+                        "timeout_seconds=60, re-issuing the same call while it times out. "
+                        "60 is the safe default: some clients block a tool call held much "
+                        "longer, and a blocked call costs a whole turn while a re-issued "
+                        "wait costs nothing. Do not spin on operation get -- progress mode "
+                        "wakes you once per step and tells you nothing extra."
                     ),
                 )
             result = self._from_adhoc(
