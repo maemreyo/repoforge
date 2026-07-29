@@ -526,6 +526,123 @@ def test_operation_wait_reaches_terminal_in_at_most_five_nonempty_calls(
     assert calls <= 5
 
 
+def test_operation_wait_until_terminal_wakes_the_caller_once(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """A caller that only wants the answer must not be woken per step.
+
+    The default `progress` mode returns on every `updated_at` delta, and a profile
+    emits one at each step start and completion. On a real 8-step gate that turned a
+    single question -- did it pass? -- into dozens of round trips, which is what
+    `until="terminal"` exists to collapse.
+    """
+    manager = forge_env.service.operations
+    task = manager.create(kind="workspace_run_profile", phase="queued", cancel_supported=True)
+    running = manager.start(task.operation_id)
+
+    def advance_through_steps() -> None:
+        for step in (1, 2, 3):
+            time.sleep(0.05)
+            manager.progress(
+                task.operation_id,
+                phase="running",
+                current=step,
+                total=3,
+                unit="steps",
+                message=f"completed step {step}/3",
+            )
+        time.sleep(0.05)
+        manager.succeed(task.operation_id, result_reference="workspace_run_profile:done")
+
+    worker = threading.Thread(target=advance_through_steps)
+    worker.start()
+    try:
+        result = forge_env.service.operation(
+            "wait",
+            operation_id=task.operation_id,
+            since_updated_at=running.updated_at,
+            timeout_seconds=5,
+            until="terminal",
+        )
+    finally:
+        worker.join(timeout=5)
+
+    assert result["timed_out"] is False
+    assert result["operation"]["terminal"] is True
+    assert result["operation"]["state"] == "succeeded"
+
+
+def test_operation_wait_until_terminal_returns_current_evidence_on_timeout(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Timing out is the ordinary case for a long gate, so the response has to carry
+    enough to pace the next call -- unlike progress mode, where a timeout means
+    nothing moved at all."""
+    manager = forge_env.service.operations
+    task = manager.create(kind="workspace_run_profile", phase="queued", cancel_supported=True)
+    running = manager.start(task.operation_id)
+
+    result = forge_env.service.operation(
+        "wait",
+        operation_id=task.operation_id,
+        since_updated_at=running.updated_at,
+        timeout_seconds=1,
+        until="terminal",
+    )
+
+    assert result["timed_out"] is True
+    operation = result["operation"]
+    assert operation is not None
+    assert operation["terminal"] is False
+    assert operation["state"] == "running"
+    assert operation["suggested_poll_after_s"] is not None
+
+
+def test_operation_wait_until_progress_remains_the_unchanged_default(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Back-compat: the existing mode still returns on the first delta, and still
+    returns no operation payload when nothing moved."""
+    manager = forge_env.service.operations
+    task = manager.create(kind="workspace_run_profile", phase="queued", cancel_supported=True)
+    running = manager.start(task.operation_id)
+
+    def advance_once() -> None:
+        time.sleep(0.05)
+        manager.progress(
+            task.operation_id,
+            phase="running",
+            current=1,
+            total=3,
+            unit="steps",
+            message="completed step 1/3",
+        )
+
+    worker = threading.Thread(target=advance_once)
+    worker.start()
+    try:
+        advanced = forge_env.service.operation(
+            "wait",
+            operation_id=task.operation_id,
+            since_updated_at=running.updated_at,
+            timeout_seconds=5,
+        )
+    finally:
+        worker.join(timeout=5)
+
+    assert advanced["changed_since"] is True
+    assert advanced["operation"]["terminal"] is False
+
+    idle = forge_env.service.operation(
+        "wait",
+        operation_id=task.operation_id,
+        since_updated_at=str(advanced["operation"]["updated_at"]),
+        timeout_seconds=1,
+    )
+    assert idle["timed_out"] is True
+    assert idle["operation"] is None
+
+
 def test_operation_wait_timeout_returns_typed_current_evidence(
     forge_env: ForgeEnvironment,
 ) -> None:

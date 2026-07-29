@@ -16,6 +16,13 @@ from .list import OperationListCommand, OperationLister
 from .status import OperationStatusCommand, OperationStatusReader
 
 _ACTIONS = frozenset({"get", "wait", "list", "cancel", "failure_evidence"})
+_WAIT_UNTIL = frozenset({"progress", "terminal"})
+# The ceiling is bounded by the client, not by RepoForge: a held request dies with the
+# connector, and this codebase has watched that happen. Progress notifications keep the
+# request alive while work continues, and `since_updated_at` makes a dropped wait
+# resumable, so 300 seconds is the point where one call covers most gates without
+# betting the answer on a five-minute-plus tunnel.
+_MAX_WAIT_SECONDS = 300
 
 
 def _invalid(message: str) -> RepoForgeError:
@@ -41,6 +48,7 @@ class OperationCommand:
     failure_id: str | None = None
     since_updated_at: str | None = None
     timeout_seconds: int | None = None
+    until: str = "progress"
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,8 +212,16 @@ class OperationCoordinator:
             if command.operation_id is None:
                 raise _invalid("operation wait requires operation_id")
             timeout_seconds = command.timeout_seconds if command.timeout_seconds is not None else 30
-            if not 1 <= timeout_seconds <= 60:
-                raise _invalid("operation wait timeout_seconds must be between 1 and 60")
+            if not 1 <= timeout_seconds <= _MAX_WAIT_SECONDS:
+                raise _invalid(
+                    f"operation wait timeout_seconds must be between 1 and {_MAX_WAIT_SECONDS}"
+                )
+            if command.until not in _WAIT_UNTIL:
+                raise _invalid("operation wait until must be 'progress' or 'terminal'")
+            # 'terminal' asks to be woken by the outcome, not by motion: a profile emits a
+            # progress delta at every step start and completion, so returning on each one
+            # turns "did it pass?" into one round trip per step.
+            wake_on_progress = command.until == "progress"
             reporter: ProgressReporter = progress_reporter or NullProgressReporter()
             current = self.status.read(command.operation_id)
             baseline = command.since_updated_at or current.updated_at
@@ -216,7 +232,7 @@ class OperationCoordinator:
                 self._emit_progress(reporter, current)
                 last_reported_at = current.updated_at
             deadline = time.monotonic() + timeout_seconds
-            while not terminal and not changed_since:
+            while not terminal and not (changed_since and wake_on_progress):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -230,7 +246,10 @@ class OperationCoordinator:
                 if reporter.enabled and current.updated_at != last_reported_at:
                     self._emit_progress(reporter, current)
                     last_reported_at = current.updated_at
-            timed_out = not terminal and not changed_since
+            # In 'terminal' mode a delta is not an answer, so advancing without finishing
+            # is still a timeout -- and the caller needs current evidence to pace the next
+            # call, which for a long gate is the ordinary outcome rather than an anomaly.
+            timed_out = not terminal if not wake_on_progress else not terminal and not changed_since
             self.status.operations.ctx.record_metric(
                 "operation_wait_empty_delta" if timed_out else "operation_wait_delta",
                 success=True,
@@ -243,12 +262,16 @@ class OperationCoordinator:
                     if terminal
                     else (
                         f"Operation {command.operation_id} advanced"
-                        if changed_since
+                        if changed_since and wake_on_progress
                         else f"Operation {command.operation_id} wait timed out"
                     )
                 ),
                 action="wait",
-                operation=(operation_evidence(current) if terminal or changed_since else None),
+                operation=(
+                    operation_evidence(current)
+                    if not wake_on_progress or terminal or changed_since
+                    else None
+                ),
                 operations=[],
                 cancellation_requested=False,
                 truncated=False,

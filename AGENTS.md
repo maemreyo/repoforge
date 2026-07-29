@@ -183,6 +183,26 @@ For safety-policy, state, runner, Git, or write-tool changes, include:
 - real local Git/worktree integration;
 - in-memory MCP schema and invocation coverage.
 
+### A failure is never "transient" because it passed on its own
+
+A step that fails inside a full run and then passes when run alone has not been explained. It has
+been reproduced under one condition and not the other, which is the signature of an
+order-dependent, concurrency-dependent, or resource-dependent failure — exactly the failures that
+only appear in a full run. A standalone pass rules nothing out, so it can never downgrade a gate
+failure to "flaky" or "transient", and it can never be the evidence a change ships on.
+
+Read what the failure already recorded before re-running anything:
+
+- `selectors_unavailable_reason` says why no failing selector was extracted (`output_unrecognized`,
+  `provider_not_supported`, `selectors_truncated`, `artifact_unavailable`) — an empty selector list
+  is not the same as no failure;
+- `output_artifact_reference` addresses the complete persisted stdout and stderr, untruncated;
+- `reproducibility` and the `flaky_suspected` failure class carry the system's own judgement.
+
+If the cause is still unknown after reading those, re-run the *full* suite several times and record
+the hit rate. "Unexplained, N of M full runs" is an honest status. "Transient" is a claim, and it
+needs evidence like any other.
+
 For tool metadata changes, run the direct, indirect, and negative prompts in
 `docs/testing/PLUGIN_TEST_CASES.md`, then record results using
 `docs/testing/TEST_RUN_RECORD.md`.

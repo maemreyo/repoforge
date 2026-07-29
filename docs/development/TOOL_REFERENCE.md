@@ -172,9 +172,9 @@ idempotent for the same inputs.
 
 | Tool | Purpose |
 | --- | --- |
-| `operation` | `get`, `wait`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. `wait` long-polls one exact operation for 1–60 seconds and returns on a progress timestamp change, terminal state, or typed timeout; `since_updated_at` binds the caller's last observed state. Every operation evidence item includes bounded progress unit/message, `suggested_poll_after_s`, and an ETA when step totals and timing evidence permit it. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. Each recovery action is exactly `{kind, precondition, arguments}`; `arguments` validates directly as the input of the named public tool, without a caller-side translation layer. |
+| `operation` | `get`, `wait`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. `wait` long-polls one exact operation for 1–300 seconds and returns on terminal state or typed timeout, plus a progress timestamp change when `until="progress"` (the default); `since_updated_at` binds the caller's last observed state. Every operation evidence item includes bounded progress unit/message, `suggested_poll_after_s`, and an ETA when step totals and timing evidence permit it. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. Each recovery action is exactly `{kind, precondition, arguments}`; `arguments` validates directly as the input of the named public tool, without a caller-side translation layer. |
 | `config_inspect` | Read accepted/active configuration generations, repository facts, pending changes, runtime identity, and health. |
-| `runtime_logs_read` | Read bounded redacted audit or runtime-log evidence with filters and cursors. |
+| `runtime_logs_read` | Read bounded redacted audit or runtime-log evidence with filters and cursors. With `source="failure_artifact"` and an `artifact_reference` it returns the complete persisted stdout and stderr of a failing command — the retrieval a failure whose selectors could not be extracted actually needs. |
 
 `workspace_verify.mode = "plan"` additionally supports a plan lifecycle for structured multi-stage work: `plan_action = "create"` compiles reviewed profiles/diagnostics into a deterministic typed DAG and returns an immutable plan for operator review; `"accept"` admits it after revalidating every binding; `"execute"` runs it through either iteration stages or the final full boundary, returning a durable operation reference immediately (poll with `operation`). Every completed stage writes a private, bounded, content-addressed schema-v2 receipt carrying environment identity schema version and requested/effective policy hashes. A read-only iteration stage may reuse a private content-addressed schema-v2 cache entry only when workspace/input, stage definition, target identity, environment/toolchain, requested/effective policy, lockfiles, configuration, policy, and dependency receipts remain compatible; mutating and final-verification stages are always non-cacheable. A compatible legacy schema-v1 entry explains an `environment_identity_schema_changed` miss but can never grant a hit. Only the accepted plan's final verification-enabled stage can populate `last_verification`.
 
@@ -194,6 +194,24 @@ Re-sending the mutation instead risks applying it twice; the exact-state precond
 (`expected_workspace_fingerprint`, `expected_head_sha`) will usually refuse the second attempt, but
 a refusal is not evidence about the first. Read the operation. When a response *is* received, its
 `outcome` carries the `operation_id` and `receipt_id` for exactly this purpose -- record them.
+
+#### Waiting without polling
+
+`wait` takes `until`, and the choice decides how many round trips a long operation costs:
+
+- `until="terminal"` returns only when the operation finishes. A timeout is the ordinary outcome
+  for a long gate, so the response still carries current state, `suggested_poll_after_s`, and an
+  ETA when available — call again with the same arguments. Use this whenever the only question is
+  the outcome.
+- `until="progress"` (default, unchanged) returns on the next durable progress delta. Background
+  profile execution emits one at each step start and completion, so an eight-step gate wakes the
+  caller sixteen times. Use it only when intermediate steps change what you do next.
+
+`timeout_seconds` accepts 1–300. The ceiling is set by the client, not by RepoForge: a held request
+dies with the connector. Progress notifications keep the open request alive while work continues,
+and `since_updated_at` makes a dropped wait resumable, so a re-issued `wait` never loses its place.
+Spinning on `action="get"` is always the wrong shape — it burns a round trip per sample and learns
+nothing `wait` would not have delivered.
 
 A wait response sets `changed_since=true` when durable progress advanced, or returns terminal evidence immediately. A bounded timeout sets `timed_out=true` while still returning the complete slim current operation evidence and pacing hint; it never returns an empty payload. Background profile execution emits one progress update at each step start and completion, not per test, so `updated_at` acts as a liveness heartbeat without unbounded write volume.
 

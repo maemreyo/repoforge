@@ -1818,6 +1818,66 @@ class FailureEvidenceWorkspaceIdentity(StrictModel):
     policy_hash: Sha256
 
 
+class RuntimeLogSource(str, Enum):
+    AUDIT = "audit"
+    RUNTIME = "runtime"
+    FAILURE_ARTIFACT = "failure_artifact"
+
+
+# Moved above the failure recovery-action union: `RuntimeLogsReadRecoveryAction`
+# embeds this input model, and the union is a runtime expression, so the model must
+# already exist by the time it is evaluated.
+
+
+class RuntimeLogsReadInput(StrictModel):
+    source: RuntimeLogSource = RuntimeLogSource.AUDIT
+    limit: int = Field(default=50, ge=1, le=200)
+    action: str | None = Field(default=None, max_length=160)
+    only_failed: bool = False
+    min_duration_ms: float | None = Field(default=None, ge=0, le=86_400_000)
+    start_time: str | None = Field(default=None, max_length=80)
+    end_time: str | None = Field(default=None, max_length=80)
+    cursor: Cursor | None = None
+    artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> RuntimeLogsReadInput:
+        parsed: dict[str, datetime] = {}
+        for field, value in (("start_time", self.start_time), ("end_time", self.end_time)):
+            if value is None:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+            if timestamp.tzinfo is None:
+                raise ValueError(f"{field} must include a timezone offset")
+            parsed[field] = timestamp
+        if (
+            "start_time" in parsed
+            and "end_time" in parsed
+            and parsed["start_time"] > parsed["end_time"]
+        ):
+            raise ValueError("start_time must not be after end_time")
+        if self.source is RuntimeLogSource.FAILURE_ARTIFACT:
+            if self.artifact_reference is None:
+                raise ValueError("failure_artifact source requires artifact_reference")
+            if (
+                self.action is not None
+                or self.only_failed
+                or self.min_duration_ms is not None
+                or self.start_time is not None
+                or self.end_time is not None
+            ):
+                raise ValueError("failure_artifact source does not accept log filters")
+        elif self.artifact_reference is not None:
+            raise ValueError("artifact_reference is only valid for failure_artifact source")
+        return self
+
+
 class OperationRecoveryAction(StrictModel):
     kind: Literal["operation"]
     precondition: str = Field(min_length=1, max_length=500)
@@ -1854,13 +1914,27 @@ class ConfigInspectRecoveryAction(StrictModel):
     arguments: ConfigInspectInput
 
 
+class RuntimeLogsReadRecoveryAction(StrictModel):
+    """Read the complete persisted stdout and stderr of the failing command.
+
+    The excerpt on failure evidence is bounded, and a failure whose selectors could not
+    be extracted is exactly the one whose full output the caller needs. This action names
+    the retrieval so nobody has to re-run a suite to recover what was already recorded.
+    """
+
+    kind: Literal["runtime_logs_read"]
+    precondition: str = Field(min_length=1, max_length=500)
+    arguments: RuntimeLogsReadInput
+
+
 FailureRecoveryAction = Annotated[
     OperationRecoveryAction
     | WorkspaceStatusRecoveryAction
     | WorkspaceVerifyRecoveryAction
     | WorkspaceRefreshRecoveryAction
     | WorkspaceMutateRecoveryAction
-    | ConfigInspectRecoveryAction,
+    | ConfigInspectRecoveryAction
+    | RuntimeLogsReadRecoveryAction,
     Field(discriminator="kind"),
 ]
 
@@ -1935,7 +2009,17 @@ class OperationInput(StrictModel):
     cursor: Cursor | None = None
     failure_id: Identifier | None = None
     since_updated_at: str | None = Field(default=None, max_length=80)
-    timeout_seconds: int | None = Field(default=None, ge=1, le=60)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+    until: Literal["progress", "terminal"] = Field(
+        default="progress",
+        description=(
+            "What ends the wait. 'progress' returns on the next durable progress delta -- "
+            "one per step start and completion -- so a multi-step gate wakes the caller "
+            "many times. 'terminal' returns only when the operation finishes, or on "
+            "timeout with the current evidence and a pacing hint; prefer it when the only "
+            "question is the outcome."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> OperationInput:
@@ -1956,6 +2040,8 @@ class OperationInput(StrictModel):
             raise ValueError(
                 "since_updated_at and timeout_seconds are only valid for operation wait"
             )
+        if self.action is not OperationAction.WAIT and self.until != "progress":
+            raise ValueError("until is only valid for operation wait")
         if self.action is OperationAction.FAILURE_EVIDENCE and self.failure_id is None:
             raise ValueError("operation failure_evidence requires failure_id")
         if self.action is not OperationAction.FAILURE_EVIDENCE and self.failure_id is not None:
@@ -2133,12 +2219,6 @@ class ConfigInspectOutput(ToolResponse):
     runtime_health: RuntimeHealthView | None = None
 
 
-class RuntimeLogSource(str, Enum):
-    AUDIT = "audit"
-    RUNTIME = "runtime"
-    FAILURE_ARTIFACT = "failure_artifact"
-
-
 class RuntimeTimestampState(str, Enum):
     OBSERVED = "observed"
     UNAVAILABLE = "unavailable"
@@ -2173,55 +2253,6 @@ class RuntimeLogEntry(StrictModel):
     trace_id: str | None = Field(default=None, max_length=160)
     workspace_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     repository_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-
-
-class RuntimeLogsReadInput(StrictModel):
-    source: RuntimeLogSource = RuntimeLogSource.AUDIT
-    limit: int = Field(default=50, ge=1, le=200)
-    action: str | None = Field(default=None, max_length=160)
-    only_failed: bool = False
-    min_duration_ms: float | None = Field(default=None, ge=0, le=86_400_000)
-    start_time: str | None = Field(default=None, max_length=80)
-    end_time: str | None = Field(default=None, max_length=80)
-    cursor: Cursor | None = None
-    artifact_reference: str | None = Field(
-        default=None,
-        pattern=r"^failure-output:[a-f0-9]{64}$",
-    )
-
-    @model_validator(mode="after")
-    def validate_time_range(self) -> RuntimeLogsReadInput:
-        parsed: dict[str, datetime] = {}
-        for field, value in (("start_time", self.start_time), ("end_time", self.end_time)):
-            if value is None:
-                continue
-            try:
-                timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
-            if timestamp.tzinfo is None:
-                raise ValueError(f"{field} must include a timezone offset")
-            parsed[field] = timestamp
-        if (
-            "start_time" in parsed
-            and "end_time" in parsed
-            and parsed["start_time"] > parsed["end_time"]
-        ):
-            raise ValueError("start_time must not be after end_time")
-        if self.source is RuntimeLogSource.FAILURE_ARTIFACT:
-            if self.artifact_reference is None:
-                raise ValueError("failure_artifact source requires artifact_reference")
-            if (
-                self.action is not None
-                or self.only_failed
-                or self.min_duration_ms is not None
-                or self.start_time is not None
-                or self.end_time is not None
-            ):
-                raise ValueError("failure_artifact source does not accept log filters")
-        elif self.artifact_reference is not None:
-            raise ValueError("artifact_reference is only valid for failure_artifact source")
-        return self
 
 
 class RuntimeLogsReadOutput(ToolResponse):

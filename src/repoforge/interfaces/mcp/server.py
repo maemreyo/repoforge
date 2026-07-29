@@ -271,6 +271,12 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "workspace_pr_evidence": "Read bounded overview, delta, check, review, comment, or failure evidence for the workspace PR.",
     "operation": (
         "Get, wait for progress, list, cancel, or read failure evidence for durable operations. "
+        "When the only question is the outcome, wait with until='terminal' and the largest "
+        "timeout_seconds you can afford: it returns when the operation finishes instead of once "
+        "per step, which is the difference between one call and dozens on a long gate. The "
+        "default until='progress' returns on every progress delta -- use it only when you act on "
+        "intermediate steps. On a timeout, call again with the same arguments; the response "
+        "carries current state and suggested_poll_after_s. Never spin on action='get'. "
         "Also the way to answer 'did my write land?' after a lost connection: every mutating "
         "call is a durable operation, so list with scope='workspace:<workspace_id>' to find it "
         "by kind (the tool name) and state, then get its operation_id to read the durable "
