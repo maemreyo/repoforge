@@ -240,7 +240,15 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "no_match means no repository is enrolled yet."
     ),
     "repo_policy": "Preview or apply an exact-state-bound repository policy proposal through the reviewed generation pipeline.",
-    "workspace_create": "Create one worktree for a task: a fresh ai/* branch, or -- with adopt_branch -- an existing branch the instruction named.",
+    "workspace_create": (
+        "Create one worktree for a task: a fresh ai/* branch, or -- with adopt_branch -- an "
+        "existing branch the instruction named. This writes: it cuts a branch and materializes "
+        "a worktree on disk, with no preview mode and no dry run, from repo_id and task_slug "
+        "alone. Call it only when you intend that. To see what already exists, or to check that "
+        "this surface is reachable, use workspace_list or workspace_status -- neither creates "
+        "anything. Pass idempotency_key when resuming, so a retry rejoins the same workspace "
+        "instead of cutting a second one."
+    ),
     "workspace_remove": "Remove a clean local worktree without touching remote data.",
     "workspace_list": "List bounded workspace lifecycle and cleanup evidence.",
     "workspace_refresh": "Preview or apply a merge-based refresh against the configured remote base.",
@@ -261,7 +269,13 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
     "workspace_pr": "Create, update, comment on, watch, or otherwise manage the workspace draft pull request.",
     "workspace_pr_evidence": "Read bounded overview, delta, check, review, comment, or failure evidence for the workspace PR.",
-    "operation": "Get, wait for progress, list, cancel, or read failure evidence for durable operations.",
+    "operation": (
+        "Get, wait for progress, list, cancel, or read failure evidence for durable operations. "
+        "Also the way to answer 'did my write land?' after a lost connection: every mutating "
+        "call is a durable operation, so list with scope='workspace:<workspace_id>' to find it "
+        "by kind (the tool name) and state, then get its operation_id to read the durable "
+        "result. Do this instead of re-sending a mutation whose response you never received."
+    ),
     "config_inspect": "Inspect accepted and active configuration, effective policy, pending changes, and runtime identity.",
     "runtime_logs_read": "Read bounded redacted audit or managed-runtime log entries with filters and cursors.",
 }

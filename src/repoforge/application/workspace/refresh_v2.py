@@ -1452,7 +1452,7 @@ class WorkspaceRefreshV2:
             if first_output_identity is None:
                 raise SecurityError("Cannot compute regenerated output identity")
             self.ctx.git.stage_paths(workspace, repo, regenerated_paths)
-            self._assert_no_unstaged_regeneration_effects(workspace)
+            self._assert_no_unstaged_regeneration_effects(workspace, repo, commands)
 
             run_commands(session)
             second_paths = observed_generated_paths()
@@ -1466,7 +1466,7 @@ class WorkspaceRefreshV2:
                     f"{first_output_identity}, second output {second_output_identity}"
                 )
             self.ctx.git.stage_paths(workspace, repo, second_paths)
-            self._assert_no_unstaged_regeneration_effects(workspace)
+            self._assert_no_unstaged_regeneration_effects(workspace, repo, commands)
 
         receipt = RefreshRegenerationReceipt(
             commands=commands,
@@ -1522,12 +1522,60 @@ class WorkspaceRefreshV2:
             if target.is_symlink() or not target.is_file():
                 raise SecurityError(f"Regenerated output must be a regular file: {path}")
 
-    def _assert_no_unstaged_regeneration_effects(self, workspace: Path) -> None:
+    def _assert_no_unstaged_regeneration_effects(
+        self,
+        workspace: Path,
+        repo: Any,
+        commands: tuple[tuple[str, ...], ...],
+    ) -> None:
         unstaged = self._unstaged_paths(self.ctx.git.status_porcelain(workspace))
-        if unstaged:
-            raise SecurityError(
-                "Regeneration command left undeclared or unstaged changes: " + ", ".join(unstaged)
+        if not unstaged:
+            return
+        raise SecurityError(
+            "Regeneration command left undeclared or unstaged changes: " + ", ".join(unstaged),
+            safe_next_action=self._undeclared_path_remedy(repo, commands, unstaged),
+        )
+
+    @staticmethod
+    def _undeclared_path_remedy(
+        repo: Any,
+        commands: tuple[tuple[str, ...], ...],
+        unstaged: tuple[str, ...],
+    ) -> str:
+        """Name both ways out of an undeclared regeneration effect.
+
+        The transaction is right to fail closed, but a bare refusal leaves the caller
+        with no in-band move, and an agent that cannot see one will reach for
+        hand-editing the artifact this guard exists to protect. RepoForge cannot tell a
+        stray write from a missing declaration -- that is the operator's call -- so name
+        both readings and, for the second, the exact block someone has to add.
+        """
+        undeclared = tuple(
+            path for path in unstaged if generated_path_rule_for(repo.generated_paths, path) is None
+        )
+        if not undeclared:
+            return (
+                "Every unstaged path is already declared generated, so the regeneration command "
+                "wrote outside the rules that name it. Re-run the command locally and reconcile "
+                "its declared outputs before refreshing again."
             )
+        command = " ".join(commands[0]) if commands else "<regeneration command>"
+        repo_id = getattr(repo, "repo_id", "<repo-id>")
+        blocks = "\n".join(
+            f'[[repositories.{repo_id}.generated_paths]]\nglob = "{path}"\n'
+            f"regeneration_command = {list(commands[0]) if commands else []!r}"
+            for path in undeclared
+        )
+        return (
+            f"`{command}` also writes {', '.join(undeclared)}, which this repository does not "
+            "declare generated, so the refresh transaction cannot attribute the write to the "
+            "reviewed regeneration. Either the command should not be writing it -- fix the "
+            "command -- or the repository should declare it. Do not hand-edit or hand-compute the "
+            "artifact to get past this. Declaring it is an operator config change (`rf config "
+            "edit`, `rf repo refresh <id> --accept`, `rf runtime reload`), not one the model "
+            f"applies on its own authority:\n{blocks}\n"
+            "Once the new generation is active, re-run workspace_refresh preview."
+        )
 
     @staticmethod
     def _path_identity(

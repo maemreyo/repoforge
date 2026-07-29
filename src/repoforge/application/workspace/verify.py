@@ -17,6 +17,7 @@ from ...domain.errors import (
     SecurityError,
     WorkspaceError,
 )
+from ...domain.excerpts import bound_command_excerpt
 from ...domain.filesystem_transaction import CreateFile, TransactionPlan, WriteFile
 from ...domain.operation_task import (
     TERMINAL_OPERATION_STATES,
@@ -299,7 +300,7 @@ def _command_evidence(raw: dict[str, object]) -> dict[str, object]:
         "argv": argv,
         "returncode": returncode,
         "duration_ms": float(duration),
-        "output_excerpt": excerpt[:12_000],
+        "output_excerpt": bound_command_excerpt(excerpt, 12_000),
     }
 
 

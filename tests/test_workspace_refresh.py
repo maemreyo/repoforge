@@ -1115,7 +1115,7 @@ def test_v2_refresh_rejects_generator_side_effects_and_rolls_back(
         expected_fingerprint=str(before["workspace_fingerprint"]),
     )
 
-    with pytest.raises(SecurityError, match="undeclared or unstaged changes"):
+    with pytest.raises(SecurityError, match="undeclared or unstaged changes") as caught:
         service.workspace_refresh_v2(
             workspace_id,
             action="apply",
@@ -1124,6 +1124,17 @@ def test_v2_refresh_rejects_generator_side_effects_and_rolls_back(
             plan_token=str(preview["plan_token"]),
             resolutions=[],
         )
+
+    # A bare refusal here is what pushed a real agent into hand-computing the artifact
+    # the guard protects: the only legitimate way forward is an operator config change,
+    # so the refusal has to name it and say whose call it is.
+    remedy = caught.value.safe_next_action or ""
+    assert "README.md" in remedy
+    assert "[[repositories.demo.generated_paths]]" in remedy
+    assert 'glob = "README.md"' in remedy
+    assert "python3" in remedy
+    assert "rf config edit" in remedy
+    assert "hand-edit" in remedy
 
     restored = service.workspace_status(workspace_id)
     assert restored["head_sha"] == before["head_sha"]

@@ -71,6 +71,7 @@ class RepositoryLister:
                         name: {
                             "description": p.description,
                             "verification": p.verification,
+                            "model_invocable": p.model_invocable,
                             "commands": [list(c) for c in p.commands],
                             "working_directory": p.working_directory,
                         }

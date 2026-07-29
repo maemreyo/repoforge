@@ -31,6 +31,9 @@ class RepositoryContextResult:
     scripts: dict[str, str]
     instruction_files: list[dict[str, Any]]
     profiles: list[str]
+    # A flat name list let a model pick a profile the reviewed config reserves for the
+    # operator, and learn about it only from PROFILE_NOT_MODEL_INVOCABLE after the call.
+    operator_only_profiles: list[str]
     default_verification_profile: str | None
     diagnostics: list[dict[str, Any]]
     diagnostic_pack_suggestions: list[dict[str, Any]]
@@ -184,6 +187,7 @@ class RepositoryContextReader:
             scripts,
             instructions,
             sorted(repo.profiles),
+            sorted(name for name, profile in repo.profiles.items() if not profile.model_invocable),
             repo.default_verification_profile,
             diagnostics,
             pack_suggestions,

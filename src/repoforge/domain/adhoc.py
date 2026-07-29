@@ -255,6 +255,49 @@ def _adhoc_error(message: str, code: ErrorCode, *, safe_next_action: str) -> Rep
     )
 
 
+def _argv_element_violation(element: object) -> tuple[str, str] | None:
+    """Name why one argv element is unacceptable, or ``None`` when it is fine.
+
+    One message per cause. A single message covering "empty, oversized, or
+    control-character" forces the caller to re-derive which of the three it hit, and a
+    newline in particular reads as neither of the other two.
+    """
+    if not isinstance(element, str):
+        return (
+            f"must be a string, got {type(element).__name__}",
+            "Pass each argv element as a separate string; RepoForge never accepts a shell string.",
+        )
+    if not element:
+        return (
+            "is empty",
+            "Drop the empty element; an argv element must carry an actual token.",
+        )
+    if len(element) > MAX_ADHOC_ARGV_ELEMENT_LENGTH:
+        return (
+            f"is {len(element)} characters; the limit is {MAX_ADHOC_ARGV_ELEMENT_LENGTH}",
+            f"Keep every argv element at most {MAX_ADHOC_ARGV_ELEMENT_LENGTH} characters. A "
+            "program too long to pass inline belongs in a file the runner reads.",
+        )
+    if "\n" in element or "\r" in element:
+        return (
+            "contains a newline",
+            "Ad-hoc argv carries one command, not a script: pass single-line arguments, or put "
+            "a multi-line program in a file and pass that path.",
+        )
+    if "\x00" in element:
+        return (
+            "contains a NUL byte",
+            "Remove the NUL byte; it cannot be passed to a process argument.",
+        )
+    for character in element:
+        if ord(character) < 32:
+            return (
+                f"contains the control character U+{ord(character):04X}",
+                "Keep every argv element printable.",
+            )
+    return None
+
+
 def validate_adhoc_argv(argv: tuple[str, ...], runners: tuple[str, ...]) -> tuple[str, ...]:
     """Validate one ad-hoc argv list against the repository's runner allowlist.
 
@@ -267,21 +310,14 @@ def validate_adhoc_argv(argv: tuple[str, ...], runners: tuple[str, ...]) -> tupl
             ErrorCode.ADHOC_ARGV_INVALID,
             safe_next_action="Supply a bounded argv list; split a longer command into multiple ad-hoc runs.",
         )
-    for element in argv:
-        if (
-            not isinstance(element, str)
-            or not element
-            or len(element) > MAX_ADHOC_ARGV_ELEMENT_LENGTH
-            or "\x00" in element
-            or any(ord(character) < 32 for character in element)
-        ):
+    for index, element in enumerate(argv):
+        violation = _argv_element_violation(element)
+        if violation is not None:
+            reason, remedy = violation
             raise _adhoc_error(
-                "Ad-hoc argv contains an empty, oversized, or control-character element",
+                f"Ad-hoc argv[{index}] {reason}",
                 ErrorCode.ADHOC_ARGV_INVALID,
-                safe_next_action=(
-                    f"Keep every argv element non-empty, printable, and at most "
-                    f"{MAX_ADHOC_ARGV_ELEMENT_LENGTH} characters."
-                ),
+                safe_next_action=remedy,
             )
     runner = argv[0]
     if "/" in runner or "\\" in runner:
