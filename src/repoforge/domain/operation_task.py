@@ -260,8 +260,11 @@ def operation_record_inconsistencies(task: OperationTask) -> tuple[str, ...]:
             diagnostics.append("terminal_progress_incomplete")
         if task.progress_message != "Completed":
             diagnostics.append("terminal_message_mismatch")
-    elif terminal and task.progress_message is not None:
-        diagnostics.append("terminal_message_mismatch")
+    # A non-success terminal record may carry its last progress message. This deliberately
+    # reverses the older invariant that required it to be absent: the reason to clear it
+    # was that a "running ..." string on a finished record could be misread as liveness,
+    # but `state` and `phase` both say otherwise, and the cost of the rule was losing how
+    # far the work got on exactly the records where that question is asked first.
     if not terminal and task.result_reference is not None:
         diagnostics.append("nonterminal_result_reference")
     if task.state in {OperationState.FAILED, OperationState.EXPIRED, OperationState.ORPHANED}:
@@ -458,8 +461,11 @@ def transition_operation(
         if task.progress_total is not None:
             progress_current = task.progress_total
         progress_message = "Completed"
-    elif terminal:
-        progress_message = None
+    # A failed, cancelled or orphaned operation KEEPS its last progress. Clearing it threw
+    # away the one fact the reader wants first -- how far it got -- at exactly the moment
+    # it became useful: a 30-minute profile that hit its timeout left a record saying only
+    # that it failed. `state` already says the work is not running, so the message is read
+    # as the last observed position, not a claim of liveness.
     updated = replace(
         task,
         state=new_state,

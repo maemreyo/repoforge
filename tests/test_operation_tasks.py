@@ -976,6 +976,58 @@ def test_terminal_success_completes_known_progress_and_phase() -> None:
     assert succeeded.record_diagnostics == ()
 
 
+def test_terminal_failure_keeps_the_last_observed_progress() -> None:
+    """Where it got to is the first thing a reader wants, and failure is when it matters.
+
+    Clearing `progress_message` on a non-success terminal state meant a profile that ran
+    for thirty minutes and hit its timeout left a record saying only that it failed.
+    `state` already says the work is not running, so the message reads as the last
+    observed position rather than a claim of liveness.
+    """
+    running = transition_operation(_task(), OperationState.RUNNING, now="2026-07-21T00:00:01+00:00")
+    progressed = update_operation_progress(
+        running,
+        phase="testing",
+        current=2,
+        total=5,
+        unit="steps",
+        message="running business_tests (step 3/5, elapsed 900s)",
+        now="2026-07-21T00:00:02+00:00",
+    )
+
+    failed = transition_operation(
+        progressed,
+        OperationState.FAILED,
+        now="2026-07-21T00:00:03+00:00",
+        error_code="COMMAND_TIMEOUT",
+    )
+
+    assert failed.progress_message == "running business_tests (step 3/5, elapsed 900s)"
+    assert failed.progress_current == 2
+    assert failed.error_code == "COMMAND_TIMEOUT"
+
+
+def test_terminal_cancellation_keeps_the_last_observed_progress() -> None:
+    running = transition_operation(_task(), OperationState.RUNNING, now="2026-07-21T00:00:01+00:00")
+    progressed = update_operation_progress(
+        running,
+        phase="typecheck",
+        current=4,
+        total=7,
+        unit="steps",
+        message="running typecheck (step 5/7, elapsed 12s)",
+        now="2026-07-21T00:00:02+00:00",
+    )
+
+    cancelled = transition_operation(
+        progressed,
+        OperationState.CANCELLED,
+        now="2026-07-21T00:00:03+00:00",
+    )
+
+    assert cancelled.progress_message == "running typecheck (step 5/7, elapsed 12s)"
+
+
 def test_legacy_v1_record_migrates_without_fabricating_progress(tmp_path: Path) -> None:
     store = JsonOperationStore(tmp_path, InMemoryLockManager())
     operation_id = "op-000000000000000000000002"
