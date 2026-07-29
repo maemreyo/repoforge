@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,11 +19,18 @@ from ...domain.github_api_identity import (
     GitHubAppInstallationSpec,
     StoredGhAccountSpec,
 )
+from ...domain.github_capability_preflight import (
+    GitHubCapabilityPreflightReport,
+    GitHubCapabilityPreflightRequest,
+    GitHubOperationCapability,
+    authorize_github_capabilities,
+)
 from ...domain.repository_auth_broker import (
     AuthEnvironmentBinding,
     AuthMaterial,
     AuthMaterialState,
     EphemeralSecret,
+    ProcessAuthContext,
 )
 from ...domain.repository_identity import (
     ActorClass,
@@ -39,8 +47,11 @@ from ...ports.github_api_token import (
     GitHubAppJwtSigner,
     StoredGhAccountTokenSource,
 )
+from ...ports.github_capability_preflight import GitHubCapabilityPreflightGateway
 
 _SAFE_ENVIRONMENT_KEYS = ("HOME", "PATH", "LANG", "LC_ALL")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_REFRESHABLE_PREFLIGHT_METADATA = frozenset({"github_preflight_observed_at"})
 
 
 class _Clock(Protocol):
@@ -122,6 +133,20 @@ def _provider_error(code: ErrorCode, message: str, *, retryable: bool = False) -
     )
 
 
+def _revision(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a lowercase SHA-256")
+    return value
+
+
+def _refresh_metadata_identity(
+    values: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (key, value) for key, value in values if key not in _REFRESHABLE_PREFLIGHT_METADATA
+    )
+
+
 def _release_grant(
     grant: GitHubApiTokenGrant,
     *,
@@ -180,6 +205,10 @@ class GitHubApiAuthProvider:
         stored_source: StoredGhAccountTokenSource,
         app_issuer: GitHubAppInstallationTokenIssuer,
         verifier: GitHubApiIdentityVerifier,
+        capability_preflight: GitHubCapabilityPreflightGateway,
+        cwd: Path,
+        config_revision: str,
+        policy_revision: str,
     ) -> None:
         self._stored_accounts = {item.reference_id: item for item in stored_accounts}
         self._app_installations = {item.reference_id: item for item in app_installations}
@@ -193,6 +222,12 @@ class GitHubApiAuthProvider:
         self._stored_source = stored_source
         self._app_issuer = app_issuer
         self._verifier = verifier
+        self._capability_preflight = capability_preflight
+        if not isinstance(cwd, Path) or not cwd.is_absolute():
+            raise ValueError("cwd must be an absolute Path")
+        self._cwd = cwd
+        self._config_revision = _revision(config_revision, "config_revision")
+        self._policy_revision = _revision(policy_revision, "policy_revision")
         self._issued: dict[str, GitHubApiTokenGrant] = {}
         self._lock = Lock()
 
@@ -326,6 +361,7 @@ class GitHubApiAuthProvider:
         profile_id: str,
         actor_class: ActorClass,
         host: str,
+        preflight: GitHubCapabilityPreflightReport,
     ) -> AuthMaterial:
         digest = grant.token_digest()
         material_id = (
@@ -338,6 +374,12 @@ class GitHubApiAuthProvider:
             ("github_kind", grant.kind.value),
             ("github_host", host),
             ("repository_id", grant.repository_id),
+            ("github_preflight_evidence_digest", preflight.evidence_digest),
+            ("github_capability_digest", preflight.capability_digest),
+            ("github_permission_digest", preflight.permission_digest),
+            ("github_preflight_observed_at", preflight.observed_at),
+            ("config_revision", preflight.config_revision),
+            ("policy_revision", preflight.policy_revision),
         ]
         if grant.installation_id is not None:
             metadata.append(("installation_id", grant.installation_id))
@@ -360,6 +402,71 @@ class GitHubApiAuthProvider:
             self._issued[material_id] = grant
         return material
 
+    def _preflight(
+        self,
+        *,
+        grant: GitHubApiTokenGrant,
+        profile_id: str,
+        host: str,
+    ) -> GitHubCapabilityPreflightReport:
+        token = grant.token.reveal()
+        auth_context = ProcessAuthContext(
+            profile_id=profile_id,
+            material_id=grant.grant_id,
+            target_kind=AuthTargetKind.REPOSITORY,
+            target_id=grant.repository_id,
+            environment=(("GH_TOKEN", token),),
+            _secret_values=(token,),
+        )
+        request = GitHubCapabilityPreflightRequest(
+            host=host,
+            actor_id=grant.actor_id,
+            repository_id=grant.repository_id,
+            installation_id=grant.installation_id,
+            capability_ids=tuple(
+                GitHubOperationCapability(value) for value in grant.capability_ids
+            ),
+            permission_ids=grant.permission_ids,
+            config_revision=self._config_revision,
+            policy_revision=self._policy_revision,
+            observed_at=grant.issued_at,
+        )
+        app_issuer = (
+            self._app_issuer if grant.kind is GitHubApiIdentityKind.APP_INSTALLATION else None
+        )
+        try:
+            report = self._capability_preflight.preflight(
+                self._cwd,
+                request,
+                auth_context,
+            )
+            if (
+                report.host != request.host
+                or report.actor_id != request.actor_id
+                or report.repository_id != request.repository_id
+                or report.installation_id != request.installation_id
+                or set(report.capability_ids) != set(request.capability_ids)
+                or set(report.permission_ids) != set(request.permission_ids)
+                or report.config_revision != request.config_revision
+                or report.policy_revision != request.policy_revision
+                or report.observed_at != request.observed_at
+            ):
+                raise _provider_error(
+                    ErrorCode.GITHUB_API_PERMISSION_DENIED,
+                    "GitHub capability preflight changed a reviewed identity field.",
+                )
+            return authorize_github_capabilities(report)
+        except RepoForgeError:
+            _release_grant(grant, app_issuer=app_issuer)
+            raise
+        except Exception:
+            _release_grant(grant, app_issuer=app_issuer)
+            raise _provider_error(
+                ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
+                "GitHub capability preflight failed without usable evidence.",
+                retryable=True,
+            ) from None
+
     def resolve(self, reference: OpaqueCredentialReference) -> AuthMaterial | None:
         if reference.scheme == "gh-account":
             stored_spec = self._stored_accounts.get(reference.reference_id)
@@ -381,11 +488,17 @@ class GitHubApiAuthProvider:
                 permission_ids=None,
                 installation_id=None,
             )
+            preflight = self._preflight(
+                grant=grant,
+                profile_id=stored_spec.profile_id,
+                host=stored_spec.host,
+            )
             return self._material(
                 grant=grant,
                 profile_id=stored_spec.profile_id,
                 actor_class=stored_spec.actor_class,
                 host=stored_spec.host,
+                preflight=preflight,
             )
         if reference.scheme == "github-app":
             app_spec = self._app_installations.get(reference.reference_id)
@@ -407,11 +520,17 @@ class GitHubApiAuthProvider:
                 permission_ids=app_spec.permission_ids,
                 installation_id=app_spec.installation_id,
             )
+            preflight = self._preflight(
+                grant=grant,
+                profile_id=app_spec.profile_id,
+                host=app_spec.host,
+            )
             return self._material(
                 grant=grant,
                 profile_id=app_spec.profile_id,
                 actor_class=ActorClass.AUTONOMOUS_AGENT,
                 host=app_spec.host,
+                preflight=preflight,
             )
         return None
 
@@ -430,7 +549,8 @@ class GitHubApiAuthProvider:
             or material.target_kind is not previous.target_kind
             or material.target_id != previous.target_id
             or material.capability_ids != previous.capability_ids
-            or material.provider_metadata != previous.provider_metadata
+            or _refresh_metadata_identity(material.provider_metadata)
+            != _refresh_metadata_identity(previous.provider_metadata)
         ):
             self.release(material)
             raise _provider_error(

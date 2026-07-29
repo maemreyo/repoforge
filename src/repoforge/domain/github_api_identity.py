@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
+from .github_capability_preflight import GitHubOperationCapability
 from .repository_auth_broker import EphemeralSecret
 from .repository_identity import ActorClass
 
@@ -34,6 +35,19 @@ def _unique_ids(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
     normalized = tuple(_safe_id(value, field_name) for value in values)
     if len(set(normalized)) != len(normalized):
         raise ValueError(f"{field_name} entries must be unique")
+    return normalized
+
+
+def _operation_capabilities(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = _unique_ids(values, "capability_ids")
+    if not normalized:
+        raise ValueError("capability_ids must be a non-empty tuple")
+    try:
+        tuple(GitHubOperationCapability(value) for value in normalized)
+    except ValueError:
+        raise ValueError(
+            "capability_ids must contain exact GitHub operation capability IDs"
+        ) from None
     return normalized
 
 
@@ -105,7 +119,7 @@ class StoredGhAccountSpec:
         ):
             raise ValueError("stored account actor_class must be human-operated or delegated-human")
         _safe_id(self.repository_id, "repository_id")
-        _unique_ids(self.capability_ids, "capability_ids")
+        _operation_capabilities(self.capability_ids)
         if (
             not isinstance(self.lease_seconds, int)
             or isinstance(self.lease_seconds, bool)
@@ -134,7 +148,7 @@ class GitHubAppInstallationSpec:
         _safe_id(self.installation_id, "installation_id")
         _safe_id(self.actor_id, "actor_id")
         _safe_id(self.repository_id, "repository_id")
-        _unique_ids(self.capability_ids, "capability_ids")
+        _operation_capabilities(self.capability_ids)
         _permission_pairs(self.permissions)
         if not self.permissions:
             raise ValueError("GitHub App installation requires explicit minimal permissions")
@@ -168,7 +182,7 @@ class GitHubApiTokenGrant:
             raise ValueError("token must be an EphemeralSecret")
         _safe_id(self.actor_id, "actor_id")
         _safe_id(self.repository_id, "repository_id")
-        _unique_ids(self.capability_ids, "capability_ids")
+        _operation_capabilities(self.capability_ids)
         _permissions(self.permission_ids)
         issued = _timestamp(self.issued_at, "issued_at")
         expires = _timestamp(self.expires_at, "expires_at")
@@ -217,7 +231,7 @@ class GitHubApiIdentityProof:
     def __post_init__(self) -> None:
         _safe_id(self.actor_id, "actor_id")
         _safe_id(self.repository_id, "repository_id")
-        _unique_ids(self.capability_ids, "capability_ids")
+        _operation_capabilities(self.capability_ids)
         _permissions(self.permission_ids)
         if self.installation_id is not None:
             _safe_id(self.installation_id, "installation_id")

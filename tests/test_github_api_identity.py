@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +26,25 @@ from repoforge.domain.github_api_identity import (
     GitHubAppInstallationSpec,
     StoredGhAccountSpec,
 )
-from repoforge.domain.repository_auth_broker import EphemeralSecret
+from repoforge.domain.github_capability_preflight import (
+    GitHubCapabilityEvidenceState,
+    GitHubCapabilityPreflightReport,
+    GitHubCapabilityPreflightRequest,
+    GitHubCapabilityResult,
+    GitHubOperationCapability,
+)
+from repoforge.domain.repository_auth_broker import EphemeralSecret, ProcessAuthContext
 from repoforge.domain.repository_identity import ActorClass, OpaqueCredentialReference
 from repoforge.ports.command import CommandResult
 from repoforge.testing.fakes import FixedClock
+
+_CONFIG = "a" * 64
+_POLICY = "b" * 64
+_CAPABILITIES = (
+    GitHubOperationCapability.CONTENTS_READ.value,
+    GitHubOperationCapability.ISSUES_WRITE.value,
+    GitHubOperationCapability.PULL_REQUESTS_WRITE.value,
+)
 
 
 class StoredSource:
@@ -66,14 +82,17 @@ class AppIssuer:
 
 
 class Verifier:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.proofs: dict[str, GitHubApiIdentityProof] = {}
         self.failure: Exception | None = None
+        self.events = events
 
     def verify_stored_account(
         self, spec: StoredGhAccountSpec, grant: GitHubApiTokenGrant
     ) -> GitHubApiIdentityProof:
         del grant
+        if self.events is not None:
+            self.events.append("verify_stored")
         if self.failure is not None:
             raise self.failure
         return self.proofs[spec.reference_id]
@@ -82,9 +101,62 @@ class Verifier:
         self, spec: GitHubAppInstallationSpec, grant: GitHubApiTokenGrant
     ) -> GitHubApiIdentityProof:
         del grant
+        if self.events is not None:
+            self.events.append("verify_app")
         if self.failure is not None:
             raise self.failure
         return self.proofs[spec.reference_id]
+
+
+class PreflightGateway:
+    def __init__(
+        self,
+        *,
+        events: list[str] | None = None,
+        detail_digests: list[str] | None = None,
+        failure: tuple[GitHubCapabilityEvidenceState, ErrorCode, str] | None = None,
+    ) -> None:
+        self.events = events
+        self.detail_digests = detail_digests or ["d" * 64]
+        self.failure = failure
+        self.calls: list[tuple[Path, GitHubCapabilityPreflightRequest, ProcessAuthContext]] = []
+
+    def preflight(
+        self,
+        cwd: Path,
+        request: GitHubCapabilityPreflightRequest,
+        auth_context: ProcessAuthContext,
+    ) -> GitHubCapabilityPreflightReport:
+        if self.events is not None:
+            self.events.append("preflight")
+        self.calls.append((cwd, request, auth_context))
+        detail = (
+            self.detail_digests.pop(0) if len(self.detail_digests) > 1 else self.detail_digests[0]
+        )
+        results: list[GitHubCapabilityResult] = []
+        for capability in request.capability_ids:
+            if self.failure is None:
+                results.append(
+                    GitHubCapabilityResult(
+                        capability=capability,
+                        state=GitHubCapabilityEvidenceState.PROVEN_AVAILABLE,
+                        reason_code="test_preflight_available",
+                        detail_digest=detail,
+                    )
+                )
+            else:
+                state, code, category = self.failure
+                results.append(
+                    GitHubCapabilityResult(
+                        capability=capability,
+                        state=state,
+                        reason_code=category,
+                        detail_digest=detail,
+                        error_code=code,
+                        policy_category=category,
+                    )
+                )
+        return GitHubCapabilityPreflightReport.build(request, tuple(results))
 
 
 class IsolatedExecutor:
@@ -150,7 +222,7 @@ def _stored(
         actor_id=actor_id,
         actor_class=ActorClass.HUMAN_OPERATED,
         repository_id=repository_id,
-        capability_ids=("github_api_read", "github_api_write"),
+        capability_ids=_CAPABILITIES,
     )
 
 
@@ -163,7 +235,7 @@ def _app() -> GitHubAppInstallationSpec:
         installation_id="installation-84",
         actor_id="installation:84",
         repository_id="123456",
-        capability_ids=("github_api_read", "github_api_write"),
+        capability_ids=_CAPABILITIES,
         permissions=(("contents", "read"), ("issues", "write"), ("pull_requests", "write")),
     )
 
@@ -175,12 +247,14 @@ def _grant(
     token: str,
     actor_id: str,
     repository_id: str,
-    capabilities: tuple[str, ...] = ("github_api_read", "github_api_write"),
+    capabilities: tuple[str, ...] = _CAPABILITIES,
     permissions: tuple[str, ...] = ("contents:read", "issues:write", "pull_requests:write"),
     installation_id: str | None = None,
     sso_authorized: bool = True,
     approved: bool = True,
     revoked: bool = False,
+    issued_at: str = "2026-07-28T00:00:00+00:00",
+    expires_at: str = "2026-07-28T00:05:00+00:00",
 ) -> GitHubApiTokenGrant:
     return GitHubApiTokenGrant(
         grant_id=grant_id,
@@ -190,8 +264,8 @@ def _grant(
         repository_id=repository_id,
         capability_ids=capabilities,
         permission_ids=permissions,
-        issued_at="2026-07-28T00:00:00+00:00",
-        expires_at="2026-07-28T00:05:00+00:00",
+        issued_at=issued_at,
+        expires_at=expires_at,
         installation_id=installation_id,
         sso_authorized=sso_authorized,
         approved=approved,
@@ -205,6 +279,7 @@ def _provider(
     app: AppIssuer,
     verifier: Verifier,
     app_specs: tuple[GitHubAppInstallationSpec, ...] = (),
+    preflight: PreflightGateway | None = None,
 ) -> GitHubApiAuthProvider:
     return GitHubApiAuthProvider(
         stored_accounts=stored_specs,
@@ -212,7 +287,205 @@ def _provider(
         stored_source=stored,
         app_issuer=app,
         verifier=verifier,
+        capability_preflight=preflight or PreflightGateway(),
+        cwd=Path("/repo"),
+        config_revision=_CONFIG,
+        policy_revision=_POLICY,
     )
+
+
+def test_specs_reject_legacy_coarse_capability_ids() -> None:
+    with pytest.raises(ValueError, match="exact GitHub operation"):
+        replace(_app(), capability_ids=("github_api_write",))
+
+
+def test_provider_runs_preflight_after_identity_proof_and_binds_safe_metadata() -> None:
+    events: list[str] = []
+    spec = _app()
+    token = "preflight-material-token-canary-293"
+    grant = _grant(
+        grant_id="grant-preflight",
+        kind=GitHubApiIdentityKind.APP_INSTALLATION,
+        token=token,
+        actor_id=spec.actor_id,
+        repository_id=spec.repository_id,
+        installation_id=spec.installation_id,
+    )
+    issuer = AppIssuer({spec.reference_id: grant})
+    verifier = Verifier(events)
+    verifier.proofs[spec.reference_id] = GitHubApiIdentityProof(
+        spec.actor_id,
+        spec.repository_id,
+        spec.capability_ids,
+        grant.permission_ids,
+        installation_id=spec.installation_id,
+    )
+    preflight = PreflightGateway(events=events)
+    provider = _provider(
+        (),
+        StoredSource({}),
+        issuer,
+        verifier,
+        (spec,),
+        preflight,
+    )
+
+    material = provider.resolve(OpaqueCredentialReference("github-app", spec.reference_id))
+
+    assert material is not None
+    assert events == ["verify_app", "preflight"]
+    assert len(preflight.calls) == 1
+    cwd, request, auth_context = preflight.calls[0]
+    assert cwd == Path("/repo")
+    assert request.actor_id == spec.actor_id
+    assert request.repository_id == spec.repository_id
+    assert request.installation_id == spec.installation_id
+    assert request.capability_ids == tuple(
+        GitHubOperationCapability(item) for item in spec.capability_ids
+    )
+    assert request.permission_ids == spec.permission_ids
+    assert request.config_revision == _CONFIG
+    assert request.policy_revision == _POLICY
+    assert auth_context.target_id == spec.repository_id
+    assert auth_context.secret_values == (token,)
+
+    metadata = dict(material.provider_metadata)
+    assert metadata == {
+        "github_kind": "app_installation",
+        "github_host": "github.com",
+        "repository_id": "123456",
+        "installation_id": "installation-84",
+        "github_preflight_evidence_digest": metadata["github_preflight_evidence_digest"],
+        "github_capability_digest": metadata["github_capability_digest"],
+        "github_permission_digest": metadata["github_permission_digest"],
+        "github_preflight_observed_at": grant.issued_at,
+        "config_revision": _CONFIG,
+        "policy_revision": _POLICY,
+    }
+    for key in (
+        "github_preflight_evidence_digest",
+        "github_capability_digest",
+        "github_permission_digest",
+    ):
+        assert len(metadata[key]) == 64
+
+    reference = OpaqueCredentialReference("github-app", spec.reference_id)
+    lease = github_api_auth_lease(
+        material,
+        reference,
+        lease_id="lease-preflight-company-app",
+        config_revision=_CONFIG,
+        policy_revision=_POLICY,
+    )
+    assert lease.provider_metadata == material.provider_metadata
+    encoded = json.dumps(lease.payload(), sort_keys=True)
+    assert token not in encoded
+    assert token not in json.dumps(material.safe_payload(), sort_keys=True)
+
+
+def test_preflight_denial_releases_grant_before_material_creation() -> None:
+    spec = _app()
+    grant = _grant(
+        grant_id="grant-preflight-denied",
+        kind=GitHubApiIdentityKind.APP_INSTALLATION,
+        token="denied-preflight-token-canary-293",
+        actor_id=spec.actor_id,
+        repository_id=spec.repository_id,
+        installation_id=spec.installation_id,
+    )
+    issuer = AppIssuer({spec.reference_id: grant})
+    verifier = Verifier()
+    verifier.proofs[spec.reference_id] = GitHubApiIdentityProof(
+        spec.actor_id,
+        spec.repository_id,
+        spec.capability_ids,
+        grant.permission_ids,
+        installation_id=spec.installation_id,
+    )
+    preflight = PreflightGateway(
+        failure=(
+            GitHubCapabilityEvidenceState.LIKELY_POLICY_DENIED,
+            ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED,
+            "sso",
+        )
+    )
+    provider = _provider((), StoredSource({}), issuer, verifier, (spec,), preflight)
+
+    with pytest.raises(RepoForgeError) as failure:
+        provider.resolve(OpaqueCredentialReference("github-app", spec.reference_id))
+
+    assert failure.value.code is ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED
+    assert issuer.revoked == [grant.grant_id]
+    assert grant.token.released is True
+
+
+def test_refresh_allows_new_observation_time_but_rejects_preflight_evidence_drift() -> None:
+    spec = _app()
+    initial = _grant(
+        grant_id="grant-preflight-initial",
+        kind=GitHubApiIdentityKind.APP_INSTALLATION,
+        token="initial-preflight-token-canary-293",
+        actor_id=spec.actor_id,
+        repository_id=spec.repository_id,
+        installation_id=spec.installation_id,
+        issued_at="2026-07-28T00:00:00+00:00",
+        expires_at="2026-07-28T00:30:00+00:00",
+    )
+    refreshed = _grant(
+        grant_id="grant-preflight-refreshed",
+        kind=GitHubApiIdentityKind.APP_INSTALLATION,
+        token="refreshed-preflight-token-canary-293",
+        actor_id=spec.actor_id,
+        repository_id=spec.repository_id,
+        installation_id=spec.installation_id,
+        issued_at="2026-07-28T00:10:00+00:00",
+        expires_at="2026-07-28T00:40:00+00:00",
+    )
+    drifted = _grant(
+        grant_id="grant-preflight-drifted",
+        kind=GitHubApiIdentityKind.APP_INSTALLATION,
+        token="drifted-preflight-token-canary-293",
+        actor_id=spec.actor_id,
+        repository_id=spec.repository_id,
+        installation_id=spec.installation_id,
+        issued_at="2026-07-28T00:20:00+00:00",
+        expires_at="2026-07-28T00:50:00+00:00",
+    )
+    issuer = AppIssuer({spec.reference_id: initial})
+    verifier = Verifier()
+    verifier.proofs[spec.reference_id] = GitHubApiIdentityProof(
+        spec.actor_id,
+        spec.repository_id,
+        spec.capability_ids,
+        initial.permission_ids,
+        installation_id=spec.installation_id,
+    )
+    preflight = PreflightGateway(detail_digests=["1" * 64, "1" * 64, "2" * 64])
+    provider = _provider((), StoredSource({}), issuer, verifier, (spec,), preflight)
+    reference = OpaqueCredentialReference("github-app", spec.reference_id)
+    material = provider.resolve(reference)
+    assert material is not None
+
+    issuer.grants[spec.reference_id] = refreshed
+    renewed = provider.refresh(reference, material)
+    assert renewed is not None
+    initial_metadata = dict(material.provider_metadata)
+    renewed_metadata = dict(renewed.provider_metadata)
+    assert (
+        initial_metadata["github_preflight_observed_at"]
+        != renewed_metadata["github_preflight_observed_at"]
+    )
+    assert (
+        initial_metadata["github_preflight_evidence_digest"]
+        == renewed_metadata["github_preflight_evidence_digest"]
+    )
+
+    issuer.grants[spec.reference_id] = drifted
+    with pytest.raises(RepoForgeError) as failure:
+        provider.refresh(reference, renewed)
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
+    assert drifted.token.released is True
 
 
 def test_named_stored_accounts_ignore_wrong_global_active_account_and_isolate_concurrently() -> (

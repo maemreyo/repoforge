@@ -73,6 +73,7 @@ def _lease(
     config_revision: str = _CONFIG,
     policy_revision: str = _POLICY,
     material_digest: str = _MATERIAL,
+    provider_metadata: tuple[tuple[str, str], ...] = (("installation_id", "installation-84"),),
 ) -> AuthLease:
     return AuthLease(
         lease_id=lease_id,
@@ -89,7 +90,7 @@ def _lease(
         config_revision=config_revision,
         policy_revision=policy_revision,
         material_digest=material_digest,
-        provider_metadata=(("installation_id", "installation-84"),),
+        provider_metadata=provider_metadata,
     )
 
 
@@ -363,6 +364,58 @@ def test_same_identity_refresh_succeeds_but_identity_drift_fails() -> None:
         with pytest.raises(RepoForgeError) as mismatch:
             refresh_operation_lease(record, changed, now="2026-07-28T00:40:00+00:00")
         assert mismatch.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
+
+
+def test_lease_refresh_allows_new_preflight_timestamp_but_rejects_digest_drift() -> None:
+    initial_metadata = (
+        ("installation_id", "installation-84"),
+        ("github_capability_digest", "1" * 64),
+        ("github_permission_digest", "2" * 64),
+        ("github_preflight_evidence_digest", "3" * 64),
+        ("github_preflight_observed_at", "2026-07-28T00:00:00+00:00"),
+    )
+    initial = _lease(provider_metadata=initial_metadata)
+    context = replace(_context(), auth_leases=(initial,))
+    record = new_operation_identity_record(
+        context,
+        context_id=_CONTEXT_ID,
+        capability_requests=_requests(),
+        now="2026-07-28T00:00:00+00:00",
+    )
+    renewed = _lease(
+        lease_id="lease-primary-refresh",
+        issued_at="2026-07-28T00:40:00+00:00",
+        expires_at="2026-07-28T02:00:00+00:00",
+        material_digest="e" * 64,
+        provider_metadata=tuple(
+            (key, "2026-07-28T00:40:00+00:00")
+            if key == "github_preflight_observed_at"
+            else (key, value)
+            for key, value in initial_metadata
+        ),
+    )
+
+    refreshed = refresh_operation_lease(
+        record,
+        renewed,
+        now="2026-07-28T00:40:00+00:00",
+    )
+
+    assert refreshed.reference == record.reference
+    assert refreshed.context.auth_leases == (renewed,)
+
+    drifted_metadata = tuple(
+        (key, "4" * 64) if key == "github_capability_digest" else (key, value)
+        for key, value in renewed.provider_metadata
+    )
+    with pytest.raises(RepoForgeError) as failure:
+        refresh_operation_lease(
+            record,
+            replace(renewed, provider_metadata=drifted_metadata),
+            now="2026-07-28T00:40:00+00:00",
+        )
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
 
 
 def test_manager_lifecycle_stale_revision_is_typed(tmp_path: Path) -> None:

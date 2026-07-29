@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 _CONTEXT_ID = re.compile(r"^identity-[a-f0-9]{24}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_RENEWABLE_PROVIDER_METADATA_KEYS = frozenset({"github_preflight_observed_at"})
 
 
 def _error(code: ErrorCode, message: str, *, retryable: bool = False) -> RepoForgeError:
@@ -120,6 +121,14 @@ class OperationIdentityRecord:
         }
 
 
+def _provider_identity_metadata(lease: AuthLease) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (key, value)
+        for key, value in lease.provider_metadata
+        if key not in _RENEWABLE_PROVIDER_METADATA_KEYS
+    )
+
+
 def _lease_identity_payload(lease: AuthLease) -> dict[str, object]:
     """Return only immutable identity fields, excluding renewable lifecycle material."""
 
@@ -133,7 +142,7 @@ def _lease_identity_payload(lease: AuthLease) -> dict[str, object]:
         "credential_ref": lease.credential_ref.payload(),
         "config_revision": lease.config_revision,
         "policy_revision": lease.policy_revision,
-        "provider_metadata": dict(lease.provider_metadata),
+        "provider_metadata": dict(_provider_identity_metadata(lease)),
     }
 
 
@@ -277,7 +286,7 @@ def _refresh_identity(lease: AuthLease) -> tuple[object, ...]:
         lease.credential_ref,
         lease.config_revision,
         lease.policy_revision,
-        lease.provider_metadata,
+        _provider_identity_metadata(lease),
     )
 
 
