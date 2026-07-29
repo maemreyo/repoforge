@@ -24,6 +24,22 @@ _EXPORTS = {
     "EnvironmentIdentity": ("execution_environment", "EnvironmentIdentity"),
     "ExecutionEvidence": ("execution_environment", "ExecutionEvidence"),
     "RequestedExecutionPolicy": ("execution_environment", "RequestedExecutionPolicy"),
+    "GitHubCapabilityEvidenceState": (
+        "github_capability_preflight",
+        "GitHubCapabilityEvidenceState",
+    ),
+    "GitHubCapabilityPreflightReport": (
+        "github_capability_preflight",
+        "GitHubCapabilityPreflightReport",
+    ),
+    "GitHubCapabilityPreflightRequest": (
+        "github_capability_preflight",
+        "GitHubCapabilityPreflightRequest",
+    ),
+    "GitHubOperationCapability": (
+        "github_capability_preflight",
+        "GitHubOperationCapability",
+    ),
     "ActorClass": ("repository_identity", "ActorClass"),
     "AuthLease": ("repository_identity", "AuthLease"),
     "CredentialProfile": ("repository_identity", "CredentialProfile"),
