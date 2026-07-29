@@ -24,19 +24,36 @@ trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
 export PYTHONDONTWRITEBYTECODE=1
 export RUFF_CACHE_DIR="$TMP_ROOT/ruff-cache"
 
-echo "[change] synchronize frozen dependencies"
-uv sync --extra dev --frozen
-echo "[change] validate release contract"
-uv run python scripts/check_release_contracts.py
-echo "[change] run Forge v2 release corpora"
-make v2-gates
-echo "[change] check formatting, lint, and types"
-uv run ruff format --check src tests scripts
-uv run ruff check src tests scripts
-uv run mypy --strict --cache-dir "$TMP_ROOT/mypy-cache" src/repoforge
-echo "[change] run the full pytest suite in lanes"
-uv run --extra dev python scripts/select_affected_tests.py --full --run
+# One stage per invocation, so the reviewed profile can declare typed steps
+# (`--stage sync`, `--stage typecheck`, ...) and a caller polling the operation sees which
+# stage is running rather than one opaque script and an elapsed counter. Every stage still
+# lives here and only here: the profile names stages, it does not redefine them, so
+# `make verify` and the profile cannot drift into meaning different things.
+STAGES="sync release-contract v2-gates format lint typecheck suite diff"
 
-echo "[change] validate diff cleanliness"
-git diff --check
+run_stage() {
+  case "$1" in
+    sync)             uv sync --extra dev --frozen ;;
+    release-contract) uv run python scripts/check_release_contracts.py ;;
+    v2-gates)         make v2-gates ;;
+    format)           uv run ruff format --check src tests scripts ;;
+    lint)             uv run ruff check src tests scripts ;;
+    typecheck)        uv run mypy --strict --cache-dir "$TMP_ROOT/mypy-cache" src/repoforge ;;
+    suite)            uv run --extra dev python scripts/select_affected_tests.py --full --run ;;
+    diff)             git diff --check ;;
+    *) echo "unknown stage: $1 (expected one of: $STAGES)" >&2; exit 2 ;;
+  esac
+}
+
+if [ "${1:-}" = "--stage" ]; then
+  [ -n "${2:-}" ] || { echo "--stage requires a stage name (one of: $STAGES)" >&2; exit 2; }
+  echo "[change] $2"
+  run_stage "$2"
+  exit 0
+fi
+
+for stage in $STAGES; do
+  echo "[change] $stage"
+  run_stage "$stage"
+done
 echo "change verification passed for $HEAD_SHA"
