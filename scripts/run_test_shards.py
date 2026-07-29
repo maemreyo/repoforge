@@ -174,7 +174,9 @@ def _run_shard(
         sys.executable,
         "-m",
         "pytest",
-        "--timeout=60",
+        # No --timeout here on purpose: pyproject sets 120 to clear the app's own git
+        # subprocess budget, and a 60s ceiling under this runner's contention kills
+        # healthy-but-slow git calls -- the exact inversion 546cf52 removed.
         "-p",
         "no:cacheprovider",
         "--durations=0",
