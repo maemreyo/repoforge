@@ -480,6 +480,17 @@ def test_background_profile_emits_observable_per_step_progress(
     assert observed["updated_at"] != observed["created_at"]
     first_step_update = observed["updated_at"]
 
+    # The step-start message must name the stage too, not only the heartbeat that follows
+    # it 30s later. Only the heartbeat was pinned, so a first pass at this fixed one
+    # emitter and left the other reporting `running unknown` for a step whose reviewed id
+    # is `sync` -- visible only by running a real profile against the live runtime.
+    # Whichever emitter produced the message currently on the record -- the step-start one
+    # or a heartbeat that has already fired -- it must name the stage. Asserting the exact
+    # step-start string races the heartbeat: it held on macOS and failed on ubuntu.
+    step_message = observed["progress"]["message"]
+    assert isinstance(step_message, str)
+    assert step_message.startswith("running tests [business_tests] (step 2/2")
+
     def same_step_heartbeat() -> dict[str, object] | None:
         status = second_step_running()
         if status is not None and status["updated_at"] != first_step_update:
@@ -495,7 +506,10 @@ def test_background_profile_emits_observable_per_step_progress(
         assert heartbeat_progress[key] == observed_progress[key]
     heartbeat_message = heartbeat_progress["message"]
     assert isinstance(heartbeat_message, str)
-    assert heartbeat_message.startswith("running business_tests (step 2/2, elapsed ")
+    # The step id leads: it is the name the reviewed configuration gave this stage and the
+    # one an operator recognises. `kind` follows in brackets as the coarse classification,
+    # which is `unknown` for anything the enum does not cover.
+    assert heartbeat_message.startswith("running tests [business_tests] (step 2/2, elapsed ")
     assert heartbeat_message.endswith("s)")
 
     release.write_text("continue\n", encoding="utf-8")

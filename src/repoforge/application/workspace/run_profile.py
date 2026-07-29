@@ -103,6 +103,7 @@ def _step_progress_heartbeat(
     step_index: int,
     total: int,
     kind: str,
+    step_id: str,
     interval_seconds: float = _PROGRESS_HEARTBEAT_SECONDS,
 ) -> Iterator[None]:
     """Re-emit "running" progress on a timer while the wrapped command executes."""
@@ -120,7 +121,12 @@ def _step_progress_heartbeat(
                 step_index,
                 total,
                 "steps",
-                f"running {kind} (step {step_index + 1}/{total}, elapsed {elapsed:.0f}s)",
+                # `step_id` first: it is the name the reviewed configuration gave this
+                # stage, and it is what the operator recognises. `kind` is a coarse
+                # classification and is `unknown` for anything the enum does not cover, so
+                # a message built from it alone reads "running unknown".
+                f"running {step_id} [{kind}] "
+                f"(step {step_index + 1}/{total}, elapsed {elapsed:.0f}s)",
             )
 
     thread = threading.Thread(target=tick, name="run-profile-progress-heartbeat", daemon=True)
@@ -407,13 +413,17 @@ class WorkspaceProfileRunner:
                     return
                 ordinal = step_index + 1
                 total = len(steps)
+                # Same shape as the heartbeat: the reviewed step id names the stage, the
+                # kind classifies it. Reporting only the kind made step `sync` read as
+                # "running unknown" -- observed on the live runtime.
                 kind = verification_step.kind.value
+                label = f"{verification_step.step_id} [{kind}]"
                 if completed:
                     assert duration_ms is not None
-                    message = f"completed {kind} (step {ordinal}/{total}, {duration_ms:.3f} ms)"
+                    message = f"completed {label} (step {ordinal}/{total}, {duration_ms:.3f} ms)"
                     current = ordinal
                 else:
-                    message = f"running {kind} (step {ordinal}/{total})"
+                    message = f"running {label} (step {ordinal}/{total})"
                     current = step_index
                 on_progress("running", current, total, "steps", message)
 
@@ -784,6 +794,7 @@ class WorkspaceProfileRunner:
                             step_index=step_index,
                             total=len(steps),
                             kind=verification_step.kind.value,
+                            step_id=verification_step.step_id,
                             interval_seconds=_PROGRESS_HEARTBEAT_SECONDS,
                         ):
                             receipts.append(session.execute(command))
