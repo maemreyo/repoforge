@@ -69,6 +69,7 @@ from .github_api_token import (
     StoredGhAccountTokenSource,
 )
 from .github_capabilities import GitHubCapabilityProbe
+from .github_capability_preflight import GitHubCapabilityPreflightGateway
 from .github_read_cache import GitHubReadCache
 from .hygiene import (
     HygieneBaselineCache,
@@ -182,6 +183,7 @@ __all__ = [
     "GitHubApiIdentityVerifier",
     "GitHubAppInstallationTokenIssuer",
     "GitHubAppJwtSigner",
+    "GitHubCapabilityPreflightGateway",
     "GitHubCapabilityProbe",
     "GitHubCheckAnnotation",
     "GitHubCheckRun",

@@ -5,11 +5,13 @@ from .api_identity import (
     GitHubApiAuthProvider,
     github_api_auth_lease,
 )
+from .capability_preflight import CommandGitHubCapabilityPreflight
 from .capability_probe import CommandGitHubCapabilityProbe
 from .gh_cli import GhCliGateway
 from .ticket_graph import CommandGitHubTicketGraphGateway
 
 __all__ = [
+    "CommandGitHubCapabilityPreflight",
     "CommandGitHubCapabilityProbe",
     "CommandGitHubTicketGraphGateway",
     "GhCliGateway",
