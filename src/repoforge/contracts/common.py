@@ -164,13 +164,17 @@ class ReadFileResult(StrictModel):
     end_line: int = Field(ge=0)
     total_lines: int = Field(ge=0)
     truncated: bool = False
-    #: Why this item stopped short, when it did. `source_limit` means the file
-    #: has fewer lines than the requested range; `result_transport_budget` means
-    #: the page ran out of serialized bytes and `next_cursor` resumes it. The two
-    #: call for opposite reactions -- widen the range, or fetch the next page --
-    #: and a bare boolean cannot tell them apart. Spelled as `RepoSearchOutput`
-    #: already spells it, so the two read surfaces do not name one concept twice.
-    truncation_reason: Literal["source_limit", "result_transport_budget"] | None = None
+    # Spelled as `RepoSearchOutput` already spells it, so the two read surfaces do not
+    # name one concept twice.
+    truncation_reason: Literal["source_limit", "result_transport_budget"] | None = Field(
+        default=None,
+        description=(
+            "Why this item stopped short, when it did. `source_limit`: the file has fewer "
+            "lines than the requested range -- widen or accept it. `result_transport_budget`: "
+            "the page ran out of serialized bytes -- resume with `next_cursor`. The two call "
+            "for opposite reactions, which a bare boolean could not tell apart."
+        ),
+    )
     omitted_line_range: tuple[int, int] | None = None
     next_cursor: Cursor | None = None
 

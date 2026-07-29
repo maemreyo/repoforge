@@ -746,16 +746,24 @@ class RefreshAction(str, Enum):
 
 class RefreshResolution(StrictModel):
     path: RelativePath
-    #: `content` writes the text supplied here. `ours` and `theirs` keep one side
-    #: of the conflict whole, read back from the commits the plan is bound to --
-    #: so a caller no longer has to echo an entire file to say "keep mine". The
-    #: conflict evidence in a preview is clipped to a byte budget and cannot be
-    #: used for that, which is exactly why these strategies exist.
-    strategy: Literal["content", "ours", "theirs"] = "content"
-    #: Required for `content`, and refused for the others: an entry carrying both
-    #: a strategy and a body states two different intentions, and picking one is
-    #: how a reviewed resolution becomes an unreviewed write.
-    content: str | None = Field(default=None, max_length=2_000_000)
+    strategy: Literal["content", "ours", "theirs"] = Field(
+        default="content",
+        description=(
+            "`content` writes the text supplied in `content`. `ours` and `theirs` keep one "
+            "side of the conflict whole, read back from the commits the plan is bound to, so "
+            "you never have to echo a whole file to say 'keep mine' -- the conflict evidence "
+            "in a preview is clipped to a byte budget and cannot be used for that."
+        ),
+    )
+    content: str | None = Field(
+        default=None,
+        max_length=2_000_000,
+        description=(
+            "Required for strategy='content' and refused for the others: an entry carrying "
+            "both a side-picking strategy and a body states two different intentions, and "
+            "picking one for you is how a reviewed resolution becomes an unreviewed write."
+        ),
+    )
 
 
 class RefreshConflictEvidence(StrictModel):
@@ -2150,26 +2158,42 @@ class RuntimeActivationEvidenceView(StrictModel):
     activated_process_identity: Sha256 | None = None
     runtime_phase: ShortText | None = None
     error_code: ShortText | None = None
-    #: `matches` when the live runtime serves the configuration generation this
-    #: receipt activated. `diverged` when it serves a different one -- the activation
-    #: did not end where it claimed, or something else took over since. `unverifiable`
-    #: when no generation was recorded or none is observable, so nothing can be
-    #: checked either way; that is reported rather than defaulted to success.
-    #:
-    #: Deliberately NOT a comparison of process identity or tool-surface hash. Both
-    #: describe one process instance and one release, so both change legitimately --
-    #: on a watchdog restart, or after a later release activation -- and comparing
-    #: them reported a healthy converged installation as diverged, which is worse
-    #: than reporting nothing. Those changes are facts, not verdicts, so they are
-    #: reported separately below.
-    agreement: Literal["matches", "diverged", "unverifiable"]
-    #: True when the live process is not the instance the receipt recorded, i.e. the
-    #: runtime has been restarted since. Normal after a watchdog restart or a later
-    #: activation; None when either identity is unknown.
-    process_restarted_since_activation: bool | None = None
-    #: True when the live tool surface differs from the one recorded, which is what a
-    #: release upgrade after this activation looks like. None when either is unknown.
-    tool_surface_changed_since_activation: bool | None = None
+    # Deliberately NOT a comparison of process identity or tool-surface hash. Both
+    # describe one process instance and one release, so both change legitimately -- on a
+    # watchdog restart, or after a later release activation -- and comparing them reported
+    # a healthy converged installation as diverged, which is worse than reporting nothing
+    # (#314). Those changes are facts, not verdicts, so they are reported separately, and
+    # every field below says so in its own description: the reasoning has to travel with
+    # the schema, because a caller reading two booleans named "changed since activation"
+    # with no description will call a healthy installation diverged. That is exactly what
+    # #314 was, and it happened a second time while this text lived only in a comment.
+    agreement: Literal["matches", "diverged", "unverifiable"] = Field(
+        description=(
+            "THE verdict on this activation, and the only field that is one. `matches`: the "
+            "live runtime serves the configuration generation this receipt activated. "
+            "`diverged`: it serves a different one -- the activation did not end where it "
+            "claimed, or something else took over. `unverifiable`: nothing was recorded or "
+            "nothing is observable, reported rather than defaulted to success. Compares the "
+            "configuration generation only, never process identity or tool-surface hash."
+        )
+    )
+    process_restarted_since_activation: bool | None = Field(
+        default=None,
+        description=(
+            "A fact, not a fault: true when the live process is not the instance this "
+            "receipt recorded. Expected after a watchdog restart or any later activation. "
+            "Null when either identity is unknown. Read `agreement` for the verdict."
+        ),
+    )
+    tool_surface_changed_since_activation: bool | None = Field(
+        default=None,
+        description=(
+            "A fact, not a fault: true when the live tool surface differs from the one this "
+            "receipt recorded, which is what a release upgrade after this activation looks "
+            "like. Comparing it against a hash from an earlier activation will therefore "
+            "differ by design. Null when either is unknown. Read `agreement` for the verdict."
+        ),
+    )
 
 
 class ConfigProjectionView(StrictModel):
