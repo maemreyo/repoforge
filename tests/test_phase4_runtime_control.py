@@ -924,6 +924,47 @@ def test_the_ttl_participates_in_the_profile_fingerprint() -> None:
     assert base.fingerprint != tuned.fingerprint
 
 
+def test_the_ttl_is_read_from_the_source_config_that_the_runtime_actually_parses() -> None:
+    """The layer that made the first attempt unreachable.
+
+    `[server]` is rendered into a reviewed generation from the PREVIOUS resolved document,
+    not from source, so a `[server]` edit never reaches a running runtime -- deliberately,
+    since that table carries capability grants. `[tunnel]` is re-read from source text on
+    every runtime start, which is why the connection lifetime belongs there. A test that
+    only exercised argv construction passed while the setting could not be set at all.
+    """
+    from repoforge.application.configuration.source import parse_source
+
+    source = parse_source(
+        "\nversion = 2\n"
+        '[tunnel]\nid = "tunnel_x"\nmcp_connection_max_ttl_seconds = 3600\n'
+        '[[repo]]\nid = "demo"\npath = "/tmp/demo"\n'
+    )
+
+    assert source.mcp_connection_max_ttl_seconds == 3600
+
+
+def test_the_ttl_defaults_to_unset_when_the_source_omits_it() -> None:
+    from repoforge.application.configuration.source import parse_source
+
+    source = parse_source(
+        '\nversion = 2\n[tunnel]\nid = "tunnel_x"\n[[repo]]\nid = "demo"\npath = "/tmp/demo"\n'
+    )
+
+    assert source.mcp_connection_max_ttl_seconds is None
+
+
+def test_a_non_positive_ttl_in_source_is_refused() -> None:
+    from repoforge.application.configuration.source import parse_source
+
+    with pytest.raises(ValueError, match="mcp_connection_max_ttl_seconds"):
+        parse_source(
+            "\nversion = 2\n"
+            '[tunnel]\nid = "tunnel_x"\nmcp_connection_max_ttl_seconds = 0\n'
+            '[[repo]]\nid = "demo"\npath = "/tmp/demo"\n'
+        )
+
+
 def test_a_non_positive_ttl_is_refused() -> None:
     from repoforge.domain.runtime import TunnelProfile
 
