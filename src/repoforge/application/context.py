@@ -598,6 +598,8 @@ class ApplicationContext:
         serialize: Callable[[T], Any] | None = None,
         deserialize: Callable[[Any], T] | None = None,
         effect_boundary: IdempotencyEffectBoundary | None = None,
+        reconcile_uncertain: Callable[[], T | None] | None = None,
+        operation_id: str | None = None,
     ) -> T:
         return execute_idempotent(
             self,
@@ -609,4 +611,6 @@ class ApplicationContext:
             serialize=serialize,
             deserialize=deserialize,
             effect_boundary=effect_boundary,
+            reconcile_uncertain=reconcile_uncertain,
+            operation_id=operation_id,
         )

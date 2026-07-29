@@ -2,10 +2,23 @@ from __future__ import annotations
 
 from dataclasses import replace
 from importlib import import_module
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.git_transport_identity import (
+    GitTransportAccess,
+    GitTransportKind,
+    GitTransportSpec,
+)
+from repoforge.domain.operation_identity import (
+    LeaseCapabilityRequest,
+    OperationIdentityReference,
+)
+from repoforge.domain.operations import IdempotencyRecord, IdempotencyState, hash_idempotency_key
+from repoforge.domain.repository_auth_broker import ProcessAuthContext
 from repoforge.domain.repository_identity import (
     ActorClass,
     AuthLease,
@@ -15,6 +28,7 @@ from repoforge.domain.repository_identity import (
     IdentitySurface,
     IdentitySurfaceEvidence,
     OpaqueCredentialReference,
+    OperationIdentityContext,
     PublicationIntent,
     PublicationKind,
     RepositoryProvider,
@@ -22,6 +36,7 @@ from repoforge.domain.repository_identity import (
 
 _publication = import_module("repoforge.domain.publication")
 _publication_adapter = import_module("repoforge.adapters.publication")
+_publication_application = import_module("repoforge.application.publication")
 _publication_port = import_module("repoforge.ports.publication")
 PublicationEvidence = _publication.PublicationEvidence
 RemoteTopology = _publication.RemoteTopology
@@ -377,3 +392,189 @@ def test_actor_and_transport_surface_evidence_are_both_required() -> None:
         with pytest.raises(RepoForgeError) as failure:
             review_publication(_intent(), _evidence(surfaces=surfaces))
         assert failure.value.code is ErrorCode.EVIDENCE_INVALID
+
+
+class _CoordinatorIdempotency:
+    def __init__(self) -> None:
+        self.record: IdempotencyRecord | None = None
+
+    def load(self, action: str, key_hash: str) -> IdempotencyRecord | None:
+        if self.record is None:
+            return None
+        assert self.record.action == action
+        assert self.record.key_hash == key_hash
+        return self.record
+
+
+class _CoordinatorContext:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.idempotency = _CoordinatorIdempotency()
+        self.boundary = None
+        self.clock = SimpleNamespace(now_iso=lambda: _OBSERVED_AT)
+
+    def idempotent(self, action, key, request, operation, **kwargs):
+        self.events.append("idempotent")
+        self.boundary = kwargs["effect_boundary"]
+        result = operation()
+        self.idempotency.record = IdempotencyRecord(
+            action=action,
+            key_hash=hash_idempotency_key(key),
+            request_fingerprint="f" * 64,
+            state=IdempotencyState.COMPLETED,
+            updated_at=_OBSERVED_AT,
+            updated_at_epoch=0.0,
+            correlation_id="correlation-publication",
+            result=result.safe_payload(),
+            receipt_id="receipt-" + "a" * 24,
+            operation_id=kwargs["operation_id"],
+        )
+        return result
+
+
+class _CoordinatorIdentities:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def bind(self, context, *, context_id, capability_requests, now):
+        self.events.append("bind")
+        assert context.operation_id == _OPERATION_ID
+        assert context_id == "identity-" + "e" * 24
+        assert capability_requests[0].capability_ids == ("git.push",)
+        return SimpleNamespace(
+            reference=OperationIdentityReference("identity-" + "e" * 24, "f" * 64)
+        )
+
+    def require_write(self, **kwargs):
+        self.events.append("require_write")
+        assert kwargs["operation_id"] == _OPERATION_ID
+        assert kwargs["capability_id"] == "git.push"
+        return _lease()
+
+
+class _CoordinatorGateway:
+    def __init__(self, events: list[str], *, fail_revalidation: bool = False) -> None:
+        self.events = events
+        self.fail_revalidation = fail_revalidation
+
+    def inspect(self, cwd: Path, intent: PublicationIntent):
+        self.events.append("inspect")
+        assert cwd == Path("/workspace")
+        assert intent == _intent()
+        return _topology()
+
+    def revalidate(self, cwd, intent, preflight, expected_authorization):
+        self.events.append("revalidate")
+        if self.fail_revalidation:
+            raise RepoForgeError("topology drift", code=ErrorCode.PUBLICATION_TARGET_MISMATCH)
+        return review_publication(intent, _evidence(preflight=preflight, observed=preflight))
+
+    def publish(self, cwd, reviewed, topology, **kwargs):
+        self.events.append("publish")
+        assert reviewed.operation_id == _OPERATION_ID
+        return _publication_port.PublicationEffect(
+            publication_id=reviewed.publication_id,
+            kind=reviewed.kind,
+            destination_repository_id=reviewed.destination_repository_id,
+            destination_ref=topology.destination_ref,
+            commit_sha=reviewed.commit_sha,
+            external_id="effect-publication-292",
+            url=None,
+            reconciled=False,
+        )
+
+    def reconcile(self, *args, **kwargs):
+        self.events.append("reconcile")
+        return None
+
+
+def _coordinator_request():
+    lease = _lease()
+    authorization = _publication_port.PublicationAuthorization(
+        profile_id="company-app",
+        actor_class=ActorClass.AUTONOMOUS_AGENT,
+        actor_id="installation:84",
+        installation_id="installation-84",
+        lease=lease,
+        identity_surfaces=(
+            _surface(IdentitySurface.GITHUB_API),
+            _surface(IdentitySurface.GIT_PUSH),
+        ),
+        capability_digest=_CAPABILITY,
+        permission_digest=_PERMISSION,
+        remote_version=_REMOTE_VERSION,
+        observed_at=_OBSERVED_AT,
+        approved_cross_boundary_id=None,
+    )
+    return _publication_application.PublicationRequest(
+        workspace_id="workspace-publication",
+        cwd=Path("/workspace"),
+        intent=_intent(),
+        authorization=authorization,
+        identity_context=OperationIdentityContext(
+            operation_id=_OPERATION_ID,
+            primary_repository_id="123456",
+            actor_class=ActorClass.AUTONOMOUS_AGENT,
+            auth_leases=(lease,),
+            selected_at=_OBSERVED_AT,
+            config_revision=_CONFIG,
+            policy_revision=_POLICY,
+        ),
+        identity_context_id="identity-" + "e" * 24,
+        capability_requests=(LeaseCapabilityRequest("lease-company-repository", ("git.push",)),),
+        capability_id="git.push",
+        transport_spec=GitTransportSpec(
+            profile_id="company-app",
+            repository_id="123456",
+            target_id="github-repository-123456",
+            provider_host="github.com",
+            kind=GitTransportKind.SSH,
+            credential_fingerprint="f" * 64,
+            allowed_access=(GitTransportAccess.WRITE,),
+            ssh_identity_file="/identity/company-app",
+        ),
+        auth_context=ProcessAuthContext(
+            profile_id="company-app",
+            material_id="material-company-app",
+            target_kind=AuthTargetKind.REPOSITORY,
+            target_id="github-repository-123456",
+            environment=(),
+        ),
+        idempotency_key="publication-coordinator-key-292",
+    )
+
+
+def test_publication_coordinator_orders_identity_review_before_effect() -> None:
+    events: list[str] = []
+    ctx = _CoordinatorContext(events)
+    coordinator = _publication_application.PublicationCoordinator(
+        ctx,
+        gateway=_CoordinatorGateway(events),
+        identities=_CoordinatorIdentities(events),
+    )
+
+    outcome = coordinator.execute(_coordinator_request())
+
+    assert events == ["inspect", "idempotent", "bind", "require_write", "revalidate", "publish"]
+    assert ctx.boundary.started is True
+    assert ctx.boundary.authoritative_result is not None
+    assert outcome.operation_id == _OPERATION_ID
+    assert outcome.receipt_id == "receipt-" + "a" * 24
+    assert outcome.result_reference == f"operation-result:{_OPERATION_ID}"
+
+
+def test_publication_coordinator_stops_before_boundary_on_revalidation_drift() -> None:
+    events: list[str] = []
+    ctx = _CoordinatorContext(events)
+    coordinator = _publication_application.PublicationCoordinator(
+        ctx,
+        gateway=_CoordinatorGateway(events, fail_revalidation=True),
+        identities=_CoordinatorIdentities(events),
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        coordinator.execute(_coordinator_request())
+
+    assert failure.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH
+    assert events == ["inspect", "idempotent", "bind", "require_write", "revalidate"]
+    assert ctx.boundary.started is False

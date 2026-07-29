@@ -25,10 +25,12 @@ from repoforge.adapters.persistence import (
 from repoforge.adapters.runtime.tunnel_cli import TunnelCliClient
 from repoforge.application.context import ApplicationContext
 from repoforge.application.diagnostics.bundle import build_diagnostics_bundle
-from repoforge.application.idempotency import IdempotencyEffectBoundary
+from repoforge.application.idempotency import IdempotencyEffectBoundary, execute_idempotent
 from repoforge.application.repository.doctor import Doctor, DoctorCommand
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig, load_config
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
+from repoforge.domain.execution_receipt import EffectReceiptState
+from repoforge.domain.operation_task import OperationState
 from repoforge.domain.operations import (
     IdempotencyRecord,
     IdempotencyState,
@@ -608,6 +610,89 @@ def test_idempotency_pre_effect_failure_releases_key_for_safe_retry(tmp_path: Pa
         effect_boundary=IdempotencyEffectBoundary(),
     )
     assert recovered == {"mutated": True}
+
+
+def test_idempotency_uses_the_pinned_operation_id(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    operation_id = "op-" + "7" * 24
+
+    result = execute_idempotent(
+        ctx,
+        "workspace_push",
+        "pinned-operation-key-12345678",
+        {"workspace_id": "demo", "publication_id": "publication-292"},
+        lambda: {"published": True},
+        operation_id=operation_id,
+    )
+
+    assert result == {"published": True}
+    assert ctx.operation_store is not None
+    stored = ctx.operation_store.read(operation_id)
+    assert stored is not None
+    assert stored.operation_id == operation_id
+    assert stored.state is OperationState.SUCCEEDED
+
+
+def test_uncertain_reconciliation_terminalizes_the_original_receipt_and_result(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    operation_id = "op-" + "8" * 24
+    key = "reconcile-publication-key-12345678"
+    request = {"workspace_id": "demo", "publication_id": "publication-292"}
+    boundary = IdempotencyEffectBoundary()
+
+    def uncertain_effect() -> dict[str, Any]:
+        boundary.begin()
+        raise RepoForgeError(
+            "provider response was lost",
+            code=ErrorCode.COMMAND_FAILED,
+            details={"provider_request_id": "request-42"},
+        )
+
+    with pytest.raises(ConfigError) as unknown:
+        execute_idempotent(
+            ctx,
+            "workspace_push",
+            key,
+            request,
+            uncertain_effect,
+            operation_id=operation_id,
+            effect_boundary=boundary,
+        )
+    assert unknown.value.code is ErrorCode.EFFECT_OUTCOME_UNKNOWN
+
+    reconciled = execute_idempotent(
+        ctx,
+        "workspace_push",
+        key,
+        request,
+        lambda: (_ for _ in ()).throw(AssertionError("must not publish twice")),
+        operation_id=operation_id,
+        reconcile_uncertain=lambda: {"published": True, "reconciled": True},
+    )
+
+    assert reconciled == {"published": True, "reconciled": True}
+    assert ctx.idempotency is not None
+    record = ctx.idempotency.load("workspace_push", hash_idempotency_key(key))
+    assert record is not None and record.receipt_id is not None
+    assert record.operation_id == operation_id
+    assert ctx.effect_receipts is not None
+    receipt_envelope = ctx.effect_receipts.read(record.receipt_id)
+    assert receipt_envelope is not None
+    assert receipt_envelope.value.state is EffectReceiptState.APPLIED_VALIDATED
+    assert receipt_envelope.value.effect_boundary_crossed is True
+    assert receipt_envelope.value.result_reference == f"operation-result:{operation_id}"
+    assert ctx.operation_result_store is not None
+    assert ctx.operation_result_store.read(operation_id) == {
+        "published": True,
+        "reconciled": True,
+    }
+    assert ctx.operation_store is not None
+    operation = ctx.operation_store.read(operation_id)
+    assert operation is not None
+    assert operation.state is OperationState.SUCCEEDED
+    assert operation.result_reference == f"operation-result:{operation_id}"
 
 
 def test_stale_local_mutation_claim_transitions_to_uncertain(tmp_path: Path) -> None:

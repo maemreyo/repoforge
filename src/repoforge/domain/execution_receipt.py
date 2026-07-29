@@ -72,6 +72,7 @@ _EFFECT_TRANSITIONS: dict[EffectReceiptState, frozenset[EffectReceiptState]] = {
             EffectReceiptState.UNKNOWN,
         }
     ),
+    EffectReceiptState.UNKNOWN: frozenset({EffectReceiptState.APPLIED_VALIDATED}),
 }
 
 EffectIdentity = tuple[tuple[str, str], ...]

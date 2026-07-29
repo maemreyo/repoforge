@@ -32,6 +32,25 @@ _IDENTITY_KEYS = frozenset(
         "generation",
         "target_base_sha",
         "transaction_id",
+        "publication_id",
+        "source_repository_id",
+        "destination_repository_id",
+        "source_ref",
+        "destination_ref",
+        "commit_sha",
+        "tree_sha",
+        "profile_id",
+        "actor_id",
+        "installation_id",
+        "lease_id",
+        "topology_digest",
+        "capability_digest",
+        "permission_digest",
+        "config_revision",
+        "policy_revision",
+        "remote_version",
+        "review_digest",
+        "reconciled",
     }
 )
 
@@ -65,7 +84,8 @@ def capture_effect_identity(
 
     identity = _bounded_scalars(details)
     workspace_id = identity.get("workspace_id")
-    if isinstance(workspace_id, str):
+    publication_scope = (details or {}).get("effect_identity_scope") == "publication"
+    if isinstance(workspace_id, str) and not publication_scope:
         try:
             record, repo, workspace = ctx.workspace(workspace_id)
             identity.setdefault("repo_id", repo.repo_id)

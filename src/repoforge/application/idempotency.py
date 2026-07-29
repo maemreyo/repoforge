@@ -92,6 +92,7 @@ def execute_idempotent(
     deserialize: Callable[[Any], T] | None = None,
     effect_boundary: IdempotencyEffectBoundary | None = None,
     reconcile_uncertain: Callable[[], T | None] | None = None,
+    operation_id: str | None = None,
 ) -> T:
     """Claim, execute, persist, and replay one reviewed keyed operation."""
     if key is None:
@@ -138,6 +139,32 @@ def execute_idempotent(
             store.delete(action, key_hash)
             return _RECONCILE_MISS
         persisted, safe_result = materialize(result)
+        if record.operation_id is None or record.receipt_id is None:
+            raise ConfigError("Durable reconciliation identity is missing")
+        result_reference = f"operation-result:{record.operation_id}"
+        operation_result_store.save(record.operation_id, _durable_result(result))
+        receipt_envelope = receipt_store.read(record.receipt_id)
+        if receipt_envelope is None:
+            raise ConfigError("Durable reconciliation receipt is missing")
+        receipt_envelope = receipt_store.save(
+            transition_effect_receipt(
+                receipt_envelope.value,
+                EffectReceiptState.APPLIED_VALIDATED,
+                now=ctx.clock.now_iso(),
+                result_reference=result_reference,
+                effect_boundary_crossed=True,
+                post_identity=capture_effect_identity(ctx, details, result=result),
+            ),
+            expected_revision=receipt_envelope.revision,
+        )
+        from .operations.manager import OperationManager
+
+        OperationManager(ctx).reconcile_success(
+            record.operation_id,
+            result_reference=result_reference,
+            receipt_id=record.receipt_id,
+            now=ctx.clock.now_iso(),
+        )
         store.save(
             replace(
                 record,
@@ -147,6 +174,7 @@ def execute_idempotent(
                 result=persisted,
             )
         )
+        publish_outcome(receipt_envelope.value)
         ctx.audit.record(
             action,
             success=True,
@@ -172,6 +200,17 @@ def execute_idempotent(
             now_iso = ctx.clock.now_iso()
             now_epoch = ctx.now_epoch()
             existing = store.load(action, key_hash)
+            if (
+                existing is not None
+                and operation_id is not None
+                and existing.operation_id is not None
+                and existing.operation_id != operation_id
+            ):
+                raise ConfigError(
+                    "IDEMPOTENCY_CONFLICT: the key is bound to another durable operation",
+                    code=ErrorCode.IDEMPOTENCY_CONFLICT,
+                    retryable=False,
+                )
             if existing is not None and existing.request_fingerprint != fingerprint:
                 raise ConfigError(
                     "IDEMPOTENCY_CONFLICT: the key is already bound to different input",
@@ -276,6 +315,7 @@ def execute_idempotent(
 
             operations = OperationManager(ctx)
             operation_task = operations.create(
+                operation_id=operation_id,
                 kind=action,
                 phase="accepted",
                 cancel_supported=False,
