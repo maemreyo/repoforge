@@ -71,6 +71,15 @@ jobs:
       # unmapped path escalates to the whole suite, so a narrow run is only ever a run it
       # could justify. Coverage is deliberately not enforced here -- a subset cannot meet a
       # whole-repository threshold, and pretending otherwise would make the number a lie.
+      # Static, sub-second: reads the diff and the map, runs nothing. The authoritative
+      # map check needs a full recording run and so is push-only -- by which point a stale
+      # entry is already on main. This catches the common case (a new module nobody
+      # remapped) while it is still a pull request.
+      - name: Coverage map covers the changed modules (pull request)
+        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: |
+          uv run python scripts/select_affected_tests.py \
+            --check-map-freshness --base "origin/${{ github.base_ref }}"
       - name: Affected tests (pull request)
         if: github.event_name == 'pull_request'
         run: |

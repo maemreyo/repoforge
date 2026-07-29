@@ -301,3 +301,33 @@ def test_coverage_map_conftest_change_adds_consumers() -> None:
         "tests/test_c.py",
         "tests/test_smoke.py",
     )
+
+
+# ------------------------- pull-request-time coverage-map freshness
+
+
+def test_map_freshness_passes_when_changed_modules_are_mapped() -> None:
+    manifest = _coverage_manifest()
+
+    assert selector.check_map_freshness(manifest, ["src/repoforge/adapters/git/cli.py"]) == 0
+
+
+def test_map_freshness_fails_on_a_package_module_missing_from_the_map() -> None:
+    """An unmapped module makes the selector fail closed, so every later change to it
+    runs the whole suite. That is the rot this catches while it is still a pull request."""
+    manifest = _coverage_manifest()
+
+    assert selector.check_map_freshness(manifest, ["src/repoforge/brand_new.py"]) == 1
+
+
+def test_map_freshness_ignores_paths_the_map_never_covers() -> None:
+    """The map is source-to-test; docs, tests and data are selected by other rules."""
+    manifest = _coverage_manifest()
+
+    assert (
+        selector.check_map_freshness(
+            manifest,
+            ["docs/guide.md", "tests/test_new.py", "pyproject.toml", "src/repoforge/notes.txt"],
+        )
+        == 0
+    )
