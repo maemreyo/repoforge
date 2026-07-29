@@ -13,7 +13,7 @@ endif
 
 .PHONY: default start dev-server restart status stop logs doctor
 .PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check test-map
-.PHONY: v2-gates build check install release
+.PHONY: v2-gates build verify check install release
 .PHONY: smoke clean live-activation
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
 
@@ -33,6 +33,7 @@ help:  # Show available commands without changing local or runtime state
 	  '  make test-groups-check Verify every test file is mapped by tests/test-groups.toml' \
 	  '  make test-map          Regenerate the coverage map that powers precise test-affected selection' \
 	  '  make v2-gates          Run corpora and control-plane fault gates' \
+	  '  make verify            Verify a change in progress (no coverage floor, build, or wheel smoke)' \
 	  '  make check             Run the full dirty-tree production gate' \
 	  '  make production-check  Run the clean-tree production gate' \
 	  '  make live-activation   Real activate/rollback lifecycle in an isolated sandbox' \
@@ -105,6 +106,9 @@ v2-gates:  # Execute frozen corpora and production-composition control-plane fau
 		uv run --extra dev python scripts/run_control_plane_gates.py \
 			--manifest tests/fixtures/v2_corpora/control_plane_faults.json \
 			--report-dir "$$report_dir"
+
+verify:  # Verification gate for a change in progress: contracts, gates, lint, types, full suite
+	scripts/verify-change.sh
 
 check:  # Authoritative full verification gate for dirty development workspaces
 	scripts/verify-production.sh --allow-dirty

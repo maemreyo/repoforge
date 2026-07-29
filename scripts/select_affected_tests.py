@@ -61,7 +61,7 @@ ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
     "Makefile",
     "tests/test-groups.toml",
     "scripts/select_affected_tests.py",
-    "scripts/run_test_shards.py",
+    "scripts/run_test_suite.py",
     "scripts/verify-production.sh",
     ".github/workflows/**",
 )
@@ -104,7 +104,7 @@ class Manifest:
         """Test files owned by a `parallel = false` group.
 
         These carry a known worker-contention risk under xdist (see the
-        `run_test_shards.py` serial-lane comment) and must run outside any
+        `run_test_suite.py` serial-lane comment) and must run outside any
         `-n` invocation, never mixed into the same pytest process as the
         parallel lane.
         """
@@ -445,7 +445,7 @@ def _run_in_lanes(root: Path, files: Sequence[str], manifest: Manifest) -> int:
     Files owned by a `parallel = false` group carry a known worker-contention
     risk under xdist (see Group.serial_files) and must never share a pytest
     process with `-n`. They run first, alone; the rest run under `-n 3`.
-    Mirrors the split `run_test_shards.py` already does for `make check`.
+    Mirrors the split `run_test_suite.py` already does for `make check`.
     """
     serial_files = manifest.serial_files()
     serial = sorted(f for f in files if f in serial_files)
@@ -558,7 +558,7 @@ def main(argv: list[str] | None = None) -> int:
         # Coverage-gated authoritative runs belong to `make test`; this tool's
         # job is fast affected-test feedback, split into a serial lane (files
         # from `parallel = false` groups) and an xdist lane, same split
-        # `run_test_shards.py` already uses for `make check`.
+        # `run_test_suite.py` already uses for `make check`.
         return _run_in_lanes(root, selection.selected_files, manifest)
     return 0
 

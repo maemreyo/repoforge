@@ -11,7 +11,7 @@ exactly the test files that execute it, instead of a whole capability group.
 Regenerate after material source/test changes (``make test-map``); CI can
 regenerate and diff to catch drift.
 
-The suite runs in the same two lanes as ``run_test_shards.py`` (serial-lane
+The suite runs in the same two lanes as ``run_test_suite.py`` (serial-lane
 groups alone, then the rest under ``-n 3``) so genuinely stateful tests do not
 corrupt each other during the recording run. Test failures during generation
 do not abort the map: coverage for everything that did run is still recorded,
