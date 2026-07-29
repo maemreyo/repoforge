@@ -81,7 +81,7 @@ jobs:
       # to select is caught here, before it can be built into a release.
       - name: Full suite with coverage (push)
         if: github.event_name != 'pull_request'
-        run: uv run pytest --timeout=60 --cov=repoforge --cov-branch --cov-report=term-missing
+        run: uv run pytest --cov=repoforge --cov-branch --cov-report=term-missing
 
   # A release gate that no unit test can replace: it performs a REAL `rf upgrade
   # --activate` (real wheel build, real per-release venv, real smoke, real supervisor

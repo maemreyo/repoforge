@@ -215,3 +215,46 @@ def test_risk_and_recommendation_become_stale_with_snapshot_change() -> None:
     changed = replace(assessment.snapshot, snapshot_id="e" * 64)
     assert risk.assessment_snapshot_id != changed.snapshot_id
     assert recommendation.assessment_snapshot_id != changed.snapshot_id
+
+
+def _critical_codes(paths: list[str]) -> set[str]:
+    risk = assess_workspace_risk(_assessment(paths), default_risk_policy(final_profile="full"))
+    return {factor.code for factor in risk.factors}
+
+
+def test_runtime_package_members_are_not_critical_paths() -> None:
+    """`**/runtime*.py` names a file, not a directory tree.
+
+    `fnmatch` let `*` cross `/`, so every member of any `runtime/` package matched and the
+    whole runtime workstream was escalated to the slowest profile.
+    """
+    assert "CRITICAL_PATH_CHANGE" not in _critical_codes(
+        ["src/repoforge/adapters/runtime/unix_control.py"]
+    )
+    assert "CRITICAL_PATH_CHANGE" not in _critical_codes(
+        ["src/repoforge/application/runtime/supervisor.py"]
+    )
+
+
+def test_runtime_named_modules_are_still_critical_paths() -> None:
+    assert "CRITICAL_PATH_CHANGE" in _critical_codes(["src/repoforge/ports/runtime_control.py"])
+    assert "CRITICAL_PATH_CHANGE" in _critical_codes(["src/repoforge/domain/runtime.py"])
+    assert "CRITICAL_PATH_CHANGE" in _critical_codes(["src/repoforge/config.py"])
+
+
+def test_leading_doublestar_spans_zero_or_more_directories() -> None:
+    """`**/uv.lock` has to match the manifest at the repository root too."""
+    assert "DEPENDENCY_OR_MANIFEST_CHANGE" in _critical_codes(["uv.lock"])
+    assert "DEPENDENCY_OR_MANIFEST_CHANGE" in _critical_codes(["packages/api/uv.lock"])
+
+
+def test_trailing_doublestar_covers_the_whole_subtree() -> None:
+    assert "CRITICAL_PATH_CHANGE" in _critical_codes([".github/workflows/production-gate.yml"])
+    assert "PUBLIC_CONTRACT_CHANGE" in _critical_codes(["src/repoforge/interfaces/cli/main.py"])
+
+
+def test_star_does_not_cross_a_directory_boundary_for_docs() -> None:
+    """`docs/**` is what makes a docs change docs-only; a bare `*.md` is root-relative."""
+    assert "DOCS_ONLY_CHANGE" in _critical_codes(["docs/guide.md"])
+    assert "DOCS_ONLY_CHANGE" in _critical_codes(["README.md"])
+    assert "DOCS_ONLY_CHANGE" not in _critical_codes(["src/repoforge/domain/notes.md"])

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import fnmatch
+import re
 from collections.abc import Collection
+from functools import lru_cache
 
 from ...domain.assessment import AssessmentEvidenceStatus, WorkspaceAssessment
 from ...domain.risk import (
@@ -24,8 +25,58 @@ def _paths(assessment: WorkspaceAssessment) -> tuple[str, ...]:
     return tuple(sorted({item.replace("\\", "/") for item in raw if isinstance(item, str)}))
 
 
+def _segment_pattern(segment: str) -> str:
+    """Translate one glob segment, where `*` and `?` never cross a path separator."""
+    out: list[str] = []
+    index = 0
+    while index < len(segment):
+        character = segment[index]
+        if character == "*":
+            out.append("[^/]*")
+        elif character == "?":
+            out.append("[^/]")
+        elif character == "[":
+            closing = segment.find("]", index + 1)
+            if closing == -1:
+                out.append(re.escape(character))
+            else:
+                body = segment[index + 1 : closing]
+                if body.startswith(("!", "^")):
+                    body = "^" + body[1:]
+                out.append(f"[{body}]")
+                index = closing
+        else:
+            out.append(re.escape(character))
+        index += 1
+    return "".join(out)
+
+
+@lru_cache(maxsize=512)
+def _compiled_glob(pattern: str) -> re.Pattern[str]:
+    """Compile a path glob with directory-aware semantics.
+
+    `fnmatch` lets `*` cross `/`, so `**/runtime*.py` also matched every file under any
+    `runtime/` directory -- `adapters/runtime/unix_control.py` and the rest of the package.
+    That silently escalated most of the runtime workstream to the slowest verification
+    profile, which is not what a filename pattern is written to mean. Here `*` and `?` stay
+    inside one segment, a whole `**` segment spans zero or more directories, and a trailing
+    `/**` means everything below that directory.
+    """
+    segments = pattern.split("/")
+    parts: list[str] = []
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "**":
+            # Trailing `**` must match at least one path component so `docs/**` covers what
+            # is inside `docs` without also matching `docs` itself.
+            parts.append(".+" if last else "(?:[^/]+/)*")
+            continue
+        parts.append(_segment_pattern(segment) + ("" if last else "/"))
+    return re.compile("".join(parts) + r"\Z")
+
+
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+    return any(_compiled_glob(pattern).match(path) is not None for pattern in patterns)
 
 
 def _factor(

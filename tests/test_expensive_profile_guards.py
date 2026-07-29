@@ -353,3 +353,45 @@ def test_an_old_release_would_have_rejected_these_keys() -> None:
 
     with pytest.raises(PolicyPatchError, match="unsupported keys"):
         ProfilePatch.from_table("gate", {"commands": [["true"]], "not_a_field": 1})
+
+
+# ------------------------------------- surviving a transport drop mid-call
+
+
+def _adhoc_request(*, argv: tuple[str, ...] = ("uv", "run", "pytest")) -> OperationWorkRequest:
+    return OperationWorkRequest.adhoc(
+        workspace_id="workspace-1",
+        argv=argv,
+        working_directory=None,
+        mutability="read_only",
+        expected_head_sha="a" * 40,
+        expected_fingerprint="b" * 64,
+        config_generation=TEST_CONFIG_GENERATION,
+    )
+
+
+def test_an_adhoc_retry_after_a_dropped_response_joins_the_live_run(tmp_path: Path) -> None:
+    """The tunnel tears its MCP session down on its own schedule, and a call in flight when
+    that happens returns a gateway 502 with no operation id. Retrying the identical call is
+    the only thing the caller can do, so it has to land on the run already going -- not
+    start a second one, and not be refused."""
+    admission, _application, queue = _admission(tmp_path)
+
+    first = admission.admit(_adhoc_request(), operation_kind="workspace_run_adhoc")
+    retry = admission.admit(_adhoc_request(), operation_kind="workspace_run_adhoc")
+
+    assert retry.operation_id == first.operation_id
+    assert len(queue.list_records(max_records=10).records) == 1
+
+
+def test_a_different_adhoc_command_is_different_work(tmp_path: Path) -> None:
+    admission, _application, queue = _admission(tmp_path)
+
+    first = admission.admit(_adhoc_request(), operation_kind="workspace_run_adhoc")
+    other = admission.admit(
+        _adhoc_request(argv=("uv", "run", "pytest", "-k", "other")),
+        operation_kind="workspace_run_adhoc",
+    )
+
+    assert other.operation_id != first.operation_id
+    assert len(queue.list_records(max_records=10).records) == 2

@@ -56,9 +56,11 @@ documented in [TICKET_GOVERNANCE.md](TICKET_GOVERNANCE.md).
 
 A change is not complete until ticket and release contracts, linting, strict typing, tests with the
 configured branch-coverage threshold, clean package builds, and installed-wheel smoke all pass.
-The production gate runs deterministic capability-group-aware test shards (a dedicated serial lane
-for stateful groups, plus timing-aware balancing for the rest) and combines their coverage data; set
-`REPOFORGE_TEST_SHARDS` to a positive integer to tune local parallelism without changing scope.
+The production gate runs the suite in two lanes and combines their coverage data: a dedicated serial
+lane for the stateful (`parallel = false`) groups, then everything else in one xdist run. Set
+`REPOFORGE_TEST_WORKERS` to a positive integer to tune local parallelism without changing scope; the
+default of 3 is the measured cap for this suite, above which git child processes oversubscribe cores
+and produce contention-flaky failures.
 
 ### Module-aware test selection
 
