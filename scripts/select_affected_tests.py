@@ -212,6 +212,43 @@ def _actual_conftest_consumers(tests_dir: Path) -> set[str]:
     return consumers
 
 
+def check_map_freshness(manifest: Manifest, changed_paths: Sequence[str]) -> int:
+    """Fail when a changed package module is absent from the coverage map.
+
+    This is the pull-request half of the map's staleness gate. Rebuilding the map needs a
+    full recording run, so the authoritative check is push-only -- but by then the stale
+    entry is already on `main`. This one is static: it reads the diff and the map, runs no
+    tests, and answers in under a second.
+
+    An unmapped package module is not merely untidy. The selector fails closed on it, so
+    every later change touching that file runs the whole suite; 170 such files had
+    accumulated when nothing was watching, and five of the last eight commits ran
+    everything as a result.
+    """
+    unmapped = sorted(
+        path
+        for path in changed_paths
+        if path.startswith(_PACKAGE_SRC_PREFIX)
+        and path.endswith(".py")
+        and path not in manifest.coverage_map
+    )
+    if not unmapped:
+        print("[select-affected-tests] every changed package module is in the coverage map")
+        return 0
+    print(
+        f"[select-affected-tests] {len(unmapped)} changed package module(s) are missing from "
+        "the coverage map, so every later change to them will run the whole suite:",
+        file=sys.stderr,
+    )
+    for path in unmapped:
+        print(f"    {path}", file=sys.stderr)
+    print(
+        "[select-affected-tests] run `make test-map` and commit tests/coverage-map.json",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def check_completeness(manifest: Manifest, tests_dir: Path = DEFAULT_TESTS_DIR) -> list[str]:
     """Return human-readable violations; an empty list means the manifest is complete."""
     violations: list[str] = []
@@ -513,6 +550,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--tests-dir", type=Path, default=DEFAULT_TESTS_DIR)
     parser.add_argument("--check-completeness", action="store_true")
+    parser.add_argument(
+        "--check-map-freshness",
+        action="store_true",
+        help=(
+            "Fail when a changed package module is missing from the coverage map. "
+            "Static: reads the diff and the map, runs no tests."
+        ),
+    )
     parser.add_argument("--base", default="main", help="Base ref for git diff (default: main)")
     parser.add_argument(
         "--path",
@@ -545,6 +590,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("[select-affected-tests] manifest is complete")
         return 0
+
+    if args.check_map_freshness:
+        root = Path.cwd()
+        changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
+        return check_map_freshness(manifest, changed)
 
     root = Path.cwd()
     if args.full:
