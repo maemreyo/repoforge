@@ -495,7 +495,10 @@ def test_background_profile_emits_observable_per_step_progress(
         assert heartbeat_progress[key] == observed_progress[key]
     heartbeat_message = heartbeat_progress["message"]
     assert isinstance(heartbeat_message, str)
-    assert heartbeat_message.startswith("running business_tests (step 2/2, elapsed ")
+    # The step id leads: it is the name the reviewed configuration gave this stage and the
+    # one an operator recognises. `kind` follows in brackets as the coarse classification,
+    # which is `unknown` for anything the enum does not cover.
+    assert heartbeat_message.startswith("running tests [business_tests] (step 2/2, elapsed ")
     assert heartbeat_message.endswith("s)")
 
     release.write_text("continue\n", encoding="utf-8")
