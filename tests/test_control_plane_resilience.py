@@ -28,6 +28,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from repoforge.adapters.runtime.unix_control import (
     UnixRuntimeControlServer,
     resolve_unix_socket_path,
@@ -319,3 +321,69 @@ def test_runtime_health_fails_when_the_control_plane_is_not_serving(tmp_path: Pa
     assert named["control_plane"][0] is False
     assert "no longer running" in named["control_plane"][1]
     assert healthy is False, "a runtime with no control plane reported itself healthy"
+
+
+def test_restart_evidence_survives_the_stability_reset_that_clears_restart_count() -> None:
+    """`restart_count` is policy, not evidence.
+
+    It resets after `stable_health_reset_seconds` of calm, so sixty seconds after the last
+    restart the record reads `0`. During the 2026-07-28 incident the connector was torn
+    down twice in twelve minutes and the record afterwards said `healthy, 0 restarts` --
+    every durable fact insisting nothing had happened, which is what sent diagnosis to the
+    raw tunnel log. `restarts_total` and `last_restart_at` are never reset.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    from repoforge.domain.runtime import RuntimePhase, RuntimeRecord
+
+    after_two_restarts = RuntimeRecord(
+        protocol_version=1,
+        phase=RuntimePhase.HEALTHY,
+        pid=100,
+        process_identity="a" * 64,
+        active_generation=12,
+        accepted_generation=12,
+        tunnel_profile="repoforge",
+        tunnel_profile_fingerprint="b" * 64,
+        tool_surface_hash="c" * 64,
+        started_at="2026-07-28T17:16:17+00:00",
+        updated_at="2026-07-28T17:16:17+00:00",
+        correlation_id="d" * 24,
+        child_pid=200,
+        child_process_identity="e" * 64,
+        restart_count=1,
+        restarts_total=2,
+        last_restart_at="2026-07-28T17:15:55+00:00",
+    )
+
+    settled = dataclass_replace(
+        after_two_restarts,
+        restart_count=0,
+        updated_at="2026-07-28T17:17:18+00:00",
+    )
+
+    assert settled.restart_count == 0
+    assert settled.restarts_total == 2
+    assert settled.last_restart_at == "2026-07-28T17:15:55+00:00"
+
+
+def test_a_record_cannot_claim_more_current_restarts_than_it_ever_had() -> None:
+    from repoforge.domain.runtime import RuntimePhase, RuntimeRecord
+
+    with pytest.raises(ValueError):
+        RuntimeRecord(
+            protocol_version=1,
+            phase=RuntimePhase.DEGRADED,
+            pid=None,
+            process_identity=None,
+            active_generation=None,
+            accepted_generation=12,
+            tunnel_profile="repoforge",
+            tunnel_profile_fingerprint="b" * 64,
+            tool_surface_hash="c" * 64,
+            started_at=None,
+            updated_at="2026-07-28T17:17:18+00:00",
+            correlation_id="d" * 24,
+            restart_count=3,
+            restarts_total=1,
+        )

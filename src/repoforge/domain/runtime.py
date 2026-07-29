@@ -174,6 +174,14 @@ class RuntimeRecord:
     running_release_sha: str | None = None
     health_observed_at: str | None = None
     consecutive_health_failures: int = 0
+    # `restart_count` is a gauge the restart policy consumes: it resets after a stable
+    # interval, so 60 seconds after the last restart the record reads `0` and an outage
+    # leaves no trace at all. During the 2026-07-28 incident the connector was torn down
+    # twice in twelve minutes and the durable record afterwards said `healthy, 0 restarts`,
+    # which is what sent diagnosis to the raw tunnel log. These two are evidence, not
+    # policy: nothing resets them for the life of the record.
+    restarts_total: int = 0
+    last_restart_at: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -195,6 +203,8 @@ class RuntimeRecord:
         if (
             self.restart_count < 0
             or self.consecutive_health_failures < 0
+            or self.restarts_total < 0
+            or self.restarts_total < self.restart_count
             or not self.updated_at
             or not self.correlation_id
         ):
