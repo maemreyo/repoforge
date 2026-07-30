@@ -11,6 +11,12 @@ from pathlib import Path
 
 from ..domain.errors import ErrorCode, RepoForgeError
 from ..domain.git_transport_identity import GitTransportSpec
+from ..domain.github_capability_preflight import (
+    GitHubCapabilityPreflightRequest,
+    GitHubOperationCapability,
+    authorize_github_capabilities,
+    github_capability_requirements,
+)
 from ..domain.publication import (
     PublicationEvidence,
     RemoteTopology,
@@ -19,9 +25,10 @@ from ..domain.publication import (
     review_publication,
 )
 from ..domain.repository_auth_broker import ProcessAuthContext
-from ..domain.repository_identity import PublicationIntent, PublicationKind
+from ..domain.repository_identity import IdentitySurface, PublicationIntent, PublicationKind
 from ..ports.command import CommandExecutor
 from ..ports.git_transport import GitTransportGateway
+from ..ports.github_capability_preflight import GitHubCapabilityPreflightGateway
 from ..ports.publication import (
     GitHubPublicationGateway,
     PublicationAuthorization,
@@ -64,6 +71,7 @@ class PublicationAdapter:
         commands: CommandExecutor,
         repositories: PublicationRepositoryResolver,
         authorization: PublicationAuthorizationGateway,
+        capability_preflight: GitHubCapabilityPreflightGateway,
         transport: GitTransportGateway,
         github: GitHubPublicationGateway,
         clock: Callable[[], str],
@@ -71,6 +79,7 @@ class PublicationAdapter:
         self._commands = commands
         self._repositories = repositories
         self._authorization = authorization
+        self._capability_preflight = capability_preflight
         self._transport = transport
         self._github = github
         self._clock = clock
@@ -224,14 +233,165 @@ class PublicationAdapter:
             )
         return commit_rows[0].lower(), tree_rows[0].lower()
 
+    @staticmethod
+    def _requested_capabilities(
+        requested_capability_ids: tuple[str, ...],
+    ) -> tuple[GitHubOperationCapability, ...]:
+        if not requested_capability_ids:
+            raise _publication_error(
+                ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
+                "Publication requires at least one exact GitHub operation capability.",
+            )
+        try:
+            capabilities = tuple(
+                GitHubOperationCapability(item) for item in requested_capability_ids
+            )
+        except ValueError as exc:
+            raise _publication_error(
+                ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
+                "Publication requested an unknown GitHub operation capability.",
+            ) from exc
+        if len(set(capabilities)) != len(capabilities):
+            raise _publication_error(
+                ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
+                "Publication GitHub operation capabilities must be unique.",
+            )
+        return capabilities
+
+    @staticmethod
+    def _pinned_metadata(
+        expected: PublicationAuthorization,
+        key: str,
+    ) -> str:
+        value = dict(expected.lease.provider_metadata).get(key)
+        if not isinstance(value, str) or not value:
+            raise _publication_error(
+                ErrorCode.EVIDENCE_INVALID,
+                f"Publication auth lease is missing pinned {key} evidence.",
+            )
+        return value
+
+    def _capability_authorization(
+        self,
+        cwd: Path,
+        intent: PublicationIntent,
+        expected: PublicationAuthorization,
+        *,
+        requested_capability_ids: tuple[str, ...],
+        auth_context: ProcessAuthContext,
+    ) -> tuple[PublicationAuthorization, str]:
+        capabilities = self._requested_capabilities(requested_capability_ids)
+        requirements = github_capability_requirements()
+        permission_ids = tuple(
+            sorted({requirements[capability].permission_id for capability in capabilities})
+        )
+        request = GitHubCapabilityPreflightRequest(
+            host=self._pinned_metadata(expected, "github_host"),
+            actor_id=expected.actor_id,
+            repository_id=intent.destination_repository_id,
+            installation_id=expected.installation_id,
+            capability_ids=capabilities,
+            permission_ids=permission_ids,
+            config_revision=expected.lease.config_revision,
+            policy_revision=expected.lease.policy_revision,
+            observed_at=self._clock(),
+        )
+        report = authorize_github_capabilities(
+            self._capability_preflight.preflight(cwd, request, auth_context)
+        )
+        metadata = dict(expected.lease.provider_metadata)
+        pinned_capability = metadata.get("github_capability_digest")
+        pinned_permission = metadata.get("github_permission_digest")
+        pinned_config = metadata.get("config_revision")
+        pinned_policy = metadata.get("policy_revision")
+        if report.repository_id != intent.destination_repository_id:
+            raise _publication_error(
+                ErrorCode.GITHUB_API_REPOSITORY_MISMATCH,
+                "Write-time GitHub preflight observed a different repository.",
+            )
+        if (
+            report.actor_id != expected.actor_id
+            or report.installation_id != expected.installation_id
+            or report.config_revision != expected.lease.config_revision
+            or report.policy_revision != expected.lease.policy_revision
+            or (pinned_config is not None and pinned_config != report.config_revision)
+            or (pinned_policy is not None and pinned_policy != report.policy_revision)
+        ):
+            raise _publication_error(
+                ErrorCode.OPERATION_IDENTITY_MISMATCH,
+                "Write-time GitHub preflight changed a pinned publication identity field.",
+            )
+        if report.capability_ids != capabilities:
+            raise _publication_error(
+                ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
+                "Write-time GitHub preflight returned a different capability set.",
+            )
+        if report.permission_ids != permission_ids:
+            raise _publication_error(
+                ErrorCode.GITHUB_API_PERMISSION_DENIED,
+                "Write-time GitHub preflight returned a different permission set.",
+            )
+        if (
+            report.capability_digest != expected.capability_digest
+            or pinned_capability != report.capability_digest
+        ):
+            raise _publication_error(
+                ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
+                "Write-time GitHub capability digest changed before publication.",
+            )
+        if (
+            report.permission_digest != expected.permission_digest
+            or pinned_permission != report.permission_digest
+        ):
+            raise _publication_error(
+                ErrorCode.GITHUB_API_PERMISSION_DENIED,
+                "Write-time GitHub permission digest changed before publication.",
+            )
+
+        live = self._authorization.revalidate(
+            intent,
+            expected,
+            requested_capability_ids=requested_capability_ids,
+            auth_context=auth_context,
+        )
+        surfaces = tuple(
+            replace(
+                item,
+                observed_at=report.observed_at,
+                evidence_digest=report.evidence_digest,
+            )
+            if item.surface is IdentitySurface.GITHUB_API
+            else item
+            for item in live.identity_surfaces
+        )
+        return (
+            replace(
+                live,
+                identity_surfaces=surfaces,
+                capability_digest=report.capability_digest,
+                permission_digest=report.permission_digest,
+                observed_at=report.observed_at,
+            ),
+            report.evidence_digest,
+        )
+
     def revalidate(
         self,
         cwd: Path,
         intent: PublicationIntent,
         preflight: RemoteTopology,
         expected_authorization: PublicationAuthorization,
+        *,
+        requested_capability_ids: tuple[str, ...],
+        auth_context: ProcessAuthContext,
     ) -> ReviewedPublication:
-        live = self._authorization.revalidate(intent, expected_authorization)
+        live, preflight_evidence_digest = self._capability_authorization(
+            cwd,
+            intent,
+            expected_authorization,
+            requested_capability_ids=requested_capability_ids,
+            auth_context=auth_context,
+        )
         observed, _push_url = self._inspect_with_push_url(cwd, intent)
         commit_sha, tree_sha = self._source_objects(cwd, intent.source_ref)
         evidence = PublicationEvidence(
@@ -252,6 +412,7 @@ class PublicationAdapter:
             observed_permission_digest=live.permission_digest,
             expected_remote_version=expected_authorization.remote_version,
             observed_remote_version=live.remote_version,
+            preflight_evidence_digest=preflight_evidence_digest,
             approved_cross_boundary_id=live.approved_cross_boundary_id,
             observed_at=live.observed_at,
         )

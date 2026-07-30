@@ -90,6 +90,7 @@ class _PublicationResult:
     topology_digest: str
     capability_digest: str
     permission_digest: str
+    preflight_evidence_digest: str
     config_revision: str
     policy_revision: str
     remote_version: str
@@ -116,6 +117,7 @@ class _PublicationResult:
             "topology_digest": self.topology_digest,
             "capability_digest": self.capability_digest,
             "permission_digest": self.permission_digest,
+            "preflight_evidence_digest": self.preflight_evidence_digest,
             "config_revision": self.config_revision,
             "policy_revision": self.policy_revision,
             "remote_version": self.remote_version,
@@ -145,6 +147,7 @@ class PublicationOutcome:
     destination_ref: str
     commit_sha: str
     tree_sha: str
+    preflight_evidence_digest: str
     review_digest: str
     external_id: str
     url: str | None
@@ -163,6 +166,7 @@ class PublicationOutcome:
             "destination_ref": self.destination_ref,
             "commit_sha": self.commit_sha,
             "tree_sha": self.tree_sha,
+            "preflight_evidence_digest": self.preflight_evidence_digest,
             "review_digest": self.review_digest,
             "external_id": self.external_id,
             "url": self.url,
@@ -196,6 +200,32 @@ class PublicationCoordinator:
         )
 
     @staticmethod
+    def _github_capability_ids(request: PublicationRequest) -> tuple[str, ...]:
+        matching = tuple(
+            item
+            for item in request.capability_requests
+            if item.lease_id == request.authorization.lease.lease_id
+        )
+        if len(matching) != 1:
+            raise RepoForgeError(
+                "Publication requires one exact capability request for its auth lease",
+                code=ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
+                unchanged_state=("No external publication effect was started.",),
+            )
+        values = tuple(
+            capability
+            for capability in matching[0].capability_ids
+            if capability.startswith("github.")
+        )
+        if not values or len(set(values)) != len(values):
+            raise RepoForgeError(
+                "Publication requires unique exact GitHub operation capabilities",
+                code=ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
+                unchanged_state=("No external publication effect was started.",),
+            )
+        return values
+
+    @staticmethod
     def _request_payload(
         request: PublicationRequest,
         preflight: RemoteTopology,
@@ -206,6 +236,7 @@ class PublicationCoordinator:
             "preflight_topology_digest": preflight.topology_digest,
             "identity_context_id": request.identity_context_id,
             "capability_id": request.capability_id,
+            "github_capability_ids": list(PublicationCoordinator._github_capability_ids(request)),
             "profile_id": request.authorization.profile_id,
             "lease_id": request.authorization.lease.lease_id,
             "capability_digest": request.authorization.capability_digest,
@@ -273,6 +304,7 @@ class PublicationCoordinator:
             topology_digest=reviewed.topology_digest,
             capability_digest=reviewed.capability_digest,
             permission_digest=reviewed.permission_digest,
+            preflight_evidence_digest=reviewed.preflight_evidence_digest,
             config_revision=request.identity_context.config_revision,
             policy_revision=request.identity_context.policy_revision,
             remote_version=reviewed.remote_version,
@@ -284,6 +316,7 @@ class PublicationCoordinator:
 
     def execute(self, request: PublicationRequest) -> PublicationOutcome:
         preflight = self._gateway.inspect(request.cwd, request.intent)
+        github_capability_ids = self._github_capability_ids(request)
         boundary = IdempotencyEffectBoundary()
         action = self._action(request.intent.kind)
 
@@ -314,6 +347,8 @@ class PublicationCoordinator:
                 request.intent,
                 preflight,
                 request.authorization,
+                requested_capability_ids=github_capability_ids,
+                auth_context=request.auth_context,
             )
             boundary.begin()
             effect = self._gateway.publish(
@@ -334,6 +369,8 @@ class PublicationCoordinator:
                 request.intent,
                 preflight,
                 request.authorization,
+                requested_capability_ids=github_capability_ids,
+                auth_context=request.auth_context,
             )
             effect = self._gateway.reconcile(
                 request.cwd,
@@ -384,6 +421,7 @@ class PublicationCoordinator:
             destination_ref=result.destination_ref,
             commit_sha=result.commit_sha,
             tree_sha=result.tree_sha,
+            preflight_evidence_digest=result.preflight_evidence_digest,
             review_digest=result.review_digest,
             external_id=result.external_id,
             url=result.url,

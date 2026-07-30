@@ -221,6 +221,7 @@ class PublicationEvidence:
     observed_permission_digest: str
     expected_remote_version: str
     observed_remote_version: str
+    preflight_evidence_digest: str
     approved_cross_boundary_id: str | None
     observed_at: str
 
@@ -251,6 +252,7 @@ class PublicationEvidence:
             ("observed_permission_digest", self.observed_permission_digest),
             ("expected_remote_version", self.expected_remote_version),
             ("observed_remote_version", self.observed_remote_version),
+            ("preflight_evidence_digest", self.preflight_evidence_digest),
         ):
             _sha256(value, name)
         if self.approved_cross_boundary_id is not None:
@@ -277,6 +279,7 @@ class ReviewedPublication:
     capability_digest: str
     permission_digest: str
     remote_version: str
+    preflight_evidence_digest: str
     evidence_digests: tuple[str, ...]
     cross_boundary_approval_id: str | None
     reviewed_at: str
@@ -304,6 +307,7 @@ class ReviewedPublication:
             ("capability_digest", self.capability_digest),
             ("permission_digest", self.permission_digest),
             ("remote_version", self.remote_version),
+            ("preflight_evidence_digest", self.preflight_evidence_digest),
             ("review_digest", self.review_digest),
         ):
             _sha256(value, name)
@@ -334,6 +338,7 @@ class ReviewedPublication:
             "capability_digest": self.capability_digest,
             "permission_digest": self.permission_digest,
             "remote_version": self.remote_version,
+            "preflight_evidence_digest": self.preflight_evidence_digest,
             "evidence_digests": list(self.evidence_digests),
             "cross_boundary_approval_id": self.cross_boundary_approval_id,
             "reviewed_at": self.reviewed_at,
@@ -540,6 +545,7 @@ def review_publication(
         "capability_digest": evidence.observed_capability_digest,
         "permission_digest": evidence.observed_permission_digest,
         "remote_version": evidence.observed_remote_version,
+        "preflight_evidence_digest": evidence.preflight_evidence_digest,
         "evidence_digests": evidence_digests,
         "approved_cross_boundary_id": evidence.approved_cross_boundary_id,
         "reviewed_at": evidence.observed_at,
@@ -562,6 +568,7 @@ def review_publication(
         capability_digest=evidence.observed_capability_digest,
         permission_digest=evidence.observed_permission_digest,
         remote_version=evidence.observed_remote_version,
+        preflight_evidence_digest=evidence.preflight_evidence_digest,
         evidence_digests=evidence_digests,
         cross_boundary_approval_id=intent.cross_boundary_approval_id,
         reviewed_at=evidence.observed_at,

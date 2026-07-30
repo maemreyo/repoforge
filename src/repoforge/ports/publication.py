@@ -151,6 +151,9 @@ class PublicationAuthorizationGateway(Protocol):
         self,
         intent: PublicationIntent,
         expected: PublicationAuthorization,
+        *,
+        requested_capability_ids: tuple[str, ...],
+        auth_context: ProcessAuthContext,
     ) -> PublicationAuthorization: ...
 
 
@@ -197,6 +200,9 @@ class PublicationGateway(Protocol):
         intent: PublicationIntent,
         preflight: RemoteTopology,
         expected_authorization: PublicationAuthorization,
+        *,
+        requested_capability_ids: tuple[str, ...],
+        auth_context: ProcessAuthContext,
     ) -> ReviewedPublication: ...
 
     def publish(

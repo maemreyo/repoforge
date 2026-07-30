@@ -17,6 +17,13 @@ from repoforge.domain.git_transport_identity import (
     GitTransportKind,
     GitTransportSpec,
 )
+from repoforge.domain.github_capability_preflight import (
+    GitHubCapabilityEvidenceState,
+    GitHubCapabilityPreflightReport,
+    GitHubCapabilityPreflightRequest,
+    GitHubCapabilityResult,
+    GitHubOperationCapability,
+)
 from repoforge.domain.repository_auth_broker import ProcessAuthContext
 from repoforge.domain.repository_identity import (
     ActorClass,
@@ -49,6 +56,7 @@ _REMOTE_VERSION = "5" * 64
 _CREDENTIAL = "6" * 64
 _API_EVIDENCE = "7" * 64
 _PUSH_EVIDENCE = "8" * 64
+_PREFLIGHT_DETAIL = "9" * 64
 
 
 class FakeCommands:
@@ -83,18 +91,53 @@ class FakeResolver:
 
 
 class FakeAuthorizationGateway:
-    def __init__(self, live: PublicationAuthorization) -> None:
+    def __init__(
+        self,
+        live: PublicationAuthorization,
+        events: list[str] | None = None,
+    ) -> None:
         self.live = live
         self.calls: list[str] = []
+        self.events = events
 
     def revalidate(
         self,
         intent: PublicationIntent,
         expected: PublicationAuthorization,
+        *,
+        requested_capability_ids: tuple[str, ...],
+        auth_context: ProcessAuthContext,
     ) -> PublicationAuthorization:
+        if self.events is not None:
+            self.events.append("revalidate")
         self.calls.append(intent.publication_id)
         assert expected.profile_id == self.live.profile_id
+        if requested_capability_ids:
+            assert all(item.startswith("github.") for item in requested_capability_ids)
+        assert auth_context.profile_id == expected.profile_id
         return self.live
+
+
+class FakeCapabilityPreflight:
+    def __init__(
+        self,
+        report: GitHubCapabilityPreflightReport,
+        events: list[str] | None = None,
+    ) -> None:
+        self.report = report
+        self.events = events
+        self.calls: list[tuple[Path, GitHubCapabilityPreflightRequest, ProcessAuthContext]] = []
+
+    def preflight(
+        self,
+        cwd: Path,
+        request: GitHubCapabilityPreflightRequest,
+        auth_context: ProcessAuthContext,
+    ) -> GitHubCapabilityPreflightReport:
+        if self.events is not None:
+            self.events.append("capability_preflight")
+        self.calls.append((cwd, request, auth_context))
+        return self.report
 
 
 class FakeTransport:
@@ -285,7 +328,16 @@ def _lease(repository_id: str = "repo-company") -> AuthLease:
         config_revision="a" * 64,
         policy_revision="b" * 64,
         material_digest="c" * 64,
-        provider_metadata=(("installation_id", "installation-84"),),
+        provider_metadata=(
+            ("installation_id", "installation-84"),
+            ("github_host", "github.com"),
+            ("github_preflight_evidence_digest", _API_EVIDENCE),
+            ("github_capability_digest", _CAPABILITY),
+            ("github_permission_digest", _PERMISSION),
+            ("github_preflight_observed_at", _NOW),
+            ("config_revision", "a" * 64),
+            ("policy_revision", "b" * 64),
+        ),
     )
 
 
@@ -326,6 +378,78 @@ def _authorization(
         remote_version=_REMOTE_VERSION,
         observed_at=_NOW,
         approved_cross_boundary_id=approval_id,
+    )
+
+
+def _preflight_report(
+    *,
+    state: GitHubCapabilityEvidenceState = GitHubCapabilityEvidenceState.PROVEN_AVAILABLE,
+    error_code: ErrorCode | None = None,
+    reason_code: str = "bounded_probe_succeeded",
+    actor_id: str = "installation:84",
+    repository_id: str = "repo-company",
+    installation_id: str | None = "installation-84",
+    capability: GitHubOperationCapability = GitHubOperationCapability.CONTENTS_WRITE,
+    permission_ids: tuple[str, ...] = ("contents:write",),
+) -> GitHubCapabilityPreflightReport:
+    request = GitHubCapabilityPreflightRequest(
+        host="github.com",
+        actor_id=actor_id,
+        repository_id=repository_id,
+        installation_id=installation_id,
+        capability_ids=(capability,),
+        permission_ids=permission_ids,
+        config_revision="a" * 64,
+        policy_revision="b" * 64,
+        observed_at=_NOW,
+    )
+    result = GitHubCapabilityResult(
+        capability=capability,
+        state=state,
+        reason_code=reason_code,
+        detail_digest=_PREFLIGHT_DETAIL,
+        error_code=error_code,
+        policy_category=None if error_code is None else "publication",
+    )
+    return GitHubCapabilityPreflightReport.build(request, (result,))
+
+
+def _authorization_for_report(
+    report: GitHubCapabilityPreflightReport,
+) -> PublicationAuthorization:
+    authorization = _authorization(report.repository_id)
+    metadata = (
+        ("installation_id", report.installation_id or ""),
+        ("github_host", report.host),
+        ("github_preflight_evidence_digest", "f" * 64),
+        ("github_capability_digest", report.capability_digest),
+        ("github_permission_digest", report.permission_digest),
+        ("github_preflight_observed_at", "2026-07-29T06:00:00+00:00"),
+        ("config_revision", report.config_revision),
+        ("policy_revision", report.policy_revision),
+    )
+    return replace(
+        authorization,
+        lease=replace(authorization.lease, provider_metadata=metadata),
+        capability_digest=report.capability_digest,
+        permission_digest=report.permission_digest,
+    )
+
+
+def _legacy_preflight(
+    repository_id: str = "repo-company",
+    *,
+    capability: GitHubOperationCapability = GitHubOperationCapability.CONTENTS_WRITE,
+    permission_ids: tuple[str, ...] = ("contents:write",),
+) -> GitHubCapabilityPreflightReport:
+    return replace(
+        _preflight_report(
+            repository_id=repository_id,
+            capability=capability,
+            permission_ids=permission_ids,
+        ),
+        capability_digest=_CAPABILITY,
+        permission_digest=_PERMISSION,
     )
 
 
@@ -377,6 +501,7 @@ def _adapter(
     commands: FakeCommands | None = None,
     resolver: FakeResolver | None = None,
     live: PublicationAuthorization | None = None,
+    capability_preflight: FakeCapabilityPreflight | None = None,
     transport: FakeTransport | None = None,
     github: FakeGitHubPublication | None = None,
 ) -> PublicationAdapter:
@@ -384,6 +509,7 @@ def _adapter(
         commands=commands or _commands(),
         repositories=resolver or _resolver(),
         authorization=FakeAuthorizationGateway(live or _authorization()),
+        capability_preflight=capability_preflight or FakeCapabilityPreflight(_legacy_preflight()),
         transport=transport or FakeTransport(),
         github=github or FakeGitHubPublication(),
         clock=lambda: _NOW,
@@ -427,9 +553,17 @@ def test_revalidate_detects_pushurl_drift_before_effect() -> None:
     adapter._commands = _commands(  # type: ignore[attr-defined]
         push_urls=("git@github.com:personal/project.git",),
     )
+    _spec, context = _transport_identity()
 
     with pytest.raises(RepoForgeError) as failure:
-        adapter.revalidate(_ROOT, intent, preflight, _authorization())
+        adapter.revalidate(
+            _ROOT,
+            intent,
+            preflight,
+            _authorization(),
+            requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+            auth_context=context,
+        )
 
     assert failure.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH
 
@@ -439,8 +573,15 @@ def test_publish_push_uses_only_the_reviewed_exact_refspec() -> None:
     adapter = _adapter(transport=transport)
     intent = _push_intent()
     topology = adapter.inspect(_ROOT, intent)
-    reviewed = adapter.revalidate(_ROOT, intent, topology, _authorization())
     spec, context = _transport_identity()
+    reviewed = adapter.revalidate(
+        _ROOT,
+        intent,
+        topology,
+        _authorization(),
+        requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+        auth_context=context,
+    )
 
     effect = adapter.publish(
         _ROOT,
@@ -462,7 +603,16 @@ def test_publish_push_uses_only_the_reviewed_exact_refspec() -> None:
 
 def test_pull_request_publication_passes_explicit_base_head_repositories_and_refs() -> None:
     github = FakeGitHubPublication()
-    adapter = _adapter(github=github)
+    adapter = _adapter(
+        github=github,
+        capability_preflight=FakeCapabilityPreflight(
+            _legacy_preflight(
+                "repo-upstream",
+                capability=GitHubOperationCapability.PULL_REQUESTS_WRITE,
+                permission_ids=("pull_requests:write",),
+            )
+        ),
+    )
     intent = PublicationIntent(
         publication_id="publication-pr",
         operation_id="op-" + "e" * 24,
@@ -488,8 +638,15 @@ def test_pull_request_publication_passes_explicit_base_head_repositories_and_ref
     )
     adapter._authorization = FakeAuthorizationGateway(authorization)  # type: ignore[attr-defined]
     topology = adapter.inspect(_ROOT, intent)
-    reviewed = adapter.revalidate(_ROOT, intent, topology, authorization)
     spec, context = _transport_identity("repo-upstream")
+    reviewed = adapter.revalidate(
+        _ROOT,
+        intent,
+        topology,
+        authorization,
+        requested_capability_ids=(GitHubOperationCapability.PULL_REQUESTS_WRITE.value,),
+        auth_context=context,
+    )
 
     effect = adapter.publish(
         _ROOT,
@@ -524,8 +681,15 @@ def test_reconcile_push_queries_only_the_exact_destination_ref() -> None:
     adapter = _adapter(transport=transport)
     intent = _push_intent()
     topology = adapter.inspect(_ROOT, intent)
-    reviewed = adapter.revalidate(_ROOT, intent, topology, _authorization())
     spec, context = _transport_identity()
+    reviewed = adapter.revalidate(
+        _ROOT,
+        intent,
+        topology,
+        _authorization(),
+        requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+        auth_context=context,
+    )
 
     effect = adapter.reconcile(
         _ROOT,
@@ -546,8 +710,15 @@ def test_reconcile_does_not_accept_a_different_commit() -> None:
     adapter = _adapter(transport=transport)
     intent = _push_intent()
     topology = adapter.inspect(_ROOT, intent)
-    reviewed = adapter.revalidate(_ROOT, intent, topology, _authorization())
     spec, context = _transport_identity()
+    reviewed = adapter.revalidate(
+        _ROOT,
+        intent,
+        topology,
+        _authorization(),
+        requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+        auth_context=context,
+    )
 
     assert (
         adapter.reconcile(
@@ -637,3 +808,162 @@ def test_gh_cli_pull_request_response_identity_mismatch_fails_closed() -> None:
         )
 
     assert failure.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH
+
+
+def test_write_time_preflight_runs_before_authorization_review_and_binds_evidence() -> None:
+    events: list[str] = []
+    report = _preflight_report()
+    authorization = _authorization_for_report(report)
+    capability_preflight = FakeCapabilityPreflight(report, events)
+    authorization_gateway = FakeAuthorizationGateway(authorization, events)
+    adapter = PublicationAdapter(
+        commands=_commands(),
+        repositories=_resolver(),
+        authorization=authorization_gateway,
+        capability_preflight=capability_preflight,
+        transport=FakeTransport(),
+        github=FakeGitHubPublication(),
+        clock=lambda: _NOW,
+    )
+    intent = _push_intent()
+    topology = adapter.inspect(_ROOT, intent)
+    _spec, auth_context = _transport_identity()
+
+    reviewed = adapter.revalidate(
+        _ROOT,
+        intent,
+        topology,
+        authorization,
+        requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+        auth_context=auth_context,
+    )
+
+    assert events == ["capability_preflight", "revalidate"]
+    assert authorization_gateway.calls == [intent.publication_id]
+    assert len(capability_preflight.calls) == 1
+    cwd, request, observed_context = capability_preflight.calls[0]
+    assert cwd == _ROOT
+    assert observed_context is auth_context
+    assert request.actor_id == authorization.actor_id
+    assert request.repository_id == intent.destination_repository_id
+    assert request.installation_id == authorization.installation_id
+    assert request.capability_ids == (GitHubOperationCapability.CONTENTS_WRITE,)
+    assert request.permission_ids == ("contents:write",)
+    assert request.config_revision == authorization.lease.config_revision
+    assert request.policy_revision == authorization.lease.policy_revision
+    assert reviewed.capability_digest == report.capability_digest
+    assert reviewed.permission_digest == report.permission_digest
+    assert report.evidence_digest in reviewed.evidence_digests
+
+
+@pytest.mark.parametrize(
+    ("state", "code", "reason"),
+    [
+        (
+            GitHubCapabilityEvidenceState.PROVEN_DENIED,
+            ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED,
+            "sso_authorization_required",
+        ),
+        (
+            GitHubCapabilityEvidenceState.LIKELY_POLICY_DENIED,
+            ErrorCode.GITHUB_RULESET_POLICY_DENIED,
+            "ruleset_policy_denied",
+        ),
+        (
+            GitHubCapabilityEvidenceState.PROVIDER_UNAVAILABLE,
+            ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
+            "provider_unavailable",
+        ),
+        (
+            GitHubCapabilityEvidenceState.UNOBSERVABLE,
+            ErrorCode.GITHUB_ENTERPRISE_EVIDENCE_UNOBSERVABLE,
+            "enterprise_evidence_unobservable",
+        ),
+    ],
+)
+def test_write_time_preflight_denial_stops_before_authorization_review(
+    state: GitHubCapabilityEvidenceState,
+    code: ErrorCode,
+    reason: str,
+) -> None:
+    events: list[str] = []
+    initial = _preflight_report()
+    authorization = _authorization_for_report(initial)
+    denied = _preflight_report(state=state, error_code=code, reason_code=reason)
+    authorization_gateway = FakeAuthorizationGateway(authorization, events)
+    adapter = PublicationAdapter(
+        commands=_commands(),
+        repositories=_resolver(),
+        authorization=authorization_gateway,
+        capability_preflight=FakeCapabilityPreflight(denied, events),
+        transport=FakeTransport(),
+        github=FakeGitHubPublication(),
+        clock=lambda: _NOW,
+    )
+    intent = _push_intent()
+    topology = adapter.inspect(_ROOT, intent)
+    _spec, auth_context = _transport_identity()
+
+    with pytest.raises(RepoForgeError) as failure:
+        adapter.revalidate(
+            _ROOT,
+            intent,
+            topology,
+            authorization,
+            requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+            auth_context=auth_context,
+        )
+
+    assert failure.value.code is code
+    assert events == ["capability_preflight"]
+    assert authorization_gateway.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("actor_id", "other-actor", ErrorCode.OPERATION_IDENTITY_MISMATCH),
+        ("installation_id", "installation-99", ErrorCode.OPERATION_IDENTITY_MISMATCH),
+        ("repository_id", "repo-other", ErrorCode.GITHUB_API_REPOSITORY_MISMATCH),
+        ("config_revision", "c" * 64, ErrorCode.OPERATION_IDENTITY_MISMATCH),
+        ("policy_revision", "d" * 64, ErrorCode.OPERATION_IDENTITY_MISMATCH),
+        ("capability_digest", "e" * 64, ErrorCode.CREDENTIAL_CAPABILITY_DENIED),
+        ("permission_digest", "f" * 64, ErrorCode.GITHUB_API_PERMISSION_DENIED),
+    ],
+)
+def test_write_time_preflight_identity_and_digest_drift_fails_closed(
+    field: str,
+    value: str,
+    code: ErrorCode,
+) -> None:
+    events: list[str] = []
+    initial = _preflight_report()
+    authorization = _authorization_for_report(initial)
+    drifted = replace(initial, **{field: value})
+    authorization_gateway = FakeAuthorizationGateway(authorization, events)
+    adapter = PublicationAdapter(
+        commands=_commands(),
+        repositories=_resolver(),
+        authorization=authorization_gateway,
+        capability_preflight=FakeCapabilityPreflight(drifted, events),
+        transport=FakeTransport(),
+        github=FakeGitHubPublication(),
+        clock=lambda: _NOW,
+    )
+    intent = _push_intent()
+    topology = adapter.inspect(_ROOT, intent)
+    _spec, auth_context = _transport_identity()
+
+    with pytest.raises(RepoForgeError) as failure:
+        adapter.revalidate(
+            _ROOT,
+            intent,
+            topology,
+            authorization,
+            requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+            auth_context=auth_context,
+        )
+
+    assert failure.value.code is code
+    assert events == ["capability_preflight"]
+    assert authorization_gateway.calls == []

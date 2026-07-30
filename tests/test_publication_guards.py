@@ -57,6 +57,7 @@ _PERMISSION = "a" * 64
 _REMOTE_VERSION = "b" * 64
 _API_EVIDENCE = "c" * 64
 _TRANSPORT_EVIDENCE = "d" * 64
+_PREFLIGHT_EVIDENCE = "1" * 64
 _OBSERVED_AT = "2026-07-29T06:30:00+00:00"
 
 
@@ -210,6 +211,7 @@ def _evidence(
     observed_capability_digest: str = _CAPABILITY,
     observed_permission_digest: str = _PERMISSION,
     observed_remote_version: str = _REMOTE_VERSION,
+    preflight_evidence_digest: str = _PREFLIGHT_EVIDENCE,
     approved_cross_boundary_id: str | None = None,
     surfaces: tuple[IdentitySurfaceEvidence, ...] | None = None,
 ) -> PublicationEvidence:
@@ -236,6 +238,7 @@ def _evidence(
         observed_permission_digest=observed_permission_digest,
         expected_remote_version=_REMOTE_VERSION,
         observed_remote_version=observed_remote_version,
+        preflight_evidence_digest=preflight_evidence_digest,
         approved_cross_boundary_id=approved_cross_boundary_id,
         observed_at=_OBSERVED_AT,
     )
@@ -440,7 +443,10 @@ class _CoordinatorIdentities:
         self.events.append("bind")
         assert context.operation_id == _OPERATION_ID
         assert context_id == "identity-" + "e" * 24
-        assert capability_requests[0].capability_ids == ("git.push",)
+        assert capability_requests[0].capability_ids == (
+            "git.push",
+            "github.contents.write",
+        )
         return SimpleNamespace(
             reference=OperationIdentityReference("identity-" + "e" * 24, "f" * 64)
         )
@@ -463,7 +469,19 @@ class _CoordinatorGateway:
         assert intent == _intent()
         return _topology()
 
-    def revalidate(self, cwd, intent, preflight, expected_authorization):
+    def revalidate(
+        self,
+        cwd,
+        intent,
+        preflight,
+        expected_authorization,
+        *,
+        requested_capability_ids,
+        auth_context,
+    ):
+        self.events.append("capability_preflight")
+        assert requested_capability_ids == ("github.contents.write",)
+        assert auth_context.profile_id == expected_authorization.profile_id
         self.events.append("revalidate")
         if self.fail_revalidation:
             raise RepoForgeError("topology drift", code=ErrorCode.PUBLICATION_TARGET_MISMATCH)
@@ -521,7 +539,12 @@ def _coordinator_request():
             policy_revision=_POLICY,
         ),
         identity_context_id="identity-" + "e" * 24,
-        capability_requests=(LeaseCapabilityRequest("lease-company-repository", ("git.push",)),),
+        capability_requests=(
+            LeaseCapabilityRequest(
+                "lease-company-repository",
+                ("git.push", "github.contents.write"),
+            ),
+        ),
         capability_id="git.push",
         transport_spec=GitTransportSpec(
             profile_id="company-app",
@@ -555,12 +578,22 @@ def test_publication_coordinator_orders_identity_review_before_effect() -> None:
 
     outcome = coordinator.execute(_coordinator_request())
 
-    assert events == ["inspect", "idempotent", "bind", "require_write", "revalidate", "publish"]
+    assert events == [
+        "inspect",
+        "idempotent",
+        "bind",
+        "require_write",
+        "capability_preflight",
+        "revalidate",
+        "publish",
+    ]
     assert ctx.boundary.started is True
     assert ctx.boundary.authoritative_result is not None
     assert outcome.operation_id == _OPERATION_ID
     assert outcome.receipt_id == "receipt-" + "a" * 24
     assert outcome.result_reference == f"operation-result:{_OPERATION_ID}"
+    assert outcome.preflight_evidence_digest == _PREFLIGHT_EVIDENCE
+    assert ctx.boundary.authoritative_result.preflight_evidence_digest == _PREFLIGHT_EVIDENCE
 
 
 def test_publication_coordinator_stops_before_boundary_on_revalidation_drift() -> None:
@@ -576,5 +609,12 @@ def test_publication_coordinator_stops_before_boundary_on_revalidation_drift() -
         coordinator.execute(_coordinator_request())
 
     assert failure.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH
-    assert events == ["inspect", "idempotent", "bind", "require_write", "revalidate"]
+    assert events == [
+        "inspect",
+        "idempotent",
+        "bind",
+        "require_write",
+        "capability_preflight",
+        "revalidate",
+    ]
     assert ctx.boundary.started is False
