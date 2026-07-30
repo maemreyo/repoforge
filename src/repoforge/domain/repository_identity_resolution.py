@@ -394,11 +394,14 @@ def resolve_repository_identity(
     bindings: tuple[RepositoryBindingSnapshot, ...],
     profiles: tuple[CredentialProfileEligibility, ...],
     expected_binding_revision: Revision | None = None,
+    selected_profile_id: str | None = None,
 ) -> RepositoryIdentityResolution:
     """Resolve one repository without global account state or implicit profile fallback."""
 
     if not isinstance(role, CredentialRole):
         raise ValueError("role must be a CredentialRole")
+    if selected_profile_id is not None:
+        _safe_id(selected_profile_id, "selected_profile_id")
     if not isinstance(bindings, tuple) or any(
         not isinstance(item, RepositoryBindingSnapshot) for item in bindings
     ):
@@ -448,6 +451,17 @@ def resolve_repository_identity(
                 "The repository binding belongs to a different configuration revision.",
                 retryable=True,
                 actions=(RecoveryAction(RecoveryActionKind.RECONCILE_BINDING),),
+                binding_revision=snapshot.revision,
+            )
+        bound_profile_id = (
+            binding.agent_profile_id if role is CredentialRole.AGENT else binding.human_profile_id
+        )
+        if selected_profile_id is not None and bound_profile_id != selected_profile_id:
+            return _failed(
+                observation,
+                RepositoryAuthFailureCode.PROFILE_NOT_AUTHORIZED,
+                "The explicit credential profile conflicts with the exact repository binding.",
+                actions=(RecoveryAction(RecoveryActionKind.RESELECT_PROFILE),),
                 binding_revision=snapshot.revision,
             )
         reconciliation: RepositoryReconciliationEvent | None = None
@@ -505,9 +519,49 @@ def resolve_repository_identity(
             actions=(RecoveryAction(RecoveryActionKind.RECONCILE_BINDING),),
         )
 
-    matching = tuple(
-        item for item in profiles if item.matches(observation) and _role_matches(item.profile, role)
-    )
+    matching: tuple[CredentialProfileEligibility, ...]
+    if selected_profile_id is not None:
+        declared = tuple(
+            item for item in profiles if item.profile.profile_id == selected_profile_id
+        )
+        if len(declared) > 1:
+            return _failed(
+                observation,
+                RepositoryAuthFailureCode.PROFILE_AMBIGUOUS,
+                "The explicit credential profile is declared more than once.",
+                actions=(RecoveryAction(RecoveryActionKind.RESELECT_PROFILE),),
+            )
+        if not declared:
+            return _failed(
+                observation,
+                RepositoryAuthFailureCode.PROFILE_NOT_FOUND,
+                "The explicit credential profile is not declared.",
+                actions=(RecoveryAction(RecoveryActionKind.RESELECT_PROFILE),),
+            )
+        selected_eligibility = declared[0]
+        if not selected_eligibility.enabled:
+            return _failed(
+                observation,
+                RepositoryAuthFailureCode.PROFILE_NOT_AUTHORIZED,
+                "The explicit credential profile is disabled.",
+                actions=(RecoveryAction(RecoveryActionKind.REAUTHORIZE),),
+            )
+        if not selected_eligibility.matches(observation) or not _role_matches(
+            selected_eligibility.profile, role
+        ):
+            return _failed(
+                observation,
+                RepositoryAuthFailureCode.PROFILE_NOT_AUTHORIZED,
+                "The explicit credential profile is incompatible with the repository or actor role.",
+                actions=(RecoveryAction(RecoveryActionKind.RESELECT_PROFILE),),
+            )
+        matching = (selected_eligibility,)
+    else:
+        matching = tuple(
+            item
+            for item in profiles
+            if item.matches(observation) and _role_matches(item.profile, role)
+        )
     eligible = tuple(item for item in matching if item.enabled)
     if len(eligible) > 1:
         return _failed(
