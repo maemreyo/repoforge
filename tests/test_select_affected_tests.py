@@ -61,6 +61,90 @@ def test_the_shipped_manifest_is_complete_against_the_real_tests_directory() -> 
     assert violations == []
 
 
+@pytest.mark.parametrize(
+    ("changed_path", "required_tests"),
+    [
+        (
+            "src/repoforge/domain/github_capability_preflight.py",
+            {"tests/test_github_capability_preflight_domain.py"},
+        ),
+        (
+            "src/repoforge/ports/github_capability_preflight.py",
+            {"tests/test_github_capability_preflight_adapter.py"},
+        ),
+        (
+            "src/repoforge/adapters/github/capability_preflight.py",
+            {"tests/test_github_capability_preflight_adapter.py"},
+        ),
+        (
+            "src/repoforge/adapters/github/api_identity.py",
+            {
+                "tests/test_github_api_identity.py",
+                "tests/test_github_capability_preflight_adapter.py",
+            },
+        ),
+        (
+            "src/repoforge/domain/repository_identity.py",
+            {
+                "tests/test_github_api_identity.py",
+                "tests/test_operation_identity_leases.py",
+                "tests/test_repository_identity_contracts.py",
+            },
+        ),
+        (
+            "src/repoforge/adapters/publication.py",
+            {
+                "tests/test_github_api_identity.py",
+                "tests/test_publication_adapter.py",
+            },
+        ),
+        (
+            "src/repoforge/application/publication.py",
+            {
+                "tests/test_github_api_identity.py",
+                "tests/test_publication_guards.py",
+            },
+        ),
+        (
+            "src/repoforge/application/context.py",
+            {
+                "tests/test_github_api_identity.py",
+                "tests/test_integration.py",
+            },
+        ),
+        (
+            "src/repoforge/bootstrap.py",
+            {
+                "tests/test_github_api_identity.py",
+                "tests/test_integration.py",
+            },
+        ),
+    ],
+)
+def test_shipped_manifest_selects_github_capability_preflight_consumers(
+    changed_path: str,
+    required_tests: set[str],
+) -> None:
+    root = Path(__file__).parents[1]
+    manifest = selector.load_manifest(root / "tests/test-groups.toml")
+
+    selection = selector.select_affected_tests(manifest, [changed_path])
+
+    assert selection.escalated_to_wide is False
+    assert required_tests <= set(selection.selected_files)
+
+
+def test_shipped_manifest_fails_closed_for_an_unmapped_package_module() -> None:
+    root = Path(__file__).parents[1]
+    manifest = selector.load_manifest(root / "tests/test-groups.toml")
+    changed_path = "src/repoforge/task7_unmapped_sentinel.py"
+
+    selection = selector.select_affected_tests(manifest, [changed_path])
+
+    assert selection.escalated_to_wide is True
+    assert changed_path in (selection.escalation_reason or "")
+
+
 def test_glob_matching_supports_recursive_and_single_segment_wildcards() -> None:
     assert selector._matches_any(
         "src/repoforge/adapters/git/foo.py", ("src/repoforge/adapters/git/**",)

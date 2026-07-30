@@ -69,21 +69,12 @@ ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
 
 CONFTEST_PATH = "tests/conftest.py"
 
-# Coverage contexts cannot express every capability-preflight dependency: the
-# protocol has no executable body, and composition/binding tests exercise a
-# preflight consumer through a wider workflow. Keep those reviewed direct
-# consumers beside the ordinary coverage map so source changes remain narrow
-# without weakening the default fail-closed behavior for unknown modules.
+# Coverage contexts cannot express every capability-preflight dependency:
+# composition and binding tests exercise consumers through wider workflows.
+# Keep only those additional reviewed consumers beside the ordinary coverage
+# map so source changes remain narrow without inflating consumer counts or
+# weakening the default fail-closed behavior for unknown modules.
 _GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS: dict[str, tuple[str, ...]] = {
-    "src/repoforge/domain/github_capability_preflight.py": (
-        "tests/test_github_capability_preflight_domain.py",
-    ),
-    "src/repoforge/ports/github_capability_preflight.py": (
-        "tests/test_github_capability_preflight_adapter.py",
-    ),
-    "src/repoforge/adapters/github/capability_preflight.py": (
-        "tests/test_github_capability_preflight_adapter.py",
-    ),
     "src/repoforge/adapters/github/api_identity.py": (
         "tests/test_github_api_identity.py",
         "tests/test_github_capability_preflight_adapter.py",
