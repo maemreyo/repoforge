@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from .common import (
+    AuthSelectionInput,
     ByteBudget,
     ChangeMetrics,
     CommandEvidence,
@@ -336,7 +337,7 @@ class GraphEvidenceCapabilityCoverage(StrictModel):
     truncated: bool = False
 
 
-class RepoIssueInput(StrictModel):
+class RepoIssueInput(AuthSelectionInput):
     repo_id: RepoId
     mode: IssueMode
     issue_number: int | None = Field(default=None, ge=1)
@@ -366,6 +367,10 @@ class RepoIssueInput(StrictModel):
             IssueMode.CREATE,
         }
         issue_modes = write_modes - {IssueMode.CREATE}
+        if self.mode not in write_modes and self.mode is not IssueMode.MANAGE:
+            # A read mode performs no external mutation, so choosing an identity for it would
+            # promise something the call does not do.
+            self.reject_selector_on_read(f"repo_issue {self.mode.value}")
         if self.mode is IssueMode.MANAGE:
             if self.manage is None:
                 raise ValueError("repo_issue manage requires manage")
@@ -667,7 +672,7 @@ class RepoPolicyOutput(ToolResponse):
     operator_instruction: str | None = Field(default=None, max_length=1000)
 
 
-class WorkspaceCreateInput(StrictModel):
+class WorkspaceCreateInput(AuthSelectionInput):
     repo_id: RepoId
     task_slug: str = Field(min_length=1, max_length=160)
     base: GitRef | None = None
@@ -792,7 +797,7 @@ class RefreshChangeMetrics(StrictModel):
     total_current_bytes: int = Field(default=0, ge=0)
 
 
-class WorkspaceRefreshInput(StrictModel):
+class WorkspaceRefreshInput(AuthSelectionInput):
     workspace_id: Identifier
     action: RefreshAction
     expected_head_sha: GitObjectId
@@ -1507,7 +1512,7 @@ class ShippingChangeMetrics(StrictModel):
     within_limits: bool
 
 
-class WorkspaceCommitInput(StrictModel):
+class WorkspaceCommitInput(AuthSelectionInput):
     workspace_id: Identifier
     message: str = Field(min_length=1, max_length=1000)
     expected_head_sha: GitObjectId | None = None
@@ -1528,7 +1533,7 @@ class WorkspaceCommitOutput(ToolResponse):
     command_source_paths_committed: tuple[RelativePath, ...] = Field(default=(), max_length=100)
 
 
-class WorkspacePushInput(StrictModel):
+class WorkspacePushInput(AuthSelectionInput):
     workspace_id: Identifier
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=256)
     expected_remote_head: GitObjectId | None = None
@@ -1627,7 +1632,7 @@ class PrCommentEvidence(StrictModel):
     review_comment_id: int | None = Field(default=None, ge=1)
 
 
-class WorkspacePrInput(StrictModel):
+class WorkspacePrInput(AuthSelectionInput):
     workspace_id: Identifier
     action: WorkspacePrAction
     title: str | None = Field(default=None, max_length=1000)
@@ -1678,6 +1683,7 @@ class WorkspacePrInput(StrictModel):
         ):
             raise ValueError("comment fields are only valid for workspace_pr comment")
         if self.action is WorkspacePrAction.WATCH:
+            self.reject_selector_on_read("workspace_pr watch")
             if any(value is not None for value in (self.title, self.body, self.idempotency_key)):
                 raise ValueError("workspace_pr watch does not accept write fields")
             if self.event_cursor is None and self.expected_remote_version is None:

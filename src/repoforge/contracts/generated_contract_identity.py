@@ -4,8 +4,8 @@ from __future__ import annotations
 
 CONTRACT_IDENTITY: dict[str, object] = {
     "contract_version": 2,
-    "input_contract_digest": "fc23049827ff22c514dc729de58e3eee62da11449b456e4c9ecfb0888b585a10",
-    "output_contract_digest": "66793c31e00179b520bde7b759046f535315f70db0229f302ae270a4db94b82d",
+    "input_contract_digest": "deed4624c14b77b3996d5665b30e4705f3b60ec71195865557e6b6d7a1dc9bf6",
+    "output_contract_digest": "6f3752cbf0b7d45f91df4f5e1badb07ab1bed9d5163cd7bdbbbf33fc5c8f50bd",
     "tool_count": 28,
-    "tool_schema_bundle_digest": "700cff45e064a6294ca184fe7eaef41167e7cdde40ef090b69f806115941d765",
+    "tool_schema_bundle_digest": "8cb2b3d3289a8ffb17946884627e7a06d091b5754f1b250b58033102988f1aab",
 }
