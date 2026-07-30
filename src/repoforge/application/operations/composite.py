@@ -8,11 +8,12 @@ from datetime import datetime
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
-from ...ports.progress_reporter import NullProgressReporter, ProgressReporter
+from ...ports.progress_reporter import ProgressReporter
 from ..workspace.failure_intelligence import FailureEvidenceReadCommand, FailureIntelligenceService
 from .cancel import OperationCancelCommand, OperationCancellationRequester
 from .dto import OperationStatusView, OperationSummary
 from .list import OperationListCommand, OperationLister
+from .progress_context import current_progress_reporter
 from .status import OperationStatusCommand, OperationStatusReader
 
 _ACTIONS = frozenset({"get", "wait", "list", "cancel", "failure_evidence"})
@@ -222,7 +223,9 @@ class OperationCoordinator:
             # progress delta at every step start and completion, so returning on each one
             # turns "did it pass?" into one round trip per step.
             wake_on_progress = command.until == "progress"
-            reporter: ProgressReporter = progress_reporter or NullProgressReporter()
+            # An explicit reporter wins (tests, direct callers); otherwise take the one
+            # the transport bound for this request. Neither present means poll guidance.
+            reporter: ProgressReporter = progress_reporter or current_progress_reporter()
             current = self.status.read(command.operation_id)
             baseline = command.since_updated_at or current.updated_at
             terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
