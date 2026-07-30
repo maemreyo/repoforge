@@ -16,6 +16,29 @@ profile = "repoforge"
 # read once at setup and then frozen; these are re-read from source on every runtime start.
 # mcp_connection_max_ttl_seconds = 3600
 
+# Auth profiles pin a reviewed actor and transport without storing raw tokens or keys.
+# `credential_reference` names an external account; the environment name is resolved only
+# when an operation acquires a short-lived lease. Add one table per operator or automation
+# identity and keep repository patterns inside a single reviewed owner boundary.
+# [auth_profiles.personal]
+# provider = "github"
+# credential_kind = "stored_account"
+# credential_reference = "gh-account-personal"
+# actor_class = "human_operated"
+# expected_actor_id = "github-user-123"
+# enabled = true
+# repository_id = "987654"
+# repository_patterns = ["github.com/example-owner/*"]
+# boundary_id = "example-owner"
+# capability_ids = ["github.contents.read", "github.contents.write"]
+# github_host = "github.com"
+# github_login = "example-user"
+# transport_kind = "https"
+# https_token_environment = "REPOFORGE_GH_PERSONAL_TOKEN"
+# credential_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# allowed_access = ["read", "write"]
+# lease_seconds = 300
+
 [[repo]]
 id = "example-repository"
 path = "/absolute/path/to/repository"

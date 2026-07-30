@@ -35,6 +35,7 @@ from ...application.activation.version_status import (
 )
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
+    apply_auth_profiles,
     apply_policy_patch,
     apply_proposal,
     apply_risk_policy,
@@ -977,14 +978,19 @@ def _repo_refresh(args: argparse.Namespace) -> int:
                 item.policy_patch,
                 item.ticket_graph,
                 item.risk_policy,
+                item.generated_paths,
+                item.issue_writes,
             )
             if item.repo_id in proposal_by_id
             else item
             for item in source.repositories
         ),
+        source.mcp_connection_max_ttl_seconds,
+        source.auth_profiles,
     )
     source_text = render_source(updated_source)
     document = parse_resolved(store.read_resolved_text())
+    document = apply_auth_profiles(document, updated_source.auth_profiles)
     fingerprint_map = current.repository_fingerprint_map()
     patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
     graph_by_id = {item.repo_id: item.ticket_graph for item in source.repositories}

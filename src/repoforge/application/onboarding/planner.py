@@ -24,7 +24,12 @@ from ...domain.onboarding import (
     transition_session,
 )
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
-from ..configuration.document import apply_proposal, parse_resolved, render_resolved
+from ..configuration.document import (
+    apply_auth_profiles,
+    apply_proposal,
+    parse_resolved,
+    render_resolved,
+)
 from ..configuration.source import (
     SourceConfiguration,
     SourceRepository,
@@ -147,6 +152,7 @@ class OnboardingPlanner:
                 raise ConfigError("INPUT_REQUIRED: --tunnel-id is required for initial onboarding")
             source = SourceConfiguration(tunnel_id, profile, ())
         document = parse_resolved(current_resolved_text)
+        document = apply_auth_profiles(document, source.auth_profiles)
         fingerprints = current_generation.repository_fingerprint_map() if current_generation else {}
         for proposal, value, _approval_hash in selected:
             source = add_source_repository(

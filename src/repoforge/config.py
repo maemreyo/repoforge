@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -11,6 +13,7 @@ from typing import Any, TypeVar
 
 import tomli as tomllib
 
+from .application.configuration.source import SourceAuthProfile
 from .domain.adhoc import ExecutionMode, validate_adhoc_runners
 from .domain.command_source import (
     derive_command_source_paths,
@@ -28,6 +31,12 @@ from .domain.diagnostics import (
 )
 from .domain.errors import ConfigError
 from .domain.generated_paths import GeneratedPathRule, parse_generated_paths
+from .domain.git_transport_identity import (
+    GitTransportAccess,
+    GitTransportKind,
+    GitTransportSpec,
+)
+from .domain.github_api_identity import GitHubAppInstallationSpec, StoredGhAccountSpec
 from .domain.hygiene import (
     FormatterPolicy,
     HygieneNetworkPolicy,
@@ -37,7 +46,14 @@ from .domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from .domain.mutation_policy import MUTATION_OPS, validate_allowed_mutation_ops
 from .domain.provider_config import load_provider_manifests
 from .domain.provider_manifest import ProviderManifest
-from .domain.repository_identity import ActorClass
+from .domain.repository_identity import (
+    ActorClass,
+    CredentialKind,
+    CredentialProfile,
+    OpaqueCredentialReference,
+    RepositoryProvider,
+)
+from .domain.repository_identity_resolution import CredentialProfileEligibility
 from .domain.resource_budget import (
     DEFAULT_RESOURCE_BUDGET,
     RESOURCE_BUDGET_FIELDS,
@@ -248,12 +264,30 @@ class ServerConfig:
     github_webhook_max_body_bytes: int = 1_000_000
 
 
+@dataclass(frozen=True, slots=True)
+class AuthProfileConfig:
+    """Validated identity primitives built from one secret-free config declaration."""
+
+    profile: CredentialProfile
+    eligibility: CredentialProfileEligibility
+    api_identity: StoredGhAccountSpec | GitHubAppInstallationSpec
+    transport: GitTransportSpec
+    source_ssh_alias: str | None = None
+
+
 @dataclass(frozen=True)
 class AppConfig:
     source_path: Path
     server: ServerConfig
     repositories: dict[str, RepositoryConfig]
     providers: tuple[ProviderManifest, ...] = ()
+    auth_profiles: dict[str, AuthProfileConfig] = field(default_factory=dict)
+
+    @property
+    def identity_migration_required(self) -> bool:
+        """Whether this legacy config still needs explicit repository auth profiles."""
+
+        return not bool(self.auth_profiles)
 
 
 def _expand_path(value: str, *, base_dir: Path) -> Path:
@@ -978,6 +1012,100 @@ def _load_commit_identity(value: object, repo_id: str) -> CommitIdentityPolicy |
         raise ConfigError(f"{context} is invalid: {exc}") from exc
 
 
+def _load_auth_profiles(raw: Any) -> dict[str, AuthProfileConfig]:
+    table = _expect_mapping({} if raw is None else raw, "auth_profiles")
+    result: dict[str, AuthProfileConfig] = {}
+    for profile_id, raw_profile in sorted(table.items()):
+        context = f"auth_profiles.{profile_id}"
+        try:
+            source = SourceAuthProfile.from_table(
+                profile_id,
+                raw_profile,
+                context=context,
+            )
+            revision = hashlib.sha256(
+                json.dumps(
+                    source.as_table(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            actor_class = ActorClass(source.actor_class)
+            profile = CredentialProfile(
+                profile_id=source.profile_id,
+                provider=RepositoryProvider(source.provider),
+                credential_kind=CredentialKind(source.credential_kind),
+                credential_ref=OpaqueCredentialReference(
+                    scheme="repoforge",
+                    reference_id=source.credential_reference,
+                ),
+                actor_class=actor_class,
+                expected_actor_id=source.expected_actor_id,
+                capability_ids=source.capability_ids,
+                revision=revision,
+            )
+            eligibility = CredentialProfileEligibility(
+                profile=profile,
+                enabled=source.enabled,
+                repository_patterns=source.repository_patterns,
+                boundary_id=source.boundary_id,
+            )
+            if source.credential_kind == "stored_account":
+                if source.github_login is None:
+                    raise ValueError("stored-account profile requires github_login")
+                api_identity: StoredGhAccountSpec | GitHubAppInstallationSpec = StoredGhAccountSpec(
+                    reference_id=source.credential_reference,
+                    profile_id=source.profile_id,
+                    host=source.github_host,
+                    login=source.github_login,
+                    actor_id=source.expected_actor_id,
+                    actor_class=actor_class,
+                    repository_id=source.repository_id,
+                    capability_ids=source.capability_ids,
+                    lease_seconds=source.lease_seconds,
+                )
+            else:
+                if source.github_app_id is None or source.github_installation_id is None:
+                    raise ValueError("GitHub App profile requires app and installation ids")
+                api_identity = GitHubAppInstallationSpec(
+                    reference_id=source.credential_reference,
+                    profile_id=source.profile_id,
+                    host=source.github_host,
+                    app_id=source.github_app_id,
+                    installation_id=source.github_installation_id,
+                    actor_id=source.expected_actor_id,
+                    repository_id=source.repository_id,
+                    capability_ids=source.capability_ids,
+                    permissions=tuple(
+                        (permission.partition(":")[0], permission.partition(":")[2])
+                        for permission in source.github_permissions
+                    ),
+                )
+            transport = GitTransportSpec(
+                profile_id=source.profile_id,
+                repository_id=source.repository_id,
+                target_id=source.repository_id,
+                provider_host=source.github_host,
+                kind=GitTransportKind(source.transport_kind),
+                credential_fingerprint=source.credential_fingerprint,
+                allowed_access=tuple(
+                    GitTransportAccess(access) for access in source.allowed_access
+                ),
+                ssh_identity_file=source.ssh_identity_file,
+                https_token_environment=source.https_token_environment,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{context} is invalid: {exc}") from exc
+        result[profile_id] = AuthProfileConfig(
+            profile=profile,
+            eligibility=eligibility,
+            api_identity=api_identity,
+            transport=transport,
+            source_ssh_alias=source.source_ssh_alias,
+        )
+    return result
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     config_value: str | Path = path or os.environ.get("REPOFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
     config_path = Path(config_value).expanduser().resolve()
@@ -1130,6 +1258,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             "server.resource_budget",
         ),
     )
+    auth_profiles = _load_auth_profiles(raw.get("auth_profiles"))
     repositories_raw = _expect_mapping(raw.get("repositories"), "repositories")
     if not repositories_raw:
         raise ConfigError("At least one repository must be configured")
@@ -1174,6 +1303,18 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         formatters = _load_formatters(repo_raw.get("formatters"), repo_id)
         ticket_graph = _load_github_ticket_graph(repo_raw.get("ticket_graph"), repo_id)
         commit_identity = _load_commit_identity(repo_raw.get("commit_identity"), repo_id)
+        if commit_identity is not None and auth_profiles:
+            configured_auth = auth_profiles.get(commit_identity.profile_id)
+            if configured_auth is None:
+                raise ConfigError(
+                    f"repositories.{repo_id}.commit_identity references unknown auth profile "
+                    f"{commit_identity.profile_id!r}"
+                )
+            if commit_identity.actor_class is not configured_auth.profile.actor_class:
+                raise ConfigError(
+                    f"repositories.{repo_id}.commit_identity actor_class is incompatible with "
+                    f"auth profile {commit_identity.profile_id!r}"
+                )
         try:
             generated_paths = parse_generated_paths(
                 repo_raw.get("generated_paths"),
@@ -1329,4 +1470,5 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         server=server,
         repositories=repositories,
         providers=providers,
+        auth_profiles=auth_profiles,
     )

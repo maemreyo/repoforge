@@ -16,6 +16,14 @@ from ...domain.policy_patch import PolicyPatchError, RepositoryPolicyPatch
 
 SOURCE_CONFIG_VERSION = 2
 _GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_AUTH_PROFILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_GITHUB_HOST = re.compile(r"^[a-z0-9.-]+$")
+_ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SECRET_SHAPED_REFERENCE = re.compile(
+    r"^(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-)|(?:token|secret|password)=",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +245,258 @@ class SourceRepository:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceAuthProfile:
+    """Secret-free, human-owned declaration of one repository auth profile."""
+
+    profile_id: str
+    provider: str
+    credential_kind: str
+    credential_reference: str
+    actor_class: str
+    expected_actor_id: str
+    enabled: bool
+    repository_id: str
+    repository_patterns: tuple[str, ...]
+    boundary_id: str
+    capability_ids: tuple[str, ...]
+    github_host: str
+    transport_kind: str
+    credential_fingerprint: str
+    allowed_access: tuple[str, ...]
+    github_login: str | None = None
+    github_app_id: str | None = None
+    github_installation_id: str | None = None
+    github_permissions: tuple[str, ...] = ()
+    ssh_identity_file: str | None = None
+    https_token_environment: str | None = None
+    source_ssh_alias: str | None = None
+    lease_seconds: int = 300
+
+    @classmethod
+    def from_table(cls, profile_id: str, raw: object, *, context: str) -> SourceAuthProfile:
+        if _AUTH_PROFILE_ID.fullmatch(profile_id) is None:
+            raise ValueError(f"{context} has an invalid profile id")
+        if not isinstance(raw, dict):
+            raise ValueError(f"{context} must be a TOML table")
+        allowed = {
+            "provider",
+            "credential_kind",
+            "credential_reference",
+            "actor_class",
+            "expected_actor_id",
+            "enabled",
+            "repository_id",
+            "repository_patterns",
+            "boundary_id",
+            "capability_ids",
+            "github_host",
+            "github_login",
+            "github_app_id",
+            "github_installation_id",
+            "github_permissions",
+            "transport_kind",
+            "credential_fingerprint",
+            "allowed_access",
+            "ssh_identity_file",
+            "https_token_environment",
+            "source_ssh_alias",
+            "lease_seconds",
+        }
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise ValueError(f"{context} contains unsupported fields: {unknown}")
+
+        def required_string(name: str) -> str:
+            value = raw.get(name)
+            if not isinstance(value, str) or not value or len(value) > 512:
+                raise ValueError(f"{context}.{name} must be a non-empty bounded string")
+            return value
+
+        def optional_string(name: str) -> str | None:
+            value = raw.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, str) or not value or len(value) > 512:
+                raise ValueError(f"{context}.{name} must be a non-empty bounded string")
+            return value
+
+        def strings(name: str, *, required: bool) -> tuple[str, ...]:
+            value = raw.get(name)
+            if value is None and not required:
+                return ()
+            if (
+                not isinstance(value, list)
+                or (required and not value)
+                or len(value) > 64
+                or not all(isinstance(item, str) and item and len(item) <= 512 for item in value)
+                or len(set(value)) != len(value)
+            ):
+                raise ValueError(
+                    f"{context}.{name} must be a unique array of bounded non-empty strings"
+                )
+            return tuple(value)
+
+        provider = required_string("provider")
+        if provider != "github":
+            raise ValueError(f"{context}.provider must be 'github'")
+        credential_kind = required_string("credential_kind")
+        if credential_kind not in {"stored_account", "github_app"}:
+            raise ValueError(f"{context}.credential_kind must be 'stored_account' or 'github_app'")
+        credential_reference = required_string("credential_reference")
+        if (
+            _AUTH_PROFILE_ID.fullmatch(credential_reference) is None
+            or _SECRET_SHAPED_REFERENCE.search(credential_reference) is not None
+        ):
+            raise ValueError(f"{context}.credential_reference must be a safe opaque identifier")
+        actor_class = required_string("actor_class")
+        if actor_class not in {"human_operated", "delegated_human", "autonomous_agent"}:
+            raise ValueError(f"{context}.actor_class is unsupported")
+        expected_actor_id = required_string("expected_actor_id")
+        repository_id = required_string("repository_id")
+        boundary_id = required_string("boundary_id")
+        repository_patterns = strings("repository_patterns", required=True)
+        capability_ids = strings("capability_ids", required=True)
+        github_host = required_string("github_host")
+        if _GITHUB_HOST.fullmatch(github_host) is None:
+            raise ValueError(f"{context}.github_host must be a lowercase host name")
+        transport_kind = required_string("transport_kind")
+        if transport_kind not in {"ssh", "https"}:
+            raise ValueError(f"{context}.transport_kind must be 'ssh' or 'https'")
+        credential_fingerprint = required_string("credential_fingerprint")
+        if _SHA256.fullmatch(credential_fingerprint) is None:
+            raise ValueError(f"{context}.credential_fingerprint must be a lowercase SHA-256")
+        allowed_access = strings("allowed_access", required=True)
+        if not set(allowed_access) <= {"read", "write"}:
+            raise ValueError(f"{context}.allowed_access contains an unsupported access mode")
+        enabled = raw.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{context}.enabled must be a boolean")
+        lease_seconds = raw.get("lease_seconds", 300)
+        if (
+            not isinstance(lease_seconds, int)
+            or isinstance(lease_seconds, bool)
+            or not 30 <= lease_seconds <= 3600
+        ):
+            raise ValueError(f"{context}.lease_seconds must be an integer in 30..3600")
+
+        github_login = optional_string("github_login")
+        github_app_id = optional_string("github_app_id")
+        github_installation_id = optional_string("github_installation_id")
+        github_permissions = strings("github_permissions", required=False)
+        if credential_kind == "stored_account":
+            if actor_class not in {"human_operated", "delegated_human"} or github_login is None:
+                raise ValueError(
+                    f"{context} stored-account profiles require a human actor and github_login"
+                )
+            if (
+                github_app_id is not None
+                or github_installation_id is not None
+                or github_permissions
+            ):
+                raise ValueError(
+                    f"{context} stored-account profiles cannot declare GitHub App fields"
+                )
+        else:
+            if (
+                actor_class != "autonomous_agent"
+                or github_app_id is None
+                or github_installation_id is None
+                or not github_permissions
+            ):
+                raise ValueError(
+                    f"{context} GitHub App profiles require an autonomous actor and app fields"
+                )
+            if github_login is not None:
+                raise ValueError(f"{context} GitHub App profiles cannot declare github_login")
+        for permission in github_permissions:
+            name, separator, level = permission.partition(":")
+            if not separator or not name or level not in {"read", "write", "admin"}:
+                raise ValueError(f"{context}.github_permissions contains an invalid permission")
+
+        ssh_identity_file = optional_string("ssh_identity_file")
+        https_token_environment = optional_string("https_token_environment")
+        source_ssh_alias = optional_string("source_ssh_alias")
+        if transport_kind == "ssh":
+            if ssh_identity_file is None or not Path(ssh_identity_file).is_absolute():
+                raise ValueError(
+                    f"{context}.ssh_identity_file must be an absolute identity-file path"
+                )
+            if https_token_environment is not None:
+                raise ValueError(
+                    f"{context} SSH transport cannot declare an HTTPS token environment"
+                )
+        else:
+            if (
+                https_token_environment is None
+                or _ENVIRONMENT_NAME.fullmatch(https_token_environment) is None
+            ):
+                raise ValueError(
+                    f"{context}.https_token_environment must be an uppercase environment name"
+                )
+            if ssh_identity_file is not None:
+                raise ValueError(f"{context} HTTPS transport cannot declare an SSH identity file")
+
+        return cls(
+            profile_id=profile_id,
+            provider=provider,
+            credential_kind=credential_kind,
+            credential_reference=credential_reference,
+            actor_class=actor_class,
+            expected_actor_id=expected_actor_id,
+            enabled=enabled,
+            repository_id=repository_id,
+            repository_patterns=repository_patterns,
+            boundary_id=boundary_id,
+            capability_ids=capability_ids,
+            github_host=github_host,
+            transport_kind=transport_kind,
+            credential_fingerprint=credential_fingerprint,
+            allowed_access=allowed_access,
+            github_login=github_login,
+            github_app_id=github_app_id,
+            github_installation_id=github_installation_id,
+            github_permissions=github_permissions,
+            ssh_identity_file=ssh_identity_file,
+            https_token_environment=https_token_environment,
+            source_ssh_alias=source_ssh_alias,
+            lease_seconds=lease_seconds,
+        )
+
+    def as_table(self) -> dict[str, bool | int | str | list[str]]:
+        result: dict[str, bool | int | str | list[str]] = {
+            "provider": self.provider,
+            "credential_kind": self.credential_kind,
+            "credential_reference": self.credential_reference,
+            "actor_class": self.actor_class,
+            "expected_actor_id": self.expected_actor_id,
+            "enabled": self.enabled,
+            "repository_id": self.repository_id,
+            "repository_patterns": list(self.repository_patterns),
+            "boundary_id": self.boundary_id,
+            "capability_ids": list(self.capability_ids),
+            "github_host": self.github_host,
+            "transport_kind": self.transport_kind,
+            "credential_fingerprint": self.credential_fingerprint,
+            "allowed_access": list(self.allowed_access),
+            "lease_seconds": self.lease_seconds,
+        }
+        for name in (
+            "github_login",
+            "github_app_id",
+            "github_installation_id",
+            "ssh_identity_file",
+            "https_token_environment",
+            "source_ssh_alias",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                result[name] = value
+        if self.github_permissions:
+            result["github_permissions"] = list(self.github_permissions)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class SourceConfiguration:
     tunnel_id: str | None
     profile: str
@@ -247,12 +507,23 @@ class SourceConfiguration:
     #: grants like `allowed_environment` -- while these are re-read from source on every
     #: runtime start. `None` passes nothing and leaves the tunnel's own default in force.
     mcp_connection_max_ttl_seconds: int | None = None
+    auth_profiles: tuple[SourceAuthProfile, ...] = ()
 
 
 def parse_source(text: str) -> SourceConfiguration:
     raw: Any = tomllib.loads(text)
     if not isinstance(raw, dict):
         raise ValueError("Configuration must be a TOML table")
+    unknown_root = sorted(set(raw) - {"version", "tunnel", "repo", "repositories", "auth_profiles"})
+    if unknown_root:
+        raise ValueError(f"Configuration contains unsupported fields: {unknown_root}")
+    raw_auth_profiles = raw.get("auth_profiles", {})
+    if not isinstance(raw_auth_profiles, dict):
+        raise ValueError("auth_profiles must be a TOML table")
+    auth_profiles = tuple(
+        SourceAuthProfile.from_table(str(profile_id), table, context=f"auth_profiles.{profile_id}")
+        for profile_id, table in sorted(raw_auth_profiles.items())
+    )
     tunnel = raw.get("tunnel")
     mcp_connection_max_ttl_seconds: int | None = None
     if tunnel is None:
@@ -361,7 +632,13 @@ def parse_source(text: str) -> SourceConfiguration:
         raise ValueError(
             f"repositories contains metadata for unknown repository ids: {unknown_metadata}"
         )
-    return SourceConfiguration(tunnel_id, profile, tuple(result), mcp_connection_max_ttl_seconds)
+    return SourceConfiguration(
+        tunnel_id,
+        profile,
+        tuple(result),
+        mcp_connection_max_ttl_seconds,
+        auth_profiles,
+    )
 
 
 def _toml_value(value: Any) -> str:
@@ -413,6 +690,14 @@ def render_source(config: SourceConfiguration) -> str:
                 f"profile = {json.dumps(config.profile)}",
             ]
         )
+        if config.mcp_connection_max_ttl_seconds is not None:
+            lines.append(
+                "mcp_connection_max_ttl_seconds = " + str(config.mcp_connection_max_ttl_seconds)
+            )
+    for auth_profile in sorted(config.auth_profiles, key=lambda item: item.profile_id):
+        lines.extend(["", f"[auth_profiles.{_toml_key(auth_profile.profile_id)}]"])
+        for key, value in auth_profile.as_table().items():
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
     for repo in config.repositories:
         lines.extend(
             [
@@ -475,6 +760,8 @@ def add_source_repository(
         config.tunnel_id,
         config.profile,
         tuple(sorted((*config.repositories, repository), key=lambda item: item.repo_id)),
+        config.mcp_connection_max_ttl_seconds,
+        config.auth_profiles,
     )
 
 
@@ -484,4 +771,10 @@ def remove_source_repository(config: SourceConfiguration, repo_id: str) -> Sourc
         raise ValueError(f"Unknown repository id: {repo_id}")
     if not remaining:
         raise ValueError("Cannot remove the final repository")
-    return SourceConfiguration(config.tunnel_id, config.profile, remaining)
+    return SourceConfiguration(
+        config.tunnel_id,
+        config.profile,
+        remaining,
+        config.mcp_connection_max_ttl_seconds,
+        config.auth_profiles,
+    )

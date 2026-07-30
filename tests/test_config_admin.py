@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import tomli as tomllib
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from repoforge.adapters.configuration import ConfigGenerationStore
@@ -18,6 +19,7 @@ from repoforge.adapters.persistence.failure_output_artifact_store import (
 )
 from repoforge.application.config_admin import ConfigAdminService
 from repoforge.application.configuration.document import (
+    apply_auth_profiles,
     apply_policy_patch,
     apply_proposal,
     apply_risk_policy,
@@ -26,6 +28,7 @@ from repoforge.application.configuration.document import (
     render_resolved,
 )
 from repoforge.application.configuration.source import (
+    SourceAuthProfile,
     SourceConfiguration,
     SourceRepository,
     SourceTicketGraph,
@@ -444,6 +447,8 @@ def _admin(
     ticket_graph: SourceTicketGraph | None = None,
     preserve_ticket_graph_in_resolved: bool = False,
     runtime_record: object | None = None,
+    auth_profiles: tuple[SourceAuthProfile, ...] = (),
+    mcp_connection_max_ttl_seconds: int | None = None,
 ) -> ConfigAdminService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -459,6 +464,8 @@ def _admin(
                 ticket_graph=ticket_graph,
             ),
         ),
+        mcp_connection_max_ttl_seconds,
+        auth_profiles,
     )
     source_path.write_text(render_source(source), encoding="utf-8")
     store = ConfigGenerationStore(
@@ -466,6 +473,9 @@ def _admin(
     )
     proposal = _proposal(repo_root)
     document = apply_proposal(parse_resolved(None), proposal)
+    # Acceptance projects reviewed auth profiles into the resolved generation, so a bootstrap
+    # that declares them must start with them already accepted.
+    document = apply_auth_profiles(document, auth_profiles)
     if preserve_ticket_graph_in_resolved:
         document = apply_ticket_graph(document, "demo", ticket_graph)
     resolved = render_resolved(
@@ -634,6 +644,41 @@ def test_restriction_is_applied_immediately_with_hot_reload(tmp_path: Path) -> N
     # The durable source now carries the patch, so a later refresh preserves it.
     persisted = parse_source(admin._store.read_source_text())
     assert persisted.repositories[0].policy_patch.remove_profiles == ("quick",)
+
+
+def _auth_profile() -> SourceAuthProfile:
+    return SourceAuthProfile(
+        profile_id="personal",
+        provider="github",
+        credential_kind="stored_account",
+        credential_reference="gh-account-personal",
+        actor_class="human_operated",
+        expected_actor_id="github-user-123",
+        enabled=True,
+        repository_id="987654",
+        repository_patterns=("github.com/acme/*",),
+        boundary_id="acme",
+        capability_ids=("github.contents.write",),
+        github_host="github.com",
+        transport_kind="https",
+        credential_fingerprint="a" * 64,
+        allowed_access=("read", "write"),
+        github_login="acme-operator",
+        https_token_environment="REPOFORGE_GH_PERSONAL_TOKEN",
+    )
+
+
+def test_policy_apply_preserves_reviewed_auth_profiles(tmp_path: Path) -> None:
+    admin = _admin(tmp_path, auth_profiles=(_auth_profile(),))
+
+    result = admin.repo_policy_apply("demo", remove_profiles=["quick"])
+
+    assert result["status"] == "applied"
+    persisted = parse_source(admin._store.read_source_text())
+    assert persisted.auth_profiles == (_auth_profile(),)
+    resolved = tomllib.loads(admin._store.read_resolved_text(int(result["generation"])))
+    assert resolved["auth_profiles"]["personal"]["github_login"] == "acme-operator"
+    assert "credential_fingerprint" in resolved["auth_profiles"]["personal"]
 
 
 def test_expansion_requires_operator_approval_and_never_applies(tmp_path: Path) -> None:

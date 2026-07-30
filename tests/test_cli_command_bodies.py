@@ -9,7 +9,11 @@ from typing import Any, ClassVar
 
 import pytest
 
-from repoforge.application.configuration.source import SourceConfiguration, SourceRepository
+from repoforge.application.configuration.source import (
+    SourceAuthProfile,
+    SourceConfiguration,
+    SourceRepository,
+)
 from repoforge.domain.config_generation import (
     CapabilityChange,
     CapabilityDelta,
@@ -17,6 +21,8 @@ from repoforge.domain.config_generation import (
     ConfigGeneration,
 )
 from repoforge.domain.errors import ConfigError
+from repoforge.domain.generated_paths import GeneratedPathRule
+from repoforge.domain.issue_writes import IssueWritePolicy
 from repoforge.domain.repository_proposal import (
     DetectionFinding,
     EnrollmentMode,
@@ -317,6 +323,100 @@ def test_repo_refresh_preview_accept_unchanged_and_errors(
     store._current = None
     with pytest.raises(ConfigError, match="No accepted"):
         cli._repo_refresh(args)
+
+
+def test_repo_refresh_preserves_metadata_the_proposal_does_not_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A refresh rebuilds the refreshed repository's source entry from the proposal, so every
+    # reviewed field the proposal does not own has to be carried across explicitly.
+    _common(monkeypatch)
+    rendered: list[SourceConfiguration] = []
+    monkeypatch.setattr(
+        cli, "render_source", lambda source: rendered.append(source) or "source-new"
+    )
+    generated = (
+        GeneratedPathRule(
+            glob="docs/contracts/*.json",
+            regeneration_command=("uv", "run", "render"),
+            description="Generated contracts",
+        ),
+    )
+    issue_writes = IssueWritePolicy(enabled_ops=("comment", "close"), max_writes_per_call=1)
+    auth_profile = SourceAuthProfile(
+        profile_id="personal",
+        provider="github",
+        credential_kind="stored_account",
+        credential_reference="gh-account-personal",
+        actor_class="human_operated",
+        expected_actor_id="github-user-123",
+        enabled=True,
+        repository_id="987654",
+        repository_patterns=("github.com/acme/*",),
+        boundary_id="acme",
+        capability_ids=("github.contents.write",),
+        github_host="github.com",
+        transport_kind="https",
+        credential_fingerprint="a" * 64,
+        allowed_access=("read", "write"),
+        github_login="acme-operator",
+        https_token_environment="REPOFORGE_GH_TOKEN",
+    )
+    store = FakeStore(tmp_path, current=_generation(1, proposal_id="old"))
+    source = SourceConfiguration(
+        "tunnel",
+        "repoforge",
+        (
+            SourceRepository(
+                "demo",
+                "/repos/demo",
+                "old",
+                "standard",
+                generated_paths=generated,
+                issue_writes=issue_writes,
+            ),
+        ),
+        3600,
+        (auth_profile,),
+    )
+    monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)
+    monkeypatch.setattr(cli, "_editable_source", lambda value: source)
+    monkeypatch.setattr(
+        cli,
+        "classify_capability_delta",
+        lambda a, b: CapabilityDelta(
+            CapabilityDeltaKind.EXPANSION,
+            "a" * 64,
+            "b" * 64,
+            (
+                CapabilityChange(
+                    "repositories.demo", None, {}, CapabilityDeltaKind.EXPANSION, "added"
+                ),
+            ),
+        ),
+    )
+
+    args = argparse.Namespace(
+        config=str(tmp_path / "config.toml"),
+        repo_id=None,
+        decision=[],
+        policy_override=[],
+        template=None,
+        approve=[f"approve:{ProposalService.proposal.proposal_id}"],
+        accept=True,
+        activate="auto",
+        wait=True,
+        rollback_on_failure=True,
+    )
+    assert cli._repo_refresh(args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "accepted"
+
+    assert len(rendered) == 1
+    refreshed = rendered[0].repositories[0]
+    assert refreshed.generated_paths == generated
+    assert refreshed.issue_writes == issue_writes
+    assert rendered[0].auth_profiles == (auth_profile,)
+    assert rendered[0].mcp_connection_max_ttl_seconds == 3600
 
 
 def test_repo_enroll_and_remove_paths(
