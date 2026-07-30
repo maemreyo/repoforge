@@ -9,6 +9,9 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+# Re-exported, not redefined: `application` needs the same names and does not depend on
+# the contract layer, so the single declaration lives in `domain`.
+from ..domain.context_sections import DEFAULT_CONTEXT_SECTIONS, ContextSectionName
 from .common import (
     ByteBudget,
     ChangeMetrics,
@@ -43,15 +46,6 @@ from .common import (
 )
 
 
-class ContextSectionName(str, Enum):
-    REPOSITORY = "repository"
-    STATUS = "status"
-    TICKET = "ticket"
-    TICKET_WORKFLOW = "ticket_workflow"
-    WORKSPACE = "workspace"
-    RECENT_COMMITS = "recent_commits"
-
-
 class ContextSection(StrictModel):
     name: ContextSectionName
     freshness: Freshness
@@ -65,13 +59,7 @@ class RepoTaskContextInput(StrictModel):
     issue_number: int | None = Field(default=None, ge=1)
     workspace_id: Identifier | None = None
     sections: tuple[ContextSectionName, ...] = Field(
-        default=(
-            ContextSectionName.REPOSITORY,
-            ContextSectionName.STATUS,
-            ContextSectionName.TICKET,
-            ContextSectionName.WORKSPACE,
-            ContextSectionName.RECENT_COMMITS,
-        ),
+        default=DEFAULT_CONTEXT_SECTIONS,
         min_length=1,
         max_length=5,
     )
