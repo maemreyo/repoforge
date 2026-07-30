@@ -13,7 +13,7 @@ from repoforge.application.operations.identity import OperationIdentityManager
 from repoforge.application.workspace.run_adhoc import WorkspaceAdhocRunner
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import AppConfig, ServerConfig
-from repoforge.domain.durable_state import Revision
+from repoforge.domain.durable_state import Revision, SchemaVersion, StateEnvelope
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.operation_identity import (
     LeaseCapabilityRequest,
@@ -220,6 +220,89 @@ def test_manager_binds_once_and_resume_requires_exact_reference(tmp_path: Path) 
             now="2026-07-28T00:02:00+00:00",
         )
     assert changed_decision.value.code is ErrorCode.OPERATION_IDENTITY_MISMATCH
+
+
+def test_manager_bind_race_rejects_changed_capability_requests() -> None:
+    raced = new_operation_identity_record(
+        _context(),
+        context_id=_CONTEXT_ID,
+        capability_requests=(LeaseCapabilityRequest("lease-primary", ("github_api_read",)),),
+        now="2026-07-28T00:00:00+00:00",
+    )
+
+    class RacingIdentityStore:
+        def __init__(self) -> None:
+            self.read_count = 0
+
+        def read(self, operation_id: str):
+            assert operation_id == _OPERATION_ID
+            self.read_count += 1
+            if self.read_count == 1:
+                return None
+            return StateEnvelope(
+                record_id=operation_id,
+                schema_version=SchemaVersion(1),
+                revision=Revision(1),
+                value=raced,
+            )
+
+        def create(self, record):
+            assert record.reference == raced.reference
+            raise RepoForgeError("identity exists", code=ErrorCode.ALREADY_EXISTS)
+
+    manager = OperationIdentityManager(
+        operations=_operation_store(),
+        identities=RacingIdentityStore(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        manager.bind(
+            _context(),
+            context_id=_CONTEXT_ID,
+            capability_requests=_requests(),
+            now="2026-07-28T00:00:00+00:00",
+        )
+
+    assert failure.value.code is ErrorCode.OPERATION_IDENTITY_MISMATCH
+
+
+def test_manager_bind_race_returns_only_the_exact_identity_decision() -> None:
+    raced = _record()
+
+    class RacingIdentityStore:
+        def __init__(self) -> None:
+            self.read_count = 0
+
+        def read(self, operation_id: str):
+            assert operation_id == _OPERATION_ID
+            self.read_count += 1
+            if self.read_count == 1:
+                return None
+            return StateEnvelope(
+                record_id=operation_id,
+                schema_version=SchemaVersion(1),
+                revision=Revision(1),
+                value=raced,
+            )
+
+        def create(self, record):
+            assert record.reference == raced.reference
+            raise RepoForgeError("identity exists", code=ErrorCode.ALREADY_EXISTS)
+
+    manager = OperationIdentityManager(
+        operations=_operation_store(),
+        identities=RacingIdentityStore(),  # type: ignore[arg-type]
+    )
+
+    assert (
+        manager.bind(
+            _context(),
+            context_id=_CONTEXT_ID,
+            capability_requests=_requests(),
+            now="2026-07-28T00:00:00+00:00",
+        )
+        == raced
+    )
 
 
 def test_manager_rejects_unknown_or_mismatched_operation(tmp_path: Path) -> None:

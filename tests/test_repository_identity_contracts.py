@@ -844,6 +844,7 @@ def _auth_material(
     issued_at: str = "2026-07-27T10:00:00+00:00",
     expires_at: str = "2026-07-27T11:00:00+00:00",
     state: object = None,
+    provider_metadata: tuple[tuple[str, str], ...] = (),
 ):
     from repoforge.domain.repository_auth_broker import (
         AuthEnvironmentBinding,
@@ -863,6 +864,7 @@ def _auth_material(
         expires_at=expires_at,
         state=state or AuthMaterialState.ACTIVE,
         actor_id=actor_id,
+        provider_metadata=provider_metadata,
         environment=(AuthEnvironmentBinding("GH_TOKEN", EphemeralSecret.from_text(secret)),),
         git_config=(("credential.useHttpPath", "true"),),
         callback_config=(("helper_mode", "askpass"),),
@@ -1092,6 +1094,74 @@ def test_auth_broker_missing_reference_and_outage_fail_closed_without_fallback()
     assert outage_error.value.__context__ is None
 
 
+def test_auth_broker_preserves_typed_provider_error_on_resolve() -> None:
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+
+    typed = RepoForgeError(
+        "The selected account requires SSO authorization.",
+        code=ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED,
+        retryable=False,
+        safe_next_action="Authorize the selected account for this organization.",
+    )
+
+    class TypedFailureProvider:
+        def resolve(self, reference):
+            del reference
+            raise typed
+
+        def refresh(self, reference, previous):
+            del reference, previous
+            raise AssertionError("refresh must not run")
+
+        def release(self, material):
+            del material
+
+    with pytest.raises(RepoForgeError) as failure:
+        RepositoryAuthBroker(TypedFailureProvider()).session(_auth_request())
+
+    assert failure.value is typed
+    assert failure.value.code is ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED
+    assert failure.value.retryable is False
+    assert failure.value.safe_next_action == (
+        "Authorize the selected account for this organization."
+    )
+
+
+def test_auth_broker_preserves_typed_provider_error_on_refresh_and_releases_previous() -> None:
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+
+    expired = _auth_material(
+        material_id="material-expired-typed",
+        expires_at="2026-07-27T10:10:00+00:00",
+    )
+    typed = RepoForgeError(
+        "The GitHub App installation requires approval.",
+        code=ErrorCode.GITHUB_INSTALLATION_APPROVAL_REQUIRED,
+        retryable=False,
+        safe_next_action="Approve the exact installation before retrying.",
+    )
+
+    class TypedRefreshFailureProvider:
+        def resolve(self, reference):
+            del reference
+            return expired
+
+        def refresh(self, reference, previous):
+            del reference
+            assert previous is expired
+            raise typed
+
+        def release(self, material):
+            material.release()
+
+    with pytest.raises(RepoForgeError) as failure:
+        RepositoryAuthBroker(TypedRefreshFailureProvider()).session(_auth_request())
+
+    assert failure.value is typed
+    assert failure.value.code is ErrorCode.GITHUB_INSTALLATION_APPROVAL_REQUIRED
+    assert expired.environment[0].value.released is True
+
+
 def test_expired_auth_material_refreshes_only_with_equivalent_identity_and_ceiling() -> None:
     from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
     from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
@@ -1141,6 +1211,65 @@ def test_expired_auth_material_refreshes_only_with_equivalent_identity_and_ceili
         RepositoryAuthBroker(mismatch_provider).session(_auth_request())
     assert mismatch.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
     assert changed.environment[0].value.released is True
+
+
+def test_auth_broker_refresh_allows_only_renewable_preflight_metadata() -> None:
+    from repoforge.domain.repository_auth_broker import RepositoryAuthBroker
+    from repoforge.testing.auth_fakes import DeterministicAuthMaterialProvider
+
+    initial_metadata = (
+        ("github_capability_digest", "1" * 64),
+        ("github_permission_digest", "2" * 64),
+        ("github_preflight_evidence_digest", "3" * 64),
+        ("github_preflight_observed_at", "2026-07-27T10:00:00+00:00"),
+    )
+    expired = _auth_material(
+        material_id="material-expired-preflight",
+        expires_at="2026-07-27T10:10:00+00:00",
+        provider_metadata=initial_metadata,
+    )
+    renewed = _auth_material(
+        material_id="material-renewed-preflight",
+        issued_at="2026-07-27T10:10:00+00:00",
+        expires_at="2026-07-27T11:10:00+00:00",
+        provider_metadata=tuple(
+            (key, "2026-07-27T10:30:00+00:00")
+            if key == "github_preflight_observed_at"
+            else (key, value)
+            for key, value in initial_metadata
+        ),
+    )
+    provider = DeterministicAuthMaterialProvider(
+        {"github-personal-v1": expired},
+        refreshes={"github-personal-v1": renewed},
+    )
+
+    with RepositoryAuthBroker(provider).session(_auth_request()) as session:
+        assert session.process_context({}).material_id == "material-renewed-preflight"
+
+    drifted_expired = _auth_material(
+        material_id="material-expired-drift",
+        expires_at="2026-07-27T10:10:00+00:00",
+        provider_metadata=initial_metadata,
+    )
+    drifted = _auth_material(
+        material_id="material-renewed-drift",
+        issued_at="2026-07-27T10:10:00+00:00",
+        expires_at="2026-07-27T11:10:00+00:00",
+        provider_metadata=tuple(
+            (key, "4" * 64) if key == "github_capability_digest" else (key, value)
+            for key, value in initial_metadata
+        ),
+    )
+    drifted_provider = DeterministicAuthMaterialProvider(
+        {"github-personal-v1": drifted_expired},
+        refreshes={"github-personal-v1": drifted},
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        RepositoryAuthBroker(drifted_provider).session(_auth_request())
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
 
 
 def test_revoked_or_scope_mismatched_auth_material_is_denied_and_released() -> None:

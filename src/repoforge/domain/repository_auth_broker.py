@@ -52,6 +52,7 @@ _IDENTITY_ENVIRONMENT = frozenset(
     }
 )
 _IDENTITY_ENVIRONMENT_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+_RENEWABLE_PROVIDER_METADATA_KEYS = frozenset({"github_preflight_observed_at"})
 
 
 def _safe_id(value: str, field_name: str) -> str:
@@ -256,6 +257,16 @@ class AuthMaterial:
             f"state={self.state.value!r}, environment_keys="
             f"{tuple(item.name for item in self.environment)!r})"
         )
+
+
+def _provider_identity_metadata(material: AuthMaterial) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            (key, value)
+            for key, value in material.provider_metadata
+            if key not in _RENEWABLE_PROVIDER_METADATA_KEYS
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +495,8 @@ class RepositoryAuthBroker:
         provider_failed = False
         try:
             material = self._provider.resolve(request.profile.credential_ref)
+        except RepoForgeError:
+            raise
         except Exception:
             material = None
             provider_failed = True
@@ -505,6 +518,9 @@ class RepositoryAuthBroker:
             refresh_failed = False
             try:
                 refreshed = self._provider.refresh(request.profile.credential_ref, previous)
+            except RepoForgeError:
+                _release(self._provider, previous)
+                raise
             except Exception:
                 refreshed = None
                 refresh_failed = True
@@ -528,7 +544,7 @@ class RepositoryAuthBroker:
                 and refreshed.target_kind is previous.target_kind
                 and refreshed.target_id == previous.target_id
                 and refreshed.capability_ids == previous.capability_ids
-                and refreshed.provider_metadata == previous.provider_metadata
+                and _provider_identity_metadata(refreshed) == _provider_identity_metadata(previous)
             )
             if not equivalent:
                 _release(self._provider, refreshed)

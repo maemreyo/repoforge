@@ -29,6 +29,17 @@ def _error(code: ErrorCode, message: str, *, retryable: bool = False) -> RepoFor
     )
 
 
+def _same_identity_decision(
+    current: OperationIdentityRecord,
+    candidate: OperationIdentityRecord,
+) -> bool:
+    return (
+        current.reference == candidate.reference
+        and current.context == candidate.context
+        and current.capability_requests == candidate.capability_requests
+    )
+
+
 class OperationIdentityManager:
     def __init__(
         self,
@@ -86,11 +97,7 @@ class OperationIdentityManager:
         existing = self._read(context.operation_id)
         if existing is not None:
             current = existing.value
-            if (
-                current.reference == candidate.reference
-                and current.context == candidate.context
-                and current.capability_requests == candidate.capability_requests
-            ):
+            if _same_identity_decision(current, candidate):
                 return current
             raise _error(
                 ErrorCode.OPERATION_IDENTITY_MISMATCH,
@@ -101,7 +108,7 @@ class OperationIdentityManager:
         except RepoForgeError as exc:
             if exc.code is ErrorCode.ALREADY_EXISTS:
                 raced = self._read(context.operation_id)
-                if raced is not None and raced.value.reference == candidate.reference:
+                if raced is not None and _same_identity_decision(raced.value, candidate):
                     return raced.value
                 raise _error(
                     ErrorCode.OPERATION_IDENTITY_MISMATCH,
