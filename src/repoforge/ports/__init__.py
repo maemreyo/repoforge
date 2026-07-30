@@ -83,6 +83,12 @@ from .ids import IdGenerator
 from .iteration_cache import IterationCache
 from .locking import LockManager
 from .metrics import MetricsSink
+from .nested_identity import (
+    NestedDiscoveryRequest,
+    NestedLeaseProvider,
+    NestedResourceDiscovery,
+    NestedTargetResolver,
+)
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
 from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
@@ -206,6 +212,10 @@ __all__ = [
     "IterationCache",
     "LockManager",
     "MetricsSink",
+    "NestedDiscoveryRequest",
+    "NestedLeaseProvider",
+    "NestedResourceDiscovery",
+    "NestedTargetResolver",
     "ObservedRuntime",
     "OnboardingEnvironment",
     "OnboardingStore",

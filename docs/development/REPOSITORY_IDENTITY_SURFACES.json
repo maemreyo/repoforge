@@ -124,6 +124,27 @@
       "planned_owner": "#291"
     },
     {
+      "path": "src/repoforge/adapters/git/nested_identity.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "submodule",
+        "lfs",
+        "nested_resource_discovery"
+      ],
+      "credential_inputs": [
+        "none during read-only discovery"
+      ],
+      "target_inputs": [
+        "reviewed primary repository endpoint",
+        "repository-local .gitmodules and .lfsconfig",
+        "explicit depth, resource, output, and timeout bounds"
+      ],
+      "current_risk": "none_local_only",
+      "planned_owner": "#294"
+    },
+    {
       "path": "src/repoforge/adapters/git/transport.py",
       "executables": [
         "git",
