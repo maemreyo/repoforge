@@ -8,6 +8,10 @@ from typing import NoReturn, cast
 import pytest
 from conftest import ForgeEnvironment, build_test_service
 
+from repoforge.adapters.github import (
+    CommandGitHubCapabilityPreflight,
+    CommandGitHubCapabilityProbe,
+)
 from repoforge.application.service import CodingService
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
@@ -17,6 +21,18 @@ from repoforge.ports import GitHubCapabilityPreflightGateway, GitHubCapabilityPr
 
 def run(*args: str, cwd: Path) -> None:
     subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def test_default_capability_preflight_composition_keeps_doctor_probe(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Default bootstrap keeps diagnostics and write preflight on distinct adapters."""
+
+    ctx = forge_env.service.application.context
+
+    assert isinstance(ctx.github_capabilities, CommandGitHubCapabilityProbe)
+    assert isinstance(ctx.github_capability_preflight, CommandGitHubCapabilityPreflight)
+    assert type(ctx.github_capabilities) is not type(ctx.github_capability_preflight)
 
 
 def test_doctor_uses_legacy_capability_probe_not_write_preflight(
