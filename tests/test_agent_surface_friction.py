@@ -35,10 +35,13 @@ from repoforge.contracts.v2 import WorkspaceVerifyInput
 from repoforge.domain.adhoc import (
     MAX_ADHOC_ARGV_ELEMENT_LENGTH,
     MAX_ADHOC_ARGV_ELEMENTS,
+    MAX_ADHOC_RUNNERS,
+    MAX_ADHOC_STDIN_LENGTH,
     validate_adhoc_argv,
 )
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.excerpts import bound_command_excerpt
+from repoforge.domain.policy_patch import MAX_ADHOC_TIMEOUT_SECONDS
 from repoforge.interfaces.mcp.server import create_server
 
 _EXCERPT_LIMIT = 12_000
@@ -394,3 +397,32 @@ class TestReasoningTravelsWithTheSchema:
             description = schema[name]["description"]
             assert "fact, not a fault" in description, name
             assert "agreement" in description, name
+
+
+class TestAdhocPolicyContractMatchesEnforcement:
+    """A repo_policy proposal must not advertise what the config loader will refuse."""
+
+    def test_stdin_bound_equals_the_domain_constant(self) -> None:
+        assert v2_contracts._MAX_ADHOC_STDIN_LENGTH == MAX_ADHOC_STDIN_LENGTH
+
+    def test_runner_bounds_equal_the_domain_constants(self) -> None:
+        assert v2_contracts._MAX_ADHOC_RUNNERS == MAX_ADHOC_RUNNERS
+        assert v2_contracts._MAX_ADHOC_TIMEOUT_SECONDS == MAX_ADHOC_TIMEOUT_SECONDS
+
+    def test_schema_rejects_a_runner_path_the_domain_rejects(self) -> None:
+        with pytest.raises(ValueError):
+            v2_contracts.ExecutionPolicyDeclaration(adhoc_runners=("/usr/bin/python3",))
+
+    def test_schema_accepts_a_bare_runner_basename(self) -> None:
+        declaration = v2_contracts.ExecutionPolicyDeclaration(adhoc_runners=("uv", "bash"))
+
+        assert declaration.adhoc_runners == ("uv", "bash")
+
+    def test_stdin_text_is_refused_outside_adhoc_mode(self) -> None:
+        with pytest.raises(ValueError, match="only valid for mode=adhoc"):
+            WorkspaceVerifyInput(
+                workspace_id="ws-1",
+                mode="profile",
+                profile_name="full",
+                stdin_text="anything",
+            )

@@ -19,6 +19,7 @@ from repoforge.application.workspace.run_adhoc import WorkspaceRunAdhocResult
 from repoforge.application.workspace.verify import _adhoc_evidence
 from repoforge.config import load_config
 from repoforge.contracts.v2 import AdhocEvidence
+from repoforge.domain.adhoc import MAX_ADHOC_STDIN_LENGTH
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 
 
@@ -477,3 +478,106 @@ def test_verify_surfaces_a_read_only_violation_instead_of_dropping_it(tmp_path: 
     assert evidence["command_class"] == "read_only"
     assert evidence["content_inspected"] is True
     AdhocEvidence(**evidence)
+
+
+# ---------------------------------------------------------------------------
+# Standard input
+# ---------------------------------------------------------------------------
+
+
+def test_adhoc_command_can_read_supplied_standard_input(tmp_path: Path) -> None:
+    """Without this the child gets DEVNULL, so `git apply -` and friends cannot work."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "import sys; sys.stdout.write(sys.stdin.read().upper())"],
+        stdin_text="fed through stdin\n",
+    )
+
+    assert result["returncode"] == 0
+    assert "FED THROUGH STDIN" in result["stdout"]
+
+
+def test_adhoc_stdin_accepts_newlines_that_argv_refuses(tmp_path: Path) -> None:
+    """stdin is content, not a command argument: a patch is multi-line by nature."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin lines")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "import sys; print(len(sys.stdin.read().splitlines()))"],
+        stdin_text="one\ntwo\nthree\n",
+    )
+
+    assert result["stdout"].strip() == "3"
+
+
+def test_adhoc_stdin_is_bounded(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin bound")["workspace_id"]
+
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(
+            workspace_id,
+            ["python3", "-c", "pass"],
+            stdin_text="x" * (MAX_ADHOC_STDIN_LENGTH + 1),
+        )
+
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
+    assert "file" in (exc.value.safe_next_action or "")
+
+
+def test_adhoc_audit_records_stdin_length_but_never_its_content(tmp_path: Path) -> None:
+    """Standard input is caller content and may carry a token or a patch."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin audit")["workspace_id"]
+    secret = "correct-horse-battery-staple"
+
+    env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "import sys; sys.stdin.read()"],
+        stdin_text=secret,
+    )
+
+    events = _audit_events(env.root, "workspace_run_adhoc")
+    assert events, "the ad-hoc run must be audited"
+    assert events[-1]["details"]["stdin_length"] == len(secret)
+    assert secret not in json.dumps(events[-1])
+
+
+def test_a_gitignored_script_does_not_move_the_workspace_fingerprint(tmp_path: Path) -> None:
+    """The scratch-directory convention in TOOL_REFERENCE.md rests entirely on this.
+
+    The fingerprint reads untracked files through `git ls-files --others
+    --exclude-standard`, so an ignored path contributes nothing. If that ever changed,
+    every scratch script would start dirtying the tree it was chosen to stay out of,
+    and the documented convention would be quietly wrong rather than loudly broken.
+    """
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "scratch script")["workspace_id"]
+
+    env.service.workspace_run_adhoc(
+        workspace_id,
+        [
+            "python3",
+            "-c",
+            "from pathlib import Path; Path('.gitignore').write_text('.rf-scratch/\\n')",
+        ],
+    )
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        [
+            "python3",
+            "-c",
+            "from pathlib import Path; d = Path('.rf-scratch'); d.mkdir(); "
+            "(d / 'run.sh').write_text('set -e\\necho multi\\necho line\\n')",
+        ],
+    )
+
+    assert result["returncode"] == 0
+    assert result["fingerprint_changed"] is False
+    # `.gitignore` itself is an ordinary untracked file and stays reported; the point is
+    # that nothing under the ignored directory does.
+    assert not any(path.startswith(".rf-scratch") for path in result["changed_paths"])

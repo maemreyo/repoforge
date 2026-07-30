@@ -19,6 +19,10 @@ _RUNNER_BASENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_ADHOC_RUNNERS = 32
 MAX_ADHOC_ARGV_ELEMENTS = 32
 MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
+# Standard input is content, not a command argument, so it is bounded far more loosely
+# than an argv element -- a patch fed to `git apply -` is routinely longer than 512
+# characters. It is still bounded: the text is persisted with the durable work request.
+MAX_ADHOC_STDIN_LENGTH = 64_000
 
 
 class ExecutionMode(str, Enum):
@@ -246,6 +250,42 @@ def validate_adhoc_runners(runners: tuple[str, ...], repo_id: str) -> tuple[str,
     return runners
 
 
+def validate_adhoc_stdin(text: str | None) -> str | None:
+    """Validate optional standard input for one ad-hoc run.
+
+    Unlike an argv element this may contain newlines -- feeding a multi-line patch or
+    JSON document is the whole point -- but it is still bounded and must be real text,
+    because a NUL byte cannot survive the round trip through the durable work request.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise _adhoc_error(
+            f"Ad-hoc stdin_text must be a string, got {type(text).__name__}",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action="Pass stdin_text as text, or omit it to give the command no input.",
+        )
+    if len(text) > MAX_ADHOC_STDIN_LENGTH:
+        raise _adhoc_error(
+            f"Ad-hoc stdin_text is {len(text)} characters; the limit is {MAX_ADHOC_STDIN_LENGTH}",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action=(
+                "Write input this large to a file in the workspace and have the command read "
+                f"that path; stdin_text carries at most {MAX_ADHOC_STDIN_LENGTH} characters."
+            ),
+        )
+    if "\x00" in text:
+        raise _adhoc_error(
+            "Ad-hoc stdin_text contains a NUL byte",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action=(
+                "Remove the NUL byte. Binary input belongs in a file the command reads, not in "
+                "stdin_text."
+            ),
+        )
+    return text
+
+
 def _adhoc_error(message: str, code: ErrorCode, *, safe_next_action: str) -> RepoForgeError:
     return RepoForgeError(
         message,
@@ -345,9 +385,11 @@ __all__ = [
     "MAX_ADHOC_ARGV_ELEMENTS",
     "MAX_ADHOC_ARGV_ELEMENT_LENGTH",
     "MAX_ADHOC_RUNNERS",
+    "MAX_ADHOC_STDIN_LENGTH",
     "CommandClass",
     "ExecutionMode",
     "classify_adhoc_command",
     "validate_adhoc_argv",
     "validate_adhoc_runners",
+    "validate_adhoc_stdin",
 ]

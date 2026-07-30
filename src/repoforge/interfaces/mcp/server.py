@@ -133,7 +133,10 @@ single-repository selection is pinned to the MCP session; reuse that context for
 and do not poll repo_list again unless stale-selection recovery requires it or the user changes repos. The
 public surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
 composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
-profiles, and workspace_pr for draft-PR lifecycle operations. Review workspace_diff after meaningful
+profiles, and workspace_pr for draft-PR lifecycle operations. To run a command that no enrolled
+diagnostic covers, use workspace_verify mode=adhoc with an argv list -- never a shell string -- limited
+to the repository's adhoc_runners allowlist; when the runner you need is missing, propose it through
+repo_policy rather than working around it. Review workspace_diff after meaningful
 changes. Run final verification immediately before workspace_commit. For desired GitHub issue graphs,
 use repo_issue mode=manage with plan/apply/status/reconcile; never substitute raw GitHub mutation.
 Resume a disconnected or new session from repo_task_context section ticket_workflow. After apply, use
@@ -212,7 +215,7 @@ _TOOL_TITLES: Mapping[str, str] = {
     "workspace_tree": "List workspace tree",
     "workspace_diff": "Read workspace diff",
     "workspace_mutate": "Apply exact-state workspace mutations",
-    "workspace_verify": "Plan or run workspace verification",
+    "workspace_verify": "Plan, verify, or run an allowlisted command",
     "workspace_commit": "Commit verified workspace",
     "workspace_push": "Push workspace branch",
     "workspace_pr": "Manage draft pull request",
@@ -264,7 +267,13 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "for files whose patch content is needed. Follow next_cursor when truncated."
     ),
     "workspace_mutate": "Atomically plan or apply typed exact-state mutations under workspace policy and budgets.",
-    "workspace_verify": "Plan, route, or run reviewed diagnostics, profiles, or relaxed-mode adhoc verification.",
+    "workspace_verify": (
+        "Plan, route, or run reviewed diagnostics and profiles, and -- under relaxed execution mode -- "
+        "run an allowlisted command directly with mode=adhoc. Ad-hoc takes an argv list, never a shell "
+        "string, and its result is evidence only: it never satisfies the commit gate. The response's "
+        "adhoc_evidence.content_inspected reports whether RepoForge inspected the command at all, which "
+        "it does for git argv only."
+    ),
     "workspace_commit": "Commit only the exact verified tree with optional exact-head and fingerprint locks.",
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
     "workspace_pr": "Create, update, comment on, watch, or otherwise manage the workspace draft pull request.",
@@ -628,7 +637,7 @@ def _dispatch_kwargs(
     if tool_name in {"repo_search", "workspace_search"}:
         kwargs["mode"] = ApplicationSearchMode(kwargs["mode"])
     if tool_name == "repo_policy" and kwargs["action"] == "apply":
-        for field in ("mutations", "generated_paths", "issue_writes"):
+        for field in ("mutations", "generated_paths", "issue_writes", "execution"):
             if field not in model.model_fields_set:
                 kwargs.pop(field, None)
     if tool_name == "workspace_create":

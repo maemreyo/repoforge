@@ -595,6 +595,37 @@ class PolicyMutation(StrictModel):
     value: str | None = Field(default=None, max_length=20_000)
 
 
+# The contracts package deliberately imports no domain module, so these must be kept
+# equal to MAX_ADHOC_RUNNERS, MAX_ADHOC_TIMEOUT_SECONDS and the domain's runner-basename
+# pattern by test rather than by import. A schema that accepts what `domain.adhoc` then
+# refuses reads to the caller as an arbitrary failure.
+_MAX_ADHOC_RUNNERS = 32
+_MAX_ADHOC_TIMEOUT_SECONDS = 3_600
+_AdhocRunnerName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")]
+
+
+class ExecutionPolicyDeclaration(StrictModel):
+    """Relaxed-mode ad-hoc execution settings for one repository.
+
+    This is the reviewed way for an agent to ask for a runner it does not have, rather
+    than working around a missing one. Widening any field here is a capability
+    expansion, so `repo_policy` apply returns `pending_approval` and the change waits
+    on an operator; narrowing applies through the same pipeline as a restriction.
+
+    A runner is a bare executable basename resolved through the constrained runtime
+    PATH -- never a path, never a shell string. Note that adding a shell (`bash`, `sh`)
+    is permitted and is the direct way to obtain pipes and globbing, but RepoForge
+    content-inspects `git` argv only: under a shell the git guards do not see what the
+    shell runs, which `workspace_verify` reports as `content_inspected = false`.
+    """
+
+    execution_mode: Literal["strict", "relaxed"] | None = None
+    adhoc_runners: tuple[_AdhocRunnerName, ...] | None = Field(
+        default=None, max_length=_MAX_ADHOC_RUNNERS
+    )
+    adhoc_timeout_seconds: int | None = Field(default=None, ge=1, le=_MAX_ADHOC_TIMEOUT_SECONDS)
+
+
 class GeneratedPathDeclaration(StrictModel):
     glob: str = Field(min_length=1, max_length=512)
     regeneration_command: tuple[str, ...] = Field(min_length=1, max_length=64)
@@ -652,6 +683,7 @@ class RepoPolicyInput(StrictModel):
     mutations: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
     generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
     issue_writes: IssueWritePolicyDeclaration | None = None
+    execution: ExecutionPolicyDeclaration | None = None
     preview_token: str | None = Field(default=None, max_length=2048)
 
 
@@ -664,6 +696,7 @@ class RepoPolicyOutput(ToolResponse):
     changes: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
     generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
     issue_writes: IssueWritePolicyDeclaration | None = None
+    execution: ExecutionPolicyDeclaration | None = None
     operator_instruction: str | None = Field(default=None, max_length=1000)
 
 
@@ -1361,6 +1394,7 @@ _Selector = _SelectorItem | _SelectorItems
 # package deliberately imports no domain module, so a test pins the two together.
 _MAX_ADHOC_ARGV_ELEMENTS = 32
 _MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
+_MAX_ADHOC_STDIN_LENGTH = 64_000
 _AdhocArgvItem = Annotated[str, Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENT_LENGTH)]
 
 
@@ -1375,6 +1409,15 @@ class WorkspaceVerifyInput(StrictModel):
         default=None, max_length=_MAX_ADHOC_ARGV_ELEMENTS
     )
     working_directory: RelativePath | None = None
+    stdin_text: str | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_STDIN_LENGTH,
+        description=(
+            "Optional standard input for a mode=adhoc command; omitted leaves the command "
+            "with no input. May contain newlines, unlike an argv element. Input larger than "
+            "the limit belongs in a workspace file the command reads."
+        ),
+    )
     expected_fingerprint: Sha256 | None = None
     expected_head_sha: GitObjectId | None = None
     mutability: Literal["read_only", "workspace"] = "read_only"
@@ -1398,6 +1441,8 @@ class WorkspaceVerifyInput(StrictModel):
             raise ValueError("diagnostic mode requires diagnostic_id")
         if self.mode is VerifyMode.ADHOC and not self.argv:
             raise ValueError("adhoc mode requires argv")
+        if self.stdin_text is not None and self.mode is not VerifyMode.ADHOC:
+            raise ValueError("stdin_text is only valid for mode=adhoc")
         if self.mutability == "workspace":
             if self.mode is not VerifyMode.ADHOC:
                 raise ValueError("mutability='workspace' is only valid for mode=adhoc")

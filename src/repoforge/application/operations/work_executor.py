@@ -99,6 +99,7 @@ class VerificationWorkHandlers:
                     expected_fingerprint=request.expected_fingerprint,
                     expected_head_sha=request.expected_head_sha,
                     mutability=request.mutability,
+                    stdin_text=request.stdin_text,
                 ),
                 cancellation_token=cancellation_token,
                 progress=progress,

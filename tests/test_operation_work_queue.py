@@ -390,11 +390,53 @@ def test_adhoc_work_request_round_trips_exact_argv_and_policy() -> None:
         "argv": ["python3", "-c", "print('durable')"],
         "working_directory": "src",
         "mutability": "read_only",
+        "stdin_text": None,
         "expected_head_sha": "b" * 40,
         "expected_fingerprint": "c" * 64,
         "config_generation": 12,
     }
     assert work_item_from_payload(payload) == item
+
+
+def test_adhoc_work_queued_before_stdin_existed_still_decodes() -> None:
+    """An activation must not strand work the previous release already queued.
+
+    The decoder matches the request field set exactly, so adding `stdin_text` would
+    have made every in-flight ad-hoc item undecodable the moment a new release took
+    over. It is accepted as absent, and only as absent -- unknown fields still fail.
+    """
+    import pytest
+
+    from repoforge.domain.errors import RepoForgeError
+    from repoforge.domain.operation_work import (
+        OperationWorkRequest,
+        new_work_item,
+        work_item_from_payload,
+        work_item_payload,
+    )
+
+    item = new_work_item(
+        operation_id="op-" + "a" * 24,
+        request=OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("python3", "-c", "print('durable')"),
+            working_directory="src",
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        ),
+        now="2026-07-27T00:00:00+00:00",
+    )
+    legacy = work_item_payload(item)
+    del legacy["request"]["stdin_text"]  # type: ignore[union-attr]
+
+    assert work_item_from_payload(legacy) == item
+
+    unknown = work_item_payload(item)
+    unknown["request"]["unexpected"] = "value"  # type: ignore[index]
+    with pytest.raises(RepoForgeError):
+        work_item_from_payload(unknown)
 
 
 def test_queue_claim_is_fenced_to_exact_config_generation(tmp_path) -> None:

@@ -83,6 +83,7 @@ class WorkspaceVerifyCommand:
     rerun: VerifyRerun | None = None
     impact_paths: tuple[str, ...] = ()
     artifact_output_path: str | None = None
+    stdin_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,6 +785,7 @@ class WorkspaceVerifier:
                     expected_head_sha=assessment.snapshot.head_sha,
                     expected_fingerprint=assessment.snapshot.workspace_fingerprint,
                     config_generation=self.ctx.config_generation,
+                    stdin_text=command.stdin_text,
                 ),
                 operation_kind="workspace_run_adhoc",
             )

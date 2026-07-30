@@ -1748,3 +1748,83 @@ def test_agent_facing_inspect_reports_restart_evidence(tmp_path: Path) -> None:
 
 def test_agent_facing_inspect_omits_health_when_no_runtime_record_exists(tmp_path: Path) -> None:
     assert _admin(tmp_path).config_inspect_v2()["runtime_health"] is None
+
+
+# ---------------------------------------------------------------------------
+# Ad-hoc execution policy through the reviewed generation pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_repo_policy_can_propose_an_adhoc_runner(tmp_path: Path) -> None:
+    """An agent that needs a runner asks for it here rather than working around it.
+
+    Every layer under this already supported execution policy; only the v2 surface had
+    no field reaching it, so the one reviewed path to a new runner was an operator
+    hand-editing config.
+    """
+    admin = _admin(tmp_path)
+
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        execution={
+            "execution_mode": "relaxed",
+            "adhoc_runners": ["uv", "bash"],
+            "adhoc_timeout_seconds": 900,
+        },
+    )
+
+    assert preview["result"] == "preview"
+    assert preview["execution"] == {
+        "execution_mode": "relaxed",
+        "adhoc_runners": ["uv", "bash"],
+        "adhoc_timeout_seconds": 900,
+    }
+
+    applied = admin.repo_policy(
+        "demo",
+        action="apply",
+        preview_token=preview["preview_token"],
+    )
+
+    # Widening execution policy is an EXPANSION, so it is never applied on the model's
+    # authority: it waits for `rf config approve`.
+    assert applied["result"] == "pending_approval"
+    assert applied["execution"]["adhoc_runners"] == ["uv", "bash"]
+
+
+def test_repo_policy_refuses_a_runner_the_config_loader_would_reject(tmp_path: Path) -> None:
+    """The surface must not accept a runner that `domain.adhoc` refuses later."""
+    admin = _admin(tmp_path)
+
+    with pytest.raises(ConfigError, match="basename"):
+        admin.repo_policy(
+            "demo",
+            action="preview",
+            execution={"adhoc_runners": ["/usr/bin/python3"]},
+        )
+
+
+def test_repo_policy_refuses_an_empty_execution_declaration(tmp_path: Path) -> None:
+    admin = _admin(tmp_path)
+
+    with pytest.raises(ConfigError, match="at least one field"):
+        admin.repo_policy("demo", action="preview", execution={})
+
+
+def test_repo_policy_apply_refuses_execution_alongside_a_token(tmp_path: Path) -> None:
+    """Apply acts on the exact previewed proposal, never on a re-sent declaration."""
+    admin = _admin(tmp_path)
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        execution={"adhoc_timeout_seconds": 600},
+    )
+
+    with pytest.raises(ConfigError, match="only the exact preview_token"):
+        admin.repo_policy(
+            "demo",
+            action="apply",
+            preview_token=preview["preview_token"],
+            execution={"adhoc_timeout_seconds": 30},
+        )
