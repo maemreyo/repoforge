@@ -6,6 +6,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ...domain.context_sections import (
+    CONTEXT_SECTION_VALUES,
+    DEFAULT_CONTEXT_SECTION_VALUES,
+)
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.repository_selection import select_repository
 from ...domain.tickets import TicketNode
@@ -285,13 +289,7 @@ class RepositoryTaskContextV2Command:
     repo_id: str
     issue_number: int | None = None
     workspace_id: str | None = None
-    sections: tuple[str, ...] = (
-        "repository",
-        "status",
-        "ticket",
-        "workspace",
-        "recent_commits",
-    )
+    sections: tuple[str, ...] = DEFAULT_CONTEXT_SECTION_VALUES
     byte_budget: int = 96_000
 
 
@@ -954,9 +952,9 @@ class RepositoryIssueV2:
 
 
 class RepositoryTaskContextV2:
-    _SECTIONS = frozenset(
-        {"repository", "status", "ticket", "ticket_workflow", "workspace", "recent_commits"}
-    )
+    # Derived, not restated: a name added to the enum is accepted here automatically, so
+    # the two cannot disagree about what exists.
+    _SECTIONS = CONTEXT_SECTION_VALUES
 
     def __init__(
         self,
@@ -1146,7 +1144,7 @@ class RepositoryTaskContextV2:
                         ),
                     )
                 )
-            else:
+            elif name == "recent_commits":
                 recent = self._recent.compute(RecentCommitsCommand(command.repo_id, 5))
                 compact = [_compact_recent(item) for item in recent.commits]
                 sections.append(
@@ -1163,6 +1161,15 @@ class RepositoryTaskContextV2:
                             for item in compact
                         ),
                     )
+                )
+            else:
+                # A name that passed the accepted-set check but has no builder. This used
+                # to be the `recent_commits` branch, which meant any newly declared
+                # section silently returned commit history under its own name -- the
+                # `name` in the output is echoed from the request, so it looked right.
+                raise ConfigError(
+                    f"Task-context section {name!r} is declared but has no builder",
+                    code=ErrorCode.INTERNAL_ERROR,
                 )
         bounded: list[ContextSectionV2] = []
         used = 0

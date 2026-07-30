@@ -33,6 +33,7 @@ source_globs = [
 test_files = [
   "tests/test_agent_surface_friction.py",
   "tests/test_client_capabilities.py",
+  "tests/test_context_section_declarations.py",
   "tests/test_mcp_contract.py",
   "tests/test_mcp_contract_v2.py",
   "tests/test_mcp_runtime_coverage.py",
@@ -526,6 +527,7 @@ test_files = [
   "tests/test_code_intelligence_integration.py",
   "tests/test_command_source_integrity.py",
   "tests/test_constitution_source.py",
+  "tests/test_context_section_declarations.py",
   "tests/test_control_plane_responsiveness.py",
   "tests/test_cli_surface_coverage.py",
   "tests/test_doctor_github_capabilities.py",
