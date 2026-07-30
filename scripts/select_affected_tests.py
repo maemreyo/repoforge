@@ -75,6 +75,14 @@ CONFTEST_PATH = "tests/conftest.py"
 # map so source changes remain narrow without inflating consumer counts or
 # weakening the default fail-closed behavior for unknown modules.
 _GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS: dict[str, tuple[str, ...]] = {
+    # Protocol-only module: every line executes at import, so which test context coverage
+    # attributes it to is a race between whichever test imports it first -- and collection
+    # itself has no test context at all. It was mapped by one recording run and dropped by the
+    # next, which escalated an unrelated change to the whole suite. Declaring the blast radius
+    # here makes it independent of that lottery.
+    "src/repoforge/ports/github_capability_preflight.py": (
+        "tests/test_github_capability_preflight_adapter.py",
+    ),
     "src/repoforge/adapters/github/api_identity.py": (
         "tests/test_github_api_identity.py",
         "tests/test_github_capability_preflight_adapter.py",
