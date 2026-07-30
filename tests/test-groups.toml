@@ -456,6 +456,7 @@ test_files = [
   "tests/test_background_run_profile.py",
   "tests/test_code_intelligence.py",
   "tests/test_code_intelligence_integration.py",
+  "tests/test_code_reference_spans.py",
   "tests/test_command_executor_error_codes.py",
   "tests/test_doctor_github_capabilities.py",
   "tests/test_fingerprint_cache.py",

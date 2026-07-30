@@ -73,6 +73,11 @@ def _line(node: Node) -> int:
     return node.start_point.row + 1
 
 
+def _column(node: Node) -> int:
+    # Already a 0-based byte offset within the row, which is what the fact declares.
+    return node.start_point.column
+
+
 def _name_node(node: Node) -> Node | None:
     return node.child_by_field_name("name")
 
@@ -186,6 +191,7 @@ def _python_facts(
                     path,
                     name,
                     _line(node),
+                    _column(node),
                     imported_names[name],
                 )
             )
@@ -294,7 +300,9 @@ def _javascript_facts(
         name = _text(node, source)
         if name in imported_names:
             references.append(
-                CodeReferenceFact(language, path, name, _line(node), imported_names[name])
+                CodeReferenceFact(
+                    language, path, name, _line(node), _column(node), imported_names[name]
+                )
             )
     return symbols, imports, references
 
