@@ -62,6 +62,14 @@ def _line(value: int) -> int:
     return value
 
 
+def _column(value: int) -> int:
+    # 0-based, unlike `line`: column 0 is the first byte of the line and is legitimate
+    # for any symbol at the start of a line.
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise _invalid("fact column must be a non-negative integer")
+    return value
+
+
 def _bounded_unique(
     values: tuple[str, ...], field_name: str, *, paths: bool = False
 ) -> tuple[str, ...]:
@@ -181,10 +189,24 @@ class CodeImportFact:
 
 @dataclass(frozen=True, slots=True)
 class CodeReferenceFact:
+    """One occurrence of a symbol, located precisely enough to rewrite.
+
+    ``line`` is 1-based and ``column`` is a 0-based **byte** offset within that line --
+    the convention both providers already produce natively (``ast.AST.col_offset`` and
+    tree-sitter's ``Node.start_point.column``).
+
+    The column is what makes this fact actionable rather than merely informative. A
+    line number alone forces a consumer to re-find the symbol by matching text on that
+    line, which cannot tell ``user`` from the ``user`` inside ``username`` and cannot
+    choose between two occurrences on one line. Anything rewriting references must use
+    :attr:`span`, never a text search.
+    """
+
     language: CodeLanguage
     source_path: str
     symbol: str
     line: int
+    column: int
     resolved_path: str | None = None
 
     def __post_init__(self) -> None:
@@ -193,8 +215,24 @@ class CodeReferenceFact:
         object.__setattr__(self, "source_path", _path(self.source_path, "reference source_path"))
         object.__setattr__(self, "symbol", _text(self.symbol, "reference symbol"))
         object.__setattr__(self, "line", _line(self.line))
+        object.__setattr__(self, "column", _column(self.column))
         if self.resolved_path is not None:
             object.__setattr__(self, "resolved_path", _path(self.resolved_path, "resolved_path"))
+
+    @property
+    def end_column(self) -> int:
+        """Exclusive end of the occurrence, in the same 0-based byte units as ``column``.
+
+        Derived rather than stored: a reference fact names the bare identifier at that
+        position, so its width is the symbol's own encoded length. A stored end column
+        could disagree with the symbol; a derived one cannot.
+        """
+        return self.column + len(self.symbol.encode("utf-8"))
+
+    @property
+    def span(self) -> tuple[int, int]:
+        """``(column, end_column)`` -- the half-open byte range to replace."""
+        return (self.column, self.end_column)
 
 
 @dataclass(frozen=True, slots=True)
