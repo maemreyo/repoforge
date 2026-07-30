@@ -14,6 +14,9 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+import anyio
+import anyio.from_thread
+import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp.types import Tool as McpTool
@@ -22,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from ... import __version__
 from ...application.audit_context import bind_audit_attribution
 from ...application.config_admin import ConfigAdminService
+from ...application.operations.progress_context import bind_progress_reporter
 from ...application.outcome_context import (
     begin_outcome_capture,
     current_outcome,
@@ -65,14 +69,17 @@ from ...domain.repository_selection import (
 )
 from ...domain.runtime import RUNTIME_CONTROL_PROTOCOL_VERSION
 from ...domain.runtime_contract import RuntimeContractIdentity, changed_contract_fields
-from .capabilities import capability_policy_from_context
+from ...ports.progress_reporter import NullProgressReporter, ProgressReporter
+from .capabilities import capability_policy_from_context, client_capabilities_from_context
 from .payload import render_tool_payload
+from .progress import build_progress_reporter
 
 FORGE_V2_IDENTITY = "forge_v2"
 FORGE_V2_CONTRACT_VERSION = 2
 _PROCESS_START_IDENTITY = secrets.token_hex(32)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 _REPOSITORY_SELECTION_TTL_SECONDS = 900.0
+_MAX_CONCURRENT_OFFLOADED_WAITS = 8
 
 
 class _IssueGraphApprovalForm(BaseModel):
@@ -365,6 +372,18 @@ class _StructuredMcpToolError(RuntimeError):
 
 def _bounded(text: str, limit: int = 500) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _sleeps_while_waiting(tool_name: str, kwargs: Mapping[str, Any]) -> bool:
+    """Whether this dispatch blocks on time rather than on work.
+
+    ``operation wait`` is a bounded poll loop, so running it inline stops the
+    session servicing any other tool call for as long as it blocks -- which
+    defeats the point of a long poll and leaves no thread-safe way to push
+    progress on the open request. Every other dispatch is bounded by its own
+    work and stays on the event loop.
+    """
+    return tool_name == "operation" and kwargs.get("action") == "wait"
 
 
 def _raise_structured_error(
@@ -712,6 +731,8 @@ class ForgeV2FastMCP(FastMCP[None]):
         self._initial_contract_identity = contract_identity_provider()
         self._session_contract_identities: dict[int, RuntimeContractIdentity] = {}
         self._session_repository_selections: dict[int, RepositorySelectionPin] = {}
+        # Built on first use: a CapacityLimiter needs a running event loop.
+        self._wait_limiter: anyio.CapacityLimiter | None = None
 
     def _session_key(self) -> int | None:
         try:
@@ -912,6 +933,68 @@ class ForgeV2FastMCP(FastMCP[None]):
             "approval_request_id."
         )
 
+    def _wait_thread_limiter(self) -> anyio.CapacityLimiter:
+        """Cap offloaded waits so long polls cannot drain AnyIO's shared thread pool.
+
+        A wait holds its worker for up to the connector ceiling, so without a
+        limiter of its own a burst of concurrent waits would occupy the default
+        pool that every other ``to_thread`` caller shares.
+        """
+        limiter = self._wait_limiter
+        if limiter is None:
+            limiter = anyio.CapacityLimiter(_MAX_CONCURRENT_OFFLOADED_WAITS)
+            self._wait_limiter = limiter
+        return limiter
+
+    def _progress_bridge(self) -> ProgressReporter:
+        """A reporter that pushes ``notifications/progress`` from the worker thread.
+
+        Enabled only when the client advertised progress support at initialize
+        *and* supplied a progress token on this request -- never push into a
+        client that cannot consume it. ``anyio.from_thread.run`` hands the
+        coroutine back to the event loop that owns the session, which is the only
+        thread allowed to write to the transport.
+        """
+        try:
+            context = self.get_context()
+            request_context = context.request_context
+        except (LookupError, AttributeError, ValueError):
+            return NullProgressReporter()
+        meta = getattr(request_context, "meta", None)
+        if getattr(meta, "progressToken", None) is None:
+            return NullProgressReporter()
+
+        def emit(current: int, total: int | None, message: str | None) -> None:
+            anyio.from_thread.run(
+                context.report_progress,
+                float(current),
+                None if total is None else float(total),
+                message,
+            )
+
+        return build_progress_reporter(
+            capabilities=client_capabilities_from_context(context),
+            has_progress_token=True,
+            emit=emit,
+        )
+
+    async def _dispatch_off_event_loop(
+        self, tool_name: str, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run a deliberately-blocking dispatch in a worker thread.
+
+        ``to_thread.run_sync`` copies this task's context into the worker, so the
+        bound service, audit attribution and the progress reporter below all
+        remain visible inside the dispatch while staying scoped to this request.
+        """
+        reporter = self._progress_bridge()
+
+        def run() -> dict[str, Any]:
+            with bind_progress_reporter(reporter):
+                return self._dispatch(tool_name, kwargs)
+
+        return await anyio.to_thread.run_sync(run, limiter=self._wait_thread_limiter())
+
     def _dispatch(self, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         if tool_name in _ADMIN_METHODS:
             return self._admin_boundary.call(_ADMIN_METHODS[tool_name], **kwargs)
@@ -990,7 +1073,10 @@ class ForgeV2FastMCP(FastMCP[None]):
                         identity=request_identity,
                         service=service,
                     )
-                    raw = self._dispatch(name, dispatch_kwargs)
+                    if _sleeps_while_waiting(name, dispatch_kwargs):
+                        raw = await self._dispatch_off_event_loop(name, dispatch_kwargs)
+                    else:
+                        raw = self._dispatch(name, dispatch_kwargs)
                     await self._maybe_elicit_issue_graph_approval(name, raw)
                     if name == "repo_list":
                         selection_pin = self._pin_repository_selection(
