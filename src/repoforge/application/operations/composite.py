@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ...domain.errors import ErrorCode, RepoForgeError
-from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
+from ...domain.operation_task import (
+    TERMINAL_OPERATION_STATES,
+    OperationState,
+    OperationTask,
+)
 from ...ports.progress_reporter import ProgressReporter
 from ..workspace.failure_intelligence import FailureEvidenceReadCommand, FailureIntelligenceService
 from .cancel import OperationCancelCommand, OperationCancellationRequester
@@ -183,14 +187,16 @@ class OperationCoordinator:
         self.failure_evidence = failure_evidence
 
     @staticmethod
-    def _emit_progress(
-        reporter: ProgressReporter,
-        view: OperationSummary | OperationStatusView,
-    ) -> None:
+    def _emit_task_progress(reporter: ProgressReporter, task: OperationTask) -> None:
+        """Heartbeat from the operation record itself.
+
+        The same values the status view exposes under ``progress``, read from the one
+        record the wait loop already has, so a heartbeat costs no extra store reads.
+        """
         reporter.report(
-            current=view.progress.current,
-            total=view.progress.total,
-            message=view.progress.message or view.phase,
+            current=task.progress_current,
+            total=task.progress_total,
+            message=task.progress_message or task.phase,
         )
 
     def execute(
@@ -232,29 +238,42 @@ class OperationCoordinator:
             # An explicit reporter wins (tests, direct callers); otherwise take the one
             # the transport bound for this request. Neither present means poll guidance.
             reporter: ProgressReporter = progress_reporter or current_progress_reporter()
-            current = self.status.read(command.operation_id)
-            baseline = command.since_updated_at or current.updated_at
-            terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
-            changed_since = command.since_updated_at is not None and current.updated_at != baseline
+            # Poll the operation record alone. The full status view additionally reads the
+            # result store and the effect-receipt store, which this loop never consults --
+            # at ten ticks a second that tripled the file reads and JSON decodes charged to
+            # a held-open request, for evidence only the return value needs (#350).
+            poll = self.status.operations.status
+            task = poll(command.operation_id)
+            baseline = command.since_updated_at or task.updated_at
+            terminal = task.state in TERMINAL_OPERATION_STATES
+            changed_since = command.since_updated_at is not None and task.updated_at != baseline
             last_reported_at = ""
             if reporter.enabled:
-                self._emit_progress(reporter, current)
-                last_reported_at = current.updated_at
+                self._emit_task_progress(reporter, task)
+                last_reported_at = task.updated_at
             deadline = time.monotonic() + timeout_seconds
             while not terminal and not (changed_since and wake_on_progress):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 time.sleep(min(0.1, remaining))
-                current = self.status.read(command.operation_id)
-                terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
-                changed_since = current.updated_at != baseline
+                task = poll(command.operation_id)
+                terminal = task.state in TERMINAL_OPERATION_STATES
+                changed_since = task.updated_at != baseline
                 # Heartbeat the open request so a progress-capable client learns
                 # of forward motion without issuing another poll, and the
                 # connector's idle timeout is reset while work continues.
-                if reporter.enabled and current.updated_at != last_reported_at:
-                    self._emit_progress(reporter, current)
-                    last_reported_at = current.updated_at
+                if reporter.enabled and task.updated_at != last_reported_at:
+                    self._emit_task_progress(reporter, task)
+                    last_reported_at = task.updated_at
+            # One full view, once the answer is known: the only point where the result and
+            # receipt stores are genuinely needed. It is a strictly later read than the last
+            # poll, so the decision is recomputed from it -- otherwise a state that advanced
+            # in between would be reported as a timeout alongside terminal evidence. States
+            # only move toward terminal, so this can make the answer fresher, never staler.
+            current = self.status.read(command.operation_id)
+            terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
+            changed_since = current.updated_at != baseline
             # In 'terminal' mode a delta is not an answer, so advancing without finishing
             # is still a timeout -- and the caller needs current evidence to pace the next
             # call, which for a long gate is the ordinary outcome rather than an anomaly.

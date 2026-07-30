@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
 from conftest import ForgeEnvironment
 
 from repoforge.application.operations.composite import OperationCommand
@@ -304,3 +307,103 @@ def test_non_wait_actions_carry_no_wait_only_fields(forge_env: ForgeEnvironment)
         assert result.progress_delivery is None
         assert result.next_since_updated_at is None
         assert result.suggested_poll_after_s is None
+
+
+# ------------------------------------------- what the poll loop costs per tick (#350)
+
+
+def test_the_wait_polls_the_record_and_builds_the_full_view_once(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The expensive read belongs at the exit, not on every tick.
+
+    `OperationStatusReader.read` also reads the result store and the effect-receipt
+    store. The loop consults none of that -- only state, updated_at, progress and
+    phase, all of which live on the record. Counting calls is deterministic; the
+    earlier wall-clock version of this measurement is what broke main.
+    """
+
+    coordinator = forge_env.service._operation
+    manager = forge_env.service.operations
+    task = manager.create(kind="watch", phase="queued", cancel_supported=True)
+    manager.start(task.operation_id)
+
+    full_view_reads = 0
+    record_reads = 0
+    real_read = coordinator.status.read
+    real_status = manager.status
+
+    def counted_read(operation_id: str) -> Any:
+        nonlocal full_view_reads
+        full_view_reads += 1
+        return real_read(operation_id)
+
+    def counted_status(operation_id: str) -> Any:
+        nonlocal record_reads
+        record_reads += 1
+        return real_status(operation_id)
+
+    monkeypatch.setattr(coordinator.status, "read", counted_read)
+    monkeypatch.setattr(manager, "status", counted_status)
+
+    result = coordinator.execute(
+        OperationCommand(
+            action="wait",
+            operation_id=task.operation_id,
+            until="terminal",
+            timeout_seconds=1,
+        )
+    )
+
+    assert result.timed_out is True
+    # Exactly one full view, taken after the loop to build the returned evidence.
+    assert full_view_reads == 1
+    # And the loop itself ticked several times against the cheap read.
+    assert record_reads > 2
+
+
+def test_the_returned_decision_is_recomputed_from_the_returned_evidence(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state that moves between the last poll and the final read must not contradict itself.
+
+    Polling the record and reading the full view separately opens that window: the view
+    is a strictly later read. Reporting a timeout beside terminal evidence would be the
+    visible symptom, so the decision comes from the view, not from the last poll.
+    """
+
+    coordinator = forge_env.service._operation
+    manager = forge_env.service.operations
+    task = manager.create(kind="watch", phase="queued", cancel_supported=True)
+    manager.start(task.operation_id)
+
+    real_read = coordinator.status.read
+    calls = 0
+
+    def advance_then_read(operation_id: str) -> Any:
+        nonlocal calls
+        calls += 1
+        # Land the terminal transition in exactly that window: after the loop's last
+        # poll saw RUNNING, before the full view is taken.
+        manager.succeed(operation_id, result_reference="verify:done")
+        return real_read(operation_id)
+
+    monkeypatch.setattr(coordinator.status, "read", advance_then_read)
+
+    result = coordinator.execute(
+        OperationCommand(
+            action="wait",
+            operation_id=task.operation_id,
+            until="terminal",
+            timeout_seconds=1,
+        )
+    )
+
+    assert calls == 1
+    assert result.operation is not None
+    assert result.operation["terminal"] is True
+    # Not "timed out" alongside terminal evidence.
+    assert result.timed_out is False
+    assert result.next_since_updated_at is None
