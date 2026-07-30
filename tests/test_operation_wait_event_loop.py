@@ -55,21 +55,23 @@ async def test_open_wait_does_not_serialize_a_second_call_on_the_same_session(
     server = create_server(service=forge_env.service)
     async with create_connected_server_and_client_session(server) as session:
         wait_results: list[Any] = []
+        wait_returned = False
 
         async def run_wait() -> None:
-            wait_results.append(
-                await session.call_tool(
-                    "operation",
-                    {
-                        "action": "wait",
-                        "operation_id": task.operation_id,
-                        "timeout_seconds": _WAIT_SECONDS,
-                        # 'terminal' so no progress delta can end the wait early --
-                        # it stays open for the full timeout.
-                        "until": "terminal",
-                    },
-                )
+            nonlocal wait_returned
+            result = await session.call_tool(
+                "operation",
+                {
+                    "action": "wait",
+                    "operation_id": task.operation_id,
+                    "timeout_seconds": _WAIT_SECONDS,
+                    # 'terminal' so no progress delta can end the wait early --
+                    # it stays open for the full timeout.
+                    "until": "terminal",
+                },
             )
+            wait_returned = True
+            wait_results.append(result)
 
         started = time.monotonic()
         async with anyio.create_task_group() as task_group:
@@ -79,15 +81,22 @@ async def test_open_wait_does_not_serialize_a_second_call_on_the_same_session(
                 "operation",
                 {"action": "get", "operation_id": task.operation_id},
             )
-            second_elapsed = time.monotonic() - started
+            # Ordering, not elapsed time: the second call came back before the wait
+            # did. Asserting a wall-clock margin instead made this flake on slower
+            # CI runners, where the wait's 10 Hz polling of the same record contends
+            # on its file lock and a concurrent read can take seconds -- slow, but
+            # still concurrent, which is the property under test. Before the fix this
+            # could only return *after* the wait returned, so `wait_returned` would
+            # already be True here.
+            second_returned_first = not wait_returned
         total_elapsed = time.monotonic() - started
 
     assert second.isError is False
-    # Serviced while the wait was still open. Before the fix this could only
-    # return after the wait had returned, i.e. at >= _WAIT_SECONDS.
-    assert second_elapsed < _WAIT_SECONDS / 2
+    assert second_returned_first, "the second call was not serviced until the wait finished"
 
-    # And the wait really did stay open for its full bound rather than being cut short.
+    # And the wait really did stay open for its full bound, so the ordering above is
+    # not a vacuous pass from a wait that never started. A lower bound on a sleep is
+    # safe on any machine: a slow runner only makes it more true.
     assert total_elapsed >= _WAIT_SECONDS
     (wait_result,) = wait_results
     assert wait_result.isError is False
