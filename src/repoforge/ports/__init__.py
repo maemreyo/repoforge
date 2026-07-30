@@ -26,6 +26,12 @@ from .auth_discovery import (
     NamedAccountDiscovery,
     SshAliasDiscovery,
 )
+from .auth_inspection import (
+    ApiIdentityInspector,
+    CommitIdentityInspector,
+    PublicationTargetInspector,
+    TransportInspector,
+)
 from .background_tasks import BackgroundTaskRunner
 from .capabilities import ExecutableLocator
 from .clock import Clock
@@ -155,6 +161,7 @@ from .workspace_store import WorkspaceStore
 
 __all__ = [
     "AmbientAuthConflictReader",
+    "ApiIdentityInspector",
     "ApprovalPayloadStore",
     "ApprovalStore",
     "ApprovedExecution",
@@ -167,6 +174,7 @@ __all__ = [
     "CommandExecutor",
     "CommandResult",
     "CommitIdentityGateway",
+    "CommitIdentityInspector",
     "ConfigurationStore",
     "DevConfigProvisioner",
     "DiscoveryRequest",
@@ -246,6 +254,7 @@ __all__ = [
     "PublicationGateway",
     "PublicationRepositoryMetadata",
     "PublicationRepositoryResolver",
+    "PublicationTargetInspector",
     "PullRequestGateway",
     "PullRequestPublication",
     "ReapOutcome",
@@ -277,6 +286,7 @@ __all__ = [
     "TaskStore",
     "TicketGraphGateway",
     "TicketProjectGateway",
+    "TransportInspector",
     "TunnelClient",
     "TunnelProfileStore",
     "WorkerBindingStore",

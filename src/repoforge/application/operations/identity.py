@@ -109,6 +109,23 @@ class OperationIdentityManager:
                 ) from None
             raise
 
+    def inspect(self, operation_id: str) -> StateEnvelope[OperationIdentityRecord]:
+        """Read the sidecar with its revision, for reporting and compare-and-swap revocation.
+
+        Unlike `resume`, this does not require the caller to already hold the identity
+        reference: an operator inspecting or revoking a lease is asking what the operation is
+        bound to, not asserting it.
+        """
+
+        self._operation(operation_id)
+        envelope = self._read(operation_id)
+        if envelope is None:
+            raise _error(
+                ErrorCode.OPERATION_IDENTITY_NOT_FOUND,
+                "No durable operation identity sidecar exists for this operation.",
+            )
+        return envelope
+
     def resume(
         self,
         operation_id: str,

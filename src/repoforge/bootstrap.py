@@ -141,6 +141,7 @@ from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandE
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
+from .application.auth_ux import AuthUxService, ObserveRepository
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
 from .application.execution.coordinator import ExecutionCoordinator
@@ -158,6 +159,7 @@ from .application.operations import (
     recover_operation_work,
     recover_operations,
 )
+from .application.operations.identity import OperationIdentityManager
 from .application.outcome_reconciliation import (
     OutcomeReceiptReconciler,
     RuntimeActivationReconciler,
@@ -419,6 +421,39 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
         activate=lambda generation, mode, wait, rollback: activator.activate(
             generation, mode=mode, wait=wait, rollback_on_failure=rollback
         ),
+    )
+
+
+def build_auth_ux_service(
+    ctx: ApplicationContext,
+    *,
+    observe: ObserveRepository,
+) -> AuthUxService:
+    """Compose the identity facade from whatever this context actually has.
+
+    Each per-surface inspector is passed through exactly as composed: a context without one
+    yields ``unavailable`` for that surface, which is the whole point -- there is no ambient
+    fallback path that could quietly answer with the active account instead.
+    """
+
+    bindings = ctx.repository_bindings or JsonRepositoryBindingStore(
+        ctx.config.server.state_root, build_lock_manager(ctx.config.server.state_root)
+    )
+    identities: OperationIdentityManager | None = None
+    if ctx.operation_store is not None and ctx.operation_identities is not None:
+        identities = OperationIdentityManager(
+            operations=ctx.operation_store,
+            identities=ctx.operation_identities,
+        )
+    return AuthUxService(
+        config=ctx.config,
+        bindings=bindings,
+        observe=observe,
+        identities=identities,
+        api=ctx.auth_api_inspector,
+        transport=ctx.auth_transport_inspector,
+        commits=ctx.auth_commit_inspector,
+        publication=ctx.auth_publication_inspector,
     )
 
 

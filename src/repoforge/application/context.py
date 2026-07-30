@@ -17,11 +17,13 @@ from ..domain.operations import automatic_retry_allowed, unchanged_state_for
 from ..domain.policy import validate_adopted_branch, validate_branch
 from ..domain.workspace import WorkspaceRecord
 from ..ports import (
+    ApiIdentityInspector,
     AuditSink,
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
     CommitIdentityGateway,
+    CommitIdentityInspector,
     EffectReceiptStore,
     ExecutableLocator,
     ExecutionPlanAcceptanceStore,
@@ -52,10 +54,12 @@ from ..ports import (
     OperationWorkQueue,
     ProcessReaper,
     ProviderRegistry,
+    PublicationTargetInspector,
     PullRequestGateway,
     RepositoryBindingStore,
     TicketGraphGateway,
     TicketProjectGateway,
+    TransportInspector,
     WorkerBindingStore,
     WorkspacePublicationService,
     WorkspaceStore,
@@ -294,6 +298,13 @@ class ApplicationContext:
     worker_bindings: WorkerBindingStore | None = None
     reaper: ProcessReaper | None = None
     publications: WorkspacePublicationService | None = None
+    #: Per-surface identity inspectors. Each is optional and independent: an absent one makes
+    #: `rf auth whoami` report that surface as unavailable rather than falling back to ambient
+    #: state, so composing one surface never implies evidence for another.
+    auth_api_inspector: ApiIdentityInspector | None = None
+    auth_transport_inspector: TransportInspector | None = None
+    auth_commit_inspector: CommitIdentityInspector | None = None
+    auth_publication_inspector: PublicationTargetInspector | None = None
     config_generation: int = 0
 
     def now_epoch(self) -> float:
