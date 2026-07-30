@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ...config import RepositoryConfig
 from ...domain.context_sections import (
     CONTEXT_SECTION_VALUES,
     DEFAULT_CONTEXT_SECTION_VALUES,
@@ -15,6 +16,7 @@ from ...domain.repository_selection import select_repository
 from ...domain.tickets import TicketNode
 from ..context import ApplicationContext
 from ..retrieval import paginate
+from ..rules.constitution import compile_constitution
 from ..workspace.status import WorkspaceStatusCommand, WorkspaceStatusReader
 from .commit_read import RepositoryCommitReadCommand, RepositoryCommitReader
 from .compare import RepositoryCompareCommand, RepositoryComparer
@@ -983,6 +985,54 @@ class RepositoryTaskContextV2:
             lambda: self._read(command),
         )
 
+    def _rules_section(self, name: str, repo: RepositoryConfig) -> ContextSectionV2:
+        """The typed rules in force, compiled from the accepted default-branch generation.
+
+        Not from the working tree: a task editing `.repoforge/rules/` is judged by the
+        accepted constitution, never by its own uncommitted edits (#354). The section
+        carries `constitution_sha` so a caller can tell which constitution it read, and
+        one fact per rule so the byte budget can trim the list rather than the identity.
+
+        A repository whose default branch cannot be read is reported `unavailable` rather
+        than as an empty rule set: "no rules" and "could not find out" are different
+        answers, and an agent told the first would proceed ungoverned.
+        """
+
+        try:
+            compiled = compile_constitution(git=self.ctx.git, path=repo.path, repo=repo)
+        except RepoForgeError as exc:
+            return ContextSectionV2(
+                name,
+                "unavailable",
+                False,
+                False,
+                (Fact("unavailable_reason", _json_value(str(exc))[:1000]),),
+            )
+        facts = [
+            Fact("constitution_sha", compiled.source.constitution_sha),
+            Fact("constitution_ref", compiled.source.resolved_ref),
+            Fact("constitution_commit", compiled.source.commit_sha),
+            Fact("rule_count", str(len(compiled.rules))),
+        ]
+        facts.extend(
+            Fact(
+                rule.id,
+                _json_value(
+                    {
+                        "enforcement": rule.enforcement.value,
+                        "validator": rule.validator,
+                        "paths": list(rule.paths),
+                        "override_policy": rule.override_policy.value,
+                        "delivery": rule.delivery,
+                        "params": rule.params,
+                        "source": rule.source,
+                    }
+                ),
+            )
+            for rule in sorted(compiled.rules, key=lambda item: item.id)
+        )
+        return ContextSectionV2(name, "local", True, False, tuple(facts))
+
     def _read(self, command: RepositoryTaskContextV2Command) -> RepositoryTaskContextV2Result:
         if not 1 <= command.byte_budget <= 120_000:
             raise ValueError("byte_budget must be between 1 and 120000")
@@ -1144,6 +1194,8 @@ class RepositoryTaskContextV2:
                         ),
                     )
                 )
+            elif name == "rules":
+                sections.append(self._rules_section(name, repo))
             elif name == "recent_commits":
                 recent = self._recent.compute(RecentCommitsCommand(command.repo_id, 5))
                 compact = [_compact_recent(item) for item in recent.commits]

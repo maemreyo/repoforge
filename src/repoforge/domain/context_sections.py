@@ -24,10 +24,13 @@ class ContextSectionName(str, Enum):
     TICKET_WORKFLOW = "ticket_workflow"
     WORKSPACE = "workspace"
     RECENT_COMMITS = "recent_commits"
+    RULES = "rules"
 
 
 #: What a caller gets when it asks for no particular sections. Deliberately not every
-#: section: `ticket_workflow` is a resume path, not part of an ordinary first look.
+#: section: `ticket_workflow` is a resume path, and `rules` costs a git snapshot read, so
+#: neither belongs in an ordinary first look. Changing this changes what every caller that
+#: passes no `sections` receives, without any of them changing a line.
 DEFAULT_CONTEXT_SECTIONS: tuple[ContextSectionName, ...] = (
     ContextSectionName.REPOSITORY,
     ContextSectionName.STATUS,
