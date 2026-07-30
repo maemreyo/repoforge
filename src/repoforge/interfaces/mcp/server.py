@@ -14,6 +14,9 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+import anyio
+import anyio.from_thread
+import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from mcp.types import Tool as McpTool
@@ -22,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from ... import __version__
 from ...application.audit_context import bind_audit_attribution
 from ...application.config_admin import ConfigAdminService
+from ...application.operations.progress_context import bind_progress_reporter
 from ...application.outcome_context import (
     begin_outcome_capture,
     current_outcome,
@@ -65,14 +69,17 @@ from ...domain.repository_selection import (
 )
 from ...domain.runtime import RUNTIME_CONTROL_PROTOCOL_VERSION
 from ...domain.runtime_contract import RuntimeContractIdentity, changed_contract_fields
-from .capabilities import capability_policy_from_context
+from ...ports.progress_reporter import NullProgressReporter, ProgressReporter
+from .capabilities import capability_policy_from_context, client_capabilities_from_context
 from .payload import render_tool_payload
+from .progress import build_progress_reporter
 
 FORGE_V2_IDENTITY = "forge_v2"
 FORGE_V2_CONTRACT_VERSION = 2
 _PROCESS_START_IDENTITY = secrets.token_hex(32)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 _REPOSITORY_SELECTION_TTL_SECONDS = 900.0
+_MAX_CONCURRENT_OFFLOADED_WAITS = 8
 
 
 class _IssueGraphApprovalForm(BaseModel):
@@ -133,7 +140,10 @@ single-repository selection is pinned to the MCP session; reuse that context for
 and do not poll repo_list again unless stale-selection recovery requires it or the user changes repos. The
 public surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
 composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
-profiles, and workspace_pr for draft-PR lifecycle operations. Review workspace_diff after meaningful
+profiles, and workspace_pr for draft-PR lifecycle operations. To run a command that no enrolled
+diagnostic covers, use workspace_verify mode=adhoc with an argv list -- never a shell string -- limited
+to the repository's adhoc_runners allowlist; when the runner you need is missing, propose it through
+repo_policy rather than working around it. Review workspace_diff after meaningful
 changes. Run final verification immediately before workspace_commit. For desired GitHub issue graphs,
 use repo_issue mode=manage with plan/apply/status/reconcile; never substitute raw GitHub mutation.
 Resume a disconnected or new session from repo_task_context section ticket_workflow. After apply, use
@@ -212,7 +222,7 @@ _TOOL_TITLES: Mapping[str, str] = {
     "workspace_tree": "List workspace tree",
     "workspace_diff": "Read workspace diff",
     "workspace_mutate": "Apply exact-state workspace mutations",
-    "workspace_verify": "Plan or run workspace verification",
+    "workspace_verify": "Plan, verify, or run an allowlisted command",
     "workspace_commit": "Commit verified workspace",
     "workspace_push": "Push workspace branch",
     "workspace_pr": "Manage draft pull request",
@@ -240,7 +250,15 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "no_match means no repository is enrolled yet."
     ),
     "repo_policy": "Preview or apply an exact-state-bound repository policy proposal through the reviewed generation pipeline.",
-    "workspace_create": "Create one worktree for a task: a fresh ai/* branch, or -- with adopt_branch -- an existing branch the instruction named.",
+    "workspace_create": (
+        "Create one worktree for a task: a fresh ai/* branch, or -- with adopt_branch -- an "
+        "existing branch the instruction named. This writes: it cuts a branch and materializes "
+        "a worktree on disk, with no preview mode and no dry run, from repo_id and task_slug "
+        "alone. Call it only when you intend that. To see what already exists, or to check that "
+        "this surface is reachable, use workspace_list or workspace_status -- neither creates "
+        "anything. Pass idempotency_key when resuming, so a retry rejoins the same workspace "
+        "instead of cutting a second one."
+    ),
     "workspace_remove": "Remove a clean local worktree without touching remote data.",
     "workspace_list": "List bounded workspace lifecycle and cleanup evidence.",
     "workspace_refresh": "Preview or apply a merge-based refresh against the configured remote base.",
@@ -256,12 +274,33 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "for files whose patch content is needed. Follow next_cursor when truncated."
     ),
     "workspace_mutate": "Atomically plan or apply typed exact-state mutations under workspace policy and budgets.",
-    "workspace_verify": "Plan, route, or run reviewed diagnostics, profiles, or relaxed-mode adhoc verification.",
+    "workspace_verify": (
+        "Plan, route, or run reviewed diagnostics and profiles, and -- under relaxed execution mode -- "
+        "run an allowlisted command directly with mode=adhoc. Ad-hoc takes an argv list, never a shell "
+        "string, and its result is evidence only: it never satisfies the commit gate. The response's "
+        "adhoc_evidence.content_inspected reports whether RepoForge inspected the command at all, which "
+        "it does for git argv only."
+    ),
     "workspace_commit": "Commit only the exact verified tree with optional exact-head and fingerprint locks.",
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
     "workspace_pr": "Create, update, comment on, watch, or otherwise manage the workspace draft pull request.",
     "workspace_pr_evidence": "Read bounded overview, delta, check, review, comment, or failure evidence for the workspace PR.",
-    "operation": "Get, wait for progress, list, cancel, or read failure evidence for durable operations.",
+    "operation": (
+        "Get, wait for progress, list, cancel, or read failure evidence for durable operations. "
+        "When the only question is the outcome, wait with until='terminal' and "
+        "timeout_seconds=60: it returns when the operation finishes instead of once per step, "
+        "which is the difference between one call and dozens on a long gate. Re-issue the same "
+        "call while it times out -- that is the intended shape, and cheap. Raising the timeout "
+        "much above 60 is a false economy: some clients block a tool call held that long, and a "
+        "blocked call costs a whole turn. The "
+        "default until='progress' returns on every progress delta -- use it only when you act on "
+        "intermediate steps. On a timeout, call again with the same arguments; the response "
+        "carries current state and suggested_poll_after_s. Never spin on action='get'. "
+        "Also the way to answer 'did my write land?' after a lost connection: every mutating "
+        "call is a durable operation, so list with scope='workspace:<workspace_id>' to find it "
+        "by kind (the tool name) and state, then get its operation_id to read the durable "
+        "result. Do this instead of re-sending a mutation whose response you never received."
+    ),
     "config_inspect": "Inspect accepted and active configuration, effective policy, pending changes, and runtime identity.",
     "runtime_logs_read": "Read bounded redacted audit or managed-runtime log entries with filters and cursors.",
 }
@@ -333,6 +372,18 @@ class _StructuredMcpToolError(RuntimeError):
 
 def _bounded(text: str, limit: int = 500) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _sleeps_while_waiting(tool_name: str, kwargs: Mapping[str, Any]) -> bool:
+    """Whether this dispatch blocks on time rather than on work.
+
+    ``operation wait`` is a bounded poll loop, so running it inline stops the
+    session servicing any other tool call for as long as it blocks -- which
+    defeats the point of a long poll and leaves no thread-safe way to push
+    progress on the open request. Every other dispatch is bounded by its own
+    work and stays on the event loop.
+    """
+    return tool_name == "operation" and kwargs.get("action") == "wait"
 
 
 def _raise_structured_error(
@@ -605,7 +656,7 @@ def _dispatch_kwargs(
     if tool_name in {"repo_search", "workspace_search"}:
         kwargs["mode"] = ApplicationSearchMode(kwargs["mode"])
     if tool_name == "repo_policy" and kwargs["action"] == "apply":
-        for field in ("mutations", "generated_paths", "issue_writes"):
+        for field in ("mutations", "generated_paths", "issue_writes", "execution"):
             if field not in model.model_fields_set:
                 kwargs.pop(field, None)
     if tool_name == "workspace_create":
@@ -680,6 +731,8 @@ class ForgeV2FastMCP(FastMCP[None]):
         self._initial_contract_identity = contract_identity_provider()
         self._session_contract_identities: dict[int, RuntimeContractIdentity] = {}
         self._session_repository_selections: dict[int, RepositorySelectionPin] = {}
+        # Built on first use: a CapacityLimiter needs a running event loop.
+        self._wait_limiter: anyio.CapacityLimiter | None = None
 
     def _session_key(self) -> int | None:
         try:
@@ -880,6 +933,68 @@ class ForgeV2FastMCP(FastMCP[None]):
             "approval_request_id."
         )
 
+    def _wait_thread_limiter(self) -> anyio.CapacityLimiter:
+        """Cap offloaded waits so long polls cannot drain AnyIO's shared thread pool.
+
+        A wait holds its worker for up to the connector ceiling, so without a
+        limiter of its own a burst of concurrent waits would occupy the default
+        pool that every other ``to_thread`` caller shares.
+        """
+        limiter = self._wait_limiter
+        if limiter is None:
+            limiter = anyio.CapacityLimiter(_MAX_CONCURRENT_OFFLOADED_WAITS)
+            self._wait_limiter = limiter
+        return limiter
+
+    def _progress_bridge(self) -> ProgressReporter:
+        """A reporter that pushes ``notifications/progress`` from the worker thread.
+
+        Enabled only when the client advertised progress support at initialize
+        *and* supplied a progress token on this request -- never push into a
+        client that cannot consume it. ``anyio.from_thread.run`` hands the
+        coroutine back to the event loop that owns the session, which is the only
+        thread allowed to write to the transport.
+        """
+        try:
+            context = self.get_context()
+            request_context = context.request_context
+        except (LookupError, AttributeError, ValueError):
+            return NullProgressReporter()
+        meta = getattr(request_context, "meta", None)
+        if getattr(meta, "progressToken", None) is None:
+            return NullProgressReporter()
+
+        def emit(current: int, total: int | None, message: str | None) -> None:
+            anyio.from_thread.run(
+                context.report_progress,
+                float(current),
+                None if total is None else float(total),
+                message,
+            )
+
+        return build_progress_reporter(
+            capabilities=client_capabilities_from_context(context),
+            has_progress_token=True,
+            emit=emit,
+        )
+
+    async def _dispatch_off_event_loop(
+        self, tool_name: str, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run a deliberately-blocking dispatch in a worker thread.
+
+        ``to_thread.run_sync`` copies this task's context into the worker, so the
+        bound service, audit attribution and the progress reporter below all
+        remain visible inside the dispatch while staying scoped to this request.
+        """
+        reporter = self._progress_bridge()
+
+        def run() -> dict[str, Any]:
+            with bind_progress_reporter(reporter):
+                return self._dispatch(tool_name, kwargs)
+
+        return await anyio.to_thread.run_sync(run, limiter=self._wait_thread_limiter())
+
     def _dispatch(self, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         if tool_name in _ADMIN_METHODS:
             return self._admin_boundary.call(_ADMIN_METHODS[tool_name], **kwargs)
@@ -958,7 +1073,10 @@ class ForgeV2FastMCP(FastMCP[None]):
                         identity=request_identity,
                         service=service,
                     )
-                    raw = self._dispatch(name, dispatch_kwargs)
+                    if _sleeps_while_waiting(name, dispatch_kwargs):
+                        raw = await self._dispatch_off_event_loop(name, dispatch_kwargs)
+                    else:
+                        raw = self._dispatch(name, dispatch_kwargs)
                     await self._maybe_elicit_issue_graph_approval(name, raw)
                     if name == "repo_list":
                         selection_pin = self._pin_repository_selection(

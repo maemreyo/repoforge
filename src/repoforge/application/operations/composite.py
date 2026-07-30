@@ -7,15 +7,27 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ...domain.errors import ErrorCode, RepoForgeError
-from ...domain.operation_task import TERMINAL_OPERATION_STATES, OperationState
-from ...ports.progress_reporter import NullProgressReporter, ProgressReporter
+from ...domain.operation_task import (
+    TERMINAL_OPERATION_STATES,
+    OperationState,
+    OperationTask,
+)
+from ...ports.progress_reporter import ProgressReporter
 from ..workspace.failure_intelligence import FailureEvidenceReadCommand, FailureIntelligenceService
 from .cancel import OperationCancelCommand, OperationCancellationRequester
 from .dto import OperationStatusView, OperationSummary
 from .list import OperationListCommand, OperationLister
+from .progress_context import current_progress_reporter
 from .status import OperationStatusCommand, OperationStatusReader
 
 _ACTIONS = frozenset({"get", "wait", "list", "cancel", "failure_evidence"})
+_WAIT_UNTIL = frozenset({"progress", "terminal"})
+# The ceiling is bounded by the client, not by RepoForge: a held request dies with the
+# connector, and this codebase has watched that happen. Progress notifications keep the
+# request alive while work continues, and `since_updated_at` makes a dropped wait
+# resumable, so 300 seconds is the point where one call covers most gates without
+# betting the answer on a five-minute-plus tunnel.
+_MAX_WAIT_SECONDS = 300
 
 
 def _invalid(message: str) -> RepoForgeError:
@@ -41,6 +53,7 @@ class OperationCommand:
     failure_id: str | None = None
     since_updated_at: str | None = None
     timeout_seconds: int | None = None
+    until: str = "progress"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +68,12 @@ class OperationResult:
     failure_evidence: dict[str, object] | None = None
     changed_since: bool = False
     timed_out: bool = False
+    # Wait-only. `progress_delivery` tells the caller which mechanism it actually got, and
+    # the two resubscribe fields are the only way to continue a wait that returned no
+    # evidence -- an `until=progress` timeout with no delta used to return nothing at all.
+    progress_delivery: str | None = None
+    next_since_updated_at: str | None = None
+    suggested_poll_after_s: float | None = None
 
 
 def _poll_after(view: OperationSummary | OperationStatusView) -> float | None:
@@ -168,14 +187,16 @@ class OperationCoordinator:
         self.failure_evidence = failure_evidence
 
     @staticmethod
-    def _emit_progress(
-        reporter: ProgressReporter,
-        view: OperationSummary | OperationStatusView,
-    ) -> None:
+    def _emit_task_progress(reporter: ProgressReporter, task: OperationTask) -> None:
+        """Heartbeat from the operation record itself.
+
+        The same values the status view exposes under ``progress``, read from the one
+        record the wait loop already has, so a heartbeat costs no extra store reads.
+        """
         reporter.report(
-            current=view.progress.current,
-            total=view.progress.total,
-            message=view.progress.message or view.phase,
+            current=task.progress_current,
+            total=task.progress_total,
+            message=task.progress_message or task.phase,
         )
 
     def execute(
@@ -204,33 +225,59 @@ class OperationCoordinator:
             if command.operation_id is None:
                 raise _invalid("operation wait requires operation_id")
             timeout_seconds = command.timeout_seconds if command.timeout_seconds is not None else 30
-            if not 1 <= timeout_seconds <= 60:
-                raise _invalid("operation wait timeout_seconds must be between 1 and 60")
-            reporter: ProgressReporter = progress_reporter or NullProgressReporter()
-            current = self.status.read(command.operation_id)
-            baseline = command.since_updated_at or current.updated_at
-            terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
-            changed_since = command.since_updated_at is not None and current.updated_at != baseline
+            if not 1 <= timeout_seconds <= _MAX_WAIT_SECONDS:
+                raise _invalid(
+                    f"operation wait timeout_seconds must be between 1 and {_MAX_WAIT_SECONDS}"
+                )
+            if command.until not in _WAIT_UNTIL:
+                raise _invalid("operation wait until must be 'progress' or 'terminal'")
+            # 'terminal' asks to be woken by the outcome, not by motion: a profile emits a
+            # progress delta at every step start and completion, so returning on each one
+            # turns "did it pass?" into one round trip per step.
+            wake_on_progress = command.until == "progress"
+            # An explicit reporter wins (tests, direct callers); otherwise take the one
+            # the transport bound for this request. Neither present means poll guidance.
+            reporter: ProgressReporter = progress_reporter or current_progress_reporter()
+            # Poll the operation record alone. The full status view additionally reads the
+            # result store and the effect-receipt store, which this loop never consults --
+            # at ten ticks a second that tripled the file reads and JSON decodes charged to
+            # a held-open request, for evidence only the return value needs (#350).
+            poll = self.status.operations.status
+            task = poll(command.operation_id)
+            baseline = command.since_updated_at or task.updated_at
+            terminal = task.state in TERMINAL_OPERATION_STATES
+            changed_since = command.since_updated_at is not None and task.updated_at != baseline
             last_reported_at = ""
             if reporter.enabled:
-                self._emit_progress(reporter, current)
-                last_reported_at = current.updated_at
+                self._emit_task_progress(reporter, task)
+                last_reported_at = task.updated_at
             deadline = time.monotonic() + timeout_seconds
-            while not terminal and not changed_since:
+            while not terminal and not (changed_since and wake_on_progress):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 time.sleep(min(0.1, remaining))
-                current = self.status.read(command.operation_id)
-                terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
-                changed_since = current.updated_at != baseline
+                task = poll(command.operation_id)
+                terminal = task.state in TERMINAL_OPERATION_STATES
+                changed_since = task.updated_at != baseline
                 # Heartbeat the open request so a progress-capable client learns
                 # of forward motion without issuing another poll, and the
                 # connector's idle timeout is reset while work continues.
-                if reporter.enabled and current.updated_at != last_reported_at:
-                    self._emit_progress(reporter, current)
-                    last_reported_at = current.updated_at
-            timed_out = not terminal and not changed_since
+                if reporter.enabled and task.updated_at != last_reported_at:
+                    self._emit_task_progress(reporter, task)
+                    last_reported_at = task.updated_at
+            # One full view, once the answer is known: the only point where the result and
+            # receipt stores are genuinely needed. It is a strictly later read than the last
+            # poll, so the decision is recomputed from it -- otherwise a state that advanced
+            # in between would be reported as a timeout alongside terminal evidence. States
+            # only move toward terminal, so this can make the answer fresher, never staler.
+            current = self.status.read(command.operation_id)
+            terminal = OperationState(current.state) in TERMINAL_OPERATION_STATES
+            changed_since = current.updated_at != baseline
+            # In 'terminal' mode a delta is not an answer, so advancing without finishing
+            # is still a timeout -- and the caller needs current evidence to pace the next
+            # call, which for a long gate is the ordinary outcome rather than an anomaly.
+            timed_out = not terminal if not wake_on_progress else not terminal and not changed_since
             self.status.operations.ctx.record_metric(
                 "operation_wait_empty_delta" if timed_out else "operation_wait_delta",
                 success=True,
@@ -243,18 +290,29 @@ class OperationCoordinator:
                     if terminal
                     else (
                         f"Operation {command.operation_id} advanced"
-                        if changed_since
+                        if changed_since and wake_on_progress
                         else f"Operation {command.operation_id} wait timed out"
                     )
                 ),
                 action="wait",
-                operation=(operation_evidence(current) if terminal or changed_since else None),
+                operation=(
+                    operation_evidence(current)
+                    if not wake_on_progress or terminal or changed_since
+                    else None
+                ),
                 operations=[],
                 cancellation_requested=False,
                 truncated=False,
                 next_cursor=None,
                 changed_since=changed_since,
                 timed_out=timed_out,
+                # Name the mechanism the caller got rather than making it infer one from
+                # whether notifications happened to arrive.
+                progress_delivery="pushed" if reporter.enabled else "poll",
+                # A terminal wait has nothing to resume; anything else does, and must say
+                # so even when it carries no evidence to read the cursor off.
+                next_since_updated_at=None if terminal else current.updated_at,
+                suggested_poll_after_s=_poll_after(current),
             )
         if command.action == "get":
             if command.operation_id is None:

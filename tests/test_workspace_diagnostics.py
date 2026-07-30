@@ -550,6 +550,11 @@ def test_multi_value_selector_rejects_values_beyond_max_values(
         "received_values": 2,
         "expansion": "repeat",
     }
+    # Naming the cap is not the same as naming the shape: a caller that has more values
+    # than the cap needs to be told that separate runs are the supported way through.
+    remedy = exc.value.safe_next_action or ""
+    assert "Split the 2 values" in remedy
+    assert "one operation each" in remedy
 
 
 def test_multi_value_join_expansion_uses_declared_separator(

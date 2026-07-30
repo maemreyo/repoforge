@@ -190,7 +190,7 @@ from .domain.activation import AGENT_SECRET_FILE_ENV_VAR, AGENT_SECRET_KEY
 from .domain.errors import ConfigError, ErrorCode, RepoForgeError
 from .domain.operation_task import OperationTask
 from .domain.repository_identity_resolution import RepositoryIdentityObservation
-from .domain.runtime import TunnelProfile
+from .domain.runtime import RuntimeRecord, TunnelProfile
 from .ports import (
     ApprovalPayloadStore,
     ApprovalStore,
@@ -910,6 +910,31 @@ def write_private_file(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     ConfigGenerationStore._atomic_write(path, data, mode=mode)
 
 
+def _active_runtime_for_reconciliation(path: Path) -> RuntimeRecord | None:
+    """Read the runtime record for startup reconciliation, tolerating one it cannot use.
+
+    Startup reads this record to decide whether a pending activation receipt actually
+    landed. That is a sweep, not a caller asking for this exact record, so it follows
+    the same rule as every other durable store swept here: one unusable record must not
+    stop the process from starting. `JsonRuntimeStore.read` stays strict for direct
+    reads -- `rf runtime status` has to keep reporting a bad record rather than quietly
+    calling it absent.
+
+    Without this, an upgrade that makes the record unreadable is unrecoverable in place:
+    `rf` runs the active release's code, so the tool an operator would reach for runs
+    the same decoder that is rejecting the record, and every release carrying the defect
+    is equally unusable. That is what happened on 2026-07-29.
+
+    `None` is the conservative answer, not a guess: the reconciler already handles it as
+    "no runtime to compare against", which can only downgrade a receipt to a manually
+    resolvable outcome. It never lets one be recorded as activated.
+    """
+    try:
+        return build_runtime_store(path).read()
+    except ConfigError:
+        return None
+
+
 def build_application(
     config: AppConfig,
     *,
@@ -1102,9 +1127,9 @@ def build_application(
         receipts=runtime_activation_store,
         operations=operation_store,
     ).reconcile(
-        active_runtime=build_runtime_store(
+        active_runtime=_active_runtime_for_reconciliation(
             config.server.state_root / "managed-runtime-v3.json"
-        ).read()
+        )
     )
     OutcomeReceiptReconciler(context).reconcile(
         stale_after_seconds=config.server.idempotency_stale_seconds,

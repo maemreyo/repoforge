@@ -17,6 +17,7 @@ from ...domain.errors import (
     SecurityError,
     WorkspaceError,
 )
+from ...domain.excerpts import bound_command_excerpt
 from ...domain.filesystem_transaction import CreateFile, TransactionPlan, WriteFile
 from ...domain.operation_task import (
     TERMINAL_OPERATION_STATES,
@@ -82,6 +83,7 @@ class WorkspaceVerifyCommand:
     rerun: VerifyRerun | None = None
     impact_paths: tuple[str, ...] = ()
     artifact_output_path: str | None = None
+    stdin_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +111,16 @@ class WorkspaceVerifyResult:
     head_sha: str
     workspace_fingerprint: str
     execution_evidence: dict[str, object] | None = None
+    # Set only for mode=adhoc. Carries the two facts the ad-hoc runner computes that no
+    # other section can express: whether RepoForge inspected the command's content at
+    # all, and whether a command declared read-only actually moved the tree. Both are
+    # load-bearing for an opaque runner (a shell, `uv`, `python3`), where the git argv
+    # guards never ran and the fingerprint is the only behavioural check left.
+    adhoc_evidence: dict[str, object] | None = None
+    # What the caller should do when the call returns before the work is done -- the
+    # exact `operation` wait for a background run. Set only then; a finished verify
+    # answers with its outcome.
+    next_action: str | None = None
     failed_selectors: list[str] = field(default_factory=list)
     output_artifact_reference: str | None = None
     failure_provider: str | None = None
@@ -299,7 +311,28 @@ def _command_evidence(raw: dict[str, object]) -> dict[str, object]:
         "argv": argv,
         "returncode": returncode,
         "duration_ms": float(duration),
-        "output_excerpt": excerpt[:12_000],
+        "output_excerpt": bound_command_excerpt(excerpt, 12_000),
+    }
+
+
+def _adhoc_evidence(result: WorkspaceRunAdhocResult) -> dict[str, object]:
+    """Project the ad-hoc runner's own policy facts onto the verify surface.
+
+    ``command_class`` is ``None`` exactly when RepoForge did not inspect the command's
+    content -- every runner other than ``git``, a shell included. Publishing that as
+    ``content_inspected`` keeps the caller from reading the git argv guards as though
+    they had applied to a ``bash -c`` line they never saw.
+    """
+    return {
+        "mutability": result.mutability,
+        "command_class": result.command_class,
+        "content_inspected": result.command_class is not None,
+        "fingerprint_changed": result.fingerprint_changed,
+        "read_only_violation": result.read_only_violation,
+        "changed_paths": list(result.changed_paths),
+        "changed_paths_truncated": result.changed_paths_truncated,
+        "network_policy": result.network_policy,
+        "verification_invalidated": result.verification_invalidated,
     }
 
 
@@ -663,7 +696,15 @@ class WorkspaceVerifier:
                 diagnostic_result = WorkspaceRunDiagnosticBackgroundResult(
                     operation_id=admitted.operation_id,
                     phase=durable_task.phase,
-                    safe_next_action="Poll operation status until the durable worker completes.",
+                    safe_next_action=(
+                        "Wait for operation "
+                        f"{admitted.operation_id} with until='terminal' and "
+                        "timeout_seconds=60, re-issuing the same call while it times out. "
+                        "60 is the safe default: some clients block a tool call held much "
+                        "longer, and a blocked call costs a whole turn while a re-issued "
+                        "wait costs nothing. Do not spin on operation get -- progress mode "
+                        "wakes you once per step and tells you nothing extra."
+                    ),
                 )
             result = self._from_diagnostic(
                 command,
@@ -708,7 +749,15 @@ class WorkspaceVerifier:
                 profile_result = WorkspaceRunProfileBackgroundResult(
                     operation_id=admitted.operation_id,
                     phase=durable_task.phase,
-                    safe_next_action="Poll operation status until the durable worker completes.",
+                    safe_next_action=(
+                        "Wait for operation "
+                        f"{admitted.operation_id} with until='terminal' and "
+                        "timeout_seconds=60, re-issuing the same call while it times out. "
+                        "60 is the safe default: some clients block a tool call held much "
+                        "longer, and a blocked call costs a whole turn while a re-issued "
+                        "wait costs nothing. Do not spin on operation get -- progress mode "
+                        "wakes you once per step and tells you nothing extra."
+                    ),
                 )
             result = self._from_profile(
                 command,
@@ -736,6 +785,7 @@ class WorkspaceVerifier:
                     expected_head_sha=assessment.snapshot.head_sha,
                     expected_fingerprint=assessment.snapshot.workspace_fingerprint,
                     config_generation=self.ctx.config_generation,
+                    stdin_text=command.stdin_text,
                 ),
                 operation_kind="workspace_run_adhoc",
             )
@@ -751,7 +801,15 @@ class WorkspaceVerifier:
                 adhoc_result = WorkspaceRunAdhocBackgroundResult(
                     operation_id=admitted.operation_id,
                     phase=durable_task.phase,
-                    safe_next_action="Poll operation status until the durable worker completes.",
+                    safe_next_action=(
+                        "Wait for operation "
+                        f"{admitted.operation_id} with until='terminal' and "
+                        "timeout_seconds=60, re-issuing the same call while it times out. "
+                        "60 is the safe default: some clients block a tool call held much "
+                        "longer, and a blocked call costs a whole turn while a re-issued "
+                        "wait costs nothing. Do not spin on operation get -- progress mode "
+                        "wakes you once per step and tells you nothing extra."
+                    ),
                 )
             result = self._from_adhoc(
                 command,
@@ -794,6 +852,7 @@ class WorkspaceVerifier:
         if isinstance(delegated, WorkspaceRunDiagnosticBackgroundResult):
             return WorkspaceVerifyResult(
                 summary="Workspace diagnostic is queued or running",
+                next_action=delegated.safe_next_action,
                 workspace_id=command.workspace_id,
                 requested_mode=command.mode,
                 selected_mode="diagnostic",
@@ -884,6 +943,7 @@ class WorkspaceVerifier:
         if isinstance(delegated, WorkspaceRunProfileBackgroundResult):
             return WorkspaceVerifyResult(
                 summary="Workspace verification profile is running",
+                next_action=delegated.safe_next_action,
                 workspace_id=command.workspace_id,
                 requested_mode=command.mode,
                 selected_mode="profile",
@@ -957,6 +1017,7 @@ class WorkspaceVerifier:
         if isinstance(delegated, WorkspaceRunAdhocBackgroundResult):
             return WorkspaceVerifyResult(
                 summary="Ad-hoc verification evidence is running",
+                next_action=delegated.safe_next_action,
                 workspace_id=command.workspace_id,
                 requested_mode=command.mode,
                 selected_mode="adhoc",
@@ -1019,6 +1080,7 @@ class WorkspaceVerifier:
             head_sha=delegated.head_sha,
             workspace_fingerprint=delegated.fingerprint_after,
             execution_evidence=delegated.execution_evidence,
+            adhoc_evidence=_adhoc_evidence(delegated),
         )
 
     def _persist_artifact(

@@ -31,6 +31,7 @@ def _request(
     failure_mode: CommandFailureMode,
     artifact_paths: tuple[str, ...] = (),
     cancel_token: CancellationToken | None = None,
+    stdin_text: str | None = None,
 ) -> ExecutionRequest:
     return ExecutionRequest(
         scope=ExecutionScope(
@@ -51,6 +52,7 @@ def _request(
         artifact_paths=artifact_paths,
         failure_mode=failure_mode,
         cancel_token=cancel_token,
+        stdin_text=stdin_text,
     )
 
 
@@ -119,6 +121,7 @@ def adhoc_execution_request(
     timeout_seconds: int,
     output_limit: int,
     cancel_token: CancellationToken | None = None,
+    stdin_text: str | None = None,
 ) -> ExecutionRequest:
     return _request(
         workspace_id=workspace_id,
@@ -131,6 +134,7 @@ def adhoc_execution_request(
         filesystem=FilesystemAccess.WORKSPACE_WRITE,
         failure_mode=CommandFailureMode.RETURN,
         cancel_token=cancel_token,
+        stdin_text=stdin_text,
     )
 
 

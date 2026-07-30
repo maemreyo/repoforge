@@ -1115,7 +1115,7 @@ def test_v2_refresh_rejects_generator_side_effects_and_rolls_back(
         expected_fingerprint=str(before["workspace_fingerprint"]),
     )
 
-    with pytest.raises(SecurityError, match="undeclared or unstaged changes"):
+    with pytest.raises(SecurityError, match="undeclared or unstaged changes") as caught:
         service.workspace_refresh_v2(
             workspace_id,
             action="apply",
@@ -1124,6 +1124,19 @@ def test_v2_refresh_rejects_generator_side_effects_and_rolls_back(
             plan_token=str(preview["plan_token"]),
             resolutions=[],
         )
+
+    # A bare refusal here is what pushed a real agent into hand-computing the artifact the
+    # guard protects. The remedy has to name the real mechanism -- repo_policy, whose
+    # generated_paths REPLACES the set -- and say that approving it is the operator's call.
+    remedy = caught.value.safe_next_action or ""
+    assert "README.md" in remedy
+    assert "repo_policy" in remedy
+    assert "'demo'" in remedy
+    assert "replaces the set" in remedy
+    assert "hello.txt" in remedy, "the rules already in force must be listed too"
+    assert "python3" in remedy
+    assert "pending_approval" in remedy
+    assert "hand-edit" in remedy
 
     restored = service.workspace_status(workspace_id)
     assert restored["head_sha"] == before["head_sha"]

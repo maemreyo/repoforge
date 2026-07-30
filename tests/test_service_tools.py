@@ -293,11 +293,16 @@ def test_v2_repo_list_history_and_pr_facades_are_compact_and_path_safe(
     service = forge_env.service
 
     listed = service.repo_list_v2(limit=10)
+    # Profile names are part of the compact entry on purpose: `verify` in capabilities says
+    # the repository can be verified, not which profiles a model is allowed to start, and
+    # discovering the difference by being refused costs a call.
     assert listed["repositories"] == [
         {
             "repo_id": "demo",
             "capabilities": ["read", "write", "publish", "verify"],
             "default_ref": "main",
+            "model_invocable_profiles": ["full", "quick"],
+            "operator_only_profiles": [],
         }
     ]
     assert str(forge_env.source) not in json.dumps(listed)

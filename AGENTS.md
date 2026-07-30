@@ -155,7 +155,13 @@ Every tool change must include all of the following:
 6. Stable structured output with actionable error messages.
 7. Positive unit coverage.
 8. Negative and stale-state coverage.
-9. MCP protocol-level coverage through an actual client session.
+9. MCP protocol-level coverage through an actual client session. This applies to **adding a
+   field to an existing tool**, not only to adding a tool. A service-level assertion proves
+   nothing about the surface: `repo_list` projects `RepositorySummary`, the v2
+   `repo_task_context` repository section is built from its own `Fact` list, and
+   `workspace_verify` drops any field its output model does not declare. Three fixes have
+   already shipped green and invisible this way. If the point of a change is that a caller can
+   see something, the test must read it back through `create_connected_server_and_client_session`.
 10. Documentation updates in `docs/development/TOOL_REFERENCE.md`.
 11. Golden-prompt updates when discovery or tool selection can change.
 
@@ -182,6 +188,26 @@ For safety-policy, state, runner, Git, or write-tool changes, include:
 - audit behavior without sensitive payloads;
 - real local Git/worktree integration;
 - in-memory MCP schema and invocation coverage.
+
+### A failure is never "transient" because it passed on its own
+
+A step that fails inside a full run and then passes when run alone has not been explained. It has
+been reproduced under one condition and not the other, which is the signature of an
+order-dependent, concurrency-dependent, or resource-dependent failure — exactly the failures that
+only appear in a full run. A standalone pass rules nothing out, so it can never downgrade a gate
+failure to "flaky" or "transient", and it can never be the evidence a change ships on.
+
+Read what the failure already recorded before re-running anything:
+
+- `selectors_unavailable_reason` says why no failing selector was extracted (`output_unrecognized`,
+  `provider_not_supported`, `selectors_truncated`, `artifact_unavailable`) — an empty selector list
+  is not the same as no failure;
+- `output_artifact_reference` addresses the complete persisted stdout and stderr, untruncated;
+- `reproducibility` and the `flaky_suspected` failure class carry the system's own judgement.
+
+If the cause is still unknown after reading those, re-run the *full* suite several times and record
+the hit rate. "Unexplained, N of M full runs" is an honest status. "Transient" is a claim, and it
+needs evidence like any other.
 
 For tool metadata changes, run the direct, indirect, and negative prompts in
 `docs/testing/PLUGIN_TEST_CASES.md`, then record results using

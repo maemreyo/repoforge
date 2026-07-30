@@ -26,6 +26,7 @@ from ...domain.adhoc import (
     ExecutionMode,
     classify_adhoc_command,
     validate_adhoc_argv,
+    validate_adhoc_stdin,
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
@@ -58,6 +59,7 @@ class WorkspaceRunAdhocCommand:
     expected_fingerprint: str | None = None
     expected_head_sha: str | None = None
     mutability: str = "read_only"
+    stdin_text: str | None = None
     cancellation_token: CancellationToken | None = None
 
 
@@ -105,6 +107,22 @@ _GATE_GUIDANCE = (
     "Run an enrolled verification profile (workspace_verify / workspace_run_profile) on the exact "
     "tree immediately before workspace_commit."
 )
+
+
+_MAX_ADHOC_TIMEOUT_SECONDS = 3_600
+
+
+def _adhoc_timeout_remedy(budget_seconds: int) -> str:
+    """Name the budget that expired, and the two legitimate ways past it."""
+    return (
+        f"The ad-hoc budget for this repository is {budget_seconds}s "
+        "(repositories.<id>.adhoc_timeout_seconds), not a platform limit: an operator can raise it "
+        f"to {_MAX_ADHOC_TIMEOUT_SECONDS}s. A long job that is already reviewed and named -- a full "
+        "test recording, a coverage build -- belongs in a reviewed profile with its own "
+        "timeout_seconds instead of the ad-hoc runner, which keeps one documented command as its "
+        "own reproducible generator. Do not split the job into hand-written chunks to fit the "
+        "budget: the output stops being reproducible by the command that is supposed to produce it."
+    )
 
 
 def _strict_mode_error(repo_id: str) -> RepoForgeError:
@@ -229,6 +247,7 @@ class WorkspaceAdhocRunner:
                 ErrorCode.ADHOC_ARGV_INVALID,
             )
         argv = validate_adhoc_argv(c.argv, repo.adhoc_runners)
+        stdin_text = validate_adhoc_stdin(c.stdin_text)
         # Content-inspect the exact argv: blocks irreversible/history-rewriting git forms
         # (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers whether a
         # git command is read-only or mutating. Non-git runners return None (opaque).
@@ -269,12 +288,22 @@ class WorkspaceAdhocRunner:
             "expected_head_sha": c.expected_head_sha,
             "mutability": c.mutability,
             "command_class": command_class.value if command_class is not None else None,
+            # Length only. Standard input is caller-supplied content that may carry a
+            # patch, a token, or anything else, and the audit log is not the place for it.
+            "stdin_length": len(stdin_text) if stdin_text is not None else 0,
         }
 
         def record_command_failure(exc: CommandError) -> None:
             audit_details["exit_code"] = exc.details.get("exit_code")
             if exc.details.get("cancelled"):
                 audit_details["cancelled"] = True
+            if exc.code is ErrorCode.COMMAND_TIMEOUT and not exc.safe_next_action:
+                # The executor knows only the number of seconds it waited. Which reviewed
+                # budget that number came from -- and that it is an operator-adjustable
+                # field rather than a platform limit -- is known here, and withholding it
+                # is what makes an agent invent a chunked workaround for a job that simply
+                # needed a bigger budget or a profile of its own.
+                exc.safe_next_action = _adhoc_timeout_remedy(repo.adhoc_timeout_seconds)
 
         def run_body(
             cancel_token: CancellationToken | None,
@@ -333,6 +362,7 @@ class WorkspaceAdhocRunner:
                     timeout_seconds=locked_repo.adhoc_timeout_seconds,
                     output_limit=self.ctx.config.server.max_tool_output_chars,
                     cancel_token=cancel_token,
+                    stdin_text=stdin_text,
                 )
                 try:
                     with self.ctx.execution.prepare(execution_request) as session:

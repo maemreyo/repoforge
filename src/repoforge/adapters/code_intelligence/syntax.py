@@ -236,6 +236,7 @@ class _PythonCollector(ast.NodeVisitor):
                     self.path,
                     node.id,
                     node.lineno,
+                    node.col_offset,
                     self.imported_names[node.id],
                 )
             )
@@ -305,8 +306,22 @@ def _javascript_facts(
 
     for line_number, line in enumerate(content.splitlines(), start=1):
         for name, resolved in imported_names.items():
-            if re.search(rf"\b{re.escape(name)}\b", line):
-                references.append(CodeReferenceFact(language, path, name, line_number, resolved))
+            # Every occurrence, not just the first on the line: a consumer rewriting
+            # references needs all of them, and one fact per line silently drops the
+            # rest. `finditer` also yields the offset, which `search` discarded.
+            for match in re.finditer(rf"\b{re.escape(name)}\b", line):
+                references.append(
+                    CodeReferenceFact(
+                        language,
+                        path,
+                        name,
+                        line_number,
+                        # `match.start()` counts characters; the fact's column is a byte
+                        # offset, so convert rather than assume the line is ASCII.
+                        len(line[: match.start()].encode("utf-8")),
+                        resolved,
+                    )
+                )
     return symbols, imports, references
 
 

@@ -96,10 +96,31 @@ path = "/absolute/path/to/repository"
 
 # Generated paths name an approved regeneration command. Refresh conflict evidence points agents
 # at this command instead of encouraging hand-merges.
+#
+# Declare EVERY path the command writes. A refresh regenerates, then fails closed if the command
+# touched a path no rule names -- it cannot tell an approved output from a stray write. One missing
+# glob therefore blocks the refresh outright, and the only way through is to add the rule and
+# activate a new generation. `make schemas` in this repository writes three paths, not one.
+#
+# This file is one of two ways these rules arrive, and the other is the common one: the
+# `repo_policy` tool (preview, then apply with the returned token) declares them without editing
+# any file. Its `generated_paths` REPLACES the whole set rather than adding to it, so an apply must
+# carry every rule the repository should end up with. Because broadening policy is a capability
+# expansion, the result is `pending_approval` until an operator approves it in the terminal --
+# which means a live installation's rules may not appear in any config file at all, and
+# `rf show-config` is the authority on what is actually in force.
 # [[repositories.example-repository.generated_paths]]
 # glob = "docs/contracts/tool-schemas-v2.json"
 # regeneration_command = ["make", "schemas"]
 # description = "Generated Forge v2 tool schema bundle"
+# [[repositories.example-repository.generated_paths]]
+# glob = "docs/contracts/release-contract-v2.json"
+# regeneration_command = ["make", "schemas"]
+# description = "Generated compact release contract"
+# [[repositories.example-repository.generated_paths]]
+# glob = "src/repoforge/contracts/generated_contract_identity.py"
+# regeneration_command = ["make", "schemas"]
+# description = "Generated contract identity digests"
 
 # GitHub issue writes are explicit per-repository authority. Comment is the safe default; enable
 # close/reopen/link/create only after review. Project V2 writes are never enabled here.

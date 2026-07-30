@@ -13,9 +13,13 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import ForgeEnvironment, create_forge_environment
+from conftest import ForgeEnvironment, create_forge_environment, durable_worker
 
+from repoforge.application.workspace.run_adhoc import WorkspaceRunAdhocResult
+from repoforge.application.workspace.verify import _adhoc_evidence
 from repoforge.config import load_config
+from repoforge.contracts.v2 import AdhocEvidence
+from repoforge.domain.adhoc import MAX_ADHOC_STDIN_LENGTH
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 
 
@@ -31,6 +35,47 @@ def _relaxed_env(
         execution_mode="relaxed",
         adhoc_runners=runners,
     )
+
+
+def _adhoc_result(**overrides: object) -> WorkspaceRunAdhocResult:
+    """A completed ad-hoc result, for asserting on the projection rather than a run.
+
+    `read_only_violation` is unreachable through real git -- every subcommand in the
+    read-only set genuinely leaves the tree alone, which is the point of that set. The
+    flag exists for the case where that classification is wrong, so the projection is
+    what has to be tested directly.
+    """
+    fields: dict[str, object] = {
+        "workspace_id": "ws-1",
+        "argv": ["git", "status"],
+        "runner": "git",
+        "working_directory": ".",
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "duration_ms": 1.0,
+        "fingerprint_before": "a" * 64,
+        "fingerprint_after": "b" * 64,
+        "fingerprint_changed": False,
+        "changed_paths": [],
+        "changed_paths_truncated": False,
+        "head_sha": "c" * 40,
+        "head_sha_before": "c" * 40,
+        "mutability": "read_only",
+        "command_class": "read_only",
+        "read_only_violation": False,
+        "network_policy": "advisory_local_only",
+        "evidence_only": True,
+        "satisfies_commit_gate": False,
+        "verification_invalidated": False,
+        "gate_guidance": "evidence only",
+        "enrollment_nudge": None,
+        "next_safe_actions": [],
+    }
+    fields.update(overrides)
+    return WorkspaceRunAdhocResult(**fields)  # type: ignore[arg-type]
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -369,3 +414,170 @@ def test_different_argv_shapes_do_not_cross_contaminate_nudge_counts(tmp_path: P
             workspace_id, ["python3", "-c", f"print({value!r})"]
         )
         assert result["enrollment_nudge"] is None
+
+
+# ---------------------------------------------------------------------------
+# Ad-hoc policy evidence reaching the workspace_verify surface
+# ---------------------------------------------------------------------------
+
+
+def _verify_adhoc(env: ForgeEnvironment, workspace_id: str, argv: list[str]) -> dict[str, object]:
+    # A foreground adhoc verify admits durable work and bounded-waits on it, so a worker
+    # has to claim the item for the call to come back with a terminal result.
+    with durable_worker(env.service):
+        result = env.service.workspace_verify(workspace_id, mode="adhoc", argv=tuple(argv))
+    evidence = result["adhoc_evidence"]
+    assert isinstance(evidence, dict), "mode=adhoc must publish its policy evidence"
+    # extra="forbid" on the contract model: this fails if the projection and the declared
+    # contract ever drift apart in either direction.
+    AdhocEvidence(**evidence)
+    return evidence
+
+
+def test_verify_publishes_that_a_git_command_was_content_inspected(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "inspected git")["workspace_id"]
+
+    evidence = _verify_adhoc(env, workspace_id, ["git", "status", "--porcelain=v2"])
+
+    assert evidence["content_inspected"] is True
+    assert evidence["command_class"] == "read_only"
+    assert evidence["read_only_violation"] is False
+    assert evidence["mutability"] == "read_only"
+
+
+def test_verify_publishes_that_an_opaque_runner_was_not_inspected(tmp_path: Path) -> None:
+    """The load-bearing case: a non-git runner never met the git argv guards.
+
+    Without this flag a caller reading `mode=adhoc` evidence cannot tell a guarded
+    `git` run from a `python3 -c` (or `bash -c`) line whose content RepoForge never
+    looked at, and would credit the run with protection it did not have.
+    """
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "opaque runner")["workspace_id"]
+
+    evidence = _verify_adhoc(env, workspace_id, ["python3", "-c", "print('opaque')"])
+
+    assert evidence["content_inspected"] is False
+    assert evidence["command_class"] is None
+
+
+def test_verify_surfaces_a_read_only_violation_instead_of_dropping_it(tmp_path: Path) -> None:
+    """A run classified read-only that moved the tree must say so on the surface.
+
+    The runner has always computed this; it used to stop at the audit log, so an agent
+    was told the command was read-only by classification and never told the tree had
+    moved anyway.
+    """
+    violation = _adhoc_result(read_only_violation=True, fingerprint_changed=True)
+
+    evidence = _adhoc_evidence(violation)
+
+    assert evidence["read_only_violation"] is True
+    assert evidence["fingerprint_changed"] is True
+    assert evidence["command_class"] == "read_only"
+    assert evidence["content_inspected"] is True
+    AdhocEvidence(**evidence)
+
+
+# ---------------------------------------------------------------------------
+# Standard input
+# ---------------------------------------------------------------------------
+
+
+def test_adhoc_command_can_read_supplied_standard_input(tmp_path: Path) -> None:
+    """Without this the child gets DEVNULL, so `git apply -` and friends cannot work."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "import sys; sys.stdout.write(sys.stdin.read().upper())"],
+        stdin_text="fed through stdin\n",
+    )
+
+    assert result["returncode"] == 0
+    assert "FED THROUGH STDIN" in result["stdout"]
+
+
+def test_adhoc_stdin_accepts_newlines_that_argv_refuses(tmp_path: Path) -> None:
+    """stdin is content, not a command argument: a patch is multi-line by nature."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin lines")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "import sys; print(len(sys.stdin.read().splitlines()))"],
+        stdin_text="one\ntwo\nthree\n",
+    )
+
+    assert result["stdout"].strip() == "3"
+
+
+def test_adhoc_stdin_is_bounded(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin bound")["workspace_id"]
+
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(
+            workspace_id,
+            ["python3", "-c", "pass"],
+            stdin_text="x" * (MAX_ADHOC_STDIN_LENGTH + 1),
+        )
+
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
+    assert "file" in (exc.value.safe_next_action or "")
+
+
+def test_adhoc_audit_records_stdin_length_but_never_its_content(tmp_path: Path) -> None:
+    """Standard input is caller content and may carry a token or a patch."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "adhoc stdin audit")["workspace_id"]
+    secret = "correct-horse-battery-staple"
+
+    env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "import sys; sys.stdin.read()"],
+        stdin_text=secret,
+    )
+
+    events = _audit_events(env.root, "workspace_run_adhoc")
+    assert events, "the ad-hoc run must be audited"
+    assert events[-1]["details"]["stdin_length"] == len(secret)
+    assert secret not in json.dumps(events[-1])
+
+
+def test_a_gitignored_script_does_not_move_the_workspace_fingerprint(tmp_path: Path) -> None:
+    """The scratch-directory convention in TOOL_REFERENCE.md rests entirely on this.
+
+    The fingerprint reads untracked files through `git ls-files --others
+    --exclude-standard`, so an ignored path contributes nothing. If that ever changed,
+    every scratch script would start dirtying the tree it was chosen to stay out of,
+    and the documented convention would be quietly wrong rather than loudly broken.
+    """
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "scratch script")["workspace_id"]
+
+    env.service.workspace_run_adhoc(
+        workspace_id,
+        [
+            "python3",
+            "-c",
+            "from pathlib import Path; Path('.gitignore').write_text('.rf-scratch/\\n')",
+        ],
+    )
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        [
+            "python3",
+            "-c",
+            "from pathlib import Path; d = Path('.rf-scratch'); d.mkdir(); "
+            "(d / 'run.sh').write_text('set -e\\necho multi\\necho line\\n')",
+        ],
+    )
+
+    assert result["returncode"] == 0
+    assert result["fingerprint_changed"] is False
+    # `.gitignore` itself is an ordinary untracked file and stays reported; the point is
+    # that nothing under the ignored directory does.
+    assert not any(path.startswith(".rf-scratch") for path in result["changed_paths"])

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ...config import load_config
+from ...domain.adhoc import validate_adhoc_runners
 from ...domain.config_generation import (
     CapabilityDeltaKind,
     ConfigGeneration,
@@ -42,6 +43,7 @@ from ...domain.errors import ConfigError, RepoForgeError
 from ...domain.generated_paths import parse_generated_paths
 from ...domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from ...domain.policy_patch import (
+    MAX_ADHOC_TIMEOUT_SECONDS,
     PolicyPatchError,
     ProfilePatch,
     RepositoryPolicyPatch,
@@ -158,6 +160,61 @@ class ProfileDefinition:
     verification: bool = False
     timeout_seconds: int | None = None
     working_directory: str | None = None
+
+
+_EXECUTION_FIELDS = ("execution_mode", "adhoc_runners", "adhoc_timeout_seconds")
+
+
+def _canonical_execution(raw: dict[str, Any] | None, repo_id: str) -> dict[str, Any] | None:
+    """Validate one `repo_policy` execution declaration into its stored canonical form.
+
+    Returns ``None`` when the caller declared nothing, so an untouched execution policy
+    stays absent from the patch rather than being restated as a no-op change.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("repo_policy execution must be an object")
+    unknown = sorted(set(raw) - set(_EXECUTION_FIELDS))
+    if unknown:
+        raise ConfigError(f"repo_policy execution has unknown fields: {', '.join(unknown)}")
+    canonical: dict[str, Any] = {}
+    mode = raw.get("execution_mode")
+    if mode is not None:
+        if mode not in {"strict", "relaxed"}:
+            raise ConfigError("repo_policy execution.execution_mode must be 'strict' or 'relaxed'")
+        canonical["execution_mode"] = mode
+    runners = raw.get("adhoc_runners")
+    if runners is not None:
+        if not isinstance(runners, (list, tuple)) or not all(
+            isinstance(item, str) for item in runners
+        ):
+            raise ConfigError("repo_policy execution.adhoc_runners must be a list of strings")
+        # The same validator the config loader uses, so the surface cannot accept a
+        # runner name that would be refused once the generation is resolved.
+        canonical["adhoc_runners"] = list(validate_adhoc_runners(tuple(runners), repo_id))
+    timeout = raw.get("adhoc_timeout_seconds")
+    if timeout is not None:
+        if (
+            not isinstance(timeout, int)
+            or isinstance(timeout, bool)
+            or not 1 <= timeout <= MAX_ADHOC_TIMEOUT_SECONDS
+        ):
+            raise ConfigError(
+                "repo_policy execution.adhoc_timeout_seconds must be an integer in "
+                f"1..{MAX_ADHOC_TIMEOUT_SECONDS}"
+            )
+        canonical["adhoc_timeout_seconds"] = timeout
+    if not canonical:
+        raise ConfigError("repo_policy execution must declare at least one field")
+    return canonical
+
+
+def _execution_apply_arguments(canonical: dict[str, Any] | None) -> dict[str, Any]:
+    """Spread a canonical execution declaration onto `repo_policy_apply` keywords."""
+    if canonical is None:
+        return {}
+    return {field: canonical.get(field) for field in _EXECUTION_FIELDS}
 
 
 def _changed_since(recorded: str | None, observed: str | None) -> bool | None:
@@ -1056,6 +1113,7 @@ class ConfigAdminService:
         mutations: list[dict[str, Any]] | None = None,
         generated_paths: list[dict[str, Any]] | None = None,
         issue_writes: dict[str, Any] | None = None,
+        execution: dict[str, Any] | None = None,
         preview_token: str | None = None,
     ) -> dict[str, Any]:
         """Preview or apply one exact-state-bound v2 repository policy proposal."""
@@ -1089,12 +1147,14 @@ class ConfigAdminService:
                 )
             except IssueWritePolicyError as exc:
                 raise ConfigError(f"Invalid issue_writes declaration: {exc}") from exc
+            canonical_execution = _canonical_execution(execution, repo_id)
             arguments = self._policy_apply_arguments(normalized)
             preview = self.repo_policy_apply(
                 repo_id,
                 **arguments,
                 generated_paths=canonical_generated,
                 issue_writes=canonical_issue_writes,
+                **_execution_apply_arguments(canonical_execution),
                 dry_run=True,
             )
             current = self._store.current()
@@ -1107,6 +1167,7 @@ class ConfigAdminService:
                 "mutations": normalized,
                 "generated_paths": canonical_generated,
                 "issue_writes": canonical_issue_writes,
+                "execution": canonical_execution,
                 "expected_generation": current.generation,
                 "expected_source_sha256": sha256_text(self._store.read_source_text()),
             }
@@ -1126,13 +1187,19 @@ class ConfigAdminService:
                 "changes": normalized,
                 "generated_paths": canonical_generated or [],
                 "issue_writes": canonical_issue_writes,
+                "execution": canonical_execution,
                 "operator_instruction": preview.get("safe_next_action"),
             }
         if action != "apply":
             raise ConfigError("repo_policy action must be 'preview' or 'apply'")
         if preview_token is None:
             raise ConfigError("repo_policy apply requires preview_token")
-        if mutations or generated_paths is not None or issue_writes is not None:
+        if (
+            mutations
+            or generated_paths is not None
+            or issue_writes is not None
+            or execution is not None
+        ):
             raise ConfigError("repo_policy apply accepts only the exact preview_token")
         try:
             stored_payload = self.pending.payloads.read(preview_token)
@@ -1160,11 +1227,18 @@ class ConfigAdminService:
         stored_issue_writes = stored_payload.get("issue_writes")
         if stored_issue_writes is not None and not isinstance(stored_issue_writes, dict):
             raise ConfigError("repo_policy preview_token issue_writes payload is corrupt")
+        stored_execution = stored_payload.get("execution")
+        if stored_execution is not None and not isinstance(stored_execution, dict):
+            raise ConfigError("repo_policy preview_token execution payload is corrupt")
+        # Re-validate rather than trust the stored copy: the token is persisted state, and
+        # the preview's canonical form is the only shape the apply may act on.
+        stored_execution = _canonical_execution(stored_execution, repo_id)
         result = self.repo_policy_apply(
             repo_id,
             **self._policy_apply_arguments(normalized),
             generated_paths=stored_generated,
             issue_writes=stored_issue_writes,
+            **_execution_apply_arguments(stored_execution),
             dry_run=False,
         )
         self.pending.payloads.delete(preview_token)
@@ -1188,6 +1262,7 @@ class ConfigAdminService:
             "changes": normalized,
             "generated_paths": stored_generated or [],
             "issue_writes": stored_issue_writes,
+            "execution": stored_execution,
             "operator_instruction": result.get("safe_next_action"),
         }
 

@@ -9,6 +9,9 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+# Re-exported, not redefined: `application` needs the same names and does not depend on
+# the contract layer, so the single declaration lives in `domain`.
+from ..domain.context_sections import DEFAULT_CONTEXT_SECTIONS, ContextSectionName
 from .common import (
     AuthSelectionInput,
     ByteBudget,
@@ -44,15 +47,6 @@ from .common import (
 )
 
 
-class ContextSectionName(str, Enum):
-    REPOSITORY = "repository"
-    STATUS = "status"
-    TICKET = "ticket"
-    TICKET_WORKFLOW = "ticket_workflow"
-    WORKSPACE = "workspace"
-    RECENT_COMMITS = "recent_commits"
-
-
 class ContextSection(StrictModel):
     name: ContextSectionName
     freshness: Freshness
@@ -66,13 +60,7 @@ class RepoTaskContextInput(StrictModel):
     issue_number: int | None = Field(default=None, ge=1)
     workspace_id: Identifier | None = None
     sections: tuple[ContextSectionName, ...] = Field(
-        default=(
-            ContextSectionName.REPOSITORY,
-            ContextSectionName.STATUS,
-            ContextSectionName.TICKET,
-            ContextSectionName.WORKSPACE,
-            ContextSectionName.RECENT_COMMITS,
-        ),
+        default=DEFAULT_CONTEXT_SECTIONS,
         min_length=1,
         max_length=5,
     )
@@ -600,6 +588,37 @@ class PolicyMutation(StrictModel):
     value: str | None = Field(default=None, max_length=20_000)
 
 
+# The contracts package deliberately imports no domain module, so these must be kept
+# equal to MAX_ADHOC_RUNNERS, MAX_ADHOC_TIMEOUT_SECONDS and the domain's runner-basename
+# pattern by test rather than by import. A schema that accepts what `domain.adhoc` then
+# refuses reads to the caller as an arbitrary failure.
+_MAX_ADHOC_RUNNERS = 32
+_MAX_ADHOC_TIMEOUT_SECONDS = 3_600
+_AdhocRunnerName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")]
+
+
+class ExecutionPolicyDeclaration(StrictModel):
+    """Relaxed-mode ad-hoc execution settings for one repository.
+
+    This is the reviewed way for an agent to ask for a runner it does not have, rather
+    than working around a missing one. Widening any field here is a capability
+    expansion, so `repo_policy` apply returns `pending_approval` and the change waits
+    on an operator; narrowing applies through the same pipeline as a restriction.
+
+    A runner is a bare executable basename resolved through the constrained runtime
+    PATH -- never a path, never a shell string. Note that adding a shell (`bash`, `sh`)
+    is permitted and is the direct way to obtain pipes and globbing, but RepoForge
+    content-inspects `git` argv only: under a shell the git guards do not see what the
+    shell runs, which `workspace_verify` reports as `content_inspected = false`.
+    """
+
+    execution_mode: Literal["strict", "relaxed"] | None = None
+    adhoc_runners: tuple[_AdhocRunnerName, ...] | None = Field(
+        default=None, max_length=_MAX_ADHOC_RUNNERS
+    )
+    adhoc_timeout_seconds: int | None = Field(default=None, ge=1, le=_MAX_ADHOC_TIMEOUT_SECONDS)
+
+
 class GeneratedPathDeclaration(StrictModel):
     glob: str = Field(min_length=1, max_length=512)
     regeneration_command: tuple[str, ...] = Field(min_length=1, max_length=64)
@@ -657,6 +676,7 @@ class RepoPolicyInput(StrictModel):
     mutations: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
     generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
     issue_writes: IssueWritePolicyDeclaration | None = None
+    execution: ExecutionPolicyDeclaration | None = None
     preview_token: str | None = Field(default=None, max_length=2048)
 
 
@@ -669,6 +689,7 @@ class RepoPolicyOutput(ToolResponse):
     changes: tuple[PolicyMutation, ...] = Field(default=(), max_length=100)
     generated_paths: tuple[GeneratedPathDeclaration, ...] = Field(default=(), max_length=64)
     issue_writes: IssueWritePolicyDeclaration | None = None
+    execution: ExecutionPolicyDeclaration | None = None
     operator_instruction: str | None = Field(default=None, max_length=1000)
 
 
@@ -751,16 +772,24 @@ class RefreshAction(str, Enum):
 
 class RefreshResolution(StrictModel):
     path: RelativePath
-    #: `content` writes the text supplied here. `ours` and `theirs` keep one side
-    #: of the conflict whole, read back from the commits the plan is bound to --
-    #: so a caller no longer has to echo an entire file to say "keep mine". The
-    #: conflict evidence in a preview is clipped to a byte budget and cannot be
-    #: used for that, which is exactly why these strategies exist.
-    strategy: Literal["content", "ours", "theirs"] = "content"
-    #: Required for `content`, and refused for the others: an entry carrying both
-    #: a strategy and a body states two different intentions, and picking one is
-    #: how a reviewed resolution becomes an unreviewed write.
-    content: str | None = Field(default=None, max_length=2_000_000)
+    strategy: Literal["content", "ours", "theirs"] = Field(
+        default="content",
+        description=(
+            "`content` writes the text supplied in `content`. `ours` and `theirs` keep one "
+            "side of the conflict whole, read back from the commits the plan is bound to, so "
+            "you never have to echo a whole file to say 'keep mine' -- the conflict evidence "
+            "in a preview is clipped to a byte budget and cannot be used for that."
+        ),
+    )
+    content: str | None = Field(
+        default=None,
+        max_length=2_000_000,
+        description=(
+            "Required for strategy='content' and refused for the others: an entry carrying "
+            "both a side-picking strategy and a body states two different intentions, and "
+            "picking one for you is how a reviewed resolution becomes an unreviewed write."
+        ),
+    )
 
 
 class RefreshConflictEvidence(StrictModel):
@@ -1351,6 +1380,16 @@ _SelectorItem = Annotated[str, Field(min_length=1, max_length=4096)]
 _SelectorItems = Annotated[tuple[_SelectorItem, ...], Field(max_length=100)]
 _Selector = _SelectorItem | _SelectorItems
 
+# An ad-hoc argv is bounded far more tightly than a selector, and the schema must say
+# so: advertising a selector's 100x4096 here let a caller build a request the schema
+# accepted and `domain.adhoc` then rejected, which reads as an arbitrary failure. These
+# must equal MAX_ADHOC_ARGV_ELEMENTS and MAX_ADHOC_ARGV_ELEMENT_LENGTH; the contracts
+# package deliberately imports no domain module, so a test pins the two together.
+_MAX_ADHOC_ARGV_ELEMENTS = 32
+_MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
+_MAX_ADHOC_STDIN_LENGTH = 64_000
+_AdhocArgvItem = Annotated[str, Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENT_LENGTH)]
+
 
 class WorkspaceVerifyInput(StrictModel):
     workspace_id: Identifier
@@ -1359,8 +1398,19 @@ class WorkspaceVerifyInput(StrictModel):
     selector: _Selector | None = None
     selector2: _Selector | None = None
     profile_name: Identifier | None = None
-    argv: tuple[_SelectorItem, ...] | None = Field(default=None, max_length=100)
+    argv: tuple[_AdhocArgvItem, ...] | None = Field(
+        default=None, max_length=_MAX_ADHOC_ARGV_ELEMENTS
+    )
     working_directory: RelativePath | None = None
+    stdin_text: str | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_STDIN_LENGTH,
+        description=(
+            "Optional standard input for a mode=adhoc command; omitted leaves the command "
+            "with no input. May contain newlines, unlike an argv element. Input larger than "
+            "the limit belongs in a workspace file the command reads."
+        ),
+    )
     expected_fingerprint: Sha256 | None = None
     expected_head_sha: GitObjectId | None = None
     mutability: Literal["read_only", "workspace"] = "read_only"
@@ -1384,6 +1434,8 @@ class WorkspaceVerifyInput(StrictModel):
             raise ValueError("diagnostic mode requires diagnostic_id")
         if self.mode is VerifyMode.ADHOC and not self.argv:
             raise ValueError("adhoc mode requires argv")
+        if self.stdin_text is not None and self.mode is not VerifyMode.ADHOC:
+            raise ValueError("stdin_text is only valid for mode=adhoc")
         if self.mutability == "workspace":
             if self.mode is not VerifyMode.ADHOC:
                 raise ValueError("mutability='workspace' is only valid for mode=adhoc")
@@ -1434,6 +1486,35 @@ class FailureLocationEvidence(StrictModel):
     code: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class AdhocEvidence(StrictModel):
+    """Policy facts for a `mode="adhoc"` run, absent for every other mode.
+
+    `content_inspected` is the field that keeps this surface honest: RepoForge
+    content-inspects `git` argv only, so any other runner -- a shell above all -- runs
+    without the guards that block force pushes and history rewrites. When it is false,
+    the exact-state lock and `read_only_violation` are the whole safety story.
+    """
+
+    mutability: Literal["read_only", "workspace"]
+    command_class: Literal["read_only", "mutating"] | None = None
+    content_inspected: bool
+    fingerprint_changed: bool
+    read_only_violation: bool = Field(
+        description=(
+            "True when a command that was classified or declared read-only nonetheless "
+            "changed the workspace fingerprint. Treat the run's own claim about what it "
+            "touched as unreliable and re-read workspace_status."
+        )
+    )
+    # A plain bounded string, not RelativePath: these paths come from parsing git status
+    # output, and one unusual shape (a quoted rename, a non-UTF-8 name) must not cost the
+    # caller the entire verify response.
+    changed_paths: tuple[str, ...] = Field(default=(), max_length=200)
+    changed_paths_truncated: bool = False
+    network_policy: Literal["advisory_local_only"]
+    verification_invalidated: bool = False
+
+
 class WorkspaceVerifyOutput(ToolResponse):
     workspace_id: Identifier
     requested_mode: VerifyMode
@@ -1443,6 +1524,16 @@ class WorkspaceVerifyOutput(ToolResponse):
     assessment: WorkspaceVerifyAssessment | None = None
     recommendations: tuple[VerifyRecommendationEvidence, ...] = Field(default=(), max_length=32)
     staleness_warning: str | None = Field(default=None, max_length=1000)
+    next_action: str | None = Field(
+        default=None,
+        max_length=1000,
+        description=(
+            "What to do with this response when it did not finish the work -- above all, "
+            "the exact `operation` wait to issue for a background run. Present whenever "
+            "the run continues after the call returns; null for a completed verify, "
+            "whose outcome is the answer."
+        ),
+    )
     operation: OperationEvidence | None = None
     commands: tuple[CommandEvidence, ...] = Field(default=(), max_length=100)
     steps: tuple[VerifyStepEvidence, ...] = Field(default=(), max_length=100)
@@ -1458,6 +1549,7 @@ class WorkspaceVerifyOutput(ToolResponse):
     workspace_fingerprint: Sha256
     plan: ExecutionPlanEvidence | None = None
     execution_evidence: ExecutionEvidenceModel | None = None
+    adhoc_evidence: AdhocEvidence | None = None
     failed_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
     output_artifact_reference: str | None = Field(
         default=None,
@@ -1813,6 +1905,66 @@ class FailureEvidenceWorkspaceIdentity(StrictModel):
     policy_hash: Sha256
 
 
+class RuntimeLogSource(str, Enum):
+    AUDIT = "audit"
+    RUNTIME = "runtime"
+    FAILURE_ARTIFACT = "failure_artifact"
+
+
+# Moved above the failure recovery-action union: `RuntimeLogsReadRecoveryAction`
+# embeds this input model, and the union is a runtime expression, so the model must
+# already exist by the time it is evaluated.
+
+
+class RuntimeLogsReadInput(StrictModel):
+    source: RuntimeLogSource = RuntimeLogSource.AUDIT
+    limit: int = Field(default=50, ge=1, le=200)
+    action: str | None = Field(default=None, max_length=160)
+    only_failed: bool = False
+    min_duration_ms: float | None = Field(default=None, ge=0, le=86_400_000)
+    start_time: str | None = Field(default=None, max_length=80)
+    end_time: str | None = Field(default=None, max_length=80)
+    cursor: Cursor | None = None
+    artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> RuntimeLogsReadInput:
+        parsed: dict[str, datetime] = {}
+        for field, value in (("start_time", self.start_time), ("end_time", self.end_time)):
+            if value is None:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+            if timestamp.tzinfo is None:
+                raise ValueError(f"{field} must include a timezone offset")
+            parsed[field] = timestamp
+        if (
+            "start_time" in parsed
+            and "end_time" in parsed
+            and parsed["start_time"] > parsed["end_time"]
+        ):
+            raise ValueError("start_time must not be after end_time")
+        if self.source is RuntimeLogSource.FAILURE_ARTIFACT:
+            if self.artifact_reference is None:
+                raise ValueError("failure_artifact source requires artifact_reference")
+            if (
+                self.action is not None
+                or self.only_failed
+                or self.min_duration_ms is not None
+                or self.start_time is not None
+                or self.end_time is not None
+            ):
+                raise ValueError("failure_artifact source does not accept log filters")
+        elif self.artifact_reference is not None:
+            raise ValueError("artifact_reference is only valid for failure_artifact source")
+        return self
+
+
 class OperationRecoveryAction(StrictModel):
     kind: Literal["operation"]
     precondition: str = Field(min_length=1, max_length=500)
@@ -1849,13 +2001,27 @@ class ConfigInspectRecoveryAction(StrictModel):
     arguments: ConfigInspectInput
 
 
+class RuntimeLogsReadRecoveryAction(StrictModel):
+    """Read the complete persisted stdout and stderr of the failing command.
+
+    The excerpt on failure evidence is bounded, and a failure whose selectors could not
+    be extracted is exactly the one whose full output the caller needs. This action names
+    the retrieval so nobody has to re-run a suite to recover what was already recorded.
+    """
+
+    kind: Literal["runtime_logs_read"]
+    precondition: str = Field(min_length=1, max_length=500)
+    arguments: RuntimeLogsReadInput
+
+
 FailureRecoveryAction = Annotated[
     OperationRecoveryAction
     | WorkspaceStatusRecoveryAction
     | WorkspaceVerifyRecoveryAction
     | WorkspaceRefreshRecoveryAction
     | WorkspaceMutateRecoveryAction
-    | ConfigInspectRecoveryAction,
+    | ConfigInspectRecoveryAction
+    | RuntimeLogsReadRecoveryAction,
     Field(discriminator="kind"),
 ]
 
@@ -1930,7 +2096,17 @@ class OperationInput(StrictModel):
     cursor: Cursor | None = None
     failure_id: Identifier | None = None
     since_updated_at: str | None = Field(default=None, max_length=80)
-    timeout_seconds: int | None = Field(default=None, ge=1, le=60)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+    until: Literal["progress", "terminal"] = Field(
+        default="progress",
+        description=(
+            "What ends the wait. 'progress' returns on the next durable progress delta -- "
+            "one per step start and completion -- so a multi-step gate wakes the caller "
+            "many times. 'terminal' returns only when the operation finishes, or on "
+            "timeout with the current evidence and a pacing hint; prefer it when the only "
+            "question is the outcome."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> OperationInput:
@@ -1951,6 +2127,8 @@ class OperationInput(StrictModel):
             raise ValueError(
                 "since_updated_at and timeout_seconds are only valid for operation wait"
             )
+        if self.action is not OperationAction.WAIT and self.until != "progress":
+            raise ValueError("until is only valid for operation wait")
         if self.action is OperationAction.FAILURE_EVIDENCE and self.failure_id is None:
             raise ValueError("operation failure_evidence requires failure_id")
         if self.action is not OperationAction.FAILURE_EVIDENCE and self.failure_id is not None:
@@ -1968,6 +2146,32 @@ class OperationOutput(ToolResponse):
     failure_evidence: FailureEvidenceDetail | None = None
     changed_since: bool = False
     timed_out: bool = False
+    progress_delivery: Literal["pushed", "poll"] | None = Field(
+        default=None,
+        description=(
+            "Wait only. Which mechanism this wait actually used: 'pushed' means live "
+            "progress notifications were sent on the open request, so a long wait is "
+            "worth re-issuing; 'poll' means this client cannot consume notifications "
+            "and should pace itself with suggested_poll_after_s instead."
+        ),
+    )
+    next_since_updated_at: str | None = Field(
+        default=None,
+        max_length=80,
+        description=(
+            "Wait only. Pass back as since_updated_at to resume where this wait stopped. "
+            "Null when the operation is terminal and there is nothing left to wait for."
+        ),
+    )
+    suggested_poll_after_s: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Wait only. How long to wait before the next call. Present even when the "
+            "wait returns no operation evidence, which is the case a caller would "
+            "otherwise have nothing to pace from."
+        ),
+    )
 
 
 class ConfigInspectInput(StrictModel):
@@ -2049,26 +2253,42 @@ class RuntimeActivationEvidenceView(StrictModel):
     activated_process_identity: Sha256 | None = None
     runtime_phase: ShortText | None = None
     error_code: ShortText | None = None
-    #: `matches` when the live runtime serves the configuration generation this
-    #: receipt activated. `diverged` when it serves a different one -- the activation
-    #: did not end where it claimed, or something else took over since. `unverifiable`
-    #: when no generation was recorded or none is observable, so nothing can be
-    #: checked either way; that is reported rather than defaulted to success.
-    #:
-    #: Deliberately NOT a comparison of process identity or tool-surface hash. Both
-    #: describe one process instance and one release, so both change legitimately --
-    #: on a watchdog restart, or after a later release activation -- and comparing
-    #: them reported a healthy converged installation as diverged, which is worse
-    #: than reporting nothing. Those changes are facts, not verdicts, so they are
-    #: reported separately below.
-    agreement: Literal["matches", "diverged", "unverifiable"]
-    #: True when the live process is not the instance the receipt recorded, i.e. the
-    #: runtime has been restarted since. Normal after a watchdog restart or a later
-    #: activation; None when either identity is unknown.
-    process_restarted_since_activation: bool | None = None
-    #: True when the live tool surface differs from the one recorded, which is what a
-    #: release upgrade after this activation looks like. None when either is unknown.
-    tool_surface_changed_since_activation: bool | None = None
+    # Deliberately NOT a comparison of process identity or tool-surface hash. Both
+    # describe one process instance and one release, so both change legitimately -- on a
+    # watchdog restart, or after a later release activation -- and comparing them reported
+    # a healthy converged installation as diverged, which is worse than reporting nothing
+    # (#314). Those changes are facts, not verdicts, so they are reported separately, and
+    # every field below says so in its own description: the reasoning has to travel with
+    # the schema, because a caller reading two booleans named "changed since activation"
+    # with no description will call a healthy installation diverged. That is exactly what
+    # #314 was, and it happened a second time while this text lived only in a comment.
+    agreement: Literal["matches", "diverged", "unverifiable"] = Field(
+        description=(
+            "THE verdict on this activation, and the only field that is one. `matches`: the "
+            "live runtime serves the configuration generation this receipt activated. "
+            "`diverged`: it serves a different one -- the activation did not end where it "
+            "claimed, or something else took over. `unverifiable`: nothing was recorded or "
+            "nothing is observable, reported rather than defaulted to success. Compares the "
+            "configuration generation only, never process identity or tool-surface hash."
+        )
+    )
+    process_restarted_since_activation: bool | None = Field(
+        default=None,
+        description=(
+            "A fact, not a fault: true when the live process is not the instance this "
+            "receipt recorded. Expected after a watchdog restart or any later activation. "
+            "Null when either identity is unknown. Read `agreement` for the verdict."
+        ),
+    )
+    tool_surface_changed_since_activation: bool | None = Field(
+        default=None,
+        description=(
+            "A fact, not a fault: true when the live tool surface differs from the one this "
+            "receipt recorded, which is what a release upgrade after this activation looks "
+            "like. Comparing it against a hash from an earlier activation will therefore "
+            "differ by design. Null when either is unknown. Read `agreement` for the verdict."
+        ),
+    )
 
 
 class ConfigProjectionView(StrictModel):
@@ -2128,12 +2348,6 @@ class ConfigInspectOutput(ToolResponse):
     runtime_health: RuntimeHealthView | None = None
 
 
-class RuntimeLogSource(str, Enum):
-    AUDIT = "audit"
-    RUNTIME = "runtime"
-    FAILURE_ARTIFACT = "failure_artifact"
-
-
 class RuntimeTimestampState(str, Enum):
     OBSERVED = "observed"
     UNAVAILABLE = "unavailable"
@@ -2168,55 +2382,6 @@ class RuntimeLogEntry(StrictModel):
     trace_id: str | None = Field(default=None, max_length=160)
     workspace_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     repository_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-
-
-class RuntimeLogsReadInput(StrictModel):
-    source: RuntimeLogSource = RuntimeLogSource.AUDIT
-    limit: int = Field(default=50, ge=1, le=200)
-    action: str | None = Field(default=None, max_length=160)
-    only_failed: bool = False
-    min_duration_ms: float | None = Field(default=None, ge=0, le=86_400_000)
-    start_time: str | None = Field(default=None, max_length=80)
-    end_time: str | None = Field(default=None, max_length=80)
-    cursor: Cursor | None = None
-    artifact_reference: str | None = Field(
-        default=None,
-        pattern=r"^failure-output:[a-f0-9]{64}$",
-    )
-
-    @model_validator(mode="after")
-    def validate_time_range(self) -> RuntimeLogsReadInput:
-        parsed: dict[str, datetime] = {}
-        for field, value in (("start_time", self.start_time), ("end_time", self.end_time)):
-            if value is None:
-                continue
-            try:
-                timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
-            if timestamp.tzinfo is None:
-                raise ValueError(f"{field} must include a timezone offset")
-            parsed[field] = timestamp
-        if (
-            "start_time" in parsed
-            and "end_time" in parsed
-            and parsed["start_time"] > parsed["end_time"]
-        ):
-            raise ValueError("start_time must not be after end_time")
-        if self.source is RuntimeLogSource.FAILURE_ARTIFACT:
-            if self.artifact_reference is None:
-                raise ValueError("failure_artifact source requires artifact_reference")
-            if (
-                self.action is not None
-                or self.only_failed
-                or self.min_duration_ms is not None
-                or self.start_time is not None
-                or self.end_time is not None
-            ):
-                raise ValueError("failure_artifact source does not accept log filters")
-        elif self.artifact_reference is not None:
-            raise ValueError("artifact_reference is only valid for failure_artifact source")
-        return self
 
 
 class RuntimeLogsReadOutput(ToolResponse):

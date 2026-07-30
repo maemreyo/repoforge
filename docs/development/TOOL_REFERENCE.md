@@ -41,8 +41,8 @@ RepoForge never merges, force-pushes, writes protected branches, exposes arbitra
 
 | Tool | Purpose |
 | --- | --- |
-| `repo_list` | List bounded reviewed repositories, default refs, and capabilities. |
-| `repo_task_context` | Assemble bounded repository, status, ticket, workspace, and recent-commit sections in one call. |
+| `repo_list` | List bounded reviewed repositories, default refs, capabilities, and which verification profiles a model may start (`model_invocable_profiles`) versus which the reviewed configuration reserves for the operator (`operator_only_profiles`). |
+| `repo_task_context` | Assemble bounded repository, status, ticket, workspace, and recent-commit sections in one call. The `repository` section carries `model_invocable_profiles` and `operator_only_profiles`. |
 | `repo_read` | Read up to 20 UTF-8 files from one immutable snapshot with independent ranges, one global byte budget, and resumable cursors. |
 | `repo_search` | Search literal text, reviewed regular expressions, or file names in one immutable snapshot. |
 | `repo_tree` | List a bounded snapshot tree, optionally below one subtree. |
@@ -143,6 +143,31 @@ Because `workspace_mutate` can delete or restore content, its tool-wide MCP anno
 - `profile` runs a reviewed repository profile;
 - `adhoc` accepts only allowlisted runners under relaxed policy.
 
+`mode = "adhoc"` returns an `adhoc_evidence` section, absent for every other mode. It carries the runner's own policy facts: the declared `mutability`, the inferred `command_class`, `content_inspected`, `fingerprint_changed`, `read_only_violation`, the bounded `changed_paths`, and `network_policy`.
+
+`content_inspected` is the field to read first, because RepoForge content-inspects `git` argv only. A `git` run is checked before any process starts: force, mirror, and delete pushes, history rewrites, `reflog expire`, `update-ref -d`, `clean --force`, and every `--exec` form are refused with `ADHOC_COMMAND_FORBIDDEN`, and a mutating form additionally requires `mutability = "workspace"` with both `expected_head_sha` and `expected_fingerprint`. Every other runner is opaque: `command_class` is `null`, `content_inspected` is `false`, and those guards never ran.
+
+That distinction matters most when an operator adds a shell (`bash`, `sh`) to `repositories.<id>.adhoc_runners`. Nothing blocks it, and it is the direct way to give an agent pipes, `&&`, and globbing — but `["bash", "-c", "git push --force …"]` is a shell invocation, not a git one, so the git argv guards do not apply to what the shell then runs. Under an opaque runner the remaining protections are the exact-state lock, the fingerprint comparison, and `read_only_violation`.
+
+### Running programs that do not fit in an argv
+
+An argv element carries at most 512 characters and rejects newlines, so a multi-line program belongs in a file the runner reads rather than in a `bash -c` string. Put it in a **gitignored scratch directory** — a convention, not a feature:
+
+```
+# .gitignore
+.rf-scratch/
+```
+
+The workspace fingerprint is `HEAD`, `git diff HEAD`, and `git ls-files --others --exclude-standard`. That last flag is the point: a gitignored file contributes nothing to the fingerprint. A script written to `.rf-scratch/` therefore does not change the fingerprint, does not appear in `changed_paths` or `workspace_diff`, does not require `mutability = "workspace"`, and cannot leak into a commit — while persisting across calls, which nothing else in the ad-hoc surface does. Write it with `workspace_mutate`, which consults `allowed_paths`/`denied_paths` and not `.gitignore`, then run `["bash", ".rf-scratch/run.sh"]`.
+
+A script that should be reviewed belongs in the tree instead, where the diff shows it.
+
+### Standard input
+
+`stdin_text` supplies standard input to a `mode = "adhoc"` command and is rejected for every other mode; without it the command gets no input at all. Unlike an argv element it may contain newlines, which is what makes `["git", "apply", "-"]` usable. It is bounded at 64000 characters; larger input belongs in a file the command reads. Only its length is audited, never its content.
+
+`read_only_violation` is true when a command classified or declared read-only nonetheless changed the workspace fingerprint. It means the run's own account of what it touched is unreliable: re-read `workspace_status` rather than trusting the classification.
+
 Diagnostic failures publish up to 100 complete structured pytest node IDs even when their bounded excerpt truncates. A truncated failed command also returns a content-addressed `failure-output:<sha256>` reference backed by a private 0600 artifact. `rerun = "failed"` is valid only with explicit diagnostic mode and a diagnostic ID; it restores the exact last failure set, forces real execution instead of deterministic failure replay, keeps the same `failure_chain_id`, and refuses with typed stale-workspace evidence when the fingerprint changed. `failure_expectation` distinguishes valid expected TDD RED evidence from unexpected failures in audit and tool output.
 
 Only a successful verification-enabled profile on the exact current fingerprint satisfies the commit gate. A low-confidence or unavailable code-intelligence provider broadens verification; it never narrows a safety gate.
@@ -187,11 +212,46 @@ A selector is an input to choosing an identity, never a result field. It appears
 
 | Tool | Purpose |
 | --- | --- |
-| `operation` | `get`, `wait`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. `wait` long-polls one exact operation for 1–60 seconds and returns on a progress timestamp change, terminal state, or typed timeout; `since_updated_at` binds the caller's last observed state. Every operation evidence item includes bounded progress unit/message, `suggested_poll_after_s`, and an ETA when step totals and timing evidence permit it. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. Each recovery action is exactly `{kind, precondition, arguments}`; `arguments` validates directly as the input of the named public tool, without a caller-side translation layer. |
+| `operation` | `get`, `wait`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. `wait` long-polls one exact operation for 1–300 seconds and returns on terminal state or typed timeout, plus a progress timestamp change when `until="progress"` (the default); `since_updated_at` binds the caller's last observed state. Every operation evidence item includes bounded progress unit/message, `suggested_poll_after_s`, and an ETA when step totals and timing evidence permit it. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. Each recovery action is exactly `{kind, precondition, arguments}`; `arguments` validates directly as the input of the named public tool, without a caller-side translation layer. |
 | `config_inspect` | Read accepted/active configuration generations, repository facts, pending changes, runtime identity, and health. |
-| `runtime_logs_read` | Read bounded redacted audit or runtime-log evidence with filters and cursors. |
+| `runtime_logs_read` | Read bounded redacted audit or runtime-log evidence with filters and cursors. With `source="failure_artifact"` and an `artifact_reference` it returns the complete persisted stdout and stderr of a failing command — the retrieval a failure whose selectors could not be extracted actually needs. |
 
 `workspace_verify.mode = "plan"` additionally supports a plan lifecycle for structured multi-stage work: `plan_action = "create"` compiles reviewed profiles/diagnostics into a deterministic typed DAG and returns an immutable plan for operator review; `"accept"` admits it after revalidating every binding; `"execute"` runs it through either iteration stages or the final full boundary, returning a durable operation reference immediately (poll with `operation`). Every completed stage writes a private, bounded, content-addressed schema-v2 receipt carrying environment identity schema version and requested/effective policy hashes. A read-only iteration stage may reuse a private content-addressed schema-v2 cache entry only when workspace/input, stage definition, target identity, environment/toolchain, requested/effective policy, lockfiles, configuration, policy, and dependency receipts remain compatible; mutating and final-verification stages are always non-cacheable. A compatible legacy schema-v1 entry explains an `environment_identity_schema_changed` miss but can never grant a hit. Only the accepted plan's final verification-enabled stage can populate `last_verification`.
+
+#### Recovering a call whose response was lost
+
+A dropped connection, a 502, or a terminated session between effect and response leaves the caller
+without its result -- not without its effect. Every mutating call is a durable operation, so the
+answer to "did my write land?" is a read, never a blind retry:
+
+1. `operation` with `action="list"` and `scope="workspace:<workspace_id>"` lists that workspace's
+   operations. `kind` is the tool name (`workspace_mutate`, `workspace_commit`, ...), and `state`
+   says whether it reached a terminal state.
+2. `operation` with `action="get"` and that `operation_id` returns the durable result the lost
+   response would have carried, including exactly which paths changed.
+
+Re-sending the mutation instead risks applying it twice; the exact-state preconditions
+(`expected_workspace_fingerprint`, `expected_head_sha`) will usually refuse the second attempt, but
+a refusal is not evidence about the first. Read the operation. When a response *is* received, its
+`outcome` carries the `operation_id` and `receipt_id` for exactly this purpose -- record them.
+
+#### Waiting without polling
+
+`wait` takes `until`, and the choice decides how many round trips a long operation costs:
+
+- `until="terminal"` returns only when the operation finishes. A timeout is the ordinary outcome
+  for a long gate, so the response still carries current state, `suggested_poll_after_s`, and an
+  ETA when available — call again with the same arguments. Use this whenever the only question is
+  the outcome.
+- `until="progress"` (default, unchanged) returns on the next durable progress delta. Background
+  profile execution emits one at each step start and completion, so an eight-step gate wakes the
+  caller sixteen times. Use it only when intermediate steps change what you do next.
+
+`timeout_seconds` accepts 1–300. The ceiling is set by the client, not by RepoForge: a held request
+dies with the connector. Progress notifications keep the open request alive while work continues,
+and `since_updated_at` makes a dropped wait resumable, so a re-issued `wait` never loses its place.
+Spinning on `action="get"` is always the wrong shape — it burns a round trip per sample and learns
+nothing `wait` would not have delivered.
 
 A wait response sets `changed_since=true` when durable progress advanced, or returns terminal evidence immediately. A bounded timeout sets `timed_out=true` while still returning the complete slim current operation evidence and pacing hint; it never returns an empty payload. Background profile execution emits one progress update at each step start and completion, not per test, so `updated_at` acts as a liveness heartbeat without unbounded write volume.
 

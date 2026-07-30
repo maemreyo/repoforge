@@ -19,6 +19,10 @@ _RUNNER_BASENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_ADHOC_RUNNERS = 32
 MAX_ADHOC_ARGV_ELEMENTS = 32
 MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
+# Standard input is content, not a command argument, so it is bounded far more loosely
+# than an argv element -- a patch fed to `git apply -` is routinely longer than 512
+# characters. It is still bounded: the text is persisted with the durable work request.
+MAX_ADHOC_STDIN_LENGTH = 64_000
 
 
 class ExecutionMode(str, Enum):
@@ -246,6 +250,42 @@ def validate_adhoc_runners(runners: tuple[str, ...], repo_id: str) -> tuple[str,
     return runners
 
 
+def validate_adhoc_stdin(text: str | None) -> str | None:
+    """Validate optional standard input for one ad-hoc run.
+
+    Unlike an argv element this may contain newlines -- feeding a multi-line patch or
+    JSON document is the whole point -- but it is still bounded and must be real text,
+    because a NUL byte cannot survive the round trip through the durable work request.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise _adhoc_error(
+            f"Ad-hoc stdin_text must be a string, got {type(text).__name__}",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action="Pass stdin_text as text, or omit it to give the command no input.",
+        )
+    if len(text) > MAX_ADHOC_STDIN_LENGTH:
+        raise _adhoc_error(
+            f"Ad-hoc stdin_text is {len(text)} characters; the limit is {MAX_ADHOC_STDIN_LENGTH}",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action=(
+                "Write input this large to a file in the workspace and have the command read "
+                f"that path; stdin_text carries at most {MAX_ADHOC_STDIN_LENGTH} characters."
+            ),
+        )
+    if "\x00" in text:
+        raise _adhoc_error(
+            "Ad-hoc stdin_text contains a NUL byte",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action=(
+                "Remove the NUL byte. Binary input belongs in a file the command reads, not in "
+                "stdin_text."
+            ),
+        )
+    return text
+
+
 def _adhoc_error(message: str, code: ErrorCode, *, safe_next_action: str) -> RepoForgeError:
     return RepoForgeError(
         message,
@@ -253,6 +293,49 @@ def _adhoc_error(message: str, code: ErrorCode, *, safe_next_action: str) -> Rep
         unchanged_state=("The workspace, configuration, and remote state were not modified.",),
         safe_next_action=safe_next_action,
     )
+
+
+def _argv_element_violation(element: object) -> tuple[str, str] | None:
+    """Name why one argv element is unacceptable, or ``None`` when it is fine.
+
+    One message per cause. A single message covering "empty, oversized, or
+    control-character" forces the caller to re-derive which of the three it hit, and a
+    newline in particular reads as neither of the other two.
+    """
+    if not isinstance(element, str):
+        return (
+            f"must be a string, got {type(element).__name__}",
+            "Pass each argv element as a separate string; RepoForge never accepts a shell string.",
+        )
+    if not element:
+        return (
+            "is empty",
+            "Drop the empty element; an argv element must carry an actual token.",
+        )
+    if len(element) > MAX_ADHOC_ARGV_ELEMENT_LENGTH:
+        return (
+            f"is {len(element)} characters; the limit is {MAX_ADHOC_ARGV_ELEMENT_LENGTH}",
+            f"Keep every argv element at most {MAX_ADHOC_ARGV_ELEMENT_LENGTH} characters. A "
+            "program too long to pass inline belongs in a file the runner reads.",
+        )
+    if "\n" in element or "\r" in element:
+        return (
+            "contains a newline",
+            "Ad-hoc argv carries one command, not a script: pass single-line arguments, or put "
+            "a multi-line program in a file and pass that path.",
+        )
+    if "\x00" in element:
+        return (
+            "contains a NUL byte",
+            "Remove the NUL byte; it cannot be passed to a process argument.",
+        )
+    for character in element:
+        if ord(character) < 32:
+            return (
+                f"contains the control character U+{ord(character):04X}",
+                "Keep every argv element printable.",
+            )
+    return None
 
 
 def validate_adhoc_argv(argv: tuple[str, ...], runners: tuple[str, ...]) -> tuple[str, ...]:
@@ -267,21 +350,14 @@ def validate_adhoc_argv(argv: tuple[str, ...], runners: tuple[str, ...]) -> tupl
             ErrorCode.ADHOC_ARGV_INVALID,
             safe_next_action="Supply a bounded argv list; split a longer command into multiple ad-hoc runs.",
         )
-    for element in argv:
-        if (
-            not isinstance(element, str)
-            or not element
-            or len(element) > MAX_ADHOC_ARGV_ELEMENT_LENGTH
-            or "\x00" in element
-            or any(ord(character) < 32 for character in element)
-        ):
+    for index, element in enumerate(argv):
+        violation = _argv_element_violation(element)
+        if violation is not None:
+            reason, remedy = violation
             raise _adhoc_error(
-                "Ad-hoc argv contains an empty, oversized, or control-character element",
+                f"Ad-hoc argv[{index}] {reason}",
                 ErrorCode.ADHOC_ARGV_INVALID,
-                safe_next_action=(
-                    f"Keep every argv element non-empty, printable, and at most "
-                    f"{MAX_ADHOC_ARGV_ELEMENT_LENGTH} characters."
-                ),
+                safe_next_action=remedy,
             )
     runner = argv[0]
     if "/" in runner or "\\" in runner:
@@ -309,9 +385,11 @@ __all__ = [
     "MAX_ADHOC_ARGV_ELEMENTS",
     "MAX_ADHOC_ARGV_ELEMENT_LENGTH",
     "MAX_ADHOC_RUNNERS",
+    "MAX_ADHOC_STDIN_LENGTH",
     "CommandClass",
     "ExecutionMode",
     "classify_adhoc_command",
     "validate_adhoc_argv",
     "validate_adhoc_runners",
+    "validate_adhoc_stdin",
 ]
