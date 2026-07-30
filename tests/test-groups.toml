@@ -367,6 +367,8 @@ source_globs = [
 test_files = [
   "tests/test_ci_failure_evidence.py",
   "tests/test_github_api_identity.py",
+  "tests/test_github_capability_preflight_adapter.py",
+  "tests/test_github_capability_preflight_domain.py",
   "tests/test_github_capability_probe.py",
   "tests/test_github_webhook_ingress.py",
   "tests/test_git_transport_identity.py",
@@ -533,6 +535,8 @@ test_files = [
   "tests/test_mcp_contract.py",
   "tests/test_config.py",
   "tests/test_execution_identity.py",
+  "tests/test_github_capability_preflight_adapter.py",
+  "tests/test_github_capability_preflight_domain.py",
   "tests/test_source_integrity_policy.py",
 ]
 

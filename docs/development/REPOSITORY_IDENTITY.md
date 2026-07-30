@@ -32,6 +32,47 @@ Autonomous GitHub writes prefer repository-selected App installation tokens. The
 
 `github_api_auth_lease` copies only the token digest, actor ID, installation/repository metadata, revisions and opaque reference into `AuthLease`; raw API material never enters leases or receipts.
 
+## GitHub capability evidence
+
+RepoForge keeps two deliberately separate GitHub capability surfaces. The ambient
+doctor/discovery probe may describe the local `gh` installation or currently
+discoverable account, but is informational only: it never authorizes a write.
+`CommandGitHubCapabilityPreflight` is operation-scoped authorization evidence.
+It runs bounded, read-only GitHub API observations through the exact isolated
+`ProcessAuthContext` selected for that operation; it does not switch the global
+`gh` account, mutate provider state, or fall back to ambient credentials.
+
+The exact catalogue is:
+
+- `github.contents.read`, `github.contents.write`;
+- `github.issues.read`, `github.issues.write`;
+- `github.pull_requests.read`, `github.pull_requests.write`;
+- `github.actions.read`, `github.workflows.write`;
+- `github.releases.read`, `github.releases.write`;
+- `github.organization_projects.read`, `github.organization_projects.write`;
+- `github.packages.read`, `github.packages.write`.
+
+Every requested capability receives one typed evidence result. Only
+`proven_available` authorizes the affected external write. Missing permission,
+provider unavailability, stale binding, repository mismatch, and unobservable
+enterprise evidence all deny that write. Coarse repository write access,
+organisation role, and a successful unrelated probe never imply a capability.
+
+`AuthLease` and publication metadata retain only the safe binding evidence:
+actor ID, installation ID, repository ID, capability and permission digests,
+credential-material identity, policy/configuration revisions, timestamps, and
+evidence digest. Write-time publication revalidation requires all of those
+values to remain the same as the admission evidence; a changed actor,
+installation, repository, capability ceiling, policy/configuration revision, or
+credential-material identity denies the effect.
+
+Recovery is represented by typed actions such as reauthorizing the selected
+profile, refreshing an equivalent lease, or asking an operator to resolve a
+specific enterprise policy. No recovery asks for broader credentials, retries
+with a stronger profile, or expands permissions automatically. Production
+composition continues to retain the doctor probe for discovery while binding a
+separate preflight gateway for operation authorization.
+
 ## Git transport identities
 
 `GitTransportRouter` validates the operation-scoped profile, stable repository target, provider host and read/write ceiling before starting Git. SSH transport supplies one absolute identity-file reference through an exact `GIT_SSH_COMMAND` with `IdentitiesOnly=yes`, `IdentityAgent=none`, `BatchMode=yes` and no user SSH config. Ambient agents and alternate keys cannot participate.

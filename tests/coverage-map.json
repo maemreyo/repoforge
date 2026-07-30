@@ -583,6 +583,9 @@
   "src/repoforge/adapters/github/api_identity.py": [
     "tests/test_github_api_identity.py"
   ],
+  "src/repoforge/adapters/github/capability_preflight.py": [
+    "tests/test_github_capability_preflight_adapter.py"
+  ],
   "src/repoforge/adapters/github/capability_probe.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
@@ -10573,6 +10576,9 @@
   "src/repoforge/domain/github_api_identity.py": [
     "tests/test_github_api_identity.py"
   ],
+  "src/repoforge/domain/github_capability_preflight.py": [
+    "tests/test_github_capability_preflight_domain.py"
+  ],
   "src/repoforge/domain/github_capability_probe.py": [
     "tests/test_github_capability_probe.py"
   ],
@@ -11959,6 +11965,9 @@
     "tests/test_workspace_diagnostics.py",
     "tests/test_workspace_hygiene.py",
     "tests/test_workspace_refresh.py"
+  ],
+  "src/repoforge/ports/github_capability_preflight.py": [
+    "tests/test_github_capability_preflight_adapter.py"
   ],
   "src/repoforge/ports/progress_reporter.py": [
     "tests/test_operation_progress_wait.py"

@@ -173,6 +173,32 @@
       "planned_owner": "#288"
     },
     {
+      "path": "src/repoforge/adapters/github/capability_preflight.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_capability_domain",
+        "github_capability_preflight_port",
+        "github_capability_preflight_adapter",
+        "auth_lease_safe_metadata_binding",
+        "publication_write_time_revalidation",
+        "doctor_preflight_composition_separation"
+      ],
+      "credential_inputs": [
+        "operation-scoped ProcessAuthContext",
+        "safe AuthLease capability and permission digests"
+      ],
+      "target_inputs": [
+        "provider host",
+        "stable repository ID",
+        "installation ID",
+        "exact requested capability catalogue"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#293"
+    },
+    {
       "path": "src/repoforge/adapters/github/capability_probe.py",
       "executables": [
         "gh"

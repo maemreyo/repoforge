@@ -69,6 +69,48 @@ ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
 
 CONFTEST_PATH = "tests/conftest.py"
 
+# Coverage contexts cannot express every capability-preflight dependency: the
+# protocol has no executable body, and composition/binding tests exercise a
+# preflight consumer through a wider workflow. Keep those reviewed direct
+# consumers beside the ordinary coverage map so source changes remain narrow
+# without weakening the default fail-closed behavior for unknown modules.
+_GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS: dict[str, tuple[str, ...]] = {
+    "src/repoforge/domain/github_capability_preflight.py": (
+        "tests/test_github_capability_preflight_domain.py",
+    ),
+    "src/repoforge/ports/github_capability_preflight.py": (
+        "tests/test_github_capability_preflight_adapter.py",
+    ),
+    "src/repoforge/adapters/github/capability_preflight.py": (
+        "tests/test_github_capability_preflight_adapter.py",
+    ),
+    "src/repoforge/adapters/github/api_identity.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_github_capability_preflight_adapter.py",
+    ),
+    "src/repoforge/domain/repository_identity.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_operation_identity_leases.py",
+        "tests/test_repository_identity_contracts.py",
+    ),
+    "src/repoforge/adapters/publication.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_publication_adapter.py",
+    ),
+    "src/repoforge/application/publication.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_publication_guards.py",
+    ),
+    "src/repoforge/application/context.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_integration.py",
+    ),
+    "src/repoforge/bootstrap.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_integration.py",
+    ),
+}
+
 # Any export from tests/conftest.py that a test file might reference. Kept in
 # sync with the checked-in `conftest_consumers` list by --check-completeness.
 _CONFTEST_SYMBOL_RE = re.compile(
@@ -434,11 +476,16 @@ def _select_via_coverage(
             reasons.append(f"{path!r} -> itself (changed test)")
         elif path.startswith(_PACKAGE_SRC_PREFIX) and path.endswith(".py"):
             covering = manifest.coverage_map.get(path)
-            if covering is None:
+            direct_consumers = _GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS.get(path, ())
+            if covering is None and not direct_consumers:
                 unmapped.append(path)
             else:
-                selected_files.update(covering)
-                reasons.append(f"{path!r} -> {len(covering)} covering test file(s)")
+                selected_files.update(covering or ())
+                selected_files.update(direct_consumers)
+                reasons.append(
+                    f"{path!r} -> {len(covering or ())} covering test file(s), "
+                    f"{len(direct_consumers)} reviewed direct consumer(s)"
+                )
         else:
             matched = False
             for group in manifest.groups:
