@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn, cast
 
 import pytest
 
@@ -854,6 +855,36 @@ def test_write_time_preflight_runs_before_authorization_review_and_binds_evidenc
     assert reviewed.capability_digest == report.capability_digest
     assert reviewed.permission_digest == report.permission_digest
     assert report.evidence_digest in reviewed.evidence_digests
+
+
+def test_publication_revalidation_does_not_fall_back_to_doctor_capability_probe() -> None:
+    """Publication authorization requires the dedicated write-time preflight contract."""
+
+    class LegacyDoctorProbe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def probe(self, *_args: object) -> NoReturn:
+            self.calls += 1
+            raise AssertionError("publication must not call the doctor capability probe")
+
+    legacy_probe = LegacyDoctorProbe()
+    adapter = _adapter(capability_preflight=cast(FakeCapabilityPreflight, legacy_probe))
+    intent = _push_intent()
+    topology = adapter.inspect(_ROOT, intent)
+    _spec, auth_context = _transport_identity()
+
+    with pytest.raises(AttributeError, match="preflight"):
+        adapter.revalidate(
+            _ROOT,
+            intent,
+            topology,
+            _authorization(),
+            requested_capability_ids=(GitHubOperationCapability.CONTENTS_WRITE.value,),
+            auth_context=auth_context,
+        )
+
+    assert legacy_probe.calls == 0
 
 
 @pytest.mark.parametrize(

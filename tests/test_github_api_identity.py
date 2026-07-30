@@ -5,7 +5,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn, cast
 
 import pytest
 
@@ -381,6 +381,53 @@ def test_provider_runs_preflight_after_identity_proof_and_binds_safe_metadata() 
     encoded = json.dumps(lease.payload(), sort_keys=True)
     assert token not in encoded
     assert token not in json.dumps(material.safe_payload(), sort_keys=True)
+
+
+def test_auth_provider_does_not_fall_back_to_doctor_capability_probe() -> None:
+    """Credential issuance requires the dedicated write-time preflight contract."""
+
+    class LegacyDoctorProbe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def probe(self, *_args: object) -> NoReturn:
+            self.calls += 1
+            raise AssertionError("auth must not call the doctor capability probe")
+
+    spec = _app()
+    grant = _grant(
+        grant_id="grant-no-doctor-fallback",
+        kind=GitHubApiIdentityKind.APP_INSTALLATION,
+        token="no-doctor-fallback-token",
+        actor_id=spec.actor_id,
+        repository_id=spec.repository_id,
+        installation_id=spec.installation_id,
+    )
+    issuer = AppIssuer({spec.reference_id: grant})
+    verifier = Verifier()
+    verifier.proofs[spec.reference_id] = GitHubApiIdentityProof(
+        spec.actor_id,
+        spec.repository_id,
+        spec.capability_ids,
+        grant.permission_ids,
+        installation_id=spec.installation_id,
+    )
+    legacy_probe = LegacyDoctorProbe()
+    provider = _provider(
+        (),
+        StoredSource({}),
+        issuer,
+        verifier,
+        (spec,),
+        cast(PreflightGateway, legacy_probe),
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        provider.resolve(OpaqueCredentialReference("github-app", spec.reference_id))
+
+    assert failure.value.code is ErrorCode.GITHUB_PROVIDER_UNAVAILABLE
+    assert legacy_probe.calls == 0
+    assert issuer.revoked == [grant.grant_id]
 
 
 def test_preflight_denial_releases_grant_before_material_creation() -> None:

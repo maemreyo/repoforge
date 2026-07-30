@@ -3,32 +3,66 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import NoReturn, cast
 
 import pytest
 from conftest import ForgeEnvironment, build_test_service
 
-from repoforge.adapters.github import (
-    CommandGitHubCapabilityPreflight,
-    CommandGitHubCapabilityProbe,
-)
+from repoforge.application.service import CodingService
+from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.domain.errors import CommandError
+from repoforge.ports import GitHubCapabilityPreflightGateway, GitHubCapabilityProbe
 
 
 def run(*args: str, cwd: Path) -> None:
     subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
 
 
-def test_capability_preflight_composition_keeps_doctor_probe(
+def test_doctor_uses_legacy_capability_probe_not_write_preflight(
     forge_env: ForgeEnvironment,
 ) -> None:
-    """Catches bootstrap omitting the dedicated gateway or reusing the doctor probe for writes."""
+    """Doctor diagnostics stay on the legacy probe even when write preflight is available."""
 
-    ctx = forge_env.service.application.context
+    class LegacyDoctorProbe:
+        def __init__(self) -> None:
+            self.calls: list[Path] = []
 
-    assert isinstance(ctx.github_capabilities, CommandGitHubCapabilityProbe)
-    assert isinstance(ctx.github_capability_preflight, CommandGitHubCapabilityPreflight)
-    assert type(ctx.github_capabilities) is not type(ctx.github_capability_preflight)
+        def probe(self, cwd: Path, _ticket_graph: object) -> NoReturn:
+            self.calls.append(cwd)
+            raise RuntimeError("legacy doctor probe selected")
+
+    class WritePreflightMustNotRun:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def preflight(self, *_args: object) -> NoReturn:
+            self.calls += 1
+            raise AssertionError("doctor must not run write-time capability preflight")
+
+    legacy_probe = LegacyDoctorProbe()
+    write_preflight = WritePreflightMustNotRun()
+    config = load_config(forge_env.config_path)
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(
+            github_capabilities=cast(GitHubCapabilityProbe, legacy_probe),
+            github_capability_preflight=cast(
+                GitHubCapabilityPreflightGateway,
+                write_preflight,
+            ),
+        ),
+        config_generation=1,
+    )
+
+    result = CodingService(config, application=application).doctor()
+
+    assert legacy_probe.calls == [forge_env.source]
+    assert write_preflight.calls == 0
+    capability_check = next(
+        check for check in result["checks"] if check["name"] == "github_capabilities:demo"
+    )
+    assert capability_check["detail"] == "legacy doctor probe selected"
 
 
 def test_workspace_edit_verify_and_commit(tmp_path: Path) -> None:
