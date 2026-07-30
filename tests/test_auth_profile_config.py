@@ -1,3 +1,11 @@
+"""Reviewed auth-profile configuration: parse, project, load, and survive a refresh.
+
+The declaration is secret-free by construction, and the runtime model builds the existing
+identity primitives rather than a parallel bag of strings. The round-trip and copy-helper
+tests exist because a reviewed profile silently dropped during an unrelated repository
+refresh would leave the runtime with no identity and no error.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
