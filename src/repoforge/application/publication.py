@@ -13,6 +13,7 @@ from ..domain.operations import hash_idempotency_key
 from ..domain.publication import RemoteTopology, ReviewedPublication
 from ..domain.repository_auth_broker import ProcessAuthContext
 from ..domain.repository_identity import (
+    AuthTargetKind,
     OperationIdentityContext,
     PublicationIntent,
     PublicationKind,
@@ -68,8 +69,37 @@ class PublicationRequest:
             raise ValueError("process auth target must match the pinned lease")
         if self.intent.kind is PublicationKind.PULL_REQUEST and self.pull_request is None:
             raise ValueError("pull-request publication requires reviewed title and body")
-        if self.intent.kind is PublicationKind.GIT_PUSH and self.pull_request is not None:
-            raise ValueError("Git push publication cannot include pull-request content")
+        if self.intent.kind is not PublicationKind.PULL_REQUEST and self.pull_request is not None:
+            raise ValueError("non-PR publication cannot include pull-request content")
+        if self.intent.kind is PublicationKind.RELEASE:
+            lease = self.authorization.lease
+            if lease.target_kind is not AuthTargetKind.RELEASE:
+                raise ValueError("release publication requires an exact release-target lease")
+            if (
+                lease.repository_id != self.intent.destination_repository_id
+                or lease.profile_id != self.authorization.profile_id
+                or lease.config_revision != self.identity_context.config_revision
+                or lease.policy_revision != self.identity_context.policy_revision
+                or self.authorization.actor_class is not self.identity_context.actor_class
+            ):
+                raise ValueError("release lease must match the exact operation identity")
+            if (
+                not self.intent.source_ref.startswith("refs/tags/")
+                or self.intent.destination_ref != self.intent.source_ref
+                or self.intent.expected_tree_sha is None
+            ):
+                raise ValueError("release publication requires one exact tag, commit, and tree")
+            if self.capability_id != "github.releases.write":
+                raise ValueError("release publication requires github.releases.write")
+            matching = tuple(
+                item
+                for item in self.capability_requests
+                if item.lease_id == self.authorization.lease.lease_id
+            )
+            if len(matching) != 1 or matching[0].capability_ids != ("github.releases.write",):
+                raise ValueError(
+                    "release publication requires one exact release capability request"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +224,8 @@ class PublicationCoordinator:
             return "workspace_push"
         if kind is PublicationKind.PULL_REQUEST:
             return "workspace_create_draft_pr"
+        if kind is PublicationKind.RELEASE:
+            return "workspace_publish_release"
         raise RepoForgeError(
             "Publication kind is not supported by the durable coordinator",
             code=ErrorCode.PUBLICATION_TARGET_MISMATCH,

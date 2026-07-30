@@ -618,3 +618,135 @@ def test_publication_coordinator_stops_before_boundary_on_revalidation_drift() -
         "revalidate",
     ]
     assert ctx.boundary.started is False
+
+
+def _release_request(**changes: object):
+    original = _coordinator_request()
+    lease = replace(
+        original.authorization.lease,
+        lease_id="lease-release-123456",
+        target_kind=AuthTargetKind.RELEASE,
+        target_id="release-123456",
+    )
+    values: dict[str, object] = {
+        "workspace_id": original.workspace_id,
+        "cwd": original.cwd,
+        "intent": replace(
+            original.intent,
+            kind=PublicationKind.RELEASE,
+            source_ref="refs/tags/v2.0.0",
+            destination_ref="refs/tags/v2.0.0",
+        ),
+        "authorization": replace(original.authorization, lease=lease),
+        "identity_context": replace(original.identity_context, auth_leases=(lease,)),
+        "identity_context_id": original.identity_context_id,
+        "capability_requests": (
+            LeaseCapabilityRequest(lease.lease_id, ("github.releases.write",)),
+        ),
+        "capability_id": "github.releases.write",
+        "transport_spec": original.transport_spec,
+        "auth_context": replace(
+            original.auth_context,
+            target_kind=AuthTargetKind.RELEASE,
+            target_id=lease.target_id,
+        ),
+        "idempotency_key": "publication-release-key-294",
+        "pull_request": None,
+    }
+    values.update(changes)
+    return _publication_application.PublicationRequest(**values)
+
+
+def test_release_request_is_admitted_with_exact_release_lease_and_capability() -> None:
+    request = _release_request()
+
+    assert request.intent.kind is PublicationKind.RELEASE
+    assert request.intent.source_ref == "refs/tags/v2.0.0"
+    assert request.intent.expected_commit_sha == _COMMIT_SHA
+    assert request.intent.expected_tree_sha == _TREE_SHA
+    assert request.authorization.lease.target_kind is AuthTargetKind.RELEASE
+    assert request.capability_id == "github.releases.write"
+    assert (
+        _publication_application.PublicationCoordinator._action(request.intent.kind)
+        == "workspace_publish_release"
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        "pull_request",
+        "target_kind",
+        "capability",
+        "tag_ref",
+        "tree",
+        "repository",
+        "revision",
+        "profile",
+    ),
+)
+def test_release_request_rejects_pr_data_repository_lease_or_wrong_capability(
+    invalid: str,
+) -> None:
+    request = _release_request()
+    changes: dict[str, object]
+    if invalid == "pull_request":
+        changes = {"pull_request": _publication_port.PullRequestPublication("title", "body")}
+    elif invalid == "target_kind":
+        lease = replace(
+            request.authorization.lease,
+            target_kind=AuthTargetKind.REPOSITORY,
+            target_id="github-repository-123456",
+        )
+        changes = {
+            "authorization": replace(request.authorization, lease=lease),
+            "identity_context": replace(request.identity_context, auth_leases=(lease,)),
+            "auth_context": replace(
+                request.auth_context,
+                target_kind=lease.target_kind,
+                target_id=lease.target_id,
+            ),
+            "capability_requests": (
+                LeaseCapabilityRequest(lease.lease_id, ("github.releases.write",)),
+            ),
+        }
+    elif invalid == "capability":
+        changes = {
+            "capability_id": "github.contents.write",
+            "capability_requests": (
+                LeaseCapabilityRequest(
+                    request.authorization.lease.lease_id,
+                    ("github.contents.write",),
+                ),
+            ),
+        }
+    elif invalid == "tag_ref":
+        changes = {
+            "intent": replace(
+                request.intent,
+                source_ref="refs/heads/main",
+                destination_ref="refs/heads/main",
+            )
+        }
+    elif invalid == "tree":
+        changes = {"intent": replace(request.intent, expected_tree_sha=None)}
+    else:
+        lease_changes = {
+            "repository": {"repository_id": "999999"},
+            "revision": {"config_revision": "f" * 64},
+            "profile": {"profile_id": "personal-profile"},
+        }[invalid]
+        lease = replace(request.authorization.lease, **lease_changes)
+        context_changes: dict[str, object] = {"auth_leases": (lease,)}
+        if invalid == "repository":
+            context_changes["primary_repository_id"] = lease.repository_id
+        changes = {
+            "authorization": replace(request.authorization, lease=lease),
+            "identity_context": replace(request.identity_context, **context_changes),
+            "capability_requests": (
+                LeaseCapabilityRequest(lease.lease_id, ("github.releases.write",)),
+            ),
+        }
+
+    with pytest.raises(ValueError):
+        _release_request(**changes)
