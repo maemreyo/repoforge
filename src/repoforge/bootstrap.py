@@ -450,6 +450,7 @@ def build_auth_ux_service(
         bindings=bindings,
         observe=observe,
         identities=identities,
+        clock=ctx.clock,
         api=ctx.auth_api_inspector,
         transport=ctx.auth_transport_inspector,
         commits=ctx.auth_commit_inspector,

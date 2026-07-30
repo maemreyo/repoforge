@@ -323,6 +323,23 @@
       "planned_owner": "#288/#292"
     },
     {
+      "path": "src/repoforge/adapters/github/repository_observation.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "repository_binding"
+      ],
+      "credential_inputs": [
+        "none; reads public repository metadata with ambient state stripped"
+      ],
+      "target_inputs": [
+        "reviewed repository worktree path"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
+    },
+    {
       "path": "src/repoforge/adapters/github/ticket_graph.py",
       "executables": [
         "gh"

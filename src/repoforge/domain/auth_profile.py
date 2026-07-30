@@ -33,6 +33,12 @@ class RequestedActorClass(str, Enum):
     HUMAN = "human"
     AGENT = "agent"
 
+    @property
+    def role(self) -> CredentialRole:
+        """The internal credential role this public actor class selects for."""
+
+        return CredentialRole.AGENT if self is RequestedActorClass.AGENT else CredentialRole.HUMAN
+
 
 @dataclass(frozen=True, slots=True)
 class AuthProfileSelector:
@@ -53,11 +59,7 @@ class AuthProfileSelector:
 
     @property
     def role(self) -> CredentialRole:
-        return (
-            CredentialRole.AGENT
-            if self.actor_class is RequestedActorClass.AGENT
-            else CredentialRole.HUMAN
-        )
+        return self.actor_class.role
 
     @property
     def automatic(self) -> bool:

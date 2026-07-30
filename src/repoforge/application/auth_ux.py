@@ -41,6 +41,7 @@ from ..ports.auth_inspection import (
     PublicationTargetInspector,
     TransportInspector,
 )
+from ..ports.clock import Clock
 from ..ports.repository_binding_store import RepositoryBindingStore
 from .operations.identity import OperationIdentityManager
 
@@ -200,6 +201,7 @@ class AuthUxService:
         bindings: RepositoryBindingStore,
         observe: ObserveRepository,
         identities: OperationIdentityManager | None = None,
+        clock: Clock | None = None,
         api: ApiIdentityInspector | None = None,
         transport: TransportInspector | None = None,
         commits: CommitIdentityInspector | None = None,
@@ -209,6 +211,7 @@ class AuthUxService:
         self._bindings = bindings
         self._observe = observe
         self._identities = identities
+        self._clock = clock
         self._api = api
         self._transport = transport
         self._commits = commits
@@ -824,7 +827,6 @@ class AuthUxService:
         *,
         operation_id: str,
         expected_revision: int,
-        now: str,
         lease_id: str | None = None,
         profile_id: str | None = None,
     ) -> dict[str, object]:
@@ -832,7 +834,7 @@ class AuthUxService:
         updated = manager.revoke(
             operation_id,
             expected_revision=Revision(expected_revision),
-            now=now,
+            now=self._now(),
             lease_id=lease_id,
             profile_id=profile_id,
         )
@@ -841,6 +843,15 @@ class AuthUxService:
             "operation_id": operation_id,
             "identity": updated.safe_payload(),
         }
+
+    def _now(self) -> str:
+        if self._clock is None:
+            raise _error(
+                ErrorCode.OPERATION_IDENTITY_NOT_FOUND,
+                "No clock is composed, so a lease lifecycle change cannot be timestamped.",
+                next_action="Start the managed runtime before changing operation leases.",
+            )
+        return self._clock.now_iso()
 
     def _require_identities(self) -> OperationIdentityManager:
         if self._identities is None:
