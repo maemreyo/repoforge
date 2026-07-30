@@ -293,6 +293,7 @@ test_files = [
   "tests/test_phases1_4_production_hardening.py",
   "tests/test_constitution_source.py",
   "tests/test_context_pack_binding.py",
+  "tests/test_context_pack_budget.py",
   "tests/test_provider_config.py",
   "tests/test_repo_list_selection_v2.py",
   "tests/test_repository_selection.py",

@@ -6114,6 +6114,9 @@
     "tests/test_v2_retrieval.py",
     "tests/test_workspace_diff_budget.py"
   ],
+  "src/repoforge/application/rules/budget.py": [
+    "tests/test_context_pack_budget.py"
+  ],
   "src/repoforge/application/rules/constitution.py": [
     "tests/test_constitution_source.py"
   ],
