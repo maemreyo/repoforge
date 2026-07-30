@@ -268,7 +268,20 @@ class AuthUxService:
         selector: AuthProfileSelector,
         expected_binding_revision: int | None = None,
     ) -> dict[str, object]:
-        observation = self._observe(repo_id)
+        return self._resolve_observed(
+            repo_id,
+            self._observe(repo_id),
+            selector,
+            expected_binding_revision,
+        )
+
+    def _resolve_observed(
+        self,
+        repo_id: str,
+        observation: RepositoryIdentityObservation,
+        selector: AuthProfileSelector,
+        expected_binding_revision: int | None,
+    ) -> dict[str, object]:
         resolution = resolve_auth_profile(
             AuthSelectionRequest(
                 observation=observation,
@@ -486,12 +499,19 @@ class AuthUxService:
         repo_id: str,
         checks: tuple[AuthSurface, ...] | None = None,
     ) -> AuthWhoamiResult:
+        return self._whoami_observed(repo_id, self._observe(repo_id), checks)
+
+    def _whoami_observed(
+        self,
+        repo_id: str,
+        observation: RepositoryIdentityObservation,
+        checks: tuple[AuthSurface, ...] | None,
+    ) -> AuthWhoamiResult:
         requested = (
             AUTH_SURFACE_ORDER
             if checks is None
             else tuple(surface for surface in AUTH_SURFACE_ORDER if surface in set(checks))
         )
-        observation = self._observe(repo_id)
         snapshots = self._binding_snapshots()
         exact = tuple(
             item
@@ -781,7 +801,10 @@ class AuthUxService:
                         recovery_actions=(RecoveryAction(RecoveryActionKind.REAUTHORIZE),),
                     )
                 )
-        resolution = self.resolve(repo_id=repo_id, selector=AuthProfileSelector())
+        # One observation for the whole report: two `gh` round trips instead of four, and the
+        # resolution half cannot disagree with the surface half about what the repository is.
+        observation = self._observe(repo_id)
+        resolution = self._resolve_observed(repo_id, observation, AuthProfileSelector(), None)
         failure = resolution.get("failure")
         if isinstance(failure, dict):
             actions = tuple(
@@ -798,7 +821,7 @@ class AuthUxService:
                     recovery_actions=actions,
                 )
             )
-        for evidence in self.whoami(repo_id=repo_id).surfaces:
+        for evidence in self._whoami_observed(repo_id, observation, None).surfaces:
             if evidence.state is AuthSurfaceState.BLOCKED:
                 findings.append(
                     AuthDoctorFinding(

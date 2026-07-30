@@ -47,6 +47,7 @@ from repoforge.domain.repository_identity_resolution import (
     CredentialRole,
     RepositoryIdentityObservation,
 )
+from repoforge.testing import FixedClock
 
 NOW = "2026-07-30T00:00:00+00:00"
 _SHA = "a" * 64
@@ -719,3 +720,30 @@ def test_a_declared_but_unobserved_surface_is_configured_not_unavailable(
 
     # Readiness is unchanged by the relabelling.
     assert bound.whoami(repo_id="demo").ready is False
+
+
+def test_doctor_observes_the_repository_once(tmp_path: Path) -> None:
+    """Each observation is two `gh` round trips against the provider.
+
+    `doctor` reports both the resolution outcome and every surface, and both need the same
+    observation. Observing twice doubles the provider calls for one command and lets the two
+    halves of a single report disagree if the repository changes between them.
+    """
+
+    calls: list[str] = []
+    store = JsonRepositoryBindingStore(tmp_path / "state", FcntlLockManager(tmp_path / "locks"))
+
+    def observe(repo_id: str) -> RepositoryIdentityObservation:
+        calls.append(repo_id)
+        return _observation()
+
+    service = AuthUxService(
+        config=_config(tmp_path),
+        bindings=store,
+        observe=observe,
+        clock=FixedClock(NOW),
+    )
+
+    service.doctor(repo_id="demo")
+
+    assert calls == ["demo"]
