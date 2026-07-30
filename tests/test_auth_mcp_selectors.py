@@ -220,3 +220,82 @@ def test_no_generated_schema_carries_a_credential_reference() -> None:
 
     for canary in ("credential_ref", "https_token_environment", "ssh_identity_file", "gho_"):
         assert canary not in rendered, canary
+
+
+# ---------------------------------------------------------------------------
+# The selector must actually reach the application
+# ---------------------------------------------------------------------------
+
+
+def test_every_effectful_tool_forwards_the_selector_to_its_service_method() -> None:
+    """The v2 dispatch maps validated input fields straight onto service kwargs.
+
+    Adding a field to an input without accepting it on the service method makes every call to
+    that tool raise `TypeError` at runtime, which no schema test would catch.
+    """
+
+    import inspect
+
+    from repoforge.application.service import CodingService
+    from repoforge.interfaces.mcp import server
+
+    cases = {
+        "workspace_create": WorkspaceCreateInput(repo_id="demo", task_slug="task"),
+        "workspace_commit": _commit(),
+        "workspace_push": WorkspacePushInput(workspace_id="ws-1"),
+        "workspace_refresh": WorkspaceRefreshInput(
+            workspace_id="ws-1",
+            action=RefreshAction.PREVIEW,
+            expected_head_sha=_SHA,
+            expected_fingerprint=_SHA256,
+        ),
+        "workspace_pr": WorkspacePrInput(
+            workspace_id="ws-1",
+            action=WorkspacePrAction.CREATE_DRAFT,
+            title="t",
+            body="b",
+            idempotency_key="idem-key-1",
+        ),
+        "repo_issue": RepoIssueInput(
+            repo_id="demo",
+            mode=IssueMode.COMMENT,
+            issue_number=1,
+            body="b",
+            evidence_ref="ref",
+            idempotency_key="idem-key-1",
+        ),
+    }
+    for tool_name, model in cases.items():
+        method = getattr(CodingService, server._SERVICE_METHODS[tool_name])
+        accepted = set(inspect.signature(method).parameters)
+        supplied = set(
+            server._dispatch_kwargs(
+                tool_name,
+                model,
+                runtime_identity=None,
+            )
+        )
+        assert {"auth_profile", "actor_class"} <= supplied, tool_name
+        assert supplied <= accepted, (tool_name, sorted(supplied - accepted))
+
+
+def test_a_secret_shaped_selector_is_refused_before_any_effect_is_admitted() -> None:
+    from repoforge.application.service import _auth_selector
+    from repoforge.domain.errors import ErrorCode as DomainErrorCode
+    from repoforge.domain.errors import RepoForgeError
+
+    with pytest.raises(RepoForgeError) as failure:
+        _auth_selector("ghp_looks_like_a_token", "human")
+
+    assert failure.value.code is DomainErrorCode.CREDENTIAL_SCOPE_MISMATCH
+    assert "No identity was acquired" in " ".join(failure.value.unchanged_state)
+    assert "ghp_looks_like_a_token" not in str(failure.value)
+
+
+def test_the_default_selector_is_the_deterministic_one_at_the_application_boundary() -> None:
+    from repoforge.application.service import _auth_selector
+
+    selector = _auth_selector("auto", "human")
+
+    assert selector.automatic is True
+    assert selector.actor_class is RequestedActorClass.HUMAN
