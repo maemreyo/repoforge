@@ -147,7 +147,24 @@ Because `workspace_mutate` can delete or restore content, its tool-wide MCP anno
 
 `content_inspected` is the field to read first, because RepoForge content-inspects `git` argv only. A `git` run is checked before any process starts: force, mirror, and delete pushes, history rewrites, `reflog expire`, `update-ref -d`, `clean --force`, and every `--exec` form are refused with `ADHOC_COMMAND_FORBIDDEN`, and a mutating form additionally requires `mutability = "workspace"` with both `expected_head_sha` and `expected_fingerprint`. Every other runner is opaque: `command_class` is `null`, `content_inspected` is `false`, and those guards never ran.
 
-That distinction matters most when an operator adds a shell (`bash`, `sh`) to `repositories.<id>.adhoc_runners`. Nothing blocks it, and it is the direct way to give an agent pipes, `&&`, and globbing — but `["bash", "-c", "git push --force …"]` is a shell invocation, not a git one, so the git argv guards do not apply to what the shell then runs. Under an opaque runner the remaining protections are the exact-state lock, the fingerprint comparison, and `read_only_violation`. A multi-line program is better placed in a file the runner reads: argv elements reject newlines, and a script committed to the workspace stays visible in `workspace_diff` and inside the fingerprint.
+That distinction matters most when an operator adds a shell (`bash`, `sh`) to `repositories.<id>.adhoc_runners`. Nothing blocks it, and it is the direct way to give an agent pipes, `&&`, and globbing — but `["bash", "-c", "git push --force …"]` is a shell invocation, not a git one, so the git argv guards do not apply to what the shell then runs. Under an opaque runner the remaining protections are the exact-state lock, the fingerprint comparison, and `read_only_violation`.
+
+### Running programs that do not fit in an argv
+
+An argv element carries at most 512 characters and rejects newlines, so a multi-line program belongs in a file the runner reads rather than in a `bash -c` string. Put it in a **gitignored scratch directory** — a convention, not a feature:
+
+```
+# .gitignore
+.rf-scratch/
+```
+
+The workspace fingerprint is `HEAD`, `git diff HEAD`, and `git ls-files --others --exclude-standard`. That last flag is the point: a gitignored file contributes nothing to the fingerprint. A script written to `.rf-scratch/` therefore does not change the fingerprint, does not appear in `changed_paths` or `workspace_diff`, does not require `mutability = "workspace"`, and cannot leak into a commit — while persisting across calls, which nothing else in the ad-hoc surface does. Write it with `workspace_mutate`, which consults `allowed_paths`/`denied_paths` and not `.gitignore`, then run `["bash", ".rf-scratch/run.sh"]`.
+
+A script that should be reviewed belongs in the tree instead, where the diff shows it.
+
+### Standard input
+
+`stdin_text` supplies standard input to a `mode = "adhoc"` command and is rejected for every other mode; without it the command gets no input at all. Unlike an argv element it may contain newlines, which is what makes `["git", "apply", "-"]` usable. It is bounded at 64000 characters; larger input belongs in a file the command reads. Only its length is audited, never its content.
 
 `read_only_violation` is true when a command classified or declared read-only nonetheless changed the workspace fingerprint. It means the run's own account of what it touched is unreliable: re-read `workspace_status` rather than trusting the classification.
 

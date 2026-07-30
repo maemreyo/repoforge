@@ -57,6 +57,7 @@ class CoordinatedExecutionSession:
             output_limit=self.request.output_limit,
             check=self.request.failure_mode is CommandFailureMode.RAISE,
             cancel_token=self.request.cancel_token,
+            stdin_text=self.request.stdin_text,
         )
         artifacts = self._backend.collect_session_artifacts(
             self.prepared,

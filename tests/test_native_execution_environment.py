@@ -283,8 +283,9 @@ class RecordingSessionBackend:
         output_limit: int,
         check: bool,
         cancel_token=None,
+        stdin_text: str | None = None,
     ) -> CommandResult:
-        del session, timeout, output_limit, cancel_token
+        del session, timeout, output_limit, cancel_token, stdin_text
         self.executed.append((argv, check))
         return CommandResult(argv, str(cwd), 0, "ok", "")
 

@@ -1414,6 +1414,7 @@ class CodingService:
         expected_fingerprint: str | None = None,
         expected_head_sha: str | None = None,
         mutability: str = "read_only",
+        stdin_text: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._adhoc.execute(
@@ -1425,6 +1426,7 @@ class CodingService:
                     expected_fingerprint=expected_fingerprint,
                     expected_head_sha=expected_head_sha,
                     mutability=mutability,
+                    stdin_text=stdin_text,
                 )
             )
         )
@@ -1496,6 +1498,7 @@ class CodingService:
         plan_task_id: str | None = None,
         plan_expires_at: str | None = None,
         plan_through: str = "iteration",
+        stdin_text: str | None = None,
     ) -> dict[str, Any]:
         if mode == "plan" and plan_action != "preview":
             return self._workspace_verify_plan_action(
@@ -1528,6 +1531,7 @@ class CodingService:
                     rerun=rerun,  # type: ignore[arg-type]
                     impact_paths=impact_paths,
                     artifact_output_path=artifact_output_path,
+                    stdin_text=stdin_text,
                 )
             )
         )

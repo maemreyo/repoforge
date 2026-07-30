@@ -26,6 +26,7 @@ from ...domain.adhoc import (
     ExecutionMode,
     classify_adhoc_command,
     validate_adhoc_argv,
+    validate_adhoc_stdin,
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
@@ -57,6 +58,7 @@ class WorkspaceRunAdhocCommand:
     expected_fingerprint: str | None = None
     expected_head_sha: str | None = None
     mutability: str = "read_only"
+    stdin_text: str | None = None
     cancellation_token: CancellationToken | None = None
 
 
@@ -244,6 +246,7 @@ class WorkspaceAdhocRunner:
                 ErrorCode.ADHOC_ARGV_INVALID,
             )
         argv = validate_adhoc_argv(c.argv, repo.adhoc_runners)
+        stdin_text = validate_adhoc_stdin(c.stdin_text)
         # Content-inspect the exact argv: blocks irreversible/history-rewriting git forms
         # (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers whether a
         # git command is read-only or mutating. Non-git runners return None (opaque).
@@ -284,6 +287,9 @@ class WorkspaceAdhocRunner:
             "expected_head_sha": c.expected_head_sha,
             "mutability": c.mutability,
             "command_class": command_class.value if command_class is not None else None,
+            # Length only. Standard input is caller-supplied content that may carry a
+            # patch, a token, or anything else, and the audit log is not the place for it.
+            "stdin_length": len(stdin_text) if stdin_text is not None else 0,
         }
 
         def record_command_failure(exc: CommandError) -> None:
@@ -355,6 +361,7 @@ class WorkspaceAdhocRunner:
                     timeout_seconds=locked_repo.adhoc_timeout_seconds,
                     output_limit=self.ctx.config.server.max_tool_output_chars,
                     cancel_token=cancel_token,
+                    stdin_text=stdin_text,
                 )
                 try:
                     with self.ctx.execution.prepare(execution_request) as session:

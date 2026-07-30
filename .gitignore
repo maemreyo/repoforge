@@ -19,3 +19,9 @@ config.toml
 # Local MCP client wiring for whichever agent tooling a developer runs; not part of
 # RepoForge and not reviewed configuration. Swept in once by a careless `git add -A`.
 .mcp.json
+
+# Scratch space for ad-hoc runner scripts. Gitignored on purpose: the workspace
+# fingerprint is built from `git ls-files --others --exclude-standard`, so anything
+# here is invisible to it and cannot reach a commit or a diff. A script meant to be
+# reviewed belongs in the tree instead.
+.rf-scratch/

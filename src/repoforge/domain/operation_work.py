@@ -47,6 +47,10 @@ _ADHOC_REQUEST_FIELDS = frozenset(
         "config_generation",
     }
 )
+#: Fields the encoder always writes but whose absence must still decode, so an item
+#: queued by an earlier release survives the activation that adds them. The decoder
+#: stays exact about unknown fields; it is only tolerant about these missing ones.
+_OPTIONAL_REQUEST_FIELDS: dict[str, frozenset[str]] = {"adhoc": frozenset({"stdin_text"})}
 _DIAGNOSTIC_REQUEST_FIELDS = frozenset(
     {
         "kind",
@@ -90,6 +94,7 @@ class OperationWorkRequest:
     expected_failure_class: str | None = None
     force_rerun: bool = False
     rerun_failed: bool = False
+    stdin_text: str | None = None
 
     @classmethod
     def profile(
@@ -154,6 +159,7 @@ class OperationWorkRequest:
         expected_head_sha: str,
         expected_fingerprint: str,
         config_generation: int,
+        stdin_text: str | None = None,
     ) -> Self:
         return cls(
             kind="adhoc",
@@ -161,6 +167,7 @@ class OperationWorkRequest:
             argv=argv,
             working_directory=working_directory,
             mutability=mutability,
+            stdin_text=stdin_text,
             expected_head_sha=expected_head_sha,
             expected_fingerprint=expected_fingerprint,
             config_generation=config_generation,
@@ -328,6 +335,7 @@ def work_item_payload(item: OperationWorkItem) -> dict[str, object]:
             "argv": list(request.argv),
             "working_directory": request.working_directory,
             "mutability": request.mutability,
+            "stdin_text": request.stdin_text,
             "expected_head_sha": request.expected_head_sha,
             "expected_fingerprint": request.expected_fingerprint,
             "config_generation": request.config_generation,
@@ -355,6 +363,9 @@ def work_item_from_payload(payload: dict[str, object]) -> OperationWorkItem:
         "adhoc": _ADHOC_REQUEST_FIELDS,
         "diagnostic": _DIAGNOSTIC_REQUEST_FIELDS,
     }.get(request_kind, frozenset())
+    optional_fields = _OPTIONAL_REQUEST_FIELDS.get(request_kind, frozenset())
+    request_keys = set(request_payload) if isinstance(request_payload, dict) else set()
+    request_shape_ok = request_fields <= request_keys <= request_fields | optional_fields
     raw_attempt = payload.get("attempt")
     raw_schema_version = payload.get("schema_version")
     raw_child_started = payload.get("child_started")
@@ -368,7 +379,7 @@ def work_item_from_payload(payload: dict[str, object]) -> OperationWorkItem:
         or raw_attempt < 0
         or not isinstance(raw_child_started, bool)
         or not isinstance(request_payload, dict)
-        or set(request_payload) != request_fields
+        or not request_shape_ok
         or request_kind not in {"profile", "adhoc", "diagnostic"}
     ):
         raise RepoForgeError(
@@ -432,6 +443,11 @@ def work_item_from_payload(payload: dict[str, object]) -> OperationWorkItem:
                 else str(request_payload["working_directory"])
             ),
             mutability=str(request_payload["mutability"]),
+            stdin_text=(
+                None
+                if request_payload.get("stdin_text") is None
+                else str(request_payload["stdin_text"])
+            ),
             expected_head_sha=str(request_payload["expected_head_sha"]),
             expected_fingerprint=str(request_payload["expected_fingerprint"]),
             config_generation=int(request_payload["config_generation"]),

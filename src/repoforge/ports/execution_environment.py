@@ -37,6 +37,10 @@ class ExecutionRequest:
     artifact_paths: tuple[str, ...] = ()
     failure_mode: CommandFailureMode = CommandFailureMode.RAISE
     cancel_token: CancellationToken | None = None
+    # Optional standard input for the reviewed commands. Part of the request rather than
+    # a per-execute argument so it is bound to the prepared session, exactly as argv is
+    # bound through `reviewed_commands`. None leaves the child on DEVNULL.
+    stdin_text: str | None = None
     lockfiles: tuple[str, ...] = (
         "uv.lock",
         "poetry.lock",
@@ -136,6 +140,7 @@ class ExecutionEnvironmentPort(Protocol):
         output_limit: int,
         check: bool,
         cancel_token: CancellationToken | None = None,
+        stdin_text: str | None = None,
     ) -> CommandResult: ...
 
     def execute_bytes_in_session(
