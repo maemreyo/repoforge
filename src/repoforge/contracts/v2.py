@@ -2152,6 +2152,32 @@ class OperationOutput(ToolResponse):
     failure_evidence: FailureEvidenceDetail | None = None
     changed_since: bool = False
     timed_out: bool = False
+    progress_delivery: Literal["pushed", "poll"] | None = Field(
+        default=None,
+        description=(
+            "Wait only. Which mechanism this wait actually used: 'pushed' means live "
+            "progress notifications were sent on the open request, so a long wait is "
+            "worth re-issuing; 'poll' means this client cannot consume notifications "
+            "and should pace itself with suggested_poll_after_s instead."
+        ),
+    )
+    next_since_updated_at: str | None = Field(
+        default=None,
+        max_length=80,
+        description=(
+            "Wait only. Pass back as since_updated_at to resume where this wait stopped. "
+            "Null when the operation is terminal and there is nothing left to wait for."
+        ),
+    )
+    suggested_poll_after_s: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Wait only. How long to wait before the next call. Present even when the "
+            "wait returns no operation evidence, which is the case a caller would "
+            "otherwise have nothing to pace from."
+        ),
+    )
 
 
 class ConfigInspectInput(StrictModel):

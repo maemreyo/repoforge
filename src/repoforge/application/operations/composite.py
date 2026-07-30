@@ -64,6 +64,12 @@ class OperationResult:
     failure_evidence: dict[str, object] | None = None
     changed_since: bool = False
     timed_out: bool = False
+    # Wait-only. `progress_delivery` tells the caller which mechanism it actually got, and
+    # the two resubscribe fields are the only way to continue a wait that returned no
+    # evidence -- an `until=progress` timeout with no delta used to return nothing at all.
+    progress_delivery: str | None = None
+    next_since_updated_at: str | None = None
+    suggested_poll_after_s: float | None = None
 
 
 def _poll_after(view: OperationSummary | OperationStatusView) -> float | None:
@@ -281,6 +287,13 @@ class OperationCoordinator:
                 next_cursor=None,
                 changed_since=changed_since,
                 timed_out=timed_out,
+                # Name the mechanism the caller got rather than making it infer one from
+                # whether notifications happened to arrive.
+                progress_delivery="pushed" if reporter.enabled else "poll",
+                # A terminal wait has nothing to resume; anything else does, and must say
+                # so even when it carries no evidence to read the cursor off.
+                next_since_updated_at=None if terminal else current.updated_at,
+                suggested_poll_after_s=_poll_after(current),
             )
         if command.action == "get":
             if command.operation_id is None:
