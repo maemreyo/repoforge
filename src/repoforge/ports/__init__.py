@@ -21,6 +21,11 @@ from .activation import (
 )
 from .approval_store import ApprovalPayloadStore, ApprovalStore
 from .audit import AuditSink
+from .auth_discovery import (
+    AmbientAuthConflictReader,
+    NamedAccountDiscovery,
+    SshAliasDiscovery,
+)
 from .background_tasks import BackgroundTaskRunner
 from .capabilities import ExecutableLocator
 from .clock import Clock
@@ -149,6 +154,7 @@ from .workspace_publication import (
 from .workspace_store import WorkspaceStore
 
 __all__ = [
+    "AmbientAuthConflictReader",
     "ApprovalPayloadStore",
     "ApprovalStore",
     "ApprovedExecution",
@@ -212,6 +218,7 @@ __all__ = [
     "IterationCache",
     "LockManager",
     "MetricsSink",
+    "NamedAccountDiscovery",
     "NestedDiscoveryRequest",
     "NestedLeaseProvider",
     "NestedResourceDiscovery",
@@ -264,6 +271,7 @@ __all__ = [
     "RuntimeStore",
     "Sleeper",
     "SmokeResult",
+    "SshAliasDiscovery",
     "StateRepository",
     "StoredGhAccountTokenSource",
     "TaskStore",

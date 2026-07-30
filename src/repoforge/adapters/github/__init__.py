@@ -1,3 +1,4 @@
+from .account_discovery import GhCliNamedAccountDiscovery
 from .api_identity import (
     GhCliGitHubApiIdentityVerifier,
     GhCliGitHubAppInstallationTokenIssuer,
@@ -17,6 +18,7 @@ __all__ = [
     "GhCliGateway",
     "GhCliGitHubApiIdentityVerifier",
     "GhCliGitHubAppInstallationTokenIssuer",
+    "GhCliNamedAccountDiscovery",
     "GhCliStoredAccountTokenSource",
     "GitHubApiAuthProvider",
     "github_api_auth_lease",

@@ -75,6 +75,26 @@
       "planned_owner": "#290"
     },
     {
+      "path": "src/repoforge/adapters/git/ambient_auth.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "commit_author",
+        "commit_signer",
+        "transport"
+      ],
+      "credential_inputs": [
+        "none; reports credential-helper and token environment names, never values"
+      ],
+      "target_inputs": [
+        "reviewed repository path",
+        "safe dotted git config key"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
+    },
+    {
       "path": "src/repoforge/adapters/git/cli.py",
       "executables": [
         "git"
@@ -145,6 +165,23 @@
       "planned_owner": "#294"
     },
     {
+      "path": "src/repoforge/adapters/git/ssh_alias_discovery.py",
+      "executables": [
+        "ssh"
+      ],
+      "surfaces": [
+        "transport"
+      ],
+      "credential_inputs": [
+        "none; resolves an identity-file path, never key material"
+      ],
+      "target_inputs": [
+        "explicit safe SSH alias"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
+    },
+    {
       "path": "src/repoforge/adapters/git/transport.py",
       "executables": [
         "git",
@@ -168,6 +205,24 @@
       ],
       "current_risk": "shared_executor_boundary",
       "planned_owner": "#289"
+    },
+    {
+      "path": "src/repoforge/adapters/github/account_discovery.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "api"
+      ],
+      "credential_inputs": [
+        "ephemeral named-account token used only for one isolated actor probe"
+      ],
+      "target_inputs": [
+        "explicit provider host",
+        "explicit named login"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
     },
     {
       "path": "src/repoforge/adapters/github/api_identity.py",
@@ -349,6 +404,32 @@
       "planned_owner": "#295"
     },
     {
+      "path": "src/repoforge/adapters/publication.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "remote_topology",
+        "git_push",
+        "pull_request",
+        "publication_reconciliation"
+      ],
+      "credential_inputs": [
+        "none for read-only Git topology inspection",
+        "operation-scoped Git transport spec and process auth context for push effects",
+        "operation-scoped isolated GitHub API auth delegated to the publication gateway"
+      ],
+      "target_inputs": [
+        "stable source and destination repository IDs",
+        "reviewed remote URL and ordered rewrite configuration",
+        "exact source, destination, base and head refs",
+        "expected commit and tree object IDs",
+        "explicit cross-boundary approval"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#292"
+    },
+    {
       "path": "src/repoforge/adapters/repository/discovery.py",
       "executables": [
         "git"
@@ -388,32 +469,6 @@
       ],
       "current_risk": "ambient_or_implicit",
       "planned_owner": "#286"
-    },
-    {
-      "path": "src/repoforge/adapters/publication.py",
-      "executables": [
-        "git"
-      ],
-      "surfaces": [
-        "remote_topology",
-        "git_push",
-        "pull_request",
-        "publication_reconciliation"
-      ],
-      "credential_inputs": [
-        "none for read-only Git topology inspection",
-        "operation-scoped Git transport spec and process auth context for push effects",
-        "operation-scoped isolated GitHub API auth delegated to the publication gateway"
-      ],
-      "target_inputs": [
-        "stable source and destination repository IDs",
-        "reviewed remote URL and ordered rewrite configuration",
-        "exact source, destination, base and head refs",
-        "expected commit and tree object IDs",
-        "explicit cross-boundary approval"
-      ],
-      "current_risk": "shared_executor_boundary",
-      "planned_owner": "#292"
     },
     {
       "path": "src/repoforge/adapters/runtime/execution_worker.py",
