@@ -23,7 +23,6 @@ from ..domain.durable_state import Revision, StateEnvelope
 from ..domain.errors import ErrorCode, RepoForgeError
 from ..domain.git_transport_identity import GitTransportKind
 from ..domain.repository_identity import (
-    ActorClass,
     RecoveryAction,
     RecoveryActionKind,
     RepositoryIdentityBinding,
@@ -34,6 +33,7 @@ from ..domain.repository_identity_resolution import (
     RepositoryBindingSnapshot,
     RepositoryIdentityObservation,
     RepositoryResolutionOutcome,
+    role_accepts_actor_class,
 )
 from ..ports.auth_inspection import (
     ApiIdentityInspector,
@@ -873,18 +873,10 @@ class AuthUxService:
 
 
 def _role_matches(configured: AuthProfileConfig, role: CredentialRole) -> bool:
-    return _actor_class_matches(configured.profile.actor_class, role)
+    return role_accepts_actor_class(role, configured.profile.actor_class)
 
 
 def _role_matches_eligibility(
     eligibility: CredentialProfileEligibility, role: CredentialRole
 ) -> bool:
-    return _actor_class_matches(eligibility.profile.actor_class, role)
-
-
-def _actor_class_matches(actor_class: ActorClass, role: CredentialRole) -> bool:
-    """`human` accepts a delegated human; `agent` accepts only an autonomous agent."""
-
-    if role is CredentialRole.AGENT:
-        return actor_class is ActorClass.AUTONOMOUS_AGENT
-    return actor_class in {ActorClass.HUMAN_OPERATED, ActorClass.DELEGATED_HUMAN}
+    return role_accepts_actor_class(role, eligibility.profile.actor_class)

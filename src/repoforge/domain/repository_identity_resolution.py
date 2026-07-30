@@ -123,10 +123,21 @@ def _pattern_matches(pattern: str, canonical_name: str) -> bool:
     )
 
 
-def _role_matches(profile: CredentialProfile, role: CredentialRole) -> bool:
+def role_accepts_actor_class(role: CredentialRole, actor_class: ActorClass) -> bool:
+    """The single authority for which actor classes a requested role accepts.
+
+    `human` accepts a delegated human as well as a directly operated one; `agent` accepts only
+    an autonomous agent. Every caller -- the resolver, the selector, and the UX facade -- must
+    ask this, so the rule cannot drift between them.
+    """
+
     if role is CredentialRole.AGENT:
-        return profile.actor_class is ActorClass.AUTONOMOUS_AGENT
-    return profile.actor_class in {ActorClass.HUMAN_OPERATED, ActorClass.DELEGATED_HUMAN}
+        return actor_class is ActorClass.AUTONOMOUS_AGENT
+    return actor_class in {ActorClass.HUMAN_OPERATED, ActorClass.DELEGATED_HUMAN}
+
+
+def _role_matches(profile: CredentialProfile, role: CredentialRole) -> bool:
+    return role_accepts_actor_class(role, profile.actor_class)
 
 
 @dataclass(frozen=True, slots=True)
