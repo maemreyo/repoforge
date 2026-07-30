@@ -6122,6 +6122,9 @@
     "tests/test_rules_loader.py",
     "tests/test_skills_scaffold.py"
   ],
+  "src/repoforge/application/rules/pack.py": [
+    "tests/test_context_pack_binding.py"
+  ],
   "src/repoforge/application/rules/validators.py": [
     "tests/test_rules_loader.py",
     "tests/test_rules_validators.py"
@@ -10985,6 +10988,7 @@
     "tests/test_code_intelligence_integration.py",
     "tests/test_command_source_integrity.py",
     "tests/test_config_admin.py",
+    "tests/test_context_pack_binding.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_execution_plans.py",
     "tests/test_expensive_profile_guards.py",
