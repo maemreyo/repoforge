@@ -27,6 +27,18 @@ from repoforge.interfaces.mcp.server import _sleeps_while_waiting, create_server
 _WAIT_SECONDS = 5
 """Long enough that a serialized second call could not possibly beat it."""
 
+_TERMINAL_WAIT_SECONDS = 30
+"""Deliberately far larger than the work it waits on.
+
+The terminal-wake test needs to distinguish "returned because the operation
+finished" from "returned because the clock ran out", and the only machine-independent
+way to do that is a bound the clock cannot plausibly reach. A tight bound measures the
+runner instead: with a 5 s bound this failed on main at 5.58 s, because `succeed()` has
+to take the same record's exclusive lock that the wait loop is grabbing ten times a
+second (see #350). Returning early is not something the test can control; returning at
+all, well inside 30 s, is.
+"""
+
 
 # ------------------------------------------------------------------- the predicate
 
@@ -129,7 +141,7 @@ async def test_offloaded_wait_still_wakes_on_terminal_before_its_timeout(
                 {
                     "action": "wait",
                     "operation_id": task.operation_id,
-                    "timeout_seconds": _WAIT_SECONDS,
+                    "timeout_seconds": _TERMINAL_WAIT_SECONDS,
                     "until": "terminal",
                 },
             )
@@ -137,10 +149,11 @@ async def test_offloaded_wait_still_wakes_on_terminal_before_its_timeout(
 
     assert result.isError is False
     assert result.structuredContent is not None
+    # Woke on the outcome, not on the clock: terminal evidence, no timeout, and back
+    # long before a bound the clock could not have reached.
     assert result.structuredContent["timed_out"] is False
     assert result.structuredContent["operation"]["terminal"] is True
-    # Returned on the outcome, not on the clock.
-    assert elapsed < _WAIT_SECONDS
+    assert elapsed < _TERMINAL_WAIT_SECONDS
 
 
 # ------------------------------------------------------------- the progress bridge
