@@ -565,10 +565,15 @@ class AuthUxService:
                 detail="No reviewed auth profile is selected for this repository.",
             )
         if self._api is None:
+            # The identity is declared, it simply was not proved on this call. That is a
+            # different answer from "nothing is declared", and a different next step.
             return AuthSurfaceEvidence(
                 surface=AuthSurface.API,
-                state=AuthSurfaceState.UNAVAILABLE,
-                detail="No API identity inspector is composed, so no actor can be proved.",
+                state=AuthSurfaceState.CONFIGURED,
+                detail=(
+                    f"{configured.profile.expected_actor_id} is the reviewed API actor. No API "
+                    "identity inspector is composed here, so it was not proved live."
+                ),
                 profile_id=configured.profile.profile_id,
             )
         try:
@@ -616,8 +621,12 @@ class AuthUxService:
         if self._transport is None or path is None:
             return AuthSurfaceEvidence(
                 surface=AuthSurface.TRANSPORT,
-                state=AuthSurfaceState.UNAVAILABLE,
-                detail="No pinned transport inspector is composed for this repository.",
+                state=AuthSurfaceState.CONFIGURED,
+                detail=(
+                    f"A pinned {configured.transport.kind.value.upper()} transport is reviewed "
+                    "for this repository. No transport inspector is composed here, so it was "
+                    "not exercised."
+                ),
                 profile_id=configured.profile.profile_id,
             )
         try:

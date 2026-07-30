@@ -438,9 +438,7 @@ def test_whoami_requests_a_subset_but_keeps_the_stable_order(tmp_path: Path) -> 
     assert [item.surface.value for item in result.surfaces] == ["api", "publication"]
 
 
-def test_a_missing_inspector_is_unavailable_and_never_an_ambient_fallback(
-    tmp_path: Path,
-) -> None:
+def test_a_missing_inspector_never_becomes_an_ambient_fallback(tmp_path: Path) -> None:
     service = _service(tmp_path)
     _bound(service)
 
@@ -448,14 +446,22 @@ def test_a_missing_inspector_is_unavailable_and_never_an_ambient_fallback(
     states = {item.surface: item.state for item in result.surfaces}
 
     assert states[AuthSurface.REPOSITORY_BINDING] is AuthSurfaceState.VERIFIED
+    # Declared but not proved on this call.
+    for surface in (AuthSurface.API, AuthSurface.TRANSPORT):
+        assert states[surface] is AuthSurfaceState.CONFIGURED, surface
+    # Nothing reviewed and nothing composed.
     for surface in (
-        AuthSurface.API,
-        AuthSurface.TRANSPORT,
         AuthSurface.COMMIT_AUTHOR,
         AuthSurface.COMMIT_SIGNER,
         AuthSurface.PUBLICATION,
     ):
-        assert states[surface] is AuthSurfaceState.UNAVAILABLE
+        assert states[surface] is AuthSurfaceState.UNAVAILABLE, surface
+    # Whatever the label, nothing unobserved may be treated as usable.
+    assert not any(
+        item.satisfied
+        for item in result.surfaces
+        if item.surface is not AuthSurface.REPOSITORY_BINDING
+    )
     assert result.ready is False
 
 
@@ -468,7 +474,9 @@ def test_transport_success_never_upgrades_api_actor_evidence(tmp_path: Path) -> 
 
     assert surfaces[AuthSurface.TRANSPORT].state is AuthSurfaceState.VERIFIED
     assert surfaces[AuthSurface.TRANSPORT].actor_id is None
-    assert surfaces[AuthSurface.API].state is AuthSurfaceState.UNAVAILABLE
+    # The API surface stays unproved and names no observed actor, whatever the transport did.
+    assert surfaces[AuthSurface.API].state is AuthSurfaceState.CONFIGURED
+    assert surfaces[AuthSurface.API].satisfied is False
     assert surfaces[AuthSurface.API].actor_id is None
 
 
@@ -682,3 +690,32 @@ def test_an_explicit_profile_cannot_override_an_exact_binding(tmp_path: Path) ->
 
     assert resolved["outcome"] == "failed"
     assert resolved["failure"]["code"] == "PROFILE_NOT_AUTHORIZED"
+
+
+def test_a_declared_but_unobserved_surface_is_configured_not_unavailable(
+    tmp_path: Path,
+) -> None:
+    """`configured` and `unavailable` are different answers and must not collapse.
+
+    A profile that declares an API identity and a pinned transport, inspected by a context that
+    composes no inspector for them, is *declared but not observed*. Reporting `unavailable`
+    there would lose the distinction from a repository that declares nothing at all -- and the
+    operator's next step differs: compose the inspector, versus declare a profile.
+    """
+
+    bound = _service(tmp_path)
+    bound.bind(repo_id="demo", selector=AuthProfileSelector())
+    undeclared = _service(tmp_path / "none", profiles={})
+
+    bound_states = {item.surface: item for item in bound.whoami(repo_id="demo").surfaces}
+    undeclared_states = {item.surface: item for item in undeclared.whoami(repo_id="demo").surfaces}
+
+    for surface in (AuthSurface.API, AuthSurface.TRANSPORT):
+        assert bound_states[surface].state is AuthSurfaceState.CONFIGURED, surface
+        assert bound_states[surface].profile_id == "personal", surface
+        # Still not an observation, so it can never satisfy a required surface.
+        assert bound_states[surface].satisfied is False, surface
+        assert undeclared_states[surface].state is AuthSurfaceState.UNAVAILABLE, surface
+
+    # Readiness is unchanged by the relabelling.
+    assert bound.whoami(repo_id="demo").ready is False

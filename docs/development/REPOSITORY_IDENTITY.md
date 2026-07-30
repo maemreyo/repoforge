@@ -129,6 +129,97 @@ Commit evidence records author, committer, actor class, signing mode, signer fin
 
 Actor, Git transport, author, committer, signer, PR creator, release creator, and publication destination must be compared independently. Missing required evidence fails closed.
 
+## Reviewed configuration
+
+Auth profiles are declared in one root `[auth_profiles.<id>]` table, separate from the per-repository verification `profiles` table. Each declaration is secret-free: it names a `credential_reference`, a `credential_fingerprint`, and for HTTPS an environment *name*, never a value. `AppConfig` turns each declaration into the existing identity primitives — `CredentialProfile`, `CredentialProfileEligibility`, one of `StoredGhAccountSpec` or `GitHubAppInstallationSpec`, and `GitTransportSpec` — so there is no parallel representation to keep in sync. A configuration with no auth profiles loads unchanged and reports `identity_migration_required`.
+
+```toml
+[auth_profiles.personal]
+provider = "github"
+credential_kind = "stored_account"
+credential_reference = "gh-account-personal"
+actor_class = "human_operated"
+expected_actor_id = "github-user-123"
+enabled = true
+repository_id = "987654"
+repository_patterns = ["github.com/example-owner/*"]
+boundary_id = "example-owner"
+capability_ids = ["github.contents.read", "github.contents.write"]
+github_host = "github.com"
+github_login = "example-user"
+transport_kind = "https"
+https_token_environment = "REPOFORGE_GH_PERSONAL_TOKEN"
+credential_fingerprint = "…64 lowercase hex…"
+allowed_access = ["read", "write"]
+lease_seconds = 300
+```
+
+Adding, enabling, or widening a profile is a **capability expansion**, so `classify_capability_delta` gates it behind operator approval. Removing, disabling, or narrowing one is a restriction. Swapping the actor, credential reference, or pinned transport behind an existing profile id is incompatible: the id would then name a different identity. Recorded import provenance (`source_ssh_alias`) is metadata only. A root section the classifier does not recognize lands in `unclassified` and is reported as incompatible, which is why every field above has a declared direction.
+
+## Selecting an identity
+
+The public selector is `auth_profile` (a declared id, or `auto`) plus `actor_class` (`human` or `agent`). `auto` succeeds only for exactly one deterministically eligible profile; ambiguity, a missing candidate, and a disabled candidate all fail closed. `human` accepts `HUMAN_OPERATED` and `DELEGATED_HUMAN`; `agent` accepts only `AUTONOMOUS_AGENT`. An explicit profile passes the same binding, role, capability, transport, author, signer, and publication checks as automatic selection, and can never override an exact binding.
+
+The selector appears on the MCP inputs of the six tools whose calls can act as an identity: `workspace_create`, `workspace_commit`, `workspace_push`, `workspace_refresh`, `workspace_pr`, and `repo_issue`. Defaults are `auto` / `human`, so callers written before selectors existed keep working. Branches that perform no write reject an explicit selector rather than accepting and ignoring it — `workspace_pr watch` and the read-only `repo_issue` modes. Every `workspace_refresh` action keeps the selector, including `preview`, because it fetches the base through the pinned transport. The public tool roster stays at 28.
+
+The contract pattern admits `_`, so a token-shaped profile id reaches the application layer; the domain `AuthProfileSelector` is the fail-closed layer for that, and it is validated before any material is acquired or any effect is admitted.
+
+## Operator commands
+
+```bash
+rf auth profile list --enabled-only
+rf auth profile inspect personal
+rf auth resolve demo                      # what would be selected; writes nothing
+rf auth bind demo                         # persist the proposed binding
+rf auth bind demo --actor-class agent     # fill the other role slot
+rf auth unbind demo --actor-class human --expected-revision 3
+rf auth whoami demo --check all
+rf auth doctor demo
+rf auth lease inspect op-1234
+rf auth lease revoke op-1234 --expected-revision 2 --profile-id personal
+rf auth import gh --login example-user
+rf auth import ssh github-work
+rf auth migrate inspect demo
+rf auth migrate apply demo --plan-id … --plan-hash …
+```
+
+Reads need no flags when one profile is eligible. Writes must name the exact state they were reviewed against: a binding revision, a lease revision, or a plan hash. `whoami` and `doctor` exit 3 when a required surface is unsatisfied or a finding blocks. Clearing the final role on a binding is refused — a binding with no profile is not representable, and dropping the binding entirely is a different decision than narrowing its actor classes.
+
+`rf auth` runs outside the managed runtime, so it composes no per-surface inspectors and no durable operation identity store. Those surfaces report `unavailable`; they never answer from whatever account happens to be active.
+
+## Independent identity surfaces
+
+`rf auth whoami` reports these surfaces in this stable order, so two runs diff line by line:
+
+```text
+repository_binding
+api
+transport
+commit_author
+commit_committer
+commit_signer
+publication
+```
+
+Each is `verified`, `configured`, `unobservable`, `blocked`, or `unavailable`. A reachable transport reports `verified` with **no actor**, so it can never be read as proof of an API actor. An unsigned attestation reports `unobservable` rather than naming a signer the repository does not have. A surface with no composed inspector reports `unavailable`. Overall readiness depends on every requested required surface, not on any single one.
+
+## Importing an existing setup
+
+Discovery is strictly read-only and reports ambient state rather than adopting it:
+
+- `GhCliNamedAccountDiscovery` lists stored `gh` accounts and proves one named account with `gh auth token --hostname <host> --user <login>` followed by an isolated `gh api user` under that token alone.
+- `SshCommandAliasDiscovery` accepts an `ssh -G` result only when it is unambiguous: one concrete lowercase host, exactly one absolute identity file with no `%`, `$`, or `~` left in it, and no proxy command, jump host, or identity agent.
+- `GitAmbientAuthConflictReader` reads `git config --show-origin --get-all <key>` and environment variable *names*.
+- `GhCliRepositoryObserver` reads the provider's own answer for a worktree's repository — current name and host, then the stable numeric ID — so a rename observes as the same repository.
+
+`AuthMigrationService.inspect()` binds its plan to the exact source digest and configuration generation it saw. `apply()` re-gathers every input and distinguishes a vanished account, an ambiguous one, a stale plan, and one that still needs a human. These findings **block** a plan: ambient GitHub token variables, credential helpers, conflicting authors, signing already in force, and a remote that disagrees with the observed target. Ambiguous SSH configuration falls back to an explicitly proposed HTTPS transport rather than a guess.
+
+Because adopting an identity is a capability expansion, the plan hash the operator transcribes after reading the inspection is recorded as their explicit approval of exactly that content.
+
+## Prohibited global mutations
+
+No code path may invoke `gh auth switch`, `git config --global`, `git config --system`, any SSH configuration write, or ambient credential-helper fallback. Discovery adapters have no method that can pass a mutating flag, and the CLI tests assert that no recorded argv contains `auth switch`, `--global`, `--system`, `--replace-all`, `--unset`, `ssh-keygen`, or `ssh-add`.
+
 ## Compatibility mapping
 
 A single-account installation imports or selects one local profile, creates one binding for each enrolled repository ID, and resolves `auto` only when exactly one binding matches. This preserves the existing one-account workflow without relying on `gh auth switch`, global Git configuration mutation, inherited `GH_TOKEN`, or opportunistic SSH-agent selection.
