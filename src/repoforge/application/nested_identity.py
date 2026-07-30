@@ -279,8 +279,8 @@ class NestedIdentityCoordinator:
         self,
         *,
         discovery: NestedResourceDiscovery,
-        resolver: NestedTargetResolver,
-        leases: NestedLeaseProvider,
+        resolver: NestedTargetResolver | None,
+        leases: NestedLeaseProvider | None,
         identities: OperationIdentityManager,
         clock: Clock,
     ) -> None:
@@ -310,6 +310,12 @@ class NestedIdentityCoordinator:
         target_ids: set[str] = set()
         target_keys: set[tuple[object, str]] = set()
         for candidate, locations in _candidate_groups(candidates):
+            if self._resolver is None:
+                raise _error(
+                    ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                    "Nested target resolution is unavailable for a discovered resource.",
+                    details={"endpoint_digest": candidate.endpoint_digest},
+                )
             target = self._resolver.resolve(candidate)
             _validate_resolved_target(candidate, target)
             target_key = (target.target_kind, target.target_id)
@@ -386,6 +392,12 @@ class NestedIdentityCoordinator:
                 raise _error(
                     ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
                     "Bound nested routing decision omitted its exact profile.",
+                )
+            if self._leases is None:
+                raise _error(
+                    ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                    "Nested lease acquisition is unavailable for a credentialed resource.",
+                    details={"target_id": target.target_id},
                 )
             lease = self._leases.acquire(
                 operation_id=request.identity_context.operation_id,

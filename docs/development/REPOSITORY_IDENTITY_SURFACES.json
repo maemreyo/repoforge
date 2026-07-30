@@ -141,7 +141,7 @@
         "repository-local .gitmodules and .lfsconfig",
         "explicit depth, resource, output, and timeout bounds"
       ],
-      "current_risk": "none_local_only",
+      "current_risk": "reviewed_read_only",
       "planned_owner": "#294"
     },
     {

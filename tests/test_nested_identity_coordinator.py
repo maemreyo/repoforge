@@ -269,6 +269,65 @@ def _coordinator(
     return coordinator, leases, store, manager
 
 
+def test_unavailable_composition_fails_closed_but_anonymous_read_needs_no_lease(
+    tmp_path: Path,
+) -> None:
+    private = _candidate("https://github.com/acme/private-sdk.git", ".gitmodules:sdk")
+    private_target = _target(private, "submodule-private-sdk")
+
+    missing_resolver_manager, _ = _manager(tmp_path / "missing-resolver")
+    missing_resolver = NestedIdentityCoordinator(
+        discovery=StaticDiscovery((private,)),
+        resolver=None,
+        leases=None,
+        identities=missing_resolver_manager,
+        clock=FixedClock(_NOW),
+    )
+    with pytest.raises(RepoForgeError, match="target resolution is unavailable") as failure:
+        missing_resolver.prepare(_prepare_request(tmp_path))
+    assert failure.value.code is ErrorCode.CREDENTIAL_SCOPE_MISMATCH
+
+    missing_lease_manager, _ = _manager(tmp_path / "missing-lease")
+    missing_lease = NestedIdentityCoordinator(
+        discovery=StaticDiscovery((private,)),
+        resolver=MappingResolver({private.endpoint_digest: private_target}),
+        leases=None,
+        identities=missing_lease_manager,
+        clock=FixedClock(_NOW),
+    )
+    with pytest.raises(RepoForgeError, match="lease acquisition is unavailable") as failure:
+        missing_lease.prepare(_prepare_request(tmp_path))
+    assert failure.value.code is ErrorCode.CREDENTIAL_SCOPE_MISMATCH
+
+    public = _candidate("https://github.com/public/docs.git", ".gitmodules:docs")
+    public_target = _target(
+        public,
+        "submodule-public-docs",
+        repository_id=None,
+        profile_id=None,
+        binding_state=NestedBindingState.MISSING,
+        public_read=True,
+    )
+    anonymous_manager, _ = _manager(tmp_path / "anonymous")
+    anonymous = NestedIdentityCoordinator(
+        discovery=StaticDiscovery((public,)),
+        resolver=MappingResolver({public.endpoint_digest: public_target}),
+        leases=None,
+        identities=anonymous_manager,
+        clock=FixedClock(_NOW),
+    ).prepare(
+        _prepare_request(
+            tmp_path,
+            allow_anonymous_public_read=True,
+        )
+    )
+
+    assert anonymous.context.auth_leases == _context().auth_leases
+    assert len(anonymous.receipts) == 1
+    assert anonymous.receipts[0].routing_status is NestedRoutingStatus.ANONYMOUS_READ
+    assert anonymous.receipts[0].lease_id is None
+
+
 def test_composes_distinct_child_leases_deduplicates_sources_and_keeps_primary(
     tmp_path: Path,
 ) -> None:

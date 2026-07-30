@@ -45,7 +45,7 @@ from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSyste
 from .adapters.filesystem.receipt_transaction_factory import (
     ReceiptJournaledFileTransactionFactory,
 )
-from .adapters.git import GitCliRepository, GitCommitIdentityGateway
+from .adapters.git import GitCliRepository, GitCommitIdentityGateway, GitNestedResourceDiscovery
 from .adapters.github import (
     CommandGitHubCapabilityPreflight,
     CommandGitHubCapabilityProbe,
@@ -210,6 +210,9 @@ from .ports import (
     IterationCache,
     LockManager,
     MetricsSink,
+    NestedLeaseProvider,
+    NestedResourceDiscovery,
+    NestedTargetResolver,
     OnboardingEnvironment,
     OnboardingStore,
     OperationGate,
@@ -268,6 +271,18 @@ class AdapterOverrides:
     ticket_projects: TicketProjectGateway | None = None
     github_capabilities: GitHubCapabilityProbe | None = None
     github_capability_preflight: GitHubCapabilityPreflightGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_resource_discovery: NestedResourceDiscovery | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_target_resolver: NestedTargetResolver | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_lease_provider: NestedLeaseProvider | None = field(
         default=None,
         kw_only=True,
     )
@@ -840,6 +855,11 @@ def build_application(
     github_capability_preflight = o.github_capability_preflight or CommandGitHubCapabilityPreflight(
         command, config.server
     )
+    nested_resource_discovery = (
+        o.nested_resource_discovery
+        if o.nested_resource_discovery is not None
+        else GitNestedResourceDiscovery(command)
+    )
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
@@ -943,6 +963,9 @@ def build_application(
         receipt_file_transactions=receipt_file_transactions,
         github_capabilities=github_capabilities,
         github_capability_preflight=github_capability_preflight,
+        nested_resource_discovery=nested_resource_discovery,
+        nested_target_resolver=o.nested_target_resolver,
+        nested_lease_provider=o.nested_lease_provider,
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
         execution_receipts=execution_receipts,

@@ -42,6 +42,9 @@ from ..ports import (
     IterationCache,
     LockManager,
     MetricsSink,
+    NestedLeaseProvider,
+    NestedResourceDiscovery,
+    NestedTargetResolver,
     OperationGate,
     OperationIdentityStore,
     OperationResultStore,
@@ -265,6 +268,18 @@ class ApplicationContext:
     ticket_projects: TicketProjectGateway | None = None
     github_capabilities: GitHubCapabilityProbe | None = None
     github_capability_preflight: GitHubCapabilityPreflightGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_resource_discovery: NestedResourceDiscovery | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_target_resolver: NestedTargetResolver | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_lease_provider: NestedLeaseProvider | None = field(
         default=None,
         kw_only=True,
     )

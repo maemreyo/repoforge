@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from repoforge.adapters.git import GitNestedResourceDiscovery
 from repoforge.adapters.persistence.json_repository_binding_store import (
     JsonRepositoryBindingStore,
 )
@@ -392,6 +393,7 @@ def test_identity_surface_inventory_classifies_every_sensitive_production_adapte
         assert entry["current_risk"] in {
             "none_local_only",
             "ambient_or_implicit",
+            "reviewed_read_only",
             "shared_executor_boundary",
         }
         assert entry["planned_owner"].startswith("#")
@@ -1263,3 +1265,75 @@ def test_build_application_wires_repository_binding_registry(tmp_path: Path) -> 
     )
 
     assert isinstance(application.context.repository_bindings, JsonRepositoryBindingStore)
+
+
+def test_build_application_wires_explicit_nested_identity_dependencies(tmp_path: Path) -> None:
+    config = AppConfig(
+        source_path=tmp_path / "config.toml",
+        server=ServerConfig(
+            workspace_root=tmp_path / "workspaces",
+            state_root=tmp_path / "state",
+        ),
+        repositories={},
+    )
+    discovery = object()
+    resolver = object()
+    leases = object()
+
+    overridden = build_application(
+        config,
+        overrides=AdapterOverrides(
+            command=ScriptedCommandExecutor(),
+            nested_resource_discovery=discovery,  # type: ignore[arg-type]
+            nested_target_resolver=resolver,  # type: ignore[arg-type]
+            nested_lease_provider=leases,  # type: ignore[arg-type]
+        ),
+    )
+    defaulted = build_application(
+        config,
+        overrides=AdapterOverrides(command=ScriptedCommandExecutor()),
+    )
+
+    assert overridden.context.nested_resource_discovery is discovery
+    assert overridden.context.nested_target_resolver is resolver
+    assert overridden.context.nested_lease_provider is leases
+    assert isinstance(defaulted.context.nested_resource_discovery, GitNestedResourceDiscovery)
+    assert defaulted.context.nested_target_resolver is None
+    assert defaulted.context.nested_lease_provider is None
+
+
+def test_nested_git_discovery_inventory_is_exact_and_read_only() -> None:
+    payload = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    entry = next(
+        item
+        for item in payload["entries"]
+        if item["path"] == "src/repoforge/adapters/git/nested_identity.py"
+    )
+
+    assert entry == {
+        "path": "src/repoforge/adapters/git/nested_identity.py",
+        "executables": ["git"],
+        "surfaces": ["submodule", "lfs", "nested_resource_discovery"],
+        "credential_inputs": ["none during read-only discovery"],
+        "target_inputs": [
+            "reviewed primary repository endpoint",
+            "repository-local .gitmodules and .lfsconfig",
+            "explicit depth, resource, output, and timeout bounds",
+        ],
+        "current_risk": "reviewed_read_only",
+        "planned_owner": "#294",
+    }
+
+
+def test_nested_git_discovery_cannot_issue_fetch_or_write_commands() -> None:
+    path = PACKAGE / "adapters" / "git" / "nested_identity.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    constants = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert {"fetch", "push", "clone", "upload-pack", "receive-pack", "git-lfs"}.isdisjoint(
+        constants
+    )

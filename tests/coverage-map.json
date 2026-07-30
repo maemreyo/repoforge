@@ -577,6 +577,10 @@
     "tests/test_v2_retrieval.py",
     "tests/test_workspace_diff_budget.py"
   ],
+  "src/repoforge/adapters/git/nested_identity.py": [
+    "tests/test_nested_identity_adapter.py",
+    "tests/test_repository_identity_contracts.py"
+  ],
   "src/repoforge/adapters/git/transport.py": [
     "tests/test_git_transport_identity.py"
   ],
@@ -3905,6 +3909,10 @@
     "tests/test_workspace_mutate.py",
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
+  ],
+  "src/repoforge/application/nested_identity.py": [
+    "tests/test_nested_identity_coordinator.py",
+    "tests/test_repository_identity_contracts.py"
   ],
   "src/repoforge/application/nudges.py": [
     "tests/test_adoption_nudges.py",
@@ -10826,6 +10834,14 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/domain/nested_identity.py": [
+    "tests/test_nested_identity_coordinator.py",
+    "tests/test_nested_identity_domain.py"
+  ],
+  "src/repoforge/domain/nested_publication.py": [
+    "tests/test_nested_publication.py",
+    "tests/test_publication_guards.py"
+  ],
   "src/repoforge/domain/onboarding.py": [
     "tests/test_onboarding_cli.py",
     "tests/test_onboarding_coordinator.py",
@@ -11968,6 +11984,11 @@
   ],
   "src/repoforge/ports/github_capability_preflight.py": [
     "tests/test_github_capability_preflight_adapter.py"
+  ],
+  "src/repoforge/ports/nested_identity.py": [
+    "tests/test_nested_identity_adapter.py",
+    "tests/test_nested_identity_coordinator.py",
+    "tests/test_repository_identity_contracts.py"
   ],
   "src/repoforge/ports/progress_reporter.py": [
     "tests/test_operation_progress_wait.py"

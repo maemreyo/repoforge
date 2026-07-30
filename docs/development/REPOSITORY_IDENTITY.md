@@ -81,6 +81,16 @@ HTTPS transport clears the complete helper chain, enables `credential.useHttpPat
 
 `GitTransportEvidence` records the stable repository ID, profile ID, provider host, access level, transport kind, credential fingerprint, remote-URL digest and observed ref SHA. Successful access remains `unobservable` for the human/API actor; it never upgrades transport proof into actor proof.
 
+## Nested resource identities
+
+`GitNestedResourceDiscovery` inspects only repository-local `.gitmodules` and `.lfsconfig` through bounded `git config --file` reads. The reviewed request fixes the primary endpoint, recursion depth, resource count, output size and command timeout. Discovery never fetches, writes, invokes credential helpers or consults ambient credential state; canonical endpoints and digests are returned in deterministic order.
+
+Every discovered or explicit submodule, LFS, package or release candidate must pass an explicit `NestedTargetResolver`. A public read may be represented as anonymous only when policy allows it and the resolved target proves that exact public/read-only route. Private reads and every write require an independently selected profile plus an exact target-bound child `AuthLease`; the primary repository lease is never inherited. Production constructs the Git discovery adapter by default, but intentionally supplies no ambient resolver or lease-provider fallback. Missing resolver composition denies any discovered route, while missing lease-provider composition denies credentialed routes before an effect.
+
+`NestedIdentityCoordinator` binds the complete primary-and-child lease set and capability requests into the immutable operation identity sidecar. Retries may reproduce that same decision, but a changed endpoint, target, profile, lease, capability, configuration revision or policy revision requires a new operation. Receipts contain only safe target IDs, endpoint digests, routing status, profile/lease IDs, capabilities and source locations.
+
+LFS/package uploads and release publication require their own reviewed nested publication intent, exact endpoint and target, active lease, capability and permission evidence, lifecycle state, payload/config/policy digests and boundary approval. Write-time revalidation must match the reviewed contract exactly. Unresolved targets, missing capabilities, cross-boundary ambiguity, expiry, revocation or TOCTOU drift fail closed with safe target evidence and typed recovery; recovery never broadens credentials or silently redirects the write.
+
 ## Exact publication effects
 
 `PublicationIntent` is the complete authority for one external publication. It pins stable source and destination repository IDs, exact source and destination refs, the reviewed commit and tree object IDs, the remote name, publication kind and any explicit cross-boundary approval. An idempotency key can replay only this exact intent; it cannot authorize a changed repository, ref, object or approval boundary.
