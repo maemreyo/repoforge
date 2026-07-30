@@ -6,7 +6,7 @@ import hmac
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -31,6 +31,7 @@ from ..ports import (
     FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityPreflightGateway,
     GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
@@ -263,6 +264,10 @@ class ApplicationContext:
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     github_capabilities: GitHubCapabilityProbe | None = None
+    github_capability_preflight: GitHubCapabilityPreflightGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
     file_transactions: FileTransactionFactory | None = None
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None

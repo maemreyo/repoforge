@@ -5,14 +5,30 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import build_test_service
+from conftest import ForgeEnvironment, build_test_service
 
+from repoforge.adapters.github import (
+    CommandGitHubCapabilityPreflight,
+    CommandGitHubCapabilityProbe,
+)
 from repoforge.config import load_config
 from repoforge.domain.errors import CommandError
 
 
 def run(*args: str, cwd: Path) -> None:
     subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def test_capability_preflight_composition_keeps_doctor_probe(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Catches bootstrap omitting the dedicated gateway or reusing the doctor probe for writes."""
+
+    ctx = forge_env.service.application.context
+
+    assert isinstance(ctx.github_capabilities, CommandGitHubCapabilityProbe)
+    assert isinstance(ctx.github_capability_preflight, CommandGitHubCapabilityPreflight)
+    assert type(ctx.github_capabilities) is not type(ctx.github_capability_preflight)
 
 
 def test_workspace_edit_verify_and_commit(tmp_path: Path) -> None:

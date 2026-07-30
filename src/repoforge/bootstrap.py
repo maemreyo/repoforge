@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -47,6 +47,7 @@ from .adapters.filesystem.receipt_transaction_factory import (
 )
 from .adapters.git import GitCliRepository, GitCommitIdentityGateway
 from .adapters.github import (
+    CommandGitHubCapabilityPreflight,
     CommandGitHubCapabilityProbe,
     CommandGitHubTicketGraphGateway,
     GhCliGateway,
@@ -198,6 +199,7 @@ from .ports import (
     FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityPreflightGateway,
     GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
@@ -265,6 +267,10 @@ class AdapterOverrides:
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     github_capabilities: GitHubCapabilityProbe | None = None
+    github_capability_preflight: GitHubCapabilityPreflightGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
     executables: ExecutableLocator | None = None
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
@@ -831,6 +837,9 @@ def build_application(
     github_capabilities = o.github_capabilities or CommandGitHubCapabilityProbe(
         command, config.server
     )
+    github_capability_preflight = o.github_capability_preflight or CommandGitHubCapabilityPreflight(
+        command, config.server
+    )
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
@@ -933,6 +942,7 @@ def build_application(
         approval_payloads=approval_payloads,
         receipt_file_transactions=receipt_file_transactions,
         github_capabilities=github_capabilities,
+        github_capability_preflight=github_capability_preflight,
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
         execution_receipts=execution_receipts,
