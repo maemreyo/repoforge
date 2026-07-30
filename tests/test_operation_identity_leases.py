@@ -418,6 +418,39 @@ def test_lease_refresh_allows_new_preflight_timestamp_but_rejects_digest_drift()
     assert failure.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
 
 
+def test_nested_endpoint_binding_cannot_drift_during_lease_refresh() -> None:
+    nested = _lease(
+        lease_id="lease-submodule",
+        profile_id="dependency-reader",
+        repository_id="654321",
+        target_kind=AuthTargetKind.SUBMODULE,
+        target_id="submodule-vendor-sdk",
+        actor_id="github-app-77",
+        material_digest="d" * 64,
+        provider_metadata=(("nested_endpoint_digest", "1" * 64),),
+    )
+    context = replace(_context(nested=True), auth_leases=(_lease(), nested))
+    record = new_operation_identity_record(
+        context,
+        context_id=_CONTEXT_ID,
+        capability_requests=_requests(nested=True),
+        now="2026-07-28T00:00:00+00:00",
+    )
+    drifted = replace(
+        nested,
+        lease_id="lease-submodule-refresh",
+        issued_at="2026-07-28T00:40:00+00:00",
+        expires_at="2026-07-28T02:00:00+00:00",
+        material_digest="e" * 64,
+        provider_metadata=(("nested_endpoint_digest", "2" * 64),),
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        refresh_operation_lease(record, drifted, now="2026-07-28T00:40:00+00:00")
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH
+
+
 def test_manager_lifecycle_stale_revision_is_typed(tmp_path: Path) -> None:
     store = JsonOperationIdentityStore(tmp_path, InMemoryLockManager())
     manager = OperationIdentityManager(
