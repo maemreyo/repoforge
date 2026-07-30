@@ -180,6 +180,7 @@
   ],
   "src/repoforge/adapters/capabilities.py": [
     "tests/test_doctor_github_capabilities.py",
+    "tests/test_integration.py",
     "tests/test_phases1_5_full_lifecycle.py",
     "tests/test_repo_issue_graph_tools.py",
     "tests/test_workspace_diagnostics.py",
@@ -258,6 +259,7 @@
   ],
   "src/repoforge/adapters/configuration/generation_store.py": [
     "tests/test_audit_cursor.py",
+    "tests/test_auth_migration.py",
     "tests/test_bootstrap_factories.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_surface_coverage.py",
@@ -371,6 +373,7 @@
   "src/repoforge/adapters/filesystem/atomic.py": [
     "tests/test_activation_first_bootstrap.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_migration.py",
     "tests/test_bootstrap_factories.py",
     "tests/test_cli_agent_auth_material.py",
     "tests/test_cli_surface_coverage.py",
@@ -433,6 +436,10 @@
     "tests/test_workspace_assessment.py",
     "tests/test_workspace_mutate.py",
     "tests/test_workspace_refresh.py"
+  ],
+  "src/repoforge/adapters/git/ambient_auth.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_import_adapters.py"
   ],
   "src/repoforge/adapters/git/cli.py": [
     "tests/test_adoption_nudges.py",
@@ -578,17 +585,156 @@
     "tests/test_workspace_diff_budget.py"
   ],
   "src/repoforge/adapters/git/nested_identity.py": [
+    "tests/test_adoption_nudges.py",
+    "tests/test_audit_cursor.py",
+    "tests/test_background_run_profile.py",
+    "tests/test_ci_failure_evidence.py",
+    "tests/test_cli_surface_coverage.py",
+    "tests/test_code_intelligence_integration.py",
+    "tests/test_command_source_integrity.py",
+    "tests/test_control_plane_responsiveness.py",
+    "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_verification_dispatch.py",
+    "tests/test_execution_plans.py",
+    "tests/test_expensive_profile_guards.py",
+    "tests/test_failure_intelligence.py",
+    "tests/test_fingerprint_cache.py",
+    "tests/test_git_diff_summary.py",
+    "tests/test_github_read_cache.py",
+    "tests/test_integration.py",
+    "tests/test_issue_graph_publication.py",
+    "tests/test_issue_graph_publication_executor.py",
+    "tests/test_issue_graph_workflow.py",
+    "tests/test_mcp_contract.py",
+    "tests/test_mcp_contract_v2.py",
+    "tests/test_mcp_payload_v2.py",
+    "tests/test_mutation_idempotency.py",
     "tests/test_nested_identity_adapter.py",
-    "tests/test_repository_identity_contracts.py"
+    "tests/test_onboarding_real_git.py",
+    "tests/test_operation_execution_worker.py",
+    "tests/test_operation_identity_leases.py",
+    "tests/test_operation_observability.py",
+    "tests/test_operation_progress_wait.py",
+    "tests/test_operation_tasks.py",
+    "tests/test_operation_worker_binding.py",
+    "tests/test_optimistic_lock_tokens.py",
+    "tests/test_outcome_records.py",
+    "tests/test_phases1_4_real_git_integration.py",
+    "tests/test_phases1_5_full_lifecycle.py",
+    "tests/test_plan_execution.py",
+    "tests/test_pr_check_watch.py",
+    "tests/test_provider_config.py",
+    "tests/test_repo_issue_graph_tools.py",
+    "tests/test_repo_list_selection_v2.py",
+    "tests/test_repo_task_context.py",
+    "tests/test_repository_commit_evidence.py",
+    "tests/test_repository_identity_contracts.py",
+    "tests/test_repository_snapshot.py",
+    "tests/test_resource_budgets.py",
+    "tests/test_retry_guidance.py",
+    "tests/test_serve_config_generation.py",
+    "tests/test_service_tools.py",
+    "tests/test_skills_scaffold.py",
+    "tests/test_upgrade_compatibility.py",
+    "tests/test_v2_reads.py",
+    "tests/test_v2_retrieval.py",
+    "tests/test_v2_shipping.py",
+    "tests/test_verification_dag_cache.py",
+    "tests/test_workflow_recording.py",
+    "tests/test_workspace_adhoc.py",
+    "tests/test_workspace_adopt_branch.py",
+    "tests/test_workspace_assessment.py",
+    "tests/test_workspace_diagnostics.py",
+    "tests/test_workspace_diff_budget.py",
+    "tests/test_workspace_edit.py",
+    "tests/test_workspace_hygiene.py",
+    "tests/test_workspace_issue_links.py",
+    "tests/test_workspace_mutate.py",
+    "tests/test_workspace_refresh.py",
+    "tests/test_workspace_stale_cleanup.py"
+  ],
+  "src/repoforge/adapters/git/ssh_alias_discovery.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_import_adapters.py"
   ],
   "src/repoforge/adapters/git/transport.py": [
     "tests/test_git_transport_identity.py"
+  ],
+  "src/repoforge/adapters/github/account_discovery.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_import_adapters.py"
   ],
   "src/repoforge/adapters/github/api_identity.py": [
     "tests/test_github_api_identity.py"
   ],
   "src/repoforge/adapters/github/capability_preflight.py": [
-    "tests/test_github_capability_preflight_adapter.py"
+    "tests/test_adoption_nudges.py",
+    "tests/test_audit_cursor.py",
+    "tests/test_background_run_profile.py",
+    "tests/test_ci_failure_evidence.py",
+    "tests/test_cli_surface_coverage.py",
+    "tests/test_code_intelligence_integration.py",
+    "tests/test_command_source_integrity.py",
+    "tests/test_control_plane_responsiveness.py",
+    "tests/test_doctor_github_capabilities.py",
+    "tests/test_durable_verification_dispatch.py",
+    "tests/test_execution_plans.py",
+    "tests/test_expensive_profile_guards.py",
+    "tests/test_failure_intelligence.py",
+    "tests/test_fingerprint_cache.py",
+    "tests/test_git_diff_summary.py",
+    "tests/test_github_capability_preflight_adapter.py",
+    "tests/test_github_read_cache.py",
+    "tests/test_integration.py",
+    "tests/test_issue_graph_publication.py",
+    "tests/test_issue_graph_publication_executor.py",
+    "tests/test_issue_graph_workflow.py",
+    "tests/test_mcp_contract.py",
+    "tests/test_mcp_contract_v2.py",
+    "tests/test_mcp_payload_v2.py",
+    "tests/test_mutation_idempotency.py",
+    "tests/test_onboarding_real_git.py",
+    "tests/test_operation_execution_worker.py",
+    "tests/test_operation_identity_leases.py",
+    "tests/test_operation_observability.py",
+    "tests/test_operation_progress_wait.py",
+    "tests/test_operation_tasks.py",
+    "tests/test_operation_worker_binding.py",
+    "tests/test_optimistic_lock_tokens.py",
+    "tests/test_outcome_records.py",
+    "tests/test_phases1_4_real_git_integration.py",
+    "tests/test_phases1_5_full_lifecycle.py",
+    "tests/test_plan_execution.py",
+    "tests/test_pr_check_watch.py",
+    "tests/test_provider_config.py",
+    "tests/test_repo_issue_graph_tools.py",
+    "tests/test_repo_list_selection_v2.py",
+    "tests/test_repo_task_context.py",
+    "tests/test_repository_commit_evidence.py",
+    "tests/test_repository_identity_contracts.py",
+    "tests/test_repository_snapshot.py",
+    "tests/test_resource_budgets.py",
+    "tests/test_retry_guidance.py",
+    "tests/test_serve_config_generation.py",
+    "tests/test_service_tools.py",
+    "tests/test_skills_scaffold.py",
+    "tests/test_upgrade_compatibility.py",
+    "tests/test_v2_reads.py",
+    "tests/test_v2_retrieval.py",
+    "tests/test_v2_shipping.py",
+    "tests/test_verification_dag_cache.py",
+    "tests/test_workflow_recording.py",
+    "tests/test_workspace_adhoc.py",
+    "tests/test_workspace_adopt_branch.py",
+    "tests/test_workspace_assessment.py",
+    "tests/test_workspace_diagnostics.py",
+    "tests/test_workspace_diff_budget.py",
+    "tests/test_workspace_edit.py",
+    "tests/test_workspace_hygiene.py",
+    "tests/test_workspace_issue_links.py",
+    "tests/test_workspace_mutate.py",
+    "tests/test_workspace_refresh.py",
+    "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/adapters/github/capability_probe.py": [
     "tests/test_adoption_nudges.py",
@@ -729,6 +875,9 @@
     "tests/test_workspace_mutate.py",
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
+  ],
+  "src/repoforge/adapters/github/repository_observation.py": [
+    "tests/test_auth_repository_observation.py"
   ],
   "src/repoforge/adapters/github/ticket_graph.py": [
     "tests/test_adoption_nudges.py",
@@ -940,6 +1089,9 @@
   "src/repoforge/adapters/locking/fcntl.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_migration.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
     "tests/test_ci_failure_evidence.py",
@@ -2020,6 +2172,7 @@
     "tests/test_mcp_contract_v2.py",
     "tests/test_mcp_payload_v2.py",
     "tests/test_mutation_idempotency.py",
+    "tests/test_nested_identity_coordinator.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_operation_execution_worker.py",
     "tests/test_operation_identity_leases.py",
@@ -2344,6 +2497,8 @@
   "src/repoforge/adapters/persistence/json_repository_binding_store.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -2489,6 +2644,8 @@
   "src/repoforge/adapters/persistence/json_state_repository.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
     "tests/test_ci_failure_evidence.py",
@@ -2516,6 +2673,7 @@
     "tests/test_mcp_contract_v2.py",
     "tests/test_mcp_payload_v2.py",
     "tests/test_mutation_idempotency.py",
+    "tests/test_nested_identity_coordinator.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_operation_execution_worker.py",
     "tests/test_operation_identity_leases.py",
@@ -3376,6 +3534,13 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/application/auth_migration.py": [
+    "tests/test_auth_migration.py"
+  ],
+  "src/repoforge/application/auth_ux.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_ux_service.py"
+  ],
   "src/repoforge/application/capability_policy.py": [
     "tests/test_client_capabilities.py",
     "tests/test_issue_graph_workflow.py",
@@ -3451,6 +3616,8 @@
     "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/application/configuration/document.py": [
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
     "tests/test_cli_command_bodies.py",
     "tests/test_config_admin.py",
     "tests/test_expensive_profile_guards.py",
@@ -3464,6 +3631,9 @@
     "tests/test_workspace_hygiene.py"
   ],
   "src/repoforge/application/configuration/source.py": [
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_cli_command_bodies.py",
     "tests/test_config_admin.py",
     "tests/test_config_cli.py",
     "tests/test_local_setup.py",
@@ -3911,8 +4081,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/nested_identity.py": [
-    "tests/test_nested_identity_coordinator.py",
-    "tests/test_repository_identity_contracts.py"
+    "tests/test_nested_identity_coordinator.py"
   ],
   "src/repoforge/application/nudges.py": [
     "tests/test_adoption_nudges.py",
@@ -4165,6 +4334,7 @@
     "tests/test_verification_dag_cache.py"
   ],
   "src/repoforge/application/operations/identity.py": [
+    "tests/test_nested_identity_coordinator.py",
     "tests/test_operation_identity_leases.py"
   ],
   "src/repoforge/application/operations/list.py": [
@@ -6270,6 +6440,7 @@
   "src/repoforge/application/service.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_mcp_selectors.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -9664,6 +9835,7 @@
   "src/repoforge/config.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_profile_config.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_activation_wiring.py",
@@ -9743,10 +9915,14 @@
     "tests/test_v2_schema_golden.py"
   ],
   "src/repoforge/contracts/common.py": [
+    "tests/test_auth_mcp_selectors.py",
     "tests/test_mcp_contract.py",
-    "tests/test_mcp_contract_v2.py"
+    "tests/test_mcp_contract_v2.py",
+    "tests/test_pr_check_watch.py",
+    "tests/test_v2_contract_models.py"
   ],
   "src/repoforge/contracts/registry.py": [
+    "tests/test_auth_mcp_selectors.py",
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
@@ -9776,6 +9952,7 @@
     "tests/test_workspace_refresh.py"
   ],
   "src/repoforge/contracts/v2.py": [
+    "tests/test_auth_mcp_selectors.py",
     "tests/test_config_admin.py",
     "tests/test_failure_intelligence.py",
     "tests/test_issue_graph_workflow.py",
@@ -9801,6 +9978,7 @@
     "tests/test_adhoc_command_guard.py",
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_profile_config.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -9892,6 +10070,32 @@
     "tests/test_workspace_diagnostics.py",
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_risk.py"
+  ],
+  "src/repoforge/domain/auth_migration.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_import_adapters.py",
+    "tests/test_auth_migration.py"
+  ],
+  "src/repoforge/domain/auth_profile.py": [
+    "tests/test_adoption_nudges.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_mcp_selectors.py",
+    "tests/test_auth_profile_selection.py",
+    "tests/test_auth_ux_service.py",
+    "tests/test_ci_failure_evidence.py",
+    "tests/test_command_source_integrity.py",
+    "tests/test_integration.py",
+    "tests/test_issue_graph_workflow.py",
+    "tests/test_mcp_contract.py",
+    "tests/test_phases1_4_real_git_integration.py",
+    "tests/test_phases1_5_full_lifecycle.py",
+    "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
+    "tests/test_service_tools.py",
+    "tests/test_v2_shipping.py",
+    "tests/test_workspace_adhoc.py",
+    "tests/test_workspace_refresh.py",
+    "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/ci_evidence.py": [
     "tests/test_adoption_nudges.py",
@@ -9995,6 +10199,8 @@
   ],
   "src/repoforge/domain/commit_identity.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_code_intelligence_integration.py",
@@ -10042,6 +10248,7 @@
   ],
   "src/repoforge/domain/config_generation.py": [
     "tests/test_audit_cursor.py",
+    "tests/test_auth_migration.py",
     "tests/test_bootstrap_factories.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_command_bodies.py",
@@ -10093,6 +10300,7 @@
     "tests/test_fingerprint_cache.py",
     "tests/test_git_diff_summary.py",
     "tests/test_github_read_cache.py",
+    "tests/test_integration.py",
     "tests/test_issue_graph_publication.py",
     "tests/test_issue_graph_publication_executor.py",
     "tests/test_issue_graph_workflow.py",
@@ -10234,6 +10442,13 @@
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_import_adapters.py",
+    "tests/test_auth_mcp_selectors.py",
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_repository_observation.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_activation_wiring.py",
@@ -10264,6 +10479,7 @@
     "tests/test_git_diff_summary.py",
     "tests/test_git_transport_identity.py",
     "tests/test_github_api_identity.py",
+    "tests/test_github_capability_preflight_domain.py",
     "tests/test_github_read_cache.py",
     "tests/test_github_ticket_graph_adapter.py",
     "tests/test_integration.py",
@@ -10279,6 +10495,9 @@
     "tests/test_mcp_runtime_coverage.py",
     "tests/test_mutation_idempotency.py",
     "tests/test_native_execution_environment.py",
+    "tests/test_nested_identity_adapter.py",
+    "tests/test_nested_identity_coordinator.py",
+    "tests/test_nested_publication.py",
     "tests/test_onboarding_cli.py",
     "tests/test_onboarding_coordinator.py",
     "tests/test_onboarding_domain.py",
@@ -10500,8 +10719,11 @@
   "src/repoforge/domain/generated_paths.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
+    "tests/test_cli_command_bodies.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_code_intelligence_integration.py",
     "tests/test_command_source_integrity.py",
@@ -10577,15 +10799,26 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/git_transport_identity.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_ux_service.py",
+    "tests/test_config_admin.py",
     "tests/test_git_transport_identity.py",
     "tests/test_publication_adapter.py",
     "tests/test_publication_guards.py"
   ],
   "src/repoforge/domain/github_api_identity.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_ux_service.py",
+    "tests/test_config_admin.py",
     "tests/test_github_api_identity.py"
   ],
   "src/repoforge/domain/github_capability_preflight.py": [
-    "tests/test_github_capability_preflight_domain.py"
+    "tests/test_github_api_identity.py",
+    "tests/test_github_capability_preflight_adapter.py",
+    "tests/test_github_capability_preflight_domain.py",
+    "tests/test_publication_adapter.py"
   ],
   "src/repoforge/domain/github_capability_probe.py": [
     "tests/test_github_capability_probe.py"
@@ -10607,6 +10840,7 @@
     "tests/test_fingerprint_cache.py",
     "tests/test_git_diff_summary.py",
     "tests/test_github_read_cache.py",
+    "tests/test_integration.py",
     "tests/test_issue_graph_publication.py",
     "tests/test_issue_graph_publication_executor.py",
     "tests/test_issue_graph_workflow.py",
@@ -10664,6 +10898,11 @@
   "src/repoforge/domain/issue_writes.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_repository_observation.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_command_bodies.py",
@@ -10763,6 +11002,7 @@
   "src/repoforge/domain/mutation_policy.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_profile_config.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -10835,12 +11075,13 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/nested_identity.py": [
+    "tests/test_nested_identity_adapter.py",
     "tests/test_nested_identity_coordinator.py",
-    "tests/test_nested_identity_domain.py"
+    "tests/test_nested_identity_domain.py",
+    "tests/test_nested_publication.py"
   ],
   "src/repoforge/domain/nested_publication.py": [
-    "tests/test_nested_publication.py",
-    "tests/test_publication_guards.py"
+    "tests/test_nested_publication.py"
   ],
   "src/repoforge/domain/onboarding.py": [
     "tests/test_onboarding_cli.py",
@@ -10853,6 +11094,8 @@
     "tests/test_onboarding_session_store.py"
   ],
   "src/repoforge/domain/operation_identity.py": [
+    "tests/test_nested_identity_coordinator.py",
+    "tests/test_nested_publication.py",
     "tests/test_operation_identity_leases.py",
     "tests/test_publication_guards.py"
   ],
@@ -10873,6 +11116,7 @@
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_mutation_idempotency.py",
+    "tests/test_nested_identity_coordinator.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_operation_execution_worker.py",
     "tests/test_operation_identity_leases.py",
@@ -11046,6 +11290,8 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/policy_patch.py": [
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
     "tests/test_cli_command_bodies.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
@@ -11081,6 +11327,7 @@
   "src/repoforge/domain/provider_config.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_profile_config.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -11266,19 +11513,37 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/repository_auth_broker.py": [
+    "tests/test_auth_import_adapters.py",
     "tests/test_git_transport_identity.py",
     "tests/test_github_api_identity.py",
+    "tests/test_github_capability_preflight_adapter.py",
     "tests/test_publication_adapter.py",
     "tests/test_repository_identity_contracts.py"
   ],
   "src/repoforge/domain/repository_identity.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_profile_selection.py",
+    "tests/test_auth_ux_service.py",
+    "tests/test_config_admin.py",
     "tests/test_github_api_identity.py",
+    "tests/test_nested_identity_coordinator.py",
+    "tests/test_nested_identity_domain.py",
+    "tests/test_nested_publication.py",
     "tests/test_operation_identity_leases.py",
     "tests/test_publication_adapter.py",
     "tests/test_publication_guards.py",
     "tests/test_repository_identity_contracts.py"
   ],
   "src/repoforge/domain/repository_identity_resolution.py": [
+    "tests/test_auth_cli.py",
+    "tests/test_auth_migration.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_profile_selection.py",
+    "tests/test_auth_repository_observation.py",
+    "tests/test_auth_ux_service.py",
+    "tests/test_config_admin.py",
     "tests/test_repository_identity_contracts.py"
   ],
   "src/repoforge/domain/repository_proposal.py": [
@@ -11304,6 +11569,7 @@
     "tests/test_workspace_hygiene.py"
   ],
   "src/repoforge/domain/resource_budget.py": [
+    "tests/test_auth_migration.py",
     "tests/test_config_admin.py",
     "tests/test_config_delta.py",
     "tests/test_domain_config_generation_delta.py",
@@ -11342,6 +11608,10 @@
   "src/repoforge/domain/risk.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_profile_config.py",
+    "tests/test_auth_repository_observation.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -11423,7 +11693,6 @@
     "tests/test_rules_engine_domain.py",
     "tests/test_rules_loader.py",
     "tests/test_rules_validators.py",
-    "tests/test_skills_scaffold.py",
     "tests/test_task_capsule_v2.py",
     "tests/test_task_capsule_v2_persistence.py"
   ],
@@ -11626,6 +11895,9 @@
   ],
   "src/repoforge/domain/versioning.py": [
     "tests/test_adoption_nudges.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_profile_selection.py",
+    "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -11645,6 +11917,7 @@
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_mutation_idempotency.py",
+    "tests/test_nested_identity_coordinator.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_operation_execution_worker.py",
     "tests/test_operation_identity_leases.py",
@@ -11772,6 +12045,23 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/interfaces/cli/auth.py": [
+    "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
+    "tests/test_cli_activation_wiring.py",
+    "tests/test_cli_agent_auth_material.py",
+    "tests/test_cli_surface_coverage.py",
+    "tests/test_config_cli.py",
+    "tests/test_configuration_paths.py",
+    "tests/test_docs_command_drift.py",
+    "tests/test_local_setup.py",
+    "tests/test_onboarding_cli.py",
+    "tests/test_onboarding_real_git.py",
+    "tests/test_operation_tasks.py",
+    "tests/test_phases1_4_production_hardening.py",
+    "tests/test_skills_scaffold.py",
+    "tests/test_ticket_sync_cli.py"
+  ],
   "src/repoforge/interfaces/cli/contract.py": [
     "tests/test_configuration_paths.py",
     "tests/test_onboarding_contract.py",
@@ -11779,6 +12069,7 @@
   ],
   "src/repoforge/interfaces/cli/main.py": [
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_agent_auth_material.py",
     "tests/test_cli_command_bodies.py",
@@ -11801,6 +12092,7 @@
   ],
   "src/repoforge/interfaces/cli/onboarding.py": [
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_agent_auth_material.py",
     "tests/test_cli_surface_coverage.py",
@@ -11859,6 +12151,7 @@
     "tests/test_operation_progress_wait.py"
   ],
   "src/repoforge/interfaces/mcp/server.py": [
+    "tests/test_auth_mcp_selectors.py",
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
@@ -11920,6 +12213,7 @@
     "tests/test_fingerprint_cache.py",
     "tests/test_git_diff_summary.py",
     "tests/test_git_transport_identity.py",
+    "tests/test_github_capability_preflight_adapter.py",
     "tests/test_github_capability_probe.py",
     "tests/test_github_ticket_project_adapter.py",
     "tests/test_integration.py",
@@ -11982,13 +12276,9 @@
     "tests/test_workspace_hygiene.py",
     "tests/test_workspace_refresh.py"
   ],
-  "src/repoforge/ports/github_capability_preflight.py": [
-    "tests/test_github_capability_preflight_adapter.py"
-  ],
   "src/repoforge/ports/nested_identity.py": [
     "tests/test_nested_identity_adapter.py",
-    "tests/test_nested_identity_coordinator.py",
-    "tests/test_repository_identity_contracts.py"
+    "tests/test_nested_identity_coordinator.py"
   ],
   "src/repoforge/ports/progress_reporter.py": [
     "tests/test_operation_progress_wait.py"
@@ -12000,6 +12290,9 @@
   "src/repoforge/ports/workspace_publication.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_ci_failure_evidence.py",
+    "tests/test_integration.py",
+    "tests/test_phases1_4_real_git_integration.py",
+    "tests/test_phases1_5_full_lifecycle.py",
     "tests/test_pr_check_watch.py",
     "tests/test_service_tools.py",
     "tests/test_v2_shipping.py",
@@ -12011,6 +12304,9 @@
   ],
   "src/repoforge/testing/fakes.py": [
     "tests/test_audit_query.py",
+    "tests/test_auth_cli.py",
+    "tests/test_auth_migration.py",
+    "tests/test_auth_repository_observation.py",
     "tests/test_background_run_profile.py",
     "tests/test_config_admin.py",
     "tests/test_control_plane_resilience.py",
@@ -12024,6 +12320,7 @@
     "tests/test_github_read_cache.py",
     "tests/test_github_ticket_project_adapter.py",
     "tests/test_latency_tracing.py",
+    "tests/test_nested_identity_coordinator.py",
     "tests/test_operation_identity_leases.py",
     "tests/test_operation_tasks.py",
     "tests/test_operation_worker_binding.py",

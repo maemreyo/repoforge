@@ -45,13 +45,21 @@ from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSyste
 from .adapters.filesystem.receipt_transaction_factory import (
     ReceiptJournaledFileTransactionFactory,
 )
-from .adapters.git import GitCliRepository, GitCommitIdentityGateway, GitNestedResourceDiscovery
+from .adapters.git import (
+    GitAmbientAuthConflictReader,
+    GitCliRepository,
+    GitCommitIdentityGateway,
+    GitNestedResourceDiscovery,
+    SshCommandAliasDiscovery,
+)
 from .adapters.github import (
     CommandGitHubCapabilityPreflight,
     CommandGitHubCapabilityProbe,
     CommandGitHubTicketGraphGateway,
     GhCliGateway,
+    GhCliNamedAccountDiscovery,
 )
+from .adapters.github.repository_observation import GhCliRepositoryObserver
 from .adapters.github.ticket_project import GhTicketProjectGateway
 from .adapters.hygiene import CommandHygieneGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
@@ -141,6 +149,7 @@ from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandE
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
+from .application.auth_migration import AuthMigrationService
 from .application.auth_ux import AuthUxService, ObserveRepository
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
@@ -180,6 +189,7 @@ from .contracts.registry import validate_generated_contract_identity
 from .domain.activation import AGENT_SECRET_FILE_ENV_VAR, AGENT_SECRET_KEY
 from .domain.errors import ConfigError, ErrorCode, RepoForgeError
 from .domain.operation_task import OperationTask
+from .domain.repository_identity_resolution import RepositoryIdentityObservation
 from .domain.runtime import TunnelProfile
 from .ports import (
     ApprovalPayloadStore,
@@ -245,6 +255,7 @@ from .ports import (
     WorkspacePublicationService,
     WorkspaceStore,
 )
+from .ports.auth_discovery import NamedAccountDiscovery, SshAliasDiscovery
 from .ports.external_mutation_ledger import ExternalMutationLedger
 from .ports.filesystem_transaction import (
     FileTransactionFactory as ReceiptFileTransactionFactory,
@@ -455,6 +466,66 @@ def build_auth_ux_service(
         transport=ctx.auth_transport_inspector,
         commits=ctx.auth_commit_inspector,
         publication=ctx.auth_publication_inspector,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthCommandDependencies:
+    """Everything one `rf auth` invocation needs, composed in one place."""
+
+    service: AuthUxService
+    migration: AuthMigrationService
+    accounts: NamedAccountDiscovery
+    ssh: SshAliasDiscovery
+
+
+def build_auth_command_dependencies(
+    store: ConfigurationStore,
+    *,
+    config: AppConfig,
+    config_revision: str,
+    cwd: Path | None = None,
+) -> AuthCommandDependencies:
+    """Compose the identity facade and discovery adapters for the operator CLI.
+
+    `rf auth` runs outside the managed runtime, so no per-surface inspector and no durable
+    operation identity store is composed here. That is deliberate: those surfaces report
+    `unavailable` rather than answering from whatever account happens to be active.
+    """
+
+    clock = system_clock()
+    commands = SubprocessCommandExecutor(config.server)
+    working_directory = cwd if cwd is not None else Path.cwd()
+    observer = GhCliRepositoryObserver(commands, clock=clock)
+
+    def observe(repo_id: str) -> RepositoryIdentityObservation:
+        repository = config.repositories.get(repo_id)
+        if repository is None:
+            raise ConfigError(f"Unknown repository id: {repo_id}")
+        return observer.observe(repository, config_revision=config_revision)
+
+    accounts = GhCliNamedAccountDiscovery(commands, cwd=working_directory)
+    ssh = SshCommandAliasDiscovery(commands, cwd=working_directory)
+    return AuthCommandDependencies(
+        service=AuthUxService(
+            config=config,
+            bindings=JsonRepositoryBindingStore(
+                config.server.state_root, build_lock_manager(config.server.state_root)
+            ),
+            observe=observe,
+            clock=clock,
+        ),
+        migration=AuthMigrationService(
+            store=store,
+            clock=clock,
+            ids=id_generator(),
+            accounts=accounts,
+            ssh=ssh,
+            ambient=GitAmbientAuthConflictReader(commands),
+            observe=observe,
+        ),
+        accounts=accounts,
+        ssh=ssh,
     )
 
 

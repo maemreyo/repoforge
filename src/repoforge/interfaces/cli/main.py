@@ -20,13 +20,6 @@ from typing import Any
 
 from repoforge import __version__
 
-from ...adapters.git.ambient_auth import GitAmbientAuthConflictReader
-from ...adapters.git.ssh_alias_discovery import SshCommandAliasDiscovery
-from ...adapters.github.account_discovery import GhCliNamedAccountDiscovery
-from ...adapters.github.repository_observation import GhCliRepositoryObserver
-from ...adapters.locking import FcntlLockManager
-from ...adapters.persistence import JsonRepositoryBindingStore
-from ...adapters.subprocess import SubprocessCommandExecutor
 from ...application.activation.inventory import build_runtime_inventory
 from ...application.activation.selection import release_choices, resolve_receipt_id
 from ...application.activation.upgrade import (
@@ -40,8 +33,6 @@ from ...application.activation.version_status import (
     build_version_list,
     build_version_status,
 )
-from ...application.auth_migration import AuthMigrationService
-from ...application.auth_ux import AuthUxService
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
     apply_auth_profiles,
@@ -81,6 +72,7 @@ from ...bootstrap import (
     build_application,
     build_approval_payload_store,
     build_approval_store,
+    build_auth_command_dependencies,
     build_configuration_store,
     build_dev_runtime_service,
     build_lock_manager,
@@ -116,7 +108,7 @@ from ...bootstrap import (
     write_private_file,
     write_runtime_state,
 )
-from ...config import DEFAULT_CONFIG_PATH, RepositoryConfig, declared_state_root, load_config
+from ...config import DEFAULT_CONFIG_PATH, declared_state_root, load_config
 from ...contracts.registry import validate_generated_contract_identity
 from ...domain.activation import AGENT_SECRET_KEY
 from ...domain.approval import ApprovalStatus, decide_approval
@@ -135,7 +127,6 @@ from ...domain.errors import (
     operation_error_from_exception,
 )
 from ...domain.redaction import redact_text
-from ...domain.repository_identity_resolution import RepositoryIdentityObservation
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
 from ...domain.runtime_activation import RuntimeActivationReceipt
@@ -913,63 +904,30 @@ def _setup(args: argparse.Namespace) -> int:
 
 
 def _auth_command(args: argparse.Namespace, config_path: Path) -> int:
-    """Compose the identity facade for one `rf auth` invocation and dispatch it.
+    """Dispatch one `rf auth` invocation against the accepted configuration generation.
 
-    Every dependency is built from the accepted generation, so what the CLI reports is what the
-    reviewed configuration says -- not the worktree source, which may contain unaccepted edits.
+    Concrete adapters are composed in `bootstrap`, the single composition root; this reports
+    what the reviewed configuration says, not the worktree source, which may hold unaccepted
+    edits.
     """
 
     store = _ensure_generation(config_path)
     accepted = store.current()
     if accepted is None:
         raise ConfigError("No accepted configuration generation")
-    config = load_config(store.resolved_path(accepted.generation))
-    clock = system_clock()
-    locks = FcntlLockManager(store.root / "locks")
-    commands = SubprocessCommandExecutor(config.server)
-    bindings = JsonRepositoryBindingStore(config.server.state_root, locks)
-    observer = GhCliRepositoryObserver(commands, clock=clock)
-
-    def observe(repo_id: str) -> RepositoryIdentityObservation:
-        return observer.observe(
-            config.repositories[repo_id]
-            if repo_id in config.repositories
-            else _unknown_repository(repo_id),
-            config_revision=accepted.resolved_sha256,
-        )
-
-    service = AuthUxService(
-        config=config,
-        bindings=bindings,
-        observe=observe,
-        clock=clock,
-        # `rf auth` runs outside the managed runtime, so the per-surface inspectors and the
-        # durable operation identity store are deliberately absent here: whoami reports those
-        # surfaces as unavailable rather than inventing evidence from ambient state.
-    )
-    accounts = GhCliNamedAccountDiscovery(commands, cwd=Path.cwd())
-    ssh = SshCommandAliasDiscovery(commands, cwd=Path.cwd())
-    migration = AuthMigrationService(
-        store=store,
-        clock=clock,
-        ids=id_generator(),
-        accounts=accounts,
-        ssh=ssh,
-        ambient=GitAmbientAuthConflictReader(commands),
-        observe=observe,
+    dependencies = build_auth_command_dependencies(
+        store,
+        config=load_config(store.resolved_path(accepted.generation)),
+        config_revision=accepted.resolved_sha256,
     )
     return run_auth_command(
         args,
-        service=service,
-        migration=migration,
-        accounts=accounts,
-        ssh=ssh,
+        service=dependencies.service,
+        migration=dependencies.migration,
+        accounts=dependencies.accounts,
+        ssh=dependencies.ssh,
         render=_json,
     )
-
-
-def _unknown_repository(repo_id: str) -> RepositoryConfig:
-    raise ConfigError(f"Unknown repository id: {repo_id}")
 
 
 def _repo_refresh(args: argparse.Namespace) -> int:
