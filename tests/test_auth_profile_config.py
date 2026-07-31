@@ -278,6 +278,8 @@ def test_runtime_auth_profile_builds_existing_identity_primitives(tmp_path: Path
     configured = loaded.auth_profiles["personal"]
     assert isinstance(configured, AuthProfileConfig)
     assert configured.profile.profile_id == "personal"
+    assert configured.profile.credential_ref.scheme == "gh-account"
+    assert configured.profile.credential_ref.reference_id == "gh-account-personal"
     assert configured.profile.actor_class is ActorClass.HUMAN_OPERATED
     assert configured.eligibility.repository_patterns == ("github.com/maemreyo/*",)
     assert isinstance(configured.api_identity, StoredGhAccountSpec)
@@ -342,6 +344,8 @@ def test_github_app_profile_constructs_app_installation_spec(tmp_path: Path) -> 
 
     configured = load_config(path).auth_profiles["automation"]
 
+    assert configured.profile.credential_ref.scheme == "github-app"
+    assert configured.profile.credential_ref.reference_id == "github-app-prod"
     assert isinstance(configured.api_identity, GitHubAppInstallationSpec)
     assert configured.api_identity.installation_id == "314"
     assert configured.api_identity.permission_ids == ("contents:write", "pull_requests:write")

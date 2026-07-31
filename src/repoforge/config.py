@@ -1031,12 +1031,15 @@ def _load_auth_profiles(raw: Any) -> dict[str, AuthProfileConfig]:
                 ).encode("utf-8")
             ).hexdigest()
             actor_class = ActorClass(source.actor_class)
+            credential_scheme = (
+                "gh-account" if source.credential_kind == "stored_account" else "github-app"
+            )
             profile = CredentialProfile(
                 profile_id=source.profile_id,
                 provider=RepositoryProvider(source.provider),
                 credential_kind=CredentialKind(source.credential_kind),
                 credential_ref=OpaqueCredentialReference(
-                    scheme="repoforge",
+                    scheme=credential_scheme,
                     reference_id=source.credential_reference,
                 ),
                 actor_class=actor_class,
