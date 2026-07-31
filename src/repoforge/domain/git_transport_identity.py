@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from .git_remote_identity import ReviewedSshEndpoint
+
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _ENV = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
@@ -38,6 +40,7 @@ class GitTransportSpec:
     allowed_access: tuple[GitTransportAccess, ...]
     ssh_identity_file: str | None = None
     https_token_environment: str | None = None
+    ssh_endpoint: ReviewedSshEndpoint | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -61,13 +64,21 @@ class GitTransportSpec:
         ):
             raise ValueError("allowed_access must be a non-empty unique tuple")
         if self.kind is GitTransportKind.SSH:
-            if (
+            if self.ssh_endpoint is None and (
                 not isinstance(self.ssh_identity_file, str)
                 or not self.ssh_identity_file.startswith("/")
                 or "\x00" in self.ssh_identity_file
                 or len(self.ssh_identity_file) > 4096
             ):
-                raise ValueError("SSH transport requires an absolute identity-file reference")
+                raise ValueError(
+                    "SSH transport requires a reviewed endpoint or an absolute "
+                    "identity-file reference"
+                )
+            if (
+                self.ssh_endpoint is not None
+                and self.ssh_endpoint.canonical_host != self.provider_host.lower()
+            ):
+                raise ValueError("SSH endpoint host must match provider_host")
             if self.https_token_environment is not None:
                 raise ValueError("SSH transport cannot declare an HTTPS token environment")
         else:
@@ -78,6 +89,8 @@ class GitTransportSpec:
                 or _ENV.fullmatch(self.https_token_environment) is None
             ):
                 raise ValueError("HTTPS transport requires a safe token environment name")
+            if self.ssh_endpoint is not None:
+                raise ValueError("HTTPS transport cannot declare an SSH endpoint")
 
 
 @dataclass(frozen=True, slots=True)

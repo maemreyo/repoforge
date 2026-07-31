@@ -381,7 +381,9 @@ def render_resolved(
         if not isinstance(raw_profile, dict):
             raise ValueError(f"auth_profiles.{profile_id} must be a table")
         lines.extend(["", f"[auth_profiles.{_toml(profile_id)}]"])
-        for key in sorted(raw_profile):
+        scalar_keys = [key for key in sorted(raw_profile) if not isinstance(raw_profile[key], dict)]
+        nested_keys = [key for key in sorted(raw_profile) if isinstance(raw_profile[key], dict)]
+        for key in scalar_keys:
             value = raw_profile[key]
             if not isinstance(value, (str, int, bool, list)):
                 raise TypeError(
@@ -389,6 +391,22 @@ def render_resolved(
                     f"{type(value).__name__}"
                 )
             lines.append(f"{key} = {_toml(value)}")
+        for key in nested_keys:
+            nested = raw_profile[key]
+            if not isinstance(nested, dict):
+                raise TypeError(
+                    f"Unsupported auth_profiles.{profile_id}.{key} TOML value: "
+                    f"{type(nested).__name__}"
+                )
+            lines.extend(["", f"[auth_profiles.{_toml(profile_id)}.{key}]"])
+            for nested_key in sorted(nested):
+                nested_value = nested[nested_key]
+                if not isinstance(nested_value, (str, int, bool, list)):
+                    raise TypeError(
+                        f"Unsupported auth_profiles.{profile_id}.{key}.{nested_key} "
+                        f"TOML value: {type(nested_value).__name__}"
+                    )
+                lines.append(f"{nested_key} = {_toml(nested_value)}")
     repositories = document.get("repositories", {})
     if isinstance(repositories, dict):
         for repo_id in sorted(repositories):

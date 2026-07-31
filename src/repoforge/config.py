@@ -1093,6 +1093,7 @@ def _load_auth_profiles(raw: Any) -> dict[str, AuthProfileConfig]:
                 ),
                 ssh_identity_file=source.ssh_identity_file,
                 https_token_environment=source.https_token_environment,
+                ssh_endpoint=source.ssh_endpoint,
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"{context} is invalid: {exc}") from exc
