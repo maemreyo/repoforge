@@ -1,6 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.publishing import validate_pr_update
 from ..context import ApplicationContext
 from ..dto import to_data
@@ -13,6 +14,7 @@ class WorkspaceUpdateDraftPrCommand:
     title: str | None = None
     body: str | None = None
     idempotency_key: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +42,12 @@ class DraftPullRequestUpdater:
             self.ctx.idempotent(
                 "workspace_update_draft_pr",
                 c.idempotency_key,
-                {"workspace_id": c.workspace_id, "title": title, "body": body},
+                {
+                    "workspace_id": c.workspace_id,
+                    "title": title,
+                    "body": body,
+                    "selector": c.selector.payload(),
+                },
                 operation,
                 details={"workspace_id": c.workspace_id},
                 serialize=to_data,

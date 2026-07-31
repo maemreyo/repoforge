@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...domain.durable_state import Revision, SchemaVersion, StateEnvelope, StatePage
+from ...domain.operation_identity import OperationIdentityReference
 from ...domain.state_lifecycle import StateMigrationStep
 from ...domain.task_capsule import (
     LOCAL_OPERATOR_PRINCIPAL,
@@ -53,6 +54,17 @@ def _migrate_v2_to_v1(payload: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items() if key not in _V2_ADDED_FIELDS}
 
 
+_V3_ADDED_FIELDS: dict[str, object] = {"identity_contexts": []}
+
+
+def _migrate_v2_to_v3(payload: dict[str, object]) -> dict[str, object]:
+    return {**payload, **_V3_ADDED_FIELDS}
+
+
+def _migrate_v3_to_v2(payload: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in payload.items() if key not in _V3_ADDED_FIELDS}
+
+
 TASK_CAPSULE_MIGRATION_STEPS: tuple[StateMigrationStep, ...] = (
     StateMigrationStep(
         collection=TASK_CAPSULES_COLLECTION,
@@ -60,6 +72,13 @@ TASK_CAPSULE_MIGRATION_STEPS: tuple[StateMigrationStep, ...] = (
         to_version=SchemaVersion(2),
         forward=_migrate_v1_to_v2,
         reverse=_migrate_v2_to_v1,
+    ),
+    StateMigrationStep(
+        collection=TASK_CAPSULES_COLLECTION,
+        from_version=SchemaVersion(2),
+        to_version=SchemaVersion(3),
+        forward=_migrate_v2_to_v3,
+        reverse=_migrate_v3_to_v2,
     ),
 )
 
@@ -152,6 +171,7 @@ class TaskCapsuleCodec:
             "mutation_count": value.mutation_count,
             "lease_holder": value.lease_holder,
             "lease_expires_at": value.lease_expires_at,
+            "identity_contexts": [item.payload() for item in value.identity_contexts],
         }
 
     def decode(self, payload: dict[str, object]) -> TaskCapsule:
@@ -187,6 +207,7 @@ class TaskCapsuleCodec:
                 "mutation_count",
                 "lease_holder",
                 "lease_expires_at",
+                "identity_contexts",
             },
         )
         criteria: list[TaskCriterion] = []
@@ -297,6 +318,15 @@ class TaskCapsuleCodec:
         mutation_count = payload["mutation_count"]
         if not isinstance(mutation_count, int) or isinstance(mutation_count, bool):
             raise ValueError("mutation_count must be an integer")
+        identity_contexts: list[OperationIdentityReference] = []
+        for raw in _objects(payload["identity_contexts"], name="identity_contexts"):
+            _required_fields(raw, {"context_id", "context_digest"})
+            identity_contexts.append(
+                OperationIdentityReference(
+                    context_id=str(raw["context_id"]),
+                    context_digest=str(raw["context_digest"]),
+                )
+            )
 
         return TaskCapsule(
             task_id=str(payload["task_id"]),
@@ -346,6 +376,7 @@ class TaskCapsuleCodec:
                 if payload["lease_expires_at"] is not None
                 else None
             ),
+            identity_contexts=tuple(identity_contexts),
         )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -15,6 +16,7 @@ from ...config import ServerConfig
 from ...domain.errors import CommandError, ErrorCode
 from ...domain.failure_artifacts import extract_failure
 from ...domain.redaction import redact_text
+from ...domain.repository_auth_broker import EphemeralSecret
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ..persistence.failure_output_artifact_store import persist_failure_output
@@ -42,6 +44,23 @@ except OSError as exc:
     os.write(2, ("__REPOFORGE_LAUNCH_EXEC_FAILED__:" + str(exc) + "\\n").encode("utf-8", "replace"))
     os._exit(126)
 """
+
+
+def _mask_issued_secrets(text: str, secrets: tuple[str, ...]) -> str:
+    """Remove exactly the credentials this call was issued, and nothing else.
+
+    Deliberately not the full egress detector. Running that at capture would
+    inject markers into machine-readable output -- `gh` emits JSON, and a marker
+    dropped inside it makes the payload unparseable -- and the egress boundary
+    already applies the detector later with more precise markers. What has to
+    happen here is narrower: a credential handed to a pinned transport must never
+    appear in captured output, including the failure artifact that outlives the
+    call, because nothing downstream can tell it was ever a secret.
+    """
+
+    for secret in secrets:
+        text = text.replace(secret, "<redacted>")
+    return text
 
 
 class SubprocessCommandExecutor:
@@ -107,8 +126,12 @@ class SubprocessCommandExecutor:
         text: bool,
         timeout: int,
         extra_env: Mapping[str, str] | None,
+        exact_env: Mapping[str, str] | None = None,
         cancel_token: CancellationToken | None = None,
     ) -> tuple[subprocess.Popen[Any], tuple[str | bytes, str | bytes]]:
+        if exact_env is not None and extra_env is not None:
+            raise CommandError("exact_env and extra_env are mutually exclusive")
+        environment = dict(exact_env) if exact_env is not None else self.environment(extra_env)
         gate_read: int | None = None
         gate_write: int | None = None
         popen_argv = list(argv)
@@ -128,7 +151,7 @@ class SubprocessCommandExecutor:
             process = subprocess.Popen(
                 popen_argv,
                 cwd=cwd,
-                env=self.environment(extra_env),
+                env=environment,
                 stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -309,6 +332,206 @@ class SubprocessCommandExecutor:
         output_limit: int | None = None,
         cancel_token: CancellationToken | None = None,
     ) -> CommandResult:
+        return self._run_text(
+            argv,
+            cwd=cwd,
+            input_text=input_text,
+            timeout=timeout,
+            check=check,
+            extra_env=extra_env,
+            output_limit=output_limit,
+            cancel_token=cancel_token,
+        )
+
+    def run_isolated(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str],
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> CommandResult:
+        """Run with an exact environment and redact the issued secrets at capture time."""
+
+        raw_secrets = tuple(secret for secret in secrets if secret)
+        visible_inputs = (*argv, str(cwd), input_text or "")
+        if any(secret in value for secret in raw_secrets for value in visible_inputs):
+            raise CommandError(
+                "Raw repository-auth material is not allowed in argv, URLs, cwd, or stdin.",
+                code=ErrorCode.CREDENTIAL_LEAK_BLOCKED,
+                unchanged_state=("No child process was started.",),
+            )
+        return self._run_text(
+            argv,
+            cwd=cwd,
+            input_text=input_text,
+            timeout=timeout,
+            check=check,
+            exact_env=environment,
+            secrets=raw_secrets,
+            output_limit=output_limit,
+            cancel_token=cancel_token,
+        )
+
+    def _run_sensitive_bytes(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str],
+        timeout: int | None,
+        max_bytes: int,
+        cancel_token: CancellationToken | None,
+    ) -> bytes:
+        if not argv or not all(isinstance(item, str) and item for item in argv):
+            raise CommandError("Command argv must contain non-empty strings")
+        if (
+            not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or not 1 <= max_bytes <= 10_000_000
+        ):
+            raise CommandError("Sensitive command max_bytes must be between 1 and 10000000")
+        raw_secrets = tuple(secret for secret in secrets if secret)
+        visible_inputs = (*argv, str(cwd))
+        if any(secret in value for secret in raw_secrets for value in visible_inputs):
+            raise CommandError(
+                "Raw repository-auth material is not allowed in argv, URLs, or cwd.",
+                code=ErrorCode.CREDENTIAL_LEAK_BLOCKED,
+                unchanged_state=("No child process was started.",),
+            )
+        process, (stdout, stderr) = self._communicate(
+            argv,
+            cwd=cwd,
+            input_data=None,
+            text=False,
+            timeout=timeout or self.config.default_command_timeout_seconds,
+            extra_env=None,
+            exact_env=environment,
+            cancel_token=cancel_token,
+        )
+        if not isinstance(stdout, bytes) or not isinstance(stderr, bytes):
+            raise CommandError("Sensitive command returned text-mode output")
+        if (process.returncode or 0) != 0:
+            raise CommandError(
+                "Sensitive command failed without exposing captured output.",
+                code=ErrorCode.COMMAND_FAILED,
+                details={"command": argv[0], "exit_code": process.returncode or 0},
+                unchanged_state=("No captured secret was returned or persisted.",),
+            )
+        if len(stdout) > max_bytes:
+            raise CommandError(
+                "Sensitive command output exceeded its reviewed byte bound.",
+                code=ErrorCode.COMMAND_FAILED,
+                details={"command": argv[0], "max_bytes": max_bytes},
+                unchanged_state=("No captured secret was returned or persisted.",),
+            )
+        return stdout
+
+    def run_secret_text(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str] = (),
+        timeout: int | None = None,
+        max_bytes: int = 100_000,
+        cancel_token: CancellationToken | None = None,
+    ) -> EphemeralSecret:
+        """Capture one secret as ephemeral memory, never as a ``CommandResult``."""
+
+        raw = self._run_sensitive_bytes(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            secrets=secrets,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            cancel_token=cancel_token,
+        )
+        buffer = bytearray(raw)
+        del raw
+        while buffer and chr(buffer[0]).isspace():
+            del buffer[0]
+        while buffer and chr(buffer[-1]).isspace():
+            buffer.pop()
+        try:
+            return EphemeralSecret.from_bytes(buffer)
+        finally:
+            for index in range(len(buffer)):
+                buffer[index] = 0
+
+    def run_secret_json(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str],
+        field: str,
+        timeout: int | None = None,
+        max_bytes: int = 1_000_000,
+        cancel_token: CancellationToken | None = None,
+    ) -> tuple[dict[str, object], EphemeralSecret]:
+        """Parse bounded JSON and detach one secret field before returning metadata."""
+
+        if not isinstance(field, str) or not field or len(field) > 128:
+            raise CommandError("Sensitive JSON field must be bounded non-empty text")
+        raw = self._run_sensitive_bytes(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            secrets=secrets,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            cancel_token=cancel_token,
+        )
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise CommandError(
+                "Sensitive command returned invalid JSON without exposing captured output.",
+                code=ErrorCode.COMMAND_FAILED,
+                unchanged_state=("No captured secret was returned or persisted.",),
+            ) from None
+        finally:
+            del raw
+        if not isinstance(parsed, dict) or not all(isinstance(key, str) for key in parsed):
+            raise CommandError(
+                "Sensitive command returned an invalid JSON object.",
+                code=ErrorCode.COMMAND_FAILED,
+                unchanged_state=("No captured secret was returned or persisted.",),
+            )
+        value = parsed.pop(field, None)
+        if not isinstance(value, str) or not value:
+            raise CommandError(
+                "Sensitive command omitted the reviewed secret field.",
+                code=ErrorCode.COMMAND_FAILED,
+                unchanged_state=("No captured secret was returned or persisted.",),
+            )
+        metadata = {str(key): item for key, item in parsed.items()}
+        return metadata, EphemeralSecret.from_text(value)
+
+    def _run_text(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        extra_env: Mapping[str, str] | None = None,
+        exact_env: Mapping[str, str] | None = None,
+        secrets: Sequence[str] = (),
+        output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> CommandResult:
         if not argv or not all(isinstance(x, str) and x for x in argv):
             raise CommandError("Command argv must contain non-empty strings")
         actual_timeout = timeout or self.config.default_command_timeout_seconds
@@ -320,6 +543,7 @@ class SubprocessCommandExecutor:
             text=True,
             timeout=actual_timeout,
             extra_env=extra_env,
+            exact_env=exact_env,
             cancel_token=cancel_token,
         )
         if not isinstance(stdout, str) or not isinstance(stderr, str):
@@ -334,6 +558,13 @@ class SubprocessCommandExecutor:
                 },
             )
         returncode = process.returncode or 0
+        # Issued secrets are removed at capture so nothing downstream -- selector
+        # extraction, truncation, or the failure artifact that outlives this call
+        # -- can observe them. Ordinary commands issue none, so this is a no-op
+        # for them and their output reaches the egress boundary untouched.
+        if issued_secrets := tuple(secret for secret in secrets if secret):
+            stdout = _mask_issued_secrets(stdout, issued_secrets)
+            stderr = _mask_issued_secrets(stderr, issued_secrets)
         full_output = "\n".join(part for part in (stdout, stderr) if part)
         extraction = extract_failure(argv, full_output, returncode=returncode)
         bounded_stdout, stdout_truncated = self._truncate(stdout, limit)
@@ -372,10 +603,10 @@ class SubprocessCommandExecutor:
                 code=ErrorCode.COMMAND_FAILED,
                 details={
                     "command": argv[0],
-                    "argv": [redact_text(item, limit=256) for item in argv[:32]],
+                    "argv": [redact_text(item, secrets=secrets, limit=256) for item in argv[:32]],
                     "exit_code": result.returncode,
-                    "stdout_excerpt": redact_text(stdout_excerpt, limit=2_000),
-                    "stderr_excerpt": redact_text(stderr_excerpt, limit=2_000),
+                    "stdout_excerpt": redact_text(stdout_excerpt, secrets=secrets, limit=2_000),
+                    "stderr_excerpt": redact_text(stderr_excerpt, secrets=secrets, limit=2_000),
                     "stdout_truncated": result.stdout_truncated or stdout_excerpt_truncated,
                     "stderr_truncated": result.stderr_truncated or stderr_excerpt_truncated,
                     **(

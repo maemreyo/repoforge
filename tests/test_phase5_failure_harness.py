@@ -13,7 +13,11 @@ from repoforge.application.workspace.create import (
     WorkspaceCreator,
 )
 from repoforge.config import AppConfig, RepositoryConfig, ServerConfig
-from repoforge.testing import InMemoryLockManager, InMemoryOperationGate
+from repoforge.testing import (
+    InMemoryLockManager,
+    InMemoryOperationGate,
+    NullCommitIdentityGateway,
+)
 
 
 class FixedClock:
@@ -152,6 +156,7 @@ def test_workspace_creation_compensates_when_registry_save_fails(
         FixedIds(),
         NullExecutable(),
         execution_coordinator_for_tests(),
+        commit_identities=NullCommitIdentityGateway(),
     )
     with pytest.raises(OSError, match="injected"):
         WorkspaceCreator(ctx).execute(WorkspaceCreateCommand("demo", "task"))

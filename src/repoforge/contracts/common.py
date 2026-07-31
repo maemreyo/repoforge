@@ -34,10 +34,63 @@ LongText = Annotated[str, Field(min_length=1, max_length=120_000)]
 ByteBudget = Annotated[int, Field(ge=1, le=120_000)]
 
 
+#: A declared auth profile id, or `auto` for the single deterministically eligible profile.
+#: The pattern admits `_`, so a token-shaped value is not rejected here -- the domain selector
+#: is the fail-closed layer for that, and every caller maps through it before acting.
+AuthProfileId = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        description=(
+            "Declared auth profile id, or 'auto' to select the single eligible profile. "
+            "Ambiguity and missing or disabled candidates fail closed."
+        ),
+    ),
+]
+
+
+class AuthActorClass(str, Enum):
+    """Public actor classes a caller may select an identity for."""
+
+    HUMAN = "human"
+    AGENT = "agent"
+
+
 class StrictModel(BaseModel):
     """Base model that fails closed on undeclared fields."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
+
+
+class AuthSelectionInput(StrictModel):
+    """Mixin for the inputs of calls that can actually act as an identity.
+
+    Defaults are the deterministic public defaults, so every caller written before selectors
+    existed keeps working unchanged. Read and watch surfaces deliberately do not inherit this:
+    on those, a selector is an undeclared field and `extra="forbid"` rejects it.
+    """
+
+    auth_profile: AuthProfileId = "auto"
+    actor_class: AuthActorClass = AuthActorClass.HUMAN
+
+    def selector_requested(self) -> bool:
+        """Whether the caller asked for a non-default identity on this call."""
+
+        return self.auth_profile != "auto" or self.actor_class is not AuthActorClass.HUMAN
+
+    def reject_selector_on_read(self, surface: str) -> None:
+        """Refuse a selector on a branch that performs no write.
+
+        Silently ignoring it would let a caller believe a read was performed as a chosen
+        identity when it was not.
+        """
+
+        if self.selector_requested():
+            raise ValueError(
+                f"{surface} performs no write, so auth_profile and actor_class do not apply"
+            )
 
 
 class ToolErrorDetails(StrictModel):

@@ -6,7 +6,9 @@ from typing import Any
 
 from ..bootstrap import AdapterOverrides, Application, build_application
 from ..config import AppConfig
+from ..domain.auth_profile import AuthProfileSelector, RequestedActorClass
 from ..domain.egress import EgressDestination, EgressPolicy, sanitize_egress_data
+from ..domain.errors import ErrorCode, RepoForgeError
 from ..domain.ticket_sync import TicketProjectOwnerType
 from ..ports import (
     AuditSink,
@@ -273,6 +275,29 @@ _READ_EGRESS_POLICY = EgressPolicy(
     max_output_chars=120_000,
     max_output_lines=20_000,
 )
+
+
+def _auth_selector(auth_profile: str, actor_class: str) -> AuthProfileSelector:
+    """Validate a public selector at the application boundary, before any effect runs.
+
+    The MCP schema pattern admits `_`, so a token-shaped profile id reaches this point. The
+    domain selector is what refuses it, and refusing here means nothing has been acquired,
+    written, or admitted yet.
+    """
+
+    try:
+        return AuthProfileSelector(
+            auth_profile=auth_profile,
+            actor_class=RequestedActorClass(actor_class),
+        )
+    except ValueError as exc:
+        raise RepoForgeError(
+            f"The requested identity selector is not usable: {exc}",
+            code=ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+            retryable=False,
+            unchanged_state=("No identity was acquired and no external write was admitted.",),
+            safe_next_action="Pass auth_profile='auto' or a declared profile id.",
+        ) from exc
 
 
 def _result(
@@ -856,7 +881,10 @@ class CodingService:
         approval_request_id: str | None = None,
         manage: dict[str, object] | None = None,
         runtime_identity: dict[str, object] | None = None,
+        auth_profile: str = "auto",
+        actor_class: str = "human",
     ) -> dict[str, Any]:
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._repo_issue_v2.execute(
                 RepositoryIssueV2Command(
@@ -879,6 +907,7 @@ class CodingService:
                     approval_request_id=approval_request_id,
                     manage=manage,
                     runtime_identity=runtime_identity,
+                    selector=selector,
                 )
             )
         )
@@ -1001,11 +1030,20 @@ class CodingService:
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
         adopt_branch: str | None = None,
+        auth_profile: str = "auto",
+        actor_class: str = "human",
     ) -> dict[str, Any]:
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._create_v2.execute(
                 WorkspaceCreateV2Command(
-                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                    repo_id,
+                    task_slug,
+                    base,
+                    idempotency_key,
+                    issue_ids,
+                    adopt_branch,
+                    selector,
                 )
             )
         )
@@ -1334,7 +1372,10 @@ class CodingService:
         expected_fingerprint: str,
         plan_token: str | None = None,
         resolutions: list[dict[str, str]] | None = None,
+        auth_profile: str = "auto",
+        actor_class: str = "human",
     ) -> dict[str, Any]:
+        selector = _auth_selector(auth_profile, actor_class)
         normalized = tuple(
             RefreshResolution(
                 item["path"],
@@ -1352,6 +1393,7 @@ class CodingService:
                     expected_fingerprint,
                     plan_token,
                     normalized,
+                    selector,
                 )
             )
         )
@@ -1615,7 +1657,10 @@ class CodingService:
         message: str,
         expected_head_sha: str | None = None,
         expected_fingerprint: str | None = None,
+        auth_profile: str = "auto",
+        actor_class: str = "human",
     ) -> dict[str, Any]:
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._commit.execute(
                 WorkspaceCommitCommand(
@@ -1623,6 +1668,7 @@ class CodingService:
                     message,
                     expected_head_sha,
                     expected_fingerprint,
+                    selector,
                 )
             )
         )
@@ -1632,10 +1678,18 @@ class CodingService:
         workspace_id: str,
         idempotency_key: str | None = None,
         expected_remote_head: str | None = None,
+        auth_profile: str = "auto",
+        actor_class: str = "human",
     ) -> dict[str, Any]:
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._push.execute(
-                WorkspacePushCommand(workspace_id, idempotency_key, expected_remote_head)
+                WorkspacePushCommand(
+                    workspace_id,
+                    idempotency_key,
+                    expected_remote_head,
+                    selector,
+                )
             )
         )
 
@@ -1654,7 +1708,10 @@ class CodingService:
         event_cursor: str | None = None,
         issue_dispositions: tuple[dict[str, object], ...] = (),
         apply_closures: bool = False,
+        auth_profile: str = "auto",
+        actor_class: str = "human",
     ) -> dict[str, Any]:
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._pr.execute(
                 WorkspacePrCommand(
@@ -1671,6 +1728,7 @@ class CodingService:
                     event_cursor=event_cursor,
                     issue_dispositions=issue_dispositions,
                     apply_closures=apply_closures,
+                    selector=selector,
                 )
             )
         )

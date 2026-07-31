@@ -516,17 +516,6 @@ class GitCliRepository:
             output_limit=2048,
         )
 
-    def commit_merge(self, path: Path) -> str:
-        if self._commit_ref(path, "MERGE_HEAD", check=False) is None:
-            raise WorkspaceError("No reviewed merge is in progress")
-        self._executor.run(
-            ["git", "commit", "--no-edit"],
-            cwd=path,
-            timeout=self.server.verification_timeout_seconds,
-            output_limit=self.server.max_tool_output_chars,
-        )
-        return self.head_sha(path)
-
     def reset_hard(self, path: Path, target_sha: str) -> None:
         self._executor.run(["git", "reset", "--hard", target_sha], cwd=path, output_limit=2048)
 
@@ -1843,36 +1832,6 @@ class GitCliRepository:
             return False
         self._executor.run(["git", "branch", "-D", branch], cwd=repo.path)
         return True
-
-    def commit(self, path: Path, message: str) -> tuple[str, str]:
-        try:
-            self._executor.run(["git", "add", "--all", "--"], cwd=path)
-        except CommandError as exc:
-            exc.details.setdefault("commit_stage", "git_add")
-            raise
-        try:
-            staged = self._executor.run(
-                ["git", "diff", "--cached", "--name-only", "--"], cwd=path
-            ).stdout.strip()
-        except CommandError as exc:
-            exc.details.setdefault("commit_stage", "staged_diff")
-            raise
-        if not staged:
-            raise WorkspaceError("No staged changes remain after git add")
-        try:
-            self._executor.run(["git", "commit", "-m", message], cwd=path)
-        except CommandError as exc:
-            exc.details.setdefault("commit_stage", "git_commit")
-            raise
-        head = self.head_sha(path)
-        try:
-            show = self._executor.run(
-                ["git", "show", "-1", "--stat", "--oneline", "--decorate"], cwd=path
-            ).stdout
-        except CommandError as exc:
-            exc.details.setdefault("commit_stage", "commit_summary")
-            raise
-        return (head, show)
 
     def commit_summary(self, path: Path) -> str:
         return self._executor.run(

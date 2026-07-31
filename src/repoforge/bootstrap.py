@@ -7,9 +7,9 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .adapters.activation.release_store import RuntimeReleaseStore
@@ -45,12 +45,26 @@ from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSyste
 from .adapters.filesystem.receipt_transaction_factory import (
     ReceiptJournaledFileTransactionFactory,
 )
-from .adapters.git import GitCliRepository
+from .adapters.git import (
+    GitAmbientAuthConflictReader,
+    GitCliRepository,
+    GitCommitIdentityGateway,
+    GitNestedResourceDiscovery,
+    GitTransportRouter,
+    SshCommandAliasDiscovery,
+)
 from .adapters.github import (
+    CommandGitHubCapabilityPreflight,
     CommandGitHubCapabilityProbe,
     CommandGitHubTicketGraphGateway,
     GhCliGateway,
+    GhCliGitHubApiIdentityVerifier,
+    GhCliNamedAccountDiscovery,
+    GhCliStoredAccountTokenSource,
+    GitHubApiAuthProvider,
+    UnavailableGitHubAppInstallationTokenIssuer,
 )
+from .adapters.github.repository_observation import GhCliRepositoryObserver
 from .adapters.github.ticket_project import GhTicketProjectGateway
 from .adapters.hygiene import CommandHygieneGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
@@ -73,10 +87,12 @@ from .adapters.persistence import (
     JsonIssueGraphPublicationStore,
     JsonIterationCache,
     JsonOnboardingStore,
+    JsonOperationIdentityStore,
     JsonOperationResultStore,
     JsonOperationStore,
     JsonOperationWorkQueue,
     JsonPrCheckWatchStore,
+    JsonRepositoryBindingStore,
     JsonRuntimeActivationStore,
     JsonTaskStore,
     JsonWorkerBindingStore,
@@ -84,6 +100,11 @@ from .adapters.persistence import (
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
 from .adapters.provider.config_registry import ConfigProviderRegistry
+from .adapters.publication import PublicationAdapter
+from .adapters.publication_identity import (
+    DurableBindingPublicationRepositoryResolver,
+    PinnedPublicationAuthorizationGateway,
+)
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
 from .adapters.runtime import (
@@ -138,6 +159,8 @@ from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandE
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
+from .application.auth_migration import AuthMigrationService
+from .application.auth_ux import AuthUxService, ObserveRepository
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
 from .application.execution.coordinator import ExecutionCoordinator
@@ -155,11 +178,14 @@ from .application.operations import (
     recover_operation_work,
     recover_operations,
 )
+from .application.operations.identity import OperationIdentityManager
 from .application.outcome_reconciliation import (
     OutcomeReceiptReconciler,
     RuntimeActivationReconciler,
 )
+from .application.publication import PublicationCoordinator
 from .application.repository_admin.proposals import RepositoryProposalService
+from .application.repository_identity_runtime import RepositoryIdentityRuntime
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.activation_journal import RuntimeActivationJournal
 from .application.runtime.supervisor import RuntimeSupervisor
@@ -170,11 +196,35 @@ from .application.workflow import (
     WorkflowReplayEngine,
 )
 from .application.workspace.pr_watch import PrCheckWatchCoordinator
-from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
+from .application.workspace.publication import CoordinatedWorkspacePublicationService
+from .application.workspace.publication_request_factory import (
+    ScopedWorkspacePublicationRequestFactory,
+)
+from .config import (
+    DEFAULT_STATE_ROOT,
+    AppConfig,
+    AuthProfileConfig,
+    RepositoryConfig,
+    ServerConfig,
+    load_config,
+)
 from .contracts.registry import validate_generated_contract_identity
 from .domain.activation import AGENT_SECRET_FILE_ENV_VAR, AGENT_SECRET_KEY
+from .domain.auth_profile import AuthProfileSelector, RequestedActorClass
 from .domain.errors import ConfigError, ErrorCode, RepoForgeError
+from .domain.github_api_identity import GitHubAppInstallationSpec, StoredGhAccountSpec
 from .domain.operation_task import OperationTask
+from .domain.repository_auth_broker import (
+    AuthBrokerRequest,
+    EphemeralSecret,
+    ProcessAuthContext,
+    RepositoryAuthBroker,
+)
+from .domain.repository_identity import AuthTargetKind
+from .domain.repository_identity_resolution import (
+    RepositoryIdentityObservation,
+    role_accepts_actor_class,
+)
 from .domain.runtime import RuntimeRecord, TunnelProfile
 from .ports import (
     ApprovalPayloadStore,
@@ -184,6 +234,7 @@ from .ports import (
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
+    CommitIdentityGateway,
     ConfigurationStore,
     EffectReceiptStore,
     ExecutableLocator,
@@ -195,9 +246,11 @@ from .ports import (
     FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityPreflightGateway,
     GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
+    GitTransportGateway,
     HygieneBaselineCache,
     HygieneGateway,
     IdempotencyStore,
@@ -205,9 +258,13 @@ from .ports import (
     IterationCache,
     LockManager,
     MetricsSink,
+    NestedLeaseProvider,
+    NestedResourceDiscovery,
+    NestedTargetResolver,
     OnboardingEnvironment,
     OnboardingStore,
     OperationGate,
+    OperationIdentityStore,
     OperationResultStore,
     OperationStore,
     OperationWorkQueue,
@@ -216,6 +273,7 @@ from .ports import (
     ProcessReaper,
     ProviderRegistry,
     PullRequestGateway,
+    RepositoryBindingStore,
     RepositoryDiscovery,
     RepositoryProbe,
     RuntimeControlClient,
@@ -230,8 +288,10 @@ from .ports import (
     TunnelProfileStore,
     WorkerBindingStore,
     WorkflowRecordingStore,
+    WorkspacePublicationService,
     WorkspaceStore,
 )
+from .ports.auth_discovery import NamedAccountDiscovery, SshAliasDiscovery
 from .ports.external_mutation_ledger import ExternalMutationLedger
 from .ports.filesystem_transaction import (
     FileTransactionFactory as ReceiptFileTransactionFactory,
@@ -254,15 +314,33 @@ class AdapterOverrides:
     filesystem: FileSystem | None = None
     file_transactions: FileTransactionFactory | None = None
     git: GitRepository | None = None
+    commit_identities: CommitIdentityGateway | None = None
     github: PullRequestGateway | None = None
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     github_capabilities: GitHubCapabilityProbe | None = None
+    github_capability_preflight: GitHubCapabilityPreflightGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_resource_discovery: NestedResourceDiscovery | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_target_resolver: NestedTargetResolver | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_lease_provider: NestedLeaseProvider | None = field(
+        default=None,
+        kw_only=True,
+    )
     executables: ExecutableLocator | None = None
     metrics: MetricsSink | None = None
     idempotency: IdempotencyStore | None = None
     operations: OperationStore | None = None
     operation_work_queue: OperationWorkQueue | None = None
+    operation_identities: OperationIdentityStore | None = None
     operation_results: OperationResultStore | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
@@ -272,6 +350,15 @@ class AdapterOverrides:
     sleeper: Sleeper | None = None
     workflow_recordings: WorkflowRecordingStore | None = None
     provider_registry: ProviderRegistry | None = None
+    repository_bindings: RepositoryBindingStore | None = None
+    repository_identity_runtime: RepositoryIdentityRuntime | None = field(
+        default=None,
+        kw_only=True,
+    )
+    git_transport_router: GitTransportGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
     code_intelligence: CodeIntelligenceProvider | None = None
     approvals: ApprovalStore | None = None
     approval_payloads: ApprovalPayloadStore | None = None
@@ -289,6 +376,7 @@ class AdapterOverrides:
     reaper: ProcessReaper | None = None
     issue_graph_proposals: IssueGraphProposalStore | None = None
     issue_graph_publications: IssueGraphPublicationStore | None = None
+    publications: WorkspacePublicationService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +476,429 @@ def build_onboarding_coordinator(config_path: Path) -> OnboardingCoordinator:
         activate=lambda generation, mode, wait, rollback: activator.activate(
             generation, mode=mode, wait=wait, rollback_on_failure=rollback
         ),
+    )
+
+
+def build_auth_ux_service(
+    ctx: ApplicationContext,
+    *,
+    observe: ObserveRepository,
+) -> AuthUxService:
+    """Compose the identity facade from whatever this context actually has.
+
+    Each per-surface inspector is passed through exactly as composed: a context without one
+    yields ``unavailable`` for that surface, which is the whole point -- there is no ambient
+    fallback path that could quietly answer with the active account instead.
+    """
+
+    bindings = ctx.repository_bindings or JsonRepositoryBindingStore(
+        ctx.config.server.state_root, build_lock_manager(ctx.config.server.state_root)
+    )
+    identities: OperationIdentityManager | None = None
+    if ctx.operation_store is not None and ctx.operation_identities is not None:
+        identities = OperationIdentityManager(
+            operations=ctx.operation_store,
+            identities=ctx.operation_identities,
+        )
+    return AuthUxService(
+        config=ctx.config,
+        bindings=bindings,
+        observe=observe,
+        identities=identities,
+        clock=ctx.clock,
+        api=ctx.auth_api_inspector,
+        transport=ctx.auth_transport_inspector,
+        commits=ctx.auth_commit_inspector,
+        publication=ctx.auth_publication_inspector,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthCommandDependencies:
+    """Everything one `rf auth` invocation needs, composed in one place."""
+
+    service: AuthUxService
+    migration: AuthMigrationService
+    accounts: NamedAccountDiscovery
+    ssh: SshAliasDiscovery
+
+
+def _auth_observation_error(
+    code: ErrorCode,
+    message: str,
+    *,
+    next_action: str,
+) -> RepoForgeError:
+    return RepoForgeError(
+        message,
+        code=code,
+        retryable=False,
+        unchanged_state=("No repository identity was observed, bound, or used for a write.",),
+        safe_next_action=next_action,
+    )
+
+
+def _observation_profile(
+    *,
+    config: AppConfig,
+    observer: GhCliRepositoryObserver,
+    repository: RepositoryConfig,
+    selector: AuthProfileSelector,
+    config_revision: str,
+    observed_at: str,
+) -> AuthProfileConfig:
+    if not config.auth_profiles:
+        raise _auth_observation_error(
+            ErrorCode.INPUT_REQUIRED,
+            "This configuration has no reviewed repository auth profiles.",
+            next_action="Run `rf auth migrate inspect <repo-id>` before resolving an identity.",
+        )
+
+    target = observer.target(repository)
+
+    def eligible(configured: AuthProfileConfig) -> bool:
+        provisional = RepositoryIdentityObservation(
+            provider=target.provider,
+            provider_host=target.provider_host,
+            repository_id=configured.api_identity.repository_id,
+            canonical_name=target.canonical_name,
+            exists=True,
+            observed_at=observed_at,
+            config_revision=config_revision,
+        )
+        return (
+            configured.eligibility.enabled
+            and role_accepts_actor_class(selector.role, configured.profile.actor_class)
+            and configured.eligibility.matches(provisional)
+        )
+
+    if not selector.automatic:
+        configured = config.auth_profiles.get(selector.auth_profile)
+        if configured is None:
+            raise _auth_observation_error(
+                ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND,
+                f"No reviewed auth profile is declared with id {selector.auth_profile!r}.",
+                next_action="Run `rf auth profile list` and select one listed profile.",
+            )
+        if not eligible(configured):
+            raise _auth_observation_error(
+                ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                "The selected auth profile is not eligible for this repository and actor role.",
+                next_action="Select an enabled profile whose repository boundary and actor role match.",
+            )
+        return configured
+
+    matches = tuple(
+        configured for configured in config.auth_profiles.values() if eligible(configured)
+    )
+    if len(matches) != 1:
+        reason = (
+            "No auth profile is eligible"
+            if not matches
+            else "More than one auth profile is eligible"
+        )
+        raise _auth_observation_error(
+            ErrorCode.INPUT_REQUIRED,
+            f"{reason} for this repository and actor role.",
+            next_action="Pass `--auth-profile <profile-id>` to select one reviewed profile explicitly.",
+        )
+    return matches[0]
+
+
+def _named_account_context(
+    commands: SubprocessCommandExecutor,
+    *,
+    cwd: Path,
+    profile_id: str,
+    host: str,
+    login: str,
+    target_id: str,
+) -> tuple[EphemeralSecret, ProcessAuthContext]:
+    inherited = commands.environment()
+    environment = {
+        key: inherited[key]
+        for key in ("HOME", "PATH", "LANG", "LC_ALL")
+        if key in inherited and isinstance(inherited[key], str)
+    }
+    environment["GH_PROMPT_DISABLED"] = "1"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    secret = commands.run_secret_text(
+        ["gh", "auth", "token", "--hostname", host, "--user", login],
+        cwd=cwd,
+        environment=environment,
+        secrets=(),
+        max_bytes=100_000,
+    )
+    token = secret.reveal()
+    reference_digest = hashlib.sha256(
+        f"{host}\0{login}\0{profile_id}\0{target_id}".encode()
+    ).hexdigest()
+    return secret, ProcessAuthContext(
+        profile_id=profile_id,
+        material_id=f"repository-observation-{reference_digest[:24]}",
+        target_kind=AuthTargetKind.REPOSITORY,
+        target_id=target_id,
+        environment=(("GH_TOKEN", token),),
+        _secret_values=(token,),
+    )
+
+
+def _production_config_revision(config: AppConfig, config_generation: int) -> str:
+    """Return the accepted resolved-config digest without requiring the source file to exist."""
+
+    try:
+        payload = config.source_path.read_bytes()
+    except OSError:
+        safe_config = {
+            "source_path": str(config.source_path),
+            "config_generation": config_generation,
+            "profiles": [
+                {
+                    "profile_id": profile_id,
+                    "profile_revision": configured.profile.revision,
+                    "credential_reference": configured.api_identity.reference_id,
+                    "repository_id": configured.api_identity.repository_id,
+                    "transport_fingerprint": configured.transport.credential_fingerprint,
+                }
+                for profile_id, configured in sorted(config.auth_profiles.items())
+            ],
+        }
+        payload = json.dumps(safe_config, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _runtime_observation_profile(
+    *,
+    config: AppConfig,
+    bindings: RepositoryBindingStore,
+    observer: GhCliRepositoryObserver,
+    repository: RepositoryConfig,
+    selector: AuthProfileSelector,
+    config_revision: str,
+    observed_at: str,
+) -> AuthProfileConfig:
+    """Select the exact profile used to prove stable identity before broker admission."""
+
+    target = observer.target(repository)
+
+    def eligible(configured: AuthProfileConfig) -> bool:
+        provisional = RepositoryIdentityObservation(
+            provider=target.provider,
+            provider_host=target.provider_host,
+            repository_id=configured.api_identity.repository_id,
+            canonical_name=target.canonical_name,
+            exists=True,
+            observed_at=observed_at,
+            config_revision=config_revision,
+        )
+        return (
+            configured.eligibility.enabled
+            and role_accepts_actor_class(selector.role, configured.profile.actor_class)
+            and configured.eligibility.matches(provisional)
+        )
+
+    if not selector.automatic:
+        configured = config.auth_profiles.get(selector.auth_profile)
+        if configured is None:
+            raise _auth_observation_error(
+                ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND,
+                f"No reviewed auth profile is declared with id {selector.auth_profile!r}.",
+                next_action="Select one profile reported by `rf auth profile list`.",
+            )
+        if not eligible(configured):
+            raise _auth_observation_error(
+                ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                "The selected auth profile is not eligible for this repository and actor role.",
+                next_action="Select an enabled profile whose boundary and actor role match.",
+            )
+        existing = bindings.read(target.provider_host, configured.api_identity.repository_id)
+        if existing is not None:
+            bound_profile = (
+                existing.value.agent_profile_id
+                if selector.actor_class is RequestedActorClass.AGENT
+                else existing.value.human_profile_id
+            )
+            if existing.value.config_revision != config_revision:
+                raise _auth_observation_error(
+                    ErrorCode.CONFIG_STALE,
+                    "The durable repository identity binding belongs to another configuration revision.",
+                    next_action="Reconcile the binding with `rf auth bind` before retrying.",
+                )
+            if bound_profile != configured.profile.profile_id:
+                raise _auth_observation_error(
+                    ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                    "The selected profile conflicts with the exact durable binding for this actor role.",
+                    next_action="Use the profile recorded in the durable repository binding.",
+                )
+        return configured
+
+    bound_matches: list[AuthProfileConfig] = []
+    for envelope in bindings.list_bindings(max_records=500).records:
+        binding = envelope.value
+        if (
+            binding.provider_host != target.provider_host
+            or binding.canonical_name.lower() != target.canonical_name.lower()
+            or binding.config_revision != config_revision
+        ):
+            continue
+        profile_id = (
+            binding.agent_profile_id
+            if selector.actor_class is RequestedActorClass.AGENT
+            else binding.human_profile_id
+        )
+        configured = config.auth_profiles.get(profile_id or "")
+        if (
+            configured is not None
+            and configured.api_identity.repository_id == binding.repository_id
+            and eligible(configured)
+        ):
+            bound_matches.append(configured)
+    if len(bound_matches) == 1:
+        return bound_matches[0]
+    if len(bound_matches) > 1:
+        raise _auth_observation_error(
+            ErrorCode.STATE_CORRUPT,
+            "More than one durable binding claims this repository and actor role.",
+            next_action="Inspect and repair the repository identity binding store.",
+        )
+
+    eligible_profiles = tuple(
+        configured for configured in config.auth_profiles.values() if eligible(configured)
+    )
+    if len(eligible_profiles) != 1:
+        reason = (
+            "No auth profile is eligible"
+            if not eligible_profiles
+            else "More than one auth profile is eligible"
+        )
+        raise _auth_observation_error(
+            ErrorCode.INPUT_REQUIRED,
+            f"{reason} for this repository and actor role.",
+            next_action="Pass an explicit reviewed auth profile before retrying.",
+        )
+    return eligible_profiles[0]
+
+
+def build_auth_command_dependencies(
+    store: ConfigurationStore,
+    *,
+    config: AppConfig,
+    config_revision: str,
+    cwd: Path | None = None,
+) -> AuthCommandDependencies:
+    """Compose the identity facade and discovery adapters for the operator CLI.
+
+    `rf auth` runs outside the managed runtime, so no per-surface inspector and no durable
+    operation identity store is composed here. That is deliberate: those surfaces report
+    `unavailable` rather than answering from whatever account happens to be active.
+    """
+
+    clock = system_clock()
+    commands = SubprocessCommandExecutor(config.server)
+    working_directory = cwd if cwd is not None else Path.cwd()
+    observer = GhCliRepositoryObserver(commands, clock=clock)
+
+    def repository(repo_id: str) -> RepositoryConfig:
+        repository = config.repositories.get(repo_id)
+        if repository is None:
+            raise ConfigError(f"Unknown repository id: {repo_id}")
+        return repository
+
+    def observe_selected(
+        repo_id: str, selector: AuthProfileSelector
+    ) -> RepositoryIdentityObservation:
+        selected_repository = repository(repo_id)
+        configured = _observation_profile(
+            config=config,
+            observer=observer,
+            repository=selected_repository,
+            selector=selector,
+            config_revision=config_revision,
+            observed_at=clock.now_iso(),
+        )
+        spec = configured.api_identity
+        if not isinstance(spec, StoredGhAccountSpec):
+            raise _auth_observation_error(
+                ErrorCode.INPUT_REQUIRED,
+                "GitHub App observation requires the managed repository identity runtime.",
+                next_action="Run this operation through the managed RepoForge runtime.",
+            )
+        secret, context = _named_account_context(
+            commands,
+            cwd=working_directory,
+            profile_id=configured.profile.profile_id,
+            host=spec.host,
+            login=spec.login,
+            target_id=spec.repository_id,
+        )
+        try:
+            observation = observer.observe(
+                selected_repository,
+                config_revision=config_revision,
+                context=context,
+            )
+        finally:
+            secret.release()
+        if observation.repository_id != spec.repository_id:
+            raise _auth_observation_error(
+                ErrorCode.GITHUB_API_REPOSITORY_MISMATCH,
+                "The selected profile token observed a different stable repository identity.",
+                next_action="Review the profile repository_id and the checkout remote before retrying.",
+            )
+        return observation
+
+    def observe_migration(repo_id: str, login: str | None) -> RepositoryIdentityObservation:
+        selected_repository = repository(repo_id)
+        if login is None:
+            target = observer.target(selected_repository)
+            return RepositoryIdentityObservation(
+                provider=target.provider,
+                provider_host=target.provider_host,
+                repository_id="0",
+                canonical_name=target.canonical_name,
+                exists=False,
+                observed_at=clock.now_iso(),
+                config_revision=config_revision,
+            )
+        secret, context = _named_account_context(
+            commands,
+            cwd=working_directory,
+            profile_id=login,
+            host="github.com",
+            login=login,
+            target_id=repo_id,
+        )
+        try:
+            return observer.observe(
+                selected_repository,
+                config_revision=config_revision,
+                context=context,
+            )
+        finally:
+            secret.release()
+
+    accounts = GhCliNamedAccountDiscovery(commands, cwd=working_directory)
+    ssh = SshCommandAliasDiscovery(commands, cwd=working_directory)
+    return AuthCommandDependencies(
+        service=AuthUxService(
+            config=config,
+            bindings=JsonRepositoryBindingStore(
+                config.server.state_root, build_lock_manager(config.server.state_root)
+            ),
+            observe=observe_selected,
+            clock=clock,
+        ),
+        migration=AuthMigrationService(
+            store=store,
+            clock=clock,
+            ids=id_generator(),
+            accounts=accounts,
+            ssh=ssh,
+            ambient=GitAmbientAuthConflictReader(commands),
+            observe=observe_migration,
+        ),
+        accounts=accounts,
+        ssh=ssh,
     )
 
 
@@ -825,6 +1336,7 @@ def build_application(
     filesystem = o.filesystem or LocalFileSystem()
     file_transactions = o.file_transactions or JournaledFileTransactionFactory()
     git = o.git or GitCliRepository(command, config.server)
+    commit_identities = o.commit_identities or GitCommitIdentityGateway(command)
     default_github = GhCliGateway(command, config.server)
     github = o.github or default_github
     issue_mutations = o.issue_mutations or default_github
@@ -845,9 +1357,105 @@ def build_application(
     github_capabilities = o.github_capabilities or CommandGitHubCapabilityProbe(
         command, config.server
     )
+    github_capability_preflight = o.github_capability_preflight or CommandGitHubCapabilityPreflight(
+        command, config.server
+    )
+    nested_resource_discovery = (
+        o.nested_resource_discovery
+        if o.nested_resource_discovery is not None
+        else GitNestedResourceDiscovery(command)
+    )
     ids = o.ids or UuidGenerator()
     executables = o.executables or SystemExecutableLocator()
     provider_registry = o.provider_registry or ConfigProviderRegistry(config.providers, executables)
+    repository_bindings = o.repository_bindings or JsonRepositoryBindingStore(
+        config.server.state_root, locks
+    )
+    config_revision = _production_config_revision(config, config_generation)
+    policy_revision = hashlib.sha256(
+        f"{config_revision}\0repository-auth-policy-v1".encode()
+    ).hexdigest()
+    identity_cwd = config.source_path.expanduser().resolve().parent
+    credential_commands = cast(SubprocessCommandExecutor, command)
+    stored_accounts = tuple(
+        configured.api_identity
+        for configured in config.auth_profiles.values()
+        if isinstance(configured.api_identity, StoredGhAccountSpec)
+    )
+    app_installations = tuple(
+        configured.api_identity
+        for configured in config.auth_profiles.values()
+        if isinstance(configured.api_identity, GitHubAppInstallationSpec)
+    )
+    auth_provider = GitHubApiAuthProvider(
+        stored_accounts=stored_accounts,
+        app_installations=app_installations,
+        stored_source=GhCliStoredAccountTokenSource(
+            credential_commands,
+            cwd=identity_cwd,
+            clock=clock,
+        ),
+        app_issuer=UnavailableGitHubAppInstallationTokenIssuer(),
+        verifier=GhCliGitHubApiIdentityVerifier(command, cwd=identity_cwd),
+        capability_preflight=github_capability_preflight,
+        cwd=identity_cwd,
+        config_revision=config_revision,
+        policy_revision=policy_revision,
+    )
+    auth_broker = RepositoryAuthBroker(auth_provider)
+    repository_observer = GhCliRepositoryObserver(command, clock=clock)
+
+    def observe_repository_identity(
+        repo_id: str,
+        selector: AuthProfileSelector,
+    ) -> RepositoryIdentityObservation:
+        repository = config.repositories.get(repo_id)
+        if repository is None:
+            raise ConfigError(f"Unknown repository id: {repo_id}")
+        configured = _runtime_observation_profile(
+            config=config,
+            bindings=repository_bindings,
+            observer=repository_observer,
+            repository=repository,
+            selector=selector,
+            config_revision=config_revision,
+            observed_at=clock.now_iso(),
+        )
+        with auth_broker.session(
+            AuthBrokerRequest(
+                profile=configured.profile,
+                target_kind=AuthTargetKind.REPOSITORY,
+                target_id=configured.api_identity.repository_id,
+                required_capability_ids=(),
+                allowed_environment_keys=("GH_TOKEN",),
+                now=clock.now_iso(),
+            )
+        ) as session:
+            auth_context = session.process_context(command.environment())
+            observation = repository_observer.observe(
+                repository,
+                config_revision=config_revision,
+                context=auth_context,
+            )
+        if (
+            observation.provider_host != configured.api_identity.host
+            or observation.repository_id != configured.api_identity.repository_id
+        ):
+            raise _auth_observation_error(
+                ErrorCode.GITHUB_API_REPOSITORY_MISMATCH,
+                "The admitted profile observed a different stable repository identity.",
+                next_action="Review the profile repository_id and checkout remote before retrying.",
+            )
+        return observation
+
+    git_transport_router = o.git_transport_router or GitTransportRouter(command)
+    repository_identity_runtime = o.repository_identity_runtime or RepositoryIdentityRuntime(
+        config=config,
+        bindings=repository_bindings,
+        broker=auth_broker,
+        observe=observe_repository_identity,
+        clock=clock,
+    )
     code_intelligence = o.code_intelligence or FallbackCodeIntelligenceProvider(
         primary=TreeSitterCodeIntelligenceProvider(),
         fallback=SyntaxCodeIntelligenceProvider(),
@@ -870,6 +1478,10 @@ def build_application(
         config.server.state_root
     )
     operation_store = o.operations or JsonOperationStore(config.server.state_root, locks)
+    operation_identities = o.operation_identities or JsonOperationIdentityStore(
+        config.server.state_root,
+        locks,
+    )
     operation_work_queue = o.operation_work_queue or JsonOperationWorkQueue(
         config.server.state_root,
         locks,
@@ -909,6 +1521,7 @@ def build_application(
         commands=command,
         git=git,
         github=github,
+        commit_identities=commit_identities,
         filesystem=filesystem,
         file_transactions=file_transactions,
         store=store,
@@ -920,11 +1533,15 @@ def build_application(
         executables=executables,
         execution=execution,
         provider_registry=provider_registry,
+        repository_bindings=repository_bindings,
+        repository_identity_runtime=repository_identity_runtime,
+        git_transport_router=git_transport_router,
         code_intelligence=code_intelligence,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,
         operation_work_queue=operation_work_queue,
+        operation_identities=operation_identities,
         operation_result_store=operation_result_store,
         github_read_cache=github_read_cache,
         hygiene=hygiene,
@@ -937,6 +1554,10 @@ def build_application(
         approval_payloads=approval_payloads,
         receipt_file_transactions=receipt_file_transactions,
         github_capabilities=github_capabilities,
+        github_capability_preflight=github_capability_preflight,
+        nested_resource_discovery=nested_resource_discovery,
+        nested_target_resolver=o.nested_target_resolver,
+        nested_lease_provider=o.nested_lease_provider,
         execution_plans=execution_plans,
         execution_plan_acceptances=execution_plan_acceptances,
         execution_receipts=execution_receipts,
@@ -946,8 +1567,43 @@ def build_application(
         failure_output_artifacts=failure_output_artifacts,
         worker_bindings=worker_bindings,
         reaper=reaper,
+        publications=o.publications,
         config_generation=config_generation,
     )
+    if context.publications is None:
+        publication_gateway = PublicationAdapter(
+            commands=command,
+            repositories=DurableBindingPublicationRepositoryResolver(repository_bindings),
+            authorization=PinnedPublicationAuthorizationGateway(),
+            capability_preflight=github_capability_preflight,
+            transport=git_transport_router,
+            github=default_github,
+            clock=clock.now_iso,
+        )
+        publication_coordinator = PublicationCoordinator(
+            context,
+            gateway=publication_gateway,
+            identities=OperationIdentityManager(
+                operations=operation_store,
+                identities=operation_identities,
+            ),
+        )
+        publication_requests = ScopedWorkspacePublicationRequestFactory(
+            config=config,
+            runtime=repository_identity_runtime,
+            commands=command,
+            clock=clock,
+            ids=ids,
+            config_revision=config_revision,
+            policy_revision=policy_revision,
+        )
+        context = replace(
+            context,
+            publications=CoordinatedWorkspacePublicationService(
+                publication_coordinator,
+                publication_requests,
+            ),
+        )
     operations = OperationManager(context)
     processes = build_process_inspector()
     runtime_activation_store = build_runtime_activation_store(

@@ -126,6 +126,30 @@ class ScriptedCommandExecutor:
             raise response
         return response(argv) if callable(response) else response
 
+    def run_isolated(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str],
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> CommandResult:
+        del environment, secrets
+        return self.run(
+            argv,
+            cwd=cwd,
+            input_text=input_text,
+            timeout=timeout,
+            check=check,
+            output_limit=output_limit,
+            cancel_token=cancel_token,
+        )
+
     def run_bytes(
         self, argv: Sequence[str], *, cwd: Path, timeout: int | None = None, max_bytes: int
     ) -> bytes:
@@ -464,3 +488,45 @@ class RecordingProcessReaper:
 
     def read_start_token(self, pid: int) -> str | None:
         return self._start_tokens.get(pid)
+
+
+class NullCommitIdentityGateway:
+    """Resolve a fixed, valid commit identity without touching a real worktree.
+
+    Workspace creation pins commit identity and fails closed when no gateway is
+    configured, which is deliberate: an unpinned workspace would attribute commits
+    to whatever the host's global Git config happens to say. Tests that build a
+    context by hand still need that dependency satisfied, and this supplies the
+    smallest valid one rather than each fixture inventing its own.
+    """
+
+    def __init__(self, digest: str | None = None) -> None:
+        from ..domain.commit_identity import (
+            CommitConfigSnapshot,
+            CommitIdentityPolicy,
+            CommitSigningMode,
+        )
+        from ..domain.repository_identity import ActorClass
+
+        self.policy = CommitIdentityPolicy(
+            profile_id="test-profile",
+            actor_class=ActorClass.AUTONOMOUS_AGENT,
+            author_name="RepoForge Test",
+            author_email="test@example.test",
+            committer_name="RepoForge Test",
+            committer_email="test@example.test",
+            signing_mode=CommitSigningMode.UNSIGNED_ATTESTED,
+        )
+        self.snapshot = CommitConfigSnapshot(
+            digest=digest or "0" * 64,
+            worktree_config_enabled=True,
+            entries=(),
+        )
+
+    def resolve_policy(self, path: object, configured: object) -> object:
+        del path, configured
+        return self.policy
+
+    def config_snapshot(self, path: object) -> object:
+        del path
+        return self.snapshot

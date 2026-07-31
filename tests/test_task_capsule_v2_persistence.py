@@ -1,5 +1,4 @@
-"""Persistence-layer coverage for TaskCapsule v2 (#208): round-trip, CAS soak, and the v1->v2
-migration through the existing durable-state lifecycle machinery (no one-way migration)."""
+"""TaskCapsule persistence coverage across v1, v2, and identity-aware v3 migrations."""
 
 from __future__ import annotations
 
@@ -45,7 +44,7 @@ def _task() -> TaskCapsule:
     )
 
 
-def test_v2_capsule_round_trips_through_the_store_with_all_new_fields_populated(
+def test_v3_capsule_round_trips_through_the_store_with_all_new_fields_populated(
     tmp_path: Path,
 ) -> None:
     store = JsonTaskStore(tmp_path, InMemoryLockManager())
@@ -83,7 +82,7 @@ def test_v2_capsule_round_trips_through_the_store_with_all_new_fields_populated(
     loaded = store.read(task.task_id)
     assert loaded is not None
     assert loaded.value == task
-    assert loaded.schema_version.value == 2
+    assert loaded.schema_version.value == 3
 
 
 def test_cas_rejects_stale_writer_under_a_soak_of_concurrent_updates(tmp_path: Path) -> None:
@@ -120,7 +119,9 @@ def test_cas_rejects_stale_writer_under_a_soak_of_concurrent_updates(tmp_path: P
     assert final.value.mutation_count == 100
 
 
-def test_v1_capsule_migrates_to_v2_with_backup_and_reversal(tmp_path: Path) -> None:
+def test_v1_capsule_migrates_through_v2_to_v3_with_backup_and_reversal(
+    tmp_path: Path,
+) -> None:
     # A v1-shaped record predating #208, written directly (no schema_version bump helper
     # exists yet in production code -- this simulates what's actually on disk from before).
     v1_payload = {
@@ -172,7 +173,7 @@ def test_v1_capsule_migrates_to_v2_with_backup_and_reversal(tmp_path: Path) -> N
     preview = manager.preview_migration(
         collection=TASK_CAPSULES_COLLECTION,
         registry=registry,
-        target_version=SchemaVersion(2),
+        target_version=SchemaVersion(3),
         max_records=10,
     )
     assert preview.migrated_records == 1
@@ -183,12 +184,13 @@ def test_v1_capsule_migrates_to_v2_with_backup_and_reversal(tmp_path: Path) -> N
     store = JsonTaskStore(tmp_path, InMemoryLockManager())
     loaded = store.read(v1_payload["task_id"])
     assert loaded is not None
-    assert loaded.schema_version.value == 2
-    assert loaded.value.principal  # default applied
+    assert loaded.schema_version.value == 3
+    assert loaded.value.principal  # v2 default applied
     assert loaded.value.instructions == ()
     assert loaded.value.task_revision == 1
+    assert loaded.value.identity_contexts == ()  # v3 default applied
 
-    # No one-way migration: reverse plan brings it back to a v1-shaped payload.
+    # No one-way migration: reverse plan traverses v3 -> v2 -> v1.
     reverse_preview = manager.preview_migration(
         collection=TASK_CAPSULES_COLLECTION,
         registry=registry,

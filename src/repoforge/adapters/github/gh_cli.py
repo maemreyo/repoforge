@@ -4,9 +4,12 @@ import json
 import re
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlencode
 
 from ...config import RepositoryConfig, ServerConfig
-from ...domain.errors import CommandError
+from ...domain.errors import CommandError, ErrorCode, RepoForgeError
+from ...domain.repository_auth_broker import ProcessAuthContext
+from ...domain.repository_identity import AuthTargetKind, PublicationKind
 from ...ports.command import CommandExecutor, CommandResult
 from ...ports.github import (
     GitHubActionsJob,
@@ -16,12 +19,21 @@ from ...ports.github import (
     GitHubJobLog,
 )
 from ...ports.issue_mutation import RemoteComment, RemoteIssue
+from ...ports.publication import PublicationEffect
 
 _ACTIONS_JOB_URL = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/"
     r"([1-9][0-9]*)(?:/attempts/([1-9][0-9]*))?/job/([1-9][0-9]*)(?:[/?#].*)?$"
 )
 _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+_PUBLICATION_REPOSITORY = re.compile(
+    r"^([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)/"
+    r"([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})$"
+)
+_PUBLICATION_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,1023}$")
+_PUBLICATION_MARKER = re.compile(
+    r"<!-- repoforge-publication:([A-Za-z0-9][A-Za-z0-9._:-]{0,255}) -->"
+)
 _GITHUB_API_VERSION = "2022-11-28"
 _GITHUB_MEDIA_TYPE = "application/vnd.github+json"
 
@@ -59,6 +71,287 @@ class GhCliGateway:
     def _integer(value: object) -> int | None:
         return (
             value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+        )
+
+    @staticmethod
+    def _publication_error(message: str) -> RepoForgeError:
+        return RepoForgeError(
+            message,
+            code=ErrorCode.PUBLICATION_TARGET_MISMATCH,
+            retryable=False,
+            unchanged_state=("No pull-request publication was accepted.",),
+        )
+
+    @classmethod
+    def _publication_repository(cls, value: str, field: str) -> tuple[str, str, str]:
+        match = _PUBLICATION_REPOSITORY.fullmatch(value)
+        if match is None:
+            raise cls._publication_error(
+                f"{field} must be an explicit provider-host/owner/repository identity."
+            )
+        host, owner, repository = match.groups()
+        return host, owner, f"{owner}/{repository}"
+
+    @classmethod
+    def _publication_branch(cls, value: str, field: str) -> str:
+        prefix = "refs/heads/"
+        if not value.startswith(prefix):
+            raise cls._publication_error(f"{field} must be an exact refs/heads/* ref.")
+        branch = value[len(prefix) :]
+        if (
+            _PUBLICATION_BRANCH.fullmatch(branch) is None
+            or ".." in branch
+            or branch.endswith(("/", "."))
+            or "//" in branch
+        ):
+            raise cls._publication_error(f"{field} contains an unsafe branch name.")
+        return branch
+
+    @classmethod
+    def _publication_body(cls, body: str, publication_id: str) -> str:
+        marker = f"<!-- repoforge-publication:{publication_id} -->"
+        markers = _PUBLICATION_MARKER.findall(body)
+        if "<!-- repoforge-publication:" in body and not markers:
+            raise cls._publication_error(
+                "Pull-request body contains a malformed publication marker."
+            )
+        if markers:
+            if markers != [publication_id]:
+                raise cls._publication_error(
+                    "Pull-request body contains a different or duplicate publication marker."
+                )
+            return body
+        return f"{body.rstrip()}\n\n{marker}" if body else marker
+
+    def _isolated_publication_api(
+        self,
+        cwd: Path,
+        endpoint: str,
+        *,
+        auth_context: ProcessAuthContext,
+        method: str = "GET",
+        payload: dict[str, object] | None = None,
+    ) -> CommandResult:
+        argv = [
+            "gh",
+            "api",
+            "--method",
+            method,
+            "-H",
+            f"Accept: {_GITHUB_MEDIA_TYPE}",
+            "-H",
+            f"X-GitHub-Api-Version: {_GITHUB_API_VERSION}",
+            endpoint,
+        ]
+        input_text = None
+        if payload is not None:
+            argv.extend(["--input", "-"])
+            input_text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return self.executor.run_isolated(
+            argv,
+            cwd=cwd,
+            environment=auth_context.environment_dict(),
+            secrets=auth_context.secret_values,
+            input_text=input_text,
+            timeout=self.server.verification_timeout_seconds,
+            output_limit=5_000_000,
+        )
+
+    @classmethod
+    def _publication_effect(
+        cls,
+        payload: dict[str, Any],
+        *,
+        publication_id: str,
+        base_repository_id: str,
+        head_repository_id: str,
+        base_repository_slug: str,
+        head_repository_slug: str,
+        base_ref: str,
+        head_ref: str,
+        base_branch: str,
+        head_branch: str,
+        expected_commit_sha: str,
+        reconciled: bool,
+    ) -> PublicationEffect:
+        number = cls._integer(payload.get("number"))
+        url = cls._string(payload.get("html_url"))
+        body = cls._string(payload.get("body"))
+        head = payload.get("head")
+        base = payload.get("base")
+        if number is None or not url or not isinstance(head, dict) or not isinstance(base, dict):
+            raise cls._publication_error(
+                "GitHub returned incomplete pull-request identity evidence."
+            )
+        head_repo = head.get("repo")
+        base_repo = base.get("repo")
+        if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+            raise cls._publication_error("GitHub returned incomplete repository identity evidence.")
+        marker = f"<!-- repoforge-publication:{publication_id} -->"
+        observed = {
+            "head_repository_id": str(head_repo.get("id", "")),
+            "base_repository_id": str(base_repo.get("id", "")),
+            "head_repository": cls._string(head_repo.get("full_name")),
+            "base_repository": cls._string(base_repo.get("full_name")),
+            "head_ref": cls._string(head.get("ref")),
+            "base_ref": cls._string(base.get("ref")),
+            "head_sha": cls._string(head.get("sha")).lower(),
+        }
+        expected = {
+            "head_repository_id": head_repository_id,
+            "base_repository_id": base_repository_id,
+            "head_repository": head_repository_slug,
+            "base_repository": base_repository_slug,
+            "head_ref": head_branch,
+            "base_ref": base_branch,
+            "head_sha": expected_commit_sha,
+        }
+        if marker not in body or observed != expected:
+            raise cls._publication_error(
+                "GitHub pull-request identity does not match the reviewed publication intent."
+            )
+        return PublicationEffect(
+            publication_id=publication_id,
+            kind=PublicationKind.PULL_REQUEST,
+            destination_repository_id=base_repository_id,
+            destination_ref=base_ref,
+            commit_sha=expected_commit_sha,
+            external_id=f"pr-{number}",
+            url=url,
+            reconciled=reconciled,
+        )
+
+    def create_pull_request(
+        self,
+        *,
+        cwd: Path,
+        publication_id: str,
+        base_repository_id: str,
+        head_repository_id: str,
+        base_repository: str,
+        head_repository: str,
+        base_ref: str,
+        head_ref: str,
+        expected_commit_sha: str,
+        title: str,
+        body: str,
+        auth_context: ProcessAuthContext,
+    ) -> PublicationEffect:
+        base_host, _base_owner, base_slug = self._publication_repository(
+            base_repository, "base_repository"
+        )
+        head_host, head_owner, head_slug = self._publication_repository(
+            head_repository, "head_repository"
+        )
+        if base_host != head_host:
+            raise self._publication_error("Pull-request repositories must use one provider host.")
+        if (
+            auth_context.target_kind is not AuthTargetKind.REPOSITORY
+            or auth_context.target_id != base_repository_id
+        ):
+            raise self._publication_error(
+                "GitHub auth context is not bound to the reviewed base repository."
+            )
+        base_branch = self._publication_branch(base_ref, "base_ref")
+        head_branch = self._publication_branch(head_ref, "head_ref")
+        rendered_body = self._publication_body(body, publication_id)
+        result = self._isolated_publication_api(
+            cwd,
+            f"repos/{base_slug}/pulls",
+            auth_context=auth_context,
+            method="POST",
+            payload={
+                "title": title,
+                "body": rendered_body,
+                "base": base_branch,
+                "head": f"{head_owner}:{head_branch}",
+                "draft": True,
+            },
+        )
+        return self._publication_effect(
+            self._object(result, "GitHub pull-request publication"),
+            publication_id=publication_id,
+            base_repository_id=base_repository_id,
+            head_repository_id=head_repository_id,
+            base_repository_slug=base_slug,
+            head_repository_slug=head_slug,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            expected_commit_sha=expected_commit_sha,
+            reconciled=False,
+        )
+
+    def find_pull_request(
+        self,
+        *,
+        cwd: Path,
+        publication_id: str,
+        base_repository_id: str,
+        head_repository_id: str,
+        base_repository: str,
+        head_repository: str,
+        base_ref: str,
+        head_ref: str,
+        expected_commit_sha: str,
+        auth_context: ProcessAuthContext,
+    ) -> PublicationEffect | None:
+        base_host, _base_owner, base_slug = self._publication_repository(
+            base_repository, "base_repository"
+        )
+        head_host, head_owner, head_slug = self._publication_repository(
+            head_repository, "head_repository"
+        )
+        if base_host != head_host:
+            raise self._publication_error("Pull-request repositories must use one provider host.")
+        if (
+            auth_context.target_kind is not AuthTargetKind.REPOSITORY
+            or auth_context.target_id != base_repository_id
+        ):
+            raise self._publication_error(
+                "GitHub auth context is not bound to the reviewed base repository."
+            )
+        base_branch = self._publication_branch(base_ref, "base_ref")
+        head_branch = self._publication_branch(head_ref, "head_ref")
+        query = urlencode(
+            {
+                "state": "all",
+                "head": f"{head_owner}:{head_branch}",
+                "base": base_branch,
+                "per_page": 100,
+            }
+        )
+        result = self._isolated_publication_api(
+            cwd,
+            f"repos/{base_slug}/pulls?{query}",
+            auth_context=auth_context,
+        )
+        marker = f"<!-- repoforge-publication:{publication_id} -->"
+        candidates = [
+            item
+            for item in self._list(result, "GitHub pull-request reconciliation")
+            if marker in self._string(item.get("body"))
+        ]
+        if not candidates:
+            return None
+        if len(candidates) != 1:
+            raise self._publication_error(
+                "GitHub returned multiple pull requests for one publication marker."
+            )
+        return self._publication_effect(
+            candidates[0],
+            publication_id=publication_id,
+            base_repository_id=base_repository_id,
+            head_repository_id=head_repository_id,
+            base_repository_slug=base_slug,
+            head_repository_slug=head_slug,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            expected_commit_sha=expected_commit_sha,
+            reconciled=True,
         )
 
     def _slug(self, cwd: Path) -> str:

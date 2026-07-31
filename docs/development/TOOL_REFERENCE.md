@@ -193,6 +193,21 @@ idempotent for the same inputs.
 
 `workspace_pr.action` includes `create_draft`, `update`, `comment`, `watch`, `close`, and `reopen`. It never merges. Watch operations use bounded polling and durable operation evidence. `workspace_pr_evidence` requires exact selectors for check-level or failure-level detail and redacts credentials, denied paths, and unbounded logs.
 
+### Selecting the identity a write acts as
+
+The six tools whose calls can act as a repository identity — `workspace_create`, `workspace_commit`, `workspace_push`, `workspace_refresh`, `workspace_pr`, and `repo_issue` — accept two optional selector fields:
+
+| Field | Values | Default |
+| --- | --- | --- |
+| `auth_profile` | a declared auth profile id, or `auto` | `auto` |
+| `actor_class` | `human`, `agent` | `human` |
+
+`auto` succeeds only when exactly one declared profile is deterministically eligible; ambiguity and a missing or disabled candidate fail closed rather than picking by order. An explicit profile passes the same binding, role, capability, transport, author, signer, and publication checks, and can never override an exact repository binding. Because the defaults are the deterministic ones, a caller that omits both fields behaves exactly as before selectors existed.
+
+A selector applies only where a write happens. `workspace_pr action = "watch"` and the read-only `repo_issue` modes (`read`, `spec`, `graph`, `next`) **reject** an explicit selector instead of accepting and ignoring it, which would imply the read ran as a chosen identity. Read-only tools reject it as an undeclared field. Every `workspace_refresh` action keeps the selector, including `preview`, because it fetches the base through the pinned transport.
+
+A selector is an input to choosing an identity, never a result field. It appears in an output schema only inside a typed recovery action's `arguments`, where a suggested retry has to carry the same identity choice as the call that failed. See `docs/development/REPOSITORY_IDENTITY.md` for the surfaces, the operator commands, and the reviewed configuration these ids refer to.
+
 ### Durable operation and administration
 
 | Tool | Purpose |

@@ -8,9 +8,10 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
+from .operation_identity import OperationIdentityReference
 from .rules_engine import OverridePolicy, check_override_allowed
 
-TASK_CAPSULE_SCHEMA_VERSION = 2
+TASK_CAPSULE_SCHEMA_VERSION = 3
 #: V1 scope is single-user local operator (#208); `principal` is reserved so a future
 #: multi-principal binding is additive, never a one-way schema migration.
 LOCAL_OPERATOR_PRINCIPAL = "local-operator"
@@ -275,6 +276,7 @@ class TaskCapsule:
     mutation_count: int = 0
     lease_holder: str | None = None
     lease_expires_at: str | None = None
+    identity_contexts: tuple[OperationIdentityReference, ...] = ()
 
     def __post_init__(self) -> None:
         validate_task_id(self.task_id)
@@ -361,6 +363,13 @@ class TaskCapsule:
             _text("lease_expires_at", self.lease_expires_at, limit=64)
         if (self.lease_holder is None) != (self.lease_expires_at is None):
             raise ValueError("lease_holder and lease_expires_at must be set or cleared together")
+        if not isinstance(self.identity_contexts, tuple) or len(self.identity_contexts) > 64:
+            raise ValueError("identity_contexts must be a bounded tuple")
+        if any(not isinstance(item, OperationIdentityReference) for item in self.identity_contexts):
+            raise ValueError("identity_contexts must contain OperationIdentityReference values")
+        context_ids = tuple(item.context_id for item in self.identity_contexts)
+        if len(set(context_ids)) != len(context_ids):
+            raise ValueError("identity_contexts contain duplicate context IDs")
 
     @classmethod
     def new(
@@ -446,6 +455,7 @@ class TaskCapsule:
             "task_revision": self.task_revision,
             "instructions": [instruction.as_dict() for instruction in self.instructions],
             "overrides": [override.as_dict() for override in self.overrides],
+            "identity_contexts": [item.payload() for item in self.identity_contexts],
             "updated_at": self.updated_at,
         }
 

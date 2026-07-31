@@ -1,0 +1,627 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "path": "src/repoforge/adapters/activation/build.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "repository_binding",
+        "commit_source"
+      ],
+      "credential_inputs": [
+        "none for local object inspection"
+      ],
+      "target_inputs": [
+        "reviewed source worktree"
+      ],
+      "current_risk": "none_local_only",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/activation/launchd.py",
+      "executables": [
+        "launchctl"
+      ],
+      "surfaces": [
+        "runtime_process_environment"
+      ],
+      "credential_inputs": [
+        "explicit inherited environment supplied to the LaunchAgent"
+      ],
+      "target_inputs": [
+        "reviewed supervisor launcher and configuration paths"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/activation/launcher.py",
+      "executables": [
+        "rf supervisor shim"
+      ],
+      "surfaces": [
+        "runtime_process_environment",
+        "operation_identity_propagation"
+      ],
+      "credential_inputs": [
+        "allowlisted inherited environment including SSH agent and agent secret-file reference"
+      ],
+      "target_inputs": [
+        "active release shim",
+        "reviewed configuration path"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/execution/native_identity.py",
+      "executables": [
+        "git",
+        "gh"
+      ],
+      "surfaces": [
+        "execution_environment",
+        "tool_identity"
+      ],
+      "credential_inputs": [
+        "host executable availability only"
+      ],
+      "target_inputs": [
+        "reviewed execution root"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/git/ambient_auth.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "commit_author",
+        "commit_signer",
+        "transport"
+      ],
+      "credential_inputs": [
+        "none; reports credential-helper and token environment names, never values"
+      ],
+      "target_inputs": [
+        "reviewed repository path",
+        "safe dotted git config key"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
+    },
+    {
+      "path": "src/repoforge/adapters/git/cli.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "git_fetch",
+        "git_push",
+        "commit_author",
+        "commit_committer",
+        "commit_signer",
+        "remote_topology"
+      ],
+      "credential_inputs": [
+        "ambient Git helper order",
+        "ambient SSH agent",
+        "inherited Git environment"
+      ],
+      "target_inputs": [
+        "repository config remote",
+        "worktree Git config",
+        "method arguments"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#289"
+    },
+    {
+      "path": "src/repoforge/adapters/git/commit_identity.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "commit_author",
+        "commit_committer",
+        "commit_signer",
+        "worktree_git_config"
+      ],
+      "credential_inputs": [
+        "ambient signing key material referenced by user.signingkey",
+        "worktree Git config snapshot bound by digest"
+      ],
+      "target_inputs": [
+        "worktree path",
+        "reviewed commit identity policy",
+        "expected config digest"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#291"
+    },
+    {
+      "path": "src/repoforge/adapters/git/nested_identity.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "submodule",
+        "lfs",
+        "nested_resource_discovery"
+      ],
+      "credential_inputs": [
+        "none during read-only discovery"
+      ],
+      "target_inputs": [
+        "reviewed primary repository endpoint",
+        "repository-local .gitmodules and .lfsconfig",
+        "explicit depth, resource, output, and timeout bounds"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#294"
+    },
+    {
+      "path": "src/repoforge/adapters/git/ssh_alias_discovery.py",
+      "executables": [
+        "ssh"
+      ],
+      "surfaces": [
+        "transport"
+      ],
+      "credential_inputs": [
+        "none; resolves an identity-file path, never key material"
+      ],
+      "target_inputs": [
+        "explicit safe SSH alias"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
+    },
+    {
+      "path": "src/repoforge/adapters/git/transport.py",
+      "executables": [
+        "git",
+        "ssh",
+        "credential helper callback"
+      ],
+      "surfaces": [
+        "git_fetch",
+        "git_push",
+        "transport_access_proof"
+      ],
+      "credential_inputs": [
+        "pinned SSH identity-file reference",
+        "operation-scoped ephemeral HTTPS token"
+      ],
+      "target_inputs": [
+        "provider host",
+        "stable repository ID",
+        "explicit remote URL",
+        "reviewed refspec"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#289"
+    },
+    {
+      "path": "src/repoforge/adapters/github/account_discovery.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "api"
+      ],
+      "credential_inputs": [
+        "ephemeral named-account token used only for one isolated actor probe"
+      ],
+      "target_inputs": [
+        "explicit provider host",
+        "explicit named login"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
+    },
+    {
+      "path": "src/repoforge/adapters/github/api_identity.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "repository_binding",
+        "operation_identity"
+      ],
+      "credential_inputs": [
+        "opaque stored-account reference",
+        "short-lived GitHub App installation token",
+        "external app JWT signer"
+      ],
+      "target_inputs": [
+        "provider host",
+        "stable repository ID",
+        "installation ID",
+        "minimal permission set"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#288"
+    },
+    {
+      "path": "src/repoforge/adapters/github/capability_preflight.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_capability_domain",
+        "github_capability_preflight_port",
+        "github_capability_preflight_adapter",
+        "auth_lease_safe_metadata_binding",
+        "publication_write_time_revalidation",
+        "doctor_preflight_composition_separation"
+      ],
+      "credential_inputs": [
+        "operation-scoped ProcessAuthContext",
+        "safe AuthLease capability and permission digests"
+      ],
+      "target_inputs": [
+        "provider host",
+        "stable repository ID",
+        "installation ID",
+        "exact requested capability catalogue"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#293"
+    },
+    {
+      "path": "src/repoforge/adapters/github/capability_probe.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "enterprise_preflight"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "inherited GitHub environment"
+      ],
+      "target_inputs": [
+        "repository slug",
+        "GitHub API endpoint"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#293"
+    },
+    {
+      "path": "src/repoforge/adapters/github/gh_cli.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "pull_request",
+        "publication_reconciliation",
+        "release",
+        "check_runs"
+      ],
+      "credential_inputs": [
+        "operation-scoped isolated GitHub API auth for exact publication",
+        "globally active gh account for legacy non-publication methods",
+        "inherited GitHub environment for legacy non-publication methods"
+      ],
+      "target_inputs": [
+        "stable base and head repository IDs for exact publication",
+        "explicit canonical base and head repositories",
+        "exact base and head refs",
+        "expected head commit and publication marker",
+        "cwd-derived repository slug for legacy non-publication methods",
+        "branch and API endpoint for legacy non-publication methods"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#288/#292"
+    },
+    {
+      "path": "src/repoforge/adapters/github/repository_observation.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "repository_binding",
+        "github_api_observation"
+      ],
+      "credential_inputs": [
+        "explicit selected named-account ProcessAuthContext",
+        "ambient GitHub tokens and globally active gh account are excluded"
+      ],
+      "target_inputs": [
+        "reviewed repository worktree path",
+        "repository-local remote URL",
+        "stable repository ID expected by the selected profile"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#295"
+    },
+    {
+      "path": "src/repoforge/adapters/github/ticket_graph.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "issue_graph"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "inherited GitHub environment"
+      ],
+      "target_inputs": [
+        "repository slug",
+        "issue node IDs"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#288"
+    },
+    {
+      "path": "src/repoforge/adapters/github/ticket_project.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "issue_mutation",
+        "project_overlay"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "inherited GitHub environment"
+      ],
+      "target_inputs": [
+        "repository slug",
+        "issue number",
+        "project IDs"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#288"
+    },
+    {
+      "path": "src/repoforge/adapters/hygiene/command.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "workspace_diff"
+      ],
+      "credential_inputs": [
+        "none for local status inspection"
+      ],
+      "target_inputs": [
+        "reviewed workspace path"
+      ],
+      "current_risk": "none_local_only",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/onboarding_environment.py",
+      "executables": [
+        "gh",
+        "uv",
+        "python"
+      ],
+      "surfaces": [
+        "account_discovery",
+        "runtime_preflight"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "host subprocess environment"
+      ],
+      "target_inputs": [
+        "host tool installation",
+        "current gh host"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#295"
+    },
+    {
+      "path": "src/repoforge/adapters/publication.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "remote_topology",
+        "git_push",
+        "pull_request",
+        "publication_reconciliation"
+      ],
+      "credential_inputs": [
+        "none for read-only Git topology inspection",
+        "operation-scoped Git transport spec and process auth context for push effects",
+        "operation-scoped isolated GitHub API auth delegated to the publication gateway"
+      ],
+      "target_inputs": [
+        "stable source and destination repository IDs",
+        "reviewed remote URL and ordered rewrite configuration",
+        "exact source, destination, base and head refs",
+        "expected commit and tree object IDs",
+        "explicit cross-boundary approval"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#292"
+    },
+    {
+      "path": "src/repoforge/adapters/repository/discovery.py",
+      "executables": [
+        "git"
+      ],
+      "surfaces": [
+        "repository_discovery",
+        "remote_topology"
+      ],
+      "credential_inputs": [
+        "none for local configuration inspection"
+      ],
+      "target_inputs": [
+        "discovered repository path",
+        "configured remotes"
+      ],
+      "current_risk": "none_local_only",
+      "planned_owner": "#286"
+    },
+    {
+      "path": "src/repoforge/adapters/repository/local_probe.py",
+      "executables": [
+        "git",
+        "gh"
+      ],
+      "surfaces": [
+        "repository_discovery",
+        "github_api",
+        "remote_topology"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "ambient Git transport configuration"
+      ],
+      "target_inputs": [
+        "repository path",
+        "configured remote URL"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#286"
+    },
+    {
+      "path": "src/repoforge/adapters/runtime/execution_worker.py",
+      "executables": [
+        "python worker"
+      ],
+      "surfaces": [
+        "runtime_process_environment",
+        "operation_identity_propagation"
+      ],
+      "credential_inputs": [
+        "allowlisted inherited environment including SSH agent and agent secret-file reference"
+      ],
+      "target_inputs": [
+        "reviewed worker module",
+        "reviewed configuration path",
+        "accepted configuration generation"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/runtime/launcher.py",
+      "executables": [
+        "python worker"
+      ],
+      "surfaces": [
+        "runtime_process_environment",
+        "operation_identity_propagation"
+      ],
+      "credential_inputs": [
+        "allowlisted inherited environment including SSH agent and agent secret-file reference"
+      ],
+      "target_inputs": [
+        "reviewed worker module",
+        "reviewed configuration path"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/runtime/local_runtime.py",
+      "executables": [
+        "ps",
+        "managed tunnel executable"
+      ],
+      "surfaces": [
+        "runtime_process_identity",
+        "tunnel_process_identity"
+      ],
+      "credential_inputs": [
+        "managed runtime environment and tunnel profile"
+      ],
+      "target_inputs": [
+        "identity-bound runtime PID",
+        "configured tunnel executable"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/runtime/state_store.py",
+      "executables": [
+        "ps"
+      ],
+      "surfaces": [
+        "runtime_process_identity"
+      ],
+      "credential_inputs": [
+        "none; process metadata only"
+      ],
+      "target_inputs": [
+        "identity-bound runtime and child PIDs"
+      ],
+      "current_risk": "none_local_only",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/runtime/tunnel_cli.py",
+      "executables": [
+        "configured tunnel client"
+      ],
+      "surfaces": [
+        "runtime_tunnel",
+        "control_plane_auth"
+      ],
+      "credential_inputs": [
+        "control-plane credential in isolated runtime environment"
+      ],
+      "target_inputs": [
+        "reviewed tunnel profile",
+        "configured health endpoint"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#290"
+    },
+    {
+      "path": "src/repoforge/adapters/subprocess/command_executor.py",
+      "executables": [
+        "reviewed argv executable"
+      ],
+      "surfaces": [
+        "shared_command_execution",
+        "git_and_github_environment"
+      ],
+      "credential_inputs": [
+        "allowlisted environment plus explicit operation-scoped additions"
+      ],
+      "target_inputs": [
+        "reviewed argv",
+        "reviewed cwd"
+      ],
+      "current_risk": "shared_executor_boundary",
+      "planned_owner": "#287"
+    },
+    {
+      "path": "src/repoforge/adapters/subprocess/process_tree.py",
+      "executables": [
+        "ps"
+      ],
+      "surfaces": [
+        "process_identity",
+        "process_cleanup"
+      ],
+      "credential_inputs": [
+        "none; process metadata only"
+      ],
+      "target_inputs": [
+        "identity-bound root PID and descendants"
+      ],
+      "current_risk": "none_local_only",
+      "planned_owner": "#287"
+    }
+  ]
+}

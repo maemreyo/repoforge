@@ -3,16 +3,82 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import NoReturn, cast
 
 import pytest
+from conftest import ForgeEnvironment, build_test_service
 
+from repoforge.adapters.github import (
+    CommandGitHubCapabilityPreflight,
+    CommandGitHubCapabilityProbe,
+)
 from repoforge.application.service import CodingService
+from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.domain.errors import CommandError
+from repoforge.ports import GitHubCapabilityPreflightGateway, GitHubCapabilityProbe
 
 
 def run(*args: str, cwd: Path) -> None:
     subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def test_default_capability_preflight_composition_keeps_doctor_probe(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Default bootstrap keeps diagnostics and write preflight on distinct adapters."""
+
+    ctx = forge_env.service.application.context
+
+    assert isinstance(ctx.github_capabilities, CommandGitHubCapabilityProbe)
+    assert isinstance(ctx.github_capability_preflight, CommandGitHubCapabilityPreflight)
+    assert type(ctx.github_capabilities) is not type(ctx.github_capability_preflight)
+
+
+def test_doctor_uses_legacy_capability_probe_not_write_preflight(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Doctor diagnostics stay on the legacy probe even when write preflight is available."""
+
+    class LegacyDoctorProbe:
+        def __init__(self) -> None:
+            self.calls: list[Path] = []
+
+        def probe(self, cwd: Path, _ticket_graph: object) -> NoReturn:
+            self.calls.append(cwd)
+            raise RuntimeError("legacy doctor probe selected")
+
+    class WritePreflightMustNotRun:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def preflight(self, *_args: object) -> NoReturn:
+            self.calls += 1
+            raise AssertionError("doctor must not run write-time capability preflight")
+
+    legacy_probe = LegacyDoctorProbe()
+    write_preflight = WritePreflightMustNotRun()
+    config = load_config(forge_env.config_path)
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(
+            github_capabilities=cast(GitHubCapabilityProbe, legacy_probe),
+            github_capability_preflight=cast(
+                GitHubCapabilityPreflightGateway,
+                write_preflight,
+            ),
+        ),
+        config_generation=1,
+    )
+
+    result = CodingService(config, application=application).doctor()
+
+    assert legacy_probe.calls == [forge_env.source]
+    assert write_preflight.calls == 0
+    capability_check = next(
+        check for check in result["checks"] if check["name"] == "github_capabilities:demo"
+    )
+    assert capability_check["detail"] == "legacy doctor probe selected"
 
 
 def test_workspace_edit_verify_and_commit(tmp_path: Path) -> None:
@@ -56,7 +122,7 @@ commands = [["python", "-c", "from pathlib import Path; assert Path('hello.txt')
         encoding="utf-8",
     )
 
-    service = CodingService(load_config(config_path))
+    service = build_test_service(load_config(config_path))
     created = service.workspace_create("demo", "change hello")
     workspace_id = created["workspace_id"]
     current = service.workspace_read_file(workspace_id, "hello.txt")
@@ -113,7 +179,7 @@ denied_paths = [".git/**", ".env"]
 """,
         encoding="utf-8",
     )
-    service = CodingService(load_config(config_path))
+    service = build_test_service(load_config(config_path))
     created = service.workspace_create("demo", "patch test")
     workspace_id = created["workspace_id"]
     service.workspace_write_file(workspace_id, "new.txt", "new file\n", "<new>")
@@ -212,7 +278,7 @@ commands = [
         encoding="utf-8",
     )
 
-    service = CodingService(load_config(config_path))
+    service = build_test_service(load_config(config_path))
     created = service.workspace_create("demo", "run broken profile")
     workspace_id = created["workspace_id"]
 

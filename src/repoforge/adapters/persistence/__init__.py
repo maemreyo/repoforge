@@ -12,10 +12,12 @@ from .json_issue_graph_proposal_store import JsonIssueGraphProposalStore
 from .json_issue_graph_publication_store import JsonIssueGraphPublicationStore
 from .json_iteration_cache import JsonIterationCache
 from .json_onboarding_store import JsonOnboardingStore
+from .json_operation_identity_store import JsonOperationIdentityStore
 from .json_operation_result_store import JsonOperationResultStore
 from .json_operation_store import JsonOperationStore
 from .json_operation_work_queue import JsonOperationWorkQueue
 from .json_pr_check_watch_store import JsonPrCheckWatchStore
+from .json_repository_binding_store import JsonRepositoryBindingStore
 from .json_runtime_activation_store import JsonRuntimeActivationStore
 from .json_task_store import JsonTaskStore
 from .json_worker_binding_store import JsonWorkerBindingStore
@@ -39,10 +41,12 @@ __all__ = [
     "JsonIssueGraphPublicationStore",
     "JsonIterationCache",
     "JsonOnboardingStore",
+    "JsonOperationIdentityStore",
     "JsonOperationResultStore",
     "JsonOperationStore",
     "JsonOperationWorkQueue",
     "JsonPrCheckWatchStore",
+    "JsonRepositoryBindingStore",
     "JsonRuntimeActivationStore",
     "JsonTaskStore",
     "JsonWorkerBindingStore",

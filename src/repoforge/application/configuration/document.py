@@ -13,7 +13,7 @@ from ...domain.issue_writes import IssueWritePolicy
 from ...domain.policy_patch import RepositoryPolicyPatch
 from ...domain.repository_proposal import RepositoryProposal
 from ...domain.user_paths import DEFAULT_STATE_ROOT, DEFAULT_WORKSPACE_ROOT
-from .source import SourceRiskPolicy, SourceTicketGraph
+from .source import SourceAuthProfile, SourceRiskPolicy, SourceTicketGraph
 
 RESOLVED_CONFIG_FORMAT_VERSION = 3
 
@@ -267,6 +267,25 @@ def apply_risk_policy(
     return result
 
 
+def apply_auth_profiles(
+    document: dict[str, Any], profiles: tuple[SourceAuthProfile, ...]
+) -> dict[str, Any]:
+    """Replace the resolved auth-profile projection with the exact reviewed source set."""
+
+    result = deepcopy(document)
+    if not profiles:
+        result.pop("auth_profiles", None)
+        return result
+    profile_ids = [profile.profile_id for profile in profiles]
+    if len(set(profile_ids)) != len(profile_ids):
+        raise ValueError("auth profile ids must be unique")
+    result["auth_profiles"] = {
+        profile.profile_id: profile.as_table()
+        for profile in sorted(profiles, key=lambda item: item.profile_id)
+    }
+    return result
+
+
 def remove_repository(document: dict[str, Any], repo_id: str) -> dict[str, Any]:
     result = deepcopy(document)
     repositories = result.get("repositories")
@@ -354,6 +373,22 @@ def render_resolved(
                     value = values[key]
                     if isinstance(value, (str, int, bool, list)):
                         lines.append(f"{key} = {_toml(value)}")
+    auth_profiles = document.get("auth_profiles", {})
+    if not isinstance(auth_profiles, dict):
+        raise ValueError("auth_profiles must be a table")
+    for profile_id in sorted(auth_profiles):
+        raw_profile = auth_profiles[profile_id]
+        if not isinstance(raw_profile, dict):
+            raise ValueError(f"auth_profiles.{profile_id} must be a table")
+        lines.extend(["", f"[auth_profiles.{_toml(profile_id)}]"])
+        for key in sorted(raw_profile):
+            value = raw_profile[key]
+            if not isinstance(value, (str, int, bool, list)):
+                raise TypeError(
+                    f"Unsupported auth_profiles.{profile_id}.{key} TOML value: "
+                    f"{type(value).__name__}"
+                )
+            lines.append(f"{key} = {_toml(value)}")
     repositories = document.get("repositories", {})
     if isinstance(repositories, dict):
         for repo_id in sorted(repositories):

@@ -50,6 +50,20 @@ class CommandExecutor(Protocol):
         cancel_token: CancellationToken | None = None,
     ) -> CommandResult: ...
 
+    def run_isolated(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        secrets: Sequence[str],
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        output_limit: int | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> CommandResult: ...
+
     def run_bytes(
         self,
         argv: Sequence[str],

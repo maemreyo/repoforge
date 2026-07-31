@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, durable_worker, git
 
+from repoforge.adapters.git.transport import GitTransportRouter
+from repoforge.application.repository_identity_runtime import RepositoryIdentityRuntime
 from repoforge.application.service import _result
 from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.domain.approval import ApprovalStatus, decide_approval
@@ -15,12 +17,52 @@ from repoforge.domain.errors import (
     CommandError,
     ConfigError,
     ErrorCode,
+    RepoForgeError,
     SecurityError,
     WorkspaceError,
 )
-from repoforge.domain.execution_receipt import EffectReceiptState
 from repoforge.domain.issue_writes import IssueWritePolicy
 from repoforge.ports.issue_mutation import RemoteComment, RemoteIssue
+from repoforge.ports.workspace_publication import (
+    WorkspaceDraftPrPublication,
+    WorkspaceDraftPrPublicationEffect,
+    WorkspacePushPublication,
+    WorkspacePushPublicationEffect,
+)
+
+
+class _RecordingWorkspacePublications:
+    def __init__(self) -> None:
+        self.push_calls: list[WorkspacePushPublication] = []
+        self.pr_calls: list[WorkspaceDraftPrPublication] = []
+        self.push_effect: WorkspacePushPublicationEffect | None = None
+        self.pr_effect: WorkspaceDraftPrPublicationEffect | None = None
+        self.on_push = None
+
+    def push(self, request: WorkspacePushPublication) -> WorkspacePushPublicationEffect:
+        self.push_calls.append(request)
+        if self.on_push is not None:
+            self.on_push(request)
+        assert self.push_effect is not None
+        return self.push_effect
+
+    def create_draft_pr(
+        self,
+        request: WorkspaceDraftPrPublication,
+    ) -> WorkspaceDraftPrPublicationEffect:
+        self.pr_calls.append(request)
+        assert self.pr_effect is not None
+        return self.pr_effect
+
+
+def test_production_application_composes_repository_identity_runtime(
+    forge_env: ForgeEnvironment,
+) -> None:
+    context = forge_env.service.application.context
+
+    assert isinstance(context.repository_identity_runtime, RepositoryIdentityRuntime)
+    assert isinstance(context.git_transport_router, GitTransportRouter)
+    assert context.publications is not None
 
 
 class _FakeIssueMutationGateway:
@@ -1031,15 +1073,26 @@ def test_commit_failure_reports_stage_and_invalidates_mutated_verified_tree(
     service.workspace_run_profile(workspace_id)
     context = service.application.context
 
-    def failed_commit(path: Path, message: str) -> tuple[str, str]:
-        del message
+    # The commit itself now runs through the pinned commit-identity gateway rather
+    # than the raw Git port, which no longer exposes commit(); the seam moved with
+    # it. What is being simulated is unchanged: a pre-commit hook that fails *and*
+    # leaves the tree modified.
+    def failed_commit(
+        path: Path,
+        message: str,
+        policy: object,
+        *,
+        expected_config_digest: str,
+    ) -> object:
+        del message, policy, expected_config_digest
         (path / "hook-mutated.txt").write_text("formatted by hook\n", encoding="utf-8")
         raise CommandError(
             "pre-commit hook failed",
             details={"commit_stage": "git_commit", "exit_code": 1},
         )
 
-    monkeypatch.setattr(context.git, "commit", failed_commit)
+    assert context.commit_identities is not None
+    monkeypatch.setattr(context.commit_identities, "commit", failed_commit)
     with pytest.raises(CommandError) as excinfo:
         service.workspace_commit(workspace_id, "Trigger hook failure")
 
@@ -1048,6 +1101,160 @@ def test_commit_failure_reports_stage_and_invalidates_mutated_verified_tree(
     assert error.details["verification_invalidated"] is True
     assert "hook-mutated.txt" in error.details["changed_paths_after_failure"]
     assert context.store.load(workspace_id).last_verification is None
+
+
+def test_workspace_push_uses_exact_publication_service_not_ambient_git(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "exact publication route")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed before exact publication\n",
+        current["sha256"],
+    )
+    service.workspace_run_profile(workspace_id)
+    committed = service.workspace_commit(workspace_id, "Prepare exact publication")
+    context = service.application.context
+    original_push = context.git.push
+    publications = _RecordingWorkspacePublications()
+
+    def publish(request: WorkspacePushPublication) -> None:
+        branch = request.destination_ref.removeprefix("refs/heads/")
+        original_push(
+            request.cwd,
+            request.remote,
+            branch,
+            context.config.server.verification_timeout_seconds,
+        )
+
+    publications.on_push = publish
+    publications.push_effect = WorkspacePushPublicationEffect(
+        publication_id="publication-workspace-push",
+        operation_id="op-" + "1" * 24,
+        receipt_id="receipt-" + "2" * 24,
+        result_reference="operation-result:op-" + "1" * 24,
+        head_sha=committed["head_sha"],
+        remote_head_before=None,
+        remote_head_after=committed["head_sha"],
+        pushed=True,
+        reconciled=False,
+        output="fixture exact publication",
+    )
+    object.__setattr__(context, "publications", publications)
+    monkeypatch.setattr(
+        context.git,
+        "push",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("workspace path must not call ambient GitRepository.push")
+        ),
+    )
+
+    pushed = service.workspace_push(workspace_id, idempotency_key="exact-publication-push-0001")
+
+    assert pushed["head_sha"] == committed["head_sha"]
+    assert len(publications.push_calls) == 1
+    request = publications.push_calls[0]
+    branch = service.workspace_status(workspace_id)["branch"]
+    assert request.source_ref == f"refs/heads/{branch}"
+    assert request.destination_ref == f"refs/heads/{branch}"
+    assert request.head_sha == committed["head_sha"]
+    assert len(request.tree_sha) == 40
+
+
+def test_workspace_push_fails_closed_without_publication_identity(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "missing publication identity")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed before denied publication\n",
+        current["sha256"],
+    )
+    service.workspace_run_profile(workspace_id)
+    service.workspace_commit(workspace_id, "Prepare denied publication")
+    context = service.application.context
+    object.__setattr__(context, "publications", None)
+    monkeypatch.setattr(
+        context.git,
+        "push",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing identity must fail before ambient push")
+        ),
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        service.workspace_push(workspace_id, idempotency_key="missing-publication-identity-0001")
+
+    assert failure.value.code is ErrorCode.OPERATION_IDENTITY_NOT_FOUND
+
+
+def test_draft_pr_creation_uses_explicit_publication_service_not_ambient_github(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "exact draft publication")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed before exact draft PR\n",
+        current["sha256"],
+    )
+    service.workspace_run_profile(workspace_id)
+    committed = service.workspace_commit(workspace_id, "Prepare exact draft PR")
+    context = service.application.context
+    original_push = context.git.push
+    record = context.store.load(workspace_id)
+    original_push(
+        Path(record.path),
+        record.remote,
+        record.branch,
+        context.config.server.verification_timeout_seconds,
+    )
+    record.metadata["last_pushed_sha"] = committed["head_sha"]
+    context.store.save(record)
+    publications = _RecordingWorkspacePublications()
+    publications.pr_effect = WorkspaceDraftPrPublicationEffect(
+        publication_id="publication-workspace-pr",
+        operation_id="op-" + "3" * 24,
+        receipt_id="receipt-" + "4" * 24,
+        result_reference="operation-result:op-" + "3" * 24,
+        url="https://github.com/owner/demo/pull/42",
+        reconciled=False,
+    )
+    object.__setattr__(context, "publications", publications)
+    monkeypatch.setattr(
+        context.github,
+        "create_draft",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("workspace path must not call ambient create_draft")
+        ),
+    )
+
+    created = service.workspace_create_draft_pr(
+        workspace_id,
+        "Exact draft PR",
+        "Create through reviewed base and head identities.",
+        idempotency_key="exact-publication-pr-0001",
+    )
+
+    assert created["url"] == "https://github.com/owner/demo/pull/42"
+    assert len(publications.pr_calls) == 1
+    request = publications.pr_calls[0]
+    branch = service.workspace_status(workspace_id)["branch"]
+    assert request.base_ref == "refs/heads/main"
+    assert request.head_ref == f"refs/heads/{branch}"
+    assert request.head_sha == committed["head_sha"]
+    assert len(request.tree_sha) == 40
 
 
 def test_push_rejection_is_non_retrying_and_preserves_remote_head_evidence(
@@ -1114,30 +1321,20 @@ def test_push_transport_failure_after_remote_update_replays_authoritative_result
         )
 
     monkeypatch.setattr(context.git, "push", push_then_lose_response)
-    with pytest.raises(ConfigError) as failed:
-        service.workspace_push(workspace_id, idempotency_key="push-response-loss-0001")
+    reconciled = service.workspace_push(
+        workspace_id,
+        idempotency_key="push-response-loss-0001",
+    )
 
-    assert failed.value.code is ErrorCode.FAILED_AFTER_EFFECT
-    assert failed.value.retryable is False
-    operation_id = str(failed.value.details["operation_id"])
-    receipt_id = str(failed.value.details["receipt_id"])
-    result_reference = str(failed.value.details["result_reference"])
-    assert result_reference == f"operation-result:{operation_id}"
-
-    receipts = context.effect_receipts
-    results = context.operation_result_store
-    assert receipts is not None
-    assert results is not None
-    receipt = receipts.read(receipt_id)
-    assert receipt.value.state is EffectReceiptState.FAILED_AFTER_EFFECT
-    assert receipt.value.result_reference == result_reference
-    durable = results.read(operation_id)
-    assert durable["pushed"] is True
-    assert durable["remote_head_after"] == service.workspace_status(workspace_id)["head_sha"]
+    assert reconciled["pushed"] is True
+    assert reconciled["remote_head_after"] == service.workspace_status(workspace_id)["head_sha"]
+    assert "reconciled" in reconciled["output"]
+    assert calls == 1
 
     monkeypatch.setattr(context.git, "push", original_push)
     replay = service.workspace_push(workspace_id, idempotency_key="push-response-loss-0001")
-    assert replay == durable
+    assert replay["pushed"] is False
+    assert replay["remote_head_after"] == reconciled["remote_head_after"]
     assert calls == 1
 
 

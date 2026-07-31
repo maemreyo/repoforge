@@ -35,6 +35,7 @@ from ...application.activation.version_status import (
 )
 from ...application.config_admin import ConfigAdminService, PendingPolicyChangeStore
 from ...application.configuration.document import (
+    apply_auth_profiles,
     apply_policy_patch,
     apply_proposal,
     apply_risk_policy,
@@ -71,6 +72,7 @@ from ...bootstrap import (
     build_application,
     build_approval_payload_store,
     build_approval_store,
+    build_auth_command_dependencies,
     build_configuration_store,
     build_dev_runtime_service,
     build_lock_manager,
@@ -141,6 +143,7 @@ from ...ports import (
 from ...ports.activation import ReleaseProcess, SupervisorKickstarter
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
+from .auth import add_auth_parsers, run_auth_command
 from .onboarding import add_onboarding_parsers, run_onboarding_command, run_repo_discover
 
 _OUTPUT_FORMAT = "json"
@@ -900,6 +903,33 @@ def _setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _auth_command(args: argparse.Namespace, config_path: Path) -> int:
+    """Dispatch one `rf auth` invocation against the accepted configuration generation.
+
+    Concrete adapters are composed in `bootstrap`, the single composition root; this reports
+    what the reviewed configuration says, not the worktree source, which may hold unaccepted
+    edits.
+    """
+
+    store = _ensure_generation(config_path)
+    accepted = store.current()
+    if accepted is None:
+        raise ConfigError("No accepted configuration generation")
+    dependencies = build_auth_command_dependencies(
+        store,
+        config=load_config(store.resolved_path(accepted.generation)),
+        config_revision=accepted.resolved_sha256,
+    )
+    return run_auth_command(
+        args,
+        service=dependencies.service,
+        migration=dependencies.migration,
+        accounts=dependencies.accounts,
+        ssh=dependencies.ssh,
+        render=_json,
+    )
+
+
 def _repo_refresh(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
     store = _ensure_generation(config_path)
@@ -977,14 +1007,19 @@ def _repo_refresh(args: argparse.Namespace) -> int:
                 item.policy_patch,
                 item.ticket_graph,
                 item.risk_policy,
+                item.generated_paths,
+                item.issue_writes,
             )
             if item.repo_id in proposal_by_id
             else item
             for item in source.repositories
         ),
+        source.mcp_connection_max_ttl_seconds,
+        source.auth_profiles,
     )
     source_text = render_source(updated_source)
     document = parse_resolved(store.read_resolved_text())
+    document = apply_auth_profiles(document, updated_source.auth_profiles)
     fingerprint_map = current.repository_fingerprint_map()
     patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
     graph_by_id = {item.repo_id: item.ticket_graph for item in source.repositories}
@@ -2255,6 +2290,7 @@ def build_parser() -> argparse.ArgumentParser:
     repo = commands.add_parser("repo")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True)
     add_onboarding_parsers(commands, repo_sub)
+    add_auth_parsers(commands)
     for name in ("inspect", "propose", "enroll", "add"):
         item = repo_sub.add_parser(name)
         item.add_argument("path")
@@ -2578,6 +2614,8 @@ def main(argv: list[str] | None = None) -> int:
             return _upgrade_command(args)
         if args.command == "dev-runtime":
             return _dev_runtime_command(args)
+        if args.command == "auth":
+            return _auth_command(args, config_path)
         if args.command == "config":
             if args.config_command == "path":
                 _json(_resolved_paths(config_path))

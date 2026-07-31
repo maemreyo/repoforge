@@ -284,9 +284,17 @@ REMOTE="$SANDBOX/demo-remote.git"
 git init --quiet --bare -b main "$REMOTE"
 mkdir -p "$DEMO"
 git -C "$DEMO" init --quiet -b main
+# A persisted identity, not `-c` on one commit. The sandbox redirects HOME, so there is no
+# global gitconfig either, and `workspace_create` pins commit attribution by importing what
+# `git var GIT_AUTHOR_IDENT` resolves (#291) -- with neither source set, git resolves
+# nothing and enrollment fails COMMIT_IDENTITY_UNRESOLVED. A real operator machine has this
+# configured; the drill exists to prove activation and rollback, not to assert what happens
+# on a machine that cannot attribute a commit at all.
+git -C "$DEMO" config user.email sandbox@repoforge.invalid
+git -C "$DEMO" config user.name "RepoForge Sandbox"
 printf 'demo\n' > "$DEMO/README.md"
 git -C "$DEMO" add README.md
-git -C "$DEMO" -c user.email=s@x -c user.name=s commit --quiet -m "init"
+git -C "$DEMO" commit --quiet -m "init"
 # Enrollment requires a remote; a local bare repo keeps everything inside the sandbox.
 git -C "$DEMO" remote add origin "$REMOTE"
 git -C "$DEMO" push --quiet origin main

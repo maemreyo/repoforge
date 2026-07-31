@@ -19,9 +19,16 @@ from repoforge.adapters.execution.native import NativeReviewedAdapter
 from repoforge.application.execution.coordinator import ExecutionCoordinator
 from repoforge.application.service import CodingService
 from repoforge.bootstrap import AdapterOverrides, build_application
-from repoforge.config import load_config
+from repoforge.config import AppConfig, load_config
+from repoforge.domain.errors import CommandError
 from repoforge.domain.mutation_policy import MUTATION_OPS
 from repoforge.ports.clock import Clock
+from repoforge.ports.workspace_publication import (
+    WorkspaceDraftPrPublication,
+    WorkspaceDraftPrPublicationEffect,
+    WorkspacePushPublication,
+    WorkspacePushPublicationEffect,
+)
 from repoforge.testing import ScriptedCommandExecutor
 
 _REAL_HOME = Path(os.environ.get("HOME", "~")).expanduser()
@@ -133,6 +140,112 @@ class ForgeEnvironment:
     gh_state: Path
     config_path: Path
     service: CodingService
+
+
+class _FixtureWorkspacePublicationService:
+    """Exercise exact workspace publication contracts against fixture-only adapters."""
+
+    def __init__(self, context: object) -> None:
+        self._context = context
+
+    @staticmethod
+    def _identities(seed: str) -> tuple[str, str, str, str]:
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        operation_id = "op-" + digest[:24]
+        return (
+            "publication-" + digest[24:48],
+            operation_id,
+            "receipt-" + digest[40:64],
+            f"operation-result:{operation_id}",
+        )
+
+    def push(self, request: WorkspacePushPublication) -> WorkspacePushPublicationEffect:
+        context = self._context
+        branch = request.destination_ref.removeprefix("refs/heads/")
+        reconciled = False
+        output = "fixture exact publication"
+        try:
+            result = context.git.push(
+                request.cwd,
+                request.remote,
+                branch,
+                context.config.server.verification_timeout_seconds,
+            )
+            output = result.combined or output
+        except CommandError:
+            remote_after = context.git.remote_branch_sha(
+                request.cwd,
+                request.remote,
+                branch,
+                context.config.server.verification_timeout_seconds,
+            )
+            if remote_after != request.head_sha:
+                raise
+            reconciled = True
+            output = "fixture exact publication reconciled after lost response"
+        remote_after = context.git.remote_branch_sha(
+            request.cwd,
+            request.remote,
+            branch,
+            context.config.server.verification_timeout_seconds,
+        )
+        publication_id, operation_id, receipt_id, result_reference = self._identities(
+            request.idempotency_key or f"{request.workspace_id}:{request.head_sha}"
+        )
+        return WorkspacePushPublicationEffect(
+            publication_id=publication_id,
+            operation_id=operation_id,
+            receipt_id=receipt_id,
+            result_reference=result_reference,
+            head_sha=request.head_sha,
+            remote_head_before=request.remote_head_before,
+            remote_head_after=remote_after or request.head_sha,
+            pushed=True,
+            reconciled=reconciled,
+            output=output,
+        )
+
+    def create_draft_pr(
+        self,
+        request: WorkspaceDraftPrPublication,
+    ) -> WorkspaceDraftPrPublicationEffect:
+        context = self._context
+        base = request.base_ref.removeprefix("refs/heads/")
+        branch = request.head_ref.removeprefix("refs/heads/")
+        existing = context.github.find_pr(request.cwd, branch)
+        reconciled = existing is not None
+        if existing is not None:
+            if existing.get("title") != request.title or existing.get("body") != request.body:
+                existing = context.github.update(
+                    request.cwd,
+                    branch,
+                    title=request.title,
+                    body=request.body,
+                )
+            url = existing.get("url")
+            if not isinstance(url, str) or not url:
+                raise AssertionError("fixture pull request has no URL")
+        else:
+            url = context.github.create_draft(
+                request.cwd,
+                context.repo(request.repo_id),
+                branch=branch,
+                base=base,
+                title=request.title,
+                body=request.body,
+            )
+        publication_id, operation_id, receipt_id, result_reference = self._identities(
+            request.idempotency_key
+            or f"{request.workspace_id}:{request.base_ref}:{request.head_ref}:{request.head_sha}"
+        )
+        return WorkspaceDraftPrPublicationEffect(
+            publication_id=publication_id,
+            operation_id=operation_id,
+            receipt_id=receipt_id,
+            result_reference=result_reference,
+            url=url,
+            reconciled=reconciled,
+        )
 
 
 def execution_coordinator_for_tests() -> ExecutionCoordinator:
@@ -552,6 +665,22 @@ raise SystemExit(2)
     script.chmod(0o755)
 
 
+def build_test_service(config: AppConfig, *, clock: Clock | None = None) -> CodingService:
+    """Compose explicit fixture publication effects without changing production defaults."""
+
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(clock=clock) if clock is not None else None,
+        config_generation=TEST_CONFIG_GENERATION,
+    )
+    object.__setattr__(
+        application.context,
+        "publications",
+        _FixtureWorkspacePublicationService(application.context),
+    )
+    return CodingService(config, application=application)
+
+
 def create_forge_environment(
     tmp_path: Path,
     *,
@@ -642,12 +771,7 @@ parser = "ruff_format"
     # both the request side and the worker side ran at 0, so the generation filter matched
     # and nothing was ever unclaimable. That is precisely why #313 -- request side 0,
     # worker side 12 -- was invisible to this suite.
-    application = build_application(
-        config,
-        overrides=AdapterOverrides(clock=clock) if clock is not None else None,
-        config_generation=TEST_CONFIG_GENERATION,
-    )
-    service = CodingService(config, application=application)
+    service = build_test_service(config, clock=clock)
     return ForgeEnvironment(
         root=tmp_path,
         remote=remote,

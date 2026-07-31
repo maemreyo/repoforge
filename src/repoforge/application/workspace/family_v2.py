@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.execution_environment import ExecutionEvidence
 from ..context import ApplicationContext
 from ..fingerprint_cache import read_fingerprint
@@ -27,6 +28,7 @@ class WorkspaceCreateV2Command:
     idempotency_key: str | None = None
     issue_ids: tuple[str, ...] = ()
     adopt_branch: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,7 @@ class WorkspaceCreatorV2:
                 command.idempotency_key,
                 command.issue_ids,
                 command.adopt_branch,
+                command.selector,
             )
         )
         status = self._status.compute(WorkspaceStatusCommand(created.workspace_id))

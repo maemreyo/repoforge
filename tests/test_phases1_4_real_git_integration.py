@@ -6,8 +6,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import build_test_service
 
-from repoforge.application.service import CodingService
 from repoforge.config import load_config
 from repoforge.testing import CleanupTracker
 
@@ -74,7 +74,7 @@ commands = [[{sys.executable!r}, "-c", "from pathlib import Path; assert Path('h
 ''',
         encoding="utf-8",
     )
-    service = CodingService(load_config(resolved))
+    service = build_test_service(load_config(resolved))
     baseline = CleanupTracker.capture(
         repo_path=source,
         workspace_root=tmp_path / "workspaces",

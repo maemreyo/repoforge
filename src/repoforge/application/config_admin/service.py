@@ -59,6 +59,7 @@ from ...ports.configuration import ConfigurationStore
 from ...ports.ids import IdGenerator
 from ..approvals import PendingPolicyChangeStore
 from ..configuration.document import (
+    apply_auth_profiles,
     apply_generated_paths,
     apply_issue_write_policy,
     apply_policy_patch,
@@ -1378,9 +1379,12 @@ class ConfigAdminService:
                 else item
                 for item in source.repositories
             ),
+            source.mcp_connection_max_ttl_seconds,
+            source.auth_profiles,
         )
         source_text = render_source(updated_source)
         document = parse_resolved(self._store.read_resolved_text(current.generation))
+        document = apply_auth_profiles(document, updated_source.auth_profiles)
         document = apply_proposal(document, proposal)
         document = apply_ticket_graph(document, repo_id, source_item.ticket_graph)
         document = apply_risk_policy(document, repo_id, source_item.risk_policy)

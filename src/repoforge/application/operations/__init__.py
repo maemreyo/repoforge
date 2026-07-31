@@ -1,5 +1,6 @@
 """Durable operation application services."""
 
+from .identity import OperationIdentityManager
 from .manager import OperationManager
 from .recovery import (
     OperationRecoveryReport,
@@ -10,6 +11,7 @@ from .recovery import (
 )
 
 __all__ = [
+    "OperationIdentityManager",
     "OperationManager",
     "OperationRecoveryReport",
     "OperationWorkRecoveryReport",

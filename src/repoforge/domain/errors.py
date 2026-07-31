@@ -126,6 +126,42 @@ class ErrorCode(str, Enum):
     ADHOC_RUNNER_NOT_ALLOWED = "ADHOC_RUNNER_NOT_ALLOWED"
     ADHOC_ARGV_INVALID = "ADHOC_ARGV_INVALID"
     ADHOC_COMMAND_FORBIDDEN = "ADHOC_COMMAND_FORBIDDEN"
+    CREDENTIAL_BROKER_UNAVAILABLE = "CREDENTIAL_BROKER_UNAVAILABLE"
+    CREDENTIAL_REFERENCE_NOT_FOUND = "CREDENTIAL_REFERENCE_NOT_FOUND"
+    CREDENTIAL_EXPIRED = "CREDENTIAL_EXPIRED"
+    CREDENTIAL_REVOKED = "CREDENTIAL_REVOKED"
+    CREDENTIAL_SCOPE_MISMATCH = "CREDENTIAL_SCOPE_MISMATCH"
+    CREDENTIAL_CAPABILITY_DENIED = "CREDENTIAL_CAPABILITY_DENIED"
+    CREDENTIAL_REFRESH_IDENTITY_MISMATCH = "CREDENTIAL_REFRESH_IDENTITY_MISMATCH"
+    CREDENTIAL_LEAK_BLOCKED = "CREDENTIAL_LEAK_BLOCKED"
+    CREDENTIAL_CALLBACK_FAILED = "CREDENTIAL_CALLBACK_FAILED"
+    GITHUB_API_ACTOR_MISMATCH = "GITHUB_API_ACTOR_MISMATCH"
+    GITHUB_API_REPOSITORY_MISMATCH = "GITHUB_API_REPOSITORY_MISMATCH"
+    GITHUB_API_PERMISSION_DENIED = "GITHUB_API_PERMISSION_DENIED"
+    GITHUB_SSO_AUTHORIZATION_REQUIRED = "GITHUB_SSO_AUTHORIZATION_REQUIRED"
+    GITHUB_INSTALLATION_APPROVAL_REQUIRED = "GITHUB_INSTALLATION_APPROVAL_REQUIRED"
+    GITHUB_TOKEN_REVOKED = "GITHUB_TOKEN_REVOKED"
+    GITHUB_PROVIDER_UNAVAILABLE = "GITHUB_PROVIDER_UNAVAILABLE"
+    GITHUB_TOKEN_APPROVAL_REQUIRED = "GITHUB_TOKEN_APPROVAL_REQUIRED"
+    GITHUB_RULESET_POLICY_DENIED = "GITHUB_RULESET_POLICY_DENIED"
+    GITHUB_WORKFLOW_POLICY_DENIED = "GITHUB_WORKFLOW_POLICY_DENIED"
+    GITHUB_NETWORK_POLICY_DENIED = "GITHUB_NETWORK_POLICY_DENIED"
+    GITHUB_ENTERPRISE_EVIDENCE_UNOBSERVABLE = "GITHUB_ENTERPRISE_EVIDENCE_UNOBSERVABLE"
+    GIT_TRANSPORT_HOST_MISMATCH = "GIT_TRANSPORT_HOST_MISMATCH"
+    GIT_TRANSPORT_IDENTITY_MISMATCH = "GIT_TRANSPORT_IDENTITY_MISMATCH"
+    GIT_TRANSPORT_AUTHENTICATION_FAILED = "GIT_TRANSPORT_AUTHENTICATION_FAILED"
+    CREDENTIAL_INTERACTION_REQUIRED = "CREDENTIAL_INTERACTION_REQUIRED"
+    OPERATION_IDENTITY_NOT_FOUND = "OPERATION_IDENTITY_NOT_FOUND"
+    OPERATION_IDENTITY_MISMATCH = "OPERATION_IDENTITY_MISMATCH"
+    OPERATION_IDENTITY_STALE = "OPERATION_IDENTITY_STALE"
+    REMOTE_REWRITE_DETECTED = "REMOTE_REWRITE_DETECTED"
+    PUBLICATION_TARGET_MISMATCH = "PUBLICATION_TARGET_MISMATCH"
+    CROSS_BOUNDARY_PUBLICATION_DENIED = "CROSS_BOUNDARY_PUBLICATION_DENIED"
+    COMMIT_IDENTITY_UNRESOLVED = "COMMIT_IDENTITY_UNRESOLVED"
+    COMMIT_IDENTITY_CONFIG_DRIFT = "COMMIT_IDENTITY_CONFIG_DRIFT"
+    COMMIT_IDENTITY_MISMATCH = "COMMIT_IDENTITY_MISMATCH"
+    COMMIT_SIGNING_FAILED = "COMMIT_SIGNING_FAILED"
+    DELEGATION_APPROVAL_REQUIRED = "DELEGATION_APPROVAL_REQUIRED"
     PROFILE_NOT_MODEL_INVOCABLE = "PROFILE_NOT_MODEL_INVOCABLE"
     PROFILE_RERUN_TOO_SOON = "PROFILE_RERUN_TOO_SOON"
 
@@ -368,6 +404,34 @@ def operation_error_from_exception(
         ErrorCode.ADHOC_COMMAND_FORBIDDEN: "The ad-hoc command is an irreversible or history-rewriting form that RepoForge blocks; use the reviewed typed tools instead.",
         ErrorCode.EXECUTION_POLICY_UNSUPPORTED: "The selected execution backend cannot truthfully satisfy a required execution policy.",
         ErrorCode.EXECUTION_ENVIRONMENT_DRIFT: "The execution environment identity changed across a reviewed session or commit gate.",
+        ErrorCode.CREDENTIAL_BROKER_UNAVAILABLE: "The reviewed repository-auth material provider could not resolve the opaque reference.",
+        ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND: "No repository-auth material exists for the selected opaque reference.",
+        ErrorCode.CREDENTIAL_EXPIRED: "The selected repository-auth material expired and an equivalent refresh was unavailable.",
+        ErrorCode.CREDENTIAL_REVOKED: "The selected repository-auth material was explicitly revoked.",
+        ErrorCode.CREDENTIAL_SCOPE_MISMATCH: "Repository-auth material does not match the reviewed profile, actor class, or target.",
+        ErrorCode.CREDENTIAL_CAPABILITY_DENIED: "Repository-auth material exceeds or does not satisfy the reviewed capability ceiling.",
+        ErrorCode.CREDENTIAL_REFRESH_IDENTITY_MISMATCH: "Refreshed repository-auth material changed a locked identity or capability field.",
+        ErrorCode.CREDENTIAL_LEAK_BLOCKED: "A raw repository-auth value was detected in a process-visible argument or diagnostic boundary.",
+        ErrorCode.CREDENTIAL_CALLBACK_FAILED: "A repository-auth callback failed inside its bounded material lifetime.",
+        ErrorCode.GITHUB_API_ACTOR_MISMATCH: "The observed GitHub API actor or App installation does not match the reviewed profile.",
+        ErrorCode.GITHUB_API_REPOSITORY_MISMATCH: "The issued GitHub API identity is not scoped to the reviewed stable repository ID.",
+        ErrorCode.GITHUB_API_PERMISSION_DENIED: "The observed GitHub API permissions or capabilities do not match the reviewed minimal ceiling.",
+        ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED: "The selected GitHub identity requires organization SSO authorization before use.",
+        ErrorCode.GITHUB_INSTALLATION_APPROVAL_REQUIRED: "The selected GitHub App installation requires organization approval before use.",
+        ErrorCode.GITHUB_TOKEN_REVOKED: "The selected GitHub API token or installation grant was revoked.",
+        ErrorCode.GITHUB_PROVIDER_UNAVAILABLE: "GitHub token issuance or live identity verification was unavailable.",
+        ErrorCode.GIT_TRANSPORT_HOST_MISMATCH: "The Git remote host or URL scheme does not match the reviewed repository transport binding.",
+        ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH: "The Git transport context does not match the reviewed profile and stable repository target.",
+        ErrorCode.GIT_TRANSPORT_AUTHENTICATION_FAILED: "The pinned Git transport identity could not authenticate and no ambient fallback was attempted.",
+        ErrorCode.CREDENTIAL_INTERACTION_REQUIRED: "Git requested an interactive credential prompt, which durable and background operations prohibit.",
+        ErrorCode.OPERATION_IDENTITY_NOT_FOUND: "The durable operation has no repository identity sidecar to inspect, resume, or authorize.",
+        ErrorCode.OPERATION_IDENTITY_MISMATCH: "The supplied operation, context digest, target, or capability does not match the original identity decision.",
+        ErrorCode.OPERATION_IDENTITY_STALE: "The operation identity sidecar changed during a compare-and-swap lifecycle update.",
+        ErrorCode.COMMIT_IDENTITY_UNRESOLVED: "The workspace has no valid pinned author, committer, signing, and configuration identity decision.",
+        ErrorCode.COMMIT_IDENTITY_CONFIG_DRIFT: "Identity-, signing-, credential-, transport-, or remote-sensitive Git configuration changed after workspace creation.",
+        ErrorCode.COMMIT_IDENTITY_MISMATCH: "The observed commit author or committer does not match the workspace-pinned policy.",
+        ErrorCode.COMMIT_SIGNING_FAILED: "The commit signature state or signer fingerprint does not match the reviewed signing policy.",
+        ErrorCode.DELEGATION_APPROVAL_REQUIRED: "A delegated-human commit lacks the represented actor and explicit approval evidence required by policy.",
         ErrorCode.PROFILE_NOT_MODEL_INVOCABLE: "The reviewed configuration reserves this profile for the operator and CI, because it is expensive enough that the decision to run it is not the model's to make.",
         ErrorCode.PROFILE_RERUN_TOO_SOON: "This profile ran against the same workspace snapshot too recently; the reviewed configuration bounds how often it may repeat.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")

@@ -1,5 +1,6 @@
 """Reusable deterministic harness adapters for application and crash tests."""
 
+from .auth_fakes import DeterministicAuthMaterialProvider
 from .fakes import (
     CleanupTracker,
     FailureInjector,
@@ -7,6 +8,7 @@ from .fakes import (
     InMemoryLockManager,
     InMemoryOperationGate,
     InMemoryWorkspaceStore,
+    NullCommitIdentityGateway,
     ResourceSnapshot,
     ScriptedCommandExecutor,
     SequenceIdGenerator,
@@ -14,11 +16,13 @@ from .fakes import (
 
 __all__ = [
     "CleanupTracker",
+    "DeterministicAuthMaterialProvider",
     "FailureInjector",
     "FixedClock",
     "InMemoryLockManager",
     "InMemoryOperationGate",
     "InMemoryWorkspaceStore",
+    "NullCommitIdentityGateway",
     "ResourceSnapshot",
     "ScriptedCommandExecutor",
     "SequenceIdGenerator",

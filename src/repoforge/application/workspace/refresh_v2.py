@@ -10,10 +10,11 @@ import os
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.filesystem_transaction import (
     CreateFile,
@@ -37,6 +38,7 @@ from ..fingerprint_cache import prime_fingerprint, read_fingerprint
 from ..idempotency import IdempotencyEffectBoundary
 from ..outcome_receipts import execute_with_outcome_receipt
 from .base_status import collect_workspace_base_status
+from .commit_identity import require_pinned_commit_identity
 
 _PLAN_TOKEN = re.compile(
     r"^refresh-v2:([0-9a-f]{40}(?:[0-9a-f]{24})?):([0-9a-f]{64}):([0-9a-f]{64})$"
@@ -106,6 +108,7 @@ class WorkspaceRefreshV2Command:
     expected_fingerprint: str
     plan_token: str | None = None
     resolutions: tuple[RefreshResolution, ...] = ()
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,7 +488,7 @@ class WorkspaceRefreshV2:
             / "manifest.json"
         ).is_file()
         boundary = IdempotencyEffectBoundary()
-        audit_details = {
+        audit_details: dict[str, object] = {
             "workspace_id": command.workspace_id,
             "action": command.action,
             "resolution_count": len(command.resolutions),
@@ -553,6 +556,7 @@ class WorkspaceRefreshV2:
                         (),
                         None,
                     )
+                pinned_identity = require_pinned_commit_identity(self.ctx, record)
                 original_record = replace(record, metadata=dict(record.metadata))
                 transaction_id = journal.prepare(record, head, plan.target_base_sha)
                 try:
@@ -604,7 +608,13 @@ class WorkspaceRefreshV2:
                             "Refresh resolutions did not resolve every conflict: "
                             + ", ".join(remaining)
                         )
-                    new_head = self.ctx.git.commit_merge(workspace)
+                    managed = pinned_identity.gateway.commit_merge(
+                        workspace,
+                        pinned_identity.policy,
+                        expected_config_digest=pinned_identity.config_digest,
+                    )
+                    new_head = managed.head_sha
+                    identity_evidence = managed.evidence.safe_payload()
                     invalidated = invalidate_workspace_refresh_receipts(record)
                     record.metadata["workspace_base_sha"] = plan.target_base_sha
                     record.metadata["last_refresh_target_sha"] = plan.target_base_sha
@@ -617,6 +627,8 @@ class WorkspaceRefreshV2:
                         target_base_sha=plan.target_base_sha,
                         plan_hash=plan.plan_hash,
                     )
+                    record.metadata["last_commit_identity_evidence"] = identity_evidence
+                    audit_details["commit_identity"] = identity_evidence
                     self.ctx.store.save(record)
                     changed_paths = tuple(
                         sorted(

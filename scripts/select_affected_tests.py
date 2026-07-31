@@ -69,10 +69,51 @@ ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
 
 CONFTEST_PATH = "tests/conftest.py"
 
+# Coverage contexts cannot express every capability-preflight dependency:
+# composition and binding tests exercise consumers through wider workflows.
+# Keep only those additional reviewed consumers beside the ordinary coverage
+# map so source changes remain narrow without inflating consumer counts or
+# weakening the default fail-closed behavior for unknown modules.
+_GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS: dict[str, tuple[str, ...]] = {
+    # Protocol-only module: every line executes at import, so which test context coverage
+    # attributes it to is a race between whichever test imports it first -- and collection
+    # itself has no test context at all. It was mapped by one recording run and dropped by the
+    # next, which escalated an unrelated change to the whole suite. Declaring the blast radius
+    # here makes it independent of that lottery.
+    "src/repoforge/ports/github_capability_preflight.py": (
+        "tests/test_github_capability_preflight_adapter.py",
+    ),
+    "src/repoforge/adapters/github/api_identity.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_github_capability_preflight_adapter.py",
+    ),
+    "src/repoforge/domain/repository_identity.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_operation_identity_leases.py",
+        "tests/test_repository_identity_contracts.py",
+    ),
+    "src/repoforge/adapters/publication.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_publication_adapter.py",
+    ),
+    "src/repoforge/application/publication.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_publication_guards.py",
+    ),
+    "src/repoforge/application/context.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_integration.py",
+    ),
+    "src/repoforge/bootstrap.py": (
+        "tests/test_github_api_identity.py",
+        "tests/test_integration.py",
+    ),
+}
+
 # Any export from tests/conftest.py that a test file might reference. Kept in
 # sync with the checked-in `conftest_consumers` list by --check-completeness.
 _CONFTEST_SYMBOL_RE = re.compile(
-    r"\b(forge_env|create_forge_environment|ForgeEnvironment|execution_coordinator_for_tests)\b"
+    r"\b(forge_env|create_forge_environment|ForgeEnvironment|execution_coordinator_for_tests|build_test_service)\b"
 )
 
 
@@ -434,11 +475,16 @@ def _select_via_coverage(
             reasons.append(f"{path!r} -> itself (changed test)")
         elif path.startswith(_PACKAGE_SRC_PREFIX) and path.endswith(".py"):
             covering = manifest.coverage_map.get(path)
-            if covering is None:
+            direct_consumers = _GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS.get(path, ())
+            if covering is None and not direct_consumers:
                 unmapped.append(path)
             else:
-                selected_files.update(covering)
-                reasons.append(f"{path!r} -> {len(covering)} covering test file(s)")
+                selected_files.update(covering or ())
+                selected_files.update(direct_consumers)
+                reasons.append(
+                    f"{path!r} -> {len(covering or ())} covering test file(s), "
+                    f"{len(direct_consumers)} reviewed direct consumer(s)"
+                )
         else:
             matched = False
             for group in manifest.groups:

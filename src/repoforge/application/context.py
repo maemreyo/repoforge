@@ -6,7 +6,7 @@ import hmac
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -17,10 +17,13 @@ from ..domain.operations import automatic_retry_allowed, unchanged_state_for
 from ..domain.policy import validate_adopted_branch, validate_branch
 from ..domain.workspace import WorkspaceRecord
 from ..ports import (
+    ApiIdentityInspector,
     AuditSink,
     Clock,
     CodeIntelligenceProvider,
     CommandExecutor,
+    CommitIdentityGateway,
+    CommitIdentityInspector,
     EffectReceiptStore,
     ExecutableLocator,
     ExecutionPlanAcceptanceStore,
@@ -30,9 +33,11 @@ from ..ports import (
     FailureOutputArtifactStore,
     FileSystem,
     FileTransactionFactory,
+    GitHubCapabilityPreflightGateway,
     GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
+    GitTransportGateway,
     HygieneBaselineCache,
     HygieneGateway,
     IdempotencyStore,
@@ -40,16 +45,24 @@ from ..ports import (
     IterationCache,
     LockManager,
     MetricsSink,
+    NestedLeaseProvider,
+    NestedResourceDiscovery,
+    NestedTargetResolver,
     OperationGate,
+    OperationIdentityStore,
     OperationResultStore,
     OperationStore,
     OperationWorkQueue,
     ProcessReaper,
     ProviderRegistry,
+    PublicationTargetInspector,
     PullRequestGateway,
+    RepositoryBindingStore,
     TicketGraphGateway,
     TicketProjectGateway,
+    TransportInspector,
     WorkerBindingStore,
+    WorkspacePublicationService,
     WorkspaceStore,
 )
 from .audit_context import current_audit_attribution
@@ -58,6 +71,7 @@ from .execution.coordinator import ExecutionCoordinator
 from .fingerprint_cache import FingerprintCache
 from .idempotency import IdempotencyEffectBoundary, execute_idempotent
 from .nudges import AdoptionNudgeTracker
+from .repository_identity_runtime import RepositoryIdentityRuntime
 
 T = TypeVar("T")
 
@@ -241,9 +255,24 @@ class ApplicationContext:
     idempotency: IdempotencyStore | None = None
     operation_store: OperationStore | None = None
     operation_work_queue: OperationWorkQueue | None = None
+    operation_identities: OperationIdentityStore | None = None
+    # Grouped with the other identity stores rather than inserted ahead of
+    # `metrics`: this context is built positionally in places, so a new field in
+    # the middle silently shifts every argument after it -- which is how
+    # `metrics` ended up holding an idempotency store.
+    commit_identities: CommitIdentityGateway | None = None
     operation_result_store: OperationResultStore | None = None
     fingerprint_cache: FingerprintCache | None = None
     provider_registry: ProviderRegistry | None = None
+    repository_bindings: RepositoryBindingStore | None = None
+    repository_identity_runtime: RepositoryIdentityRuntime | None = field(
+        default=None,
+        kw_only=True,
+    )
+    git_transport_router: GitTransportGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
     code_intelligence: CodeIntelligenceProvider | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
@@ -252,6 +281,22 @@ class ApplicationContext:
     ticket_graphs: TicketGraphGateway | None = None
     ticket_projects: TicketProjectGateway | None = None
     github_capabilities: GitHubCapabilityProbe | None = None
+    github_capability_preflight: GitHubCapabilityPreflightGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_resource_discovery: NestedResourceDiscovery | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_target_resolver: NestedTargetResolver | None = field(
+        default=None,
+        kw_only=True,
+    )
+    nested_lease_provider: NestedLeaseProvider | None = field(
+        default=None,
+        kw_only=True,
+    )
     file_transactions: FileTransactionFactory | None = None
     execution_plans: ExecutionPlanStore | None = None
     execution_plan_acceptances: ExecutionPlanAcceptanceStore | None = None
@@ -262,6 +307,14 @@ class ApplicationContext:
     failure_output_artifacts: FailureOutputArtifactStore | None = None
     worker_bindings: WorkerBindingStore | None = None
     reaper: ProcessReaper | None = None
+    publications: WorkspacePublicationService | None = None
+    #: Per-surface identity inspectors. Each is optional and independent: an absent one makes
+    #: `rf auth whoami` report that surface as unavailable rather than falling back to ambient
+    #: state, so composing one surface never implies evidence for another.
+    auth_api_inspector: ApiIdentityInspector | None = None
+    auth_transport_inspector: TransportInspector | None = None
+    auth_commit_inspector: CommitIdentityInspector | None = None
+    auth_publication_inspector: PublicationTargetInspector | None = None
     config_generation: int = 0
 
     def now_epoch(self) -> float:
@@ -588,6 +641,8 @@ class ApplicationContext:
         serialize: Callable[[T], Any] | None = None,
         deserialize: Callable[[Any], T] | None = None,
         effect_boundary: IdempotencyEffectBoundary | None = None,
+        reconcile_uncertain: Callable[[], T | None] | None = None,
+        operation_id: str | None = None,
     ) -> T:
         return execute_idempotent(
             self,
@@ -599,4 +654,6 @@ class ApplicationContext:
             serialize=serialize,
             deserialize=deserialize,
             effect_boundary=effect_boundary,
+            reconcile_uncertain=reconcile_uncertain,
+            operation_id=operation_id,
         )

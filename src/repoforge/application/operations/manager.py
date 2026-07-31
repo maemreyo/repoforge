@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 from functools import partial
 
 from ...domain.errors import ErrorCode, RepoForgeError
@@ -14,6 +15,7 @@ from ...domain.operation_task import (
     OperationTask,
     claim_operation_ownership,
     new_operation_task,
+    next_operation_timestamp,
     renew_operation_ownership,
     request_operation_cancellation,
     requeue_operation,
@@ -208,6 +210,63 @@ class OperationManager:
             result_reference=result_reference,
             receipt_id=receipt_id,
             owner_id=owner_id,
+        )
+
+    def reconcile_success(
+        self,
+        operation_id: str,
+        *,
+        result_reference: str,
+        receipt_id: str,
+        now: str | None = None,
+    ) -> OperationTask:
+        """Recover an unknown external effect after exact authoritative reconciliation."""
+
+        current = self.status(operation_id)
+        if current.state is OperationState.SUCCEEDED:
+            if current.result_reference == result_reference and current.receipt_id == receipt_id:
+                return current
+            raise RepoForgeError(
+                "Reconciled result does not match the existing success record",
+                code=ErrorCode.OPERATION_TRANSITION_INVALID,
+            )
+        if (
+            current.state is not OperationState.FAILED
+            or current.error_code != ErrorCode.EFFECT_OUTCOME_UNKNOWN.value
+            or current.receipt_id != receipt_id
+        ):
+            raise RepoForgeError(
+                "Only the exact unknown-effect operation may reconcile to success",
+                code=ErrorCode.OPERATION_TRANSITION_INVALID,
+            )
+        updated = replace(
+            current,
+            state=OperationState.SUCCEEDED,
+            phase=OperationState.SUCCEEDED.value,
+            progress_current=current.progress_total or max(current.progress_current, 1),
+            progress_total=current.progress_total or 1,
+            progress_unit=current.progress_unit or "effects",
+            progress_message="Completed",
+            result_reference=result_reference,
+            receipt_id=receipt_id,
+            error_code=None,
+            error_message=None,
+            retryability=OperationRetryability.NONE,
+            updated_at=next_operation_timestamp(current.updated_at, self._now(now)),
+            owner_id=None,
+            lease_expires_at=None,
+        )
+        return self.ctx.audited(
+            "operation_reconcile_success",
+            {
+                "operation_id": operation_id,
+                "previous_state": current.state.value,
+                "new_state": updated.state.value,
+                "receipt_id": receipt_id,
+                "result_reference": result_reference,
+            },
+            lambda: self.store.save(updated, expected_updated_at=current.updated_at),
+            mutating=True,
         )
 
     def fail(
@@ -457,6 +516,9 @@ class OperationManager:
             if self.ctx.operation_result_store is not None:
                 with contextlib.suppress(RepoForgeError):
                     self.ctx.operation_result_store.delete(operation_id)
+            if self.ctx.operation_identities is not None:
+                with contextlib.suppress(RepoForgeError):
+                    self.ctx.operation_identities.delete(operation_id)
 
         self.ctx.audited(
             "operation_delete",

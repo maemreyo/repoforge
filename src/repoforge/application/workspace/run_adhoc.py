@@ -30,6 +30,7 @@ from ...domain.adhoc import (
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
+from ...domain.operation_identity import bind_worker_identity
 from ...domain.operation_task import OperationRetryability, OperationState
 from ...domain.operation_worker import OperationWorkerBinding
 from ...domain.policy import normalize_relative_path
@@ -523,17 +524,21 @@ class WorkspaceAdhocRunner:
         server_pid = os.getpid()
         server_token = reaper.read_start_token(server_pid) if reaper is not None else None
         with contextlib.suppress(Exception):
-            bindings.put(
-                OperationWorkerBinding(
-                    operation_id=operation_id,
-                    child_pid=child_pid,
-                    child_pgid=child_pid,
-                    child_start_token=child_token,
-                    server_pid=server_pid,
-                    server_start_token=server_token,
-                    created_at=self.ctx.clock.now_iso(),
-                )
+            binding = OperationWorkerBinding(
+                operation_id=operation_id,
+                child_pid=child_pid,
+                child_pgid=child_pid,
+                child_start_token=child_token,
+                server_pid=server_pid,
+                server_start_token=server_token,
+                created_at=self.ctx.clock.now_iso(),
             )
+            identity_store = getattr(self.ctx, "operation_identities", None)
+            if identity_store is not None:
+                identity = identity_store.read(operation_id)
+                if identity is not None:
+                    binding = bind_worker_identity(binding, identity.value.reference)
+            bindings.put(binding)
 
     def _delete_worker_binding(self, operation_id: str) -> None:
         bindings = self.ctx.worker_bindings

@@ -44,6 +44,8 @@ _SHA_B = "b" * 64
 _SHA_C = "c" * 64
 _HEAD_SHA = "9a96afa68f9ca682f674456a47f6962372e5ab17"
 _HEAD_SHA_B = "aa53cda0e8f7c1b2d3a4956871f0e2c3b4d5a6f7"
+_IDENTITY_CONTEXT_ID = "identity-" + "d" * 24
+_IDENTITY_CONTEXT_DIGEST = "e" * 64
 
 
 def _h(marker: str) -> str:
@@ -201,9 +203,99 @@ def _worker_binding(tmp_path: Path) -> tuple[object, object]:
         owner_generation=15,
         owner_id="worker-1",
         attempt=2,
+        identity_context_id=_IDENTITY_CONTEXT_ID,
+        identity_context_digest=_IDENTITY_CONTEXT_DIGEST,
     )
     store.put(written)
     return written, store.get(written.operation_id)
+
+
+def _repository_identity_binding(tmp_path: Path) -> tuple[object, object]:
+    from repoforge.adapters.persistence import JsonRepositoryBindingStore
+    from repoforge.domain.repository_identity import (
+        RepositoryIdentityBinding,
+        RepositoryProvider,
+    )
+
+    store = JsonRepositoryBindingStore(tmp_path, InMemoryLockManager())
+    written = RepositoryIdentityBinding(
+        provider=RepositoryProvider.GITHUB,
+        provider_host="github.example.com",
+        repository_id="987654",
+        canonical_name="github.example.com/acme/repoforge",
+        human_profile_id="personal",
+        agent_profile_id="automation",
+        config_revision=_SHA,
+    )
+    store.create(written)
+    return written, _value(store.read(written.provider_host, written.repository_id))
+
+
+def _operation_identity_record(tmp_path: Path) -> tuple[object, object]:
+    from repoforge.adapters.persistence import JsonOperationIdentityStore
+    from repoforge.domain.operation_identity import (
+        LeaseCapabilityRequest,
+        OperationIdentityRecord,
+        OperationIdentityReference,
+        operation_identity_digest,
+    )
+    from repoforge.domain.repository_identity import (
+        ActorClass,
+        AuthLease,
+        AuthLeaseState,
+        AuthTargetKind,
+        OpaqueCredentialReference,
+        OperationIdentityContext,
+        RepositoryProvider,
+    )
+
+    operation_id = "op-" + "f" * 24
+    lease = AuthLease(
+        lease_id="lease-primary",
+        profile_id="personal",
+        provider=RepositoryProvider.GITHUB,
+        repository_id="987654",
+        target_kind=AuthTargetKind.REPOSITORY,
+        target_id="987654",
+        actor_id="4242",
+        credential_ref=OpaqueCredentialReference("gh-account", "personal-account"),
+        issued_at="2026-07-29T09:26:21+00:00",
+        expires_at="2026-07-29T10:26:21+00:00",
+        state=AuthLeaseState.ACTIVE,
+        config_revision=_SHA,
+        policy_revision=_SHA_B,
+        material_digest=_SHA_C,
+        provider_metadata=(("github_host", "github.com"),),
+    )
+    context = OperationIdentityContext(
+        operation_id=operation_id,
+        primary_repository_id="987654",
+        actor_class=ActorClass.HUMAN_OPERATED,
+        auth_leases=(lease,),
+        selected_at="2026-07-29T09:26:21+00:00",
+        config_revision=_SHA,
+        policy_revision=_SHA_B,
+    )
+    written = OperationIdentityRecord(
+        reference=OperationIdentityReference(
+            context_id=_IDENTITY_CONTEXT_ID,
+            context_digest=operation_identity_digest(context),
+        ),
+        operation_id=operation_id,
+        context=context,
+        capability_requests=(
+            LeaseCapabilityRequest(
+                lease_id=lease.lease_id,
+                capability_ids=("github.contents.write",),
+            ),
+        ),
+        superseded_lease_ids=("lease-retired",),
+        created_at="2026-07-29T09:26:21+00:00",
+        updated_at="2026-07-29T09:39:48+00:00",
+    )
+    store = JsonOperationIdentityStore(tmp_path, InMemoryLockManager())
+    store.create(written)
+    return written, _value(store.read(written.operation_id))
 
 
 def _runtime_activation_receipt(tmp_path: Path) -> tuple[object, object]:
@@ -764,6 +856,7 @@ def _issue_graph_publication(tmp_path: Path) -> tuple[object, object]:
 
 def _task_capsule(tmp_path: Path) -> tuple[object, object]:
     from repoforge.adapters.persistence import JsonTaskStore
+    from repoforge.domain.operation_identity import OperationIdentityReference
     from repoforge.domain.task_capsule import (
         CriterionStatus,
         InstructionOrigin,
@@ -861,6 +954,12 @@ def _task_capsule(tmp_path: Path) -> tuple[object, object]:
         mutation_count=3,
         lease_holder="worker-1",
         lease_expires_at="2026-07-29T09:45:00+00:00",
+        identity_contexts=(
+            OperationIdentityReference(
+                context_id=_IDENTITY_CONTEXT_ID,
+                context_digest=_IDENTITY_CONTEXT_DIGEST,
+            ),
+        ),
     )
     store.create(written)
     return written, _value(store.read(written.task_id))
@@ -879,8 +978,10 @@ def _register() -> tuple[RoundTripCase, ...]:
         IssueGraphPublication,
         IssueGraphPublicationPlan,
     )
+    from repoforge.domain.operation_identity import OperationIdentityRecord
     from repoforge.domain.operation_work import OperationWorkItem
     from repoforge.domain.operation_worker import OperationWorkerBinding
+    from repoforge.domain.repository_identity import RepositoryIdentityBinding
     from repoforge.domain.runtime import RuntimeRecord
     from repoforge.domain.runtime_activation import RuntimeActivationReceipt
     from repoforge.domain.task_capsule import TaskCapsule
@@ -889,6 +990,8 @@ def _register() -> tuple[RoundTripCase, ...]:
     return (
         RoundTripCase(RuntimeRecord, _runtime_record),
         RoundTripCase(OperationWorkerBinding, _worker_binding),
+        RoundTripCase(RepositoryIdentityBinding, _repository_identity_binding),
+        RoundTripCase(OperationIdentityRecord, _operation_identity_record),
         RoundTripCase(RuntimeActivationReceipt, _runtime_activation_receipt),
         RoundTripCase(EffectReceipt, _effect_receipt),
         RoundTripCase(StageReceipt, _stage_receipt),

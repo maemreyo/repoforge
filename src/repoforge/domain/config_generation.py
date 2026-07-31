@@ -663,6 +663,110 @@ _SERVER_RECOGNIZED = {
     "allowed_environment",
     "resource_budget",
 }
+#: Auth-profile fields that name *who* the runtime acts as. Any change swaps the identity
+#: behind a profile id, so it is never a subset relation in either direction.
+_AUTH_PROFILE_IDENTITY = (
+    "provider",
+    "credential_kind",
+    "credential_reference",
+    "actor_class",
+    "expected_actor_id",
+    "repository_id",
+    "boundary_id",
+    "github_host",
+    "github_login",
+    "github_app_id",
+    "github_installation_id",
+    "credential_fingerprint",
+    "transport_kind",
+    "ssh_identity_file",
+    "https_token_environment",
+)
+#: Auth-profile fields whose set direction is the capability direction.
+_AUTH_PROFILE_GRANT_SETS = (
+    ("capability_ids", "profile capability grants"),
+    ("allowed_access", "profile transport access modes"),
+    ("repository_patterns", "profile repository reach"),
+    ("github_permissions", "profile GitHub App permissions"),
+)
+#: Recorded provenance of how a profile was imported; it grants nothing at runtime.
+_AUTH_PROFILE_RECOGNIZED = {
+    *_AUTH_PROFILE_IDENTITY,
+    *(name for name, _ in _AUTH_PROFILE_GRANT_SETS),
+    "enabled",
+    "lease_seconds",
+    "source_ssh_alias",
+}
+
+
+def _auth_profile_map(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    profiles = value.get("auth_profiles")
+    if not isinstance(profiles, dict):
+        return {}
+    return {str(profile_id): raw for profile_id, raw in profiles.items() if isinstance(raw, dict)}
+
+
+def _record_auth_profile_changes(
+    changes: list[CapabilityChange], before: dict[str, Any], after: dict[str, Any]
+) -> None:
+    before_profiles = _auth_profile_map(before)
+    after_profiles = _auth_profile_map(after)
+    _record_set_change(
+        changes,
+        "auth_profiles",
+        set(before_profiles),
+        set(after_profiles),
+        additions=CapabilityDeltaKind.EXPANSION,
+        removals=CapabilityDeltaKind.RESTRICTION,
+        reason="the identities the runtime may act as changed",
+    )
+    for profile_id in sorted(set(before_profiles) & set(after_profiles)):
+        left = before_profiles[profile_id]
+        right = after_profiles[profile_id]
+        prefix = f"auth_profiles.{profile_id}"
+        identity_before = tuple(left.get(field) for field in _AUTH_PROFILE_IDENTITY)
+        identity_after = tuple(right.get(field) for field in _AUTH_PROFILE_IDENTITY)
+        if identity_before != identity_after:
+            changes.append(
+                CapabilityChange(
+                    prefix + ".identity",
+                    identity_before,
+                    identity_after,
+                    CapabilityDeltaKind.INCOMPATIBLE,
+                    "profile actor, credential reference, or pinned transport changed",
+                )
+            )
+        # A disabled profile grants nothing, so enabling one widens what the runtime can do.
+        if left.get("enabled") is not right.get("enabled"):
+            enabled_after = right.get("enabled") is True
+            changes.append(
+                CapabilityChange(
+                    prefix + ".enabled",
+                    left.get("enabled"),
+                    right.get("enabled"),
+                    CapabilityDeltaKind.EXPANSION
+                    if enabled_after
+                    else CapabilityDeltaKind.RESTRICTION,
+                    "profile availability changed",
+                )
+            )
+        for field, reason in _AUTH_PROFILE_GRANT_SETS:
+            _record_set_change(
+                changes,
+                f"{prefix}.{field}",
+                _set(left.get(field)),
+                _set(right.get(field)),
+                additions=CapabilityDeltaKind.EXPANSION,
+                removals=CapabilityDeltaKind.RESTRICTION,
+                reason=reason,
+            )
+        _record_number(
+            changes,
+            prefix + ".lease_seconds",
+            left.get("lease_seconds", 300),
+            right.get("lease_seconds", 300),
+            reason="profile credential lifetime",
+        )
 
 
 def _unclassified(value: dict[str, Any]) -> dict[str, Any]:
@@ -670,6 +774,17 @@ def _unclassified(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         return {}
     residual: dict[str, Any] = loaded
+    auth_profiles = residual.get("auth_profiles")
+    if isinstance(auth_profiles, dict):
+        for profile_id in list(auth_profiles):
+            profile = auth_profiles[profile_id]
+            if isinstance(profile, dict):
+                for key in _AUTH_PROFILE_RECOGNIZED:
+                    profile.pop(key, None)
+                if not profile:
+                    auth_profiles.pop(profile_id, None)
+        if not auth_profiles:
+            residual.pop("auth_profiles", None)
     server = residual.get("server")
     if isinstance(server, dict):
         for key in _SERVER_RECOGNIZED:
@@ -774,6 +889,7 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
         removals=CapabilityDeltaKind.RESTRICTION,
         reason="repository access changed",
     )
+    _record_auth_profile_changes(changes, before, after)
 
     for repo_id in sorted(set(before_repos) & set(after_repos)):
         left = before_repos[repo_id]

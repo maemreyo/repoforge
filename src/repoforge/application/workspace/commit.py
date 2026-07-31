@@ -1,15 +1,17 @@
 import contextlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ...config import RepositoryConfig
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.command_source import dirty_command_source_paths
-from ...domain.errors import CommandError, ErrorCode, WorkspaceError
+from ...domain.errors import ErrorCode, RepoForgeError, WorkspaceError
 from ...domain.publishing import validate_commit_message
 from ..context import ApplicationContext
 from ..execution.requests import profile_execution_request
 from ..idempotency import IdempotencyEffectBoundary
 from ..outcome_receipts import execute_with_outcome_receipt
+from .commit_identity import require_pinned_commit_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +20,7 @@ class WorkspaceCommitCommand:
     message: str
     expected_head_sha: str | None = None
     expected_fingerprint: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,12 +56,14 @@ class WorkspaceCommitter:
         audit_details: dict[str, object] = {
             "workspace_id": c.workspace_id,
             "message_length": len(message),
+            "selector": c.selector.payload(),
         }
         boundary = IdempotencyEffectBoundary()
 
         def op() -> WorkspaceCommitResult:
             with self.ctx.locks.lock(c.workspace_id):
                 fresh = self.ctx.store.load(c.workspace_id)
+                pinned_identity = require_pinned_commit_identity(self.ctx, fresh)
                 committed_paths = self.ctx.git.changed_paths(path, repo)
                 command_source_union = _all_command_source_paths(repo)
                 command_source_paths_committed = list(
@@ -160,14 +165,23 @@ class WorkspaceCommitter:
                     else before_commit_fingerprint
                 )
                 committed = not (controlled_refresh and not dirty)
+                identity_evidence: dict[str, object] | None = None
                 try:
                     if not committed:
                         head = current_head
                         show = self.ctx.git.commit_summary(path)
                     else:
                         boundary.begin()
-                        head, show = self.ctx.git.commit(path, message)
-                except CommandError as exc:
+                        managed = pinned_identity.gateway.commit(
+                            path,
+                            message,
+                            pinned_identity.policy,
+                            expected_config_digest=pinned_identity.config_digest,
+                        )
+                        head = managed.head_sha
+                        show = managed.summary
+                        identity_evidence = managed.evidence.safe_payload()
+                except RepoForgeError as exc:
                     after_paths: list[str] = []
                     after_fingerprint: str | None = None
                     after_head: str | None = None
@@ -215,6 +229,9 @@ class WorkspaceCommitter:
                         }
                     )
                     raise
+                if identity_evidence is not None:
+                    fresh.metadata["last_commit_identity_evidence"] = identity_evidence
+                    audit_details["commit_identity"] = identity_evidence
                 if repo.require_verification_before_commit:
                     fresh.metadata.update(
                         {

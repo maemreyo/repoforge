@@ -17,9 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .errors import ErrorCode, RepoForgeError
+from .operation_identity import OperationIdentityReference
 from .operation_task import validate_operation_id
 
-OPERATION_WORKER_BINDING_SCHEMA_VERSION = 2
+OPERATION_WORKER_BINDING_SCHEMA_VERSION = 3
 
 _MAX_START_TOKEN = 128
 
@@ -45,6 +46,8 @@ class OperationWorkerBinding:
     owner_generation: int | None = None
     owner_id: str | None = None
     attempt: int | None = None
+    identity_context_id: str | None = None
+    identity_context_digest: str | None = None
 
 
 def _error(message: str) -> RepoForgeError:
@@ -88,6 +91,16 @@ def validate_operation_worker_binding(binding: OperationWorkerBinding) -> Operat
         raise _error("owner_id is invalid or exceeds 128 characters")
     if binding.attempt is not None:
         _positive_pid(binding.attempt, "attempt")
+    if (binding.identity_context_id is None) != (binding.identity_context_digest is None):
+        raise _error("identity context id and digest must be set or cleared together")
+    if binding.identity_context_id is not None and binding.identity_context_digest is not None:
+        try:
+            OperationIdentityReference(
+                binding.identity_context_id,
+                binding.identity_context_digest,
+            )
+        except ValueError as exc:
+            raise _error("worker binding identity context reference is invalid") from exc
     if (
         not isinstance(binding.created_at, str)
         or not binding.created_at
@@ -110,6 +123,8 @@ def worker_binding_payload(binding: OperationWorkerBinding) -> dict[str, object]
         "owner_generation": binding.owner_generation,
         "owner_id": binding.owner_id,
         "attempt": binding.attempt,
+        "identity_context_id": binding.identity_context_id,
+        "identity_context_digest": binding.identity_context_digest,
     }
 
 
@@ -129,9 +144,16 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
         "server_start_token",
         "created_at",
     }
-    # owner_generation is a v2 addition: absent in pre-v2 records (read back as None),
-    # present (possibly null) in v2 records. Any other key is a schema mismatch.
-    allowed = required | {"owner_generation", "owner_id", "attempt"}
+    # Additive optional fields are absent in older records and decode as None:
+    # owner_generation/owner_id/attempt from durable execution, and the
+    # identity-context reference from operation-scoped identities.
+    allowed = required | {
+        "owner_generation",
+        "owner_id",
+        "attempt",
+        "identity_context_id",
+        "identity_context_digest",
+    }
     if not required.issubset(payload) or (set(payload) - allowed):
         raise _error("worker binding payload fields do not match the schema")
     child_start = payload["child_start_token"]
@@ -153,5 +175,15 @@ def worker_binding_from_payload(payload: dict[str, object]) -> OperationWorkerBi
         owner_generation=owner_generation,
         owner_id=None if owner_id_raw is None else str(owner_id_raw),
         attempt=None if attempt_raw is None else _as_int(attempt_raw, "attempt"),
+        identity_context_id=(
+            None
+            if payload.get("identity_context_id") is None
+            else str(payload["identity_context_id"])
+        ),
+        identity_context_digest=(
+            None
+            if payload.get("identity_context_digest") is None
+            else str(payload["identity_context_digest"])
+        ),
     )
     return validate_operation_worker_binding(binding)

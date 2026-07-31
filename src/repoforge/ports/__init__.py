@@ -21,11 +21,23 @@ from .activation import (
 )
 from .approval_store import ApprovalPayloadStore, ApprovalStore
 from .audit import AuditSink
+from .auth_discovery import (
+    AmbientAuthConflictReader,
+    NamedAccountDiscovery,
+    SshAliasDiscovery,
+)
+from .auth_inspection import (
+    ApiIdentityInspector,
+    CommitIdentityInspector,
+    PublicationTargetInspector,
+    TransportInspector,
+)
 from .background_tasks import BackgroundTaskRunner
 from .capabilities import ExecutableLocator
 from .clock import Clock
 from .code_intelligence import CodeIntelligenceProvider
 from .command import CommandExecutor, CommandResult
+from .commit_identity import CommitIdentityGateway
 from .configuration import ConfigurationStore
 from .effect_receipt_store import EffectReceiptStore
 from .execution_environment import (
@@ -52,6 +64,7 @@ from .git import (
     GitSnapshotBlob,
     ResolvedRepositoryRef,
 )
+from .git_transport import GitTransportGateway
 from .github import (
     GitHubActionsJob,
     GitHubActionsStep,
@@ -60,7 +73,14 @@ from .github import (
     GitHubJobLog,
     PullRequestGateway,
 )
+from .github_api_token import (
+    GitHubApiIdentityVerifier,
+    GitHubAppInstallationTokenIssuer,
+    GitHubAppJwtSigner,
+    StoredGhAccountTokenSource,
+)
 from .github_capabilities import GitHubCapabilityProbe
+from .github_capability_preflight import GitHubCapabilityPreflightGateway
 from .github_read_cache import GitHubReadCache
 from .hygiene import (
     HygieneBaselineCache,
@@ -74,9 +94,16 @@ from .ids import IdGenerator
 from .iteration_cache import IterationCache
 from .locking import LockManager
 from .metrics import MetricsSink
+from .nested_identity import (
+    NestedDiscoveryRequest,
+    NestedLeaseProvider,
+    NestedResourceDiscovery,
+    NestedTargetResolver,
+)
 from .onboarding_environment import EnvironmentPreflight, OnboardingEnvironment
 from .onboarding_store import OnboardingStore
 from .operation_gate import GateState, OperationGate
+from .operation_identity_store import OperationIdentityStore
 from .operation_result_store import OperationResultStore
 from .operation_store import OperationRecordPage, OperationStore
 from .operation_work_queue import OperationWorkPage, OperationWorkQueue
@@ -85,6 +112,18 @@ from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
 from .process_reaper import ProcessReaper, ReapOutcome
 from .provider_registry import ProviderRegistry
+from .publication import (
+    GitHubPublicationGateway,
+    PublicationAuthorization,
+    PublicationAuthorizationGateway,
+    PublicationEffect,
+    PublicationGateway,
+    PublicationRepositoryMetadata,
+    PublicationRepositoryResolver,
+    PullRequestPublication,
+)
+from .repository_auth_material import RepositoryAuthMaterialProvider
+from .repository_binding_store import RepositoryBindingStore
 from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
 from .runtime_activation_store import RuntimeActivationStore
@@ -111,9 +150,18 @@ from .workflow_replay import (
     WorkflowReplayDecision,
     WorkflowReplayObservation,
 )
+from .workspace_publication import (
+    WorkspaceDraftPrPublication,
+    WorkspaceDraftPrPublicationEffect,
+    WorkspacePublicationService,
+    WorkspacePushPublication,
+    WorkspacePushPublicationEffect,
+)
 from .workspace_store import WorkspaceStore
 
 __all__ = [
+    "AmbientAuthConflictReader",
+    "ApiIdentityInspector",
     "ApprovalPayloadStore",
     "ApprovalStore",
     "ApprovedExecution",
@@ -125,6 +173,8 @@ __all__ = [
     "CodeIntelligenceProvider",
     "CommandExecutor",
     "CommandResult",
+    "CommitIdentityGateway",
+    "CommitIdentityInspector",
     "ConfigurationStore",
     "DevConfigProvisioner",
     "DiscoveryRequest",
@@ -150,15 +200,21 @@ __all__ = [
     "GitBaseReferences",
     "GitHubActionsJob",
     "GitHubActionsStep",
+    "GitHubApiIdentityVerifier",
+    "GitHubAppInstallationTokenIssuer",
+    "GitHubAppJwtSigner",
+    "GitHubCapabilityPreflightGateway",
     "GitHubCapabilityProbe",
     "GitHubCheckAnnotation",
     "GitHubCheckRun",
     "GitHubJobLog",
+    "GitHubPublicationGateway",
     "GitHubReadCache",
     "GitMergePreview",
     "GitMergeResult",
     "GitRepository",
     "GitSnapshotBlob",
+    "GitTransportGateway",
     "HealthSample",
     "HygieneBaselineCache",
     "HygieneCacheKey",
@@ -170,10 +226,16 @@ __all__ = [
     "IterationCache",
     "LockManager",
     "MetricsSink",
+    "NamedAccountDiscovery",
+    "NestedDiscoveryRequest",
+    "NestedLeaseProvider",
+    "NestedResourceDiscovery",
+    "NestedTargetResolver",
     "ObservedRuntime",
     "OnboardingEnvironment",
     "OnboardingStore",
     "OperationGate",
+    "OperationIdentityStore",
     "OperationRecordPage",
     "OperationResultStore",
     "OperationStore",
@@ -186,7 +248,15 @@ __all__ = [
     "ProcessInspector",
     "ProcessReaper",
     "ProviderRegistry",
+    "PublicationAuthorization",
+    "PublicationAuthorizationGateway",
+    "PublicationEffect",
+    "PublicationGateway",
+    "PublicationRepositoryMetadata",
+    "PublicationRepositoryResolver",
+    "PublicationTargetInspector",
     "PullRequestGateway",
+    "PullRequestPublication",
     "ReapOutcome",
     "ReleaseBuilder",
     "ReleaseInstaller",
@@ -195,6 +265,8 @@ __all__ = [
     "ReleaseProcessInspector",
     "ReleaseSmokeTester",
     "ReleaseStore",
+    "RepositoryAuthMaterialProvider",
+    "RepositoryBindingStore",
     "RepositoryDiscovery",
     "RepositoryProbe",
     "ResolvedRepositoryRef",
@@ -208,10 +280,13 @@ __all__ = [
     "RuntimeStore",
     "Sleeper",
     "SmokeResult",
+    "SshAliasDiscovery",
     "StateRepository",
+    "StoredGhAccountTokenSource",
     "TaskStore",
     "TicketGraphGateway",
     "TicketProjectGateway",
+    "TransportInspector",
     "TunnelClient",
     "TunnelProfileStore",
     "WorkerBindingStore",
@@ -221,6 +296,11 @@ __all__ = [
     "WorkflowReplayDecision",
     "WorkflowReplayObservation",
     "WorkflowRetentionReport",
+    "WorkspaceDraftPrPublication",
+    "WorkspaceDraftPrPublicationEffect",
+    "WorkspacePublicationService",
+    "WorkspacePushPublication",
+    "WorkspacePushPublicationEffect",
     "WorkspaceStore",
     "WorktreeInspector",
     "WorktreeState",
