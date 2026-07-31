@@ -884,7 +884,7 @@ class CodingService:
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
-        _auth_selector(auth_profile, actor_class)
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._repo_issue_v2.execute(
                 RepositoryIssueV2Command(
@@ -907,6 +907,7 @@ class CodingService:
                     approval_request_id=approval_request_id,
                     manage=manage,
                     runtime_identity=runtime_identity,
+                    selector=selector,
                 )
             )
         )
@@ -1032,11 +1033,17 @@ class CodingService:
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
-        _auth_selector(auth_profile, actor_class)
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._create_v2.execute(
                 WorkspaceCreateV2Command(
-                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                    repo_id,
+                    task_slug,
+                    base,
+                    idempotency_key,
+                    issue_ids,
+                    adopt_branch,
+                    selector,
                 )
             )
         )
@@ -1368,7 +1375,7 @@ class CodingService:
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
-        _auth_selector(auth_profile, actor_class)
+        selector = _auth_selector(auth_profile, actor_class)
         normalized = tuple(
             RefreshResolution(
                 item["path"],
@@ -1386,6 +1393,7 @@ class CodingService:
                     expected_fingerprint,
                     plan_token,
                     normalized,
+                    selector,
                 )
             )
         )
@@ -1652,7 +1660,7 @@ class CodingService:
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
-        _auth_selector(auth_profile, actor_class)
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._commit.execute(
                 WorkspaceCommitCommand(
@@ -1660,6 +1668,7 @@ class CodingService:
                     message,
                     expected_head_sha,
                     expected_fingerprint,
+                    selector,
                 )
             )
         )
@@ -1672,10 +1681,15 @@ class CodingService:
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
-        _auth_selector(auth_profile, actor_class)
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._push.execute(
-                WorkspacePushCommand(workspace_id, idempotency_key, expected_remote_head)
+                WorkspacePushCommand(
+                    workspace_id,
+                    idempotency_key,
+                    expected_remote_head,
+                    selector,
+                )
             )
         )
 
@@ -1697,7 +1711,7 @@ class CodingService:
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
-        _auth_selector(auth_profile, actor_class)
+        selector = _auth_selector(auth_profile, actor_class)
         return _result(
             self._pr.execute(
                 WorkspacePrCommand(
@@ -1714,6 +1728,7 @@ class CodingService:
                     event_cursor=event_cursor,
                     issue_dispositions=issue_dispositions,
                     apply_closures=apply_closures,
+                    selector=selector,
                 )
             )
         )

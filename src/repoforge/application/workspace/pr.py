@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from ...config import RepositoryConfig
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ...domain.operations import IdempotencyState, hash_idempotency_key
 from ...domain.pr_check_watch import TERMINAL_PR_CHECK_WATCH_OUTCOMES
@@ -60,6 +61,7 @@ class WorkspacePrCommand:
     event_cursor: str | None = None
     issue_dispositions: tuple[dict[str, object], ...] = ()
     apply_closures: bool = False
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +369,7 @@ class WorkspacePrCoordinator:
                     command.title,
                     managed_body,
                     command.idempotency_key,
+                    command.selector,
                 )
             )
             self._mark_issue_intent_applied(command.workspace_id, intents)
@@ -429,6 +432,7 @@ class WorkspacePrCoordinator:
                     command.title,
                     update_body,
                     command.idempotency_key,
+                    command.selector,
                 )
             )
             self._mark_issue_intent_applied(command.workspace_id, intents)
@@ -511,6 +515,7 @@ class WorkspacePrCoordinator:
                         issue_number=issue_number,
                         evidence_ref=intent.acceptance_evidence_ref,
                         idempotency_key=mutation_key,
+                        selector=command.selector,
                     )
                 )
                 operation_id: str | None = None
@@ -635,6 +640,7 @@ class WorkspacePrCoordinator:
             "body": body,
             "evidence_ref": evidence_ref,
             "review_comment_id": command.review_comment_id,
+            "selector": command.selector.payload(),
         }
         marker = self._comment_marker(request)
         rendered = f"{body}\n\nEvidence: {evidence_ref}\n\n{marker}"

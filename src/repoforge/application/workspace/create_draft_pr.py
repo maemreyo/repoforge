@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, WorkspaceError
 from ...domain.policy import validate_branch
 from ...domain.publishing import render_pr_body, validate_pr_create
@@ -14,6 +15,7 @@ class WorkspaceCreateDraftPrCommand:
     title: str
     body: str
     idempotency_key: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,7 @@ class DraftPullRequestCreator:
                     title=title,
                     body=final,
                     idempotency_key=c.idempotency_key,
+                    selector=c.selector,
                 )
             )
             authoritative_result = WorkspaceCreateDraftPrResult(

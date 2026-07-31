@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+
+from ..domain.auth_profile import AuthProfileSelector
 
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_REF = re.compile(r"^refs/(?:heads|tags)/[A-Za-z0-9][A-Za-z0-9._/-]{0,4090}$")
@@ -46,6 +48,7 @@ class WorkspacePushPublication:
     tree_sha: str
     remote_head_before: str | None
     idempotency_key: str | None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
     def __post_init__(self) -> None:
         _bounded(self.workspace_id, "workspace_id", 160)
@@ -61,6 +64,8 @@ class WorkspacePushPublication:
             _sha40(self.remote_head_before, "remote_head_before")
         if self.idempotency_key is not None:
             _bounded(self.idempotency_key, "idempotency_key", 256)
+        if not isinstance(self.selector, AuthProfileSelector):
+            raise ValueError("selector must be an AuthProfileSelector")
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +81,7 @@ class WorkspaceDraftPrPublication:
     title: str
     body: str
     idempotency_key: str | None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
     def __post_init__(self) -> None:
         _bounded(self.workspace_id, "workspace_id", 160)
@@ -92,6 +98,8 @@ class WorkspaceDraftPrPublication:
             raise ValueError("body must be bounded text")
         if self.idempotency_key is not None:
             _bounded(self.idempotency_key, "idempotency_key", 256)
+        if not isinstance(self.selector, AuthProfileSelector):
+            raise ValueError("selector must be an AuthProfileSelector")
 
 
 @dataclass(frozen=True, slots=True)

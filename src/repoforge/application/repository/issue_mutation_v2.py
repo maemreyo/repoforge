@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ...domain.approval import (
@@ -13,6 +13,7 @@ from ...domain.approval import (
     ApprovalStatus,
     ApprovalSubject,
 )
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ConfigError
 from ...domain.issue_writes import IssueLinkType
 from ...domain.redaction import redact_text
@@ -40,6 +41,7 @@ class RepositoryIssueMutationCommand:
     link_type: str | None = None
     idempotency_key: str | None = None
     approval_request_id: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,6 +464,7 @@ class RepositoryIssueMutatorV2:
             "evidence_ref": redact_text(command.evidence_ref, limit=1_000),
             "target_issue": command.target_issue,
             "link_type": command.link_type,
+            "selector": command.selector.payload(),
         }
 
     @staticmethod

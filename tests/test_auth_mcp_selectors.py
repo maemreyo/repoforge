@@ -8,6 +8,7 @@ without it, and the public tool roster must not grow.
 from __future__ import annotations
 
 import json
+from typing import Protocol, cast
 
 import pytest
 from pydantic import ValidationError
@@ -299,3 +300,149 @@ def test_the_default_selector_is_the_deterministic_one_at_the_application_bounda
 
     assert selector.automatic is True
     assert selector.actor_class is RequestedActorClass.HUMAN
+
+
+def test_every_effectful_service_method_carries_the_exact_selector_into_its_command() -> None:
+    from repoforge.application.service import CodingService
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.command: object | None = None
+
+        def execute(self, command: object) -> dict[str, bool]:
+            self.command = command
+            return {"ok": True}
+
+    service = object.__new__(CodingService)
+    recorders = {
+        "_repo_issue_v2": Recorder(),
+        "_create_v2": Recorder(),
+        "_refresh_v2": Recorder(),
+        "_commit": Recorder(),
+        "_push": Recorder(),
+        "_pr": Recorder(),
+    }
+    for name, recorder in recorders.items():
+        setattr(service, name, recorder)
+
+    service.repo_issue_v2(
+        "demo",
+        mode="comment",
+        issue_number=7,
+        body="verified",
+        evidence_ref="commit:abc",
+        idempotency_key="issue-selector-0001",
+        auth_profile="personal",
+        actor_class="agent",
+    )
+    service.workspace_create_v2(
+        "demo",
+        "selector create",
+        auth_profile="personal",
+        actor_class="agent",
+    )
+    service.workspace_refresh_v2(
+        "ws-1",
+        action="preview",
+        expected_head_sha=_SHA,
+        expected_fingerprint=_SHA256,
+        auth_profile="personal",
+        actor_class="agent",
+    )
+    service.workspace_commit(
+        "ws-1",
+        "selector commit",
+        auth_profile="personal",
+        actor_class="agent",
+    )
+    service.workspace_push(
+        "ws-1",
+        auth_profile="personal",
+        actor_class="agent",
+    )
+    service.workspace_pr(
+        "ws-1",
+        action="create_draft",
+        title="Selector PR",
+        body="Verified selector propagation.",
+        idempotency_key="pr-selector-0001",
+        auth_profile="personal",
+        actor_class="agent",
+    )
+
+    class SelectedCommand(Protocol):
+        selector: AuthProfileSelector
+
+    expected = AuthProfileSelector("personal", RequestedActorClass.AGENT)
+    for name, recorder in recorders.items():
+        assert recorder.command is not None, name
+        command = cast(SelectedCommand, recorder.command)
+        assert command.selector == expected, name
+
+
+def test_every_nested_effect_command_and_publication_request_has_a_selector() -> None:
+    from pathlib import Path
+
+    from repoforge.application.repository.family_v2 import RepositoryIssueV2Command
+    from repoforge.application.repository.issue_mutation_v2 import (
+        RepositoryIssueMutationCommand,
+    )
+    from repoforge.application.workspace.commit import WorkspaceCommitCommand
+    from repoforge.application.workspace.create import WorkspaceCreateCommand
+    from repoforge.application.workspace.create_draft_pr import (
+        WorkspaceCreateDraftPrCommand,
+    )
+    from repoforge.application.workspace.family_v2 import WorkspaceCreateV2Command
+    from repoforge.application.workspace.pr import WorkspacePrCommand
+    from repoforge.application.workspace.push import WorkspacePushCommand
+    from repoforge.application.workspace.refresh_v2 import WorkspaceRefreshV2Command
+    from repoforge.application.workspace.update_draft_pr import (
+        WorkspaceUpdateDraftPrCommand,
+    )
+    from repoforge.ports.workspace_publication import (
+        WorkspaceDraftPrPublication,
+        WorkspacePushPublication,
+    )
+
+    selector = AuthProfileSelector("personal", RequestedActorClass.AGENT)
+    commands = (
+        RepositoryIssueV2Command("demo", "comment", selector=selector),
+        RepositoryIssueMutationCommand("demo", "comment", selector=selector),
+        WorkspaceCreateV2Command("demo", "task", selector=selector),
+        WorkspaceCreateCommand("demo", "task", selector=selector),
+        WorkspaceRefreshV2Command("ws-1", "preview", _SHA, _SHA256, selector=selector),
+        WorkspaceCommitCommand("ws-1", "message", selector=selector),
+        WorkspacePushCommand("ws-1", selector=selector),
+        WorkspacePrCommand("ws-1", "create_draft", selector=selector),
+        WorkspaceCreateDraftPrCommand("ws-1", "title", "body", selector=selector),
+        WorkspaceUpdateDraftPrCommand("ws-1", selector=selector),
+        WorkspacePushPublication(
+            workspace_id="ws-1",
+            repo_id="demo",
+            cwd=Path("/tmp/workspace"),
+            remote="origin",
+            source_ref="refs/heads/feature",
+            destination_ref="refs/heads/feature",
+            head_sha=_SHA,
+            tree_sha=_SHA,
+            remote_head_before=None,
+            idempotency_key=None,
+            selector=selector,
+        ),
+        WorkspaceDraftPrPublication(
+            workspace_id="ws-1",
+            repo_id="demo",
+            cwd=Path("/tmp/workspace"),
+            remote="origin",
+            base_ref="refs/heads/main",
+            head_ref="refs/heads/feature",
+            head_sha=_SHA,
+            tree_sha=_SHA,
+            title="title",
+            body="body",
+            idempotency_key=None,
+            selector=selector,
+        ),
+    )
+
+    assert all(command.selector == selector for command in commands)

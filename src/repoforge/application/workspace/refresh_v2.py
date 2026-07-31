@@ -10,10 +10,11 @@ import os
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.filesystem_transaction import (
     CreateFile,
@@ -107,6 +108,7 @@ class WorkspaceRefreshV2Command:
     expected_fingerprint: str
     plan_token: str | None = None
     resolutions: tuple[RefreshResolution, ...] = ()
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)

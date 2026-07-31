@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
 from ...domain.policy import slugify, validate_adopted_branch, validate_branch
@@ -24,6 +25,7 @@ class WorkspaceCreateCommand:
     # ai/* one. Mutually exclusive with `base` -- there is nothing to branch from when the
     # branch already exists.
     adopt_branch: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +233,7 @@ class WorkspaceCreator:
             "base": base,
             "issue_ids": list(issue_ids),
             "adopt_branch": adopt,
+            "selector": c.selector.payload(),
         }
         result = cast(
             WorkspaceCreateResult,

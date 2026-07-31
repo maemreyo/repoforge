@@ -1,8 +1,9 @@
 import contextlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ...config import RepositoryConfig
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import ErrorCode, RepoForgeError, WorkspaceError
 from ...domain.publishing import validate_commit_message
@@ -19,6 +20,7 @@ class WorkspaceCommitCommand:
     message: str
     expected_head_sha: str | None = None
     expected_fingerprint: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,7 @@ class WorkspaceCommitter:
         audit_details: dict[str, object] = {
             "workspace_id": c.workspace_id,
             "message_length": len(message),
+            "selector": c.selector.payload(),
         }
         boundary = IdempotencyEffectBoundary()
 

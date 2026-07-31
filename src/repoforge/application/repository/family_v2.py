@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...config import RepositoryConfig
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.context_sections import (
     CONTEXT_SECTION_VALUES,
     DEFAULT_CONTEXT_SECTION_VALUES,
@@ -240,6 +241,7 @@ class RepositoryIssueV2Command:
     approval_request_id: str | None = None
     manage: dict[str, object] | None = None
     runtime_identity: dict[str, object] | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,6 +696,7 @@ class RepositoryIssueV2:
                     link_type=command.link_type,
                     idempotency_key=command.idempotency_key,
                     approval_request_id=command.approval_request_id,
+                    selector=command.selector,
                 )
             )
             evidence = IssueMutationEvidenceV2(

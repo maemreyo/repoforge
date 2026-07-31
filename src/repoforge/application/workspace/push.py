@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import CommandError, ErrorCode, WorkspaceError
 from ...domain.policy import validate_branch
 from ...domain.redaction import redact_text
@@ -13,6 +14,7 @@ class WorkspacePushCommand:
     workspace_id: str
     idempotency_key: str | None = None
     expected_remote_head: str | None = None
+    selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +95,7 @@ class WorkspacePusher:
                         tree_sha=exact_workspace_tree_sha(self.ctx, path, repo, head),
                         remote_head_before=remote_head_before,
                         idempotency_key=c.idempotency_key,
+                        selector=c.selector,
                     )
                 )
             except CommandError as exc:
