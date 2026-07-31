@@ -382,7 +382,9 @@ class AuthMigrationService:
         observation: RepositoryIdentityObservation,
         findings: list[AuthMigrationFinding],
     ) -> SshAliasCandidate | None:
-        alias = self._ssh_alias or observation.provider_host
+        #: The raw alias the checkout actually uses wins over a configured default so the
+        #: transport pins the key the remote really reaches, never a sibling account's key.
+        alias = observation.transport_alias or self._ssh_alias or observation.provider_host
         try:
             candidate = self._ssh.inspect(alias)
         except RepoForgeError:
@@ -541,11 +543,16 @@ class AuthMigrationService:
         if not observed:
             return ()
         expected_host, expected_owner, expected_repository = observation.canonical_name.split("/")
+        accepted_hosts = {expected_host}
+        if observation.transport_alias is not None:
+            #: A checkout written with the same alias the observer resolved to the canonical
+            #: host reaches the same target; the owner/repository below must still match.
+            accepted_hosts.add(observation.transport_alias.lower())
         mismatched: list[str] = []
         for origin, url in observed:
             match = _REMOTE_TARGET.match(url)
             if match is None or (
-                match.group("host").lower() != expected_host
+                match.group("host").lower() not in accepted_hosts
                 or match.group("owner").lower() != expected_owner.lower()
                 or match.group("repository").lower() != expected_repository.lower()
             ):

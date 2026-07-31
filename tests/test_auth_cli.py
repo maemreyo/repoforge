@@ -616,9 +616,15 @@ def test_production_auth_dependencies_observe_with_the_selected_named_account(
     contexts: list[ProcessAuthContext] = []
 
     class Observer:
-        def __init__(self, executor: object, *, clock: object) -> None:
+        def __init__(
+            self,
+            executor: object,
+            *,
+            clock: object,
+            ssh_discovery: object | None = None,
+        ) -> None:
             assert executor is commands
-            del clock
+            del clock, ssh_discovery
 
         def target(self, repo: RepositoryConfig) -> RepositoryObservationTarget:
             assert repo.repo_id == "demo"
@@ -703,9 +709,15 @@ def test_production_auth_dependencies_fail_closed_without_profiles(
     observed: list[str] = []
 
     class Observer:
-        def __init__(self, executor: object, *, clock: object) -> None:
+        def __init__(
+            self,
+            executor: object,
+            *,
+            clock: object,
+            ssh_discovery: object | None = None,
+        ) -> None:
             assert executor is commands
-            del clock
+            del clock, ssh_discovery
 
         def target(self, repo: RepositoryConfig) -> RepositoryObservationTarget:
             observed.append(f"target:{repo.repo_id}")

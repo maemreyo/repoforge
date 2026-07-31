@@ -204,6 +204,86 @@ def test_observation_supports_an_enterprise_host(tmp_path: Path) -> None:
     assert executor.calls[1]["argv"][3] == "github.acme-corp.net"
 
 
+def test_observer_canonicalizes_an_ssh_alias_host_and_keeps_the_raw_transport_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ssh_home = tmp_path / "home"
+    (ssh_home / ".ssh").mkdir(parents=True)
+    (ssh_home / ".ssh" / "id_rsa_work").write_text("not a real key")
+    (ssh_home / ".ssh" / "config").write_text(
+        "Host github-work\n"
+        "  HostName github.com\n"
+        "  User git\n"
+        "  IdentityFile ~/.ssh/id_rsa_work\n"
+        "  IdentitiesOnly yes\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(ssh_home))
+    from repoforge.adapters.git.ssh_alias_discovery import SshCommandAliasDiscovery
+    from repoforge.adapters.subprocess.command_executor import SubprocessCommandExecutor
+    from repoforge.config import DEFAULT_ALLOWED_ENVIRONMENT, ServerConfig
+
+    commands = SubprocessCommandExecutor(
+        ServerConfig(
+            tmp_path / "workspaces",
+            tmp_path / "state",
+            allowed_environment=(*DEFAULT_ALLOWED_ENVIRONMENT,),
+        )
+    )
+    executor = RecordingExecutor(
+        [
+            _remote("git@github-work:acme/demo.git"),
+            _ok({"id": 987654, "full_name": "acme/demo"}),
+        ]
+    )
+    observer = GhCliRepositoryObserver(
+        executor,
+        clock=FixedClock(NOW),
+        ssh_discovery=SshCommandAliasDiscovery(
+            commands,
+            cwd=tmp_path,
+            config_file=ssh_home / ".ssh" / "config",
+        ),
+    )
+
+    observed = observer.observe(_repo(tmp_path), config_revision=_SHA, context=_selected_context())
+
+    assert observed.provider_host == "github.com"
+    assert observed.transport_alias == "github-work"
+    assert observed.canonical_name == "github.com/acme/demo"
+    assert executor.calls[1]["argv"][3] == "github.com"
+
+
+def test_observer_fails_closed_when_the_remote_ssh_host_cannot_be_canonicalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "no-ssh-config"))
+    from repoforge.adapters.git.ssh_alias_discovery import SshCommandAliasDiscovery
+    from repoforge.adapters.subprocess.command_executor import SubprocessCommandExecutor
+    from repoforge.config import DEFAULT_ALLOWED_ENVIRONMENT, ServerConfig
+
+    #: OpenSSH locates its default configuration from the passwd entry, never from $HOME, so
+    #: an explicit empty configuration file makes this deterministic on any machine: the
+    #: alias matches nothing and cannot be canonicalized.
+    empty_config = tmp_path / "empty-ssh-config"
+    empty_config.write_text("", encoding="utf-8")
+    commands = SubprocessCommandExecutor(
+        ServerConfig(
+            tmp_path / "workspaces",
+            tmp_path / "state",
+            allowed_environment=(*DEFAULT_ALLOWED_ENVIRONMENT,),
+        )
+    )
+    ssh = SshCommandAliasDiscovery(commands, cwd=tmp_path, config_file=empty_config)
+    executor = RecordingExecutor([_remote("git@github-work:acme/demo.git")])
+    observer = GhCliRepositoryObserver(executor, clock=FixedClock(NOW), ssh_discovery=ssh)
+
+    with pytest.raises(RepoForgeError) as failure:
+        observer.target(_repo(tmp_path))
+
+    assert failure.value.code is ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH
+
+
 def test_a_repository_the_provider_does_not_confirm_is_observed_as_absent(
     tmp_path: Path,
 ) -> None:

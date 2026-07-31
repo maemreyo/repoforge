@@ -46,7 +46,10 @@ _SHA = "a" * 64
 
 
 def _observation(
-    *, repository_id: str = "987654", canonical_name: str = "github.com/acme/demo"
+    *,
+    repository_id: str = "987654",
+    canonical_name: str = "github.com/acme/demo",
+    transport_alias: str | None = None,
 ) -> RepositoryIdentityObservation:
     return RepositoryIdentityObservation(
         provider=RepositoryProvider.GITHUB,
@@ -56,6 +59,7 @@ def _observation(
         exists=True,
         observed_at=NOW,
         config_revision=_SHA,
+        transport_alias=transport_alias,
     )
 
 
@@ -592,6 +596,79 @@ def test_a_remote_matching_the_observed_target_is_not_a_finding(tmp_path: Path) 
             finding.code for finding in plan.findings
         }, url
         assert plan.ready is True
+
+
+def test_a_remote_using_an_equivalent_ssh_alias_is_not_a_mismatch(tmp_path: Path) -> None:
+    # The checkout remote is written with the local SSH alias, but the alias resolves to the
+    # same canonical host the repository was observed on, so the target is the same one.
+    ssh = Ssh(
+        SshAliasCandidate(
+            alias="github-work",
+            hostname="github.com",
+            identity_file="/home/demo/.ssh/id_ed25519_work",
+            user="git",
+        )
+    )
+    ambient = Ambient(
+        git_config={
+            "remote.origin.url": (
+                ("file:/repos/demo/.git/config", "git@github-work:acme/demo.git"),
+            )
+        }
+    )
+    observation = _observation(transport_alias="github-work")
+    service = _service(
+        tmp_path,
+        accounts=Accounts((_personal(),)),
+        ambient=ambient,
+        ssh=ssh,
+        observation=observation,
+    )
+
+    plan = service.inspect(repo_id="demo")
+
+    assert AuthMigrationFindingCode.REMOTE_TARGET_MISMATCH not in {
+        finding.code for finding in plan.findings
+    }
+    assert plan.ready is True
+
+
+def test_a_transport_alias_is_used_to_propose_the_pinned_ssh_transport(
+    tmp_path: Path,
+) -> None:
+    # The observed canonical host is github.com, but the operator's checkout addresses it
+    # through the github-work alias. The proposal must pin the alias's own identity file,
+    # not fall back to scanning the canonical host's key.
+    ssh = Ssh(
+        SshAliasCandidate(
+            alias="github-work",
+            hostname="github.com",
+            identity_file="/home/demo/.ssh/id_ed25519_work",
+            user="git",
+        )
+    )
+    observation = _observation(transport_alias="github-work")
+    service = _service(
+        tmp_path,
+        accounts=Accounts((_personal(),)),
+        ssh=ssh,
+        observation=observation,
+    )
+
+    plan = service.inspect(repo_id="demo")
+
+    assert ssh.calls == ["github-work"]
+    assert AuthMigrationFindingCode.SSH_CONFIGURATION_AMBIGUOUS not in {
+        finding.code for finding in plan.findings
+    }
+    pinned = [
+        change for change in plan.changes if change.kind is AuthMigrationChangeKind.PIN_TRANSPORT
+    ]
+    assert len(pinned) == 1
+    attributes = dict(pinned[0].attributes)
+    assert attributes["transport_kind"] == "ssh"
+    assert attributes["ssh_identity_file"] == "/home/demo/.ssh/id_ed25519_work"
+    assert plan.ready is True
 
 
 def test_inspect_is_deterministic_and_bound_to_its_exact_inputs(tmp_path: Path) -> None:

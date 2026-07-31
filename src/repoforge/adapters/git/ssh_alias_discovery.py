@@ -2,9 +2,11 @@
 
 `ssh -G <alias>` prints the fully expanded effective configuration without connecting. Only a
 single unambiguous result is accepted: one concrete lowercase hostname, at most one user, and
-exactly one absolute identity file with no token expansion left in it. Anything that would
-make the effective identity ambiguous or agent-mediated -- wildcards, several identity files,
-a proxy command or jump host, an identity agent -- is refused rather than guessed at.
+exactly one identity file with no token expansion left in it (a leading `~` is resolved
+against the HOME the probe runs under, because OpenSSH prints `IdentityFile` literally).
+Anything that would make the effective identity ambiguous or agent-mediated -- wildcards,
+several identity files, a proxy command or jump host, an identity agent -- is refused rather
+than guessed at.
 
 There is no write path here. Adopting an alias produces a pinned `GitTransportSpec` in
 RepoForge's own reviewed configuration; the operator's SSH configuration is never modified.
@@ -62,30 +64,49 @@ def _rejected(message: str, *, retryable: bool = False) -> RepoForgeError:
 class SshCommandAliasDiscovery:
     """Resolve an SSH alias with `ssh -G`, accepting only one unambiguous identity."""
 
-    def __init__(self, executor: _IsolatedExecutor, *, cwd: Path) -> None:
+    def __init__(
+        self,
+        executor: _IsolatedExecutor,
+        *,
+        cwd: Path,
+        config_file: Path | None = None,
+    ) -> None:
+        """Resolve with `ssh -G`; an explicit ``config_file`` is used only when given.
+
+        Production composition leaves ``config_file`` unset so `ssh -G` reads the operator's
+        real configuration. Tests pass a temporary configuration file through ``-F``, because
+        OpenSSH locates its default user configuration from the passwd entry, never from
+        ``$HOME``.
+        """
+
         self._executor = executor
         self._cwd = cwd
+        self._config_file = config_file
 
     def inspect(self, alias: str) -> SshAliasCandidate:
         if not isinstance(alias, str) or _ALIAS.fullmatch(alias) is None:
             raise _rejected("The requested SSH alias is not a safe alias name.")
+        environment = {
+            key: value
+            for key, value in self._executor.environment().items()
+            if key in _SAFE_ENVIRONMENT_KEYS and isinstance(value, str)
+        }
+        argv = ["ssh", "-G", alias]
+        if self._config_file is not None:
+            argv = ["ssh", "-G", "-F", str(self._config_file), alias]
         try:
             result = self._executor.run_isolated(
-                ["ssh", "-G", alias],
+                argv,
                 cwd=self._cwd,
-                environment={
-                    key: value
-                    for key, value in self._executor.environment().items()
-                    if key in _SAFE_ENVIRONMENT_KEYS and isinstance(value, str)
-                },
+                environment=environment,
                 secrets=(),
                 output_limit=_MAX_OUTPUT_BYTES,
             )
         except RepoForgeError as exc:
             raise _rejected("Resolving the SSH alias was unavailable.", retryable=True) from exc
-        return self._parse(alias, result)
+        return self._parse(alias, result, home=environment.get("HOME"))
 
-    def _parse(self, alias: str, result: CommandResult) -> SshAliasCandidate:
+    def _parse(self, alias: str, result: CommandResult, *, home: str | None) -> SshAliasCandidate:
         if result.stdout_truncated or len(result.stdout) > _MAX_OUTPUT_BYTES:
             raise _rejected("The SSH alias resolution exceeded the reviewed output bound.")
         lines = result.stdout.splitlines()
@@ -119,8 +140,8 @@ class SshCommandAliasDiscovery:
             raise _rejected(
                 "The SSH alias must resolve to exactly one identity file to be pinnable."
             )
-        identity_file = identity_files[0]
-        if any(marker in identity_file for marker in ("%", "$", "~")):
+        identity_file = self._expand_home(identity_files[0], home=home)
+        if any(marker in identity_file for marker in ("%", "$", "~", "*", "?")):
             raise _rejected(
                 "The SSH alias identity file still contains unexpanded tokens, so the "
                 "effective key cannot be pinned."
@@ -136,3 +157,33 @@ class SshCommandAliasDiscovery:
             raise _rejected(
                 f"The SSH alias resolution is not a safe pinned identity: {exc}"
             ) from exc
+
+    def _expand_home(self, identity_file: str, *, home: str | None) -> str:
+        """Resolve a leading ``~`` against the HOME the probe ran under.
+
+        OpenSSH prints ``IdentityFile ~/.ssh/id_rsa`` literally in `ssh -G` output, while the
+        domain contract requires one concrete absolute path; the token is expanded here rather
+        than guessed at. A reference to another user's home can never be pinned, so it is
+        refused.
+        """
+
+        if identity_file == "~":
+            if not home:
+                raise _rejected(
+                    "The SSH alias identity file expands through ~, but no HOME is available "
+                    "to pin it."
+                )
+            return home
+        if identity_file.startswith("~/"):
+            if not home:
+                raise _rejected(
+                    "The SSH alias identity file expands through ~, but no HOME is available "
+                    "to pin it."
+                )
+            return f"{home.rstrip('/')}/{identity_file[2:]}"
+        if identity_file.startswith("~"):
+            raise _rejected(
+                "The SSH alias identity file references another user's home, so its effective "
+                "key cannot be pinned."
+            )
+        return identity_file
