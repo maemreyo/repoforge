@@ -796,7 +796,8 @@ def build_auth_command_dependencies(
     clock = system_clock()
     commands = SubprocessCommandExecutor(config.server)
     working_directory = cwd if cwd is not None else Path.cwd()
-    observer = GhCliRepositoryObserver(commands, clock=clock)
+    ssh_discovery = SshCommandAliasDiscovery(commands, cwd=working_directory)
+    observer = GhCliRepositoryObserver(commands, clock=clock, ssh_discovery=ssh_discovery)
 
     def repository(repo_id: str) -> RepositoryConfig:
         repository = config.repositories.get(repo_id)
@@ -878,7 +879,7 @@ def build_auth_command_dependencies(
             secret.release()
 
     accounts = GhCliNamedAccountDiscovery(commands, cwd=working_directory)
-    ssh = SshCommandAliasDiscovery(commands, cwd=working_directory)
+    ssh = ssh_discovery
     return AuthCommandDependencies(
         service=AuthUxService(
             config=config,
@@ -1403,7 +1404,11 @@ def build_application(
         policy_revision=policy_revision,
     )
     auth_broker = RepositoryAuthBroker(auth_provider)
-    repository_observer = GhCliRepositoryObserver(command, clock=clock)
+    repository_observer = GhCliRepositoryObserver(
+        command,
+        clock=clock,
+        ssh_discovery=SshCommandAliasDiscovery(command, cwd=identity_cwd),
+    )
 
     def observe_repository_identity(
         repo_id: str,

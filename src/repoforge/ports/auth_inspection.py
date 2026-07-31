@@ -52,6 +52,10 @@ class RepositoryObservationTarget:
     provider_host: str
     owner: str
     repository: str
+    #: Raw transport alias when the remote is written with one (``git@github-work:...``),
+    #: ``None`` when the remote already used the canonical provider host. The API observes
+    #: the canonical host; the transport pins the alias's identity file.
+    transport_alias: str | None = None
 
     @property
     def canonical_name(self) -> str:
