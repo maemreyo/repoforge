@@ -12743,6 +12743,9 @@
   "src/repoforge/ports/activation.py": [
     "tests/test_release_process_retention.py"
   ],
+  "src/repoforge/ports/auth_inspection.py": [
+    "tests/test_auth_repository_observation.py"
+  ],
   "src/repoforge/ports/cancellation.py": [
     "tests/test_background_run_profile.py",
     "tests/test_command_executor_error_codes.py",

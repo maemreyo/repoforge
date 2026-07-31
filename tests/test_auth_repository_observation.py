@@ -18,6 +18,7 @@ from repoforge.config import RepositoryConfig
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.repository_auth_broker import ProcessAuthContext
 from repoforge.domain.repository_identity import AuthTargetKind, RepositoryProvider
+from repoforge.ports.auth_inspection import RepositoryObservationTarget
 from repoforge.ports.command import CommandResult
 from repoforge.testing import FixedClock
 
@@ -82,6 +83,17 @@ def _selected_context(token: str = "gho_selected_profile_canary_888") -> Process
         ),
         _secret_values=(token,),
     )
+
+
+def test_repository_observation_target_has_deterministic_canonical_name() -> None:
+    target = RepositoryObservationTarget(
+        provider=RepositoryProvider.GITHUB,
+        provider_host="github.com",
+        owner="acme",
+        repository="demo",
+    )
+
+    assert target.canonical_name == "github.com/acme/demo"
 
 
 def test_selected_context_not_globally_active_account_observes_private_repository(
