@@ -344,6 +344,25 @@
       "planned_owner": "#295"
     },
     {
+      "path": "src/repoforge/adapters/github/ssh_principal.py",
+      "executables": [
+        "ssh"
+      ],
+      "surfaces": [
+        "transport_access_proof"
+      ],
+      "credential_inputs": [
+        "operation-scoped verified SSH key material; ambient agent and SSH config are excluded"
+      ],
+      "target_inputs": [
+        "bounded provider host",
+        "expected GitHub login",
+        "reviewed SshKeyProof"
+      ],
+      "current_risk": "reviewed_read_only",
+      "planned_owner": "#295"
+    },
+    {
       "path": "src/repoforge/adapters/github/ticket_graph.py",
       "executables": [
         "gh"
