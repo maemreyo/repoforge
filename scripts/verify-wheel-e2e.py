@@ -13,6 +13,7 @@ from pathlib import Path
 from repoforge.application.service import CodingService
 from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.config import load_config
+from repoforge.domain.errors import ErrorCode, RepoForgeError
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -184,16 +185,30 @@ commands = [[{_toml(sys.executable)}, "-c", "from pathlib import Path; assert Pa
         verification = service.workspace_run_profile(workspace_id)
         assert verification["satisfies_commit_gate"] is True
         committed = service.workspace_commit(workspace_id, "Verify installed wheel lifecycle")
-        pushed = service.workspace_push(
-            workspace_id,
-            idempotency_key="wheel-e2e-push-0001",
-        )
-        assert pushed["head_sha"] == committed["head_sha"]
-        assert _git("ls-remote", "--heads", "origin", str(created["branch"]), cwd=source)
+        try:
+            service.workspace_push(
+                workspace_id,
+                idempotency_key="wheel-e2e-push-0001",
+            )
+        except RepoForgeError as failure:
+            assert failure.code is ErrorCode.GITHUB_PROVIDER_UNAVAILABLE
+            assert failure.unchanged_state == (
+                "No identity was resolved, bound, or used for a write.",
+            )
+        else:
+            raise AssertionError("an unbound local remote must not publish")
+        assert not _git("ls-remote", "--heads", "origin", str(created["branch"]), cwd=source)
 
-        removed = service.workspace_remove(workspace_id, delete_local_branch=True)
-        assert removed["removed"] is True
-        assert not workspace_path.exists()
+        try:
+            service.workspace_remove(workspace_id, delete_local_branch=True)
+        except RepoForgeError as failure:
+            assert "not pushed to its remote branch" in str(failure)
+            assert failure.unchanged_state == (
+                "The workspace, its worktree, and the workspace registry were not modified.",
+            )
+        else:
+            raise AssertionError("removal must not discard an unpublished commit")
+        assert workspace_path.exists()
         assert not tuple(root.rglob("*.tmp"))
 
         print(
@@ -203,7 +218,8 @@ commands = [[{_toml(sys.executable)}, "-c", "from pathlib import Path; assert Pa
                     "repository": "demo",
                     "workspace_id": workspace_id,
                     "head_sha": committed["head_sha"],
-                    "remote_branch": created["branch"],
+                    "publication": "blocked_unbound_local_remote",
+                    "removal": "blocked_unpublished_commit",
                     "onboarding": onboarding,
                 },
                 sort_keys=True,
