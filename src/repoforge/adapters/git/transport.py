@@ -19,6 +19,7 @@ from ...domain.git_transport_identity import (
 )
 from ...domain.repository_auth_broker import ProcessAuthContext
 from ...domain.repository_identity import AuthTargetKind
+from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 
 _SCP_REMOTE = re.compile(
@@ -64,7 +65,7 @@ class _IsolatedExecutor(Protocol):
         timeout: int | None = None,
         check: bool = True,
         output_limit: int | None = None,
-        cancel_token: object | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> CommandResult: ...
 
 
@@ -186,13 +187,21 @@ def _ssh_environment(spec: GitTransportSpec, context: ProcessAuthContext) -> dic
 
 def _https_environment(spec: GitTransportSpec, context: ProcessAuthContext) -> dict[str, str]:
     environment = _scrubbed_environment(context)
+    selected = context.environment_dict()
     token_environment = spec.https_token_environment
     if token_environment is None:
         raise _transport_error(
             ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,
             "Isolated HTTPS transport is missing its reviewed token environment.",
         )
-    token = context.environment_dict().get(token_environment)
+    configured_token = selected.get(token_environment)
+    broker_token = selected.get("GH_TOKEN")
+    if configured_token and broker_token and configured_token != broker_token:
+        raise _transport_error(
+            ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,
+            "Broker and transport token bindings disagree for the reviewed profile.",
+        )
+    token = configured_token or broker_token
     if not token or token not in context.secret_values:
         raise _transport_error(
             ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,

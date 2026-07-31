@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, durable_worker, git
 
+from repoforge.adapters.git.transport import GitTransportRouter
+from repoforge.application.repository_identity_runtime import RepositoryIdentityRuntime
 from repoforge.application.service import _result
 from repoforge.application.workspace.edit import FileEdit, TextEdit
 from repoforge.domain.approval import ApprovalStatus, decide_approval
@@ -51,6 +53,15 @@ class _RecordingWorkspacePublications:
         self.pr_calls.append(request)
         assert self.pr_effect is not None
         return self.pr_effect
+
+
+def test_production_application_composes_repository_identity_runtime(
+    forge_env: ForgeEnvironment,
+) -> None:
+    context = forge_env.service.application.context
+
+    assert isinstance(context.repository_identity_runtime, RepositoryIdentityRuntime)
+    assert isinstance(context.git_transport_router, GitTransportRouter)
 
 
 class _FakeIssueMutationGateway:

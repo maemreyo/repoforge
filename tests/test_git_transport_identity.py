@@ -183,6 +183,36 @@ def test_https_transport_clears_helpers_and_never_puts_token_in_url_or_argv() ->
     assert environment["GCM_INTERACTIVE"] == "never"
 
 
+def test_https_transport_maps_broker_github_token_to_the_reviewed_helper_environment() -> None:
+    executor = TransportExecutor()
+    context = ProcessAuthContext(
+        profile_id="company",
+        material_id="material-company",
+        target_kind=AuthTargetKind.REPOSITORY,
+        target_id="github-repository-123456",
+        environment=(
+            ("HOME", "/home/demo"),
+            ("GH_TOKEN", _COMPANY_TOKEN),
+            ("SSH_AUTH_SOCK", "/tmp/wrong-agent.sock"),
+        ),
+        _secret_values=(_COMPANY_TOKEN,),
+    )
+
+    GitTransportRouter(executor).fetch(
+        Path("/repo"),
+        "https://github.com/acme/widgets.git",
+        "+refs/heads/main:refs/remotes/origin/main",
+        _https_spec(),
+        context,
+    )
+
+    environment = executor.calls[0]["environment"]
+    assert environment["REPOFORGE_GIT_HTTPS_TOKEN"] == _COMPANY_TOKEN
+    assert "GH_TOKEN" not in environment
+    assert "SSH_AUTH_SOCK" not in environment
+    assert executor.calls[0]["secrets"] == (_COMPANY_TOKEN,)
+
+
 def test_parallel_personal_and_company_transport_contexts_do_not_cross() -> None:
     executor = TransportExecutor()
     router = GitTransportRouter(executor)

@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any, Protocol
+from typing import Protocol
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.github_api_identity import (
@@ -40,6 +40,7 @@ from ...domain.repository_identity import (
     OpaqueCredentialReference,
     RepositoryProvider,
 )
+from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
 from ...ports.github_api_token import (
     GitHubApiIdentityVerifier,
@@ -58,7 +59,7 @@ class _Clock(Protocol):
     def now_iso(self) -> str: ...
 
 
-class _IsolatedExecutor(Protocol):
+class _ApiExecutor(Protocol):
     def environment(self, extra: Mapping[str, str] | None = None) -> dict[str, str]: ...
 
     def run_isolated(
@@ -72,9 +73,11 @@ class _IsolatedExecutor(Protocol):
         timeout: int | None = None,
         check: bool = True,
         output_limit: int | None = None,
-        cancel_token: Any | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> CommandResult: ...
 
+
+class _SecretExecutor(_ApiExecutor, Protocol):
     def run_secret_text(
         self,
         argv: Sequence[str],
@@ -84,7 +87,7 @@ class _IsolatedExecutor(Protocol):
         secrets: Sequence[str] = (),
         timeout: int | None = None,
         max_bytes: int = 100_000,
-        cancel_token: Any | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> EphemeralSecret: ...
 
     def run_secret_json(
@@ -97,7 +100,7 @@ class _IsolatedExecutor(Protocol):
         field: str,
         timeout: int | None = None,
         max_bytes: int = 1_000_000,
-        cancel_token: Any | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> tuple[dict[str, object], EphemeralSecret]: ...
 
 
@@ -112,7 +115,7 @@ def _iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _safe_environment(executor: _IsolatedExecutor) -> dict[str, str]:
+def _safe_environment(executor: _ApiExecutor) -> dict[str, str]:
     inherited = executor.environment()
     environment = {
         key: inherited[key]
@@ -234,62 +237,62 @@ class GitHubApiAuthProvider:
     def _issue_stored(
         self, spec: StoredGhAccountSpec
     ) -> tuple[GitHubApiTokenGrant, GitHubApiIdentityProof]:
-        failed = False
         try:
             grant = self._stored_source.issue(spec)
+        except RepoForgeError:
+            raise
         except Exception:
-            grant = None
-            failed = True
-        if failed or grant is None:
-            raise _provider_error(
-                ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
-                "Named GitHub account token resolution failed.",
-                retryable=True,
-            )
-        verify_failed = False
-        try:
-            proof = self._verifier.verify_stored_account(spec, grant)
-        except Exception:
-            proof = None
-            verify_failed = True
-        if verify_failed or proof is None:
-            _release_grant(grant)
+            pass
+        else:
+            try:
+                proof = self._verifier.verify_stored_account(spec, grant)
+            except RepoForgeError:
+                _release_grant(grant)
+                raise
+            except Exception:
+                _release_grant(grant)
+            else:
+                return grant, proof
             raise _provider_error(
                 ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
                 "Named GitHub account identity verification failed.",
                 retryable=True,
-            )
-        return grant, proof
+            ) from None
+        raise _provider_error(
+            ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
+            "Named GitHub account token resolution failed.",
+            retryable=True,
+        ) from None
 
     def _issue_app(
         self, spec: GitHubAppInstallationSpec
     ) -> tuple[GitHubApiTokenGrant, GitHubApiIdentityProof]:
-        failed = False
         try:
             grant = self._app_issuer.issue(spec)
+        except RepoForgeError:
+            raise
         except Exception:
-            grant = None
-            failed = True
-        if failed or grant is None:
-            raise _provider_error(
-                ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
-                "GitHub App installation token issuance failed.",
-                retryable=True,
-            )
-        verify_failed = False
-        try:
-            proof = self._verifier.verify_app_installation(spec, grant)
-        except Exception:
-            proof = None
-            verify_failed = True
-        if verify_failed or proof is None:
-            _release_grant(grant, app_issuer=self._app_issuer)
+            pass
+        else:
+            try:
+                proof = self._verifier.verify_app_installation(spec, grant)
+            except RepoForgeError:
+                _release_grant(grant, app_issuer=self._app_issuer)
+                raise
+            except Exception:
+                _release_grant(grant, app_issuer=self._app_issuer)
+            else:
+                return grant, proof
             raise _provider_error(
                 ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
                 "GitHub App installation identity verification failed.",
                 retryable=True,
-            )
-        return grant, proof
+            ) from None
+        raise _provider_error(
+            ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
+            "GitHub App installation token issuance failed.",
+            retryable=True,
+        ) from None
 
     def _validate(
         self,
@@ -577,7 +580,7 @@ class GitHubApiAuthProvider:
 class GhCliStoredAccountTokenSource:
     """Read one explicitly named stored gh account; never switch the active account."""
 
-    def __init__(self, executor: _IsolatedExecutor, *, cwd: Path, clock: _Clock) -> None:
+    def __init__(self, executor: _SecretExecutor, *, cwd: Path, clock: _Clock) -> None:
         self._executor = executor
         self._cwd = cwd
         self._clock = clock
@@ -616,7 +619,7 @@ class GhCliStoredAccountTokenSource:
 class GhCliGitHubApiIdentityVerifier:
     """Collect independent live actor/repository proof using the issued token only."""
 
-    def __init__(self, executor: _IsolatedExecutor, *, cwd: Path) -> None:
+    def __init__(self, executor: _ApiExecutor, *, cwd: Path) -> None:
         self._executor = executor
         self._cwd = cwd
 
@@ -679,12 +682,38 @@ class GhCliGitHubApiIdentityVerifier:
         )
 
 
+class UnavailableGitHubAppInstallationTokenIssuer:
+    """Fail at App-credential use when no reviewed JWT signer is composed.
+
+    The application can still start and stored-account profiles remain usable. A configured
+    GitHub App profile receives a typed, recovery-oriented failure at the exact admission point
+    instead of an import-time or bootstrap-time crash.
+    """
+
+    def issue(self, spec: GitHubAppInstallationSpec) -> GitHubApiTokenGrant:
+        raise RepoForgeError(
+            f"No reviewed GitHub App JWT signer is available for profile {spec.profile_id}.",
+            code=ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND,
+            retryable=False,
+            unchanged_state=(
+                "No GitHub App JWT or installation token was issued.",
+                "No remote request was attempted.",
+            ),
+            safe_next_action=(
+                "Configure a reviewed GitHub App JWT signer for this runtime, then retry."
+            ),
+        )
+
+    def revoke(self, grant: GitHubApiTokenGrant) -> None:
+        grant.token.release()
+
+
 class GhCliGitHubAppInstallationTokenIssuer:
     """Mint and revoke repository-selected installation tokens using an external JWT signer."""
 
     def __init__(
         self,
-        executor: _IsolatedExecutor,
+        executor: _SecretExecutor,
         *,
         cwd: Path,
         clock: _Clock,

@@ -14,6 +14,7 @@ from repoforge.adapters.github.api_identity import (
     GhCliGitHubAppInstallationTokenIssuer,
     GhCliStoredAccountTokenSource,
     GitHubApiAuthProvider,
+    UnavailableGitHubAppInstallationTokenIssuer,
     github_api_auth_lease,
 )
 from repoforge.adapters.subprocess import SubprocessCommandExecutor
@@ -297,6 +298,68 @@ def _provider(
 def test_specs_reject_legacy_coarse_capability_ids() -> None:
     with pytest.raises(ValueError, match="exact GitHub operation"):
         replace(_app(), capability_ids=("github_api_write",))
+
+
+def test_provider_preserves_typed_stored_source_failure() -> None:
+    spec = _stored("personal", "personal-login", "user-1", "987654")
+    typed = RepoForgeError(
+        "organization authorization required",
+        code=ErrorCode.GITHUB_SSO_AUTHORIZATION_REQUIRED,
+        retryable=False,
+    )
+    source = StoredSource({})
+    source.failure = typed
+    provider = _provider((spec,), source, AppIssuer({}), Verifier())
+
+    with pytest.raises(RepoForgeError) as failure:
+        provider.resolve(OpaqueCredentialReference("gh-account", spec.reference_id))
+
+    assert failure.value is typed
+
+
+def test_provider_preserves_typed_verifier_failure_and_releases_grant() -> None:
+    spec = _stored("personal", "personal-login", "user-1", "987654")
+    grant = _grant(
+        grant_id="grant-typed-verifier-failure",
+        kind=GitHubApiIdentityKind.STORED_ACCOUNT,
+        token="typed-verifier-test-secret-123456",
+        actor_id=spec.actor_id,
+        repository_id=spec.repository_id,
+    )
+    typed = RepoForgeError(
+        "live actor changed",
+        code=ErrorCode.GITHUB_API_ACTOR_MISMATCH,
+        retryable=False,
+    )
+    verifier = Verifier()
+    verifier.failure = typed
+    provider = _provider((spec,), StoredSource({spec.reference_id: grant}), AppIssuer({}), verifier)
+
+    with pytest.raises(RepoForgeError) as failure:
+        provider.resolve(OpaqueCredentialReference("gh-account", spec.reference_id))
+
+    assert failure.value is typed
+    assert grant.token.released is True
+
+
+def test_unavailable_app_signer_failure_remains_typed_at_use() -> None:
+    spec = _app()
+    provider = GitHubApiAuthProvider(
+        stored_accounts=(),
+        app_installations=(spec,),
+        stored_source=StoredSource({}),
+        app_issuer=UnavailableGitHubAppInstallationTokenIssuer(),
+        verifier=Verifier(),
+        capability_preflight=PreflightGateway(),
+        cwd=Path("/repo"),
+        config_revision=_CONFIG,
+        policy_revision=_POLICY,
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        provider.resolve(OpaqueCredentialReference("github-app", spec.reference_id))
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND
 
 
 def test_provider_runs_preflight_after_identity_proof_and_binds_safe_metadata() -> None:

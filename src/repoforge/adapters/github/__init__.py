@@ -4,6 +4,7 @@ from .api_identity import (
     GhCliGitHubAppInstallationTokenIssuer,
     GhCliStoredAccountTokenSource,
     GitHubApiAuthProvider,
+    UnavailableGitHubAppInstallationTokenIssuer,
     github_api_auth_lease,
 )
 from .capability_preflight import CommandGitHubCapabilityPreflight
@@ -21,5 +22,6 @@ __all__ = [
     "GhCliNamedAccountDiscovery",
     "GhCliStoredAccountTokenSource",
     "GitHubApiAuthProvider",
+    "UnavailableGitHubAppInstallationTokenIssuer",
     "github_api_auth_lease",
 ]

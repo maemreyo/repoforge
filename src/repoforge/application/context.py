@@ -37,6 +37,7 @@ from ..ports import (
     GitHubCapabilityProbe,
     GitHubReadCache,
     GitRepository,
+    GitTransportGateway,
     HygieneBaselineCache,
     HygieneGateway,
     IdempotencyStore,
@@ -70,6 +71,7 @@ from .execution.coordinator import ExecutionCoordinator
 from .fingerprint_cache import FingerprintCache
 from .idempotency import IdempotencyEffectBoundary, execute_idempotent
 from .nudges import AdoptionNudgeTracker
+from .repository_identity_runtime import RepositoryIdentityRuntime
 
 T = TypeVar("T")
 
@@ -263,6 +265,14 @@ class ApplicationContext:
     fingerprint_cache: FingerprintCache | None = None
     provider_registry: ProviderRegistry | None = None
     repository_bindings: RepositoryBindingStore | None = None
+    repository_identity_runtime: RepositoryIdentityRuntime | None = field(
+        default=None,
+        kw_only=True,
+    )
+    git_transport_router: GitTransportGateway | None = field(
+        default=None,
+        kw_only=True,
+    )
     code_intelligence: CodeIntelligenceProvider | None = None
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
