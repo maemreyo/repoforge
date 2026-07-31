@@ -137,10 +137,18 @@ def add_auth_parsers(
     migrate_sub = migrate.add_subparsers(dest="auth_migrate_command", required=True)
     migrate_inspect = migrate_sub.add_parser("inspect", help="Build a migration plan")
     migrate_inspect.add_argument("repo_id")
+    migrate_inspect.add_argument(
+        "--login",
+        help="Named gh account to adopt when more than one is configured locally",
+    )
     migrate_apply = migrate_sub.add_parser("apply", help="Apply a reviewed migration plan")
     migrate_apply.add_argument("repo_id")
     migrate_apply.add_argument("--plan-id", required=True)
     migrate_apply.add_argument("--plan-hash", required=True)
+    migrate_apply.add_argument(
+        "--login",
+        help="Named gh account the reviewed plan was built for",
+    )
 
 
 def _surfaces(args: argparse.Namespace) -> tuple[AuthSurface, ...] | None:
@@ -273,7 +281,7 @@ def _run_migrate(
     args: argparse.Namespace, *, migration: AuthMigrationService, render: Renderer
 ) -> int:
     if args.auth_migrate_command == "inspect":
-        plan = migration.inspect(repo_id=args.repo_id)
+        plan = migration.inspect(repo_id=args.repo_id, login=args.login)
         render(
             {
                 **plan.payload(),
@@ -294,6 +302,7 @@ def _run_migrate(
             # Adopting an identity is a capability expansion, so the change is recorded
             # against the operator who ran the command in their own terminal.
             actor=os.environ.get("USER", "local-operator"),
+            login=args.login,
         )
     )
     return 0
