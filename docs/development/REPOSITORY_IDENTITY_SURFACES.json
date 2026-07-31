@@ -328,15 +328,19 @@
         "gh"
       ],
       "surfaces": [
-        "repository_binding"
+        "repository_binding",
+        "github_api_observation"
       ],
       "credential_inputs": [
-        "none; reads public repository metadata with ambient state stripped"
+        "explicit selected named-account ProcessAuthContext",
+        "ambient GitHub tokens and globally active gh account are excluded"
       ],
       "target_inputs": [
-        "reviewed repository worktree path"
+        "reviewed repository worktree path",
+        "repository-local remote URL",
+        "stable repository ID expected by the selected profile"
       ],
-      "current_risk": "reviewed_read_only",
+      "current_risk": "shared_executor_boundary",
       "planned_owner": "#295"
     },
     {

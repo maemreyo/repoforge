@@ -18,6 +18,14 @@ An `OperationIdentityContext` contains one or more target-bound `AuthLease` valu
 
 Discovery patterns may name one repository or use `host/owner/*`; they may not cross an owner boundary. Resolution evidence exposes the provider host, stable repository ID, canonical name, selected profile ID, binding revision, and outcome without exposing credential references.
 
+## Default production composition
+
+`build_application` constructs the complete repository-bound identity stack by default: the durable binding store and observer, `GitHubApiAuthProvider`, `RepositoryAuthBroker`, `RepositoryIdentityRuntime`, `GitTransportRouter`, durable operation-identity store, and the publication adapter/coordinator/service. Overrides remain available for tests and alternate deployments, but the ordinary service path no longer requires an injected publication service or an ambient GitHub gateway. Composition itself is side-effect free: no credential reference is resolved and no provider request is made until an admitted operation opens a broker session.
+
+Every identity-bearing tool selector reaches this runtime. Explicit selection and `auto` both resolve against the same stable repository binding, requested actor role, enabled-profile eligibility and capability ceiling. A selector is never accepted and discarded. An unbound, stale, ambiguous or role-incompatible selection fails before material acquisition; a reviewable binding proposal is never treated as write authority.
+
+For push and draft-PR publication, `ScopedWorkspacePublicationRequestFactory` resolves the selector, opens one broker session, creates the safe lease and operation identity, and invokes the coordinator while that session is still live. The request and raw process context do not escape the callback. Session exit releases provider material and zeroises secret buffers even when validation or the external effect raises. Durable operation, publication, identity-context and lease IDs are derived deterministically from the exact idempotency key and intent, so an exact retry reproduces the same identity decision instead of creating a competing one.
+
 ## Ephemeral broker and process isolation
 
 `RepositoryAuthBroker` resolves only the opaque reference selected by the repository binding. Material is validated against the exact profile, actor class, target and capability ceiling, then exposed for one bounded session. Missing, revoked or expired material fails closed; refresh is accepted only when profile, actor, target and capability identity remain equivalent.
@@ -28,7 +36,7 @@ Discovery patterns may name one repository or use `host/owner/*`; they may not c
 
 Stored GitHub accounts are selected by an explicit reviewed login using `gh auth token --hostname ... --user ...`; RepoForge never changes the machine-global active account. The returned token is verified independently against the expected API actor and stable repository ID before the broker can admit it.
 
-Autonomous GitHub writes prefer repository-selected App installation tokens. The App JWT is supplied by an external signer, installation-token issuance requests the exact repository ID and minimal permission map, and refresh is accepted only when installation, actor, repository, capability ceiling and provider metadata remain identical. Release revokes the installation token where supported and zeroises both JWT and token buffers.
+Autonomous GitHub writes prefer repository-selected App installation tokens. The App JWT is supplied by an external signer, installation-token issuance requests the exact repository ID and minimal permission map, and refresh is accepted only when installation, actor, repository, capability ceiling and identity-bearing provider metadata remain identical. Renewable observation metadata such as `github_preflight_observed_at` may advance; repository, actor, installation, capability/permission evidence, configuration and policy identity may not drift. Release revokes the installation token where supported and zeroises both JWT and token buffers.
 
 `github_api_auth_lease` copies only the token digest, actor ID, installation/repository metadata, revisions and opaque reference into `AuthLease`; raw API material never enters leases or receipts.
 
@@ -58,13 +66,16 @@ provider unavailability, stale binding, repository mismatch, and unobservable
 enterprise evidence all deny that write. Coarse repository write access,
 organisation role, and a successful unrelated probe never imply a capability.
 
-`AuthLease` and publication metadata retain only the safe binding evidence:
-actor ID, installation ID, repository ID, capability and permission digests,
+`AuthLease` and publication metadata retain only safe binding evidence:
+actor ID, installation ID, repository ID, profile-ceiling digests,
 credential-material identity, policy/configuration revisions, timestamps, and
-evidence digest. Write-time publication revalidation requires all of those
-values to remain the same as the admission evidence; a changed actor,
-installation, repository, capability ceiling, policy/configuration revision, or
-credential-material identity denies the effect.
+evidence digest. The broker proves that the operation capability is a subset of
+the reviewed profile ceiling; publication then pins operation-specific
+capability and permission digests. Write-time revalidation recomputes those
+operation digests and denies a changed actor, installation, repository,
+capability/permission proof, policy/configuration revision, or
+credential-material identity. A renewable observation timestamp may advance
+only when all identity-bearing evidence remains equivalent.
 
 Recovery is represented by typed actions such as reauthorizing the selected
 profile, refreshing an equivalent lease, or asking an operator to resolve a
@@ -95,7 +106,7 @@ LFS/package uploads and release publication require their own reviewed nested pu
 
 `PublicationIntent` is the complete authority for one external publication. It pins stable source and destination repository IDs, exact source and destination refs, the reviewed commit and tree object IDs, the remote name, publication kind and any explicit cross-boundary approval. An idempotency key can replay only this exact intent; it cannot authorize a changed repository, ref, object or approval boundary.
 
-Before an effect, `PublicationAdapter` inspects fetch URLs, push URLs and ordered `insteadOf`/`pushInsteadOf` rewrites, resolves every effective target to stable repository metadata and rejects ambiguous or multiple push repositories. Write-time revalidation repeats topology and authorization checks against the reviewed snapshot, including lease state, capability and permission digests, remote version and boundary approval. Git publication emits one exact `source_ref:destination_ref` refspec only; broad, forced, mirrored, deletion and all-ref publication forms are denied.
+Before an effect, `PublicationAdapter` inspects fetch URLs, push URLs and ordered `insteadOf`/`pushInsteadOf` rewrites, resolves every effective target through the durable stable-ID binding registry and rejects ambiguous, unbound or multiple push repositories. Write-time revalidation repeats topology and authorization checks, then performs an isolated `ls-remote` for the exact destination/head ref through the selected transport context. The resulting ref SHA and transport evidence replace configured metadata as live proof immediately before the effect. Lease state, operation capability/permission digests, remote version and boundary approval must still match. Git publication emits one exact `source_ref:destination_ref` refspec only; broad, forced, mirrored, deletion and all-ref publication forms are denied.
 
 Pull-request creation and reconciliation use explicit canonical base and head repositories, stable repository IDs, exact base/head refs and the expected head commit. `GhCliGateway` runs these publication calls through the operation-scoped isolated process environment rather than a cwd-derived repository slug or globally active `gh` account. Creation writes a bounded publication marker; reconciliation accepts a result only when the marker, both repositories, both refs and the exact commit all match. Missing proof remains unknown/manual and is never converted into a blind retry.
 
@@ -105,7 +116,7 @@ Workspace push and draft-PR call sites require `WorkspacePublicationService`; an
 
 `JsonOperationIdentityStore` persists one private CAS sidecar per durable operation. The record contains the immutable `OperationIdentityContext`, one capability request for every target-bound lease, the context ID/digest used by handoff references, superseded lease IDs, and lifecycle timestamps. It contains only opaque references, stable IDs, revisions, digests and safe provider metadata.
 
-Binding is single-assignment: retrying the same decision is idempotent, while a different profile, target, capability request or context digest fails with `OPERATION_IDENTITY_MISMATCH`. `OperationIdentityReference` is propagated into TaskCapsule v3 resume projections and operation-worker bindings; records written before those additive fields still decode with no identity reference.
+Binding is single-assignment: retrying the same decision is idempotent, while a different profile, target, capability request or context digest fails with `OPERATION_IDENTITY_MISMATCH`. `OperationIdentityReference` is propagated into TaskCapsule v3 resume projections and operation-worker bindings; records written before those additive fields still decode with no identity reference. After restart, workers re-open the referenced sidecar and must observe the same context digest and capability requests. Missing, unreadable, stale-CAS, expired or revoked identity state fails closed; no worker handoff or resume path reconstructs authority from ambient process state.
 
 Every external write revalidates the exact operation ID, context digest, target kind/ID, requested capability, lease state and expiry. Nested repositories never inherit the primary lease. Revocation may select one lease or profile, expiry changes only elapsed active leases, and refresh is accepted only when profile, provider, repository, target, actor, opaque reference, config/policy revisions and safe provider metadata remain identical. A missing or unavailable sidecar denies writes rather than falling back to ambient identity.
 
@@ -210,7 +221,7 @@ Discovery is strictly read-only and reports ambient state rather than adopting i
 - `GhCliNamedAccountDiscovery` lists stored `gh` accounts and proves one named account with `gh auth token --hostname <host> --user <login>` followed by an isolated `gh api user` under that token alone.
 - `SshCommandAliasDiscovery` accepts an `ssh -G` result only when it is unambiguous: one concrete lowercase host, exactly one absolute identity file with no `%`, `$`, or `~` left in it, and no proxy command, jump host, or identity agent.
 - `GitAmbientAuthConflictReader` reads `git config --show-origin --get-all <key>` and environment variable *names*.
-- `GhCliRepositoryObserver` reads the provider's own answer for a worktree's repository — current name and host, then the stable numeric ID — so a rename observes as the same repository.
+- `GhCliRepositoryObserver` derives the local remote with `git config --local`, then reads the provider's answer under the explicitly selected named-account `ProcessAuthContext` — current name and host, then the stable numeric ID. A wrong globally active `gh` account and inherited token variables cannot influence observation; a rename still observes as the same repository.
 
 `AuthMigrationService.inspect()` binds its plan to the exact source digest and configuration generation it saw. `apply()` re-gathers every input and distinguishes a vanished account, an ambiguous one, a stale plan, and one that still needs a human. These findings **block** a plan: ambient GitHub token variables, credential helpers, conflicting authors, signing already in force, and a remote that disagrees with the observed target. Ambiguous SSH configuration falls back to an explicitly proposed HTTPS transport rather than a guess.
 
@@ -226,7 +237,7 @@ A single-account installation imports or selects one local profile, creates one 
 
 ## Failure and recovery contract
 
-`RepositoryAuthFailureCode` separates resolution ambiguity, actor and transport mismatch, lease lifecycle, remote rewrite, publication mismatch, nested-resource denial, author/committer/signer mismatch, enterprise authorization, and network policy failures. Recovery is represented by typed `RecoveryAction` values such as reselecting a profile, reauthorizing, refreshing a lease, reconciling a binding, reviewing a remote, or aborting. Recovery parameters contain safe identifiers only.
+`RepositoryAuthFailureCode` separates resolution ambiguity, actor and transport mismatch, lease lifecycle, remote rewrite, publication mismatch, nested-resource denial, author/committer/signer mismatch, enterprise authorization, and network policy failures. Provider adapters preserve typed failures such as SSO authorization, installation approval, actor/repository mismatch and unavailable reviewed signers instead of collapsing them into a generic provider error. Recovery is represented by typed `RecoveryAction` values such as reselecting a profile, reauthorizing, refreshing an equivalent lease, reconciling a binding, reviewing a remote, or aborting. Recovery parameters contain safe identifiers only; recovery never switches the global account, broadens capability, retries with ambient credentials or silently rebuilds missing durable identity.
 
 ## Maintained call-site inventory
 
