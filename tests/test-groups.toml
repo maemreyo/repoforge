@@ -336,11 +336,13 @@ source_globs = [
   "src/repoforge/adapters/git/ssh_alias_discovery.py",
   "src/repoforge/adapters/git/transport.py",
   "src/repoforge/adapters/publication.py",
+  "src/repoforge/adapters/publication_identity.py",
   "src/repoforge/application/auth_migration.py",
   "src/repoforge/application/auth_ux.py",
   "src/repoforge/interfaces/cli/auth.py",
   "src/repoforge/application/nested_identity.py",
   "src/repoforge/application/publication.py",
+  "src/repoforge/application/repository_identity_runtime.py",
   "src/repoforge/application/webhooks/**",
   "src/repoforge/adapters/provider/**",
   "src/repoforge/application/workspace/create_draft_pr.py",
@@ -354,6 +356,7 @@ source_globs = [
   "src/repoforge/application/workspace/pr_status.py",
   "src/repoforge/application/workspace/pr_watch.py",
   "src/repoforge/application/workspace/publication.py",
+  "src/repoforge/application/workspace/publication_request_factory.py",
   "src/repoforge/application/workspace/push.py",
   "src/repoforge/application/workspace/update_draft_pr.py",
   "src/repoforge/domain/ci_evidence.py",
@@ -409,6 +412,8 @@ test_files = [
   "tests/test_publication_adapter.py",
   "tests/test_publication_guards.py",
   "tests/test_repository_identity_contracts.py",
+  "tests/test_repository_identity_runtime.py",
+  "tests/test_workspace_publication_factory.py",
 ]
 
 [groups.verification_diagnostics]

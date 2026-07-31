@@ -4,11 +4,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from repoforge.adapters.persistence import JsonRepositoryBindingStore
+from repoforge.adapters.publication_identity import (
+    DurableBindingPublicationRepositoryResolver,
+)
 from repoforge.application.publication import PublicationOutcome, PublicationRequest
 from repoforge.application.workspace.publication_request_factory import (
     ScopedWorkspacePublicationRequestFactory,
 )
 from repoforge.domain.auth_profile import AuthProfileSelector, RequestedActorClass
+from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.git_transport_identity import (
     GitTransportAccess,
     GitTransportKind,
@@ -32,13 +39,18 @@ from repoforge.domain.repository_identity import (
     CredentialProfile,
     OpaqueCredentialReference,
     PublicationKind,
+    RepositoryIdentityBinding,
     RepositoryProvider,
 )
 from repoforge.ports.workspace_publication import (
     WorkspaceDraftPrPublication,
     WorkspacePushPublication,
 )
-from repoforge.testing.fakes import FixedClock, SequenceIdGenerator
+from repoforge.testing.fakes import (
+    FixedClock,
+    InMemoryLockManager,
+    SequenceIdGenerator,
+)
 
 _NOW = "2026-07-31T03:30:00+00:00"
 _CONFIG = "a" * 64
@@ -369,3 +381,29 @@ def test_scoped_draft_pr_factory_uses_exact_refs_and_pull_request_capability() -
     assert outcome.url == "https://github.com/acme/widgets/pull/42"
     assert runtime.required == [("github.pull_requests.write",)]
     assert session.released is True
+
+
+def test_durable_publication_resolver_accepts_only_the_exact_bound_url(
+    tmp_path: Path,
+) -> None:
+    bindings = JsonRepositoryBindingStore(tmp_path, InMemoryLockManager())
+    binding = RepositoryIdentityBinding(
+        provider=RepositoryProvider.GITHUB,
+        provider_host="github.com",
+        repository_id="123456",
+        canonical_name="github.com/acme/widgets",
+        human_profile_id="company",
+        agent_profile_id=None,
+        config_revision=_CONFIG,
+    )
+    bindings.create(binding)
+    resolver = DurableBindingPublicationRepositoryResolver(bindings)
+
+    resolved = resolver.resolve_url("git@github.com:acme/widgets.git")
+
+    assert resolved.repository_id == "123456"
+    assert resolved.canonical_name == "github.com/acme/widgets"
+    assert resolver.resolve_id("123456") == resolved
+    with pytest.raises(RepoForgeError) as mismatch:
+        resolver.resolve_url("https://github.com/personal/widgets.git")
+    assert mismatch.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH

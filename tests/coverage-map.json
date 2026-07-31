@@ -3130,6 +3130,9 @@
   "src/repoforge/adapters/publication.py": [
     "tests/test_publication_adapter.py"
   ],
+  "src/repoforge/adapters/publication_identity.py": [
+    "tests/test_workspace_publication_factory.py"
+  ],
   "src/repoforge/adapters/repository/discovery.py": [
     "tests/test_onboarding_real_git.py",
     "tests/test_repository_discovery.py"
@@ -6617,6 +6620,9 @@
     "tests/test_v2_retrieval.py",
     "tests/test_workspace_diff_budget.py"
   ],
+  "src/repoforge/application/repository_identity_runtime.py": [
+    "tests/test_repository_identity_runtime.py"
+  ],
   "src/repoforge/application/rules/budget.py": [
     "tests/test_context_pack_budget.py"
   ],
@@ -8983,6 +8989,9 @@
     "tests/test_v2_shipping.py",
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
+  ],
+  "src/repoforge/application/workspace/publication_request_factory.py": [
+    "tests/test_workspace_publication_factory.py"
   ],
   "src/repoforge/application/workspace/push.py": [
     "tests/test_adoption_nudges.py",
@@ -12039,7 +12048,8 @@
     "tests/test_github_api_identity.py",
     "tests/test_github_capability_preflight_adapter.py",
     "tests/test_publication_adapter.py",
-    "tests/test_repository_identity_contracts.py"
+    "tests/test_repository_identity_contracts.py",
+    "tests/test_workspace_publication_factory.py"
   ],
   "src/repoforge/domain/repository_identity.py": [
     "tests/test_auth_cli.py",
@@ -12836,7 +12846,8 @@
   ],
   "src/repoforge/ports/publication.py": [
     "tests/test_publication_adapter.py",
-    "tests/test_publication_guards.py"
+    "tests/test_publication_guards.py",
+    "tests/test_workspace_publication_factory.py"
   ],
   "src/repoforge/ports/workspace_publication.py": [
     "tests/test_adoption_nudges.py",

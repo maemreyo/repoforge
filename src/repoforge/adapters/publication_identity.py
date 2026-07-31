@@ -71,7 +71,7 @@ class DurableBindingPublicationRepositoryResolver:
         self._bindings = bindings
 
     def _values(self) -> tuple[RepositoryIdentityBinding, ...]:
-        page = self._bindings.list_bindings(max_records=10_000)
+        page = self._bindings.list_bindings(max_records=2_000)
         if page.scan_truncated or page.unreadable_record_ids:
             raise _error(
                 ErrorCode.EVIDENCE_INVALID,
