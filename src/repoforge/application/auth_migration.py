@@ -68,9 +68,9 @@ _REMOTE_TARGET = re.compile(
 
 
 class ObserveRepository(Protocol):
-    """Live stable-identity observation for one configured repository."""
+    """Live stable-identity observation under one named account or local-only discovery."""
 
-    def __call__(self, repo_id: str) -> RepositoryIdentityObservation: ...
+    def __call__(self, repo_id: str, login: str | None) -> RepositoryIdentityObservation: ...
 
 
 def _failure(code: ErrorCode, message: str, *, next_action: str) -> RepoForgeError:
@@ -215,7 +215,9 @@ class AuthMigrationService:
                 f"Unknown repository id: {repo_id}",
                 next_action="Run `rf config inspect` to list the configured repositories.",
             )
-        observation = self._observe(repo_id)
+        candidates = self._accounts.candidates(host=self._host)
+        selected_login = candidates[0].login if len(candidates) == 1 else None
+        observation = self._observe(repo_id, selected_login)
         repo_path = Path(repository.path)
 
         findings: list[AuthMigrationFinding] = []
@@ -238,7 +240,6 @@ class AuthMigrationService:
             )
 
         findings.extend(self._ambient_findings(repo_id, repo_path, observation))
-        candidates = self._accounts.candidates(host=self._host)
         verified: NamedAccountCandidate | None = None
         ssh_candidate: SshAliasCandidate | None = None
 

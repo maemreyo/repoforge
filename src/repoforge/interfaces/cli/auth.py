@@ -98,13 +98,12 @@ def add_auth_parsers(
 
     unbind = auth_sub.add_parser("unbind", help="Clear one actor role from a repository binding")
     unbind.add_argument("repo_id")
-    unbind.add_argument(
-        "--actor-class", default=RequestedActorClass.HUMAN.value, choices=_ACTOR_CLASSES
-    )
+    _add_selector_flags(unbind)
     unbind.add_argument("--expected-revision", type=int, required=True)
 
     whoami = auth_sub.add_parser("whoami", help="Report each identity surface independently")
     whoami.add_argument("repo_id")
+    _add_selector_flags(whoami)
     whoami.add_argument(
         "--check",
         action="append",
@@ -114,6 +113,7 @@ def add_auth_parsers(
 
     doctor = auth_sub.add_parser("doctor", help="Report why identity is not usable, with recovery")
     doctor.add_argument("repo_id")
+    _add_selector_flags(doctor)
 
     lease = auth_sub.add_parser("lease", help="Operation-scoped auth leases")
     lease_sub = lease.add_subparsers(dest="auth_lease_command", required=True)
@@ -182,17 +182,22 @@ def run_auth_command(
                 repo_id=args.repo_id,
                 role=RequestedActorClass(args.actor_class).role,
                 expected_binding_revision=args.expected_revision,
+                selector=_selector(args),
             )
         )
         return 0
     if command == "whoami":
-        result = service.whoami(repo_id=args.repo_id, checks=_surfaces(args))
+        result = service.whoami(
+            repo_id=args.repo_id,
+            checks=_surfaces(args),
+            selector=_selector(args),
+        )
         render(result.safe_payload())
         # A report that is not ready is a finding, not a crash: exit 3 is the repository's
         # "input required" code, so a script can branch on it without parsing the payload.
         return 0 if result.ready else 3
     if command == "doctor":
-        findings = service.doctor(repo_id=args.repo_id)
+        findings = service.doctor(repo_id=args.repo_id, selector=_selector(args))
         render(
             {
                 "repo_id": args.repo_id,

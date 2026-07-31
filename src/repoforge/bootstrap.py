@@ -184,12 +184,26 @@ from .application.workflow import (
     WorkflowReplayEngine,
 )
 from .application.workspace.pr_watch import PrCheckWatchCoordinator
-from .config import DEFAULT_STATE_ROOT, AppConfig, ServerConfig, load_config
+from .config import (
+    DEFAULT_STATE_ROOT,
+    AppConfig,
+    AuthProfileConfig,
+    RepositoryConfig,
+    ServerConfig,
+    load_config,
+)
 from .contracts.registry import validate_generated_contract_identity
 from .domain.activation import AGENT_SECRET_FILE_ENV_VAR, AGENT_SECRET_KEY
+from .domain.auth_profile import AuthProfileSelector
 from .domain.errors import ConfigError, ErrorCode, RepoForgeError
+from .domain.github_api_identity import StoredGhAccountSpec
 from .domain.operation_task import OperationTask
-from .domain.repository_identity_resolution import RepositoryIdentityObservation
+from .domain.repository_auth_broker import EphemeralSecret, ProcessAuthContext
+from .domain.repository_identity import AuthTargetKind
+from .domain.repository_identity_resolution import (
+    RepositoryIdentityObservation,
+    role_accepts_actor_class,
+)
 from .domain.runtime import RuntimeRecord, TunnelProfile
 from .ports import (
     ApprovalPayloadStore,
@@ -479,6 +493,126 @@ class AuthCommandDependencies:
     ssh: SshAliasDiscovery
 
 
+def _auth_observation_error(
+    code: ErrorCode,
+    message: str,
+    *,
+    next_action: str,
+) -> RepoForgeError:
+    return RepoForgeError(
+        message,
+        code=code,
+        retryable=False,
+        unchanged_state=("No repository identity was observed, bound, or used for a write.",),
+        safe_next_action=next_action,
+    )
+
+
+def _observation_profile(
+    *,
+    config: AppConfig,
+    observer: GhCliRepositoryObserver,
+    repository: RepositoryConfig,
+    selector: AuthProfileSelector,
+    config_revision: str,
+    observed_at: str,
+) -> AuthProfileConfig:
+    if not config.auth_profiles:
+        raise _auth_observation_error(
+            ErrorCode.INPUT_REQUIRED,
+            "This configuration has no reviewed repository auth profiles.",
+            next_action="Run `rf auth migrate inspect <repo-id>` before resolving an identity.",
+        )
+
+    target = observer.target(repository)
+
+    def eligible(configured: AuthProfileConfig) -> bool:
+        provisional = RepositoryIdentityObservation(
+            provider=target.provider,
+            provider_host=target.provider_host,
+            repository_id=configured.api_identity.repository_id,
+            canonical_name=target.canonical_name,
+            exists=True,
+            observed_at=observed_at,
+            config_revision=config_revision,
+        )
+        return (
+            configured.eligibility.enabled
+            and role_accepts_actor_class(selector.role, configured.profile.actor_class)
+            and configured.eligibility.matches(provisional)
+        )
+
+    if not selector.automatic:
+        configured = config.auth_profiles.get(selector.auth_profile)
+        if configured is None:
+            raise _auth_observation_error(
+                ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND,
+                f"No reviewed auth profile is declared with id {selector.auth_profile!r}.",
+                next_action="Run `rf auth profile list` and select one listed profile.",
+            )
+        if not eligible(configured):
+            raise _auth_observation_error(
+                ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                "The selected auth profile is not eligible for this repository and actor role.",
+                next_action="Select an enabled profile whose repository boundary and actor role match.",
+            )
+        return configured
+
+    matches = tuple(
+        configured for configured in config.auth_profiles.values() if eligible(configured)
+    )
+    if len(matches) != 1:
+        reason = (
+            "No auth profile is eligible"
+            if not matches
+            else "More than one auth profile is eligible"
+        )
+        raise _auth_observation_error(
+            ErrorCode.INPUT_REQUIRED,
+            f"{reason} for this repository and actor role.",
+            next_action="Pass `--auth-profile <profile-id>` to select one reviewed profile explicitly.",
+        )
+    return matches[0]
+
+
+def _named_account_context(
+    commands: SubprocessCommandExecutor,
+    *,
+    cwd: Path,
+    profile_id: str,
+    host: str,
+    login: str,
+    target_id: str,
+) -> tuple[EphemeralSecret, ProcessAuthContext]:
+    inherited = commands.environment()
+    environment = {
+        key: inherited[key]
+        for key in ("HOME", "PATH", "LANG", "LC_ALL")
+        if key in inherited and isinstance(inherited[key], str)
+    }
+    environment["GH_PROMPT_DISABLED"] = "1"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    secret = commands.run_secret_text(
+        ["gh", "auth", "token", "--hostname", host, "--user", login],
+        cwd=cwd,
+        environment=environment,
+        secrets=(),
+        max_bytes=100_000,
+    )
+    token = secret.reveal()
+    reference_digest = hashlib.sha256(
+        f"{host}\0{login}\0{profile_id}\0{target_id}".encode()
+    ).hexdigest()
+    return secret, ProcessAuthContext(
+        profile_id=profile_id,
+        material_id=f"repository-observation-{reference_digest[:24]}",
+        target_kind=AuthTargetKind.REPOSITORY,
+        target_id=target_id,
+        environment=(("GH_TOKEN", token),),
+        _secret_values=(token,),
+    )
+
+
 def build_auth_command_dependencies(
     store: ConfigurationStore,
     *,
@@ -498,11 +632,84 @@ def build_auth_command_dependencies(
     working_directory = cwd if cwd is not None else Path.cwd()
     observer = GhCliRepositoryObserver(commands, clock=clock)
 
-    def observe(repo_id: str) -> RepositoryIdentityObservation:
+    def repository(repo_id: str) -> RepositoryConfig:
         repository = config.repositories.get(repo_id)
         if repository is None:
             raise ConfigError(f"Unknown repository id: {repo_id}")
-        return observer.observe(repository, config_revision=config_revision)
+        return repository
+
+    def observe_selected(
+        repo_id: str, selector: AuthProfileSelector
+    ) -> RepositoryIdentityObservation:
+        selected_repository = repository(repo_id)
+        configured = _observation_profile(
+            config=config,
+            observer=observer,
+            repository=selected_repository,
+            selector=selector,
+            config_revision=config_revision,
+            observed_at=clock.now_iso(),
+        )
+        spec = configured.api_identity
+        if not isinstance(spec, StoredGhAccountSpec):
+            raise _auth_observation_error(
+                ErrorCode.INPUT_REQUIRED,
+                "GitHub App observation requires the managed repository identity runtime.",
+                next_action="Run this operation through the managed RepoForge runtime.",
+            )
+        secret, context = _named_account_context(
+            commands,
+            cwd=working_directory,
+            profile_id=configured.profile.profile_id,
+            host=spec.host,
+            login=spec.login,
+            target_id=spec.repository_id,
+        )
+        try:
+            observation = observer.observe(
+                selected_repository,
+                config_revision=config_revision,
+                context=context,
+            )
+        finally:
+            secret.release()
+        if observation.repository_id != spec.repository_id:
+            raise _auth_observation_error(
+                ErrorCode.GITHUB_API_REPOSITORY_MISMATCH,
+                "The selected profile token observed a different stable repository identity.",
+                next_action="Review the profile repository_id and the checkout remote before retrying.",
+            )
+        return observation
+
+    def observe_migration(repo_id: str, login: str | None) -> RepositoryIdentityObservation:
+        selected_repository = repository(repo_id)
+        if login is None:
+            target = observer.target(selected_repository)
+            return RepositoryIdentityObservation(
+                provider=target.provider,
+                provider_host=target.provider_host,
+                repository_id="0",
+                canonical_name=target.canonical_name,
+                exists=False,
+                observed_at=clock.now_iso(),
+                config_revision=config_revision,
+            )
+        secret, context = _named_account_context(
+            commands,
+            cwd=working_directory,
+            profile_id=login,
+            host="github.com",
+            login=login,
+            target_id=repo_id,
+        )
+        try:
+            return observer.observe(
+                selected_repository,
+                config_revision=config_revision,
+                context=context,
+            )
+        finally:
+            secret.release()
 
     accounts = GhCliNamedAccountDiscovery(commands, cwd=working_directory)
     ssh = SshCommandAliasDiscovery(commands, cwd=working_directory)
@@ -512,7 +719,7 @@ def build_auth_command_dependencies(
             bindings=JsonRepositoryBindingStore(
                 config.server.state_root, build_lock_manager(config.server.state_root)
             ),
-            observe=observe,
+            observe=observe_selected,
             clock=clock,
         ),
         migration=AuthMigrationService(
@@ -522,7 +729,7 @@ def build_auth_command_dependencies(
             accounts=accounts,
             ssh=ssh,
             ambient=GitAmbientAuthConflictReader(commands),
-            observe=observe,
+            observe=observe_migration,
         ),
         accounts=accounts,
         ssh=ssh,

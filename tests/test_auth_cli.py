@@ -23,6 +23,7 @@ from repoforge.adapters.persistence.json_repository_binding_store import (
 from repoforge.application.auth_ux import AuthUxService
 from repoforge.config import AppConfig, AuthProfileConfig, RepositoryConfig, ServerConfig
 from repoforge.domain.auth_migration import NamedAccountCandidate, SshAliasCandidate
+from repoforge.domain.auth_profile import AuthProfileSelector, RequestedActorClass
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.git_transport_identity import (
     GitTransportAccess,
@@ -31,6 +32,7 @@ from repoforge.domain.git_transport_identity import (
 )
 from repoforge.domain.github_api_identity import StoredGhAccountSpec
 from repoforge.domain.github_capability_preflight import GitHubOperationCapability
+from repoforge.domain.repository_auth_broker import EphemeralSecret, ProcessAuthContext
 from repoforge.domain.repository_identity import (
     ActorClass,
     CredentialKind,
@@ -43,6 +45,7 @@ from repoforge.domain.repository_identity_resolution import (
     RepositoryIdentityObservation,
 )
 from repoforge.interfaces.cli.auth import add_auth_parsers, run_auth_command
+from repoforge.ports.auth_inspection import RepositoryObservationTarget
 from repoforge.testing import FixedClock
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
@@ -171,7 +174,7 @@ def _service(
         bindings=JsonRepositoryBindingStore(
             tmp_path / "state", FcntlLockManager(tmp_path / "locks")
         ),
-        observe=lambda repo_id: RepositoryIdentityObservation(
+        observe=lambda repo_id, selector: RepositoryIdentityObservation(
             provider=RepositoryProvider.GITHUB,
             provider_host="github.com",
             repository_id="987654",
@@ -239,10 +242,53 @@ def test_every_documented_auth_command_parses() -> None:
 
 
 def test_read_commands_default_to_the_deterministic_selector() -> None:
-    for argv in (["auth", "resolve", "demo"], ["auth", "bind", "demo"]):
+    for argv in (
+        ["auth", "resolve", "demo"],
+        ["auth", "bind", "demo"],
+        ["auth", "whoami", "demo"],
+        ["auth", "doctor", "demo"],
+        ["auth", "unbind", "demo", "--expected-revision", "1"],
+    ):
         args = _parse(argv)
         assert args.auth_profile == "auto"
         assert args.actor_class == "human"
+
+
+def test_identity_observation_commands_accept_one_exact_selector() -> None:
+    for argv in (
+        [
+            "auth",
+            "whoami",
+            "demo",
+            "--auth-profile",
+            "automation",
+            "--actor-class",
+            "agent",
+        ],
+        [
+            "auth",
+            "doctor",
+            "demo",
+            "--auth-profile",
+            "automation",
+            "--actor-class",
+            "agent",
+        ],
+        [
+            "auth",
+            "unbind",
+            "demo",
+            "--expected-revision",
+            "1",
+            "--auth-profile",
+            "automation",
+            "--actor-class",
+            "agent",
+        ],
+    ):
+        args = _parse(argv)
+        assert args.auth_profile == "automation"
+        assert args.actor_class == "agent"
 
 
 def test_mutating_commands_require_the_exact_state_they_reviewed() -> None:
@@ -469,3 +515,155 @@ def test_no_auth_payload_carries_a_token_or_credential_reference(tmp_path: Path)
     rendered = json.dumps(payloads, sort_keys=True, default=str)
     for canary in ("gho_", "ghp_", "github_pat_", "Authorization", "REPOFORGE_GH_TOKEN"):
         assert canary not in rendered, canary
+
+
+def test_production_auth_dependencies_observe_with_the_selected_named_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bootstrap = importlib.import_module("repoforge.bootstrap")
+    repo_root = tmp_path / "demo"
+    repo_root.mkdir()
+    config = AppConfig(
+        source_path=tmp_path / "config.toml",
+        server=ServerConfig(tmp_path / "workspaces", tmp_path / "state"),
+        repositories={"demo": RepositoryConfig(repo_id="demo", path=repo_root)},
+        auth_profiles={"personal": _profile_config()},
+    )
+
+    class Commands:
+        def __init__(self) -> None:
+            self.secret: EphemeralSecret | None = None
+            self.calls: list[tuple[str, ...]] = []
+
+        def environment(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+            del extra
+            return {
+                "HOME": "/home/wrong-active-user",
+                "PATH": "/bin",
+                "GH_TOKEN": "ambient-wrong-token",
+                "GH_HOST": "wrong.example",
+                "SSH_AUTH_SOCK": "/tmp/wrong-agent",
+            }
+
+        def run_secret_text(self, argv: list[str], **kwargs: Any) -> EphemeralSecret:
+            del kwargs
+            self.calls.append(tuple(argv))
+            self.secret = EphemeralSecret.from_text(_TOKEN)
+            return self.secret
+
+    commands = Commands()
+    contexts: list[ProcessAuthContext] = []
+
+    class Observer:
+        def __init__(self, executor: object, *, clock: object) -> None:
+            assert executor is commands
+            del clock
+
+        def target(self, repo: RepositoryConfig) -> RepositoryObservationTarget:
+            assert repo.repo_id == "demo"
+            return RepositoryObservationTarget(
+                provider=RepositoryProvider.GITHUB,
+                provider_host="github.com",
+                owner="acme",
+                repository="demo",
+            )
+
+        def observe(
+            self,
+            repo: RepositoryConfig,
+            *,
+            config_revision: str,
+            context: ProcessAuthContext,
+        ) -> RepositoryIdentityObservation:
+            assert repo.repo_id == "demo"
+            assert config_revision == _SHA
+            contexts.append(context)
+            assert context.environment_dict() == {"GH_TOKEN": _TOKEN}
+            return RepositoryIdentityObservation(
+                provider=RepositoryProvider.GITHUB,
+                provider_host="github.com",
+                repository_id="987654",
+                canonical_name="github.com/acme/demo",
+                exists=True,
+                observed_at=NOW,
+                config_revision=_SHA,
+            )
+
+    monkeypatch.setattr(bootstrap, "SubprocessCommandExecutor", lambda server: commands)
+    monkeypatch.setattr(bootstrap, "GhCliRepositoryObserver", Observer)
+    dependencies = bootstrap.build_auth_command_dependencies(
+        object(),  # type: ignore[arg-type]
+        config=config,
+        config_revision=_SHA,
+        cwd=tmp_path,
+    )
+
+    result = dependencies.service.resolve(
+        repo_id="demo",
+        selector=AuthProfileSelector("personal", RequestedActorClass.HUMAN),
+    )
+
+    assert result["proposal"]["profile_id"] == "personal"
+    assert [context.profile_id for context in contexts] == ["personal"]
+    assert commands.calls == [
+        (
+            "gh",
+            "auth",
+            "token",
+            "--hostname",
+            "github.com",
+            "--user",
+            "acme-operator",
+        )
+    ]
+    assert all("auth switch" not in " ".join(call) for call in commands.calls)
+    assert commands.secret is not None and commands.secret.released is True
+
+
+def test_production_auth_dependencies_fail_closed_without_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bootstrap = importlib.import_module("repoforge.bootstrap")
+    repo_root = tmp_path / "demo"
+    repo_root.mkdir()
+    config = AppConfig(
+        source_path=tmp_path / "config.toml",
+        server=ServerConfig(tmp_path / "workspaces", tmp_path / "state"),
+        repositories={"demo": RepositoryConfig(repo_id="demo", path=repo_root)},
+        auth_profiles={},
+    )
+
+    class Commands:
+        def environment(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+            del extra
+            return {"HOME": "/home/wrong-active-user", "PATH": "/bin"}
+
+    commands = Commands()
+    observed: list[str] = []
+
+    class Observer:
+        def __init__(self, executor: object, *, clock: object) -> None:
+            assert executor is commands
+            del clock
+
+        def target(self, repo: RepositoryConfig) -> RepositoryObservationTarget:
+            observed.append(f"target:{repo.repo_id}")
+            raise AssertionError("profile admission must fail before repository observation")
+
+    monkeypatch.setattr(bootstrap, "SubprocessCommandExecutor", lambda server: commands)
+    monkeypatch.setattr(bootstrap, "GhCliRepositoryObserver", Observer)
+    dependencies = bootstrap.build_auth_command_dependencies(
+        object(),  # type: ignore[arg-type]
+        config=config,
+        config_revision=_SHA,
+        cwd=tmp_path,
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        dependencies.service.resolve(
+            repo_id="demo",
+            selector=AuthProfileSelector(),
+        )
+
+    assert failure.value.code is ErrorCode.INPUT_REQUIRED
+    assert observed == []

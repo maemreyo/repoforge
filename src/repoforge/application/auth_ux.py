@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Protocol
 
 from ..config import AppConfig, AuthProfileConfig
-from ..domain.auth_profile import AuthProfileSelector, AuthSelectionRequest, resolve_auth_profile
+from ..domain.auth_profile import (
+    AuthProfileSelector,
+    AuthSelectionRequest,
+    RequestedActorClass,
+    resolve_auth_profile,
+)
 from ..domain.commit_identity import CommitSigningMode
 from ..domain.durable_state import Revision, StateEnvelope
 from ..domain.errors import ErrorCode, RepoForgeError
@@ -46,10 +51,13 @@ from ..ports.repository_binding_store import RepositoryBindingStore
 from .operations.identity import OperationIdentityManager
 
 _MAX_BINDINGS = 500
+_DEFAULT_SELECTOR = AuthProfileSelector()
 
 
 class ObserveRepository(Protocol):
-    def __call__(self, repo_id: str) -> RepositoryIdentityObservation: ...
+    def __call__(
+        self, repo_id: str, selector: AuthProfileSelector
+    ) -> RepositoryIdentityObservation: ...
 
 
 class AuthSurface(str, Enum):
@@ -270,7 +278,7 @@ class AuthUxService:
     ) -> dict[str, object]:
         return self._resolve_observed(
             repo_id,
-            self._observe(repo_id),
+            self._observe(repo_id, selector),
             selector,
             expected_binding_revision,
         )
@@ -310,7 +318,7 @@ class AuthUxService:
         role resolves and is reported unchanged rather than rewritten.
         """
 
-        observation = self._observe(repo_id)
+        observation = self._observe(repo_id, selector)
         expected = (
             Revision(expected_binding_revision) if expected_binding_revision is not None else None
         )
@@ -433,6 +441,7 @@ class AuthUxService:
         repo_id: str,
         role: CredentialRole,
         expected_binding_revision: int,
+        selector: AuthProfileSelector | None = None,
     ) -> dict[str, object]:
         """Clear exactly one role slot.
 
@@ -441,7 +450,14 @@ class AuthUxService:
         than narrowing which actor classes may use it.
         """
 
-        observation = self._observe(repo_id)
+        selected = selector or AuthProfileSelector(
+            actor_class=(
+                RequestedActorClass.AGENT
+                if role is CredentialRole.AGENT
+                else RequestedActorClass.HUMAN
+            )
+        )
+        observation = self._observe(repo_id, selected)
         existing = self._bindings.read(observation.provider_host, observation.repository_id)
         if existing is None:
             raise _error(
@@ -498,14 +514,21 @@ class AuthUxService:
         *,
         repo_id: str,
         checks: tuple[AuthSurface, ...] | None = None,
+        selector: AuthProfileSelector = _DEFAULT_SELECTOR,
     ) -> AuthWhoamiResult:
-        return self._whoami_observed(repo_id, self._observe(repo_id), checks)
+        return self._whoami_observed(
+            repo_id,
+            self._observe(repo_id, selector),
+            checks,
+            selector,
+        )
 
     def _whoami_observed(
         self,
         repo_id: str,
         observation: RepositoryIdentityObservation,
         checks: tuple[AuthSurface, ...] | None,
+        selector: AuthProfileSelector,
     ) -> AuthWhoamiResult:
         requested = (
             AUTH_SURFACE_ORDER
@@ -519,11 +542,13 @@ class AuthUxService:
             if item.binding.provider_host == observation.provider_host
             and item.binding.repository_id == observation.repository_id
         )
-        profile_id = (
-            exact[0].binding.human_profile_id or exact[0].binding.agent_profile_id
-            if exact
-            else None
-        )
+        profile_id = None
+        if exact:
+            profile_id = (
+                exact[0].binding.agent_profile_id
+                if selector.role is CredentialRole.AGENT
+                else exact[0].binding.human_profile_id
+            )
         configured = self._config.auth_profiles.get(profile_id) if profile_id else None
         path = self._repository_path(repo_id)
 
@@ -772,7 +797,12 @@ class AuthUxService:
 
     # -- doctor --------------------------------------------------------------
 
-    def doctor(self, *, repo_id: str) -> list[AuthDoctorFinding]:
+    def doctor(
+        self,
+        *,
+        repo_id: str,
+        selector: AuthProfileSelector = _DEFAULT_SELECTOR,
+    ) -> list[AuthDoctorFinding]:
         """Report every reason this repository could not write, with typed recovery."""
 
         findings: list[AuthDoctorFinding] = []
@@ -803,8 +833,8 @@ class AuthUxService:
                 )
         # One observation for the whole report: two `gh` round trips instead of four, and the
         # resolution half cannot disagree with the surface half about what the repository is.
-        observation = self._observe(repo_id)
-        resolution = self._resolve_observed(repo_id, observation, AuthProfileSelector(), None)
+        observation = self._observe(repo_id, selector)
+        resolution = self._resolve_observed(repo_id, observation, selector, None)
         failure = resolution.get("failure")
         if isinstance(failure, dict):
             actions = tuple(
@@ -821,7 +851,7 @@ class AuthUxService:
                     recovery_actions=actions,
                 )
             )
-        for evidence in self._whoami_observed(repo_id, observation, None).surfaces:
+        for evidence in self._whoami_observed(repo_id, observation, None, selector).surfaces:
             if evidence.state is AuthSurfaceState.BLOCKED:
                 findings.append(
                     AuthDoctorFinding(

@@ -8,6 +8,7 @@ refuses any plan that still needs a human decision.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -147,6 +148,7 @@ def _service(
     ambient: Ambient | None = None,
     observation: RepositoryIdentityObservation | None = None,
     source: SourceConfiguration | None = None,
+    observe: Callable[[str, str | None], RepositoryIdentityObservation] | None = None,
 ) -> AuthMigrationService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -163,7 +165,7 @@ def _service(
         accounts=accounts or Accounts(()),
         ssh=ssh or Ssh(),
         ambient=ambient or Ambient(),
-        observe=lambda repo_id: resolved_observation,
+        observe=observe or (lambda repo_id, login: resolved_observation),
     )
 
 
@@ -239,6 +241,32 @@ def test_multiple_named_accounts_require_manual_remediation(tmp_path: Path) -> N
     assert plan.manual_remediation_required is True
     # An ambiguous set is never resolved by picking the globally active account.
     assert not any(call.startswith("verify:") for call in accounts.calls)
+
+
+def test_migration_observation_is_scoped_to_one_named_account_or_local_only(
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[str, str | None]] = []
+
+    def observe(repo_id: str, login: str | None) -> RepositoryIdentityObservation:
+        observed.append((repo_id, login))
+        return _observation()
+
+    exact = _service(
+        tmp_path / "exact",
+        accounts=Accounts((_personal(login="selected-user"),)),
+        observe=observe,
+    )
+    exact.inspect(repo_id="demo")
+
+    ambiguous = _service(
+        tmp_path / "ambiguous",
+        accounts=Accounts((_personal(), _personal(login="other-user"))),
+        observe=observe,
+    )
+    ambiguous.inspect(repo_id="demo")
+
+    assert observed == [("demo", "selected-user"), ("demo", None)]
 
 
 def test_a_different_globally_active_account_is_reported_but_never_selected(

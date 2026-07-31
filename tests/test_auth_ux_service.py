@@ -229,7 +229,7 @@ def _service(
     return AuthUxService(
         config=_config(tmp_path, profiles=profiles),
         bindings=store,
-        observe=lambda repo_id: resolved,
+        observe=lambda repo_id, selector: resolved,
         api=api,
         transport=transport,
         commits=commits,
@@ -297,6 +297,60 @@ def test_profile_inspect_returns_safe_metadata_and_no_credential_reference(
 # ---------------------------------------------------------------------------
 # Resolution and bindings, against a real store
 # ---------------------------------------------------------------------------
+
+
+def test_repository_observation_receives_the_exact_selector(tmp_path: Path) -> None:
+    calls: list[tuple[str, AuthProfileSelector]] = []
+    store = JsonRepositoryBindingStore(tmp_path / "state", FcntlLockManager(tmp_path / "locks"))
+
+    def observe(repo_id: str, selector: AuthProfileSelector) -> RepositoryIdentityObservation:
+        calls.append((repo_id, selector))
+        return _observation()
+
+    service = AuthUxService(
+        config=_config(
+            tmp_path,
+            profiles={
+                "automation": _profile_config("automation", actor_class=ActorClass.AUTONOMOUS_AGENT)
+            },
+        ),
+        bindings=store,
+        observe=observe,
+    )
+    selector = AuthProfileSelector("automation", RequestedActorClass.AGENT)
+
+    service.resolve(repo_id="demo", selector=selector)
+
+    assert calls == [("demo", selector)]
+
+
+def test_whoami_uses_the_profile_bound_for_the_requested_actor_role(tmp_path: Path) -> None:
+    service = _service(
+        tmp_path,
+        profiles={
+            "personal": _profile_config("personal"),
+            "automation": _profile_config("automation", actor_class=ActorClass.AUTONOMOUS_AGENT),
+        },
+    )
+    service._bindings.create(
+        RepositoryIdentityBinding(
+            provider=RepositoryProvider.GITHUB,
+            repository_id="987654",
+            canonical_name="github.com/acme/demo",
+            human_profile_id="personal",
+            agent_profile_id="automation",
+            config_revision=_SHA,
+        )
+    )
+
+    result = service.whoami(
+        repo_id="demo",
+        selector=AuthProfileSelector("automation", RequestedActorClass.AGENT),
+        checks=(AuthSurface.REPOSITORY_BINDING, AuthSurface.API),
+    )
+
+    assert result.profile_id == "automation"
+    assert result.surfaces[1].profile_id == "automation"
 
 
 def test_resolve_reports_a_proposal_without_writing_a_binding(tmp_path: Path) -> None:
@@ -564,7 +618,7 @@ def test_a_binding_from_another_configuration_revision_blocks_the_binding_surfac
     drifted = AuthUxService(
         config=service._config,
         bindings=service._bindings,
-        observe=lambda repo_id: _observation(config_revision="d" * 64),
+        observe=lambda repo_id, selector: _observation(config_revision="d" * 64),
     )
 
     surfaces = {item.surface: item for item in drifted.whoami(repo_id="demo").surfaces}
@@ -733,7 +787,8 @@ def test_doctor_observes_the_repository_once(tmp_path: Path) -> None:
     calls: list[str] = []
     store = JsonRepositoryBindingStore(tmp_path / "state", FcntlLockManager(tmp_path / "locks"))
 
-    def observe(repo_id: str) -> RepositoryIdentityObservation:
+    def observe(repo_id: str, selector: AuthProfileSelector) -> RepositoryIdentityObservation:
+        del selector
         calls.append(repo_id)
         return _observation()
 
