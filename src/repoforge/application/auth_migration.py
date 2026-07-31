@@ -59,7 +59,10 @@ _MIGRATED_CAPABILITIES = (
 _HELPER_KEYS = ("credential.helper",)
 _AUTHOR_KEYS = ("user.email", "user.name")
 _SIGNER_KEYS = ("user.signingkey", "commit.gpgsign", "gpg.format")
+#: Git's own truthy spellings for an enabled commit signer.
+_SIGNING_TRUE = {"true", "yes", "on", "1"}
 _REMOTE_KEY = "remote.origin.url"
+_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _NON_ENVIRONMENT = re.compile(r"[^A-Z0-9]+")
 _REMOTE_TARGET = re.compile(
     r"^(?:https://|ssh://(?:[^@/]+@)?|(?:[^@/]+@))?(?P<host>[A-Za-z0-9.-]+)[:/]"
@@ -141,12 +144,20 @@ class AuthMigrationService:
 
     # -- public surface ------------------------------------------------------
 
-    def inspect(self, *, repo_id: str) -> AuthMigrationPlan:
+    def inspect(self, *, repo_id: str, login: str | None = None) -> AuthMigrationPlan:
         """Report what could be adopted and what a human still has to decide."""
 
-        return self._gather(repo_id).plan
+        return self._gather(repo_id, login=login).plan
 
-    def apply(self, *, repo_id: str, plan_id: str, plan_hash: str, actor: str) -> dict[str, object]:
+    def apply(
+        self,
+        *,
+        repo_id: str,
+        plan_id: str,
+        plan_hash: str,
+        actor: str,
+        login: str | None = None,
+    ) -> dict[str, object]:
         """Re-prove every input, then write exactly one reviewed configuration generation.
 
         Adopting an identity widens what the runtime may act as, which the capability-delta
@@ -161,7 +172,7 @@ class AuthMigrationService:
                 "An approving operator must be recorded for a migration apply.",
                 next_action="Re-run the command as the operator who reviewed the plan.",
             )
-        gathered = self._gather(repo_id)
+        gathered = self._gather(repo_id, login=login)
         if not gathered.candidates and not gathered.already_migrated:
             raise _failure(
                 ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND,
@@ -197,7 +208,7 @@ class AuthMigrationService:
 
     # -- gathering -----------------------------------------------------------
 
-    def _gather(self, repo_id: str) -> _Gathered:
+    def _gather(self, repo_id: str, *, login: str | None = None) -> _Gathered:
         source_text = self._store.read_source_text()
         source = parse_source(source_text)
         current = self._store.current()
@@ -216,6 +227,21 @@ class AuthMigrationService:
                 next_action="Run `rf config inspect` to list the configured repositories.",
             )
         candidates = self._accounts.candidates(host=self._host)
+        if login is not None:
+            if _LOGIN.fullmatch(login) is None:
+                raise _failure(
+                    ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND,
+                    f"The requested login {login!r} is not a bounded GitHub login.",
+                    next_action="Run `rf auth import gh` to list the configured accounts.",
+                )
+            narrowed = tuple(item for item in candidates if item.login == login)
+            if len(narrowed) != 1:
+                raise _failure(
+                    ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND,
+                    f"No locally configured account matches login {login!r} for {self._host}.",
+                    next_action="Run `rf auth import gh` to list the configured accounts.",
+                )
+            candidates = narrowed
         selected_login = candidates[0].login if len(candidates) == 1 else None
         observation = self._observe(repo_id, selected_login)
         repo_path = Path(repository.path)
@@ -239,12 +265,20 @@ class AuthMigrationService:
                 )
             )
 
-        findings.extend(self._ambient_findings(repo_id, repo_path, observation))
         verified: NamedAccountCandidate | None = None
         ssh_candidate: SshAliasCandidate | None = None
+        transport_kind: str | None = None
 
         if already_migrated:
-            pass
+            existing = next(
+                (
+                    profile
+                    for profile in source.auth_profiles
+                    if profile.repository_id == observation.repository_id
+                ),
+                None,
+            )
+            transport_kind = existing.transport_kind if existing is not None else None
         elif not candidates:
             findings.append(
                 AuthMigrationFinding(
@@ -295,7 +329,12 @@ class AuthMigrationService:
                     )
                 )
             ssh_candidate = self._ssh_candidate(observation, findings)
+            transport_kind = "ssh" if ssh_candidate is not None else "https"
             changes.extend(self._proposed_changes(repo_id, observation, verified, ssh_candidate))
+
+        findings.extend(
+            self._ambient_findings(repo_id, repo_path, observation, transport_kind=transport_kind)
+        )
 
         finding_tuple = tuple(findings[:64])
         change_tuple = tuple(changes[:64])
@@ -381,6 +420,8 @@ class AuthMigrationService:
         repo_id: str,
         repo_path: Path,
         observation: RepositoryIdentityObservation,
+        *,
+        transport_kind: str | None,
     ) -> tuple[AuthMigrationFinding, ...]:
         findings: list[AuthMigrationFinding] = []
         ambient_names = ambient_token_environment_names(self._ambient.environment_names())
@@ -400,19 +441,11 @@ class AuthMigrationService:
         for key in _HELPER_KEYS:
             observed = self._ambient.git_config_values(repo_path, key)
             if observed:
-                findings.append(
-                    AuthMigrationFinding(
-                        code=AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED,
-                        severity=AuthMigrationSeverity.BLOCKING,
-                        subject=key,
-                        detail=(
-                            f"{key} is configured in "
-                            + ", ".join(origin for origin, _value in observed)
-                            + ", so Git could supply an unreviewed credential."
-                        ),
-                        recovery_actions=(RecoveryAction(RecoveryActionKind.REAUTHORIZE),),
-                    )
+                helper_finding = self._credential_helper_finding(
+                    key, observed, transport_kind=transport_kind
                 )
+                if helper_finding is not None:
+                    findings.append(helper_finding)
         for key in _AUTHOR_KEYS:
             observed = self._ambient.git_config_values(repo_path, key)
             if len({value for _origin, value in observed}) > 1:
@@ -434,14 +467,14 @@ class AuthMigrationService:
             for key in _SIGNER_KEYS
             if (observed := self._ambient.git_config_values(repo_path, key))
         ]
-        if signer_scopes:
+        if _signing_is_active(signer_scopes):
             findings.append(
                 AuthMigrationFinding(
                     code=AuthMigrationFindingCode.COMMIT_SIGNER_CONFLICT,
                     severity=AuthMigrationSeverity.BLOCKING,
                     subject=repo_id,
                     detail=(
-                        "Signing configuration is already in force ("
+                        "Signing is actually enabled ("
                         + ", ".join(key for key, _observed in signer_scopes)
                         + "); a migrated profile must not silently change what signs a commit."
                     ),
@@ -450,6 +483,56 @@ class AuthMigrationService:
             )
         findings.extend(self._remote_findings(repo_path, observation))
         return tuple(findings)
+
+    def _credential_helper_finding(
+        self,
+        key: str,
+        observed: tuple[tuple[str, str], ...],
+        *,
+        transport_kind: str | None,
+    ) -> AuthMigrationFinding | None:
+        """Decide whether a declared credential helper can affect the proposed transport.
+
+        An ambient helper only matters if an execution path the migration proposes can actually
+        consult it. The pinned SSH transport never reads credential helpers, and the isolated
+        HTTPS transport resets the ambient helper chain and installs an operation-scoped reviewed
+        helper, so a declaration in those scopes is evidence, not a blocker. Only when no
+        transport can be proposed yet does a declared helper remain blocking, because then git
+        could still run with the ambient chain intact.
+        """
+
+        origins = ", ".join(origin for origin, _value in observed)
+        if transport_kind == "ssh":
+            return AuthMigrationFinding(
+                code=AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED,
+                severity=AuthMigrationSeverity.INFO,
+                subject=key,
+                detail=(
+                    f"{key} is configured in {origins}, but the proposed SSH transport pins an "
+                    "identity file and never consults credential helpers, so it cannot supply an "
+                    "unreviewed credential."
+                ),
+            )
+        if transport_kind == "https":
+            return AuthMigrationFinding(
+                code=AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED,
+                severity=AuthMigrationSeverity.INFO,
+                subject=key,
+                detail=(
+                    f"{key} is configured in {origins}, but the proposed isolated HTTPS "
+                    "transport resets the ambient helper chain and installs an operation-scoped "
+                    "reviewed helper, so it cannot supply an unreviewed credential."
+                ),
+            )
+        return AuthMigrationFinding(
+            code=AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED,
+            severity=AuthMigrationSeverity.BLOCKING,
+            subject=key,
+            detail=(
+                f"{key} is configured in {origins}, so Git could supply an unreviewed credential."
+            ),
+            recovery_actions=(RecoveryAction(RecoveryActionKind.REAUTHORIZE),),
+        )
 
     def _remote_findings(
         self, repo_path: Path, observation: RepositoryIdentityObservation
@@ -645,3 +728,20 @@ class AuthMigrationService:
                 "Ask the operator to run `rf runtime reload` so the reviewed profile is active."
             ),
         }
+
+
+def _signing_is_active(signer_scopes: list[tuple[str, tuple[tuple[str, str], ...]]]) -> bool:
+    """Whether a signing key or an enabled gpgSign makes a signer actually matter.
+
+    `gpg.format` alone only names a format; `commit.gpgsign=false` explicitly disables
+    signing, so neither one puts a signer "in force". A configured `user.signingkey` or a
+    truthy `commit.gpgsign` does.
+    """
+
+    for key, observed in signer_scopes:
+        values = [value.strip().lower() for _origin, value in observed]
+        if key == "user.signingkey" and any(values):
+            return True
+        if key == "commit.gpgsign" and any(value in _SIGNING_TRUE for value in values):
+            return True
+    return False

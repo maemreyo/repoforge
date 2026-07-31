@@ -142,7 +142,7 @@ class Migration:
     def __init__(self) -> None:
         self.applied: list[dict[str, str]] = []
 
-    def inspect(self, *, repo_id: str) -> Any:
+    def inspect(self, *, repo_id: str, login: str | None = None) -> Any:
         from repoforge.domain.auth_migration import build_auth_migration_plan
 
         return build_auth_migration_plan(
@@ -151,9 +151,23 @@ class Migration:
             config_generation=1,
         )
 
-    def apply(self, *, repo_id: str, plan_id: str, plan_hash: str, actor: str) -> dict[str, object]:
+    def apply(
+        self,
+        *,
+        repo_id: str,
+        plan_id: str,
+        plan_hash: str,
+        actor: str,
+        login: str | None = None,
+    ) -> dict[str, object]:
         self.applied.append(
-            {"repo_id": repo_id, "plan_id": plan_id, "plan_hash": plan_hash, "actor": actor}
+            {
+                "repo_id": repo_id,
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+                "actor": actor,
+                "login": login,
+            }
         )
         return {"status": "applied", "generation": 2}
 
@@ -452,8 +466,55 @@ def test_migrate_apply_records_the_operator_who_reviewed_the_plan(
             "plan_id": "authmig-1",
             "plan_hash": "b" * 64,
             "actor": "reviewing-operator",
+            "login": None,
         }
     ]
+
+
+def test_migrate_apply_passes_the_selected_login_to_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER", "reviewing-operator")
+    migration = Migration()
+
+    code, _payload = _run(
+        tmp_path,
+        [
+            "auth",
+            "migrate",
+            "apply",
+            "demo",
+            "--plan-id",
+            "authmig-1",
+            "--plan-hash",
+            "b" * 64,
+            "--login",
+            "acme-operator",
+        ],
+        migration=migration,
+    )
+
+    assert code == 0
+    assert migration.applied == [
+        {
+            "repo_id": "demo",
+            "plan_id": "authmig-1",
+            "plan_hash": "b" * 64,
+            "actor": "reviewing-operator",
+            "login": "acme-operator",
+        }
+    ]
+
+
+def test_migrate_inspect_passes_the_selected_login_to_the_service(
+    tmp_path: Path,
+) -> None:
+    code, payload = _run(
+        tmp_path, ["auth", "migrate", "inspect", "demo", "--login", "acme-operator"]
+    )
+
+    assert code == 3  # the double's plan is not ready, so inspect still exits 3
+    assert isinstance(payload, dict) and payload["ready"] is False
 
 
 # ---------------------------------------------------------------------------

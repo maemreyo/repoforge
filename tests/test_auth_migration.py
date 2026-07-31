@@ -10,12 +10,15 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import tomli as tomllib
 
 from repoforge.adapters.configuration import ConfigGenerationStore
+from repoforge.adapters.git.ambient_auth import GitAmbientAuthConflictReader
 from repoforge.adapters.locking import FcntlLockManager
+from repoforge.adapters.subprocess.command_executor import SubprocessCommandExecutor
 from repoforge.application.auth_migration import AuthMigrationService
 from repoforge.application.configuration.document import parse_resolved, render_resolved
 from repoforge.application.configuration.source import (
@@ -24,6 +27,7 @@ from repoforge.application.configuration.source import (
     parse_source,
     render_source,
 )
+from repoforge.config import DEFAULT_ALLOWED_ENVIRONMENT, ServerConfig
 from repoforge.domain.auth_migration import (
     AuthMigrationChangeKind,
     AuthMigrationFindingCode,
@@ -145,7 +149,7 @@ def _service(
     *,
     accounts: Accounts | None = None,
     ssh: Ssh | None = None,
-    ambient: Ambient | None = None,
+    ambient: Any | None = None,
     observation: RepositoryIdentityObservation | None = None,
     source: SourceConfiguration | None = None,
     observe: Callable[[str, str | None], RepositoryIdentityObservation] | None = None,
@@ -167,6 +171,30 @@ def _service(
         ambient=ambient or Ambient(),
         observe=observe or (lambda repo_id, login: resolved_observation),
     )
+
+
+def _real_ambient_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> GitAmbientAuthConflictReader:
+    """A real subprocess-backed ambient reader with a temporary Git system config.
+
+    `GIT_CONFIG_SYSTEM` points at a throwaway file that declares the same system-scope
+    `credential.helper` a stock macOS install ships, and `HOME` is redirected so the probe
+    cannot read the developer's real global Git configuration. The reader executes the real
+    `git config --show-origin --get-all` probe through `SubprocessCommandExecutor`, so this
+    is integration coverage, not a double.
+    """
+
+    system_config = tmp_path / "system-gitconfig"
+    system_config.write_text("[credential]\n\thelper = osxkeychain\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(system_config))
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    server = ServerConfig(
+        tmp_path / "workspaces",
+        tmp_path / "state",
+        allowed_environment=(*DEFAULT_ALLOWED_ENVIRONMENT, "GIT_CONFIG_SYSTEM"),
+    )
+    return GitAmbientAuthConflictReader(SubprocessCommandExecutor(server))
 
 
 def _personal(active: bool = False, login: str = "acme-operator") -> NamedAccountCandidate:
@@ -243,6 +271,46 @@ def test_multiple_named_accounts_require_manual_remediation(tmp_path: Path) -> N
     assert not any(call.startswith("verify:") for call in accounts.calls)
 
 
+def test_inspect_with_login_selects_one_account_among_many(tmp_path: Path) -> None:
+    accounts = Accounts((_personal(), _personal(login="acme-bot", active=True)))
+    service = _service(tmp_path, accounts=accounts)
+
+    plan = service.inspect(repo_id="demo", login="acme-operator")
+
+    assert AuthMigrationFindingCode.NAMED_ACCOUNT_AMBIGUOUS not in {
+        finding.code for finding in plan.findings
+    }
+    assert plan.ready is True
+    assert {change.profile_id for change in plan.changes} == {"acme-operator"}
+    assert accounts.calls.count("verify:github.com:acme-operator") == 1
+    assert accounts.calls.count("verify:github.com:acme-bot") == 0
+
+
+def test_inspect_with_a_different_login_binds_a_different_plan(
+    tmp_path: Path,
+) -> None:
+    accounts = Accounts((_personal(), _personal(login="acme-bot", active=True)))
+    service = _service(tmp_path, accounts=accounts)
+
+    operator = service.inspect(repo_id="demo", login="acme-operator")
+    bot = service.inspect(repo_id="demo", login="acme-bot")
+
+    assert operator.ready is True and bot.ready is True
+    assert operator.plan_id != bot.plan_id
+    assert operator.plan_hash != bot.plan_hash
+    assert {change.profile_id for change in operator.changes} == {"acme-operator"}
+    assert {change.profile_id for change in bot.changes} == {"acme-bot"}
+
+
+def test_inspect_with_an_unknown_login_fails_closed(tmp_path: Path) -> None:
+    service = _service(tmp_path, accounts=Accounts((_personal(),)))
+
+    with pytest.raises(RepoForgeError) as failure:
+        service.inspect(repo_id="demo", login="absent-user")
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND
+
+
 def test_migration_observation_is_scoped_to_one_named_account_or_local_only(
     tmp_path: Path,
 ) -> None:
@@ -290,7 +358,7 @@ def test_a_different_globally_active_account_is_reported_but_never_selected(
     assert {change.profile_id for change in inactive_plan.changes} == {"acme-operator"}
 
 
-def test_ambient_tokens_and_credential_helpers_block_a_plan(tmp_path: Path) -> None:
+def test_ambient_tokens_block_while_neutralized_helpers_are_reported(tmp_path: Path) -> None:
     ambient = Ambient(
         environment=("GH_TOKEN", "PATH", "GITHUB_TOKEN"),
         git_config={
@@ -310,16 +378,92 @@ def test_ambient_tokens_and_credential_helpers_block_a_plan(tmp_path: Path) -> N
         if finding.severity is AuthMigrationSeverity.BLOCKING
     }
     assert AuthMigrationFindingCode.AMBIENT_TOKEN_ENVIRONMENT in blocking
-    assert AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED in blocking
-    assert plan.ready is False
     # The ambient names are reported; their values never are.
     detail = blocking[AuthMigrationFindingCode.AMBIENT_TOKEN_ENVIRONMENT].detail
     assert "GH_TOKEN" in detail and "GITHUB_TOKEN" in detail
     assert "PATH" not in detail
+    # The credential helper is still declared, but the proposed isolated HTTPS transport
+    # resets the ambient helper chain, so it is reported as evidence, never as a blocker.
+    helper = [
+        finding
+        for finding in plan.findings
+        if finding.code is AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED
+    ]
+    assert len(helper) == 1
+    assert helper[0].severity is AuthMigrationSeverity.INFO
     # Both scopes of the helper are named so the operator knows where to look.
-    helper_detail = blocking[AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED].detail
-    assert "/home/demo/.gitconfig" in helper_detail
-    assert "/repos/demo/.git/config" in helper_detail
+    assert "/home/demo/.gitconfig" in helper[0].detail
+    assert "/repos/demo/.git/config" in helper[0].detail
+    assert plan.ready is False  # ambient tokens still block
+
+
+def test_system_scope_credential_helper_is_neutralized_by_a_pinned_ssh_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ambient = _real_ambient_reader(tmp_path, monkeypatch)
+    ssh = Ssh(
+        SshAliasCandidate(
+            alias="github-work",
+            hostname="github.com",
+            identity_file="/home/demo/.ssh/id_ed25519_work",
+            user="git",
+        )
+    )
+    service = _service(tmp_path, accounts=Accounts((_personal(),)), ambient=ambient, ssh=ssh)
+
+    plan = service.inspect(repo_id="demo")
+
+    helper = [
+        finding
+        for finding in plan.findings
+        if finding.code is AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED
+    ]
+    assert len(helper) == 1
+    # SSH transports never consult credential helpers, so osxkeychain cannot supply a
+    # credential to the pinned identity file: evidence, not a blocker.
+    assert helper[0].severity is AuthMigrationSeverity.INFO
+    assert "osxkeychain" in helper[0].detail or "credential.helper" in helper[0].detail
+    assert plan.ready is True
+
+
+def test_system_scope_credential_helper_is_neutralized_by_isolated_https_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ambient = _real_ambient_reader(tmp_path, monkeypatch)
+    # The default Ssh() double raises, so the plan proposes the isolated HTTPS transport.
+    service = _service(tmp_path, accounts=Accounts((_personal(),)), ambient=ambient)
+
+    plan = service.inspect(repo_id="demo")
+
+    helper = [
+        finding
+        for finding in plan.findings
+        if finding.code is AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED
+    ]
+    assert len(helper) == 1
+    assert helper[0].severity is AuthMigrationSeverity.INFO
+    assert plan.ready is True
+
+
+def test_credential_helper_stays_blocking_while_the_account_is_ambiguous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Until the operator names the account, no transport can be proposed, so the ambient
+    # helper could still reach whatever git runs: fail closed.
+    ambient = _real_ambient_reader(tmp_path, monkeypatch)
+    accounts = Accounts((_personal(), _personal(login="acme-bot", active=True)))
+    service = _service(tmp_path, accounts=accounts, ambient=ambient)
+
+    plan = service.inspect(repo_id="demo")
+
+    helper = [
+        finding
+        for finding in plan.findings
+        if finding.code is AuthMigrationFindingCode.CREDENTIAL_HELPER_CONFIGURED
+    ]
+    assert len(helper) == 1
+    assert helper[0].severity is AuthMigrationSeverity.BLOCKING
+    assert plan.ready is False
 
 
 def test_author_and_signer_conflicts_block_a_plan(tmp_path: Path) -> None:
@@ -344,6 +488,48 @@ def test_author_and_signer_conflicts_block_a_plan(tmp_path: Path) -> None:
     }
     assert AuthMigrationFindingCode.COMMIT_IDENTITY_CONFLICT in codes
     assert AuthMigrationFindingCode.COMMIT_SIGNER_CONFLICT in codes
+    assert plan.ready is False
+
+
+def test_inert_signer_configuration_does_not_block_a_plan(tmp_path: Path) -> None:
+    # Git's own defaults (commit.gpgsign=false, gpg.format=openpgp) do not make a signer
+    # "in force": nothing is signing commits, so a migrated profile changes nothing.
+    ambient = Ambient(
+        git_config={
+            "commit.gpgsign": (("file:/home/demo/.gitconfig", "false"),),
+            "gpg.format": (("file:/home/demo/.gitconfig", "openpgp"),),
+        }
+    )
+    service = _service(tmp_path, accounts=Accounts((_personal(),)), ambient=ambient)
+
+    plan = service.inspect(repo_id="demo")
+
+    assert AuthMigrationFindingCode.COMMIT_SIGNER_CONFLICT not in {
+        finding.code for finding in plan.findings
+    }
+    assert plan.ready is True
+
+
+def test_a_disabled_gpgsign_value_still_blocks_a_plan(tmp_path: Path) -> None:
+    # A signing key is configured, so even an explicit gpgSign=false leaves a real signer
+    # installed that a migrated profile must not silently override.
+    ambient = Ambient(
+        git_config={
+            "user.signingkey": (("file:/home/demo/.gitconfig", "ABC123"),),
+            "commit.gpgsign": (("file:/home/demo/.gitconfig", "false"),),
+        }
+    )
+    service = _service(tmp_path, accounts=Accounts((_personal(),)), ambient=ambient)
+
+    plan = service.inspect(repo_id="demo")
+
+    signer = [
+        finding
+        for finding in plan.findings
+        if finding.code is AuthMigrationFindingCode.COMMIT_SIGNER_CONFLICT
+    ]
+    assert len(signer) == 1
+    assert signer[0].severity is AuthMigrationSeverity.BLOCKING
     assert plan.ready is False
 
 
@@ -477,6 +663,45 @@ def test_apply_refuses_a_plan_that_still_needs_a_human(tmp_path: Path) -> None:
 
     assert failure.value.code is ErrorCode.INPUT_REQUIRED
     assert service._store.current() is not None
+    assert service._store.current().generation == 1
+
+
+def test_apply_with_the_reviewed_login_reproves_the_same_contract(tmp_path: Path) -> None:
+    accounts = Accounts((_personal(), _personal(login="acme-bot", active=True)))
+    service = _service(tmp_path, accounts=accounts)
+    plan = service.inspect(repo_id="demo", login="acme-operator")
+    assert plan.ready is True
+
+    result = service.apply(
+        repo_id="demo",
+        plan_id=plan.plan_id,
+        plan_hash=plan.plan_hash,
+        actor="operator",
+        login="acme-operator",
+    )
+
+    assert result["status"] == "applied"
+    assert result["generation"] == 2
+    assert accounts.calls.count("verify:github.com:acme-operator") == 2
+    persisted = parse_source(service._store.read_source_text())
+    assert [profile.profile_id for profile in persisted.auth_profiles] == ["acme-operator"]
+
+
+def test_apply_with_a_different_login_refuses_the_plan(tmp_path: Path) -> None:
+    accounts = Accounts((_personal(), _personal(login="acme-bot", active=True)))
+    service = _service(tmp_path, accounts=accounts)
+    plan = service.inspect(repo_id="demo", login="acme-operator")
+
+    with pytest.raises(RepoForgeError) as failure:
+        service.apply(
+            repo_id="demo",
+            plan_id=plan.plan_id,
+            plan_hash=plan.plan_hash,
+            actor="operator",
+            login="acme-bot",
+        )
+
+    assert failure.value.code is ErrorCode.CONFIG_STALE
     assert service._store.current().generation == 1
 
 

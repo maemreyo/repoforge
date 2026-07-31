@@ -191,10 +191,14 @@ rf auth lease revoke op-1234 --expected-revision 2 --profile-id personal
 rf auth import gh --login example-user
 rf auth import ssh github-work
 rf auth migrate inspect demo
+rf auth migrate inspect demo --login example-user   # pick one of several stored accounts
 rf auth migrate apply demo --plan-id … --plan-hash …
+rf auth migrate apply demo --login example-user --plan-id … --plan-hash …
 ```
 
 Reads need no flags when one profile is eligible. Writes must name the exact state they were reviewed against: a binding revision, a lease revision, or a plan hash. `whoami` and `doctor` exit 3 when a required surface is unsatisfied or a finding blocks. Clearing the final role on a binding is refused — a binding with no profile is not representable, and dropping the binding entirely is a different decision than narrowing its actor classes.
+
+`rf auth migrate inspect --login <login>` narrows discovery to exactly that stored `gh` account, so a machine with several accounts can adopt one without logging the others out. The plan is bound to the selected login through its proposed profile and transport changes, so `apply` must re-prove the same login; a different or missing login yields a stale plan.
 
 `rf auth` runs outside the managed runtime, so it composes no per-surface inspectors and no durable operation identity store. Those surfaces report `unavailable`; they never answer from whatever account happens to be active.
 
@@ -223,7 +227,7 @@ Discovery is strictly read-only and reports ambient state rather than adopting i
 - `GitAmbientAuthConflictReader` reads `git config --show-origin --get-all <key>` and environment variable *names*.
 - `GhCliRepositoryObserver` derives the local remote with `git config --local`, then reads the provider's answer under the explicitly selected named-account `ProcessAuthContext` — current name and host, then the stable numeric ID. A wrong globally active `gh` account and inherited token variables cannot influence observation; a rename still observes as the same repository.
 
-`AuthMigrationService.inspect()` binds its plan to the exact source digest and configuration generation it saw. `apply()` re-gathers every input and distinguishes a vanished account, an ambiguous one, a stale plan, and one that still needs a human. These findings **block** a plan: ambient GitHub token variables, credential helpers, conflicting authors, signing already in force, and a remote that disagrees with the observed target. Ambiguous SSH configuration falls back to an explicitly proposed HTTPS transport rather than a guess.
+`AuthMigrationService.inspect()` binds its plan to the exact source digest and configuration generation it saw. `apply()` re-gathers every input and distinguishes a vanished account, an ambiguous one, a stale plan, and one that still needs a human. Findings are evaluated against the transport the plan proposes: ambient GitHub token variables always block, a declared credential helper blocks only while no transport can be proposed (the pinned SSH transport never consults helpers, and the isolated HTTPS transport resets the ambient helper chain), and signing blocks only when a signing key or an enabled `commit.gpgsign` makes a signer actually active — Git's own `commit.gpgsign=false` plus `gpg.format=openpgp` defaults do not. A remote that disagrees with the observed target blocks. Ambiguous SSH configuration falls back to an explicitly proposed HTTPS transport rather than a guess.
 
 Because adopting an identity is a capability expansion, the plan hash the operator transcribes after reading the inspection is recorded as their explicit approval of exactly that content.
 
