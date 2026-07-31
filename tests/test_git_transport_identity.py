@@ -14,6 +14,12 @@ from repoforge.adapters.git.transport import GitTransportRouter
 from repoforge.adapters.subprocess import SubprocessCommandExecutor
 from repoforge.config import ServerConfig
 from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.git_remote_identity import (
+    ReviewedSshEndpoint,
+    SshAliasDefinition,
+    SshKeyProof,
+    SshPrincipalProof,
+)
 from repoforge.domain.git_transport_identity import (
     GitTransportAccess,
     GitTransportActorEvidence,
@@ -27,6 +33,7 @@ from repoforge.ports.command import CommandResult
 _SHA = "a" * 64
 _PERSONAL_TOKEN = "personal-transport-token-111"
 _COMPANY_TOKEN = "company-transport-token-222"
+_NOW = "2026-08-01T00:00:00+00:00"
 
 
 class TransportExecutor:
@@ -41,6 +48,91 @@ class TransportExecutor:
             if self.results:
                 return self.results.pop(0)
         return CommandResult(tuple(argv), str(kwargs["cwd"]), 0, "", "")
+
+
+class FakeIdentityMaterial:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> FakeIdentityMaterial:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+
+class FakeMaterials:
+    def __init__(self, material: FakeIdentityMaterial) -> None:
+        self.material = material
+        self.keys: list[SshKeyProof] = []
+
+    def open_verified(self, expected: SshKeyProof) -> FakeIdentityMaterial:
+        self.keys.append(expected)
+        return self.material
+
+
+class FakeEndpointRevalidator:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, str, ReviewedSshEndpoint]] = []
+
+    def revalidate(
+        self,
+        *,
+        cwd: Path,
+        raw_remote_url: str,
+        expected: ReviewedSshEndpoint,
+    ) -> ReviewedSshEndpoint:
+        self.calls.append((cwd, raw_remote_url, expected))
+        return expected
+
+
+def _reviewed_endpoint(
+    raw_url: str = "git@github-work:acme/widgets.git",
+) -> ReviewedSshEndpoint:
+    fingerprint = "SHA256:" + "A" * 43
+    alias = SshAliasDefinition(
+        alias="github-work",
+        canonical_host="github.com",
+        user="git",
+        port=22,
+        identity_file="/home/demo/.ssh/id_rsa_work",
+        source_config_digest="b" * 64,
+        selected_block_digest="c" * 64,
+    )
+    key = SshKeyProof(
+        canonical_path=alias.identity_file,
+        public_key_fingerprint=fingerprint,
+        owner_uid=501,
+        mode=0o600,
+        observed_at=_NOW,
+    )
+    principal = SshPrincipalProof(
+        provider_host="github.com",
+        principal_kind="github_account",
+        principal_login="company-user",
+        expected_actor_id="123456",
+        key_fingerprint=fingerprint,
+        observed_at=_NOW,
+        proof_digest="d" * 64,
+    )
+    return ReviewedSshEndpoint(
+        schema_version=1,
+        raw_host="github-work",
+        canonical_host="github.com",
+        user="git",
+        port=22,
+        owner="acme",
+        repository="widgets",
+        raw_url_digest=hashlib.sha256(raw_url.encode("utf-8")).hexdigest(),
+        alias=alias,
+        key=key,
+        principal=principal,
+        proof_digest="e" * 64,
+    )
 
 
 def _context(
@@ -84,6 +176,7 @@ def _ssh_spec(
         GitTransportAccess.WRITE,
     ),
     identity_file: str = "/run/repoforge/identity-company",
+    endpoint: ReviewedSshEndpoint | None = None,
 ) -> GitTransportSpec:
     return GitTransportSpec(
         profile_id=profile_id,
@@ -93,7 +186,8 @@ def _ssh_spec(
         kind=GitTransportKind.SSH,
         credential_fingerprint=_SHA,
         allowed_access=access,
-        ssh_identity_file=identity_file,
+        ssh_identity_file=None if endpoint is not None else identity_file,
+        ssh_endpoint=endpoint,
     )
 
 
@@ -119,7 +213,16 @@ def _https_spec(
     )
 
 
-def test_ssh_transport_ignores_wrong_agent_and_pins_one_identity() -> None:
+def test_ssh_transport_revalidates_canonicalizes_and_cleans_material(
+    tmp_path: Path,
+) -> None:
+    raw_remote = "git@github-work:acme/widgets.git"
+    endpoint = _reviewed_endpoint(raw_remote)
+    material_path = tmp_path / "operation-key"
+    material_path.write_text("operation scoped key", encoding="utf-8")
+    material = FakeIdentityMaterial(material_path)
+    materials = FakeMaterials(material)
+    revalidator = FakeEndpointRevalidator()
     result = CommandResult(
         ("git",),
         "/repo",
@@ -129,25 +232,33 @@ def test_ssh_transport_ignores_wrong_agent_and_pins_one_identity() -> None:
     )
     executor = TransportExecutor([result])
 
-    evidence = GitTransportRouter(executor).ls_remote(
+    evidence = GitTransportRouter(
+        executor,
+        endpoint_revalidator=revalidator,
+        identity_materials=materials,
+    ).ls_remote(
         Path("/repo"),
-        "git@github.com:acme/widgets.git",
+        raw_remote,
         "refs/heads/main",
-        _ssh_spec(),
+        _ssh_spec(endpoint=endpoint),
         _context(),
     )
 
     call = executor.calls[0]
+    assert call["argv"][2] == endpoint.canonical_url()
     environment = call["environment"]
     ssh_command = environment["GIT_SSH_COMMAND"]
     assert "IdentitiesOnly=yes" in ssh_command
     assert "IdentityAgent=none" in ssh_command
     assert "BatchMode=yes" in ssh_command
     assert "-F /dev/null" in ssh_command
-    assert "/run/repoforge/identity-company" in ssh_command
+    assert str(material_path) in ssh_command
     assert "SSH_AUTH_SOCK" not in environment
     assert "SSH_AGENT_PID" not in environment
     assert "/tmp/wrong" not in ssh_command
+    assert revalidator.calls == [(Path("/repo"), raw_remote, endpoint)]
+    assert materials.keys == [endpoint.key]
+    assert material.closed is True
     assert evidence.access is GitTransportAccess.READ
     assert evidence.actor_evidence is GitTransportActorEvidence.UNOBSERVABLE
     assert evidence.observed_sha == "0123456789abcdef0123456789abcdef01234567"
@@ -285,7 +396,7 @@ def test_read_proof_and_write_capability_are_separate() -> None:
         (
             "git@enterprise.example:acme/widgets.git",
             _ssh_spec(),
-            ErrorCode.GIT_TRANSPORT_HOST_MISMATCH,
+            ErrorCode.GIT_TRANSPORT_MIGRATION_REQUIRED,
         ),
         (
             "https://oauth2:must-not-leak@github.com/acme/widgets.git",
@@ -362,19 +473,46 @@ def test_prompt_required_is_typed_and_never_retries_through_ambient_identity() -
 
 
 def test_transport_authentication_failure_is_typed_without_fallback() -> None:
+    raw_remote = "git@github-work:acme/widgets.git"
+    endpoint = _reviewed_endpoint(raw_remote)
+    material = FakeIdentityMaterial(Path("/run/repoforge/operation-key"))
+    materials = FakeMaterials(material)
+    revalidator = FakeEndpointRevalidator()
     executor = TransportExecutor(
         [CommandResult(("git",), "/repo", 128, "", "Permission denied (publickey).")]
     )
     with pytest.raises(RepoForgeError) as failure:
-        GitTransportRouter(executor).push(
+        GitTransportRouter(
+            executor,
+            endpoint_revalidator=revalidator,
+            identity_materials=materials,
+        ).push(
             Path("/repo"),
-            "git@github.com:acme/widgets.git",
+            raw_remote,
             "HEAD:refs/heads/company",
-            _ssh_spec(),
+            _ssh_spec(endpoint=endpoint),
             _context(),
         )
     assert failure.value.code is ErrorCode.GIT_TRANSPORT_AUTHENTICATION_FAILED
     assert len(executor.calls) == 1
+    assert executor.calls[0]["argv"][2] == endpoint.canonical_url()
+    assert material.closed is True
+
+
+def test_legacy_path_only_ssh_transport_requires_migration_before_git() -> None:
+    executor = TransportExecutor()
+
+    with pytest.raises(RepoForgeError) as failure:
+        GitTransportRouter(executor).ls_remote(
+            Path("/repo"),
+            "git@github.com:acme/widgets.git",
+            "refs/heads/main",
+            _ssh_spec(),
+            _context(),
+        )
+
+    assert failure.value.code is ErrorCode.GIT_TRANSPORT_MIGRATION_REQUIRED
+    assert executor.calls == []
 
 
 def test_transport_evidence_is_secret_free() -> None:

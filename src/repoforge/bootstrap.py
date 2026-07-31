@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import sys
 from dataclasses import dataclass, field, replace
@@ -53,6 +54,13 @@ from .adapters.git import (
     GitTransportRouter,
     SshCommandAliasDiscovery,
 )
+from .adapters.git.endpoint_identity import ReviewedSshEndpointAuthority
+from .adapters.git.remote_identity import (
+    ConstrainedGitRemoteParser,
+    ConstrainedSshConfigAliasResolver,
+    EffectiveUserPaths,
+)
+from .adapters.git.ssh_key_identity import FileSshKeyIdentity
 from .adapters.github import (
     CommandGitHubCapabilityPreflight,
     CommandGitHubCapabilityProbe,
@@ -65,6 +73,7 @@ from .adapters.github import (
     UnavailableGitHubAppInstallationTokenIssuer,
 )
 from .adapters.github.repository_observation import GhCliRepositoryObserver
+from .adapters.github.ssh_principal import GitHubSshPrincipalVerifier
 from .adapters.github.ticket_project import GhTicketProjectGateway
 from .adapters.hygiene import CommandHygieneGateway
 from .adapters.locking import FcntlLockManager as FcntlLockManager
@@ -159,7 +168,7 @@ from .adapters.subprocess import SubprocessCommandExecutor as SubprocessCommandE
 from .adapters.system import SystemClock as SystemClock
 from .adapters.system import UuidGenerator
 from .application.approvals import PendingPolicyChangeStore
-from .application.auth_migration import AuthMigrationService
+from .application.auth_migration import AuthMigrationService, RepositoryEndpointSnapshot
 from .application.auth_ux import AuthUxService, ObserveRepository
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
@@ -220,7 +229,7 @@ from .domain.repository_auth_broker import (
     ProcessAuthContext,
     RepositoryAuthBroker,
 )
-from .domain.repository_identity import AuthTargetKind
+from .domain.repository_identity import AuthTargetKind, RepositoryProvider
 from .domain.repository_identity_resolution import (
     RepositoryIdentityObservation,
     role_accepts_actor_class,
@@ -292,6 +301,7 @@ from .ports import (
     WorkspaceStore,
 )
 from .ports.auth_discovery import NamedAccountDiscovery, SshAliasDiscovery
+from .ports.auth_inspection import RepositoryObservationTarget
 from .ports.external_mutation_ledger import ExternalMutationLedger
 from .ports.filesystem_transaction import (
     FileTransactionFactory as ReceiptFileTransactionFactory,
@@ -554,9 +564,17 @@ def _observation_profile(
             next_action="Run `rf auth migrate inspect <repo-id>` before resolving an identity.",
         )
 
-    target = observer.target(repository)
-
     def eligible(configured: AuthProfileConfig) -> bool:
+        try:
+            target = observer.target(
+                repository,
+                expected_provider_host=configured.api_identity.host,
+                reviewed_ssh_endpoint=configured.transport.ssh_endpoint,
+            )
+        except RepoForgeError as exc:
+            if exc.code is ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH:
+                return False
+            raise
         provisional = RepositoryIdentityObservation(
             provider=target.provider,
             provider_host=target.provider_host,
@@ -679,9 +697,20 @@ def _runtime_observation_profile(
 ) -> AuthProfileConfig:
     """Select the exact profile used to prove stable identity before broker admission."""
 
-    target = observer.target(repository)
+    def target_for(configured: AuthProfileConfig) -> RepositoryObservationTarget:
+        return observer.target(
+            repository,
+            expected_provider_host=configured.api_identity.host,
+            reviewed_ssh_endpoint=configured.transport.ssh_endpoint,
+        )
 
     def eligible(configured: AuthProfileConfig) -> bool:
+        try:
+            target = target_for(configured)
+        except RepoForgeError as exc:
+            if exc.code is ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH:
+                return False
+            raise
         provisional = RepositoryIdentityObservation(
             provider=target.provider,
             provider_host=target.provider_host,
@@ -711,6 +740,7 @@ def _runtime_observation_profile(
                 "The selected auth profile is not eligible for this repository and actor role.",
                 next_action="Select an enabled profile whose boundary and actor role match.",
             )
+        target = target_for(configured)
         existing = bindings.read(target.provider_host, configured.api_identity.repository_id)
         if existing is not None:
             bound_profile = (
@@ -735,12 +765,6 @@ def _runtime_observation_profile(
     bound_matches: list[AuthProfileConfig] = []
     for envelope in bindings.list_bindings(max_records=500).records:
         binding = envelope.value
-        if (
-            binding.provider_host != target.provider_host
-            or binding.canonical_name.lower() != target.canonical_name.lower()
-            or binding.config_revision != config_revision
-        ):
-            continue
         profile_id = (
             binding.agent_profile_id
             if selector.actor_class is RequestedActorClass.AGENT
@@ -748,11 +772,19 @@ def _runtime_observation_profile(
         )
         configured = config.auth_profiles.get(profile_id or "")
         if (
-            configured is not None
-            and configured.api_identity.repository_id == binding.repository_id
-            and eligible(configured)
+            configured is None
+            or configured.api_identity.repository_id != binding.repository_id
+            or not eligible(configured)
         ):
-            bound_matches.append(configured)
+            continue
+        target = target_for(configured)
+        if (
+            binding.provider_host != target.provider_host
+            or binding.canonical_name.lower() != target.canonical_name.lower()
+            or binding.config_revision != config_revision
+        ):
+            continue
+        bound_matches.append(configured)
     if len(bound_matches) == 1:
         return bound_matches[0]
     if len(bound_matches) > 1:
@@ -796,8 +828,34 @@ def build_auth_command_dependencies(
     clock = system_clock()
     commands = SubprocessCommandExecutor(config.server)
     working_directory = cwd if cwd is not None else Path.cwd()
+    remote_parser = ConstrainedGitRemoteParser()
     ssh_discovery = SshCommandAliasDiscovery(commands, cwd=working_directory)
-    observer = GhCliRepositoryObserver(commands, clock=clock, ssh_discovery=ssh_discovery)
+    observer = GhCliRepositoryObserver(
+        commands,
+        clock=clock,
+        remote_parser=remote_parser,
+    )
+    effective_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
+    key_identity = FileSshKeyIdentity(
+        commands,
+        material_root=(config.server.state_root / "ssh-material").expanduser().resolve(),
+    )
+    endpoint_authority = ReviewedSshEndpointAuthority(
+        remote_parser=remote_parser,
+        aliases=ConstrainedSshConfigAliasResolver(
+            paths=EffectiveUserPaths(
+                home=effective_home,
+                ssh_config=effective_home / ".ssh" / "config",
+            )
+        ),
+        keys=key_identity,
+        principals=GitHubSshPrincipalVerifier(
+            commands,
+            materials=key_identity,
+            cwd=working_directory,
+        ),
+        clock=clock,
+    )
 
     def repository(repo_id: str) -> RepositoryConfig:
         repository = config.repositories.get(repo_id)
@@ -835,8 +893,10 @@ def build_auth_command_dependencies(
         try:
             observation = observer.observe(
                 selected_repository,
+                expected_provider_host=spec.host,
                 config_revision=config_revision,
                 context=context,
+                reviewed_ssh_endpoint=configured.transport.ssh_endpoint,
             )
         finally:
             secret.release()
@@ -848,35 +908,117 @@ def build_auth_command_dependencies(
             )
         return observation
 
+    def raw_migration_remote(selected_repository: RepositoryConfig) -> str:
+        inherited = commands.environment()
+        environment = {
+            key: inherited[key]
+            for key in ("PATH", "LANG", "LC_ALL")
+            if key in inherited and isinstance(inherited[key], str)
+        }
+        environment.update(
+            {
+                "HOME": str(working_directory / ".repoforge-empty-home"),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
+        result = commands.run_isolated(
+            [
+                "git",
+                "config",
+                "--local",
+                "--get",
+                f"remote.{selected_repository.remote}.url",
+            ],
+            cwd=selected_repository.path,
+            environment=environment,
+            secrets=(),
+            output_limit=16_384,
+        )
+        raw = result.stdout.strip()
+        if not raw:
+            raise _auth_observation_error(
+                ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,
+                "The configured repository remote is missing.",
+                next_action="Review the repository remote before migrating identity.",
+            )
+        return raw
+
+    def local_migration_observation(
+        selected_repository: RepositoryConfig,
+        raw_remote: str,
+        provider_host: str,
+    ) -> RepositoryIdentityObservation:
+        parsed = remote_parser.parse(raw_remote)
+        return RepositoryIdentityObservation(
+            provider=RepositoryProvider.GITHUB,
+            provider_host=provider_host,
+            repository_id="0",
+            canonical_name=f"{provider_host}/{parsed.owner}/{parsed.repository}",
+            exists=False,
+            observed_at=clock.now_iso(),
+            config_revision=config_revision,
+        )
+
     def observe_migration(repo_id: str, login: str | None) -> RepositoryIdentityObservation:
+        del login
         selected_repository = repository(repo_id)
-        if login is None:
-            target = observer.target(selected_repository)
-            return RepositoryIdentityObservation(
-                provider=target.provider,
-                provider_host=target.provider_host,
-                repository_id="0",
-                canonical_name=target.canonical_name,
-                exists=False,
-                observed_at=clock.now_iso(),
-                config_revision=config_revision,
+        raw_remote = raw_migration_remote(selected_repository)
+        return local_migration_observation(selected_repository, raw_remote, "github.com")
+
+    def resolve_migration_endpoint(
+        repo_id: str,
+        *,
+        provider_host: str,
+        login: str,
+        expected_actor_id: str,
+    ) -> RepositoryEndpointSnapshot:
+        selected_repository = repository(repo_id)
+        raw_remote = raw_migration_remote(selected_repository)
+        try:
+            remote, endpoint = endpoint_authority.resolve(
+                raw_remote,
+                provider_host=provider_host,
+                expected_login=login,
+                expected_actor_id=expected_actor_id,
+            )
+        except RepoForgeError as exc:
+            remote = remote_parser.parse(raw_remote)
+            return RepositoryEndpointSnapshot(
+                observation=local_migration_observation(
+                    selected_repository,
+                    raw_remote,
+                    provider_host,
+                ),
+                remote=remote,
+                ssh_endpoint=None,
+                blocking_code=exc.code,
+                blocking_detail=str(exc),
             )
         secret, context = _named_account_context(
             commands,
             cwd=working_directory,
             profile_id=login,
-            host="github.com",
+            host=provider_host,
             login=login,
             target_id=repo_id,
         )
         try:
-            return observer.observe(
+            observation = observer.observe(
                 selected_repository,
+                expected_provider_host=provider_host,
                 config_revision=config_revision,
                 context=context,
+                reviewed_ssh_endpoint=endpoint,
             )
         finally:
             secret.release()
+        return RepositoryEndpointSnapshot(
+            observation=observation,
+            remote=remote,
+            ssh_endpoint=endpoint,
+        )
 
     accounts = GhCliNamedAccountDiscovery(commands, cwd=working_directory)
     ssh = ssh_discovery
@@ -897,6 +1039,7 @@ def build_auth_command_dependencies(
             ssh=ssh,
             ambient=GitAmbientAuthConflictReader(commands),
             observe=observe_migration,
+            resolve_endpoint=resolve_migration_endpoint,
         ),
         accounts=accounts,
         ssh=ssh,
@@ -1404,10 +1547,32 @@ def build_application(
         policy_revision=policy_revision,
     )
     auth_broker = RepositoryAuthBroker(auth_provider)
+    production_remote_parser = ConstrainedGitRemoteParser()
+    effective_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
+    production_key_identity = FileSshKeyIdentity(
+        command,
+        material_root=(config.server.state_root / "ssh-material").expanduser().resolve(),
+    )
+    production_endpoint_authority = ReviewedSshEndpointAuthority(
+        remote_parser=production_remote_parser,
+        aliases=ConstrainedSshConfigAliasResolver(
+            paths=EffectiveUserPaths(
+                home=effective_home,
+                ssh_config=effective_home / ".ssh" / "config",
+            )
+        ),
+        keys=production_key_identity,
+        principals=GitHubSshPrincipalVerifier(
+            command,
+            materials=production_key_identity,
+            cwd=identity_cwd,
+        ),
+        clock=clock,
+    )
     repository_observer = GhCliRepositoryObserver(
         command,
         clock=clock,
-        ssh_discovery=SshCommandAliasDiscovery(command, cwd=identity_cwd),
+        remote_parser=production_remote_parser,
     )
 
     def observe_repository_identity(
@@ -1439,8 +1604,10 @@ def build_application(
             auth_context = session.process_context(command.environment())
             observation = repository_observer.observe(
                 repository,
+                expected_provider_host=configured.api_identity.host,
                 config_revision=config_revision,
                 context=auth_context,
+                reviewed_ssh_endpoint=configured.transport.ssh_endpoint,
             )
         if (
             observation.provider_host != configured.api_identity.host
@@ -1453,7 +1620,11 @@ def build_application(
             )
         return observation
 
-    git_transport_router = o.git_transport_router or GitTransportRouter(command)
+    git_transport_router = o.git_transport_router or GitTransportRouter(
+        command,
+        endpoint_revalidator=production_endpoint_authority,
+        identity_materials=production_key_identity,
+    )
     repository_identity_runtime = o.repository_identity_runtime or RepositoryIdentityRuntime(
         config=config,
         bindings=repository_bindings,

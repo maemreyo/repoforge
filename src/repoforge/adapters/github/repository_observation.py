@@ -1,14 +1,4 @@
-"""Observe one configured repository through an explicitly selected identity.
-
-Local Git supplies the configured remote target without consulting a GitHub account. The
-provider API then confirms that target under an operation-scoped ``ProcessAuthContext``. Global
-Git configuration, inherited SSH agents, ambient token variables, and the globally active
-``gh`` account are excluded from both commands.
-
-An SSH remote written with an alias (``git@github-work:...``) is resolved read-only with
-`ssh -G` so the API observes the canonical provider host while the raw alias is preserved on
-the target: the transport proposal pins the alias's own identity file.
-"""
+"""Observe one configured repository under an explicitly selected provider identity."""
 
 from __future__ import annotations
 
@@ -20,28 +10,19 @@ from typing import Any, Protocol
 
 from ...config import RepositoryConfig
 from ...domain.errors import ErrorCode, RepoForgeError
+from ...domain.git_remote_identity import GitRemoteKind, ParsedGitRemote, ReviewedSshEndpoint
 from ...domain.repository_auth_broker import ProcessAuthContext
 from ...domain.repository_identity import AuthTargetKind, RepositoryProvider
 from ...domain.repository_identity_resolution import RepositoryIdentityObservation
-from ...ports.auth_discovery import SshAliasDiscovery
 from ...ports.auth_inspection import RepositoryObservationTarget
 from ...ports.command import CommandResult
+from ...ports.git_remote_identity import GitRemoteParser
+from ..git.remote_identity import ConstrainedGitRemoteParser
 
 _SAFE_ENVIRONMENT_KEYS = ("PATH", "LANG", "LC_ALL")
-#: The public GitHub host needs no alias resolution; everything else on an SSH remote is
-#: resolved read-only so an unresolvable alias fails closed instead of reaching the API.
-_PUBLIC_GITHUB_HOST = "github.com"
 _HOST = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 _NAME_PART = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_HTTPS_REMOTE = re.compile(
-    r"^https://(?P<host>[A-Za-z0-9.-]+)/(?P<owner>[A-Za-z0-9_.-]+)/"
-    r"(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
-)
-_SSH_REMOTE = re.compile(
-    r"^(?:ssh://)?(?:[^@/:]+@)?(?P<host>[A-Za-z0-9.-]+)(?::|/)"
-    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
-)
 _MAX_OUTPUT_BYTES = 1_000_000
 _ABSENT_REPOSITORY_ID = "0"
 
@@ -77,26 +58,41 @@ def _unavailable(message: str, *, retryable: bool = False) -> RepoForgeError:
     )
 
 
+def _mismatch(message: str) -> RepoForgeError:
+    return RepoForgeError(
+        message,
+        code=ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,
+        retryable=False,
+        unchanged_state=(
+            "No GitHub API request was issued for an unproved transport endpoint.",
+            "No identity was resolved, bound, or used for a write.",
+        ),
+        safe_next_action="Review or migrate the repository SSH endpoint proof before retrying.",
+    )
+
+
 class GhCliRepositoryObserver:
-    """Confirm a local GitHub target using only an explicitly selected API context."""
+    """Confirm a GitHub target using only the host owned by the selected profile."""
 
     def __init__(
         self,
         executor: _IsolatedExecutor,
         *,
         clock: _Clock,
-        ssh_discovery: SshAliasDiscovery | None = None,
+        remote_parser: GitRemoteParser | None = None,
     ) -> None:
         self._executor = executor
         self._clock = clock
-        self._ssh_discovery = ssh_discovery
+        self._remote_parser = remote_parser or ConstrainedGitRemoteParser()
 
     def observe(
         self,
         repo: RepositoryConfig,
         *,
+        expected_provider_host: str,
         config_revision: str,
         context: ProcessAuthContext,
+        reviewed_ssh_endpoint: ReviewedSshEndpoint | None = None,
     ) -> RepositoryIdentityObservation:
         if not isinstance(config_revision, str) or _SHA256.fullmatch(config_revision) is None:
             raise RepoForgeError(
@@ -120,7 +116,11 @@ class GhCliRepositoryObserver:
                 unchanged_state=("No identity was resolved.",),
             )
 
-        target = self.target(repo)
+        target = self.target(
+            repo,
+            expected_provider_host=expected_provider_host,
+            reviewed_ssh_endpoint=reviewed_ssh_endpoint,
+        )
         exists = True
         repository_id = _ABSENT_REPOSITORY_ID
         owner = target.owner
@@ -140,10 +140,35 @@ class GhCliRepositoryObserver:
             exists=exists,
             observed_at=self._clock.now_iso(),
             config_revision=config_revision,
-            transport_alias=target.transport_alias,
         )
 
-    def target(self, repo: RepositoryConfig) -> RepositoryObservationTarget:
+    def target(
+        self,
+        repo: RepositoryConfig,
+        *,
+        expected_provider_host: str,
+        reviewed_ssh_endpoint: ReviewedSshEndpoint | None = None,
+    ) -> RepositoryObservationTarget:
+        if (
+            not isinstance(expected_provider_host, str)
+            or _HOST.fullmatch(expected_provider_host) is None
+        ):
+            raise _mismatch("The selected profile provider host is not a bounded lowercase host.")
+        remote = self._read_remote(repo)
+        parsed = self._remote_parser.parse(remote)
+        self._assert_provider_authority(
+            parsed,
+            expected_provider_host=expected_provider_host,
+            reviewed_ssh_endpoint=reviewed_ssh_endpoint,
+        )
+        return RepositoryObservationTarget(
+            provider=RepositoryProvider.GITHUB,
+            provider_host=expected_provider_host,
+            owner=parsed.owner,
+            repository=parsed.repository,
+        )
+
+    def _read_remote(self, repo: RepositoryConfig) -> str:
         result = self._executor.run_isolated(
             ["git", "config", "--local", "--get", f"remote.{repo.remote}.url"],
             cwd=repo.path,
@@ -152,37 +177,35 @@ class GhCliRepositoryObserver:
             output_limit=16_384,
         )
         remote = result.stdout.strip()
-        https_match = _HTTPS_REMOTE.fullmatch(remote)
-        ssh_match = None if https_match is not None else _SSH_REMOTE.fullmatch(remote)
-        match = https_match if https_match is not None else ssh_match
-        if match is None:
-            raise _unavailable("The configured remote is not a bounded GitHub HTTPS/SSH target.")
-        host = match.group("host")
-        owner = match.group("owner")
-        name = match.group("repository")
-        if _HOST.fullmatch(host) is None:
-            raise _unavailable("The configured remote host is not a bounded lowercase host.")
-        if any(_NAME_PART.fullmatch(part) is None for part in (owner, name)):
-            raise _unavailable("The configured remote is not <owner>/<repository>.")
-        transport_alias: str | None = None
+        if not remote:
+            raise _unavailable("The configured repository remote is missing.")
+        return remote
+
+    @staticmethod
+    def _assert_provider_authority(
+        remote: ParsedGitRemote,
+        *,
+        expected_provider_host: str,
+        reviewed_ssh_endpoint: ReviewedSshEndpoint | None,
+    ) -> None:
+        direct = remote.raw_host == expected_provider_host
+        if remote.kind is GitRemoteKind.HTTPS:
+            if not direct or reviewed_ssh_endpoint is not None:
+                raise _mismatch("HTTPS remote host does not match the selected profile host.")
+            return
+        if direct and reviewed_ssh_endpoint is None:
+            return
+        endpoint = reviewed_ssh_endpoint
+        if endpoint is None:
+            raise _mismatch("Aliased SSH remote has no reviewed endpoint proof.")
         if (
-            ssh_match is not None
-            and self._ssh_discovery is not None
-            and host != _PUBLIC_GITHUB_HOST
+            endpoint.raw_host != remote.raw_host
+            or endpoint.canonical_host != expected_provider_host
+            or endpoint.owner != remote.owner
+            or endpoint.repository != remote.repository
+            or endpoint.raw_url_digest != remote.raw_url_digest
         ):
-            resolved = self._ssh_discovery.inspect(host)
-            if resolved.hostname != host:
-                transport_alias = host
-            host = resolved.hostname
-            if _HOST.fullmatch(host) is None:
-                raise _unavailable("The SSH alias resolved to an unsafe provider host.")
-        return RepositoryObservationTarget(
-            provider=RepositoryProvider.GITHUB,
-            provider_host=host,
-            owner=owner,
-            repository=name,
-            transport_alias=transport_alias,
-        )
+            raise _mismatch("Reviewed SSH endpoint does not match the live repository remote.")
 
     def _base_environment(self, cwd: Path) -> dict[str, str]:
         inherited = self._executor.environment()

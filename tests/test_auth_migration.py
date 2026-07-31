@@ -49,7 +49,6 @@ def _observation(
     *,
     repository_id: str = "987654",
     canonical_name: str = "github.com/acme/demo",
-    transport_alias: str | None = None,
 ) -> RepositoryIdentityObservation:
     return RepositoryIdentityObservation(
         provider=RepositoryProvider.GITHUB,
@@ -59,7 +58,6 @@ def _observation(
         exists=True,
         observed_at=NOW,
         config_revision=_SHA,
-        transport_alias=transport_alias,
     )
 
 
@@ -157,6 +155,7 @@ def _service(
     observation: RepositoryIdentityObservation | None = None,
     source: SourceConfiguration | None = None,
     observe: Callable[[str, str | None], RepositoryIdentityObservation] | None = None,
+    ssh_alias: str | None = None,
 ) -> AuthMigrationService:
     repo_root = tmp_path / "demo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -174,6 +173,7 @@ def _service(
         ssh=ssh or Ssh(),
         ambient=ambient or Ambient(),
         observe=observe or (lambda repo_id, login: resolved_observation),
+        ssh_alias=ssh_alias,
     )
 
 
@@ -540,19 +540,23 @@ def test_a_disabled_gpgsign_value_still_blocks_a_plan(tmp_path: Path) -> None:
 def test_ambiguous_ssh_configuration_is_reported_without_pinning_a_transport(
     tmp_path: Path,
 ) -> None:
-    service = _service(tmp_path, accounts=Accounts((_personal(),)), ssh=Ssh(candidate=None))
+    service = _service(
+        tmp_path,
+        accounts=Accounts((_personal(),)),
+        ssh=Ssh(candidate=None),
+        ssh_alias="github-work",
+    )
 
     plan = service.inspect(repo_id="demo")
 
     assert AuthMigrationFindingCode.SSH_CONFIGURATION_AMBIGUOUS in {
         finding.code for finding in plan.findings
     }
-    # Falling back to HTTPS is a reviewed decision, not a silent SSH guess.
     pinned = [
         change for change in plan.changes if change.kind is AuthMigrationChangeKind.PIN_TRANSPORT
     ]
-    assert len(pinned) == 1
-    assert dict(pinned[0].attributes)["transport_kind"] == "https"
+    assert pinned == []
+    assert plan.ready is False
 
 
 def test_a_remote_disagreeing_with_the_observed_target_blocks_a_plan(tmp_path: Path) -> None:
@@ -616,13 +620,14 @@ def test_a_remote_using_an_equivalent_ssh_alias_is_not_a_mismatch(tmp_path: Path
             )
         }
     )
-    observation = _observation(transport_alias="github-work")
+    observation = _observation()
     service = _service(
         tmp_path,
         accounts=Accounts((_personal(),)),
         ambient=ambient,
         ssh=ssh,
         observation=observation,
+        ssh_alias="github-work",
     )
 
     plan = service.inspect(repo_id="demo")
@@ -647,12 +652,13 @@ def test_a_transport_alias_is_used_to_propose_the_pinned_ssh_transport(
             user="git",
         )
     )
-    observation = _observation(transport_alias="github-work")
+    observation = _observation()
     service = _service(
         tmp_path,
         accounts=Accounts((_personal(),)),
         ssh=ssh,
         observation=observation,
+        ssh_alias="github-work",
     )
 
     plan = service.inspect(repo_id="demo")

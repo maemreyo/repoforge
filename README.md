@@ -62,6 +62,7 @@ Today, RepoForge can:
 - reuse private atomic durable-state primitives across operational records;
 - preview and apply schema migrations, reference-aware retention, integrity checks, portable backup, and rollback-safe restore without expanding the public MCP surface;
 - manage local configuration generations and runtime lifecycle;
+- bind aliased SSH remotes to reviewed host, key-fingerprint and GitHub-principal proof, revalidating that proof before every network effect without `ssh -G` or ambient agents;
 - record bounded, secret-safe audit metadata.
 
 RepoForge is deliberately **not** a general-purpose shell, unrestricted filesystem bridge, merge bot, secret manager, or CI bypass mechanism.

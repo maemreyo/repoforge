@@ -70,7 +70,10 @@ class ConstrainedGitRemoteParser:
         match = _SCP_REMOTE.fullmatch(remote_url)
         if match is None:
             raise _rejected("The Git remote is not a supported scp-style SSH URL.")
-        host = match.group("host").lower()
+        raw_host = match.group("host")
+        if raw_host != raw_host.lower():
+            raise _rejected("The Git remote host must use canonical lowercase spelling.")
+        host = raw_host
         self._require_remote_host(host)
         owner, repository = self._repository_parts(match.group("path"))
         try:
@@ -101,7 +104,11 @@ class ConstrainedGitRemoteParser:
             port = parsed.port
         except ValueError as exc:
             raise _rejected("The Git remote URL contains an invalid port.") from exc
-        host = parsed.hostname.lower()
+        authority = parsed.netloc.rsplit("@", 1)[-1]
+        raw_host = authority.rsplit(":", 1)[0] if ":" in authority else authority
+        if raw_host != raw_host.lower():
+            raise _rejected("The Git remote host must use canonical lowercase spelling.")
+        host = parsed.hostname
         self._require_remote_host(host)
         owner, repository = self._repository_parts(parsed.path)
         try:
