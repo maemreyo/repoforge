@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -100,6 +100,11 @@ from .adapters.persistence import (
 )
 from .adapters.persistence import JsonWorkspaceStore as JsonWorkspaceStore
 from .adapters.provider.config_registry import ConfigProviderRegistry
+from .adapters.publication import PublicationAdapter
+from .adapters.publication_identity import (
+    DurableBindingPublicationRepositoryResolver,
+    PinnedPublicationAuthorizationGateway,
+)
 from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
 from .adapters.runtime import (
@@ -178,6 +183,7 @@ from .application.outcome_reconciliation import (
     OutcomeReceiptReconciler,
     RuntimeActivationReconciler,
 )
+from .application.publication import PublicationCoordinator
 from .application.repository_admin.proposals import RepositoryProposalService
 from .application.repository_identity_runtime import RepositoryIdentityRuntime
 from .application.runtime.activation import GenerationActivator
@@ -190,6 +196,10 @@ from .application.workflow import (
     WorkflowReplayEngine,
 )
 from .application.workspace.pr_watch import PrCheckWatchCoordinator
+from .application.workspace.publication import CoordinatedWorkspacePublicationService
+from .application.workspace.publication_request_factory import (
+    ScopedWorkspacePublicationRequestFactory,
+)
 from .config import (
     DEFAULT_STATE_ROOT,
     AppConfig,
@@ -1560,6 +1570,40 @@ def build_application(
         publications=o.publications,
         config_generation=config_generation,
     )
+    if context.publications is None:
+        publication_gateway = PublicationAdapter(
+            commands=command,
+            repositories=DurableBindingPublicationRepositoryResolver(repository_bindings),
+            authorization=PinnedPublicationAuthorizationGateway(),
+            capability_preflight=github_capability_preflight,
+            transport=git_transport_router,
+            github=default_github,
+            clock=clock.now_iso,
+        )
+        publication_coordinator = PublicationCoordinator(
+            context,
+            gateway=publication_gateway,
+            identities=OperationIdentityManager(
+                operations=operation_store,
+                identities=operation_identities,
+            ),
+        )
+        publication_requests = ScopedWorkspacePublicationRequestFactory(
+            config=config,
+            runtime=repository_identity_runtime,
+            commands=command,
+            clock=clock,
+            ids=ids,
+            config_revision=config_revision,
+            policy_revision=policy_revision,
+        )
+        context = replace(
+            context,
+            publications=CoordinatedWorkspacePublicationService(
+                publication_coordinator,
+                publication_requests,
+            ),
+        )
     operations = OperationManager(context)
     processes = build_process_inspector()
     runtime_activation_store = build_runtime_activation_store(

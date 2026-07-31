@@ -203,6 +203,7 @@ class PublicationGateway(Protocol):
         *,
         requested_capability_ids: tuple[str, ...],
         auth_context: ProcessAuthContext,
+        transport_spec: GitTransportSpec | None = None,
     ) -> ReviewedPublication: ...
 
     def publish(

@@ -143,7 +143,7 @@ def _lease(
         provider=RepositoryProvider.GITHUB,
         repository_id=repository_id,
         target_kind=AuthTargetKind.REPOSITORY,
-        target_id=f"github-repository-{repository_id}",
+        target_id=repository_id,
         actor_id=actor_id,
         credential_ref=OpaqueCredentialReference("github-app", "company-app"),
         issued_at="2026-07-29T06:00:00+00:00",
@@ -478,6 +478,7 @@ class _CoordinatorGateway:
         *,
         requested_capability_ids,
         auth_context,
+        transport_spec=None,
     ):
         self.events.append("capability_preflight")
         assert requested_capability_ids == ("github.contents.write",)
@@ -549,7 +550,7 @@ def _coordinator_request():
         transport_spec=GitTransportSpec(
             profile_id="company-app",
             repository_id="123456",
-            target_id="github-repository-123456",
+            target_id="123456",
             provider_host="github.com",
             kind=GitTransportKind.SSH,
             credential_fingerprint="f" * 64,
@@ -560,7 +561,7 @@ def _coordinator_request():
             profile_id="company-app",
             material_id="material-company-app",
             target_kind=AuthTargetKind.REPOSITORY,
-            target_id="github-repository-123456",
+            target_id="123456",
             environment=(),
         ),
         idempotency_key="publication-coordinator-key-292",

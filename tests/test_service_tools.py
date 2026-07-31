@@ -62,6 +62,7 @@ def test_production_application_composes_repository_identity_runtime(
 
     assert isinstance(context.repository_identity_runtime, RepositoryIdentityRuntime)
     assert isinstance(context.git_transport_router, GitTransportRouter)
+    assert context.publications is not None
 
 
 class _FakeIssueMutationGateway:

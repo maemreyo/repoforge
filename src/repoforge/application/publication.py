@@ -381,6 +381,7 @@ class PublicationCoordinator:
                 request.authorization,
                 requested_capability_ids=github_capability_ids,
                 auth_context=request.auth_context,
+                transport_spec=request.transport_spec,
             )
             boundary.begin()
             effect = self._gateway.publish(
@@ -403,6 +404,7 @@ class PublicationCoordinator:
                 request.authorization,
                 requested_capability_ids=github_capability_ids,
                 auth_context=request.auth_context,
+                transport_spec=request.transport_spec,
             )
             effect = self._gateway.reconcile(
                 request.cwd,

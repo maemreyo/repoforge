@@ -25,7 +25,12 @@ from ..domain.publication import (
     review_publication,
 )
 from ..domain.repository_auth_broker import ProcessAuthContext
-from ..domain.repository_identity import IdentitySurface, PublicationIntent, PublicationKind
+from ..domain.repository_identity import (
+    IdentityEvidenceKind,
+    IdentitySurface,
+    PublicationIntent,
+    PublicationKind,
+)
 from ..ports.command import CommandExecutor
 from ..ports.git_transport import GitTransportGateway
 from ..ports.github_capability_preflight import GitHubCapabilityPreflightGateway
@@ -300,8 +305,8 @@ class PublicationAdapter:
             self._capability_preflight.preflight(cwd, request, auth_context)
         )
         metadata = dict(expected.lease.provider_metadata)
-        pinned_capability = metadata.get("github_capability_digest")
-        pinned_permission = metadata.get("github_permission_digest")
+        profile_capability = metadata.get("github_capability_digest")
+        profile_permission = metadata.get("github_permission_digest")
         pinned_config = metadata.get("config_revision")
         pinned_policy = metadata.get("policy_revision")
         if report.repository_id != intent.destination_repository_id:
@@ -332,16 +337,16 @@ class PublicationAdapter:
                 "Write-time GitHub preflight returned a different permission set.",
             )
         if (
-            report.capability_digest != expected.capability_digest
-            or pinned_capability != report.capability_digest
+            not isinstance(profile_capability, str)
+            or report.capability_digest != expected.capability_digest
         ):
             raise _publication_error(
                 ErrorCode.CREDENTIAL_CAPABILITY_DENIED,
                 "Write-time GitHub capability digest changed before publication.",
             )
         if (
-            report.permission_digest != expected.permission_digest
-            or pinned_permission != report.permission_digest
+            not isinstance(profile_permission, str)
+            or report.permission_digest != expected.permission_digest
         ):
             raise _publication_error(
                 ErrorCode.GITHUB_API_PERMISSION_DENIED,
@@ -384,6 +389,7 @@ class PublicationAdapter:
         *,
         requested_capability_ids: tuple[str, ...],
         auth_context: ProcessAuthContext,
+        transport_spec: GitTransportSpec | None = None,
     ) -> ReviewedPublication:
         live, preflight_evidence_digest = self._capability_authorization(
             cwd,
@@ -392,7 +398,61 @@ class PublicationAdapter:
             requested_capability_ids=requested_capability_ids,
             auth_context=auth_context,
         )
-        observed, _push_url = self._inspect_with_push_url(cwd, intent)
+        observed, push_url = self._inspect_with_push_url(cwd, intent)
+        if transport_spec is not None:
+            requested_ref = (
+                intent.head_ref
+                if intent.kind is PublicationKind.PULL_REQUEST
+                else intent.destination_ref
+            )
+            if requested_ref is None:
+                raise _publication_error(
+                    ErrorCode.PUBLICATION_TARGET_MISMATCH,
+                    "Publication transport proof is missing its exact destination ref.",
+                )
+            transport_evidence = self._transport.ls_remote(
+                cwd,
+                push_url,
+                requested_ref,
+                transport_spec,
+                auth_context,
+            )
+            if (
+                transport_evidence.profile_id != live.profile_id
+                or transport_evidence.repository_id != intent.destination_repository_id
+            ):
+                raise _publication_error(
+                    ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,
+                    "Live Git transport proof changed the pinned publication identity.",
+                )
+            remote_version = _digest(
+                {
+                    "repository_id": intent.destination_repository_id,
+                    "destination_ref": requested_ref,
+                    "remote_head": transport_evidence.observed_sha,
+                }
+            )
+            effect_surface = (
+                IdentitySurface.PULL_REQUEST
+                if intent.kind is PublicationKind.PULL_REQUEST
+                else IdentitySurface.GIT_PUSH
+            )
+            surfaces = tuple(
+                replace(
+                    item,
+                    evidence_kind=IdentityEvidenceKind.TRANSPORT_ACCESS_PROOF,
+                    observed_at=self._clock(),
+                    evidence_digest=_digest(transport_evidence.safe_payload()),
+                )
+                if item.surface is effect_surface
+                else item
+                for item in live.identity_surfaces
+            )
+            live = replace(
+                live,
+                identity_surfaces=surfaces,
+                remote_version=remote_version,
+            )
         commit_sha, tree_sha = self._source_objects(cwd, intent.source_ref)
         evidence = PublicationEvidence(
             operation_id=intent.operation_id,

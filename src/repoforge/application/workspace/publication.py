@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -16,15 +17,23 @@ from ...ports.workspace_publication import (
     WorkspacePushPublicationEffect,
 )
 from ..context import ApplicationContext
-from ..publication import PublicationCoordinator, PublicationRequest
+from ..publication import PublicationCoordinator, PublicationOutcome, PublicationRequest
 
 
 class WorkspacePublicationRequestFactory(Protocol):
     """Resolve reviewed repository identity without exposing it in tool inputs."""
 
-    def prepare_push(self, request: WorkspacePushPublication) -> PublicationRequest: ...
+    def execute_push(
+        self,
+        request: WorkspacePushPublication,
+        execute: Callable[[PublicationRequest], PublicationOutcome],
+    ) -> PublicationOutcome: ...
 
-    def prepare_draft_pr(self, request: WorkspaceDraftPrPublication) -> PublicationRequest: ...
+    def execute_draft_pr(
+        self,
+        request: WorkspaceDraftPrPublication,
+        execute: Callable[[PublicationRequest], PublicationOutcome],
+    ) -> PublicationOutcome: ...
 
 
 class CoordinatedWorkspacePublicationService:
@@ -39,7 +48,7 @@ class CoordinatedWorkspacePublicationService:
         self._requests = requests
 
     def push(self, request: WorkspacePushPublication) -> WorkspacePushPublicationEffect:
-        outcome = self._coordinator.execute(self._requests.prepare_push(request))
+        outcome = self._requests.execute_push(request, self._coordinator.execute)
         return WorkspacePushPublicationEffect(
             publication_id=outcome.publication_id,
             operation_id=outcome.operation_id,
@@ -61,7 +70,7 @@ class CoordinatedWorkspacePublicationService:
         self,
         request: WorkspaceDraftPrPublication,
     ) -> WorkspaceDraftPrPublicationEffect:
-        outcome = self._coordinator.execute(self._requests.prepare_draft_pr(request))
+        outcome = self._requests.execute_draft_pr(request, self._coordinator.execute)
         if outcome.url is None:
             raise RuntimeError("Pull-request publication completed without a provider URL")
         return WorkspaceDraftPrPublicationEffect(

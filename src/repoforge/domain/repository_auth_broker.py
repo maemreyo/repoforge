@@ -17,6 +17,8 @@ from typing import Protocol, TypeVar
 from .errors import ErrorCode, RepoForgeError
 from .repository_identity import (
     ActorClass,
+    AuthLease,
+    AuthLeaseState,
     AuthTargetKind,
     CredentialProfile,
     OpaqueCredentialReference,
@@ -456,6 +458,42 @@ class AuthBrokerSession(AbstractContextManager["AuthBrokerSession"]):
             git_config=self._material.git_config,
             callback_config=self._material.callback_config,
             _secret_values=secrets,
+        )
+
+    def auth_lease(
+        self,
+        *,
+        lease_id: str,
+        config_revision: str,
+        policy_revision: str,
+    ) -> AuthLease:
+        """Project the live material into one safe operation-scoped lease."""
+
+        if self._released:
+            raise _broker_error(
+                ErrorCode.CREDENTIAL_EXPIRED,
+                "Repository-auth session has already been released.",
+            )
+        return AuthLease(
+            lease_id=lease_id,
+            profile_id=self._material.profile_id,
+            provider=self._request.profile.provider,
+            repository_id=self._material.target_id,
+            target_kind=self._material.target_kind,
+            target_id=self._material.target_id,
+            actor_id=self._material.actor_id,
+            credential_ref=self._request.profile.credential_ref,
+            issued_at=self._material.issued_at,
+            expires_at=self._material.expires_at,
+            state=(
+                AuthLeaseState.REVOKED
+                if self._material.state is AuthMaterialState.REVOKED
+                else AuthLeaseState.ACTIVE
+            ),
+            config_revision=config_revision,
+            policy_revision=policy_revision,
+            material_digest=self._material.material_digest,
+            provider_metadata=self._material.provider_metadata,
         )
 
     def invoke(

@@ -423,7 +423,7 @@ def _require_lease(intent: PublicationIntent, evidence: PublicationEvidence) -> 
             ErrorCode.CREDENTIAL_REVOKED,
             "The pinned publication auth lease is not active.",
         )
-    expected_target_id = f"github-repository-{intent.destination_repository_id}"
+    expected_target_id = intent.destination_repository_id
     if (
         lease.profile_id != evidence.profile_id
         or lease.repository_id != intent.destination_repository_id
