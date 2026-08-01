@@ -1190,7 +1190,11 @@ def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconc
 def build_execution_worker_report_section(state_root: Path) -> dict[str, object]:
     """Execution-worker evidence for `rf doctor` / `rf runtime ls`, read-only."""
     from .adapters.runtime.state_store import process_identity
-    from .adapters.subprocess.process_tree import read_command_line, read_identity
+    from .adapters.subprocess.process_tree import (
+        group_has_live_member,
+        read_command_line,
+        read_identity,
+    )
     from .application.runtime.execution_worker_report import build_execution_worker_report
 
     return build_execution_worker_report(
@@ -1199,6 +1203,7 @@ def build_execution_worker_report_section(state_root: Path) -> dict[str, object]
         owner_identity_reader=process_identity,
         command_line_reader=read_command_line,
         identity_reader=read_identity,
+        process_group_gone=lambda pgid: group_has_live_member(pgid) is False,
     ).as_dict()
 
 
