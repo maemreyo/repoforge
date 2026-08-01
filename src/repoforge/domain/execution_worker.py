@@ -258,6 +258,9 @@ def validate_execution_worker_quarantine_receipt(
     ):
         raise ValueError("execution worker quarantine pid must be a positive integer or null")
     return receipt
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionWorkerArchiveEntry:
     """Immutable record of one terminated worker lease (#424).
 
