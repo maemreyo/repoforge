@@ -87,6 +87,7 @@ from .adapters.persistence import (
     JsonExecutionPlanAcceptanceStore,
     JsonExecutionPlanStore,
     JsonExecutionReceiptStore,
+    JsonExecutionWorkerBindingStore,
     JsonExternalMutationLedger,
     JsonFailureEvidenceStore,
     JsonGitHubReadCache,
@@ -197,6 +198,7 @@ from .application.repository_admin.proposals import RepositoryProposalService
 from .application.repository_identity_runtime import RepositoryIdentityRuntime
 from .application.runtime.activation import GenerationActivator
 from .application.runtime.activation_journal import RuntimeActivationJournal
+from .application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
 from .application.runtime.supervisor import RuntimeSupervisor
 from .application.tasks import TaskCapsuleService
 from .application.workflow import (
@@ -1157,6 +1159,18 @@ def build_release_store(
     )
 
 
+def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconciler:
+    """Reclaim orphaned execution workers of departed releases before a new start."""
+    from .adapters.persistence import JsonExecutionWorkerBindingStore
+    from .adapters.subprocess.os_process_reaper import OsProcessReaper
+    from .application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
+
+    return ExecutionWorkerReconciler(
+        bindings=JsonExecutionWorkerBindingStore(state_root, build_lock_manager()),
+        reaper=OsProcessReaper(),
+    )
+
+
 def build_upgrade_service(
     *,
     release_root: Path | None,
@@ -1204,6 +1218,7 @@ def build_upgrade_service(
             extra_env=extra_env,
             sleeper=sleeper,
             kickstarter=kickstarter,
+            worker_reconciler=build_execution_worker_reconciler(store.root / "runtime"),
         ),
         observer=RuntimeRecordReleaseObserver(
             runtime=runtime_store, releases_root=store.root / "releases"
@@ -2059,9 +2074,13 @@ def run_runtime_worker(
         processes=build_process_inspector(),
         mcp_runtime_path=root / "runtime.json",
         log_path=root / "managed-runtime.log",
-        execution_worker=SubprocessExecutionWorker(config_path),
+        execution_worker=SubprocessExecutionWorker(
+            config_path,
+            bindings=JsonExecutionWorkerBindingStore(root, build_lock_manager()),
+        ),
         execution_worker_log_path=root / "execution-worker.log",
         preflight=validate_generated_contract_identity,
+        worker_reconciler=build_execution_worker_reconciler(root),
     )
     return supervisor.run(
         generation=target.generation,

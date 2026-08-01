@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
 from ...contracts.registry import contract_identity_digest
 from ...domain.errors import ConfigError
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase, RuntimeRecord
@@ -336,6 +337,7 @@ class SupervisorRestarter:
         extra_env: dict[str, str] | None = None,
         sleeper: Sleeper | None = None,
         kickstarter: SupervisorKickstarter | None = None,
+        worker_reconciler: ExecutionWorkerReconciler | None = None,
         stop_timeout_seconds: float = 20.0,
         start_timeout_seconds: float = 60.0,
         poll_interval_seconds: float = 0.2,
@@ -348,11 +350,32 @@ class SupervisorRestarter:
         self._extra_env = dict(extra_env or {})
         self._sleeper = sleeper
         self._kickstarter = kickstarter
+        self._worker_reconciler = worker_reconciler
         self._stop_timeout = stop_timeout_seconds
         self._start_timeout = start_timeout_seconds
         self._poll = max(0.01, poll_interval_seconds)
 
-    def restart(self) -> RestartOutcome:
+    def _reclaim_departing(
+        self, departing_release: str | None
+    ) -> tuple[bool, dict[str, object] | None]:
+        """Reclaim the departing release's execution workers; block on a survivor.
+
+        Returns ``(ok, reclamation_evidence)``. ``ok=False`` means a worker survived
+        SIGKILL, so the new supervisor must not start: it would contend with the stale
+        worker's operation locks exactly as in the 2026-08-01 incident.
+        """
+        if self._worker_reconciler is None:
+            return True, None
+        report = self._worker_reconciler.reconcile(
+            departing_releases=(
+                frozenset({departing_release}) if departing_release else frozenset()
+            )
+        )
+        if report.survived_kill > 0:
+            return False, report.as_dict()
+        return True, report.as_dict()
+
+    def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         before = self._runtime.read()
         old_pid = before.pid if before else None
         old_identity = before.process_identity if before else None
@@ -375,6 +398,18 @@ class SupervisorRestarter:
                         f"replacement would race it for the runtime lock: {stop_detail}"
                     ),
                 )
+            reclaim_ok, reclamation = self._reclaim_departing(departing_release)
+            if not reclaim_ok:
+                return RestartOutcome(
+                    ok=False,
+                    detail=(
+                        "STALE_EXECUTION_WORKER_RECLAMATION_FAILED: a worker of the "
+                        f"departing release {departing_release or 'unknown'} survived "
+                        "SIGKILL; refusing to start a replacement that would contend "
+                        "with its locks"
+                    ),
+                    reclamation=reclamation,
+                )
             outcome = self._kickstarter.kickstart()
             if not outcome.ok:
                 return outcome
@@ -390,11 +425,24 @@ class SupervisorRestarter:
                 ok=True,
                 detail="restarted via the OS process manager",
                 pid=record.pid if record else None,
+                reclamation=reclamation,
             )
 
         stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
         if not stopped:
             return RestartOutcome(ok=False, detail=f"could not stop the runtime: {stop_detail}")
+        reclaim_ok, reclamation = self._reclaim_departing(departing_release)
+        if not reclaim_ok:
+            return RestartOutcome(
+                ok=False,
+                detail=(
+                    "STALE_EXECUTION_WORKER_RECLAMATION_FAILED: a worker of the "
+                    f"departing release {departing_release or 'unknown'} survived "
+                    "SIGKILL; refusing to start a replacement that would contend "
+                    "with its locks"
+                ),
+                reclamation=reclamation,
+            )
         try:
             pid = self._launcher.start(
                 self._config_path, foreground=False, extra_env=self._extra_env
@@ -409,7 +457,9 @@ class SupervisorRestarter:
             return RestartOutcome(
                 ok=False, detail="runtime did not publish a live record after restart", pid=pid
             )
-        return RestartOutcome(ok=True, detail=f"restarted (pid {pid})", pid=pid)
+        return RestartOutcome(
+            ok=True, detail=f"restarted (pid {pid})", pid=pid, reclamation=reclamation
+        )
 
     def _live_record(self, *, exclude_pid: int | None) -> RuntimeRecord | None:
         """Return the record only when it describes a live process that is not the old one."""

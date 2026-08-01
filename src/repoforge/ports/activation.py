@@ -119,11 +119,16 @@ class ReleaseSmokeTester(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RestartOutcome:
-    """Result of replacing the live runtime process so it re-execs through ``current``."""
+    """Result of replacing the live runtime process so it re-execs through ``current``.
+
+    ``reclamation`` carries the execution-worker reclamation evidence (#368) when the
+    restarter reconciled orphaned workers, so the activation receipt can record it.
+    """
 
     ok: bool
     detail: str
     pid: int | None = None
+    reclamation: dict[str, object] | None = None
 
 
 class RuntimeRestarter(Protocol):
@@ -131,10 +136,11 @@ class RuntimeRestarter(Protocol):
 
     A new *release* is new code, so it cannot be adopted by an in-process config
     reload -- the process must be replaced. Implementations stop the running
-    supervisor and start it again through the stable launcher.
+    supervisor and start it again through the stable launcher, reclaiming execution
+    workers of the departing release first (#368).
     """
 
-    def restart(self) -> RestartOutcome: ...
+    def restart(self, *, departing_release: str | None = None) -> RestartOutcome: ...
 
 
 @dataclass(frozen=True, slots=True)
