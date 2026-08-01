@@ -241,6 +241,7 @@ test_files = [
   "tests/test_dev_runtime.py",
   "tests/test_execution_identity.py",
   "tests/test_execution_worker_reconciler.py",
+  "tests/test_execution_worker_report.py",
   "tests/test_generation_handoff.py",
   "tests/test_launchd_registrar.py",
   "tests/test_mcp_payload_v2.py",

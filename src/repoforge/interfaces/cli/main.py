@@ -20,6 +20,7 @@ from typing import Any
 
 from repoforge import __version__
 
+from ...adapters.persistence import JsonExecutionWorkerBindingStore
 from ...application.activation.contract_identity import (
     ContractIdentityReport,
     build_contract_identity_report,
@@ -63,6 +64,7 @@ from ...application.diagnostics import build_diagnostics_bundle
 from ...application.onboarding.inputs import for_repository, parse_assignments
 from ...application.repository_admin.proposals import RepositoryProposalService
 from ...application.runtime.activation import GenerationActivator
+from ...application.runtime.execution_worker_report import build_execution_worker_report
 from ...application.runtime.hot_reload import (
     AtomicServiceRouter,
     GenerationServiceContainer,
@@ -1682,6 +1684,19 @@ def _doctor_contract_identity_report(args: argparse.Namespace) -> ContractIdenti
     return build_contract_identity_report(store=store, observed=observed)
 
 
+def _execution_worker_report(args: argparse.Namespace) -> dict[str, object] | None:
+    """Execution-worker evidence for `rf doctor` / `rf runtime ls`, best-effort."""
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        config_path = Path(args.config).expanduser().resolve()
+        state_root = _state_root(config_path)
+        bindings = JsonExecutionWorkerBindingStore(state_root, build_lock_manager(state_root))
+        return build_execution_worker_report(
+            bindings=bindings,
+            lock_root=state_root / "locks",
+        ).as_dict()
+    return None
+
+
 def _version_command(args: argparse.Namespace) -> int:
     if args.version_command == "switch":
         return _version_switch_command(args)
@@ -1792,16 +1807,18 @@ def _runtime_inventory_command(args: argparse.Namespace) -> int:
         release_processes = build_release_process_inspector(
             release_root=getattr(args, "release_root", None)
         ).list_processes()
-    _json(
-        build_runtime_inventory(
-            releases=release_choices(store),
-            observed=observed,
-            agent=agent,
-            agent_secret_usable=store.agent_secret_status().usable,
-            dev_runtimes=list(dev_runtimes),
-            release_processes=release_processes,
-        )
+    payload = build_runtime_inventory(
+        releases=release_choices(store),
+        observed=observed,
+        agent=agent,
+        agent_secret_usable=store.agent_secret_status().usable,
+        dev_runtimes=list(dev_runtimes),
+        release_processes=release_processes,
     )
+    worker_report = _execution_worker_report(args)
+    if worker_report is not None:
+        payload["execution_workers"] = worker_report
+    _json(payload)
     return 0
 
 
@@ -2811,6 +2828,19 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not report.ok:
                     result["ok"] = False
+            worker_report = _execution_worker_report(args)
+            if worker_report is not None:
+                result["execution_workers"] = worker_report
+                raw_stale = worker_report.get("stale_execution_worker_count", 0)
+                stale = raw_stale if isinstance(raw_stale, int) else 0
+                result["checks"].append(
+                    {
+                        "name": "execution_workers",
+                        "ok": stale == 0,
+                        "severity": "warning" if stale else "info",
+                        "detail": str(worker_report.get("detail", "")),
+                    }
+                )
             _json(result)
             return 0 if result["ok"] else 1
         if args.command == "list-workspaces":

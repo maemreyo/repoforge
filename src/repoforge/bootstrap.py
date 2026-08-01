@@ -1218,7 +1218,9 @@ def build_upgrade_service(
             extra_env=extra_env,
             sleeper=sleeper,
             kickstarter=kickstarter,
-            worker_reconciler=build_execution_worker_reconciler(store.root / "runtime"),
+            # The supervisor records worker bindings under the config state root (the
+            # same root the runtime record lives in); the restarter must read THAT store.
+            worker_reconciler=build_execution_worker_reconciler(runtime_record_path.parent),
         ),
         observer=RuntimeRecordReleaseObserver(
             runtime=runtime_store, releases_root=store.root / "releases"
