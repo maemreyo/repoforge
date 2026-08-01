@@ -9,9 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from repoforge.application.activation.contract_identity import build_contract_identity_report
-
 from repoforge.adapters.activation.release_store import RuntimeReleaseStore
+from repoforge.application.activation.contract_identity import build_contract_identity_report
 from repoforge.contracts.registry import contract_identity_digest, render_contract_identity_artifact
 from repoforge.domain.activation import ReleaseManifest
 from repoforge.ports.activation import ObservedRuntime
@@ -37,6 +36,7 @@ def _manifest(*, contract_identity: str = "") -> ReleaseManifest:
 def _store(tmp_path: Path, *, manifest: ReleaseManifest | None) -> RuntimeReleaseStore:
     store = RuntimeReleaseStore(tmp_path / "release-root")
     if manifest is not None:
+        store.release_path(_SHA).mkdir(parents=True, exist_ok=True)
         store.write_manifest(manifest)
         store.swap_current(_SHA)
     return store

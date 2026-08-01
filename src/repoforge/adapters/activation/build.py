@@ -494,6 +494,8 @@ class RuntimeRecordReleaseObserver:
             pid=record.pid,
             executable=record.executable,
             tool_surface_hash=record.tool_surface_hash or None,
+            last_error_code=record.last_error_code,
+            fail_closed_since=record.fail_closed_since,
         )
 
     def release_of_executable(self, executable: str | None) -> str | None:

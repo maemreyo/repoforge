@@ -156,13 +156,13 @@ def contract_identity_digest(identity: Mapping[str, object]) -> str:
     return _canonical_digest(identity)
 
 
-def _contract_artifact_paths() -> list[str]:
+def contract_artifact_paths() -> tuple[str, ...]:
     """Locate the generated identity artifact inside the installed release, best-effort."""
 
     spec = importlib.util.find_spec("repoforge.contracts.generated_contract_identity")
     if spec is not None and spec.origin:
-        return [spec.origin]
-    return []
+        return (spec.origin,)
+    return ()
 
 
 def release_contract_probe() -> dict[str, object]:
@@ -186,7 +186,7 @@ def release_contract_probe() -> dict[str, object]:
         "packaged": packaged,
         "computed": computed,
         "mismatched_fields": mismatched,
-        "artifact_paths": _contract_artifact_paths(),
+        "artifact_paths": list(contract_artifact_paths()),
         "agreement": not mismatched,
     }
 

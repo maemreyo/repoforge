@@ -154,10 +154,12 @@ def test_upgrade_reconcile_is_wired_to_the_service(
     cli_module = importlib.import_module("repoforge.interfaces.cli.main")
 
     calls: list[str] = []
+    repairs: list[str | None] = []
 
     class _Service:
-        def reconcile(self) -> UpgradeResult:
+        def reconcile(self, *, repair: str | None = None) -> UpgradeResult:
             calls.append("reconcile")
+            repairs.append(repair)
             return UpgradeResult(
                 status="reconciled",
                 candidate_sha="aaa1111",
@@ -173,9 +175,17 @@ def test_upgrade_reconcile_is_wired_to_the_service(
 
     assert cli_module.main(["upgrade", "reconcile"]) == 0
     assert calls == ["reconcile"]
+    # Repair is opt-in and reaches the service exactly as passed (#367).
+    assert repairs == [None]
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "reconciled"
     assert payload["activation_receipt"] == "act-20260728-006"
+
+    capsys.readouterr()
+    assert cli_module.main(["upgrade", "reconcile", "--repair", "rollback"]) == 0
+    assert repairs == [None, "rollback"]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "reconciled"
 
 
 def test_an_upgrade_that_ended_in_a_rollback_does_not_exit_zero(
