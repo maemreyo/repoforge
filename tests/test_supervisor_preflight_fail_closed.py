@@ -16,7 +16,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from repoforge.application.runtime.supervisor import RuntimeSupervisor
-from repoforge.domain.errors import ConfigError
+from repoforge.domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from repoforge.domain.runtime import (
     ControlCommand,
     ControlRequest,
@@ -242,6 +242,37 @@ def test_preflight_failure_enters_resident_fail_closed_without_spawning_children
 
     _shutdown_and_join(server, thread, result)
     assert store.record.phase is RuntimePhase.STOPPED
+
+
+def test_registration_failure_enters_resident_fail_closed(tmp_path: Path) -> None:
+    """A worker that cannot be durably registered fails closed, never starts a replacement."""
+    store = _Store()
+    tunnel = _Tunnel()
+    worker = _ExecutionWorker()
+
+    def failing_start(generation, *, env, log_path, correlation_id):
+        del env, log_path, correlation_id
+        raise ExecutionWorkerRegistrationError(
+            "EXECUTION_WORKER_REGISTRATION_FAILED: the durable worker lease could "
+            "not be written; the spawned worker was terminated and confirmed dead"
+        )
+
+    worker.start = failing_start  # type: ignore[method-assign]
+
+    supervisor, server = _supervisor(
+        store=store, preflight=lambda: None, tmp_path=tmp_path, tunnel=tunnel, worker=worker
+    )
+    result, thread = _run_and_wait_fail_closed(supervisor, store)
+
+    record = store.record
+    assert record.last_error_code == "EXECUTION_WORKER_REGISTRATION_FAILED"
+    assert record.fail_closed_since is not None
+    assert tunnel.starts == 0
+    response = server.handler(ControlRequest(1, ControlCommand.STATUS, "corr"))
+    assert response.ok
+    assert dict(response.payload)["record"] == "fail_closed"
+
+    _shutdown_and_join(server, thread, result)
 
 
 def test_a_fresh_supervisor_honors_a_prior_fail_closed_state_for_the_same_release(
