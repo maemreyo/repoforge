@@ -20,6 +20,10 @@ from typing import Any
 
 from repoforge import __version__
 
+from ...application.activation.contract_identity import (
+    ContractIdentityReport,
+    build_contract_identity_report,
+)
 from ...application.activation.inventory import build_runtime_inventory
 from ...application.activation.selection import release_choices, resolve_receipt_id
 from ...application.activation.upgrade import (
@@ -1665,6 +1669,19 @@ def _runtime_record_best_effort(config_path: Path) -> Any:
         return None
 
 
+def _doctor_contract_identity_report(args: argparse.Namespace) -> ContractIdentityReport | None:
+    """Field-level contract-identity report for `rf doctor`, best-effort."""
+    store = build_release_store(getattr(args, "release_root", None))
+    observed = None
+    with contextlib.suppress(ConfigError, OSError, ValueError):
+        config_path = Path(args.config).expanduser().resolve()
+        observed = build_release_observer(
+            release_root=getattr(args, "release_root", None),
+            runtime_record_path=_runtime_record_path_readonly(config_path),
+        ).observe()
+    return build_contract_identity_report(store=store, observed=observed)
+
+
 def _version_command(args: argparse.Namespace) -> int:
     if args.version_command == "switch":
         return _version_switch_command(args)
@@ -1791,9 +1808,11 @@ def _runtime_inventory_command(args: argparse.Namespace) -> int:
 def _upgrade_command(args: argparse.Namespace) -> int:
     service = _build_upgrade_service(args)
     if getattr(args, "upgrade_command", None) == "reconcile":
-        result = service.reconcile()
+        result = service.reconcile(repair=getattr(args, "repair", None))
         _json(result.as_dict())
-        return 0
+        # A reconciled or repaired activation is terminal; a repair rollback that did
+        # not converge raises rather than silently exiting 0.
+        return 0 if result.status in {"reconciled", "rolled_back", "nothing_to_reconcile"} else 1
     if getattr(args, "upgrade_command", None) == "rollback":
         receipt = args.receipt
         if receipt is not None:
@@ -2420,8 +2439,16 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_sub.add_parser(
         "reconcile",
         help=(
-            "Terminalize an activation that reached its target but wrote no receipt, "
-            "instead of rolling a healthy runtime backwards."
+            "Terminalize an in-flight activation: forward as activated when the runtime "
+            "serves its target, or roll back with --repair when it failed closed."
+        ),
+    ).add_argument(
+        "--repair",
+        choices=["rollback"],
+        help=(
+            "Repair a fail-closed activation by rolling `current` back to the previous "
+            "release after verifying the typed failure and that the target is usable. "
+            "Never the default."
         ),
     )
     dev_runtime = commands.add_parser("dev-runtime")
@@ -2768,6 +2795,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             result = service.doctor()
             result["paths"] = _resolved_paths(config_path)
+            report = _doctor_contract_identity_report(args)
+            if report is not None:
+                result["runtime_contract_identity"] = report.as_dict()
+                result["checks"].append(
+                    {
+                        "name": "runtime_contract_identity",
+                        "ok": report.ok,
+                        "severity": "error" if not report.ok else "info",
+                        "detail": (
+                            f"active release {report.release_sha or 'none'}: "
+                            f"{report.safe_next_action}"
+                        ),
+                    }
+                )
+                if not report.ok:
+                    result["ok"] = False
             _json(result)
             return 0 if result["ok"] else 1
         if args.command == "list-workspaces":

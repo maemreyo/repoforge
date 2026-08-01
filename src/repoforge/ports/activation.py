@@ -146,6 +146,11 @@ class ObservedRuntime:
     pid: int | None = None
     executable: str | None = None
     tool_surface_hash: str | None = None
+    # The typed terminal error a fail-closed/failed runtime published (#367), so the
+    # repair path can verify a release failed for a deterministic reason before
+    # mutating `current`.
+    last_error_code: str | None = None
+    fail_closed_since: str | None = None
 
 
 class ReleaseObserver(Protocol):

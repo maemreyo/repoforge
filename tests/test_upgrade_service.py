@@ -128,6 +128,25 @@ class _Sleeper:
         self.slept.append(seconds)
 
 
+class _PhaseTrackingObserver:
+    """Reports fail_closed while `current` is the broken release, healthy after rollback."""
+
+    def __init__(self, store, *, failed_sha: str, error_code: str) -> None:
+        self._store = store
+        self._failed_sha = failed_sha
+        self._error_code = error_code
+
+    def observe(self) -> ObservedRuntime:
+        sha = self._store.current_sha()
+        failed = sha == self._failed_sha
+        return ObservedRuntime(
+            running_release_sha=sha,
+            phase="fail_closed" if failed else "healthy",
+            pid=99,
+            last_error_code=self._error_code if failed else None,
+        )
+
+
 class _HealthProbe:
     """Return scripted samples; the last one repeats once exhausted."""
 
@@ -852,8 +871,8 @@ def test_reconcile_repair_rollback_recovers_a_fail_closed_target(tmp_path: Path)
         installer=_Installer(),
         smoke=_Smoke(surface=_SURFACE_NEW, contract_identity="d" * 64),
         restarter=_Restarter(),
-        observer=_Observer(
-            store, phase="fail_closed", last_error_code="CONTRACT_ARTIFACT_MISMATCH"
+        observer=_PhaseTrackingObserver(
+            store, failed_sha="2222bbb", error_code="CONTRACT_ARTIFACT_MISMATCH"
         ),
         clock=_Clock(),
         converge_attempts=2,
@@ -889,7 +908,7 @@ def test_reconcile_repair_refuses_without_a_typed_non_retryable_failure(
         installer=_Installer(),
         smoke=_Smoke(),
         restarter=_Restarter(),
-        observer=_Observer(store, phase="degraded", last_error_code=None),
+        observer=_Observer(store, pinned="9999fff", phase="degraded", last_error_code=None),
         clock=_Clock(),
         converge_attempts=2,
         converge_interval_seconds=0,

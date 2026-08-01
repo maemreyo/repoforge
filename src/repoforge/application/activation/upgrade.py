@@ -283,7 +283,7 @@ class UpgradeService:
 
     # -- reconciliation of an unterminalized activation ----------------------
 
-    def reconcile(self) -> UpgradeResult:
+    def reconcile(self, *, repair: str | None = None) -> UpgradeResult:
         """Terminalize an activation that reached its target but wrote no receipt.
 
         An activation can die between the symlink swap and its receipt -- the process is
@@ -293,6 +293,11 @@ class UpgradeService:
         blocks every later activation. Rollback is not the answer to that state: it would
         move a healthy runtime OFF the release it is correctly serving. This is the
         forward path, and it terminalizes only what it can prove.
+
+        ``repair="rollback"`` is the explicit recovery for the opposite state (#367): a
+        release that failed closed with a typed non-retryable failure and cannot serve.
+        It is never the default -- reconciliation stays forward-only -- because moving
+        ``current`` is a high-impact mutation that must be asked for.
         """
         with self._activation_lock():
             in_flight = self._store.read_in_flight_activation()
@@ -309,14 +314,65 @@ class UpgradeService:
             reconciled = self._reconcile_converged(in_flight)
             if reconciled is not None:
                 return reconciled
+            if repair == "rollback":
+                return self._repair_rollback(in_flight)
             raise ConfigError(
                 "ACTIVATION_NOT_RECONCILABLE: "
                 f"{self._unreconciled_detail(in_flight)}. An activation may only be "
                 "terminalized as activated when the live runtime is observed serving its "
                 "target and health-verified, so fix the runtime and re-run this command, "
-                f"or run `rf upgrade rollback` to return to {self._store.previous_sha()} "
-                "and record that outcome instead."
+                "or run `rf upgrade reconcile --repair rollback` when the runtime failed "
+                "closed with a typed non-retryable failure, or run `rf upgrade rollback` "
+                f"to return to {self._store.previous_sha()} and record that outcome "
+                "instead."
             )
+
+    def _repair_rollback(self, in_flight: dict[str, object]) -> UpgradeResult:
+        """Terminalize a fail-closed activation by rolling back to the previous release.
+
+        Every step is verified before the symlink moves: the journal must describe the
+        live state (`current` is the in-flight target), the runtime must provably have
+        failed closed with a typed non-retryable error, `previous` must still be the
+        journal's origin, and that release must be installed and pass the contract
+        re-verification -- only then does the ordinary rollback path run.
+        """
+        to_sha = in_flight.get("to_sha")
+        from_sha = in_flight.get("from_sha")
+        if not isinstance(to_sha, str) or not isinstance(from_sha, str):
+            raise ConfigError(
+                "ACTIVATION_NOT_REPAIRABLE: the journal has no identifiable target or "
+                "origin to repair"
+            )
+        if self._store.current_sha() != to_sha:
+            raise ConfigError(
+                "ACTIVATION_NOT_REPAIRABLE: `current` is "
+                f"{self._store.current_sha()}, not the in-flight target {to_sha}; the "
+                "journal does not describe the live state"
+            )
+        observed = self._observer.observe()
+        if observed.phase not in {"failed", "fail_closed"} or observed.last_error_code is None:
+            raise ConfigError(
+                "ACTIVATION_NOT_REPAIRABLE: the runtime is not in a typed non-retryable "
+                f"failure (phase={observed.phase}, "
+                f"error={observed.last_error_code or 'none'}). Repair rollback only "
+                "applies to a release that provably failed closed; a healthy runtime "
+                "should be reconciled forward, and a stopped one rolled back directly "
+                "with `rf upgrade rollback`."
+            )
+        if self._store.previous_sha() != from_sha:
+            raise ConfigError(
+                "ACTIVATION_NOT_REPAIRABLE: `previous` is "
+                f"{self._store.previous_sha()}, not the journal's origin {from_sha}"
+            )
+        previous_manifest = self._store.read_manifest(from_sha)
+        if previous_manifest is None or not self._store.release_path(from_sha).is_dir():
+            raise ConfigError(
+                f"ACTIVATION_NOT_REPAIRABLE: the previous release {from_sha} is not "
+                "installed and usable; rebuild it with `rf upgrade` before repairing"
+            )
+        self._verify_installed_contract(previous_manifest)
+        rolled_back = self._rollback_locked(receipt_id=None, expected_current=to_sha)
+        return replace(rolled_back, detail=f"Repair rollback: {rolled_back.detail}")
 
     def _require_no_unreconciled_activation(self, *, action: str) -> None:
         """Fail closed on an unterminalized activation -- unless it demonstrably won.
@@ -639,6 +695,12 @@ class UpgradeService:
                 continue
             if observed_sha != expected_sha:
                 detail = f"runtime is serving {observed_sha}, expected {expected_sha}"
+                continue
+            # A fail-closed/failed runtime that still names the release in its record is
+            # NOT serving it: convergence is observed serving AND healthy, and a typed
+            # terminal failure is never reconciled forward (#367).
+            if observation.phase in {"failed", "fail_closed"}:
+                detail = f"runtime is {observation.phase}, not serving {expected_sha}"
                 continue
             if self._health_probe is None:
                 return True, observed_sha, f"observed {observed_sha} (health probe not configured)"
