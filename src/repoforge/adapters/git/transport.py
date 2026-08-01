@@ -21,6 +21,10 @@ from ...domain.repository_auth_broker import ProcessAuthContext
 from ...domain.repository_identity import AuthTargetKind
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
+from ...ports.git_remote_identity import (
+    GitTransportEndpointRevalidator,
+    SshIdentityMaterialProvider,
+)
 
 _SCP_REMOTE = re.compile(
     r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?(?P<host>[A-Za-z0-9.-]+):(?P<path>[^\x00]+)$"
@@ -161,15 +165,9 @@ def _scrubbed_environment(context: ProcessAuthContext) -> dict[str, str]:
     }
 
 
-def _ssh_environment(spec: GitTransportSpec, context: ProcessAuthContext) -> dict[str, str]:
+def _ssh_environment(identity_file: Path, context: ProcessAuthContext) -> dict[str, str]:
     environment = _scrubbed_environment(context)
     environment.pop("REPOFORGE_GIT_HTTPS_TOKEN", None)
-    identity_file = spec.ssh_identity_file
-    if identity_file is None:
-        raise _transport_error(
-            ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,
-            "Pinned SSH transport is missing its reviewed identity-file reference.",
-        )
     environment.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
@@ -178,7 +176,7 @@ def _ssh_environment(spec: GitTransportSpec, context: ProcessAuthContext) -> dic
                 "ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=none "
                 "-o BatchMode=yes -o PasswordAuthentication=no "
                 "-o KbdInteractiveAuthentication=no "
-                f"-i {shlex.quote(identity_file)}"
+                f"-i {shlex.quote(str(identity_file))}"
             ),
         }
     )
@@ -234,8 +232,16 @@ def _https_environment(spec: GitTransportSpec, context: ProcessAuthContext) -> d
 class GitTransportRouter:
     """Execute one reviewed Git transport without ambient identity fallback."""
 
-    def __init__(self, executor: _IsolatedExecutor) -> None:
+    def __init__(
+        self,
+        executor: _IsolatedExecutor,
+        *,
+        endpoint_revalidator: GitTransportEndpointRevalidator | None = None,
+        identity_materials: SshIdentityMaterialProvider | None = None,
+    ) -> None:
         self._executor = executor
+        self._endpoint_revalidator = endpoint_revalidator
+        self._identity_materials = identity_materials
 
     def _environment(
         self,
@@ -251,11 +257,12 @@ class GitTransportRouter:
                 "Git transport remote host does not match the reviewed provider host.",
                 details={"expected_host": spec.provider_host, "actual_host": host},
             )
-        return (
-            _ssh_environment(spec, context)
-            if spec.kind is GitTransportKind.SSH
-            else _https_environment(spec, context)
-        )
+        if spec.kind is GitTransportKind.SSH:
+            raise _transport_error(
+                ErrorCode.GIT_TRANSPORT_MIGRATION_REQUIRED,
+                "SSH transport must be prepared through a reviewed endpoint proof.",
+            )
+        return _https_environment(spec, context)
 
     def _run(
         self,
@@ -267,15 +274,47 @@ class GitTransportRouter:
         access: GitTransportAccess,
     ) -> CommandResult:
         _assert_access(spec, access)
-        environment = self._environment(argv[2], spec, context)
-        result = self._executor.run_isolated(
-            argv,
-            cwd=cwd,
-            environment=environment,
-            secrets=context.secret_values,
-            check=False,
-            output_limit=1_000_000,
-        )
+        _assert_context(spec, context)
+        run_argv = list(argv)
+        material = None
+        if spec.kind is GitTransportKind.SSH:
+            endpoint = spec.ssh_endpoint
+            if endpoint is None:
+                raise _transport_error(
+                    ErrorCode.GIT_TRANSPORT_MIGRATION_REQUIRED,
+                    "Legacy path-only SSH transport cannot start a network operation.",
+                    details={
+                        "profile_id": spec.profile_id,
+                        "repository_id": spec.repository_id,
+                    },
+                )
+            if self._endpoint_revalidator is None or self._identity_materials is None:
+                raise _transport_error(
+                    ErrorCode.GIT_TRANSPORT_MIGRATION_REQUIRED,
+                    "SSH endpoint revalidation is not composed for this runtime.",
+                )
+            live = self._endpoint_revalidator.revalidate(
+                cwd=cwd,
+                raw_remote_url=run_argv[2],
+                expected=endpoint,
+            )
+            material = self._identity_materials.open_verified(live.key)
+            run_argv[2] = live.canonical_url()
+            environment = _ssh_environment(material.path, context)
+        else:
+            environment = self._environment(run_argv[2], spec, context)
+        try:
+            result = self._executor.run_isolated(
+                run_argv,
+                cwd=cwd,
+                environment=environment,
+                secrets=context.secret_values,
+                check=False,
+                output_limit=1_000_000,
+            )
+        finally:
+            if material is not None:
+                material.close()
         if result.returncode == 0:
             return result
         rendered = result.combined.lower()

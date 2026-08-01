@@ -621,13 +621,20 @@ def test_production_auth_dependencies_observe_with_the_selected_named_account(
             executor: object,
             *,
             clock: object,
-            ssh_discovery: object | None = None,
+            remote_parser: object | None = None,
         ) -> None:
             assert executor is commands
-            del clock, ssh_discovery
+            del clock, remote_parser
 
-        def target(self, repo: RepositoryConfig) -> RepositoryObservationTarget:
+        def target(
+            self,
+            repo: RepositoryConfig,
+            *,
+            expected_provider_host: str,
+            reviewed_ssh_endpoint: object | None = None,
+        ) -> RepositoryObservationTarget:
             assert repo.repo_id == "demo"
+            assert expected_provider_host == "github.com"
             return RepositoryObservationTarget(
                 provider=RepositoryProvider.GITHUB,
                 provider_host="github.com",
@@ -639,10 +646,13 @@ def test_production_auth_dependencies_observe_with_the_selected_named_account(
             self,
             repo: RepositoryConfig,
             *,
+            expected_provider_host: str,
             config_revision: str,
             context: ProcessAuthContext,
+            reviewed_ssh_endpoint: object | None = None,
         ) -> RepositoryIdentityObservation:
             assert repo.repo_id == "demo"
+            assert expected_provider_host == "github.com"
             assert config_revision == _SHA
             contexts.append(context)
             assert context.environment_dict() == {"GH_TOKEN": _TOKEN}
@@ -714,12 +724,18 @@ def test_production_auth_dependencies_fail_closed_without_profiles(
             executor: object,
             *,
             clock: object,
-            ssh_discovery: object | None = None,
+            remote_parser: object | None = None,
         ) -> None:
             assert executor is commands
-            del clock, ssh_discovery
+            del clock, remote_parser
 
-        def target(self, repo: RepositoryConfig) -> RepositoryObservationTarget:
+        def target(
+            self,
+            repo: RepositoryConfig,
+            *,
+            expected_provider_host: str,
+            reviewed_ssh_endpoint: object | None = None,
+        ) -> RepositoryObservationTarget:
             observed.append(f"target:{repo.repo_id}")
             raise AssertionError("profile admission must fail before repository observation")
 

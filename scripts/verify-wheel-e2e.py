@@ -191,9 +191,9 @@ commands = [[{_toml(sys.executable)}, "-c", "from pathlib import Path; assert Pa
                 idempotency_key="wheel-e2e-push-0001",
             )
         except RepoForgeError as failure:
-            assert failure.code is ErrorCode.GITHUB_PROVIDER_UNAVAILABLE
+            assert failure.code is ErrorCode.INPUT_REQUIRED
             assert failure.unchanged_state == (
-                "No identity was resolved, bound, or used for a write.",
+                "No repository identity was observed, bound, or used for a write.",
             )
         else:
             raise AssertionError("an unbound local remote must not publish")

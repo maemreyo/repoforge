@@ -11,8 +11,10 @@ from typing import Any
 import tomli as tomllib
 
 from ...domain.generated_paths import GeneratedPathRule, parse_generated_paths
+from ...domain.git_remote_identity import ReviewedSshEndpoint
 from ...domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from ...domain.policy_patch import PolicyPatchError, RepositoryPolicyPatch
+from .ssh_endpoint import parse_source_ssh_endpoint, source_ssh_endpoint_table
 
 SOURCE_CONFIG_VERSION = 2
 _GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -270,6 +272,7 @@ class SourceAuthProfile:
     ssh_identity_file: str | None = None
     https_token_environment: str | None = None
     source_ssh_alias: str | None = None
+    ssh_endpoint: ReviewedSshEndpoint | None = None
     lease_seconds: int = 300
 
     @classmethod
@@ -300,6 +303,7 @@ class SourceAuthProfile:
             "ssh_identity_file",
             "https_token_environment",
             "source_ssh_alias",
+            "ssh_endpoint",
             "lease_seconds",
         }
         unknown = sorted(set(raw) - allowed)
@@ -416,11 +420,42 @@ class SourceAuthProfile:
         ssh_identity_file = optional_string("ssh_identity_file")
         https_token_environment = optional_string("https_token_environment")
         source_ssh_alias = optional_string("source_ssh_alias")
+        ssh_endpoint_raw = raw.get("ssh_endpoint")
+        ssh_endpoint = (
+            parse_source_ssh_endpoint(
+                ssh_endpoint_raw,
+                context=f"{context}.ssh_endpoint",
+            )
+            if ssh_endpoint_raw is not None
+            else None
+        )
         if transport_kind == "ssh":
-            if ssh_identity_file is None or not Path(ssh_identity_file).is_absolute():
+            if ssh_endpoint is None and (
+                ssh_identity_file is None or not Path(ssh_identity_file).is_absolute()
+            ):
                 raise ValueError(
-                    f"{context}.ssh_identity_file must be an absolute identity-file path"
+                    f"{context} SSH transport requires ssh_endpoint or an absolute "
+                    "identity-file path in ssh_identity_file"
                 )
+            if ssh_endpoint is not None and ssh_endpoint.canonical_host != github_host:
+                raise ValueError(f"{context}.ssh_endpoint canonical host must match github_host")
+            if ssh_endpoint is not None:
+                legacy_path_mismatch = (
+                    ssh_identity_file is not None
+                    and ssh_identity_file != ssh_endpoint.key.canonical_path
+                )
+                legacy_alias_mismatch = (
+                    source_ssh_alias is not None and source_ssh_alias != ssh_endpoint.raw_host
+                )
+                if legacy_path_mismatch or legacy_alias_mismatch:
+                    raise ValueError(f"{context} legacy SSH metadata must match ssh_endpoint")
+                if ssh_endpoint.principal.expected_actor_id != expected_actor_id or (
+                    github_login is not None
+                    and ssh_endpoint.principal.principal_login != github_login
+                ):
+                    raise ValueError(
+                        f"{context}.ssh_endpoint principal must match the profile actor"
+                    )
             if https_token_environment is not None:
                 raise ValueError(
                     f"{context} SSH transport cannot declare an HTTPS token environment"
@@ -435,6 +470,8 @@ class SourceAuthProfile:
                 )
             if ssh_identity_file is not None:
                 raise ValueError(f"{context} HTTPS transport cannot declare an SSH identity file")
+            if ssh_endpoint is not None:
+                raise ValueError(f"{context} HTTPS transport cannot declare an SSH endpoint")
 
         return cls(
             profile_id=profile_id,
@@ -459,11 +496,12 @@ class SourceAuthProfile:
             ssh_identity_file=ssh_identity_file,
             https_token_environment=https_token_environment,
             source_ssh_alias=source_ssh_alias,
+            ssh_endpoint=ssh_endpoint,
             lease_seconds=lease_seconds,
         )
 
-    def as_table(self) -> dict[str, bool | int | str | list[str]]:
-        result: dict[str, bool | int | str | list[str]] = {
+    def as_table(self) -> dict[str, object]:
+        result: dict[str, object] = {
             "provider": self.provider,
             "credential_kind": self.credential_kind,
             "credential_reference": self.credential_reference,
@@ -493,6 +531,8 @@ class SourceAuthProfile:
                 result[name] = value
         if self.github_permissions:
             result["github_permissions"] = list(self.github_permissions)
+        if self.ssh_endpoint is not None:
+            result["ssh_endpoint"] = source_ssh_endpoint_table(self.ssh_endpoint)
         return result
 
 
@@ -695,9 +735,18 @@ def render_source(config: SourceConfiguration) -> str:
                 "mcp_connection_max_ttl_seconds = " + str(config.mcp_connection_max_ttl_seconds)
             )
     for auth_profile in sorted(config.auth_profiles, key=lambda item: item.profile_id):
+        table = auth_profile.as_table()
+        scalar = {key: value for key, value in table.items() if not isinstance(value, dict)}
+        nested = {key: value for key, value in table.items() if isinstance(value, dict)}
         lines.extend(["", f"[auth_profiles.{_toml_key(auth_profile.profile_id)}]"])
-        for key, value in auth_profile.as_table().items():
+        for key, value in scalar.items():
             lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+        for key, value in nested.items():
+            _render_patch_table(
+                f"auth_profiles.{_toml_key(auth_profile.profile_id)}.{_toml_key(key)}",
+                value,
+                lines,
+            )
     for repo in config.repositories:
         lines.extend(
             [

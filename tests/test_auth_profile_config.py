@@ -32,6 +32,7 @@ from repoforge.domain.github_api_identity import (
 from repoforge.domain.repository_identity import ActorClass
 
 _SHA_A = "a" * 64
+_SSH_FINGERPRINT = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
 def _stored_profile_table() -> str:
@@ -60,6 +61,73 @@ def _source_text() -> str:
     return 'version = 2\n[[repo]]\nid = "demo"\npath = "/tmp/demo"\n\n' + _stored_profile_table()
 
 
+def _ssh_profile_table() -> str:
+    return f'''[auth_profiles.work]
+provider = "github"
+credential_kind = "stored_account"
+credential_reference = "gh-account-matw-ngo"
+actor_class = "human_operated"
+expected_actor_id = "173029271"
+enabled = true
+repository_id = "341454638"
+repository_patterns = ["github.com/cicdata-io/*"]
+boundary_id = "github-com-cicdata-io"
+capability_ids = ["github.contents.read", "github.contents.write"]
+github_host = "github.com"
+github_login = "matw-ngo"
+transport_kind = "ssh"
+credential_fingerprint = "{_SHA_A}"
+allowed_access = ["read", "write"]
+lease_seconds = 300
+
+[auth_profiles.work.ssh_endpoint]
+schema_version = 1
+raw_host = "github-work"
+canonical_host = "github.com"
+user = "git"
+port = 22
+owner = "cicdata-io"
+repository = "portal-spa"
+raw_url_digest = "{_SHA_A}"
+canonical_path = "/Users/trung.ngo/.ssh/id_rsa_work"
+public_key_fingerprint = "{_SSH_FINGERPRINT}"
+owner_uid = 501
+mode = 384
+key_observed_at = "2026-08-01T00:00:00+00:00"
+source_config_digest = "{"b" * 64}"
+selected_block_digest = "{"c" * 64}"
+principal_kind = "github_account"
+principal_login = "matw-ngo"
+principal_actor_id = "173029271"
+principal_observed_at = "2026-08-01T00:00:00+00:00"
+principal_proof_digest = "{"d" * 64}"
+proof_digest = "{"e" * 64}"
+'''
+
+
+def _legacy_ssh_profile_table() -> str:
+    return f'''[auth_profiles.work]
+provider = "github"
+credential_kind = "stored_account"
+credential_reference = "gh-account-matw-ngo"
+actor_class = "human_operated"
+expected_actor_id = "173029271"
+enabled = true
+repository_id = "341454638"
+repository_patterns = ["github.com/cicdata-io/*"]
+boundary_id = "github-com-cicdata-io"
+capability_ids = ["github.contents.read", "github.contents.write"]
+github_host = "github.com"
+github_login = "matw-ngo"
+transport_kind = "ssh"
+ssh_identity_file = "/Users/trung.ngo/.ssh/id_rsa_work"
+source_ssh_alias = "github-work"
+credential_fingerprint = "{_SHA_A}"
+allowed_access = ["read", "write"]
+lease_seconds = 300
+'''
+
+
 def _write_runtime_config(tmp_path: Path, *, extra: str = "") -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -71,6 +139,22 @@ path = "{repo}"
 
 {_stored_profile_table()}
 {extra}
+''',
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_ssh_runtime_config(tmp_path: Path) -> Path:
+    repo = tmp_path / "portal-spa"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    path = tmp_path / "ssh-config.toml"
+    path.write_text(
+        f'''[repositories.portal-spa]
+path = "{repo}"
+
+{_ssh_profile_table()}
 ''',
         encoding="utf-8",
     )
@@ -92,6 +176,58 @@ def test_source_auth_profiles_round_trip_and_copy_helpers_preserve_them() -> Non
     removed = remove_source_repository(added, "second")
     assert added.auth_profiles == parsed.auth_profiles
     assert removed.auth_profiles == parsed.auth_profiles
+
+
+def test_source_ssh_endpoint_proof_round_trips_without_losing_identity_evidence() -> None:
+    source = (
+        'version = 2\n[[repo]]\nid = "portal-spa"\npath = "/tmp/portal-spa"\n\n'
+        + _ssh_profile_table()
+    )
+
+    parsed = parse_source(source)
+
+    endpoint = parsed.auth_profiles[0].ssh_endpoint
+    assert endpoint is not None
+    assert endpoint.raw_host == "github-work"
+    assert endpoint.canonical_host == "github.com"
+    assert endpoint.key.public_key_fingerprint == _SSH_FINGERPRINT
+    assert endpoint.principal.principal_login == "matw-ngo"
+    assert parse_source(render_source(parsed)) == parsed
+
+
+def test_source_ssh_endpoint_rejects_conflicting_legacy_transport_metadata() -> None:
+    source = (
+        'version = 2\n[[repo]]\nid = "portal-spa"\npath = "/tmp/portal-spa"\n\n'
+        + _ssh_profile_table().replace(
+            'transport_kind = "ssh"',
+            'transport_kind = "ssh"\n'
+            'ssh_identity_file = "/Users/trung.ngo/.ssh/id_rsa_personal"\n'
+            'source_ssh_alias = "github-personal"',
+        )
+    )
+
+    with pytest.raises(ValueError, match="legacy SSH metadata must match ssh_endpoint"):
+        parse_source(source)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('principal_login = "matw-ngo"', 'principal_login = "maemreyo"'),
+        ('principal_actor_id = "173029271"', 'principal_actor_id = "47786834"'),
+    ],
+)
+def test_source_ssh_endpoint_principal_must_match_the_profile_actor(
+    old: str,
+    new: str,
+) -> None:
+    source = (
+        'version = 2\n[[repo]]\nid = "portal-spa"\npath = "/tmp/portal-spa"\n\n'
+        + _ssh_profile_table().replace(old, new)
+    )
+
+    with pytest.raises(ValueError, match="principal must match the profile actor"):
+        parse_source(source)
 
 
 def test_source_copy_helpers_preserve_the_reviewed_tunnel_connection_ttl() -> None:
@@ -142,6 +278,8 @@ def test_runtime_auth_profile_builds_existing_identity_primitives(tmp_path: Path
     configured = loaded.auth_profiles["personal"]
     assert isinstance(configured, AuthProfileConfig)
     assert configured.profile.profile_id == "personal"
+    assert configured.profile.credential_ref.scheme == "gh-account"
+    assert configured.profile.credential_ref.reference_id == "gh-account-personal"
     assert configured.profile.actor_class is ActorClass.HUMAN_OPERATED
     assert configured.eligibility.repository_patterns == ("github.com/maemreyo/*",)
     assert isinstance(configured.api_identity, StoredGhAccountSpec)
@@ -149,6 +287,41 @@ def test_runtime_auth_profile_builds_existing_identity_primitives(tmp_path: Path
     assert configured.transport.kind is GitTransportKind.HTTPS
     assert configured.transport.https_token_environment == "REPOFORGE_GH_PERSONAL_TOKEN"
     assert loaded.identity_migration_required is False
+
+
+def test_runtime_ssh_profile_compiles_the_reviewed_endpoint_proof(tmp_path: Path) -> None:
+    loaded = load_config(_write_ssh_runtime_config(tmp_path))
+
+    transport = loaded.auth_profiles["work"].transport
+    assert transport.kind is GitTransportKind.SSH
+    assert transport.ssh_endpoint is not None
+    assert transport.ssh_endpoint.canonical_url() == (
+        "ssh://git@github.com:22/cicdata-io/portal-spa.git"
+    )
+    assert transport.ssh_identity_file is None
+
+
+def test_legacy_path_only_ssh_profile_remains_decodable_without_endpoint_authority(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "portal-spa"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    path = tmp_path / "legacy-ssh.toml"
+    path.write_text(
+        f'''[repositories.portal-spa]
+path = "{repo}"
+
+{_legacy_ssh_profile_table()}
+''',
+        encoding="utf-8",
+    )
+
+    transport = load_config(path).auth_profiles["work"].transport
+
+    assert transport.kind is GitTransportKind.SSH
+    assert transport.ssh_endpoint is None
+    assert transport.ssh_identity_file == "/Users/trung.ngo/.ssh/id_rsa_work"
 
 
 def test_github_app_profile_constructs_app_installation_spec(tmp_path: Path) -> None:
@@ -171,6 +344,8 @@ def test_github_app_profile_constructs_app_installation_spec(tmp_path: Path) -> 
 
     configured = load_config(path).auth_profiles["automation"]
 
+    assert configured.profile.credential_ref.scheme == "github-app"
+    assert configured.profile.credential_ref.reference_id == "github-app-prod"
     assert isinstance(configured.api_identity, GitHubAppInstallationSpec)
     assert configured.api_identity.installation_id == "314"
     assert configured.api_identity.permission_ids == ("contents:write", "pull_requests:write")
@@ -208,6 +383,33 @@ def test_resolved_renderer_preserves_auth_profile_tables() -> None:
 
     reparsed = tomllib.loads(rendered)
     assert reparsed["auth_profiles"]["personal"] == source_profile
+
+
+def test_resolved_renderer_preserves_structured_ssh_endpoint_proof() -> None:
+    source = parse_source(
+        'version = 2\n[[repo]]\nid = "portal-spa"\npath = "/tmp/portal-spa"\n\n'
+        + _ssh_profile_table()
+    )
+    document = apply_auth_profiles(
+        {"repositories": {"portal-spa": {"path": "/tmp/portal-spa"}}},
+        source.auth_profiles,
+    )
+
+    rendered = render_resolved(
+        document,
+        generation=2,
+        source_path="/tmp/source.toml",
+        source_sha256=_SHA_A,
+        created_at="2026-08-01T00:00:00+00:00",
+        reason="test",
+        proposal_id=None,
+        repository_fingerprints=(("portal-spa", _SHA_A),),
+    )
+
+    endpoint = tomllib.loads(rendered)["auth_profiles"]["work"]["ssh_endpoint"]
+    assert endpoint["raw_host"] == "github-work"
+    assert endpoint["public_key_fingerprint"] == _SSH_FINGERPRINT
+    assert endpoint["principal_login"] == "matw-ngo"
 
 
 def test_commit_identity_must_reference_compatible_declared_auth_profile(tmp_path: Path) -> None:

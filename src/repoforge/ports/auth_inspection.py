@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..domain.commit_identity import CommitIdentityEvidence
+from ..domain.git_remote_identity import ReviewedSshEndpoint
 from ..domain.git_transport_identity import GitTransportEvidence, GitTransportSpec
 from ..domain.github_api_identity import (
     GitHubApiIdentityProof,
@@ -52,10 +53,6 @@ class RepositoryObservationTarget:
     provider_host: str
     owner: str
     repository: str
-    #: Raw transport alias when the remote is written with one (``git@github-work:...``),
-    #: ``None`` when the remote already used the canonical provider host. The API observes
-    #: the canonical host; the transport pins the alias's identity file.
-    transport_alias: str | None = None
 
     @property
     def canonical_name(self) -> str:
@@ -65,12 +62,20 @@ class RepositoryObservationTarget:
 class RepositoryIdentityObserver(Protocol):
     """Confirm one local target under an explicitly selected process identity."""
 
-    def target(self, repo: object) -> RepositoryObservationTarget: ...
+    def target(
+        self,
+        repo: object,
+        *,
+        expected_provider_host: str,
+        reviewed_ssh_endpoint: ReviewedSshEndpoint | None = None,
+    ) -> RepositoryObservationTarget: ...
 
     def observe(
         self,
         repo: object,
         *,
+        expected_provider_host: str,
         config_revision: str,
         context: ProcessAuthContext,
+        reviewed_ssh_endpoint: ReviewedSshEndpoint | None = None,
     ) -> RepositoryIdentityObservation: ...

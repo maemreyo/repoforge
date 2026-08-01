@@ -253,7 +253,14 @@ class AuthUxService:
     @staticmethod
     def _profile_payload(configured: AuthProfileConfig) -> dict[str, object]:
         profile = configured.profile
-        return {
+        endpoint = configured.transport.ssh_endpoint
+        if configured.transport.kind is not GitTransportKind.SSH:
+            endpoint_status = "not_applicable"
+        elif endpoint is None:
+            endpoint_status = "migration_required"
+        else:
+            endpoint_status = "verified"
+        payload: dict[str, object] = {
             "profile_id": profile.profile_id,
             "provider": profile.provider.value,
             "credential_kind": profile.credential_kind.value,
@@ -265,7 +272,26 @@ class AuthUxService:
             "capability_ids": list(profile.capability_ids),
             "transport_kind": configured.transport.kind.value,
             "source_ssh_alias": configured.source_ssh_alias,
+            "ssh_endpoint_status": endpoint_status,
+            "ssh_recovery_command": (
+                f"rf auth migrate inspect {configured.transport.repository_id}"
+                if endpoint_status == "migration_required"
+                else None
+            ),
         }
+        if endpoint is not None:
+            payload["ssh_endpoint"] = {
+                "raw_host": endpoint.raw_host,
+                "canonical_host": endpoint.canonical_host,
+                "owner": endpoint.owner,
+                "repository": endpoint.repository,
+                "public_key_fingerprint": endpoint.key.public_key_fingerprint,
+                "principal_login": endpoint.principal.principal_login,
+                "principal_actor_id": endpoint.principal.expected_actor_id,
+                "proof_schema_version": endpoint.schema_version,
+                "proof_digest": endpoint.proof_digest,
+            }
+        return payload
 
     # -- resolution and bindings ---------------------------------------------
 
@@ -663,14 +689,37 @@ class AuthUxService:
                 state=AuthSurfaceState.UNAVAILABLE,
                 detail="No reviewed auth profile is selected for this repository.",
             )
+        if (
+            configured.transport.kind is GitTransportKind.SSH
+            and configured.transport.ssh_endpoint is None
+        ):
+            return AuthSurfaceEvidence(
+                surface=AuthSurface.TRANSPORT,
+                state=AuthSurfaceState.BLOCKED,
+                detail=(
+                    "This legacy SSH profile has only a key path and no reviewed endpoint proof. "
+                    "Run `rf auth migrate inspect <repo-id>` and apply the reviewed migration."
+                ),
+                profile_id=configured.profile.profile_id,
+            )
         if self._transport is None or path is None:
+            endpoint = configured.transport.ssh_endpoint
+            endpoint_detail = (
+                (
+                    f" Endpoint {endpoint.raw_host} → {endpoint.canonical_host}, key "
+                    f"{endpoint.key.public_key_fingerprint}, principal "
+                    f"{endpoint.principal.principal_login} is reviewed."
+                )
+                if endpoint is not None
+                else ""
+            )
             return AuthSurfaceEvidence(
                 surface=AuthSurface.TRANSPORT,
                 state=AuthSurfaceState.CONFIGURED,
                 detail=(
                     f"A pinned {configured.transport.kind.value.upper()} transport is reviewed "
                     "for this repository. No transport inspector is composed here, so it was "
-                    "not exercised."
+                    f"not exercised.{endpoint_detail}"
                 ),
                 profile_id=configured.profile.profile_id,
             )

@@ -24,7 +24,6 @@ from .repository_identity import (
 from .versioning import Revision
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HOST = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _NAME_PART = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -150,11 +149,6 @@ class RepositoryIdentityObservation:
     exists: bool
     observed_at: str
     config_revision: str
-    #: Raw transport alias when the checkout remote is something like
-    #: ``git@github-work:owner/repo.git``. ``None`` if the remote was already a canonical
-    #: host. Migration transports pin the alias's identity file; identity observation uses
-    #: the canonical host.
-    transport_alias: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, RepositoryProvider):
@@ -166,11 +160,6 @@ class RepositoryIdentityObservation:
             raise ValueError("exists must be boolean")
         _timestamp(self.observed_at, "observed_at")
         _sha256(self.config_revision, "config_revision")
-        if self.transport_alias is not None and (
-            not isinstance(self.transport_alias, str)
-            or _ALIAS.fullmatch(self.transport_alias) is None
-        ):
-            raise ValueError("transport_alias must be a bounded SSH alias when present")
 
 
 @dataclass(frozen=True, slots=True)

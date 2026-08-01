@@ -29,6 +29,7 @@ from ..domain.auth_migration import (
 )
 from ..domain.config_generation import ApprovalEvent, ConfigMutation, sha256_text
 from ..domain.errors import ErrorCode, RepoForgeError
+from ..domain.git_remote_identity import GitRemoteKind, ParsedGitRemote, ReviewedSshEndpoint
 from ..domain.github_capability_preflight import GitHubOperationCapability
 from ..domain.repository_identity import RecoveryAction, RecoveryActionKind
 from ..domain.repository_identity_resolution import RepositoryIdentityObservation
@@ -76,6 +77,34 @@ class ObserveRepository(Protocol):
     def __call__(self, repo_id: str, login: str | None) -> RepositoryIdentityObservation: ...
 
 
+@dataclass(frozen=True, slots=True)
+class RepositoryEndpointSnapshot:
+    """One migration read of the raw remote, provider observation, and SSH proof."""
+
+    observation: RepositoryIdentityObservation
+    remote: ParsedGitRemote
+    ssh_endpoint: ReviewedSshEndpoint | None
+    blocking_code: ErrorCode | None = None
+    blocking_detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.remote.kind is GitRemoteKind.HTTPS and self.ssh_endpoint is not None:
+            raise ValueError("HTTPS endpoint snapshots cannot contain an SSH proof")
+        if (self.blocking_code is None) != (self.blocking_detail is None):
+            raise ValueError("blocking endpoint evidence requires both code and detail")
+
+
+class ResolveRepositoryEndpoint(Protocol):
+    def __call__(
+        self,
+        repo_id: str,
+        *,
+        provider_host: str,
+        login: str,
+        expected_actor_id: str,
+    ) -> RepositoryEndpointSnapshot: ...
+
+
 def _failure(code: ErrorCode, message: str, *, next_action: str) -> RepoForgeError:
     return RepoForgeError(
         message,
@@ -112,6 +141,8 @@ class _Gathered:
     candidates: tuple[NamedAccountCandidate, ...]
     verified: NamedAccountCandidate | None
     ssh: SshAliasCandidate | None
+    remote: ParsedGitRemote | None
+    ssh_endpoint: ReviewedSshEndpoint | None
     plan: AuthMigrationPlan
     already_migrated: bool
 
@@ -129,6 +160,7 @@ class AuthMigrationService:
         ssh: SshAliasDiscovery,
         ambient: AmbientAuthConflictReader,
         observe: ObserveRepository,
+        resolve_endpoint: ResolveRepositoryEndpoint | None = None,
         host: str = "github.com",
         ssh_alias: str | None = None,
     ) -> None:
@@ -139,6 +171,7 @@ class AuthMigrationService:
         self._ssh = ssh
         self._ambient = ambient
         self._observe = observe
+        self._resolve_endpoint = resolve_endpoint
         self._host = host
         self._ssh_alias = ssh_alias
 
@@ -243,7 +276,10 @@ class AuthMigrationService:
                 )
             candidates = narrowed
         selected_login = candidates[0].login if len(candidates) == 1 else None
-        observation = self._observe(repo_id, selected_login)
+        observation = self._observe(
+            repo_id,
+            None if self._resolve_endpoint is not None else selected_login,
+        )
         repo_path = Path(repository.path)
 
         findings: list[AuthMigrationFinding] = []
@@ -267,6 +303,8 @@ class AuthMigrationService:
 
         verified: NamedAccountCandidate | None = None
         ssh_candidate: SshAliasCandidate | None = None
+        remote: ParsedGitRemote | None = None
+        ssh_endpoint: ReviewedSshEndpoint | None = None
         transport_kind: str | None = None
 
         if already_migrated:
@@ -328,12 +366,59 @@ class AuthMigrationService:
                         ),
                     )
                 )
-            ssh_candidate = self._ssh_candidate(observation, findings)
-            transport_kind = "ssh" if ssh_candidate is not None else "https"
-            changes.extend(self._proposed_changes(repo_id, observation, verified, ssh_candidate))
+            if self._resolve_endpoint is not None:
+                snapshot = self._resolve_endpoint(
+                    repo_id,
+                    provider_host=self._host,
+                    login=verified.login,
+                    expected_actor_id=verified.actor_id or verified.login,
+                )
+                observation = snapshot.observation
+                remote = snapshot.remote
+                ssh_endpoint = snapshot.ssh_endpoint
+                transport_kind = remote.kind.value
+                already_migrated = any(
+                    profile.repository_id == observation.repository_id
+                    for profile in source.auth_profiles
+                )
+                if snapshot.blocking_code is not None:
+                    assert snapshot.blocking_detail is not None
+                    findings.append(
+                        AuthMigrationFinding(
+                            code=AuthMigrationFindingCode.SSH_CONFIGURATION_AMBIGUOUS,
+                            severity=AuthMigrationSeverity.BLOCKING,
+                            subject=remote.raw_host,
+                            detail=(f"{snapshot.blocking_code.value}: {snapshot.blocking_detail}"),
+                            recovery_actions=(RecoveryAction(RecoveryActionKind.REVIEW_REMOTE),),
+                        )
+                    )
+                elif not already_migrated:
+                    changes.extend(
+                        self._proposed_changes(
+                            repo_id,
+                            observation,
+                            verified,
+                            ssh_endpoint,
+                        )
+                    )
+            else:
+                ssh_candidate = self._ssh_candidate(observation, findings)
+                transport_kind = "ssh" if ssh_candidate is not None else "https"
+                if not any(
+                    finding.severity is AuthMigrationSeverity.BLOCKING for finding in findings
+                ):
+                    changes.extend(
+                        self._proposed_changes(repo_id, observation, verified, ssh_candidate)
+                    )
 
         findings.extend(
-            self._ambient_findings(repo_id, repo_path, observation, transport_kind=transport_kind)
+            self._ambient_findings(
+                repo_id,
+                repo_path,
+                observation,
+                remote=remote,
+                transport_kind=transport_kind,
+            )
         )
 
         finding_tuple = tuple(findings[:64])
@@ -356,6 +441,8 @@ class AuthMigrationService:
             candidates=candidates,
             verified=verified,
             ssh=ssh_candidate,
+            remote=remote,
+            ssh_endpoint=ssh_endpoint,
             plan=plan,
             already_migrated=already_migrated,
         )
@@ -382,20 +469,20 @@ class AuthMigrationService:
         observation: RepositoryIdentityObservation,
         findings: list[AuthMigrationFinding],
     ) -> SshAliasCandidate | None:
-        #: The raw alias the checkout actually uses wins over a configured default so the
-        #: transport pins the key the remote really reaches, never a sibling account's key.
-        alias = observation.transport_alias or self._ssh_alias or observation.provider_host
+        if self._ssh_alias is None:
+            return None
+        alias = self._ssh_alias
         try:
             candidate = self._ssh.inspect(alias)
         except RepoForgeError:
             findings.append(
                 AuthMigrationFinding(
                     code=AuthMigrationFindingCode.SSH_CONFIGURATION_AMBIGUOUS,
-                    severity=AuthMigrationSeverity.INFO,
+                    severity=AuthMigrationSeverity.BLOCKING,
                     subject=alias,
                     detail=(
                         f"The SSH alias {alias} does not resolve to one pinnable identity file, "
-                        "so the plan proposes an explicit HTTPS transport instead."
+                        "so migration cannot prove the selected SSH principal."
                     ),
                     recovery_actions=(RecoveryAction(RecoveryActionKind.REVIEW_REMOTE),),
                 )
@@ -405,7 +492,7 @@ class AuthMigrationService:
             findings.append(
                 AuthMigrationFinding(
                     code=AuthMigrationFindingCode.SSH_CONFIGURATION_AMBIGUOUS,
-                    severity=AuthMigrationSeverity.INFO,
+                    severity=AuthMigrationSeverity.BLOCKING,
                     subject=alias,
                     detail=(
                         f"The SSH alias {alias} resolves to {candidate.hostname}, not the observed "
@@ -423,6 +510,7 @@ class AuthMigrationService:
         repo_path: Path,
         observation: RepositoryIdentityObservation,
         *,
+        remote: ParsedGitRemote | None,
         transport_kind: str | None,
     ) -> tuple[AuthMigrationFinding, ...]:
         findings: list[AuthMigrationFinding] = []
@@ -483,7 +571,7 @@ class AuthMigrationService:
                     recovery_actions=(RecoveryAction(RecoveryActionKind.REVIEW_REMOTE),),
                 )
             )
-        findings.extend(self._remote_findings(repo_path, observation))
+        findings.extend(self._remote_findings(repo_path, observation, remote))
         return tuple(findings)
 
     def _credential_helper_finding(
@@ -537,17 +625,24 @@ class AuthMigrationService:
         )
 
     def _remote_findings(
-        self, repo_path: Path, observation: RepositoryIdentityObservation
+        self,
+        repo_path: Path,
+        observation: RepositoryIdentityObservation,
+        remote: ParsedGitRemote | None,
     ) -> tuple[AuthMigrationFinding, ...]:
         observed = self._ambient.git_config_values(repo_path, _REMOTE_KEY)
         if not observed:
             return ()
         expected_host, expected_owner, expected_repository = observation.canonical_name.split("/")
         accepted_hosts = {expected_host}
-        if observation.transport_alias is not None:
-            #: A checkout written with the same alias the observer resolved to the canonical
-            #: host reaches the same target; the owner/repository below must still match.
-            accepted_hosts.add(observation.transport_alias.lower())
+        if (
+            remote is not None
+            and remote.owner.lower() == expected_owner.lower()
+            and remote.repository.lower() == expected_repository.lower()
+        ):
+            accepted_hosts.add(remote.raw_host.lower())
+        elif self._ssh_alias is not None:
+            accepted_hosts.add(self._ssh_alias.lower())
         mismatched: list[str] = []
         for origin, url in observed:
             match = _REMOTE_TARGET.match(url)
@@ -580,12 +675,25 @@ class AuthMigrationService:
         repo_id: str,
         observation: RepositoryIdentityObservation,
         account: NamedAccountCandidate,
-        ssh: SshAliasCandidate | None,
+        ssh: SshAliasCandidate | ReviewedSshEndpoint | None,
     ) -> tuple[AuthMigrationChange, ...]:
         profile = self._proposed_profile(observation, account, ssh)
         transport_attributes: list[tuple[str, str]] = [("transport_kind", profile.transport_kind)]
         if profile.ssh_identity_file is not None:
             transport_attributes.append(("ssh_identity_file", profile.ssh_identity_file))
+        if profile.ssh_endpoint is not None:
+            transport_attributes.extend(
+                (
+                    ("raw_host", profile.ssh_endpoint.raw_host),
+                    ("canonical_host", profile.ssh_endpoint.canonical_host),
+                    (
+                        "public_key_fingerprint",
+                        profile.ssh_endpoint.key.public_key_fingerprint,
+                    ),
+                    ("principal_login", profile.ssh_endpoint.principal.principal_login),
+                    ("endpoint_proof_digest", profile.ssh_endpoint.proof_digest),
+                )
+            )
         if profile.https_token_environment is not None:
             transport_attributes.append(
                 ("https_token_environment", profile.https_token_environment)
@@ -634,15 +742,27 @@ class AuthMigrationService:
         self,
         observation: RepositoryIdentityObservation,
         account: NamedAccountCandidate,
-        ssh: SshAliasCandidate | None,
+        ssh: SshAliasCandidate | ReviewedSshEndpoint | None,
     ) -> SourceAuthProfile:
         host, owner, _repository = observation.canonical_name.split("/")
         actor_id = account.actor_id or account.login
-        if ssh is not None:
+        ssh_endpoint = ssh if isinstance(ssh, ReviewedSshEndpoint) else None
+        legacy_ssh = ssh if isinstance(ssh, SshAliasCandidate) else None
+        if ssh_endpoint is not None:
             transport_kind = "ssh"
-            ssh_identity_file: str | None = ssh.identity_file
+            ssh_identity_file: str | None = None
             https_token_environment: str | None = None
-            fingerprint = _reference_fingerprint("ssh", host, ssh.identity_file)
+            fingerprint = _reference_fingerprint(
+                "ssh-endpoint-v1",
+                host,
+                ssh_endpoint.key.public_key_fingerprint,
+                ssh_endpoint.principal.principal_login,
+            )
+        elif legacy_ssh is not None:
+            transport_kind = "ssh"
+            ssh_identity_file = legacy_ssh.identity_file
+            https_token_environment = None
+            fingerprint = _reference_fingerprint("ssh", host, legacy_ssh.identity_file)
         else:
             transport_kind = "https"
             ssh_identity_file = None
@@ -667,14 +787,19 @@ class AuthMigrationService:
             github_login=account.login,
             ssh_identity_file=ssh_identity_file,
             https_token_environment=https_token_environment,
-            source_ssh_alias=ssh.alias if ssh is not None else None,
+            source_ssh_alias=legacy_ssh.alias if legacy_ssh is not None else None,
+            ssh_endpoint=ssh_endpoint,
         )
 
     # -- writing -------------------------------------------------------------
 
     def _write(self, gathered: _Gathered, *, actor: str) -> dict[str, object]:
         assert gathered.verified is not None  # guaranteed by a ready plan with changes
-        profile = self._proposed_profile(gathered.observation, gathered.verified, gathered.ssh)
+        profile = self._proposed_profile(
+            gathered.observation,
+            gathered.verified,
+            gathered.ssh_endpoint or gathered.ssh,
+        )
         updated_source = SourceConfiguration(
             gathered.source.tunnel_id,
             gathered.source.profile,

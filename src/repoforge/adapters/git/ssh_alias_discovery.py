@@ -1,15 +1,14 @@
-"""Read-only resolution of one SSH alias into a concrete pinned transport candidate.
+"""Operator-requested diagnostic expansion of one SSH alias with ``ssh -G``.
 
-`ssh -G <alias>` prints the fully expanded effective configuration without connecting. Only a
-single unambiguous result is accepted: one concrete lowercase hostname, at most one user, and
-exactly one identity file with no token expansion left in it (a leading `~` is resolved
-against the HOME the probe runs under, because OpenSSH prints `IdentityFile` literally).
-Anything that would make the effective identity ambiguous or agent-mediated -- wildcards,
-several identity files, a proxy command or jump host, an identity agent -- is refused rather
-than guessed at.
+This adapter exists for ``rf auth import ssh`` visibility and compatibility only. OpenSSH
+configuration evaluation can include semantics outside RepoForge's deterministic authority
+model, so its result is advisory and must never create a reviewed transport endpoint by
+itself. Normal observation, migration admission, and network writes use the constrained
+non-executing parser in :mod:`repoforge.adapters.git.remote_identity` instead.
 
-There is no write path here. Adopting an alias produces a pinned `GitTransportSpec` in
-RepoForge's own reviewed configuration; the operator's SSH configuration is never modified.
+The diagnostic remains read-only: it never connects and never modifies SSH or RepoForge
+configuration. It still refuses ambiguous, proxy-mediated, agent-mediated, or token-expanded
+results so operator output cannot be mistaken for one concrete key reference.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ def _rejected(message: str, *, retryable: bool = False) -> RepoForgeError:
 
 
 class SshCommandAliasDiscovery:
-    """Resolve an SSH alias with `ssh -G`, accepting only one unambiguous identity."""
+    """Produce advisory ``ssh -G`` output for one explicitly requested alias."""
 
     def __init__(
         self,

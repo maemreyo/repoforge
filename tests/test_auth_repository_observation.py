@@ -7,6 +7,7 @@ must be observable as the same repository; a missing or ambiguous answer must fa
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,12 @@ import pytest
 from repoforge.adapters.github.repository_observation import GhCliRepositoryObserver
 from repoforge.config import RepositoryConfig
 from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.git_remote_identity import (
+    ReviewedSshEndpoint,
+    SshAliasDefinition,
+    SshKeyProof,
+    SshPrincipalProof,
+)
 from repoforge.domain.repository_auth_broker import ProcessAuthContext
 from repoforge.domain.repository_identity import AuthTargetKind, RepositoryProvider
 from repoforge.ports.auth_inspection import RepositoryObservationTarget
@@ -85,6 +92,51 @@ def _selected_context(token: str = "gho_selected_profile_canary_888") -> Process
     )
 
 
+def _reviewed_endpoint(
+    raw_url: str = "git@github-work:acme/demo.git",
+) -> ReviewedSshEndpoint:
+    fingerprint = "SHA256:" + "A" * 43
+    alias = SshAliasDefinition(
+        alias="github-work",
+        canonical_host="github.com",
+        user="git",
+        port=22,
+        identity_file="/home/demo/.ssh/id_rsa_work",
+        source_config_digest="b" * 64,
+        selected_block_digest="c" * 64,
+    )
+    key = SshKeyProof(
+        canonical_path=alias.identity_file,
+        public_key_fingerprint=fingerprint,
+        owner_uid=501,
+        mode=0o600,
+        observed_at=NOW,
+    )
+    principal = SshPrincipalProof(
+        provider_host="github.com",
+        principal_kind="github_account",
+        principal_login="personal-user",
+        expected_actor_id="987654",
+        key_fingerprint=fingerprint,
+        observed_at=NOW,
+        proof_digest="d" * 64,
+    )
+    return ReviewedSshEndpoint(
+        schema_version=1,
+        raw_host="github-work",
+        canonical_host="github.com",
+        user="git",
+        port=22,
+        owner="acme",
+        repository="demo",
+        raw_url_digest=hashlib.sha256(raw_url.encode("utf-8")).hexdigest(),
+        alias=alias,
+        key=key,
+        principal=principal,
+        proof_digest="e" * 64,
+    )
+
+
 def test_repository_observation_target_has_deterministic_canonical_name() -> None:
     target = RepositoryObservationTarget(
         provider=RepositoryProvider.GITHUB,
@@ -123,6 +175,7 @@ def test_selected_context_not_globally_active_account_observes_private_repositor
 
     observed = observer.observe(
         _repo(tmp_path),
+        expected_provider_host="github.com",
         config_revision=_SHA,
         context=_selected_context(selected_token),
     )
@@ -152,7 +205,12 @@ def test_observation_anchors_on_the_provider_host_and_stable_numeric_id(tmp_path
         ]
     )
 
-    observed = observer.observe(_repo(tmp_path), config_revision=_SHA, context=_selected_context())
+    observed = observer.observe(
+        _repo(tmp_path),
+        expected_provider_host="github.com",
+        config_revision=_SHA,
+        context=_selected_context(),
+    )
 
     assert observed.provider is RepositoryProvider.GITHUB
     assert observed.provider_host == "github.com"
@@ -183,7 +241,12 @@ def test_observation_reports_a_rename_as_the_same_stable_repository(tmp_path: Pa
         ]
     )
 
-    observed = observer.observe(_repo(tmp_path), config_revision=_SHA, context=_selected_context())
+    observed = observer.observe(
+        _repo(tmp_path),
+        expected_provider_host="github.com",
+        config_revision=_SHA,
+        context=_selected_context(),
+    )
 
     assert observed.repository_id == "987654"
     assert observed.canonical_name == "github.com/acme/demo-renamed"
@@ -197,89 +260,49 @@ def test_observation_supports_an_enterprise_host(tmp_path: Path) -> None:
         ]
     )
 
-    observed = observer.observe(_repo(tmp_path), config_revision=_SHA, context=_selected_context())
+    observed = observer.observe(
+        _repo(tmp_path),
+        expected_provider_host="github.acme-corp.net",
+        config_revision=_SHA,
+        context=_selected_context(),
+    )
 
     assert observed.provider_host == "github.acme-corp.net"
     assert observed.canonical_name == "github.acme-corp.net/acme/demo"
     assert executor.calls[1]["argv"][3] == "github.acme-corp.net"
 
 
-def test_observer_canonicalizes_an_ssh_alias_host_and_keeps_the_raw_transport_alias(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_observer_accepts_an_alias_only_with_a_matching_reviewed_endpoint(
+    tmp_path: Path,
 ) -> None:
-    ssh_home = tmp_path / "home"
-    (ssh_home / ".ssh").mkdir(parents=True)
-    (ssh_home / ".ssh" / "id_rsa_work").write_text("not a real key")
-    (ssh_home / ".ssh" / "config").write_text(
-        "Host github-work\n"
-        "  HostName github.com\n"
-        "  User git\n"
-        "  IdentityFile ~/.ssh/id_rsa_work\n"
-        "  IdentitiesOnly yes\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("HOME", str(ssh_home))
-    from repoforge.adapters.git.ssh_alias_discovery import SshCommandAliasDiscovery
-    from repoforge.adapters.subprocess.command_executor import SubprocessCommandExecutor
-    from repoforge.config import DEFAULT_ALLOWED_ENVIRONMENT, ServerConfig
-
-    commands = SubprocessCommandExecutor(
-        ServerConfig(
-            tmp_path / "workspaces",
-            tmp_path / "state",
-            allowed_environment=(*DEFAULT_ALLOWED_ENVIRONMENT,),
-        )
-    )
     executor = RecordingExecutor(
         [
             _remote("git@github-work:acme/demo.git"),
             _ok({"id": 987654, "full_name": "acme/demo"}),
         ]
     )
-    observer = GhCliRepositoryObserver(
-        executor,
-        clock=FixedClock(NOW),
-        ssh_discovery=SshCommandAliasDiscovery(
-            commands,
-            cwd=tmp_path,
-            config_file=ssh_home / ".ssh" / "config",
-        ),
-    )
+    observer = GhCliRepositoryObserver(executor, clock=FixedClock(NOW))
 
-    observed = observer.observe(_repo(tmp_path), config_revision=_SHA, context=_selected_context())
+    observed = observer.observe(
+        _repo(tmp_path),
+        expected_provider_host="github.com",
+        config_revision=_SHA,
+        context=_selected_context(),
+        reviewed_ssh_endpoint=_reviewed_endpoint(),
+    )
 
     assert observed.provider_host == "github.com"
-    assert observed.transport_alias == "github-work"
     assert observed.canonical_name == "github.com/acme/demo"
     assert executor.calls[1]["argv"][3] == "github.com"
+    assert all(call["argv"][0] != "ssh" for call in executor.calls)
 
 
-def test_observer_fails_closed_when_the_remote_ssh_host_cannot_be_canonicalized(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "no-ssh-config"))
-    from repoforge.adapters.git.ssh_alias_discovery import SshCommandAliasDiscovery
-    from repoforge.adapters.subprocess.command_executor import SubprocessCommandExecutor
-    from repoforge.config import DEFAULT_ALLOWED_ENVIRONMENT, ServerConfig
-
-    #: OpenSSH locates its default configuration from the passwd entry, never from $HOME, so
-    #: an explicit empty configuration file makes this deterministic on any machine: the
-    #: alias matches nothing and cannot be canonicalized.
-    empty_config = tmp_path / "empty-ssh-config"
-    empty_config.write_text("", encoding="utf-8")
-    commands = SubprocessCommandExecutor(
-        ServerConfig(
-            tmp_path / "workspaces",
-            tmp_path / "state",
-            allowed_environment=(*DEFAULT_ALLOWED_ENVIRONMENT,),
-        )
-    )
-    ssh = SshCommandAliasDiscovery(commands, cwd=tmp_path, config_file=empty_config)
+def test_observer_fails_closed_when_an_alias_has_no_reviewed_endpoint(tmp_path: Path) -> None:
     executor = RecordingExecutor([_remote("git@github-work:acme/demo.git")])
-    observer = GhCliRepositoryObserver(executor, clock=FixedClock(NOW), ssh_discovery=ssh)
+    observer = GhCliRepositoryObserver(executor, clock=FixedClock(NOW))
 
     with pytest.raises(RepoForgeError) as failure:
-        observer.target(_repo(tmp_path))
+        observer.target(_repo(tmp_path), expected_provider_host="github.com")
 
     assert failure.value.code is ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH
 
@@ -294,7 +317,12 @@ def test_a_repository_the_provider_does_not_confirm_is_observed_as_absent(
         ]
     )
 
-    observed = observer.observe(_repo(tmp_path), config_revision=_SHA, context=_selected_context())
+    observed = observer.observe(
+        _repo(tmp_path),
+        expected_provider_host="github.com",
+        config_revision=_SHA,
+        context=_selected_context(),
+    )
 
     # `exists=False` is a real observation, and the resolver fails closed on it.
     assert observed.exists is False
@@ -325,8 +353,16 @@ def test_a_malformed_or_unsafe_provider_answer_fails_closed(tmp_path: Path) -> N
     for results in cases:
         observer, _ = _observer(results)
         with pytest.raises(RepoForgeError) as failure:
-            observer.observe(_repo(tmp_path), config_revision=_SHA, context=_selected_context())
-        assert failure.value.code is ErrorCode.GITHUB_PROVIDER_UNAVAILABLE, results
+            observer.observe(
+                _repo(tmp_path),
+                expected_provider_host="github.com",
+                config_revision=_SHA,
+                context=_selected_context(),
+            )
+        assert failure.value.code in {
+            ErrorCode.GIT_TRANSPORT_IDENTITY_MISMATCH,
+            ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
+        }, results
 
 
 def test_an_unsafe_config_revision_is_refused_before_any_command_runs(tmp_path: Path) -> None:
@@ -334,6 +370,11 @@ def test_an_unsafe_config_revision_is_refused_before_any_command_runs(tmp_path: 
 
     for revision in ("", "not-a-sha", _SHA.upper()):
         with pytest.raises(RepoForgeError) as failure:
-            observer.observe(_repo(tmp_path), config_revision=revision, context=_selected_context())
+            observer.observe(
+                _repo(tmp_path),
+                expected_provider_host="github.com",
+                config_revision=revision,
+                context=_selected_context(),
+            )
         assert failure.value.code is ErrorCode.CONFIG_INVALID
     assert executor.calls == []
