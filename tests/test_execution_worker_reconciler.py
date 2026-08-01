@@ -590,13 +590,53 @@ def test_reconcile_marks_a_refused_binding_whose_process_left_as_already_gone() 
     assert bindings.records[_WORKER].state == "already_gone"
 
 
+def test_reconcile_read_only_does_not_reap_or_mark() -> None:
+    """A read-only pass answers the blocker questions with no side effects (#424)."""
+    bindings = _Bindings(_binding())
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.evidence_complete is True
+    assert report.possibly_alive_unproven == 0
+    assert reaper.calls == []
+    assert bindings.records[_WORKER].state == "running"
+    assert bindings.states == {}
+
+
+def test_reconcile_read_only_flags_a_survived_kill_lease_as_blocker() -> None:
+    """A previous kill that failed stays a blocker in read-only preflight (#424)."""
+    bindings = _Bindings(_binding(state="survived_kill"))
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.survived_kill == 1
+    assert reaper.calls == []
+    assert bindings.records[_WORKER].state == "survived_kill"
+
+
 def test_restarter_blocks_on_possibly_alive_unproven() -> None:
     """Not killing is not safety: an unproven worker blocks the replacement start."""
     from repoforge.adapters.activation.build import SupervisorRestarter
 
     class _Reconciler:
-        def reconcile(self, *, departing_releases=frozenset()):
-            del departing_releases
+        def reconcile(self, *, departing_releases=frozenset(), read_only: bool = False):
+            del departing_releases, read_only
             return ExecutionWorkerReclamationReport(
                 inspected=1,
                 reclaimed=0,
@@ -631,8 +671,8 @@ def test_restarter_blocks_on_an_incomplete_scan() -> None:
     from repoforge.adapters.activation.build import SupervisorRestarter
 
     class _Reconciler:
-        def reconcile(self, *, departing_releases=frozenset()):
-            del departing_releases
+        def reconcile(self, *, departing_releases=frozenset(), read_only: bool = False):
+            del departing_releases, read_only
             return ExecutionWorkerReclamationReport(
                 inspected=0,
                 reclaimed=0,
@@ -668,8 +708,8 @@ def test_restarter_blocks_on_unreadable_registry_records() -> None:
     from repoforge.adapters.activation.build import SupervisorRestarter
 
     class _Reconciler:
-        def reconcile(self, *, departing_releases=frozenset()):
-            del departing_releases
+        def reconcile(self, *, departing_releases=frozenset(), read_only: bool = False):
+            del departing_releases, read_only
             return ExecutionWorkerReclamationReport(
                 inspected=0,
                 reclaimed=0,
@@ -699,6 +739,47 @@ def test_restarter_blocks_on_unreadable_registry_records() -> None:
     assert "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS" in detail
     assert evidence is not None and evidence["unreadable_record_ids"] == ["worker-bad-1"]
     assert evidence["evidence_complete"] is False
+
+
+def test_restarter_preflight_is_read_only_and_gated() -> None:
+    """The handoff preflight uses a read-only reconcile and applies the same gates."""
+    from repoforge.adapters.activation.build import SupervisorRestarter
+
+    calls: list[bool] = []
+
+    class _Reconciler:
+        def reconcile(self, *, departing_releases=frozenset(), read_only: bool = False):
+            del departing_releases
+            calls.append(read_only)
+            return ExecutionWorkerReclamationReport(
+                inspected=0,
+                reclaimed=0,
+                already_gone=0,
+                refused_unproven=0,
+                survived_kill=0,
+                possibly_alive_unproven=0,
+                scan_complete=True,
+                unreadable_record_ids=("worker-bad-1",),
+                worker_ids=(),
+                pids=(),
+                release_shas=(),
+                detail="registry contains unreadable records",
+            )
+
+    restarter = SupervisorRestarter(
+        control=None,
+        runtime=None,
+        launcher=None,
+        config_path=Path("/tmp/config.toml"),
+        correlation_id="c" * 24,
+        worker_reconciler=_Reconciler(),
+    )
+    ok, detail, evidence = restarter.preflight_reclaim(_RELEASE)
+
+    assert ok is False
+    assert "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS" in detail
+    assert calls == [True]
+    assert evidence is not None and evidence["evidence_complete"] is False
 
 
 def test_terminate_marks_reclaimed_only_after_confirmed_death(tmp_path) -> None:

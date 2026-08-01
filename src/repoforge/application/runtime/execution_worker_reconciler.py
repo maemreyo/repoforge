@@ -121,10 +121,21 @@ class ExecutionWorkerReconciler:
         self._process_group_gone = process_group_gone
 
     def reconcile(
-        self, *, departing_releases: frozenset[str] = frozenset()
+        self,
+        *,
+        departing_releases: frozenset[str] = frozenset(),
+        read_only: bool = False,
     ) -> ExecutionWorkerReclamationReport:
-        """Reclaim orphaned/departing execution workers, bounded and evidence-backed."""
+        """Evaluate and reclaim orphaned/departing workers, bounded and evidence-backed.
 
+        ``read_only=True`` answers the same blocker questions (evidence complete, no
+        possibly-alive unproven worker, no survived kill) without any side effect: no
+        reaping, no state marks, no terminal-lease collection. A restarter uses it as a
+        preflight before stopping a healthy runtime (#424) -- a handoff that cannot
+        proceed must not take the runtime down first. A provable worker is not a blocker
+        (the real pass reaps it), but a ``survived_kill`` lease stays a blocker because
+        a previous kill failed and there is no fresh proof of death.
+        """
         counts = {"reclaimed": 0, "already_gone": 0, "refused_unproven": 0, "survived_kill": 0}
         inspected = 0
         possibly_alive_unproven = 0
@@ -142,16 +153,24 @@ class ExecutionWorkerReconciler:
                 continue
             if not self._proven_execution_worker(binding):
                 if self._provably_gone(binding):
-                    self._mark(binding.worker_id, "already_gone")
+                    if not read_only:
+                        self._mark(binding.worker_id, "already_gone")
                     counts["already_gone"] += 1
                     worker_ids.append(binding.worker_id)
                     pids.append(binding.pid)
                     if binding.release_sha is not None:
                         release_shas.append(binding.release_sha)
                 else:
-                    self._mark(binding.worker_id, "refused_unproven")
+                    if not read_only:
+                        self._mark(binding.worker_id, "refused_unproven")
                     counts["refused_unproven"] += 1
                     possibly_alive_unproven += 1
+                continue
+            if read_only:
+                # No side effects in preflight: a provable worker is reaped by the real
+                # pass; a survived_kill lease is a blocker (previous kill failed).
+                if binding.state == "survived_kill":
+                    counts["survived_kill"] += 1
                 continue
             outcome = self._reaper.reap(binding)
             if outcome.reaped and outcome.attempted:
@@ -169,6 +188,7 @@ class ExecutionWorkerReconciler:
                 pids.append(binding.pid)
                 if binding.release_sha is not None:
                     release_shas.append(binding.release_sha)
+        prefix = "preflight: " if read_only else ""
         return ExecutionWorkerReclamationReport(
             inspected=inspected,
             reclaimed=counts["reclaimed"],
@@ -182,7 +202,7 @@ class ExecutionWorkerReconciler:
             pids=tuple(pids),
             release_shas=tuple(release_shas),
             detail=(
-                f"reconciled {inspected} live execution worker binding(s) "
+                f"{prefix}reconciled {inspected} live execution worker binding(s) "
                 f"(scan complete: {page.scan_complete}, unreadable records: "
                 f"{len(page.unreadable_ids)}): {counts['reclaimed']} reclaimed, "
                 f"{counts['already_gone']} already gone, {counts['refused_unproven']} "

@@ -18,7 +18,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
+from ...application.runtime.execution_worker_reconciler import (
+    ExecutionWorkerReclamationReport,
+    ExecutionWorkerReconciler,
+)
 from ...contracts.registry import contract_identity_digest
 from ...domain.errors import ConfigError
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase, RuntimeRecord
@@ -373,7 +376,36 @@ class SupervisorRestarter:
                 frozenset({departing_release}) if departing_release else frozenset()
             )
         )
-        evidence = report.as_dict()
+        return self._reclaim_gate(report, departing_release, report.as_dict())
+
+    def preflight_reclaim(
+        self, departing_release: str | None
+    ) -> tuple[bool, str, dict[str, object] | None]:
+        """Read-only handoff preflight: can this handoff proceed, without stopping?
+
+        Answers the same blocker questions as ``_reclaim_departing`` with no side
+        effect, so a caller can decide *before* taking a healthy runtime down (#424):
+        a registry that is truncated, unreadable, or hiding a possibly-alive worker
+        means the replacement cannot start, and stopping the incumbent first would
+        turn a refused upgrade into an outage.
+        """
+        if self._worker_reconciler is None:
+            return True, "", None
+        report = self._worker_reconciler.reconcile(
+            departing_releases=(
+                frozenset({departing_release}) if departing_release else frozenset()
+            ),
+            read_only=True,
+        )
+        return self._reclaim_gate(report, departing_release, report.as_dict())
+
+    def _reclaim_gate(
+        self,
+        report: ExecutionWorkerReclamationReport,
+        departing_release: str | None,
+        evidence: dict[str, object],
+    ) -> tuple[bool, str, dict[str, object] | None]:
+        """Apply the fail-closed reclamation gates to one reconciliation report."""
         if report.survived_kill > 0:
             return (
                 False,
@@ -416,6 +448,19 @@ class SupervisorRestarter:
         before = self._runtime.read()
         old_pid = before.pid if before else None
         old_identity = before.process_identity if before else None
+
+        # Phase 1 -- read-only preflight BEFORE any stop or swap: a handoff that cannot
+        # proceed (truncated or unreadable registry, possibly-alive unproven worker,
+        # survived kill) must not take a healthy runtime down first (#424).
+        preflight_ok, preflight_detail, preflight_evidence = self.preflight_reclaim(
+            departing_release
+        )
+        if not preflight_ok:
+            return RestartOutcome(
+                ok=False,
+                detail=preflight_detail,
+                reclamation=preflight_evidence,
+            )
 
         # Prefer the OS process manager so an upgrade never orphans the supervisor from
         # launchd. `kickstart -k` stops and restarts the registered job in one step.
@@ -460,6 +505,7 @@ class SupervisorRestarter:
                 reclamation=reclamation,
             )
 
+        # Phase 2 -- drain the incumbent, then reclaim on fresh evidence and start.
         stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
         if not stopped:
             return RestartOutcome(ok=False, detail=f"could not stop the runtime: {stop_detail}")

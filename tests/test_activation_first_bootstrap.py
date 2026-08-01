@@ -78,6 +78,10 @@ class _RealLauncherRestarter:
         self._config_path = config_path
         self.started = 0
 
+    def preflight_reclaim(self, departing_release: str | None = None):
+        del departing_release
+        return True, "", None
+
     def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         launcher = ReleaseAwareRuntimeLauncher(self._store.bin_launcher())
         try:

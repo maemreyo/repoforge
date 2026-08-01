@@ -565,6 +565,14 @@ class UpgradeService:
             and previous_manifest.tool_surface_hash != manifest.tool_surface_hash
         )
 
+        # Read-only handoff preflight BEFORE any mutation (#424): if the worker
+        # registry cannot support the reclamation (truncated, unreadable, possibly
+        # alive unproven worker, survived kill), the replacement cannot start -- so
+        # abort with `current` unmoved and the healthy runtime untouched.
+        preflight_ok, preflight_detail, _ = self._restarter.preflight_reclaim(previous_sha)
+        if not preflight_ok:
+            raise ConfigError(f"ACTIVATION_PREFLIGHT_FAILED: {preflight_detail}")
+
         # Journal the attempt BEFORE any side effect. A receipt is only written at a
         # terminal outcome, so without this a crash between the swap and the receipt
         # would leave `current` moved with no record that an activation ever started.
@@ -981,6 +989,12 @@ class UpgradeService:
         # verification the receipt still requires.
         if not force_unverified:
             self._verify_installed_contract(manifest)
+
+        # Read-only handoff preflight BEFORE any mutation (#424): refuse the rollback
+        # while `current` still serves rather than after it has been stopped.
+        preflight_ok, preflight_detail, _ = self._restarter.preflight_reclaim(current)
+        if not preflight_ok:
+            raise ConfigError(f"ROLLBACK_PREFLIGHT_FAILED: {preflight_detail}")
 
         self._store.swap_current(target)
         restart = self._restarter.restart(departing_release=current)
