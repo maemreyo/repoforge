@@ -16,10 +16,7 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from ...adapters.persistence import JsonExecutionWorkerBindingStore
+from typing import Any, Protocol
 
 from repoforge import __version__
 
@@ -135,6 +132,7 @@ from ...domain.errors import (
     PersonalCodingMCPError,
     operation_error_from_exception,
 )
+from ...domain.execution_worker import ExecutionWorkerQuarantineReceipt
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
@@ -150,6 +148,7 @@ from ...ports import (
     RepositoryProbe,
 )
 from ...ports.activation import ReleaseProcess, SupervisorKickstarter
+from ...ports.execution_worker_store import ExecutionWorkerBindingPage
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
 from .auth import add_auth_parsers, run_auth_command
@@ -1513,18 +1512,38 @@ def _pid_is_live(pid: object) -> bool:
     """Is the described process still present? Best-effort, for quarantine warnings."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
-    from ...adapters.runtime.state_store import process_identity
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
-    return process_identity(pid) is not None
+
+class _WorkerRegistryStore(Protocol):
+    """Adapter-free structural contract for the worker-registry store (#424).
+
+    The CLI lives outside the `adapters` package and must not import one directly
+    (composition-root rule), so this Protocol names exactly the methods the
+    worker-registry commands need.
+    """
+
+    def inspect_record(self, worker_id: str) -> dict[str, object] | None: ...
+    def quarantine_record(
+        self, worker_id: str, *, reason: str
+    ) -> ExecutionWorkerQuarantineReceipt | None: ...
+    def list_quarantined(self) -> tuple[ExecutionWorkerQuarantineReceipt, ...]: ...
+    def list_page(self, *, max_records: int = 2_000) -> ExecutionWorkerBindingPage: ...
 
 
-def _worker_registry_store(args: argparse.Namespace) -> JsonExecutionWorkerBindingStore:
+def _worker_registry_store(args: argparse.Namespace) -> _WorkerRegistryStore:
     config_path = Path(args.config).expanduser().resolve()
     state_root = _state_root(config_path)
     return build_execution_worker_binding_store(state_root)
 
 
-def _worker_registry_verdict(store: JsonExecutionWorkerBindingStore) -> dict[str, object]:
+def _worker_registry_verdict(store: _WorkerRegistryStore) -> dict[str, object]:
     page = store.list_page()
     return {
         "scan_complete": page.scan_complete,
