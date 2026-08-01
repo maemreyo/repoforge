@@ -306,3 +306,62 @@ def test_a_different_release_is_not_bound_by_a_prior_fail_closed_state(
     assert record.last_error_code == "NEW_PREFLIGHT_FAILURE"
 
     _shutdown_and_join(server, thread, result)
+
+
+def test_an_identityless_fail_closed_record_does_not_latch_a_new_supervisor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without a proven release identity, the durable latch is NOT inherited (#420).
+
+    A legacy/manual start may lack REPOFORGE_RUNNING_RELEASE_SHA; inheriting the
+    prior supervisor's fail-closed state would wrongly hold a healthy release
+    resident. The deterministic preflight re-runs instead (safe: no child spawned).
+    """
+    monkeypatch.setenv("REPOFORGE_RUNNING_RELEASE_SHA", _SHA)
+    prior = _record(
+        RuntimePhase.FAIL_CLOSED,
+        running_release_sha=None,
+        fail_closed_since="2026-07-12T00:00:00+00:00",
+        last_error_code="CONTRACT_ARTIFACT_MISMATCH",
+    )
+    store = _Store(prior)
+    tunnel = _Tunnel()
+    worker = _ExecutionWorker()
+    preflight_calls: list[int] = []
+
+    def preflight() -> None:
+        preflight_calls.append(1)
+
+    supervisor, server = _supervisor(
+        store=store, preflight=preflight, tmp_path=tmp_path, tunnel=tunnel, worker=worker
+    )
+    result, thread = _run_and_wait_fail_closed(supervisor, store)
+    _shutdown_and_join(server, thread, result)
+
+    assert preflight_calls == [1]
+    assert store.record.last_error_code == "CONTRACT_ARTIFACT_MISMATCH"
+
+
+def test_a_missing_current_release_sha_does_not_latch_either(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("REPOFORGE_RUNNING_RELEASE_SHA", raising=False)
+    prior = _record(
+        RuntimePhase.FAIL_CLOSED,
+        running_release_sha=_SHA,
+        fail_closed_since="2026-07-12T00:00:00+00:00",
+        last_error_code="CONTRACT_ARTIFACT_MISMATCH",
+    )
+    store = _Store(prior)
+    tunnel = _Tunnel()
+    worker = _ExecutionWorker()
+    preflight_calls: list[int] = []
+
+    def preflight() -> None:
+        preflight_calls.append(1)
+
+    supervisor, server = _supervisor(
+        store=store, preflight=preflight, tmp_path=tmp_path, tunnel=tunnel, worker=worker
+    )
+    result, thread = _run_and_wait_fail_closed(supervisor, store)
+    _shutdown_and_join(server, thread, result)
+
+    assert preflight_calls == [1]
