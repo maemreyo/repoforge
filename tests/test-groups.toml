@@ -249,6 +249,7 @@ test_files = [
   "tests/test_serve_config_generation.py",
   "tests/test_state_root_isolation.py",
   "tests/test_supervisor_handoff_lock.py",
+  "tests/test_supervisor_preflight_fail_closed.py",
   "tests/test_tunnel_seam_swap.py",
   "tests/test_unix_socket_path_portability.py",
   "tests/test_upgrade_service.py",
