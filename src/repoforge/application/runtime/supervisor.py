@@ -262,8 +262,11 @@ class RuntimeSupervisor:
 
         launchd relaunching a supervisor must not reset a deterministic failure: if the
         last lifetime failed closed and this process runs the same release, stay
-        fail-closed instead of re-probing and re-spawning. A different release (a
-        rollback or a re-activation) gets a fresh verdict from its own preflight.
+        fail-closed instead of re-probing and re-spawning. The latch is inherited ONLY
+        when both release identities are proven and equal; a missing identity on either
+        side means the release cannot be established, so the deterministic preflight
+        re-runs (safe -- it spawns no child) rather than wrongly holding a different
+        release resident (#420).
         """
         if prior is None or prior.fail_closed_since is None:
             return False
@@ -273,11 +276,10 @@ class RuntimeSupervisor:
             RuntimePhase.STOPPED,
         }:
             return False
-        if prior.running_release_sha is not None:
-            current_release = os.environ.get("REPOFORGE_RUNNING_RELEASE_SHA")
-            if current_release is not None and current_release != prior.running_release_sha:
-                return False
-        return True
+        if prior.running_release_sha is None:
+            return False
+        current_release = os.environ.get("REPOFORGE_RUNNING_RELEASE_SHA")
+        return current_release == prior.running_release_sha
 
     def _serve_fail_closed(self, correlation_id: str) -> None:
         """Block serving the control socket until an explicit SHUTDOWN.

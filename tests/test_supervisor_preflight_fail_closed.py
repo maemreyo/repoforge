@@ -331,6 +331,10 @@ def test_an_identityless_fail_closed_record_does_not_latch_a_new_supervisor(
 
     def preflight() -> None:
         preflight_calls.append(1)
+        raise ConfigError(
+            "CONTRACT_ARTIFACT_MISMATCH: packaged contract identity differs from the "
+            "in-process registry"
+        )
 
     supervisor, server = _supervisor(
         store=store, preflight=preflight, tmp_path=tmp_path, tunnel=tunnel, worker=worker
@@ -357,6 +361,7 @@ def test_a_missing_current_release_sha_does_not_latch_either(tmp_path: Path, mon
 
     def preflight() -> None:
         preflight_calls.append(1)
+        raise ConfigError("CONTRACT_ARTIFACT_MISMATCH: packaged identity diverges")
 
     supervisor, server = _supervisor(
         store=store, preflight=preflight, tmp_path=tmp_path, tunnel=tunnel, worker=worker
