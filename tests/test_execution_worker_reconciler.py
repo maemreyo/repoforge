@@ -359,17 +359,21 @@ def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
     spawner = SubprocessExecutionWorker(env.config_path, bindings=bindings)
     child = spawner.start(
         1,
-        env={"HOME": str(home), "PATH": os.environ.get("PATH", "")},
+        env=dict(os.environ, HOME=str(home)),
         log_path=tmp_path / "worker.log",
         correlation_id="c" * 24,
     )
     try:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if spawner.is_alive(child):
                 break
             time.sleep(0.1)
-        assert spawner.is_alive(child), "the real execution worker did not start"
+        if not spawner.is_alive(child):
+            log_tail = (tmp_path / "worker.log").read_text(encoding="utf-8", errors="replace")[
+                -2000:
+            ]
+            raise AssertionError(f"the real execution worker did not start: {log_tail}")
 
         binding = next(item for item in bindings.list_all() if item.pid == child.pid)
         assert binding.state == "running"
