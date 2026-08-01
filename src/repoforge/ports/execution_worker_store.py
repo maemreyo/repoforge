@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from ..domain.execution_worker import ExecutionWorkerBinding
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionWorkerBindingPage:
+    records: tuple[ExecutionWorkerBinding, ...]
+    scan_complete: bool
+    unreadable_ids: tuple[str, ...]
 
 
 class ExecutionWorkerBindingStore(Protocol):
@@ -18,6 +26,10 @@ class ExecutionWorkerBindingStore(Protocol):
         """Advance a binding's state under CAS, returning the updated binding."""
         ...
 
-    def list_all(self, *, max_records: int = 2_000) -> tuple[ExecutionWorkerBinding, ...]:
-        """All bindings, bounded; a reconciler never scans without a ceiling."""
+    def list_page(self, *, max_records: int = 2_000) -> ExecutionWorkerBindingPage:
+        """A bounded scan; ``scan_complete`` is False when the registry was truncated.
+
+        A reconciler must fail closed on an incomplete scan: an orphan past the limit
+        would be invisible and a replacement could start on incomplete evidence.
+        """
         ...

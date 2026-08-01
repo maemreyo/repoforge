@@ -583,11 +583,46 @@ class RuntimeSupervisor:
                     return 0
 
                 # Reclaim execution workers whose owner supervisor is gone before
-                # spawning this supervisor's own worker (#368). Best-effort: startup
-                # must still serve; a survivor's operation leases expire on their own.
+                # spawning this supervisor's own worker (#368). This is NOT
+                # best-effort anymore: an unresolved worker (unproven identity that may
+                # still run, a SIGKILL survivor, or an incomplete registry scan) can
+                # hold the exact locks that deadlocked the last incident, so the
+                # supervisor fails closed in place rather than spawn a contending
+                # replacement (#420).
                 if self._worker_reconciler is not None:
-                    with contextlib.suppress(Exception):
-                        self._worker_reconciler.reconcile()
+                    try:
+                        reclaim_report = self._worker_reconciler.reconcile()
+                    except Exception:
+                        reclaim_report = None
+                    if (
+                        reclaim_report is None
+                        or not reclaim_report.scan_complete
+                        or reclaim_report.possibly_alive_unproven > 0
+                        or reclaim_report.survived_kill > 0
+                    ):
+                        code = "STALE_EXECUTION_WORKER_RECLAMATION_UNCERTAIN"
+                        detail = (
+                            "execution workers of a prior supervisor could not be proven reclaimed"
+                            if reclaim_report is None
+                            else reclaim_report.detail
+                        )
+                        self._store.write(
+                            self._record(
+                                RuntimePhase.FAIL_CLOSED,
+                                accepted_generation=generation,
+                                active_generation=None,
+                                profile=profile,
+                                tool_surface_hash=tool_surface_hash,
+                                correlation_id=correlation_id,
+                                child=None,
+                                error_code=code,
+                                error=redact_text(detail),
+                                fail_closed_since=self._clock.now_iso(),
+                            )
+                        )
+                        self._clear_target(generation)
+                        self._serve_fail_closed(correlation_id)
+                        return 0
 
                 try:
                     initialize_profile = self._profile_store.fingerprint() != profile.fingerprint

@@ -357,23 +357,49 @@ class SupervisorRestarter:
 
     def _reclaim_departing(
         self, departing_release: str | None
-    ) -> tuple[bool, dict[str, object] | None]:
-        """Reclaim the departing release's execution workers; block on a survivor.
+    ) -> tuple[bool, str, dict[str, object] | None]:
+        """Reclaim the departing release's execution workers; block on uncertainty.
 
-        Returns ``(ok, reclamation_evidence)``. ``ok=False`` means a worker survived
-        SIGKILL, so the new supervisor must not start: it would contend with the stale
-        worker's operation locks exactly as in the 2026-08-01 incident.
+        Returns ``(ok, detail, evidence)``. ``ok=False`` means the replacement
+        supervisor must not start: a worker survived SIGKILL, a worker's identity
+        could not be proven while it may still be running, or the registry scan was
+        truncated -- each recreates the 2026-08-01 deadlock if we proceed anyway.
         """
         if self._worker_reconciler is None:
-            return True, None
+            return True, "", None
         report = self._worker_reconciler.reconcile(
             departing_releases=(
                 frozenset({departing_release}) if departing_release else frozenset()
             )
         )
+        evidence = report.as_dict()
         if report.survived_kill > 0:
-            return False, report.as_dict()
-        return True, report.as_dict()
+            return (
+                False,
+                "STALE_EXECUTION_WORKER_RECLAMATION_FAILED: a worker of the departing "
+                f"release {departing_release or 'unknown'} survived SIGKILL; refusing "
+                "to start a replacement that would contend with its locks",
+                evidence,
+            )
+        if report.possibly_alive_unproven > 0:
+            return (
+                False,
+                "STALE_EXECUTION_WORKER_IDENTITY_UNPROVEN: "
+                f"{report.possibly_alive_unproven} worker(s) of the departing release "
+                f"{departing_release or 'unknown'} could not be proven dead and may "
+                "still hold shared locks; refusing to start a replacement on unproven "
+                "identity",
+                evidence,
+            )
+        if not report.scan_complete:
+            return (
+                False,
+                "EXECUTION_WORKER_REGISTRY_SCAN_INCOMPLETE: the worker registry scan "
+                "was truncated, so an orphan may be invisible; refusing to start a "
+                "replacement on incomplete evidence",
+                evidence,
+            )
+        return True, "", evidence
 
     def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         before = self._runtime.read()
@@ -398,16 +424,11 @@ class SupervisorRestarter:
                         f"replacement would race it for the runtime lock: {stop_detail}"
                     ),
                 )
-            reclaim_ok, reclamation = self._reclaim_departing(departing_release)
+            reclaim_ok, reclaim_detail, reclamation = self._reclaim_departing(departing_release)
             if not reclaim_ok:
                 return RestartOutcome(
                     ok=False,
-                    detail=(
-                        "STALE_EXECUTION_WORKER_RECLAMATION_FAILED: a worker of the "
-                        f"departing release {departing_release or 'unknown'} survived "
-                        "SIGKILL; refusing to start a replacement that would contend "
-                        "with its locks"
-                    ),
+                    detail=reclaim_detail,
                     reclamation=reclamation,
                 )
             outcome = self._kickstarter.kickstart()
@@ -431,16 +452,11 @@ class SupervisorRestarter:
         stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
         if not stopped:
             return RestartOutcome(ok=False, detail=f"could not stop the runtime: {stop_detail}")
-        reclaim_ok, reclamation = self._reclaim_departing(departing_release)
+        reclaim_ok, reclaim_detail, reclamation = self._reclaim_departing(departing_release)
         if not reclaim_ok:
             return RestartOutcome(
                 ok=False,
-                detail=(
-                    "STALE_EXECUTION_WORKER_RECLAMATION_FAILED: a worker of the "
-                    f"departing release {departing_release or 'unknown'} survived "
-                    "SIGKILL; refusing to start a replacement that would contend "
-                    "with its locks"
-                ),
+                detail=reclaim_detail,
                 reclamation=reclamation,
             )
         try:
