@@ -233,6 +233,7 @@ test_files = [
   "tests/test_cli_activation_wiring.py",
   "tests/test_cli_agent_auth_material.py",
   "tests/test_cli_runtime_commands.py",
+  "tests/test_contract_identity_report.py",
   "tests/test_dev_runtime.py",
   "tests/test_execution_identity.py",
   "tests/test_generation_handoff.py",
