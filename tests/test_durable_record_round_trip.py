@@ -182,6 +182,7 @@ def _runtime_record(tmp_path: Path) -> tuple[object, object]:
         consecutive_health_failures=2,
         restarts_total=3,
         last_restart_at="2026-07-29T09:26:21+00:00",
+        fail_closed_since="2026-07-29T09:26:21+00:00",
     )
     store.write(written)
     return written, store.read()
