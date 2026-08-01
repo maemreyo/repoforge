@@ -288,6 +288,7 @@ Rollback to a last-v1 artifact requires stopping v2, installing the reviewed las
 - `make v2-gates` executes frozen generated-change, patch, seeded-bug, read/resume, and provider-recall corpora without leaving repository artifacts.
 - The syntax-gate acceptance test reuses the frozen generated-change corpus and enforces an in-process p95 budget of at most 100 ms per supported-language file.
 - `make check` runs release-contract validation, `make v2-gates`, formatting, lint, strict typing, deterministic pytest shards with branch coverage, source/wheel builds, and isolated installed-wheel lifecycle verification.
+- Every release is probed before activation: the packaged contract identity (`generated_contract_identity.py`) must match the in-process registry (input/output/schema-bundle digests). A mismatch refuses activation with `RELEASE_CONTRACT_IDENTITY_MISMATCH` before `current` moves; the release stays on disk as a forensic artifact. The supervisor runs the same check as a preflight and fails closed in place (`FAIL_CLOSED` record, control plane answerable, no child spawn, no launchd crash-loop) instead of retrying a child that can never start.
 
 Any intended public drift requires an explicit compatibility review and regenerated golden contract. Additive output fields still require tolerant readers; removed or renamed tools require a new reviewed identity/contract rather than hidden aliases.
 
@@ -314,6 +315,9 @@ rf runtime logs --tail 20
 rf config pending
 rf config approve CHANGE_ID --activate auto
 rf diagnostics bundle
+rf upgrade reconcile --repair rollback   # repair a fail-closed activation (never default)
 ```
 
 CLI commands are not additional MCP tools. `rf` exits `0` on success, `2` on stable validation/operation failure, and `3` when an explicit operator decision or approval is required.
+
+`rf doctor` additionally reports `runtime_contract_identity` with field-level detail (active `release_sha`, `manifest_contract_identity`, `packaged_contract_identity`, `computed_registry_identity`, `mismatched_fields`, `artifact_paths`, `safe_next_action`) and exits non-zero when a fail-closed runtime or an inconsistent release is detected.
