@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -146,6 +147,47 @@ def render_contract_identity_artifact() -> dict[str, object]:
         "input_contract_digest": digests.input_digest,
         "output_contract_digest": digests.output_digest,
         "tool_schema_bundle_digest": _canonical_digest(render_v2_schema_bundle()),
+    }
+
+
+def contract_identity_digest(identity: Mapping[str, object]) -> str:
+    """The canonical digest of one contract-identity dict, for manifest proof (#367)."""
+
+    return _canonical_digest(identity)
+
+
+def _contract_artifact_paths() -> list[str]:
+    """Locate the generated identity artifact inside the installed release, best-effort."""
+
+    spec = importlib.util.find_spec("repoforge.contracts.generated_contract_identity")
+    if spec is not None and spec.origin:
+        return [spec.origin]
+    return []
+
+
+def release_contract_probe() -> dict[str, object]:
+    """Compare the packaged generated identity against the in-process registry.
+
+    The release smoke tester runs this inside the candidate release. A divergence means
+    the release was built from a worktree whose generated contract artifacts were stale
+    or tampered: the packaged identity must match the registry or the release can never
+    be activated (its MCP serve child would die on every spawn).
+    """
+
+    computed = render_contract_identity_artifact()
+    packaged = dict(generated_contract_identity.CONTRACT_IDENTITY)
+    fields = (
+        "input_contract_digest",
+        "output_contract_digest",
+        "tool_schema_bundle_digest",
+    )
+    mismatched = [field for field in fields if computed.get(field) != packaged.get(field)]
+    return {
+        "packaged": packaged,
+        "computed": computed,
+        "mismatched_fields": mismatched,
+        "artifact_paths": _contract_artifact_paths(),
+        "agreement": not mismatched,
     }
 
 
