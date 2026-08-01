@@ -316,3 +316,39 @@ def _optional_str(raw: dict[str, Any], key: str) -> str:
 
 def _json_dumps(value: dict[str, object]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+WORKER_RECLAMATION_SUMMARY_SCHEMA = 1
+_WORKER_SAMPLE_LIMIT = 8
+
+
+def _as_count(value: object, default: int = 0) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def worker_reclamation_summary(
+    full: dict[str, object], *, artifact_id: str, digest: str
+) -> dict[str, object]:
+    """Bound the reclamation evidence a receipt may carry (#424).
+
+    The full ``ExecutionWorkerReclamationReport.as_dict()`` exceeds the receipt's
+    4 KiB evidence cap at incident scale (measured ~7.8 KiB at 92 workers), so the
+    receipt carries only counts, a bounded worker-id sample, and the reference to the
+    immutable artifact that holds the complete evidence.
+    """
+    raw_workers = full.get("worker_ids")
+    sample = (
+        tuple(raw_workers)[:_WORKER_SAMPLE_LIMIT] if isinstance(raw_workers, (list, tuple)) else ()
+    )
+    return {
+        "schema_version": WORKER_RECLAMATION_SUMMARY_SCHEMA,
+        "inspected": _as_count(full.get("inspected")),
+        "reclaimed": _as_count(full.get("reclaimed")),
+        "already_gone": _as_count(full.get("already_gone")),
+        "refused_unproven": _as_count(full.get("refused_unproven")),
+        "survived_kill": _as_count(full.get("survived_kill")),
+        "evidence_complete": bool(full.get("evidence_complete", False)),
+        "worker_sample": list(sample),
+        "evidence_digest": digest,
+        "evidence_reference": f"worker-reclamation:{artifact_id}",
+    }

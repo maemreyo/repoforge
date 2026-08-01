@@ -590,3 +590,51 @@ def test_a_non_default_release_root_gets_its_own_launchd_label(tmp_path: Path) -
         sandbox.supervisor_agent_label()
         == RuntimeReleaseStore(tmp_path / "sandbox-root").supervisor_agent_label()
     )
+
+
+# ------------- worker-reclamation evidence artifacts (#424) -----------------
+
+
+def test_worker_reclamation_artifact_writes_and_reads_back(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    evidence = {
+        "inspected": 92,
+        "reclaimed": 92,
+        "already_gone": 0,
+        "refused_unproven": 0,
+        "survived_kill": 0,
+        "evidence_complete": True,
+        "worker_ids": [f"worker-{i:012x}" for i in range(92)],
+        "pids": list(range(1000, 1092)),
+        "release_shas": ["1111aaa"],
+        "detail": "reconciled 92 worker(s)",
+    }
+
+    artifact_id, digest = store.write_worker_reclamation_artifact(evidence)
+
+    assert artifact_id.startswith("recl-")
+    assert artifact_id == f"recl-{digest[:32]}"
+    artifact = store.read_worker_reclamation_artifact(artifact_id)
+    assert artifact is not None
+    assert artifact["sha256"] == digest
+    assert artifact["reclamation"] == evidence
+
+
+def test_worker_reclamation_artifact_is_idempotent_by_content_digest(
+    tmp_path: Path,
+) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    evidence = {"inspected": 1, "worker_ids": [], "pids": [], "release_shas": []}
+
+    first_id, first_digest = store.write_worker_reclamation_artifact(evidence)
+    second_id, second_digest = store.write_worker_reclamation_artifact(evidence)
+
+    assert first_id == second_id
+    assert first_digest == second_digest
+    files = list((tmp_path / "runtime" / "worker-reclamation").glob("*.json"))
+    assert len(files) == 1
+
+
+def test_worker_reclamation_artifact_missing_read_is_none(tmp_path: Path) -> None:
+    store = RuntimeReleaseStore(tmp_path)
+    assert store.read_worker_reclamation_artifact("recl-missing") is None

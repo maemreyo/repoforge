@@ -338,7 +338,7 @@ def test_rollback_passes_the_current_release_as_departing(tmp_path: Path) -> Non
 
 
 def test_activation_receipt_records_worker_reclamation(tmp_path: Path) -> None:
-    """The receipt carries the reclamation evidence so a rollback can be audited (#368)."""
+    """The receipt carries a bounded summary; full evidence lives in the artifact (#424)."""
     reclamation = {
         "inspected": 2,
         "reclaimed": 1,
@@ -348,6 +348,7 @@ def test_activation_receipt_records_worker_reclamation(tmp_path: Path) -> None:
         "worker_ids": ["worker-0123456789ab"],
         "pids": [4242],
         "release_shas": ["1111aaa"],
+        "evidence_complete": True,
         "detail": "reconciled 2 execution worker binding(s)",
     }
     service, store, _ = _service(tmp_path, restarter=_Restarter(reclamation=reclamation))
@@ -355,7 +356,36 @@ def test_activation_receipt_records_worker_reclamation(tmp_path: Path) -> None:
 
     receipt = store.read_receipt(result.activation_receipt)
     assert receipt is not None
-    assert receipt.worker_reclamation == reclamation
+    assert receipt.worker_reclamation is not None
+    assert receipt.worker_reclamation["inspected"] == 2
+    assert receipt.worker_reclamation["worker_sample"] == ["worker-0123456789ab"]
+    reference = receipt.worker_reclamation["evidence_reference"]
+    assert reference.startswith("worker-reclamation:")
+    artifact_id = reference.split(":", 1)[1]
+    artifact = store.read_worker_reclamation_artifact(artifact_id)
+    assert artifact is not None
+    assert artifact["sha256"] == receipt.worker_reclamation["evidence_digest"]
+    assert artifact["reclamation"] == reclamation
+
+
+def test_activation_fails_closed_when_reclamation_evidence_cannot_be_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal receipt is never written without its evidence artifact (#424)."""
+    reclamation = {"inspected": 1, "worker_ids": [], "pids": [], "release_shas": []}
+    service, store, _ = _service(tmp_path, restarter=_Restarter(reclamation=reclamation))
+
+    def _broken_artifact(_reclamation):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "write_worker_reclamation_artifact", _broken_artifact)
+
+    with pytest.raises(ConfigError, match="ACTIVATION_FAILED"):
+        service.upgrade(tmp_path, activate=True)
+
+    outcomes = {receipt.outcome.value for receipt in store.list_receipts()}
+    assert "activated" not in outcomes
 
 
 def test_survived_worker_failure_is_reported_not_swallowed(tmp_path: Path) -> None:
