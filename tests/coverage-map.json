@@ -2,6 +2,7 @@
   "src/repoforge/adapters/activation/build.py": [
     "tests/test_activation_restart_semantics.py",
     "tests/test_cli_activation_wiring.py",
+    "tests/test_cli_surface_coverage.py",
     "tests/test_worktree_provenance.py"
   ],
   "src/repoforge/adapters/activation/dev_config.py": [
@@ -25,6 +26,8 @@
     "tests/test_activation_first_bootstrap.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_agent_auth_material.py",
+    "tests/test_cli_surface_coverage.py",
+    "tests/test_contract_identity_report.py",
     "tests/test_release_process_retention.py",
     "tests/test_release_selection.py",
     "tests/test_release_store.py",
@@ -404,6 +407,7 @@
     "tests/test_cli_agent_auth_material.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
+    "tests/test_contract_identity_report.py",
     "tests/test_onboarding_real_git.py",
     "tests/test_phase7_atomic_hot_reload.py",
     "tests/test_phases1_2_foundation.py",
@@ -626,6 +630,7 @@
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -773,6 +778,7 @@
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_auth_repository_observation.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
@@ -852,6 +858,7 @@
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -1376,6 +1383,7 @@
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -1734,6 +1742,7 @@
     "tests/test_resource_budgets.py",
     "tests/test_retry_guidance.py",
     "tests/test_rules_section.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
     "tests/test_skills_scaffold.py",
@@ -1971,6 +1980,7 @@
     "tests/test_resource_budgets.py",
     "tests/test_retry_guidance.py",
     "tests/test_rules_section.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
     "tests/test_skills_scaffold.py",
@@ -3412,6 +3422,7 @@
     "tests/test_resource_budgets.py",
     "tests/test_retry_guidance.py",
     "tests/test_rules_section.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
     "tests/test_skills_scaffold.py",
@@ -3890,7 +3901,8 @@
   "src/repoforge/adapters/repository/local_probe.py": [
     "tests/test_bootstrap_factories.py",
     "tests/test_onboarding_real_git.py",
-    "tests/test_phase3_repository_proposals.py"
+    "tests/test_phase3_repository_proposals.py",
+    "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/adapters/runtime/execution_worker.py": [
     "tests/test_runtime_adapters_and_serve.py"
@@ -4146,6 +4158,7 @@
     "tests/test_resource_budgets.py",
     "tests/test_retry_guidance.py",
     "tests/test_rules_section.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
     "tests/test_skills_scaffold.py",
@@ -4258,6 +4271,7 @@
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
     "tests/test_audit_query.py",
+    "tests/test_auth_cli.py",
     "tests/test_background_run_profile.py",
     "tests/test_bootstrap_factories.py",
     "tests/test_ci_failure_evidence.py",
@@ -4336,6 +4350,10 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/application/activation/contract_identity.py": [
+    "tests/test_cli_surface_coverage.py",
+    "tests/test_contract_identity_report.py"
+  ],
   "src/repoforge/application/activation/dev_runtime.py": [
     "tests/test_cli_activation_wiring.py",
     "tests/test_dev_runtime.py"
@@ -4368,7 +4386,8 @@
     "tests/test_version_status.py"
   ],
   "src/repoforge/application/approvals/service.py": [
-    "tests/test_config_admin.py"
+    "tests/test_config_admin.py",
+    "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/application/audit_context.py": [
     "tests/test_adoption_nudges.py",
@@ -4444,6 +4463,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/auth_migration.py": [
+    "tests/test_auth_cli.py",
     "tests/test_auth_migration.py"
   ],
   "src/repoforge/application/auth_ux.py": [
@@ -4526,7 +4546,8 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/config_admin/service.py": [
-    "tests/test_config_admin.py"
+    "tests/test_config_admin.py",
+    "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/application/configuration/document.py": [
     "tests/test_auth_migration.py",
@@ -7587,7 +7608,8 @@
   ],
   "src/repoforge/application/repository_admin/proposals.py": [
     "tests/test_config_admin.py",
-    "tests/test_onboarding_real_git.py"
+    "tests/test_onboarding_real_git.py",
+    "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/application/repository_identity_runtime.py": [
     "tests/test_adoption_nudges.py",
@@ -7779,13 +7801,15 @@
   "src/repoforge/application/runtime/hot_reload.py": [
     "tests/test_mcp_payload_v2.py",
     "tests/test_phase7_atomic_hot_reload.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_serve_config_generation.py"
   ],
   "src/repoforge/application/runtime/supervisor.py": [
     "tests/test_control_plane_resilience.py",
     "tests/test_phase4_runtime_control.py",
     "tests/test_phase7_atomic_hot_reload.py",
-    "tests/test_supervisor_handoff_lock.py"
+    "tests/test_supervisor_handoff_lock.py",
+    "tests/test_supervisor_preflight_fail_closed.py"
   ],
   "src/repoforge/application/service.py": [
     "tests/test_adoption_nudges.py",
@@ -11550,6 +11574,7 @@
     "tests/test_resource_budgets.py",
     "tests/test_retry_guidance.py",
     "tests/test_rules_section.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
     "tests/test_skills_scaffold.py",
@@ -11674,6 +11699,8 @@
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_config_admin.py",
+    "tests/test_contract_identity_probe.py",
+    "tests/test_contract_identity_report.py",
     "tests/test_failure_intelligence.py",
     "tests/test_issue_graph_workflow.py",
     "tests/test_mcp_contract.py",
@@ -11719,6 +11746,8 @@
     "tests/test_activation_domain.py",
     "tests/test_activation_first_bootstrap.py",
     "tests/test_cli_agent_auth_material.py",
+    "tests/test_cli_surface_coverage.py",
+    "tests/test_contract_identity_report.py",
     "tests/test_release_process_retention.py",
     "tests/test_release_selection.py",
     "tests/test_release_store.py",
@@ -12233,6 +12262,7 @@
     "tests/test_security.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
+    "tests/test_supervisor_preflight_fail_closed.py",
     "tests/test_upgrade_compatibility.py",
     "tests/test_v2_benchmark_harness.py",
     "tests/test_v2_reads.py",
@@ -12286,6 +12316,7 @@
     "tests/test_config_presets.py",
     "tests/test_constitution_source.py",
     "tests/test_context_section_declarations.py",
+    "tests/test_contract_identity_probe.py",
     "tests/test_control_plane_resilience.py",
     "tests/test_control_plane_responsiveness.py",
     "tests/test_dev_runtime.py",
@@ -12365,6 +12396,7 @@
     "tests/test_ssh_key_identity.py",
     "tests/test_ssh_principal_identity.py",
     "tests/test_supervisor_handoff_lock.py",
+    "tests/test_supervisor_preflight_fail_closed.py",
     "tests/test_task_capsule_v2_persistence.py",
     "tests/test_ticket_graph.py",
     "tests/test_ticket_project_sync.py",
@@ -13406,6 +13438,7 @@
     "tests/test_security.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
+    "tests/test_supervisor_preflight_fail_closed.py",
     "tests/test_upgrade_compatibility.py",
     "tests/test_v2_benchmark_harness.py",
     "tests/test_v2_reads.py",
@@ -13429,6 +13462,7 @@
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_auth_import_adapters.py",
     "tests/test_auth_repository_observation.py",
     "tests/test_background_run_profile.py",
@@ -13711,6 +13745,7 @@
     "tests/test_phases1_4_production_hardening.py",
     "tests/test_runtime_adapters_and_serve.py",
     "tests/test_supervisor_handoff_lock.py",
+    "tests/test_supervisor_preflight_fail_closed.py",
     "tests/test_tunnel_seam_swap.py",
     "tests/test_upgrade_compatibility.py"
   ],
@@ -13736,6 +13771,7 @@
     "tests/test_pr_check_watch.py",
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_v2_reads.py"
   ],
   "src/repoforge/domain/runtime_events.py": [
@@ -14201,18 +14237,21 @@
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
     "tests/test_rollback_drill.py",
+    "tests/test_runtime_adapters_and_serve.py",
     "tests/test_v2_reads.py"
   ],
   "src/repoforge/interfaces/runtime/execution_worker.py": [
     "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/interfaces/runtime/host.py": [
-    "tests/test_phase7_atomic_hot_reload.py"
+    "tests/test_phase7_atomic_hot_reload.py",
+    "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/ports/activation.py": [
     "tests/test_release_process_retention.py"
   ],
   "src/repoforge/ports/auth_inspection.py": [
+    "tests/test_auth_cli.py",
     "tests/test_auth_repository_observation.py"
   ],
   "src/repoforge/ports/cancellation.py": [
@@ -14316,6 +14355,7 @@
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
+    "tests/test_auth_cli.py",
     "tests/test_background_run_profile.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_surface_coverage.py",
@@ -14455,6 +14495,7 @@
     "tests/test_repository_identity_runtime.py",
     "tests/test_runtime_adapters_and_serve.py",
     "tests/test_supervisor_handoff_lock.py",
+    "tests/test_supervisor_preflight_fail_closed.py",
     "tests/test_task_capsule_v2_persistence.py",
     "tests/test_tunnel_seam_swap.py",
     "tests/test_verification_dag_cache.py",
