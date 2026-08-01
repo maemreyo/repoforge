@@ -19,6 +19,7 @@ from ...domain.activation import (
     ActivationReceipt,
     ActivationStage,
     ReleaseManifest,
+    worker_reclamation_summary,
 )
 from ...domain.errors import ConfigError
 from ...ports import (
@@ -604,6 +605,32 @@ class UpgradeService:
             )
 
         detail = f"Activated and verified: {verify_detail}"
+        # The receipt carries a bounded reclamation summary that references an immutable
+        # evidence artifact written first (#424): at incident scale (92 workers) the full
+        # evidence exceeds the receipt's 4 KiB cap, and a receipt without its artifact is
+        # not truthful -- so an artifact write failure fails the activation closed.
+        worker_reclamation = None
+        if restart.reclamation is not None:
+            try:
+                artifact_id, digest = self._store.write_worker_reclamation_artifact(
+                    restart.reclamation
+                )
+                worker_reclamation = worker_reclamation_summary(
+                    restart.reclamation, artifact_id=artifact_id, digest=digest
+                )
+            except Exception as exc:
+                return self._fail_and_rollback(
+                    manifest,
+                    previous_sha=previous_sha,
+                    previous_manifest=previous_manifest,
+                    rediscovery_required=rediscovery_required,
+                    stage=stage,
+                    observed_sha=observed_sha,
+                    detail=(
+                        "Activation failed: the worker reclamation evidence could not "
+                        f"be persisted ({exc})"
+                    ),
+                )
         receipt = ActivationReceipt(
             receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
             from_sha=previous_sha,
@@ -618,7 +645,7 @@ class UpgradeService:
             stage=ActivationStage.HEALTH_VERIFIED,
             observed_sha=observed_sha,
             converged=True,
-            worker_reclamation=restart.reclamation,
+            worker_reclamation=worker_reclamation,
         )
         # Commit the durable truth FIRST. Everything after this point is convenience:
         # the runtime is already live and verified, so an auxiliary failure must never be
@@ -974,6 +1001,23 @@ class UpgradeService:
                 f"{restart.detail if not restart.ok else verify_detail}"
             )
         )
+        # Same bounded-evidence contract as activation: full reclamation evidence goes
+        # to an immutable artifact; the receipt carries only the summary + reference.
+        worker_reclamation = None
+        if restart.reclamation is not None:
+            try:
+                artifact_id, digest = self._store.write_worker_reclamation_artifact(
+                    restart.reclamation
+                )
+                worker_reclamation = worker_reclamation_summary(
+                    restart.reclamation, artifact_id=artifact_id, digest=digest
+                )
+            except Exception as exc:
+                raise ConfigError(
+                    "ROLLBACK_EVIDENCE_FAILED: the worker reclamation evidence could "
+                    f"not be persisted ({exc}); no receipt was written, so the "
+                    "activation journal remains for reconciliation"
+                ) from exc
         receipt = ActivationReceipt(
             receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
             from_sha=current,
@@ -991,7 +1035,7 @@ class UpgradeService:
             observed_sha=observed_sha,
             converged=converged,
             cause_receipt_id=cause_receipt_id,
-            worker_reclamation=restart.reclamation,
+            worker_reclamation=worker_reclamation,
         )
         receipt = self._write_receipt(receipt)
         self._store.end_activation()

@@ -265,6 +265,7 @@ class RuntimeReleaseStore:
         self._current = root / _CURRENT
         self._previous = root / _PREVIOUS
         self._receipts = root / "runtime" / "activation-receipts"
+        self._worker_reclamation = root / "runtime" / "worker-reclamation"
         # The PATH-visible launcher lives OUTSIDE the release root, so it is only
         # provisioned when a caller explicitly opts in. A temporary release root must
         # never be able to rewrite the user's real ``~/.local/bin/rf``.
@@ -760,6 +761,60 @@ class RuntimeReleaseStore:
         if not self._receipts.is_dir():
             return set()
         return {entry.stem for entry in self._receipts.glob("*.json")}
+
+    # -- worker-reclamation evidence artifacts (#424) --------------------------
+
+    def write_worker_reclamation_artifact(self, reclamation: dict[str, object]) -> tuple[str, str]:
+        """Persist the full reclamation evidence immutably; return (artifact_id, sha256).
+
+        The activation/rollback receipt carries only a bounded summary and references
+        this artifact, so the receipt can never exceed its size cap at incident scale.
+        Idempotent by content digest: identical evidence writes once; a different
+        payload under the same digest (a hash collision) is refused.
+        """
+        digest = hashlib.sha256(
+            json.dumps(reclamation, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        artifact_id = f"recl-{digest[:32]}"
+        path = self._worker_reclamation / f"{artifact_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = (
+            json.dumps(
+                {
+                    "artifact_id": artifact_id,
+                    "sha256": digest,
+                    "reclamation": reclamation,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+        try:
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            existing = self.read_worker_reclamation_artifact(artifact_id)
+            if existing is None or existing.get("sha256") != digest:
+                raise ConfigError(
+                    "WORKER_RECLAMATION_ARTIFACT_COLLISION: an existing artifact "
+                    "does not match this evidence digest"
+                ) from None
+            return artifact_id, digest
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return artifact_id, digest
+
+    def read_worker_reclamation_artifact(self, artifact_id: str) -> dict[str, object] | None:
+        path = self._worker_reclamation / f"{artifact_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return raw if isinstance(raw, dict) else None
 
 
 _STABLE_MARKER = "repoforge-launcher:v1"
