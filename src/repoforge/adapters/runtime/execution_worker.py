@@ -19,6 +19,13 @@ from ...ports.execution_worker_store import ExecutionWorkerBindingStore
 from ..subprocess.process_tree import read_identity
 from .state_store import process_identity
 
+# Bounded settle window for a freshly exec'd worker's process identity. On macOS a
+# venv `sys.executable` shim re-execs onto the real interpreter, so `ps -o command=`
+# -- and the identity hashed from it -- can change in the first moments after Popen.
+# Poll until the identity is stable rather than trusting a single pre-exec sample.
+_IDENTITY_SETTLE_SECONDS = 10.0
+_IDENTITY_POLL_INTERVAL = 0.02
+
 
 class SubprocessExecutionWorker:
     def __init__(
@@ -61,7 +68,7 @@ class SubprocessExecutionWorker:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        identity = process_identity(process.pid)
+        identity = self._establish_stable_identity(process)
         if identity is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(process.pid, signal.SIGTERM)
@@ -107,6 +114,29 @@ class SubprocessExecutionWorker:
             return
         self._children.pop(child.pid, None)
         self._mark_state(child.pid, "reclaimed")
+
+    def _establish_stable_identity(self, process: subprocess.Popen[bytes]) -> str | None:
+        """Wait for the worker's process identity to settle, then record it.
+
+        The identity hashes ``ps -o lstart= -o command=``. On macOS the venv's
+        ``sys.executable`` is a shim that re-execs onto the real interpreter, so
+        the command line -- and therefore the identity -- changes in the first
+        moments after ``Popen`` returns. Sampling once in that window records an
+        identity no later sample will match, and ``is_alive`` would report a live
+        worker as gone. Poll until the identity is observed unchanged twice
+        consecutively (bounded), or fail closed on ``None`` exactly as before.
+        """
+        deadline = time.monotonic() + _IDENTITY_SETTLE_SECONDS
+        previous: str | None = None
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return None
+            current = process_identity(process.pid)
+            if current is not None and current == previous:
+                return current
+            previous = current
+            time.sleep(_IDENTITY_POLL_INTERVAL)
+        return None
 
     def _record_binding(
         self, pid: int, generation: int, correlation_id: str, identity: str

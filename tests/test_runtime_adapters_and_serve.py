@@ -282,6 +282,47 @@ def test_execution_worker_adapter_launches_exact_generation_in_own_process_group
     assert worker.is_alive(child) is True
 
 
+def test_execution_worker_adapter_records_a_stable_identity_across_the_exec_flap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A freshly spawned worker's identity can flap once on macOS (shim re-exec); the
+    recorded identity must be the settled one so later `is_alive` samples match."""
+    module = importlib.import_module("repoforge.adapters.runtime.execution_worker")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    samples: list[str] = []
+
+    class FakePopen:
+        pid = 789
+
+        def poll(self):
+            return None
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return FakePopen()
+
+    # First sample lands in the fork->exec window (transient), then the identity
+    # settles: exactly the macOS shim race that broke CI on the 26.5 image.
+    identities = iter(["a" * 64, "b" * 64, "b" * 64, "b" * 64])
+    monkeypatch.setattr(module.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        module, "process_identity", lambda pid: samples.append(pid) or next(identities)
+    )
+    worker = SubprocessExecutionWorker(tmp_path / "config.toml")
+
+    child = worker.start(
+        3,
+        env={"PATH": "/usr/bin"},
+        log_path=tmp_path / "execution-worker.log",
+        correlation_id="corr-flap",
+    )
+
+    assert len(samples) >= 2
+    assert child.process_identity == "b" * 64
+    assert worker.is_alive(child) is True
+
+
 def test_execution_worker_cli_binds_exact_config_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
