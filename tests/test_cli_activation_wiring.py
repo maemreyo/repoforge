@@ -120,6 +120,53 @@ def test_runtime_ls_reports_an_empty_release_root_without_failing(
     assert payload["execution_workers"]["reclamation_safe"] is True
 
 
+def test_doctor_exits_nonzero_when_execution_workers_are_unsafe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unsafe worker report fails the doctor command, not just its nested check (#424)."""
+    import importlib
+    import json
+
+    from repoforge.interfaces.cli.main import main
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'''[server]
+workspace_root = "{tmp_path / "workspaces"}"
+state_root = "{tmp_path / "state"}"
+
+[repositories.demo]
+path = "{repo}"
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REPOFORGE_CONFIG", str(config_path))
+
+    def _unsafe_worker_report(_args):
+        return {
+            "stale_execution_worker_count": 1,
+            "unreadable_record_ids": [],
+            "reclamation_safe": False,
+            "scan_complete": True,
+            "detail": "1 stale execution worker(s); reclamation safe: False",
+        }
+
+    cli_main = importlib.import_module("repoforge.interfaces.cli.main")
+    monkeypatch.setattr(cli_main, "_execution_worker_report", _unsafe_worker_report)
+
+    exit_code = main(["doctor"])
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    worker_check = next(item for item in payload["checks"] if item["name"] == "execution_workers")
+    assert worker_check["ok"] is False
+
+
 def test_version_switch_fails_closed_and_leaves_current_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

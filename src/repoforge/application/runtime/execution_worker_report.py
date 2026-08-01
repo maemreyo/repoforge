@@ -20,6 +20,7 @@ from ...ports.execution_worker_store import ExecutionWorkerBindingStore
 from .execution_worker_reconciler import (
     CommandLineReader,
     OwnerIdentityReader,
+    ProcessGroupGoneReader,
     ProcessIdentityReader,
 )
 
@@ -39,6 +40,8 @@ class ExecutionWorkerReport:
     reclamation_safe: bool
     scan_complete: bool
     unreadable_record_ids: tuple[str, ...]
+    orphaned_group_without_leader: tuple[str, ...]
+    containment_unproven: bool
     detail: str
 
     def as_dict(self) -> dict[str, object]:
@@ -51,6 +54,8 @@ class ExecutionWorkerReport:
             "reclamation_safe": self.reclamation_safe,
             "scan_complete": self.scan_complete,
             "unreadable_record_ids": list(self.unreadable_record_ids),
+            "orphaned_group_without_leader": list(self.orphaned_group_without_leader),
+            "containment_unproven": self.containment_unproven,
             "detail": self.detail,
         }
 
@@ -85,19 +90,26 @@ def build_execution_worker_report(
     owner_identity_reader: OwnerIdentityReader,
     command_line_reader: CommandLineReader,
     identity_reader: ProcessIdentityReader,
+    process_group_gone: ProcessGroupGoneReader | None = None,
 ) -> ExecutionWorkerReport:
     """Enumerate stale execution workers and the lock evidence against them.
 
-    Only active states (`running`, `refused_unproven`, `survived_kill`) are live
-    concerns: terminal bindings are history, never "stale workers". A candidate must
-    also still have a live process -- a binding whose process already exited is not a
-    stale worker, it is a stale record (#420).
+    Only active states are live concerns: terminal bindings are history, never "stale
+    workers". A candidate must also still have a live process -- a binding whose
+    process already exited is not a stale worker, it is a stale record (#420). But
+    "leader gone" does not prove "group gone": an execution worker runs in its own
+    process group, so a dead leader with live descendants is an orphaned group that
+    may still hold locks, and an unavailable group probe is unprovable containment --
+    both make reclamation unsafe (#424). A tokenless binding is likewise always unsafe
+    (PID-reuse safety cannot be proven without the start token).
     """
 
     page = bindings.list_page()
     lock_owners = _lock_owners(lock_root)
     stale: list[ExecutionWorkerBinding] = []
     owner_states: dict[str, str] = {}
+    orphaned_group: list[str] = []
+    containment_unproven = False
     for binding in page.records:
         if binding.state not in _ACTIVE_STATES:
             continue
@@ -109,9 +121,17 @@ def build_execution_worker_report(
             owner_states[binding.worker_id] = "dead"
         if owner_states[binding.worker_id] == "alive":
             continue
-        if identity_reader(binding.pid) is None:
+        if identity_reader(binding.pid) is not None:
+            stale.append(binding)
             continue
-        stale.append(binding)
+        # Leader is gone: is the whole group gone too?
+        if process_group_gone is None:
+            containment_unproven = True
+            continue
+        if not process_group_gone(binding.pgid):
+            orphaned_group.append(binding.worker_id)
+            continue
+        # Leader and group are both gone: a stale historical record, not a live worker.
 
     workers_by_release: dict[str, list[str]] = {}
     worker_pids: list[int] = []
@@ -124,13 +144,17 @@ def build_execution_worker_report(
         if argv is None or not is_execution_worker_entry_point(argv):
             unprovable += 1
             continue
-        if binding.process_start_token is not None:
-            identity = identity_reader(binding.pid)
-            if identity is None or identity.start_token != binding.process_start_token:
-                unprovable += 1
+        if binding.process_start_token is None:
+            # Without the start token, PID-reuse safety can never be proven (#424).
+            unprovable += 1
+            continue
+        identity = identity_reader(binding.pid)
+        if identity is None or identity.start_token != binding.process_start_token:
+            unprovable += 1
 
     locks_held = {binding.worker_id: lock_owners.get(binding.pid, []) for binding in stale}
-    reclamation_safe = unprovable == 0 and page.scan_complete and not page.unreadable_ids
+    unsafe = unprovable > 0 or bool(orphaned_group) or containment_unproven
+    reclamation_safe = not unsafe and page.scan_complete and not page.unreadable_ids
     return ExecutionWorkerReport(
         stale_execution_worker_count=len(stale),
         workers_by_release=workers_by_release,
@@ -140,9 +164,12 @@ def build_execution_worker_report(
         reclamation_safe=reclamation_safe,
         scan_complete=page.scan_complete,
         unreadable_record_ids=page.unreadable_ids,
+        orphaned_group_without_leader=tuple(orphaned_group),
+        containment_unproven=containment_unproven,
         detail=(
             f"{len(stale)} stale execution worker(s); reclamation safe: "
             f"{reclamation_safe} (scan complete: {page.scan_complete}, unreadable "
-            f"records: {len(page.unreadable_ids)})"
+            f"records: {len(page.unreadable_ids)}, orphaned groups without a leader: "
+            f"{len(orphaned_group)}, containment unproven: {containment_unproven})"
         ),
     )
