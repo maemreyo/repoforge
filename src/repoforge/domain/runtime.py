@@ -196,6 +196,11 @@ class RuntimeRecord:
     #: `0` on an older record is honest: nothing was counting then.
     restarts_total: int = 0
     last_restart_at: str | None = None
+    # When a supervisor entered resident fail-closed (#367). Once set it is durable:
+    # a supervisor later relaunched by launchd honors it for the same release instead
+    # of re-probing and re-spawning, so a deterministic failure is never reset by a
+    # fresh lifetime. Cleared when a different release's supervisor writes a new record.
+    fail_closed_since: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -222,6 +227,10 @@ class RuntimeRecord:
             or not self.correlation_id
         ):
             raise ValueError("Runtime record metadata is invalid")
+        if self.fail_closed_since is not None and (
+            not self.fail_closed_since or len(self.fail_closed_since) > 64
+        ):
+            raise ValueError("Runtime fail_closed_since is invalid")
         if self.running_release_sha is not None and not re.fullmatch(
             r"[0-9a-f]{7,40}", self.running_release_sha
         ):

@@ -2061,6 +2061,7 @@ def run_runtime_worker(
         log_path=root / "managed-runtime.log",
         execution_worker=SubprocessExecutionWorker(config_path),
         execution_worker_log_path=root / "execution-worker.log",
+        preflight=validate_generated_contract_identity,
     )
     return supervisor.run(
         generation=target.generation,

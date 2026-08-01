@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -79,6 +79,7 @@ class RuntimeSupervisor:
         health_failure_threshold: int = 3,
         stable_health_reset_seconds: float = 60.0,
         single_instance_wait_seconds: float = 45.0,
+        preflight: Callable[[], None] | None = None,
     ) -> None:
         self._store = store
         self._configs = configs
@@ -111,6 +112,7 @@ class RuntimeSupervisor:
         self._watchdog_interval = watchdog_interval_seconds
         self._health_failure_threshold = health_failure_threshold
         self._stable_health_reset = stable_health_reset_seconds
+        self._preflight = preflight
         self._stop = threading.Event()
         self._child: ChildProcess | None = None
         self._execution_child: ChildProcess | None = None
@@ -200,6 +202,7 @@ class RuntimeSupervisor:
         consecutive_health_failures: int = 0,
         restarts_total: int = 0,
         last_restart_at: str | None = None,
+        fail_closed_since: str | None = None,
     ) -> RuntimeRecord:
         pid = os.getpid()
         identity = self._processes.identity(pid)
@@ -234,7 +237,69 @@ class RuntimeSupervisor:
             consecutive_health_failures=consecutive_health_failures,
             restarts_total=restarts_total,
             last_restart_at=last_restart_at,
+            fail_closed_since=fail_closed_since,
         )
+
+    def _run_preflight(self) -> tuple[str, str] | None:
+        """Run the deterministic preflight; ``(error_code, message)`` on failure."""
+
+        if self._preflight is None:
+            return None
+        try:
+            self._preflight()
+        except ConfigError as exc:
+            code = str(exc).split(":", 1)[0] or "PREFLIGHT_FAILED"
+            return code, redact_text(str(exc))
+        except Exception as exc:
+            return "PREFLIGHT_FAILED", redact_text(f"{type(exc).__name__}: {exc}")
+        return None
+
+    def _durable_fail_closed(self, prior: RuntimeRecord | None) -> bool:
+        """Honor a prior supervisor's fail-closed state for the same release.
+
+        launchd relaunching a supervisor must not reset a deterministic failure: if the
+        last lifetime failed closed and this process runs the same release, stay
+        fail-closed instead of re-probing and re-spawning. A different release (a
+        rollback or a re-activation) gets a fresh verdict from its own preflight.
+        """
+        if prior is None or prior.fail_closed_since is None:
+            return False
+        if prior.phase not in {
+            RuntimePhase.FAILED,
+            RuntimePhase.FAIL_CLOSED,
+            RuntimePhase.STOPPED,
+        }:
+            return False
+        if prior.running_release_sha is not None:
+            current_release = os.environ.get("REPOFORGE_RUNNING_RELEASE_SHA")
+            if current_release is not None and current_release != prior.running_release_sha:
+                return False
+        return True
+
+    def _serve_fail_closed(self, correlation_id: str) -> None:
+        """Block serving the control socket until an explicit SHUTDOWN.
+
+        Deterministic, non-retryable failures must never be respawned and must never
+        exit: exiting lets launchd relaunch the supervisor and crash-loop across
+        lifetimes. The control plane stays answerable in FAIL_CLOSED so ``rf doctor`` /
+        ``rf runtime status`` can read the typed failure; an explicit SHUTDOWN
+        terminalizes to STOPPED (which launchd does not relaunch).
+        """
+        self._stop.wait()
+        current = self._store.read()
+        if current is not None:
+            self._store.write(
+                replace(
+                    current,
+                    phase=RuntimePhase.STOPPED,
+                    pid=None,
+                    process_identity=None,
+                    child_pid=None,
+                    child_process_identity=None,
+                    active_generation=None,
+                    updated_at=self._clock.now_iso(),
+                )
+            )
 
     def _tunnel_health(self, child: ChildProcess) -> tuple[HealthCheck, ...]:
         probe = getattr(self._tunnel, "health", None)
@@ -452,8 +517,11 @@ class RuntimeSupervisor:
             def stop_handler(_signum: int, _frame: object) -> None:
                 self._stop.set()
 
-            for signum in (signal.SIGTERM, signal.SIGINT):
-                previous_handlers[signal.Signals(signum)] = signal.signal(signum, stop_handler)
+            # Signal handlers can only be installed from the main thread; an embedded
+            # supervisor (or one under test) in another thread keeps `_stop` control-only.
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    previous_handlers[signal.Signals(signum)] = signal.signal(signum, stop_handler)
             restart_count = 0
             # Carried across supervisor lifetimes: a supervisor that itself restarted would
             # otherwise republish `0 restarts` and erase the history an operator is reading
@@ -464,6 +532,53 @@ class RuntimeSupervisor:
                 prior_record.last_restart_at if prior_record is not None else None
             )
             try:
+                if prior_record is not None and self._durable_fail_closed(prior_record):
+                    # A prior lifetime already failed closed for this release; honoring
+                    # it writes the record for THIS process and stays resident.
+                    code = prior_record.last_error_code or "PREFLIGHT_FAILED"
+                    error = prior_record.last_error or (
+                        "A previous supervisor failed closed for this release; the "
+                        "durable fail-closed state is honored"
+                    )
+                    self._store.write(
+                        self._record(
+                            RuntimePhase.FAIL_CLOSED,
+                            accepted_generation=generation,
+                            active_generation=None,
+                            profile=profile,
+                            tool_surface_hash=tool_surface_hash,
+                            correlation_id=correlation_id,
+                            child=None,
+                            error_code=code,
+                            error=error,
+                            fail_closed_since=prior_record.fail_closed_since,
+                        )
+                    )
+                    self._clear_target(generation)
+                    self._serve_fail_closed(correlation_id)
+                    return 0
+
+                preflight_error = self._run_preflight()
+                if preflight_error is not None:
+                    code, message = preflight_error
+                    self._store.write(
+                        self._record(
+                            RuntimePhase.FAIL_CLOSED,
+                            accepted_generation=generation,
+                            active_generation=None,
+                            profile=profile,
+                            tool_surface_hash=tool_surface_hash,
+                            correlation_id=correlation_id,
+                            child=None,
+                            error_code=code,
+                            error=message,
+                            fail_closed_since=self._clock.now_iso(),
+                        )
+                    )
+                    self._clear_target(generation)
+                    self._serve_fail_closed(correlation_id)
+                    return 0
+
                 try:
                     initialize_profile = self._profile_store.fingerprint() != profile.fingerprint
                     if initialize_profile:
@@ -826,5 +941,6 @@ class RuntimeSupervisor:
                 return 2
             finally:
                 self._control.close()
-                for signum, handler in previous_handlers.items():
-                    signal.signal(signum, handler)  # type: ignore[arg-type]
+                if threading.current_thread() is threading.main_thread():
+                    for signum, handler in previous_handlers.items():
+                        signal.signal(signum, handler)  # type: ignore[arg-type]
