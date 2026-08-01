@@ -63,7 +63,7 @@ class _Smoke:
 
 
 class _Restarter:
-    def restart(self) -> RestartOutcome:
+    def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         return RestartOutcome(ok=True, detail="fake restart", pid=99)
 
 

@@ -78,7 +78,7 @@ class _RealLauncherRestarter:
         self._config_path = config_path
         self.started = 0
 
-    def restart(self) -> RestartOutcome:
+    def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         launcher = ReleaseAwareRuntimeLauncher(self._store.bin_launcher())
         try:
             launcher.start(self._config_path, foreground=True, extra_env={})
@@ -145,7 +145,7 @@ def test_the_internal_shim_exists_before_the_restart_is_attempted(tmp_path: Path
     seen: list[bool] = []
 
     class _RecordingRestarter(_RealLauncherRestarter):
-        def restart(self) -> RestartOutcome:
+        def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
             seen.append(store.bin_launcher().is_file())
             return super().restart()
 
@@ -202,7 +202,7 @@ def test_first_activation_failure_reports_that_there_is_no_rollback_target(
     store = RuntimeReleaseStore(tmp_path / "release-root")
 
     class _NeverConverges(_RealLauncherRestarter):
-        def restart(self) -> RestartOutcome:
+        def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
             return RestartOutcome(ok=False, detail="candidate refused to start")
 
     restarter = _NeverConverges(store, tmp_path / "config.toml")
@@ -291,7 +291,7 @@ def test_a_crash_between_the_swap_and_the_receipt_is_detectable(tmp_path: Path) 
     store = RuntimeReleaseStore(tmp_path / "release-root")
 
     class _CrashingRestarter(_RealLauncherRestarter):
-        def restart(self) -> RestartOutcome:
+        def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
             raise KeyboardInterrupt("operator killed the activation mid-flight")
 
     restarter = _CrashingRestarter(store, tmp_path / "config.toml")
@@ -336,7 +336,7 @@ def test_a_completed_activation_clears_the_journal(tmp_path: Path) -> None:
 
 def _crash_after_swap(store: RuntimeReleaseStore, tmp_path: Path) -> None:
     class _CrashingRestarter(_RealLauncherRestarter):
-        def restart(self) -> RestartOutcome:
+        def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
             raise KeyboardInterrupt("killed mid-activation")
 
     restarter = _CrashingRestarter(store, tmp_path / "config.toml")

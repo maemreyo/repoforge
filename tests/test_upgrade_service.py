@@ -78,14 +78,28 @@ class _Smoke:
 class _Restarter:
     """Restarter fake; `serving` is what the runtime runs after each restart."""
 
-    def __init__(self, *, ok: bool = True, serving: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        serving: list[str] | None = None,
+        reclamation: dict[str, object] | None = None,
+    ) -> None:
         self._ok = ok
         self.calls = 0
         self.serving = serving
+        self.departing_releases: list[str | None] = []
+        self._reclamation = reclamation
 
-    def restart(self) -> RestartOutcome:
+    def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         self.calls += 1
-        return RestartOutcome(ok=self._ok, detail="fake restart", pid=99 if self._ok else None)
+        self.departing_releases.append(departing_release)
+        return RestartOutcome(
+            ok=self._ok,
+            detail="fake restart",
+            pid=99 if self._ok else None,
+            reclamation=self._reclamation,
+        )
 
 
 class _Observer:
@@ -287,6 +301,72 @@ def test_rollback_returns_to_the_previous_release(tmp_path: Path) -> None:
 
 
 # ------------------------------------------- truthful activation (review findings 1/3)
+
+
+def test_activation_passes_the_departing_release_to_the_restarter(tmp_path: Path) -> None:
+    """Orphan reclamation must know which release is departing (#368)."""
+    first, store, restarter = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    assert restarter.departing_releases == [None]
+
+    second, _, restarter = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    assert restarter.departing_releases == ["1111aaa"]
+
+
+def test_rollback_passes_the_current_release_as_departing(tmp_path: Path) -> None:
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, restarter = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+
+    second.rollback()
+
+    assert restarter.departing_releases[-1] == "2222bbb"
+
+
+def test_activation_receipt_records_worker_reclamation(tmp_path: Path) -> None:
+    """The receipt carries the reclamation evidence so a rollback can be audited (#368)."""
+    reclamation = {
+        "inspected": 2,
+        "reclaimed": 1,
+        "already_gone": 1,
+        "refused_unproven": 0,
+        "survived_kill": 0,
+        "worker_ids": ["worker-0123456789ab"],
+        "pids": [4242],
+        "release_shas": ["1111aaa"],
+        "detail": "reconciled 2 execution worker binding(s)",
+    }
+    service, store, _ = _service(tmp_path, restarter=_Restarter(reclamation=reclamation))
+    result = service.upgrade(tmp_path, activate=True)
+
+    receipt = store.read_receipt(result.activation_receipt)
+    assert receipt is not None
+    assert receipt.worker_reclamation == reclamation
+
+
+def test_survived_worker_failure_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """A worker that survived SIGKILL must block the activation, not quietly proceed."""
+    service, _, _ = _service(
+        tmp_path,
+        restarter=_Restarter(
+            ok=False,
+            reclamation={
+                "inspected": 1,
+                "reclaimed": 0,
+                "already_gone": 0,
+                "refused_unproven": 0,
+                "survived_kill": 1,
+                "worker_ids": [],
+                "pids": [],
+                "release_shas": [],
+                "detail": "worker survived SIGKILL",
+            },
+        ),
+    )
+    with pytest.raises(ConfigError, match="ACTIVATION_FAILED"):
+        service.upgrade(tmp_path, activate=True)
 
 
 def test_activation_requires_the_runtime_to_actually_serve_the_candidate(
