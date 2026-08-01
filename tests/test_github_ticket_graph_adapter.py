@@ -3,13 +3,21 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import create_forge_environment
 
 from repoforge.adapters.github.graph_decode import failed_capabilities
 from repoforge.adapters.github.ticket_graph import CommandGitHubTicketGraphGateway
-from repoforge.config import GitHubTicketGraphConfig, ServerConfig
+from repoforge.application.service import CodingService
+from repoforge.config import (
+    GitHubTicketGraphConfig,
+    ServerConfig,
+    load_config,
+)
+from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import CommandError
 from repoforge.domain.tickets import (
     GraphEvidenceCapability,
@@ -74,6 +82,9 @@ class GraphQLExecutor:
         self.partial_on_failure: bool = False
         self.project_failure: bool = False
         self.missing_without_error: set[int] = set()
+        #: When True, local edge nodes missing an explicit `repository` are
+        #: given the local slug so malformed-identity fixtures can opt out.
+        self.inject_repository_identity: bool = True
 
     def environment(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
         return dict(extra or {})
@@ -139,7 +150,11 @@ class GraphQLExecutor:
                         break
                     continue
                 bounded = self._bounded_connection(field, value, query)
-                if field in {"subIssues", "blockedBy"} and isinstance(bounded, dict):
+                if (
+                    self.inject_repository_identity
+                    and field in {"subIssues", "blockedBy"}
+                    and isinstance(bounded, dict)
+                ):
                     nodes = bounded.get("nodes")
                     if isinstance(nodes, list):
                         bounded = {
@@ -727,3 +742,254 @@ def test_project_failure_is_not_traversal_truncation(tmp_path: Path) -> None:
     )
     assert project_stat.provider_processes == 1
     assert snapshot.repository_slug == "acme/widgets"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review regressions (#411)
+# ---------------------------------------------------------------------------
+
+
+def test_same_repo_blocker_outside_subtree_fails_closed(tmp_path: Path) -> None:
+    """#413 is expanded, #374 and #388 are blockers in the same repo but not
+    descendants of #410. The dependency capability must be marked unavailable
+    for #413 with a diagnostic distinguishing outside-selection-scope from
+    provider-unavailable.
+    """
+    issues = {
+        410: _graphql_issue(410, "Program", children=(413,)),
+        413: _graphql_issue(413, "Ticket 413", blocked_by=(374, 388)),
+        374: _graphql_issue(374, "Ticket 374"),
+        388: _graphql_issue(388, "Ticket 388"),
+    }
+    executor = GraphQLExecutor(issues)
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(
+        tmp_path,
+        GitHubTicketGraphConfig(root_issue=410, repository="acme/widgets"),
+        max_items=20,
+    )
+
+    nodes = {node.number: node for node in snapshot.graph.nodes}
+    assert set(nodes) == {410, 413}
+    assert nodes[413].blockers == ()
+    assert snapshot.evidence_complete is False
+    assert 413 in snapshot.unavailable
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.DEPENDENCIES].complete is False
+    assert 413 in coverage[GraphEvidenceCapability.DEPENDENCIES].unavailable
+    assert any(
+        diagnostic.code == "DEPENDENCY_OUTSIDE_SELECTION_SCOPE"
+        and diagnostic.issue_number == 413
+        and "374" in diagnostic.message
+        and "388" in diagnostic.message
+        for diagnostic in snapshot.diagnostics
+    )
+
+
+def test_subissue_missing_repository_fails_closed(tmp_path: Path) -> None:
+    issues = {
+        1: _graphql_issue(1, "Program", children=(2,)),
+    }
+    issues[1] = {
+        **issues[1],
+        "subIssues": {"totalCount": 1, "nodes": [{"number": 2}]},
+    }
+    executor = GraphQLExecutor(issues)
+    executor.inject_repository_identity = False
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(
+        tmp_path,
+        GitHubTicketGraphConfig(root_issue=1, repository="acme/widgets"),
+        max_items=20,
+    )
+
+    nodes = {node.number: node for node in snapshot.graph.nodes}
+    assert nodes[1].children == ()
+    assert 1 in snapshot.unavailable
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is False
+    assert 1 in coverage[GraphEvidenceCapability.SUB_ISSUES].unavailable
+    assert any(
+        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING"
+        and diagnostic.issue_number == 1
+        for diagnostic in snapshot.diagnostics
+    )
+
+
+def test_blocker_null_repository_fails_closed(tmp_path: Path) -> None:
+    issues = {
+        1: _graphql_issue(1, "Program", blocked_by=(7,)),
+    }
+    issues[1] = {
+        **issues[1],
+        "blockedBy": {"totalCount": 1, "nodes": [{"number": 7, "repository": None}]},
+    }
+    executor = GraphQLExecutor(issues)
+    executor.inject_repository_identity = False
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(
+        tmp_path,
+        GitHubTicketGraphConfig(root_issue=1, repository="acme/widgets"),
+        max_items=20,
+    )
+
+    assert 1 in snapshot.unavailable
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.DEPENDENCIES].complete is False
+    assert 1 in coverage[GraphEvidenceCapability.DEPENDENCIES].unavailable
+    assert any(
+        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING"
+        and diagnostic.issue_number == 1
+        and "blocker" in diagnostic.message
+        for diagnostic in snapshot.diagnostics
+    )
+
+
+def test_repository_missing_name_with_owner_fails_closed(tmp_path: Path) -> None:
+    issues = {
+        1: _graphql_issue(1, "Program", children=(2,)),
+    }
+    issues[1] = {
+        **issues[1],
+        "subIssues": {"totalCount": 1, "nodes": [{"number": 2, "repository": {}}]},
+    }
+    executor = GraphQLExecutor(issues)
+    executor.inject_repository_identity = False
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(
+        tmp_path,
+        GitHubTicketGraphConfig(root_issue=1, repository="acme/widgets"),
+        max_items=20,
+    )
+
+    assert 1 in snapshot.unavailable
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is False
+    assert 1 in coverage[GraphEvidenceCapability.SUB_ISSUES].unavailable
+    assert any(
+        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING"
+        and diagnostic.issue_number == 1
+        for diagnostic in snapshot.diagnostics
+    )
+
+
+def test_repository_name_with_owner_wrong_type_fails_closed(tmp_path: Path) -> None:
+    issues = {
+        1: _graphql_issue(1, "Program", children=(2,)),
+    }
+    issues[1] = {
+        **issues[1],
+        "subIssues": {
+            "totalCount": 1,
+            "nodes": [{"number": 2, "repository": {"nameWithOwner": 42}}],
+        },
+    }
+    executor = GraphQLExecutor(issues)
+    executor.inject_repository_identity = False
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(
+        tmp_path,
+        GitHubTicketGraphConfig(root_issue=1, repository="acme/widgets"),
+        max_items=20,
+    )
+
+    assert 1 in snapshot.unavailable
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is False
+    assert 1 in coverage[GraphEvidenceCapability.SUB_ISSUES].unavailable
+    assert any(
+        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING"
+        and diagnostic.issue_number == 1
+        for diagnostic in snapshot.diagnostics
+    )
+
+
+def test_malformed_label_node_fails_closed(tmp_path: Path) -> None:
+    issues = _fixture_issues()
+    issues[2] = {
+        **issues[2],
+        "labels": {
+            "totalCount": 4,
+            "nodes": [{"name": "valid"}, {"name": ""}, "bogus", {"other": "no name"}],
+        },
+    }
+    executor = GraphQLExecutor(issues)
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(tmp_path, GitHubTicketGraphConfig(root_issue=1), max_items=20)
+
+    assert 2 in snapshot.unavailable
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.ISSUE].complete is False
+    assert 2 in coverage[GraphEvidenceCapability.ISSUE].unavailable
+
+
+def test_label_node_missing_name_fails_closed(tmp_path: Path) -> None:
+    issues = _fixture_issues()
+    issues[2] = {
+        **issues[2],
+        "labels": {"totalCount": 3, "nodes": [{"name": "ok"}, {}, {"name": 42}]},
+    }
+    executor = GraphQLExecutor(issues)
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(tmp_path, GitHubTicketGraphConfig(root_issue=1), max_items=20)
+
+    assert 2 in snapshot.unavailable
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.ISSUE].complete is False
+    assert 2 in coverage[GraphEvidenceCapability.ISSUE].unavailable
+
+
+def test_high_fanout_unavailable_set_is_schema_bound(tmp_path: Path) -> None:
+    """Root -> 100 children -> 100 grandchildren each (10k issues) under
+    max_items=200 must not push unbounded entries into `unavailable`; the
+    traversal reports truncation and one budget diagnostic per parent.
+    """
+    issues: dict[int, dict[str, object]] = {
+        1: _graphql_issue(1, "Program", children=tuple(range(2, 102)))
+    }
+    for child in range(2, 102):
+        issues[child] = _graphql_issue(
+            child,
+            f"Child {child}",
+            children=tuple(range(child * 1000 + 1, child * 1000 + 101)),
+        )
+    for grandchild in range(2001, 10101):
+        issues[grandchild] = _graphql_issue(grandchild, f"Grandchild {grandchild}")
+    executor = GraphQLExecutor(issues)
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(
+        tmp_path,
+        GitHubTicketGraphConfig(root_issue=1, repository="acme/widgets"),
+        max_items=200,
+    )
+
+    assert snapshot.truncated is True
+    assert len(snapshot.unavailable) <= 200
+    for coverage in snapshot.capability_coverage:
+        assert len(coverage.unavailable) <= 200
+    budget_diagnostics = [
+        diagnostic
+        for diagnostic in snapshot.diagnostics
+        if diagnostic.code == "SUB_ISSUE_TRAVERSAL_BUDGET_EXCEEDED"
+    ]
+    assert budget_diagnostics
+    assert all(diagnostic.issue_number in range(2, 102) for diagnostic in budget_diagnostics)
+
+    environment = create_forge_environment(tmp_path)
+    config = load_config(environment.config_path)
+    repo = replace(
+        config.repositories["demo"],
+        ticket_graph=GitHubTicketGraphConfig(root_issue=1, repository="acme/widgets"),
+    )
+    config = replace(config, repositories={"demo": repo})
+    service = CodingService(config, ticket_graphs=gateway)
+    result = service.repo_issue_v2("demo", mode="graph", fresh=True)
+    V2_TOOL_SPECS["repo_issue"].validate_output(result)

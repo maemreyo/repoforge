@@ -234,7 +234,9 @@ def _source_digest(source: GitHubTicketGraphConfig) -> str:
 
 
 def _snapshot_payload(
-    snapshot: TicketGraphSnapshot, source: GitHubTicketGraphConfig
+    snapshot: TicketGraphSnapshot,
+    source: GitHubTicketGraphConfig,
+    authority_digest: str | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": snapshot.graph.schema_version,
@@ -270,6 +272,7 @@ def _snapshot_payload(
         "api_version": GITHUB_API_VERSION,
         "repository_slug": snapshot.repository_slug,
         "source_digest": _source_digest(source),
+        "authority_digest": authority_digest,
         "payload_checksum": hashlib.sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest(),
@@ -278,7 +281,10 @@ def _snapshot_payload(
 
 
 def _payload_bindings_valid(
-    payload: object, source: GitHubTicketGraphConfig, expected_slug: str | None
+    payload: object,
+    source: GitHubTicketGraphConfig,
+    expected_slug: str | None,
+    authority_digest: str | None,
 ) -> bool:
     """Whether a cached payload's bindings match the current reader and config.
 
@@ -287,7 +293,11 @@ def _payload_bindings_valid(
     version, and the checksum is recomputed over the payload body (excluding
     bindings) so a corrupted or hand-edited cache entry fails closed instead of
     being served. An unverifiable expected slug (no configured repository and
-    no parseable github.com remote) fails closed to a miss.
+    no parseable github.com remote) fails closed to a miss. The authority
+    digest must be present and match the operator-pinned credential generation;
+    a ``None`` digest (no pinned authority) is never valid because RepoForge
+    cannot prove the ambient GitHub authority is the same one that wrote the
+    entry.
     """
     if not isinstance(payload, dict):
         return False
@@ -303,6 +313,8 @@ def _payload_bindings_valid(
     if expected_slug is None or bindings.get("repository_slug") != expected_slug:
         return False
     if bindings.get("source_digest") != _source_digest(source):
+        return False
+    if authority_digest is None or bindings.get("authority_digest") != authority_digest:
         return False
     stored = bindings.get("payload_checksum")
     if not isinstance(stored, str) or len(stored) != 64:
@@ -448,6 +460,12 @@ def _expected_slug(
     return github_slug_from_remote_url(result.stdout.strip())
 
 
+#: Cache envelopes do not survive negative age beyond this skew; a cached
+#: snapshot whose observed_at is far in the future relative to the local
+#: clock must be discarded instead of served.
+_ALLOWED_CACHE_SKEW_MS = 5_000
+
+
 def _observed_age_ms(now_epoch: float, observed_at: str) -> float | None:
     try:
         observed = datetime.fromisoformat(observed_at)
@@ -455,7 +473,14 @@ def _observed_age_ms(now_epoch: float, observed_at: str) -> float | None:
         return None
     if observed.tzinfo is None:
         return None
-    return round((now_epoch - observed.timestamp()) * 1000, 3)
+    age_ms = (now_epoch - observed.timestamp()) * 1000
+    if age_ms < -_ALLOWED_CACHE_SKEW_MS:
+        # The envelope predates the local clock by more than the allowed
+        # skew; serving it as current evidence would crash output validation
+        # (`cache_age_ms` is bounded by `ge=0`). The caller treats `None` as
+        # a miss and forces a fresh read.
+        return None
+    return round(max(0.0, age_ms), 3)
 
 
 def read_github_ticket_snapshot(
@@ -485,8 +510,9 @@ def read_github_ticket_snapshot(
     cache = ctx.github_read_cache
     now_epoch = ctx.now_epoch()
     expected_slug = _expected_slug(ctx, repo, source)
+    authority_digest = ctx.config.server.github_read_cache_authority_digest
     cache_context: dict[str, object] = {"hit_reason": None, "miss_reason": None, "age_ms": None}
-    if not fresh and cache is not None:
+    if not fresh and cache is not None and authority_digest is not None:
         cached = cache.get(
             repo.repo_id,
             repo.path,
@@ -500,23 +526,33 @@ def read_github_ticket_snapshot(
         else:
             snapshot = (
                 _snapshot_from_payload(cached)
-                if _payload_bindings_valid(cached, source, expected_slug)
+                if _payload_bindings_valid(cached, source, expected_slug, authority_digest)
                 else None
             )
             if snapshot is not None:
                 age_ms = _observed_age_ms(now_epoch, snapshot.observed_at)
-                cache_context["hit_reason"] = "valid_bindings_ttl_fresh"
-                cache_context["age_ms"] = age_ms
-                return snapshot, True, cache_context
-            cache_context["miss_reason"] = (
-                "bindings_mismatch"
-                if isinstance(cached.get("bindings"), dict)
-                else "corrupt_payload"
-            )
+                if age_ms is None:
+                    # The cached envelope's age cannot be trusted (future
+                    # timestamp beyond the allowed skew, or unparseable):
+                    # fall through and force a fresh read instead of serving
+                    # evidence whose age would violate the output contract.
+                    cache_context["miss_reason"] = "clock_skew"
+                else:
+                    cache_context["hit_reason"] = "valid_bindings_ttl_fresh"
+                    cache_context["age_ms"] = age_ms
+                    return snapshot, True, cache_context
+            else:
+                cache_context["miss_reason"] = (
+                    "bindings_mismatch"
+                    if isinstance(cached.get("bindings"), dict)
+                    else "corrupt_payload"
+                )
+    elif fresh:
+        cache_context["miss_reason"] = "fresh_requested"
     elif cache is None:
         cache_context["miss_reason"] = "cache_disabled"
     else:
-        cache_context["miss_reason"] = "fresh_requested"
+        cache_context["miss_reason"] = "authority_not_pinned"
     try:
         snapshot = ctx.ticket_graphs.read(repo.path, source, max_items=200, remote=repo.remote)
     except RepoForgeError as exc:
@@ -541,13 +577,13 @@ def read_github_ticket_snapshot(
                 "do not rewrite the reviewed graph root."
             ),
         ) from exc
-    if cache is not None:
+    if cache is not None and authority_digest is not None:
         cache.put(
             repo.repo_id,
             repo.path,
             "graph",
             source.root_issue,
-            _snapshot_payload(snapshot, source),
+            _snapshot_payload(snapshot, source, authority_digest),
             now_epoch=now_epoch,
         )
     return snapshot, False, cache_context

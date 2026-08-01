@@ -16,7 +16,6 @@ module composes them into one traversal.
 from __future__ import annotations
 
 import json
-import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +39,7 @@ from ...domain.tickets import (
 )
 from ...ports.command import CommandExecutor, CommandResult
 from .graph_decode import (
+    _REPOSITORY,
     ExpandedIssue,
     alias_issue,
     enum_value,
@@ -51,7 +51,6 @@ from .graph_query import FULL_SELECTION, build_query, selection_capabilities, st
 from .graph_transport import Stats, run_graphql
 from .project_overlay import read_project_values
 
-_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _MAX_GRAPH_NODES = 200
 _MAX_BODY_CHARS = 200_000
 _MAX_COMMENTS = 20
@@ -263,6 +262,26 @@ class CommandGitHubTicketGraphGateway:
                 if GraphEvidenceCapability.DEPENDENCIES in capabilities or issue.blockers_malformed:
                     unavailable.add(number)
                     dependencies_unavailable.add(number)
+                if issue.children_malformed_reason == "repository":
+                    diagnostics.append(
+                        TicketDiagnostic(
+                            "EDGE_REPOSITORY_IDENTITY_MISSING",
+                            number,
+                            "sub-issue edge node is missing a valid repository identity; "
+                            "local and cross-repository issue numbers cannot be "
+                            "distinguished",
+                        )
+                    )
+                if issue.blockers_malformed_reason == "repository":
+                    diagnostics.append(
+                        TicketDiagnostic(
+                            "EDGE_REPOSITORY_IDENTITY_MISSING",
+                            number,
+                            "blocker edge node is missing a valid repository identity; "
+                            "local and cross-repository issue numbers cannot be "
+                            "distinguished",
+                        )
+                    )
                 if issue.children_external:
                     unavailable.add(number)
                     sub_issues_unavailable.add(number)
@@ -304,16 +323,50 @@ class CommandGitHubTicketGraphGateway:
                     if child in discovered:
                         continue
                     if len(discovered) >= max_items:
+                        # Node budget exhausted: stop expanding this issue's
+                        # children instead of enumerating every unseen child as
+                        # unavailable, which can push thousands into the
+                        # schema-bounded (200) unavailable set. One diagnostic
+                        # per parent that hit the budget keeps the cause visible
+                        # while truncation marks the traversal incomplete.
                         truncated = True
-                        unavailable.add(child)
-                        issue_unavailable.add(child)
-                        continue
+                        sub_issues_truncated = True
+                        diagnostics.append(
+                            TicketDiagnostic(
+                                "SUB_ISSUE_TRAVERSAL_BUDGET_EXCEEDED",
+                                number,
+                                f"sub-issue traversal budget of {max_items} reached; "
+                                "remaining children are not expanded",
+                            )
+                        )
+                        break
                     discovered.add(child)
                     frontier.append(child)
 
         wanted = set(expanded)
         if source.root_issue not in wanted:
             raise TicketGraphError(f"GitHub ticket graph root #{source.root_issue} is unavailable")
+
+        # Same-repository blockers that are not descendants of the root via
+        # subIssues are still real dependency edges this traversal never
+        # expanded. Dropping them silently would let `dependencies.complete`
+        # stay true while known blockers are absent, so the capability is
+        # failed closed and the caller cannot select the issue until the
+        # dependency context is hydrated.
+        for number in wanted:
+            outside_scope_blockers = set(expanded[number].blockers) - wanted
+            if not outside_scope_blockers:
+                continue
+            unavailable.add(number)
+            dependencies_unavailable.add(number)
+            diagnostics.append(
+                TicketDiagnostic(
+                    "DEPENDENCY_OUTSIDE_SELECTION_SCOPE",
+                    number,
+                    "Dependencies exist outside the selected traversal scope: "
+                    + ", ".join(sorted(map(str, outside_scope_blockers))),
+                )
+            )
 
         project_started = time.monotonic()
         try:

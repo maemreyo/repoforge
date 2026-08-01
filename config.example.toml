@@ -16,6 +16,14 @@ profile = "repoforge"
 # read once at setup and then frozen; these are re-read from source on every runtime start.
 # mcp_connection_max_ttl_seconds = 3600
 
+# The GitHub ticket-graph cache is fail-closed by default: RepoForge never reads
+# credentials, so it cannot prove the ambient GitHub authority is unchanged between a
+# cache write and a later read. Before graph cache reads may be served, pin this to an
+# opaque 64-hex-char digest that names the current credential generation and rotate it
+# whenever that authority changes. Leave it unset to keep the graph cache disabled.
+# [server]
+# github_read_cache_authority_digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 # Auth profiles pin a reviewed actor and transport without storing raw tokens or keys.
 # `credential_reference` names an external account; the environment name is resolved only
 # when an operation acquires a short-lived lease. Add one table per operator or automation

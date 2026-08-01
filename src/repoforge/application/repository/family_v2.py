@@ -213,7 +213,9 @@ def _capability_coverage(raw: list[dict[str, Any]]) -> tuple[CapabilityCoverageV
         CapabilityCoverageV2(
             capability=str(item["capability"]),
             complete=bool(item["complete"]),
-            unavailable=tuple(int(number) for number in item.get("unavailable", ())),
+            unavailable=tuple(
+                sorted(int(number) for number in item.get("unavailable", ()))[:200]
+            ),
             truncated=bool(item["truncated"]),
         )
         for item in raw

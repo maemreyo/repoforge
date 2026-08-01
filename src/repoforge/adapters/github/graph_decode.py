@@ -18,6 +18,10 @@ _MAX_BODY_CHARS = 200_000
 _MAX_COMMENTS = 20
 _MAX_COMMENT_CHARS = 20_000
 _METADATA_LINE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?P<name>[A-Za-z ]+)\s*:\s*(?P<value>[^\n]+)")
+#: ``owner/name`` shape GitHub repository identities must match so an edge
+#: node without a valid repository can never be mapped onto a local issue
+#: number (silent cross-repository identity substitution).
+_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +46,12 @@ class ExpandedIssue:
     comments: tuple[str, ...]
     comments_truncated: bool
     comments_malformed: bool
+    #: Why an edge connection was malformed (``None`` when well-formed):
+    #: ``"connection"``, ``"number"``, or ``"repository"``. Lets the caller
+    #: emit a diagnostic that distinguishes a missing repository identity
+    #: from an otherwise-invalid edge.
+    children_malformed_reason: str | None = None
+    blockers_malformed_reason: str | None = None
 
 
 def failed_capabilities(errors: list[dict[str, Any]], alias: str) -> set[GraphEvidenceCapability]:
@@ -73,15 +83,25 @@ def alias_issue(payload: dict[str, Any], alias: str) -> dict[str, Any] | None:
     return issue if isinstance(issue, dict) else None
 
 
-def parse_labels(raw: object) -> tuple[str, ...]:
+def parse_labels(raw: object) -> tuple[tuple[str, ...], bool]:
+    """Return ``(labels, malformed)`` for one ``nodes`` list.
+
+    Any non-list input or invalid label node (not a dict, missing ``name``,
+    ``name`` not a string, or empty after strip) is malformed: skipping it
+    silently would let a truncated/partial label read report complete
+    metadata.
+    """
     if not isinstance(raw, list):
-        return ()
+        return (), True
     labels: list[str] = []
+    malformed = False
     for value in raw:
-        name = value.get("name") if isinstance(value, dict) else value
-        if isinstance(name, str) and name.strip():
-            labels.append(name.strip())
-    return tuple(labels)
+        name = value.get("name") if isinstance(value, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            malformed = True
+            continue
+        labels.append(name.strip())
+    return tuple(labels), malformed
 
 
 def parse_metadata(body: str, labels: tuple[str, ...]) -> dict[str, str]:
@@ -122,27 +142,33 @@ def graphql_labels(raw: dict[str, Any]) -> tuple[tuple[str, ...], bool, bool]:
     total_count = connection.get("totalCount")
     if not isinstance(total_count, int) or isinstance(total_count, bool):
         return (), False, True
-    labels = parse_labels(nodes)
+    labels, malformed = parse_labels(nodes)
     truncated = total_count > len(nodes)
-    return labels, truncated, False
+    return labels, truncated, malformed
 
 
 def edge_numbers(
     raw: dict[str, Any], field: str, slug: str
-) -> tuple[tuple[int, ...], bool, bool, tuple[str, ...]]:
-    """Return ``(numbers, truncated, malformed, external_refs)`` for one edge.
+) -> tuple[tuple[int, ...], bool, str | None, tuple[str, ...]]:
+    """Return ``(numbers, truncated, malformed_reason, external_refs)`` for one edge.
 
     Relationship nodes carry ``repository { nameWithOwner }`` so a
     cross-repository sub-issue or blocker is never mapped onto the same
     number in the local repository (silent identity substitution). External
     references are returned separately and the caller must degrade the
-    capability instead of hydrating the wrong issue. A connection without
-    ``totalCount``, or containing an invalid item, is malformed and fails
-    the capability closed.
+    capability instead of hydrating the wrong issue.
+
+    ``malformed_reason`` is ``None`` for a well-formed connection, or one of
+    ``"connection"`` (missing/invalid connection metadata), ``"number"`` (an
+    invalid node shape or number), or ``"repository"`` (a missing, null, or
+    malformed repository identity that makes local vs cross-repository
+    impossible to distinguish). The caller fails the capability closed and may
+    emit a diagnostic that separates identity failures from valid external
+    references.
     """
     connection = raw.get(field)
     if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
-        return (), False, True, ()
+        return (), False, "connection", ()
     nodes = connection["nodes"]
     total_count = connection.get("totalCount")
     page_info = connection.get("pageInfo")
@@ -152,22 +178,24 @@ def edge_numbers(
     elif isinstance(has_next_page, bool):
         truncated = has_next_page
     else:
-        return (), False, True, ()
+        return (), False, "connection", ()
     raw_numbers: list[int] = []
     external: list[str] = []
     for item in nodes:
         if not isinstance(item, dict):
-            return (), False, True, ()
+            return (), False, "number", ()
         number = item.get("number")
         if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
-            return (), False, True, ()
+            return (), False, "number", ()
         repository = item.get("repository")
         name_with_owner = repository.get("nameWithOwner") if isinstance(repository, dict) else None
-        if isinstance(name_with_owner, str) and name_with_owner != slug:
-            external.append(f"{name_with_owner}#{number}")
+        if not isinstance(name_with_owner, str) or _REPOSITORY.fullmatch(name_with_owner) is None:
+            return (), False, "repository", ()
+        if name_with_owner == slug:
+            raw_numbers.append(number)
             continue
-        raw_numbers.append(number)
-    return tuple(sorted(set(raw_numbers))), truncated, False, tuple(sorted(set(external)))
+        external.append(f"{name_with_owner}#{number}")
+    return tuple(sorted(set(raw_numbers))), truncated, None, tuple(sorted(set(external)))
 
 
 def comment_bodies(raw: dict[str, Any]) -> tuple[tuple[str, ...], bool, bool]:
@@ -209,10 +237,10 @@ def parse_issue(raw: dict[str, Any], number: int, slug: str) -> ExpandedIssue | 
         or len(body) > _MAX_BODY_CHARS
     ):
         return None
-    children, children_truncated, children_malformed, children_external = edge_numbers(
+    children, children_truncated, children_malformed_reason, children_external = edge_numbers(
         raw, "subIssues", slug
     )
-    blockers, blockers_truncated, blockers_malformed, blockers_external = edge_numbers(
+    blockers, blockers_truncated, blockers_malformed_reason, blockers_external = edge_numbers(
         raw, "blockedBy", slug
     )
     comments, comments_truncated, comments_malformed = comment_bodies(raw)
@@ -227,13 +255,15 @@ def parse_issue(raw: dict[str, Any], number: int, slug: str) -> ExpandedIssue | 
         labels_malformed=labels_malformed,
         children=children,
         children_truncated=children_truncated,
-        children_malformed=children_malformed,
+        children_malformed=children_malformed_reason is not None,
         children_external=children_external,
         blockers=blockers,
         blockers_truncated=blockers_truncated,
-        blockers_malformed=blockers_malformed,
+        blockers_malformed=blockers_malformed_reason is not None,
         blockers_external=blockers_external,
         comments=comments,
         comments_truncated=comments_truncated,
         comments_malformed=comments_malformed,
+        children_malformed_reason=children_malformed_reason,
+        blockers_malformed_reason=blockers_malformed_reason,
     )

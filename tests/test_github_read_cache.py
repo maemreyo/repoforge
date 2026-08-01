@@ -471,6 +471,56 @@ def test_server_config_default_github_read_cache_ttl() -> None:
     assert server.github_read_cache_ttl_seconds == 120
 
 
+def test_server_config_default_authority_digest_is_none() -> None:
+    server = ServerConfig(Path("/tmp/workspaces"), Path("/tmp/state"))
+    assert server.github_read_cache_authority_digest is None
+
+
+def test_config_accepts_pinned_authority_digest(tmp_path: Path) -> None:
+    from repoforge.config import load_config
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config_path = tmp_path / "config.toml"
+    digest = "ab12" * 16
+    config_path.write_text(
+        f"""[server]
+workspace_root = "{tmp_path / "workspaces"}"
+state_root = "{tmp_path / "state"}"
+github_read_cache_authority_digest = "{digest}"
+
+[repositories.demo]
+path = "{repo}"
+""",
+        encoding="utf-8",
+    )
+    loaded = load_config(config_path)
+    assert loaded.server.github_read_cache_authority_digest == digest.lower()
+
+
+def test_config_rejects_malformed_authority_digest(tmp_path: Path) -> None:
+    from repoforge.config import load_config
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""[server]
+workspace_root = "{tmp_path / "workspaces"}"
+state_root = "{tmp_path / "state"}"
+github_read_cache_authority_digest = "not-a-digest"
+
+[repositories.demo]
+path = "{repo}"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="github_read_cache_authority_digest"):
+        load_config(config_path)
+
+
 # --------------------------------------------------------------------------
 # End-to-end through the full wired CodingService (bootstrap + fake gh CLI)
 # --------------------------------------------------------------------------

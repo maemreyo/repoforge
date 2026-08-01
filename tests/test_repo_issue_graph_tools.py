@@ -4,16 +4,31 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from conftest import create_forge_environment
+from conftest import create_forge_environment, execution_coordinator_for_tests
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from repoforge.adapters.audit import JsonlAuditSink
+from repoforge.adapters.persistence import JsonGitHubReadCache
+from repoforge.application.context import ApplicationContext
 from repoforge.application.repository.doctor import Doctor, DoctorCommand
+from repoforge.application.repository.issue_graph import (
+    _observed_age_ms,
+    _snapshot_payload,
+    read_github_ticket_snapshot,
+)
 from repoforge.application.service import CodingService
 from repoforge.application.tickets.graph import load_ticket_graph
-from repoforge.config import GitHubTicketGraphConfig, load_config
+from repoforge.config import (
+    AppConfig,
+    GitHubTicketGraphConfig,
+    RepositoryConfig,
+    ServerConfig,
+    load_config,
+)
 from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.tickets import (
@@ -21,12 +36,24 @@ from repoforge.domain.tickets import (
     CapabilityReadStat,
     GraphEvidenceCapability,
     TicketDiagnostic,
+    TicketGraph,
     TicketGraphError,
     TicketGraphReadStats,
     TicketGraphSnapshot,
     TicketLiveMetadata,
+    TicketNode,
+    TicketPriority,
+    TicketStatus,
+    TicketType,
 )
 from repoforge.interfaces.mcp.server import create_server
+from repoforge.testing import (
+    FixedClock,
+    InMemoryLockManager,
+    InMemoryOperationGate,
+    InMemoryWorkspaceStore,
+    SequenceIdGenerator,
+)
 
 
 def _write_manifest(
@@ -917,3 +944,265 @@ def test_repo_issue_next_audits_unknown_repository_failure(tmp_path: Path) -> No
     assert events[0]["success"] is False
     assert events[0]["details"]["repo_id"] == "missing"
     assert events[0]["details"]["error_type"] == "ConfigError"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review regression (#411): negative cache age must not be served
+# ---------------------------------------------------------------------------
+
+
+def _single_node_snapshot(*, repository_slug: str, observed_at: str) -> TicketGraphSnapshot:
+    graph = TicketGraph(
+        1,
+        1,
+        (
+            TicketNode(
+                1,
+                "Program",
+                TicketType.PROGRAM,
+                TicketPriority.P0,
+                TicketStatus.IN_PROGRESS,
+                None,
+                (),
+                (),
+                (),
+                ("github",),
+            ),
+        ),
+    )
+    coverage = tuple(
+        CapabilityCoverage(capability, True, (), False) for capability in GraphEvidenceCapability
+    )
+    return TicketGraphSnapshot(
+        graph,
+        observed_at,
+        True,
+        (),
+        False,
+        (TicketLiveMetadata(1, "Program", "OPEN", "body"),),
+        coverage,
+        repository_slug=repository_slug,
+    )
+
+
+class CountingTicketGraphGateway:
+    def __init__(self, snapshot: TicketGraphSnapshot) -> None:
+        self.snapshot = snapshot
+        self.calls = 0
+
+    def read(
+        self,
+        cwd: Path,
+        source: GitHubTicketGraphConfig,
+        *,
+        max_items: int,
+        remote: str = "origin",
+    ) -> TicketGraphSnapshot:
+        del cwd, source, max_items, remote
+        self.calls += 1
+        return self.snapshot
+
+
+def _graph_context_with_cache(
+    tmp_path: Path,
+    *,
+    clock: FixedClock,
+    gateway: CountingTicketGraphGateway,
+) -> tuple[ApplicationContext, RepositoryConfig, GitHubTicketGraphConfig]:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(exist_ok=True)
+    (repo_path / ".git").mkdir(exist_ok=True)
+    state_root = tmp_path / "state"
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    config = AppConfig(
+        tmp_path / "config.toml",
+        ServerConfig(
+            tmp_path / "workspaces",
+            state_root,
+            github_read_cache_ttl_seconds=60,
+            github_read_cache_authority_digest="a" * 64,
+        ),
+        {"demo": RepositoryConfig("demo", repo_path, ticket_graph=source)},
+    )
+    locks = InMemoryLockManager()
+    audit = JsonlAuditSink(state_root, clock)
+    cache = JsonGitHubReadCache(state_root, locks)
+    ctx = ApplicationContext(
+        config=config,
+        commands=object(),
+        git=object(),
+        github=object(),
+        filesystem=object(),
+        store=InMemoryWorkspaceStore(),
+        locks=locks,
+        gate=InMemoryOperationGate(),
+        audit=audit,
+        clock=clock,
+        ids=SequenceIdGenerator(),
+        executables=object(),
+        execution=execution_coordinator_for_tests(),
+        github_read_cache=cache,
+        ticket_graphs=gateway,
+    )
+    return ctx, config.repositories["demo"], source
+
+
+def test_observed_age_ms_clamps_negative_and_rejects_skew() -> None:
+    now_epoch = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    past = datetime.fromtimestamp(now_epoch - 60, tz=timezone.utc)
+    assert _observed_age_ms(now_epoch, past.isoformat()) == 60000.0
+    future_within_skew = datetime.fromtimestamp(now_epoch + 2, tz=timezone.utc)
+    assert _observed_age_ms(now_epoch, future_within_skew.isoformat()) == 0.0
+    future_beyond_skew = datetime.fromtimestamp(now_epoch + 3600, tz=timezone.utc)
+    assert _observed_age_ms(now_epoch, future_beyond_skew.isoformat()) is None
+    assert _observed_age_ms(now_epoch, "not-a-timestamp") is None
+    assert _observed_age_ms(now_epoch, "2026-01-01T00:00:00") is None
+
+
+def test_negative_cache_age_ms_treated_as_miss(tmp_path: Path) -> None:
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-02T00:00:00+00:00")
+    gateway = CountingTicketGraphGateway(fresh)
+    ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
+
+    cached_snapshot = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-07-16T00:00:00+00:00"
+    )
+    authority_digest = "a" * 64
+    ctx.github_read_cache.put(
+        "demo",
+        repo.path,
+        "graph",
+        source.root_issue,
+        _snapshot_payload(cached_snapshot, source, authority_digest),
+        now_epoch=ctx.now_epoch(),
+    )
+
+    snapshot, cache_hit, cache_context = read_github_ticket_snapshot(
+        ctx, repo, root_issue=1, fresh=False
+    )
+
+    assert cache_hit is False
+    assert cache_context["miss_reason"] == "clock_skew"
+    assert gateway.calls == 1, "a future-dated cache envelope must not be served"
+    assert snapshot is not None
+    assert snapshot.repository_slug == "owner/demo"
+
+
+def test_graph_cache_fails_closed_without_pinned_authority(tmp_path: Path) -> None:
+    """A graph cache must never be served or written when no authority digest is
+    pinned: RepoForge cannot prove the ambient GitHub authority is the same one
+    that wrote the entry, so serving it would leak evidence under a different
+    credential context (round-2 #411)."""
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(exist_ok=True)
+    (repo_path / ".git").mkdir(exist_ok=True)
+    state_root = tmp_path / "state"
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    config = AppConfig(
+        tmp_path / "config.toml",
+        ServerConfig(tmp_path / "workspaces", state_root, github_read_cache_ttl_seconds=60),
+        {"demo": RepositoryConfig("demo", repo_path, ticket_graph=source)},
+    )
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00")
+    gateway = CountingTicketGraphGateway(fresh)
+    locks = InMemoryLockManager()
+    audit = JsonlAuditSink(state_root, clock)
+    cache = JsonGitHubReadCache(state_root, locks)
+    ctx = ApplicationContext(
+        config=config,
+        commands=object(),
+        git=object(),
+        github=object(),
+        filesystem=object(),
+        store=InMemoryWorkspaceStore(),
+        locks=locks,
+        gate=InMemoryOperationGate(),
+        audit=audit,
+        clock=clock,
+        ids=SequenceIdGenerator(),
+        executables=object(),
+        execution=execution_coordinator_for_tests(),
+        github_read_cache=cache,
+        ticket_graphs=gateway,
+    )
+    repo = config.repositories["demo"]
+
+    snapshot, cache_hit, cache_context = read_github_ticket_snapshot(
+        ctx, repo, root_issue=1, fresh=False
+    )
+
+    assert cache_hit is False
+    assert cache_context["miss_reason"] == "authority_not_pinned"
+    assert gateway.calls == 1, "the provider must be read when authority is not pinned"
+    assert snapshot is not None
+    assert (
+        cache.get(
+            "demo",
+            repo.path,
+            "graph",
+            source.root_issue,
+            ttl_seconds=60,
+            now_epoch=ctx.now_epoch(),
+        )
+        is None
+    ), "a cache entry must not be written under an unpinned authority"
+
+
+def test_graph_cache_digest_mismatch_is_a_miss(tmp_path: Path) -> None:
+    """Rotating the pinned authority digest invalidates every prior cache entry
+    instead of serving private evidence under the wrong credential context."""
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00")
+    gateway = CountingTicketGraphGateway(fresh)
+    ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
+    cached_snapshot = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    ctx.github_read_cache.put(
+        "demo",
+        repo.path,
+        "graph",
+        source.root_issue,
+        _snapshot_payload(cached_snapshot, source, "b" * 64),
+        now_epoch=ctx.now_epoch(),
+    )
+
+    _, cache_hit, cache_context = read_github_ticket_snapshot(
+        ctx, repo, root_issue=1, fresh=False
+    )
+
+    assert cache_hit is False
+    assert cache_context["miss_reason"] == "bindings_mismatch"
+    assert gateway.calls == 1, "a cache entry pinned to a different authority must not be served"
+
+
+def test_graph_cache_hit_requires_matching_pinned_authority(tmp_path: Path) -> None:
+    """A cache entry pinned to the current authority digest and fresh under the
+    TTL is served without provider traffic."""
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00")
+    gateway = CountingTicketGraphGateway(fresh)
+    ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
+    cached_snapshot = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    ctx.github_read_cache.put(
+        "demo",
+        repo.path,
+        "graph",
+        source.root_issue,
+        _snapshot_payload(cached_snapshot, source, "a" * 64),
+        now_epoch=ctx.now_epoch(),
+    )
+
+    snapshot, cache_hit, cache_context = read_github_ticket_snapshot(
+        ctx, repo, root_issue=1, fresh=False
+    )
+
+    assert cache_hit is True
+    assert cache_context["hit_reason"] == "valid_bindings_ttl_fresh"
+    assert gateway.calls == 0, "a valid pinned authority cache hit must not call the provider"
+    assert snapshot is not None
+    assert snapshot.repository_slug == "owner/demo"

@@ -64,15 +64,31 @@ reported; the failure degrades the capability and makes the snapshot not fully
 `evidence_complete`, but it is never reported as traversal truncation. Sub-issue or
 blocker references pointing at another repository are never mapped onto the same issue
 number in the local repository: the affected capability is degraded and a
-`CROSS_REPOSITORY_RELATION_UNSUPPORTED` diagnostic is reported instead.
+`CROSS_REPOSITORY_RELATION_UNSUPPORTED` diagnostic is reported instead. An edge node
+whose repository identity is missing, null, or malformed fails the capability closed
+with an `EDGE_REPOSITORY_IDENTITY_MISSING` diagnostic: without a valid repository
+identity a local and a cross-repository issue number cannot be told apart, so the
+relation is never assumed local. A same-repository blocker that exists outside the
+traversed subtree is never dropped silently: the dependency capability is degraded and
+a `DEPENDENCY_OUTSIDE_SELECTION_SCOPE` diagnostic names the unexpanded blockers, so
+`next` refuses to select the issue until its dependency context is hydrated. When the
+200-node traversal budget is exhausted, `truncated` and `sub_issues_truncated` are set
+and a `SUB_ISSUE_TRAVERSAL_BUDGET_EXCEEDED` diagnostic is reported per affected parent;
+the unseen children are not enumerated into the schema-bounded `unavailable` sets.
 
 Cached graph snapshots are bound to the resolved GitHub repository slug, a digest of the
 reviewed source configuration (root, project owner/number, field names), the reader
-contract version, and the GitHub API version; a payload checksum is recomputed and
-verified on every cache read. Any binding mismatch — a repointed remote, an edited
-project field, or a reader change — is a cache miss, never stale evidence served as
-current. Signed webhooks invalidate the affected graph cache entries; the next read
-re-traverses the batched graph rather than merging partial state.
+contract version, the GitHub API version, and the pinned authority digest; a payload
+checksum is recomputed and verified on every cache read. Any binding mismatch — a
+repointed remote, an edited project field, a reader change, or a rotated authority —
+is a cache miss, never stale evidence served as current. The graph cache is fail-closed
+by default: RepoForge never reads credentials, so it cannot prove the ambient GitHub
+authority is unchanged between a cache write and a later read. The operator must pin
+`server.github_read_cache_authority_digest` to an opaque 64-hex-char digest naming the
+current credential generation and rotate it whenever that authority changes; until then
+the graph cache is neither served nor written (`cache_miss_reason=authority_not_pinned`).
+Signed webhooks invalidate the affected graph cache entries; the next read re-traverses
+the batched graph rather than merging partial state.
 
 ## Update workflow
 

@@ -257,6 +257,13 @@ class ServerConfig:
     allowed_environment: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT
     resource_budget: ResourceBudget = DEFAULT_RESOURCE_BUDGET
     github_read_cache_ttl_seconds: int = 120
+    #: Opaque authority marker the operator must set before the GitHub ticket-graph
+    #: cache may be served. RepoForge never reads credentials, so it cannot prove
+    #: that the ambient GitHub authority is stable across cache writes and reads;
+    #: the graph cache is therefore fail-closed (never served, never written)
+    #: until the operator pins this digest to one credential generation and
+    #: rotates it whenever the ambient authority changes (#411 round-2).
+    github_read_cache_authority_digest: str | None = None
     github_webhook_enabled: bool = False
     github_webhook_bind: str = "127.0.0.1"
     github_webhook_port: int = 8766
@@ -393,6 +400,16 @@ def _boolean(value: Any, default: bool, context: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{context} must be true or false")
     return value
+
+
+def _optional_sha256_digest(value: Any, context: str) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdefABCDEF" for character in value
+    ):
+        raise ConfigError(f"{context} must be a 64-character SHA-256 hex digest")
+    return value.lower()
 
 
 def _webhook_bind(value: Any) -> str:
@@ -1226,6 +1243,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             60,
             300,
             "server.github_read_cache_ttl_seconds",
+        ),
+        github_read_cache_authority_digest=_optional_sha256_digest(
+            server_raw.get("github_read_cache_authority_digest"),
+            "server.github_read_cache_authority_digest",
         ),
         github_webhook_enabled=_boolean(
             server_raw.get("github_webhook_enabled"),
