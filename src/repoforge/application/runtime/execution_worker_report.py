@@ -45,6 +45,7 @@ class ExecutionWorkerReport:
     detail: str
 
     def as_dict(self) -> dict[str, object]:
+        sample = self.unreadable_record_ids[:8]
         return {
             "stale_execution_worker_count": self.stale_execution_worker_count,
             "workers_by_release": dict(self.workers_by_release),
@@ -53,7 +54,9 @@ class ExecutionWorkerReport:
             "locks_held": dict(self.locks_held),
             "reclamation_safe": self.reclamation_safe,
             "scan_complete": self.scan_complete,
-            "unreadable_record_ids": list(self.unreadable_record_ids),
+            "unreadable_record_count": len(self.unreadable_record_ids),
+            "unreadable_record_ids_sample": list(sample),
+            "unreadable_record_ids_truncated": len(self.unreadable_record_ids) > 8,
             "orphaned_group_without_leader": list(self.orphaned_group_without_leader),
             "containment_unproven": self.containment_unproven,
             "detail": self.detail,

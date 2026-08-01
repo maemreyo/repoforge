@@ -84,6 +84,23 @@ class ExecutionWorkerReclamationReport:
         """Fail-closed evidence: an unreadable record hides an orphan like a truncation."""
         return self.scan_complete and not self.unreadable_record_ids
 
+    @property
+    def blocker_code(self) -> str | None:
+        """The machine-actionable reason this pass blocks a replacement, if any.
+
+        One canonical code per gate so the supervisor, restarter, and doctor all report
+        the same blocker instead of each collapsing every case differently (#424).
+        """
+        if self.survived_kill > 0:
+            return "STALE_EXECUTION_WORKER_RECLAMATION_FAILED"
+        if self.possibly_alive_unproven > 0:
+            return "STALE_EXECUTION_WORKER_IDENTITY_UNPROVEN"
+        if not self.evidence_complete:
+            if self.unreadable_record_ids:
+                return "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS"
+            return "EXECUTION_WORKER_REGISTRY_SCAN_INCOMPLETE"
+        return None
+
     def as_dict(self) -> dict[str, object]:
         return {
             "inspected": self.inspected,
@@ -95,6 +112,7 @@ class ExecutionWorkerReclamationReport:
             "scan_complete": self.scan_complete,
             "unreadable_record_ids": list(self.unreadable_record_ids),
             "evidence_complete": self.evidence_complete,
+            "blocker_code": self.blocker_code,
             "worker_ids": list(self.worker_ids),
             "pids": list(self.pids),
             "release_shas": list(self.release_shas),

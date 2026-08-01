@@ -244,6 +244,64 @@ def test_preflight_failure_enters_resident_fail_closed_without_spawning_children
     assert store.record.phase is RuntimePhase.STOPPED
 
 
+def test_reconciliation_blocker_code_is_recorded_in_fail_closed(tmp_path: Path) -> None:
+    """The supervisor records the typed blocker, not one collapsed code (#424)."""
+    from repoforge.application.runtime.execution_worker_reconciler import (
+        ExecutionWorkerReclamationReport,
+    )
+
+    store = _Store()
+    tunnel = _Tunnel()
+    worker = _ExecutionWorker()
+
+    class _Reconciler:
+        def reconcile(self, *, departing_releases=frozenset()):
+            del departing_releases
+            return ExecutionWorkerReclamationReport(
+                inspected=0,
+                reclaimed=0,
+                already_gone=0,
+                refused_unproven=0,
+                survived_kill=0,
+                possibly_alive_unproven=0,
+                scan_complete=True,
+                unreadable_record_ids=("worker-bad-1",),
+                worker_ids=(),
+                pids=(),
+                release_shas=(),
+                detail="registry contains unreadable records",
+            )
+
+    server = _Server()
+    supervisor = RuntimeSupervisor(
+        store=store,
+        configs=_Configs(),
+        locks=_Locks(),
+        control=server,
+        mcp_control=_Mcp(),
+        tunnel=tunnel,
+        profile_store=_ProfileStore(),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        ids=SequenceIdGenerator(("supervisor", "health")),
+        processes=_Processes(),
+        mcp_runtime_path=tmp_path / "runtime.json",
+        log_path=tmp_path / "runtime.log",
+        execution_worker=worker,
+        execution_worker_log_path=tmp_path / "execution-worker.log",
+        preflight=lambda: None,
+        worker_reconciler=_Reconciler(),
+    )
+    result, thread = _run_and_wait_fail_closed(supervisor, store)
+
+    record = store.record
+    assert record.last_error_code == "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS"
+    assert record.fail_closed_since is not None
+    assert worker.started == []
+    assert tunnel.starts == 0
+
+    _shutdown_and_join(server, thread, result)
+
+
 def test_a_fresh_supervisor_honors_a_prior_fail_closed_state_for_the_same_release(
     tmp_path: Path, monkeypatch
 ) -> None:

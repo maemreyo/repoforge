@@ -354,8 +354,39 @@ def test_report_serializes_the_reclamation_evidence() -> None:
     assert payload["scan_complete"] is True
     assert payload["unreadable_record_ids"] == []
     assert payload["evidence_complete"] is True
+    assert payload["blocker_code"] == "STALE_EXECUTION_WORKER_IDENTITY_UNPROVEN"
     assert payload["worker_ids"] == [_WORKER]
     assert payload["release_shas"] == [_RELEASE]
+
+
+def test_reclaim_report_exposes_a_typed_blocker_code() -> None:
+    """The report names the exact fail-closed gate, single-sourced across callers (#424)."""
+    clean = _reconciler(
+        bindings=_Bindings(_binding()),
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    ).reconcile()
+    assert clean.blocker_code is None
+
+    unreadable = _reconciler(
+        bindings=_Bindings(_binding(), scan_complete=True, unreadable_ids=("worker-bad-1",)),
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    ).reconcile()
+    assert unreadable.blocker_code == "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS"
+
+    truncated = _reconciler(
+        bindings=_Bindings(_binding(), scan_complete=False),
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    ).reconcile()
+    assert truncated.blocker_code == "EXECUTION_WORKER_REGISTRY_SCAN_INCOMPLETE"
 
 
 def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:

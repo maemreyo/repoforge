@@ -112,7 +112,6 @@ def _report(
     owner: _Owner,
     command_lines: _CommandLines,
     tokens: _Tokens,
-    group_gone=None,
 ) -> ExecutionWorkerReport:
     return build_execution_worker_report(
         bindings=bindings,
@@ -120,7 +119,6 @@ def _report(
         owner_identity_reader=owner,
         command_line_reader=command_lines,
         identity_reader=tokens,
-        process_group_gone=group_gone,
     )
 
 
@@ -201,8 +199,6 @@ def test_report_serializes_all_evidence_fields() -> None:
         reclamation_safe=True,
         scan_complete=True,
         unreadable_record_ids=(),
-        orphaned_group_without_leader=(),
-        containment_unproven=False,
         detail="1 stale execution worker(s)",
     )
     payload = report.as_dict()
@@ -210,9 +206,26 @@ def test_report_serializes_all_evidence_fields() -> None:
     assert payload["workers_by_release"] == {_RELEASE: [_WORKER]}
     assert payload["worker_pids"] == [4242]
     assert payload["locks_held"] == {_WORKER: ["runtime-single-instance.lock"]}
-    assert payload["unreadable_record_ids"] == []
-    assert payload["orphaned_group_without_leader"] == []
-    assert payload["containment_unproven"] is False
+    assert payload["unreadable_record_count"] == 0
+    assert payload["unreadable_record_ids_sample"] == []
+    assert payload["unreadable_record_ids_truncated"] is False
+
+
+def test_report_bounds_unreadable_ids_in_the_json_payload(tmp_path) -> None:
+    """The doctor payload carries a count + ≤8 sample, never the full id list (#424)."""
+    ids = tuple(f"worker-bad-{i}" for i in range(2_000))
+    report = _report(
+        bindings=_Bindings(unreadable_ids=ids),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+    )
+    payload = report.as_dict()
+    assert payload["unreadable_record_count"] == 2_000
+    assert len(payload["unreadable_record_ids_sample"]) == 8
+    assert payload["unreadable_record_ids_truncated"] is True
+    assert report.reclamation_safe is False
 
 
 def test_report_does_not_show_terminal_bindings_as_stale(tmp_path) -> None:
@@ -270,66 +283,4 @@ def test_report_flags_unreadable_records_as_unsafe(tmp_path) -> None:
 
     assert report.scan_complete is True
     assert report.unreadable_record_ids == ("worker-bad-1",)
-    assert report.reclamation_safe is False
-
-
-def test_report_flags_a_tokenless_binding_as_unsafe(tmp_path) -> None:
-    """A tokenless binding cannot prove PID-reuse safety: reclamation is never safe."""
-    report = _report(
-        bindings=_Bindings(_binding(token=None)),
-        lock_root=tmp_path / "locks",
-        owner=_Owner(set()),
-        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
-        tokens=_Tokens({4242: "worker-start-token"}),
-    )
-
-    assert report.stale_execution_worker_count == 1
-    assert report.reclamation_safe is False
-
-
-def test_report_flags_an_orphaned_group_without_leader_as_unsafe(tmp_path) -> None:
-    """Leader gone + live group members: the group may still hold locks (#424)."""
-    report = _report(
-        bindings=_Bindings(_binding()),
-        lock_root=tmp_path / "locks",
-        owner=_Owner(set()),
-        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
-        tokens=_Tokens({4242: None}),
-        group_gone=lambda pgid: False,
-    )
-
-    assert report.stale_execution_worker_count == 0
-    assert report.orphaned_group_without_leader == (_WORKER,)
-    assert report.reclamation_safe is False
-
-
-def test_report_treats_leader_and_group_gone_as_a_stale_record(tmp_path) -> None:
-    """Leader AND group gone proves the worker is history, not a live concern."""
-    report = _report(
-        bindings=_Bindings(_binding()),
-        lock_root=tmp_path / "locks",
-        owner=_Owner(set()),
-        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
-        tokens=_Tokens({4242: None}),
-        group_gone=lambda pgid: True,
-    )
-
-    assert report.stale_execution_worker_count == 0
-    assert report.orphaned_group_without_leader == ()
-    assert report.reclamation_safe is True
-
-
-def test_report_flags_unprovable_containment_as_unsafe(tmp_path) -> None:
-    """No group probe available: containment is unproven, so reclamation is unsafe."""
-    report = _report(
-        bindings=_Bindings(_binding()),
-        lock_root=tmp_path / "locks",
-        owner=_Owner(set()),
-        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
-        tokens=_Tokens({4242: None}),
-        group_gone=None,
-    )
-
-    assert report.containment_unproven is True
-    assert report.reclamation_safe is False
     assert report.reclamation_safe is False

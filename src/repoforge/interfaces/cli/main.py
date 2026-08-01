@@ -16,7 +16,7 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from repoforge import __version__
 
@@ -79,7 +79,6 @@ from ...bootstrap import (
     build_auth_command_dependencies,
     build_configuration_store,
     build_dev_runtime_service,
-    build_execution_worker_binding_store,
     build_execution_worker_report_section,
     build_lock_manager,
     build_metrics_sink,
@@ -132,7 +131,6 @@ from ...domain.errors import (
     PersonalCodingMCPError,
     operation_error_from_exception,
 )
-from ...domain.execution_worker import ExecutionWorkerQuarantineReceipt
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
@@ -148,7 +146,6 @@ from ...ports import (
     RepositoryProbe,
 )
 from ...ports.activation import ReleaseProcess, SupervisorKickstarter
-from ...ports.execution_worker_store import ExecutionWorkerBindingPage
 from ...ports.process_supervisor import ProcessSupervisorRegistrar
 from ..runtime.host import McpRuntimeHost
 from .auth import add_auth_parsers, run_auth_command
@@ -1508,92 +1505,8 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
     }
 
 
-def _pid_is_live(pid: object) -> bool:
-    """Is the described process still present? Best-effort, for quarantine warnings."""
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-class _WorkerRegistryStore(Protocol):
-    """Adapter-free structural contract for the worker-registry store (#424).
-
-    The CLI lives outside the `adapters` package and must not import one directly
-    (composition-root rule), so this Protocol names exactly the methods the
-    worker-registry commands need.
-    """
-
-    def inspect_record(self, worker_id: str) -> dict[str, object] | None: ...
-    def quarantine_record(
-        self, worker_id: str, *, reason: str
-    ) -> ExecutionWorkerQuarantineReceipt | None: ...
-    def list_quarantined(self) -> tuple[ExecutionWorkerQuarantineReceipt, ...]: ...
-    def list_page(self, *, max_records: int = 2_000) -> ExecutionWorkerBindingPage: ...
-
-
-def _worker_registry_store(args: argparse.Namespace) -> _WorkerRegistryStore:
-    config_path = Path(args.config).expanduser().resolve()
-    state_root = _state_root(config_path)
-    return build_execution_worker_binding_store(state_root)
-
-
-def _worker_registry_verdict(store: _WorkerRegistryStore) -> dict[str, object]:
-    page = store.list_page()
-    return {
-        "scan_complete": page.scan_complete,
-        "active_records": len(page.records),
-        "unreadable_record_ids": list(page.unreadable_ids),
-        "quarantined_count": len(store.list_quarantined()),
-        "restart_permitted": page.scan_complete and not page.unreadable_ids,
-    }
-
-
-def _worker_registry_command(args: argparse.Namespace) -> int:
-    """`rf runtime worker-registry inspect|quarantine|reconcile` (#424)."""
-    store = _worker_registry_store(args)
-    command = getattr(args, "worker_registry_command", None)
-    if command == "inspect":
-        info = store.inspect_record(args.record_id)
-        if info is None:
-            raise ConfigError(f"WORKER_REGISTRY_RECORD_NOT_FOUND: {args.record_id}")
-        info["live_process"] = _pid_is_live(info.get("pid"))
-        _json(info)
-        return 0
-    if command == "quarantine":
-        info = store.inspect_record(args.record_id)
-        if info is None:
-            raise ConfigError(f"WORKER_REGISTRY_RECORD_NOT_FOUND: {args.record_id}")
-        pid = info.get("pid")
-        if isinstance(pid, int) and not getattr(args, "force", False) and _pid_is_live(pid):
-            raise ConfigError(
-                "WORKER_REGISTRY_QUARANTINE_REFUSED: the record describes a live "
-                f"process (pid {pid}); quarantining it would untrack a worker that "
-                "may still hold locks. Re-run with --force only after the process "
-                "is confirmed gone."
-            )
-        reason = getattr(args, "reason", "") or "operator-initiated quarantine"
-        receipt = store.quarantine_record(args.record_id, reason=reason)
-        if receipt is None:
-            raise ConfigError(f"WORKER_REGISTRY_RECORD_NOT_FOUND: {args.record_id}")
-        _json({"quarantine": receipt.to_dict(), "registry": _worker_registry_verdict(store)})
-        return 0
-    if command == "reconcile":
-        verdict = _worker_registry_verdict(store)
-        _json(verdict)
-        return 0 if verdict["restart_permitted"] else 1
-    raise ConfigError(f"WORKER_REGISTRY_COMMAND_UNKNOWN: {command}")
-
-
 def _runtime_command(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
-    if args.runtime_command == "worker-registry":
-        return _worker_registry_command(args)
     if args.runtime_command in {"start", "reload", "restart"}:
         _require_managed_runtime_configuration(config_path)
     store = _ensure_generation(config_path)
@@ -2480,27 +2393,6 @@ def build_parser() -> argparse.ArgumentParser:
                     "start after a reboot."
                 ),
             )
-    worker_registry = runtime_sub.add_parser(
-        "worker-registry",
-        help=(
-            "Inspect or quarantine execution-worker registry records, or re-check "
-            "whether the registry evidence would permit a runtime replacement."
-        ),
-    )
-    worker_registry_sub = worker_registry.add_subparsers(
-        dest="worker_registry_command", required=True
-    )
-    worker_registry_inspect = worker_registry_sub.add_parser("inspect")
-    worker_registry_inspect.add_argument("record_id")
-    worker_registry_quarantine = worker_registry_sub.add_parser("quarantine")
-    worker_registry_quarantine.add_argument("record_id")
-    worker_registry_quarantine.add_argument("--reason", default="")
-    worker_registry_quarantine.add_argument(
-        "--force",
-        action="store_true",
-        help="Quarantine even when the record describes a live process (operator override).",
-    )
-    worker_registry_sub.add_parser("reconcile")
     version = commands.add_parser("version")
     version_sub = version.add_subparsers(dest="version_command", required=True)
     for version_command in ("status", "list"):
@@ -2947,30 +2839,24 @@ def main(argv: list[str] | None = None) -> int:
                 result["execution_workers"] = worker_report
                 raw_stale = worker_report.get("stale_execution_worker_count", 0)
                 stale = raw_stale if isinstance(raw_stale, int) else 0
-                raw_unreadable = worker_report.get("unreadable_record_ids", ())
-                unreadable_ids = (
-                    tuple(raw_unreadable) if isinstance(raw_unreadable, (list, tuple)) else ()
-                )
-                unreadable = len(unreadable_ids)
-                reclamation_safe = worker_report.get("reclamation_safe") is True
-                scan_complete = worker_report.get("scan_complete") is True
+                raw_unreadable = worker_report.get("unreadable_record_count", 0)
+                unreadable = raw_unreadable if isinstance(raw_unreadable, int) else 0
+                raw_sample = worker_report.get("unreadable_record_ids_sample", ())
+                sample_ids = tuple(raw_sample) if isinstance(raw_sample, (list, tuple)) else ()
                 detail = str(worker_report.get("detail", ""))
                 if unreadable:
-                    bounded = ", ".join(unreadable_ids[:8])
-                    if unreadable > 8:
-                        bounded += f", +{unreadable - 8} more"
+                    bounded = ", ".join(sample_ids)
+                    if unreadable > len(sample_ids):
+                        bounded += f", +{unreadable - len(sample_ids)} more"
                     detail = f"{detail}; {unreadable} unreadable record(s): {bounded}"
-                worker_ok = stale == 0 and unreadable == 0 and reclamation_safe and scan_complete
                 result["checks"].append(
                     {
                         "name": "execution_workers",
-                        "ok": worker_ok,
-                        "severity": "warning" if not worker_ok else "info",
+                        "ok": stale == 0 and unreadable == 0,
+                        "severity": "warning" if (stale or unreadable) else "info",
                         "detail": detail,
                     }
                 )
-                if not worker_ok:
-                    result["ok"] = False
             _json(result)
             return 0 if result["ok"] else 1
         if args.command == "list-workspaces":
