@@ -325,3 +325,63 @@ def test_report_serializes_the_reclamation_evidence() -> None:
     assert payload["reclaimed"] == 1
     assert payload["worker_ids"] == [_WORKER]
     assert payload["release_shas"] == [_RELEASE]
+
+
+def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
+    """Real chain: spawn an execution worker, orphan its owner, reconcile reaps it."""
+    import os
+    import time
+
+    from conftest import create_forge_environment
+
+    from repoforge.adapters.persistence import JsonExecutionWorkerBindingStore
+    from repoforge.adapters.runtime.execution_worker import SubprocessExecutionWorker
+    from repoforge.adapters.subprocess.os_process_reaper import OsProcessReaper
+    from repoforge.bootstrap import build_configuration_store
+    from repoforge.domain.execution_worker import (
+        execution_worker_binding_from_payload,
+        execution_worker_binding_payload,
+    )
+    from repoforge.testing import InMemoryLockManager
+
+    env = create_forge_environment(tmp_path)
+    home = tmp_path / "home"
+    build_configuration_store(
+        env.config_path, state_root=home / ".local/state/repoforge"
+    ).import_legacy(
+        env.config_path.read_text(encoding="utf-8"),
+        env.config_path.read_text(encoding="utf-8"),
+        created_at="2026-07-29T00:00:00+00:00",
+    )
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    spawner = SubprocessExecutionWorker(env.config_path, bindings=bindings)
+    child = spawner.start(
+        1,
+        env={"HOME": str(home), "PATH": os.environ.get("PATH", "")},
+        log_path=tmp_path / "worker.log",
+        correlation_id="c" * 24,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if spawner.is_alive(child):
+                break
+            time.sleep(0.1)
+        assert spawner.is_alive(child), "the real execution worker did not start"
+
+        binding = next(item for item in bindings.list_all() if item.pid == child.pid)
+        assert binding.state == "running"
+        orphaned = execution_worker_binding_from_payload(
+            execution_worker_binding_payload(binding)
+            | {"supervisor_pid": 99999999, "supervisor_process_identity": "a" * 64}
+        )
+        bindings.put(orphaned)
+
+        reconciler = ExecutionWorkerReconciler(bindings=bindings, reaper=OsProcessReaper())
+        report = reconciler.reconcile()
+
+        assert report.reclaimed == 1
+        assert bindings.get(orphaned.worker_id).state == "reclaimed"
+        assert spawner.is_alive(child) is False
+    finally:
+        spawner.terminate(child, grace_seconds=3)
