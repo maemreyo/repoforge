@@ -91,10 +91,44 @@ def test_store_round_trips_and_lists_bindings(tmp_path: Path) -> None:
 def test_store_updates_state_with_cas(tmp_path: Path) -> None:
     store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     store.put(_binding())
-    updated = store.update_state(_WORKER_ID, "reclaimed")
-    assert updated is not None and updated.state == "reclaimed"
+    updated = store.update_state(_WORKER_ID, "refused_unproven")
+    assert updated is not None and updated.state == "refused_unproven"
     assert store.get(_WORKER_ID) is not None
-    assert store.get(_WORKER_ID).state == "reclaimed"
+    assert store.get(_WORKER_ID).state == "refused_unproven"
+
+
+def test_store_archives_and_removes_a_terminal_lease(tmp_path: Path) -> None:
+    """A terminal transition archives the lease and removes it from the registry (#424)."""
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+    updated = store.update_state(_WORKER_ID, "reclaimed")
+
+    assert updated is not None and updated.state == "reclaimed"
+    assert store.get(_WORKER_ID) is None
+    assert store.list_all() == ()
+    archived = store.list_archive()
+    assert len(archived) == 1
+    assert archived[0].worker_id == _WORKER_ID
+    assert archived[0].state == "reclaimed"
+    assert archived[0].terminated_at
+
+
+def test_collect_terminal_self_heals_pre_existing_terminal_leases(tmp_path: Path) -> None:
+    """Terminal leases left by older releases are archived on the next collect (#424)."""
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())  # running, kept
+    store.put(_binding(worker_id="worker-aaaaaaaaaaaa", state="already_gone"))
+    store.put(_binding(worker_id="worker-bbbbbbbbbbbb", state="reclaimed"))
+
+    collected = store.collect_terminal()
+
+    assert collected == 2
+    assert [item.worker_id for item in store.list_all()] == [_WORKER_ID]
+    archived = store.list_archive()
+    assert {item.worker_id for item in archived} == {
+        "worker-aaaaaaaaaaaa",
+        "worker-bbbbbbbbbbbb",
+    }
 
 
 def test_store_rejects_an_unknown_worker_id(tmp_path: Path) -> None:

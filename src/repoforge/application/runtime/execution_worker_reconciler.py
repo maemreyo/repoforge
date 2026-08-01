@@ -131,6 +131,11 @@ class ExecutionWorkerReconciler:
         worker_ids: list[str] = []
         pids: list[int] = []
         release_shas: list[str] = []
+        # Archive terminal leases left by older releases before scanning, so the
+        # bounded scan covers active leases only and cannot overflow into a permanent
+        # fail-closed block (#424).
+        with contextlib.suppress(Exception):
+            self._bindings.collect_terminal()
         page = self._bindings.list_page()
         for binding in page.records:
             if binding.state not in _ACTIVE_STATES:

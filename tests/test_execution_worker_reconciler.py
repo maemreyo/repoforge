@@ -99,6 +99,10 @@ class _Bindings:
         del max_records
         return tuple(self.records.values())
 
+    def collect_terminal(self, *, max_records: int = 5_000) -> int:
+        del max_records
+        return 0
+
 
 class _Owner:
     """Owner liveness: `process_identity(pid) == recorded identity`."""
@@ -424,7 +428,10 @@ def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
         report = reconciler.reconcile()
 
         assert report.reclaimed == 1
-        assert bindings.get(orphaned.worker_id).state == "reclaimed"
+        # The reclaimed lease is archived and removed from the active registry (#424).
+        assert bindings.get(orphaned.worker_id) is None
+        archived = bindings.list_archive()
+        assert any(item.worker_id == orphaned.worker_id for item in archived)
         assert spawner.is_alive(child) is False
     finally:
         spawner.terminate(child, grace_seconds=3)
@@ -738,8 +745,13 @@ def test_terminate_marks_reclaimed_only_after_confirmed_death(tmp_path) -> None:
 
         spawner.terminate(child, grace_seconds=3)
 
-        binding = next(item for item in bindings.list_all() if item.pid == child.pid)
-        assert binding.state == "reclaimed"
+        # `reclaimed` verifies death; the terminal lease is archived and removed (#424).
+        archived = bindings.list_archive()
+        assert any(item.pid == child.pid and item.state == "reclaimed" for item in archived)
+        assert (
+            bindings.get(next((item.worker_id for item in archived if item.pid == child.pid), ""))
+            is None
+        )
         assert spawner.is_alive(child) is False
     finally:
         spawner.terminate(child, grace_seconds=1)

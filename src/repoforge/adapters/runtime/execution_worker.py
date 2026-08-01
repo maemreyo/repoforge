@@ -11,8 +11,9 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NoReturn
 
-from ...domain.errors import ConfigError
+from ...domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from ...domain.execution_worker import ExecutionWorkerBinding
 from ...domain.runtime import ChildProcess
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
@@ -25,6 +26,7 @@ from .state_store import process_identity
 # Poll until the identity is stable rather than trusting a single pre-exec sample.
 _IDENTITY_SETTLE_SECONDS = 10.0
 _IDENTITY_POLL_INTERVAL = 0.02
+_REGISTRATION_REAP_SECONDS = 5.0
 
 
 class SubprocessExecutionWorker:
@@ -32,7 +34,7 @@ class SubprocessExecutionWorker:
         self,
         config_path: Path,
         *,
-        bindings: ExecutionWorkerBindingStore | None = None,
+        bindings: ExecutionWorkerBindingStore,
     ) -> None:
         self._config_path = config_path.expanduser().resolve()
         self._children: dict[int, subprocess.Popen[bytes]] = {}
@@ -70,11 +72,13 @@ class SubprocessExecutionWorker:
             )
         identity = self._establish_stable_identity(process)
         if identity is None:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGTERM)
+            self._reap_unregistered(process.pid)
             raise ConfigError("Could not establish execution worker process identity")
         self._children[process.pid] = process
-        self._record_binding(process.pid, generation, correlation_id or "", identity)
+        # Registration is mandatory: without a durable lease the worker could not be
+        # reclaimed later, so an unregistered worker is terminated, never left to run.
+        worker_id = self._register_binding(process.pid, generation, correlation_id or "", identity)
+        self._worker_ids[process.pid] = worker_id
         return ChildProcess(
             process.pid,
             identity,
@@ -138,22 +142,18 @@ class SubprocessExecutionWorker:
             time.sleep(_IDENTITY_POLL_INTERVAL)
         return None
 
-    def _record_binding(
+    def _register_binding(
         self, pid: int, generation: int, correlation_id: str, identity: str
-    ) -> None:
-        """Persist the durable per-worker binding, best-effort.
+    ) -> str:
+        """Persist the durable per-worker binding; mandatory for a live worker (#424).
 
-        The record is what lets a supervisor that starts AFTER this one dies prove
-        and reap the orphan. Best-effort by design: an unreadable owner identity or an
-        unwritable store must never fail a worker spawn -- absence of the record
-        degrades to fail-closed reaping (nothing is killed without proof), never to
-        an unbounded orphan.
+        Every failure path terminates the spawned worker and raises
+        ``ExecutionWorkerRegistrationError`` -- a worker is never returned as started
+        without a durable lease a later supervisor could prove and reclaim.
         """
-        if self._bindings is None:
-            return
         supervisor_identity = process_identity(os.getpid())
         if supervisor_identity is None:
-            return
+            self._fail_registration(pid, "the supervisor process identity could not be established")
         proc_identity = read_identity(pid)
         token = proc_identity.start_token if proc_identity is not None else None
         # A running binding requires a start token; without one, record the worker as
@@ -173,9 +173,34 @@ class SubprocessExecutionWorker:
             started_at=datetime.now(timezone.utc).isoformat(),
             state=state,
         )
-        with contextlib.suppress(Exception):
+        try:
             self._bindings.put(binding)
-            self._worker_ids[pid] = worker_id
+        except Exception as exc:
+            self._fail_registration(pid, f"the durable worker lease could not be written: {exc}")
+        return worker_id
+
+    def _fail_registration(self, pid: int, reason: str) -> NoReturn:
+        """TERM -> wait -> KILL the unregistered worker, verify death, then raise."""
+        self._reap_unregistered(pid)
+        raise ExecutionWorkerRegistrationError(
+            f"EXECUTION_WORKER_REGISTRATION_FAILED: {reason}; the spawned worker "
+            "was terminated and confirmed dead"
+        )
+
+    def _reap_unregistered(self, pid: int) -> None:
+        """Boundedly terminate a worker that must not keep running (#424)."""
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pid, signal.SIGTERM)
+        deadline = time.monotonic() + _REGISTRATION_REAP_SECONDS
+        while time.monotonic() < deadline:
+            if process_identity(pid) is None:
+                break
+            time.sleep(0.05)
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
+            time.sleep(0.1)
+        self._children.pop(pid, None)
 
     def _mark_state(self, pid: int, state: str) -> None:
         if self._bindings is None:

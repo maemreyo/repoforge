@@ -16,7 +16,7 @@ from pathlib import Path
 
 from repoforge import __version__
 
-from ...domain.errors import ConfigError
+from ...domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from ...domain.redaction import redact_text
 from ...domain.runtime import (
     RUNTIME_CONTROL_PROTOCOL_VERSION,
@@ -659,6 +659,26 @@ class RuntimeSupervisor:
                             environment=environment,
                             correlation_id=correlation_id,
                         )
+                    except ExecutionWorkerRegistrationError as exc:
+                        # Fail closed: the adapter terminated the unregistered worker;
+                        # staying resident is safer than starting a contending one.
+                        self._store.write(
+                            self._record(
+                                RuntimePhase.FAIL_CLOSED,
+                                accepted_generation=generation,
+                                active_generation=None,
+                                profile=profile,
+                                tool_surface_hash=tool_surface_hash,
+                                correlation_id=correlation_id,
+                                child=None,
+                                error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
+                                error=redact_text(str(exc)),
+                                fail_closed_since=self._clock.now_iso(),
+                            )
+                        )
+                        self._clear_target(generation)
+                        self._serve_fail_closed(correlation_id)
+                        return 0
                     except Exception as exc:
                         self._store.write(
                             self._record(

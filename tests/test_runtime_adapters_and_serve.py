@@ -11,12 +11,13 @@ from typing import Any
 import pytest
 
 from repoforge.adapters.filesystem.local import LocalFileSystem
+from repoforge.adapters.persistence import JsonExecutionWorkerBindingStore
 from repoforge.adapters.runtime.execution_worker import SubprocessExecutionWorker
 from repoforge.adapters.runtime.launcher import SubprocessRuntimeLauncher
 from repoforge.adapters.runtime.profile_store import JsonTunnelProfileStore
 from repoforge.adapters.runtime.state_store import JsonRuntimeStore
 from repoforge.adapters.runtime.tunnel_cli import TunnelCliClient
-from repoforge.domain.errors import ConfigError
+from repoforge.domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from repoforge.domain.runtime import (
     ControlCommand,
     ControlRequest,
@@ -25,7 +26,7 @@ from repoforge.domain.runtime import (
     TunnelProfile,
 )
 from repoforge.domain.runtime_events import RuntimeEventV1
-from repoforge.testing import InMemoryOperationGate
+from repoforge.testing import InMemoryLockManager, InMemoryOperationGate
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
 
@@ -265,8 +266,14 @@ def test_execution_worker_adapter_launches_exact_generation_in_own_process_group
         return FakePopen()
 
     monkeypatch.setattr(module.subprocess, "Popen", popen)
-    monkeypatch.setattr(module, "process_identity", lambda pid: "d" * 64 if pid == 456 else None)
-    worker = SubprocessExecutionWorker(tmp_path / "config.toml")
+    monkeypatch.setattr(
+        module,
+        "process_identity",
+        lambda pid: "d" * 64 if pid in {456, os.getpid()} else None,
+    )
+    monkeypatch.setattr(module, "read_identity", lambda pid: None)
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    worker = SubprocessExecutionWorker(tmp_path / "config.toml", bindings=bindings)
 
     child = worker.start(
         12,
@@ -280,6 +287,8 @@ def test_execution_worker_adapter_launches_exact_generation_in_own_process_group
     assert calls[0][1]["start_new_session"] is True
     assert calls[0][1]["env"] == {"PATH": "/usr/bin"}
     assert worker.is_alive(child) is True
+    # The durable lease is mandatory and was written before start() returned (#424).
+    assert any(item.pid == 456 for item in bindings.list_all())
 
 
 def test_execution_worker_adapter_records_a_stable_identity_across_the_exec_flap(
@@ -290,7 +299,6 @@ def test_execution_worker_adapter_records_a_stable_identity_across_the_exec_flap
     recorded identity must be the settled one so later `is_alive` samples match."""
     module = importlib.import_module("repoforge.adapters.runtime.execution_worker")
     calls: list[tuple[list[str], dict[str, object]]] = []
-    samples: list[str] = []
 
     class FakePopen:
         pid = 789
@@ -307,9 +315,13 @@ def test_execution_worker_adapter_records_a_stable_identity_across_the_exec_flap
     identities = iter(["a" * 64, "b" * 64, "b" * 64, "b" * 64])
     monkeypatch.setattr(module.subprocess, "Popen", popen)
     monkeypatch.setattr(
-        module, "process_identity", lambda pid: samples.append(pid) or next(identities)
+        module,
+        "process_identity",
+        lambda pid: next(identities) if pid == 789 else "d" * 64,
     )
-    worker = SubprocessExecutionWorker(tmp_path / "config.toml")
+    monkeypatch.setattr(module, "read_identity", lambda pid: None)
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    worker = SubprocessExecutionWorker(tmp_path / "config.toml", bindings=bindings)
 
     child = worker.start(
         3,
@@ -318,9 +330,80 @@ def test_execution_worker_adapter_records_a_stable_identity_across_the_exec_flap
         correlation_id="corr-flap",
     )
 
-    assert len(samples) >= 2
     assert child.process_identity == "b" * 64
     assert worker.is_alive(child) is True
+
+
+def test_execution_worker_adapter_terminates_a_worker_it_cannot_register(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker whose durable lease cannot be written is terminated, never left running."""
+    import signal
+
+    module = importlib.import_module("repoforge.adapters.runtime.execution_worker")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    killed: list[tuple[int, int]] = []
+    identity_calls = {"child": 0}
+
+    class FakePopen:
+        pid = 2468
+
+        def poll(self):
+            return None
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return FakePopen()
+
+    def fake_identity(pid: int) -> str | None:
+        if pid == 2468:
+            identity_calls["child"] += 1
+            # Settle needs two identical samples; the reap loop then sees it gone.
+            return "d" * 64 if identity_calls["child"] <= 2 else None
+        return "s" * 64
+
+    monkeypatch.setattr(module.subprocess, "Popen", popen)
+    monkeypatch.setattr(module, "process_identity", fake_identity)
+    monkeypatch.setattr(module, "read_identity", lambda pid: None)
+    monkeypatch.setattr(module.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    class FailingBindings:
+        def put(self, binding):
+            raise OSError("disk full")
+
+        def get(self, worker_id):
+            del worker_id
+            return None
+
+        def update_state(self, worker_id, state):
+            del worker_id, state
+            return None
+
+        def list_page(self, *, max_records=2_000):
+            del max_records
+            raise NotImplementedError
+
+        def collect_terminal(self, *, max_records=5_000):
+            del max_records
+            return 0
+
+    worker = SubprocessExecutionWorker(tmp_path / "config.toml", bindings=FailingBindings())
+
+    with pytest.raises(
+        ExecutionWorkerRegistrationError, match="EXECUTION_WORKER_REGISTRATION_FAILED"
+    ):
+        worker.start(
+            1,
+            env={"PATH": "/usr/bin"},
+            log_path=tmp_path / "execution-worker.log",
+            correlation_id="corr-fail",
+        )
+
+    assert killed, "the unregistered worker's process group was never signalled"
+    assert any(sig == signal.SIGTERM for _, sig in killed) or any(
+        sig == signal.SIGKILL for _, sig in killed
+    )
 
 
 def test_execution_worker_cli_binds_exact_config_generation(
