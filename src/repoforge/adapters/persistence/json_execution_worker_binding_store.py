@@ -18,6 +18,7 @@ from ...domain.execution_worker import (
     execution_worker_binding_payload,
     validate_execution_worker_binding,
 )
+from ...ports.execution_worker_store import ExecutionWorkerBindingPage
 from ...ports.locking import LockManager
 from .json_state_repository import JsonStateRepository
 
@@ -97,3 +98,12 @@ class JsonExecutionWorkerBindingStore:
     def list_all(self, *, max_records: int = 2_000) -> tuple[ExecutionWorkerBinding, ...]:
         page = self._records.list_records(max_records=max_records)
         return tuple(item.value for item in page.records)
+
+    def list_page(self, *, max_records: int = 2_000) -> ExecutionWorkerBindingPage:
+        """Scan the registry with truncation and unreadable-record evidence exposed."""
+        page = self._records.list_records(max_records=max_records)
+        return ExecutionWorkerBindingPage(
+            records=tuple(item.value for item in page.records),
+            scan_complete=not page.scan_truncated,
+            unreadable_ids=page.unreadable_record_ids,
+        )

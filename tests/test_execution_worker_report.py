@@ -39,6 +39,7 @@ def _binding(
     release_sha: str | None = _RELEASE,
     supervisor_pid: int = 4241,
     token: str | None = "worker-start-token",
+    state: str = "running",
 ) -> ExecutionWorkerBinding:
     return ExecutionWorkerBinding(
         worker_id=worker_id,
@@ -51,17 +52,28 @@ def _binding(
         supervisor_process_identity=_SHA,
         correlation_id="c" * 24,
         started_at="2026-07-29T09:26:21+00:00",
-        state="running",
+        state=state,
     )
 
 
 class _Bindings:
-    def __init__(self, *bindings: ExecutionWorkerBinding) -> None:
+    def __init__(
+        self,
+        *bindings: ExecutionWorkerBinding,
+        scan_complete: bool = True,
+    ) -> None:
         self.records = {binding.worker_id: binding for binding in bindings}
+        self.scan_complete = scan_complete
 
-    def list_all(self, *, max_records: int = 2_000) -> tuple[ExecutionWorkerBinding, ...]:
+    def list_page(self, *, max_records: int = 2_000):
         del max_records
-        return tuple(self.records.values())
+        from repoforge.ports.execution_worker_store import ExecutionWorkerBindingPage
+
+        return ExecutionWorkerBindingPage(
+            records=tuple(self.records.values()),
+            scan_complete=self.scan_complete,
+            unreadable_ids=(),
+        )
 
 
 class _Owner:
@@ -183,6 +195,7 @@ def test_report_serializes_all_evidence_fields() -> None:
         owner_supervisor_state={_WORKER: "dead"},
         locks_held={_WORKER: ["runtime-single-instance.lock"]},
         reclamation_safe=True,
+        scan_complete=True,
         detail="1 stale execution worker(s)",
     )
     payload = report.as_dict()
@@ -190,3 +203,46 @@ def test_report_serializes_all_evidence_fields() -> None:
     assert payload["workers_by_release"] == {_RELEASE: [_WORKER]}
     assert payload["worker_pids"] == [4242]
     assert payload["locks_held"] == {_WORKER: ["runtime-single-instance.lock"]}
+
+
+def test_report_does_not_show_terminal_bindings_as_stale(tmp_path) -> None:
+    """Reclaimed/already_gone bindings are history, never stale live workers (#420)."""
+    report = _report(
+        bindings=_Bindings(
+            _binding(state="reclaimed"),
+            _binding(worker_id=_WORKER_OTHER, pid=5252, state="already_gone"),
+        ),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV, 5252: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token", 5252: "worker-start-token"}),
+    )
+
+    assert report.stale_execution_worker_count == 0
+    assert report.reclamation_safe is True
+
+
+def test_report_does_not_show_a_gone_process_as_stale(tmp_path) -> None:
+    """A binding whose process already exited is a stale record, not a stale worker."""
+    report = _report(
+        bindings=_Bindings(_binding()),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: None}),
+    )
+
+    assert report.stale_execution_worker_count == 0
+
+
+def test_report_flags_an_incomplete_scan_as_unsafe(tmp_path) -> None:
+    report = _report(
+        bindings=_Bindings(scan_complete=False),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+    )
+
+    assert report.scan_complete is False
+    assert report.reclamation_safe is False

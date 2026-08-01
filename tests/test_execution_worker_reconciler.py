@@ -70,9 +70,7 @@ class _Bindings:
 
     def list_page(self, *, max_records: int = 2_000):
         del max_records
-        from repoforge.application.runtime.execution_worker_reconciler import (
-            ExecutionWorkerBindingPage,
-        )
+        from repoforge.ports.execution_worker_store import ExecutionWorkerBindingPage
 
         return ExecutionWorkerBindingPage(
             records=tuple(self.records.values()),
@@ -339,6 +337,8 @@ def test_report_serializes_the_reclamation_evidence() -> None:
         already_gone=1,
         refused_unproven=1,
         survived_kill=0,
+        possibly_alive_unproven=1,
+        scan_complete=True,
         worker_ids=(_WORKER,),
         pids=(4242,),
         release_shas=(_RELEASE,),
@@ -347,6 +347,8 @@ def test_report_serializes_the_reclamation_evidence() -> None:
     payload = report.as_dict()
     assert payload["inspected"] == 3
     assert payload["reclaimed"] == 1
+    assert payload["possibly_alive_unproven"] == 1
+    assert payload["scan_complete"] is True
     assert payload["worker_ids"] == [_WORKER]
     assert payload["release_shas"] == [_RELEASE]
 

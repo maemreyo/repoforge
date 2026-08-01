@@ -23,6 +23,11 @@ from .execution_worker_reconciler import (
     ProcessIdentityReader,
 )
 
+#: States that describe a live (or possibly live) worker, as opposed to terminal
+#: history. `refused_unproven` and `survived_kill` are active concerns: the process
+#: may still be running and holding locks.
+_ACTIVE_STATES = frozenset({"running", "refused_unproven", "survived_kill"})
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionWorkerReport:
@@ -32,6 +37,7 @@ class ExecutionWorkerReport:
     owner_supervisor_state: dict[str, str]
     locks_held: dict[str, list[str]]
     reclamation_safe: bool
+    scan_complete: bool
     detail: str
 
     def as_dict(self) -> dict[str, object]:
@@ -42,6 +48,7 @@ class ExecutionWorkerReport:
             "owner_supervisor_state": dict(self.owner_supervisor_state),
             "locks_held": dict(self.locks_held),
             "reclamation_safe": self.reclamation_safe,
+            "scan_complete": self.scan_complete,
             "detail": self.detail,
         }
 
@@ -77,19 +84,32 @@ def build_execution_worker_report(
     command_line_reader: CommandLineReader,
     identity_reader: ProcessIdentityReader,
 ) -> ExecutionWorkerReport:
-    """Enumerate stale execution workers and the lock evidence against them."""
+    """Enumerate stale execution workers and the lock evidence against them.
 
+    Only active states (`running`, `refused_unproven`, `survived_kill`) are live
+    concerns: terminal bindings are history, never "stale workers". A candidate must
+    also still have a live process -- a binding whose process already exited is not a
+    stale worker, it is a stale record (#420).
+    """
+
+    page = bindings.list_page()
+    lock_owners = _lock_owners(lock_root)
     stale: list[ExecutionWorkerBinding] = []
     owner_states: dict[str, str] = {}
-    for binding in bindings.list_all():
+    for binding in page.records:
+        if binding.state not in _ACTIVE_STATES:
+            continue
         if binding.supervisor_process_identity is None:
             owner_states[binding.worker_id] = "unknown"
         elif owner_identity_reader(binding.supervisor_pid) == binding.supervisor_process_identity:
             owner_states[binding.worker_id] = "alive"
         else:
             owner_states[binding.worker_id] = "dead"
-        if owner_states[binding.worker_id] != "alive":
-            stale.append(binding)
+        if owner_states[binding.worker_id] == "alive":
+            continue
+        if identity_reader(binding.pid) is None:
+            continue
+        stale.append(binding)
 
     workers_by_release: dict[str, list[str]] = {}
     worker_pids: list[int] = []
@@ -107,10 +127,8 @@ def build_execution_worker_report(
             if identity is None or identity.start_token != binding.process_start_token:
                 unprovable += 1
 
-    locks_held = {
-        binding.worker_id: _lock_owners(lock_root).get(binding.pid, []) for binding in stale
-    }
-    reclamation_safe = unprovable == 0
+    locks_held = {binding.worker_id: lock_owners.get(binding.pid, []) for binding in stale}
+    reclamation_safe = unprovable == 0 and page.scan_complete
     return ExecutionWorkerReport(
         stale_execution_worker_count=len(stale),
         workers_by_release=workers_by_release,
@@ -118,5 +136,9 @@ def build_execution_worker_report(
         owner_supervisor_state=owner_states,
         locks_held=locks_held,
         reclamation_safe=reclamation_safe,
-        detail=(f"{len(stale)} stale execution worker(s); reclamation safe: {reclamation_safe}"),
+        scan_complete=page.scan_complete,
+        detail=(
+            f"{len(stale)} stale execution worker(s); reclamation safe: "
+            f"{reclamation_safe} (scan complete: {page.scan_complete})"
+        ),
     )
