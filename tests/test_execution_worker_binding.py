@@ -141,11 +141,28 @@ def test_classification_requires_the_exact_entry_point() -> None:
 
 
 def test_command_line_reader_returns_the_live_process_argv() -> None:
-    import os
+    import subprocess
     import sys
+    import time
 
-    argv = read_command_line(os.getpid())
-    assert argv is not None
-    # At minimum the interpreter plus this test's module; `-m pytest` style launches
-    # keep the interpreter first, so the classification shape holds.
-    assert argv[0] == sys.executable
+    script = "import time; time.sleep(30)"
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            argv = read_command_line(process.pid)
+            if argv is not None:
+                break
+            time.sleep(0.05)
+        assert argv is not None
+        assert argv[0] == sys.executable
+        assert "-c" in argv
+        assert "time.sleep(30)" in " ".join(argv)
+    finally:
+        process.kill()
+        process.wait(timeout=5)

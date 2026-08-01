@@ -1159,16 +1159,42 @@ def build_release_store(
     )
 
 
+def build_execution_worker_binding_store(state_root: Path) -> JsonExecutionWorkerBindingStore:
+    """The durable execution-worker binding collection for one state root."""
+    from .adapters.persistence import JsonExecutionWorkerBindingStore as _Store
+
+    return _Store(state_root, build_lock_manager(state_root))
+
+
 def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconciler:
     """Reclaim orphaned execution workers of departed releases before a new start."""
-    from .adapters.persistence import JsonExecutionWorkerBindingStore
+    from .adapters.runtime.state_store import process_identity
     from .adapters.subprocess.os_process_reaper import OsProcessReaper
+    from .adapters.subprocess.process_tree import read_command_line, read_identity
     from .application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
 
     return ExecutionWorkerReconciler(
-        bindings=JsonExecutionWorkerBindingStore(state_root, build_lock_manager()),
+        bindings=build_execution_worker_binding_store(state_root),
         reaper=OsProcessReaper(),
+        owner_identity_reader=process_identity,
+        command_line_reader=read_command_line,
+        identity_reader=read_identity,
     )
+
+
+def build_execution_worker_report_section(state_root: Path) -> dict[str, object]:
+    """Execution-worker evidence for `rf doctor` / `rf runtime ls`, read-only."""
+    from .adapters.runtime.state_store import process_identity
+    from .adapters.subprocess.process_tree import read_command_line, read_identity
+    from .application.runtime.execution_worker_report import build_execution_worker_report
+
+    return build_execution_worker_report(
+        bindings=build_execution_worker_binding_store(state_root),
+        lock_root=state_root / "locks",
+        owner_identity_reader=process_identity,
+        command_line_reader=read_command_line,
+        identity_reader=read_identity,
+    ).as_dict()
 
 
 def build_upgrade_service(
@@ -2078,7 +2104,7 @@ def run_runtime_worker(
         log_path=root / "managed-runtime.log",
         execution_worker=SubprocessExecutionWorker(
             config_path,
-            bindings=JsonExecutionWorkerBindingStore(root, build_lock_manager()),
+            bindings=build_execution_worker_binding_store(root),
         ),
         execution_worker_log_path=root / "execution-worker.log",
         preflight=validate_generated_contract_identity,
