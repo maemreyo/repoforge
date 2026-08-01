@@ -203,3 +203,53 @@ def is_execution_worker_entry_point(argv: tuple[str, ...]) -> bool:
     else (``-c`` scripts, the supervisor, MCP serve) is ever an auto-reclaim candidate.
     """
     return len(argv) >= 3 and argv[1] == "-m" and argv[2] == _EXECUTION_WORKER_MODULE
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionWorkerQuarantineReceipt:
+    """Audit record of one quarantined worker-registry file (#424).
+
+    An unreadable (or operator-selected) registry record is moved into a private
+    quarantine directory -- never silently deleted -- and this receipt records where
+    it went, its content digest, why, and (when the metadata was parseable) which pid
+    it described, so the operator can still prove whether that process lives.
+    """
+
+    worker_id: str
+    quarantine_path: str
+    digest: str
+    reason: str
+    quarantined_at: str
+    pid: int | None
+    parseable: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "worker_id": self.worker_id,
+            "quarantine_path": self.quarantine_path,
+            "digest": self.digest,
+            "reason": self.reason,
+            "quarantined_at": self.quarantined_at,
+            "pid": self.pid,
+            "parseable": self.parseable,
+        }
+
+
+def validate_execution_worker_quarantine_receipt(
+    receipt: ExecutionWorkerQuarantineReceipt,
+) -> ExecutionWorkerQuarantineReceipt:
+    _require(receipt.worker_id, "worker_id")
+    if not _WORKER_ID.fullmatch(receipt.worker_id):
+        raise ValueError("execution worker worker_id must look like worker-<hex>")
+    _require(receipt.quarantine_path, "quarantine_path")
+    if not _SHA256.fullmatch(receipt.digest):
+        raise ValueError("execution worker quarantine digest must be a sha256 digest")
+    _require(receipt.reason, "reason")
+    if len(receipt.reason) > 512:
+        raise ValueError("execution worker quarantine reason is too long")
+    _text(receipt.quarantined_at, "quarantined_at", limit=64)
+    if receipt.pid is not None and (
+        not isinstance(receipt.pid, int) or isinstance(receipt.pid, bool) or receipt.pid <= 0
+    ):
+        raise ValueError("execution worker quarantine pid must be a positive integer or null")
+    return receipt

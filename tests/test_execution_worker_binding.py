@@ -97,6 +97,65 @@ def test_store_updates_state_with_cas(tmp_path: Path) -> None:
     assert store.get(_WORKER_ID).state == "reclaimed"
 
 
+def test_store_inspect_reports_a_parseable_record(tmp_path: Path) -> None:
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+    info = store.inspect_record(_WORKER_ID)
+    assert info is not None
+    assert info["parseable"] is True
+    assert info["pid"] == 4242
+    assert info["state"] == "running"
+    assert len(str(info["sha256"])) == 64
+    assert int(info["bytes"]) > 0
+
+
+def test_store_inspect_reports_an_unreadable_file_without_failing(tmp_path: Path) -> None:
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    (store.root / f"{_WORKER_ID}.json").write_text("{corrupt", encoding="utf-8")
+    info = store.inspect_record(_WORKER_ID)
+    assert info is not None
+    assert info["parseable"] is False
+    assert info["pid"] is None
+    assert len(str(info["sha256"])) == 64
+
+
+def test_store_quarantine_moves_the_file_and_writes_a_receipt(tmp_path: Path) -> None:
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+    receipt = store.quarantine_record(_WORKER_ID, reason="operator repair")
+    assert receipt is not None
+    assert receipt.parseable is True
+    assert receipt.pid == 4242
+    assert store.get(_WORKER_ID) is None
+    quarantined_file = (
+        tmp_path / "state" / "runtime-execution-workers-quarantine" / f"{_WORKER_ID}.json"
+    )
+    assert quarantined_file.is_file()
+    quarantined = store.list_quarantined()
+    assert len(quarantined) == 1
+    assert quarantined[0].worker_id == _WORKER_ID
+    assert quarantined[0].digest == receipt.digest
+    assert quarantined[0].reason == "operator repair"
+
+
+def test_store_quarantine_preserves_an_unreadable_file(tmp_path: Path) -> None:
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    (store.root / f"{_WORKER_ID}.json").write_text("{corrupt", encoding="utf-8")
+    receipt = store.quarantine_record(_WORKER_ID, reason="corrupt record")
+    assert receipt is not None
+    assert receipt.parseable is False
+    assert receipt.pid is None
+    quarantined_file = (
+        tmp_path / "state" / "runtime-execution-workers-quarantine" / f"{_WORKER_ID}.json"
+    )
+    assert quarantined_file.read_text(encoding="utf-8") == "{corrupt"
+
+
+def test_store_quarantine_of_a_missing_record_returns_none(tmp_path: Path) -> None:
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    assert store.quarantine_record(_WORKER_ID, reason="x") is None
+
+
 def test_store_rejects_an_unknown_worker_id(tmp_path: Path) -> None:
     store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     assert store.get("worker-ffffffffffff") is None
