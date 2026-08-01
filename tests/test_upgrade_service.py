@@ -49,12 +49,30 @@ class _Installer:
 
 
 class _Smoke:
-    def __init__(self, *, ok: bool = True, surface: str = _SURFACE) -> None:
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        surface: str = _SURFACE,
+        contract_identity: str = "",
+        mismatched_fields: tuple[str, ...] = (),
+        artifact_paths: tuple[str, ...] = (),
+    ) -> None:
         self._ok = ok
         self._surface = surface
+        self._contract_identity = contract_identity
+        self._mismatched = mismatched_fields
+        self._paths = artifact_paths
 
     def smoke(self, release_path: Path) -> SmokeResult:
-        return SmokeResult(ok=self._ok, tool_surface_hash=self._surface, detail="fake")
+        return SmokeResult(
+            ok=self._ok,
+            tool_surface_hash=self._surface,
+            detail="fake",
+            contract_identity=self._contract_identity,
+            contract_mismatched_fields=self._mismatched,
+            contract_artifact_paths=self._paths,
+        )
 
 
 class _Restarter:
@@ -116,6 +134,8 @@ def _service(
     clean: bool = True,
     smoke_ok: bool = True,
     surface: str = _SURFACE,
+    contract_identity: str = "",
+    smoke_mismatch: tuple[str, ...] = (),
     restarter: _Restarter | None = None,
     head: str = _CLEAN_SHA,
     store: RuntimeReleaseStore | None = None,
@@ -128,7 +148,12 @@ def _service(
         inspector=_Inspector(WorktreeState(head_sha=head, clean=clean, dirty_detail="M f.py")),
         builder=_Builder(),
         installer=_Installer(),
-        smoke=_Smoke(ok=smoke_ok, surface=surface),
+        smoke=_Smoke(
+            ok=smoke_ok,
+            surface=surface,
+            contract_identity=contract_identity,
+            mismatched_fields=smoke_mismatch,
+        ),
         restarter=used_restarter,
         observer=_Observer(used_store, pinned=pinned_observed),
         clock=_Clock(),
@@ -149,6 +174,36 @@ def test_failed_smoke_test_aborts_before_activation(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="SMOKE_FAILED"):
         service.upgrade(tmp_path, activate=True)
     assert store.current_sha() is None
+    assert restarter.calls == 0
+
+
+def test_contract_identity_mismatch_blocks_activation_before_any_swap(
+    tmp_path: Path,
+) -> None:
+    """A divergent candidate is refused before the journal opens or `current` moves."""
+    service, store, restarter = _service(
+        tmp_path, smoke_mismatch=("input_contract_digest",), contract_identity=""
+    )
+    with pytest.raises(ConfigError, match="RELEASE_CONTRACT_IDENTITY_MISMATCH"):
+        service.upgrade(tmp_path, activate=True)
+    assert store.current_sha() is None
+    assert restarter.calls == 0
+    assert store.read_in_flight_activation() is None
+
+
+def test_contract_identity_drift_on_an_existing_release_is_refused(tmp_path: Path) -> None:
+    """An installed release whose contract identity drifted from its manifest is refused."""
+    first, store, _ = _service(tmp_path, contract_identity="d" * 64, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    assert store.read_manifest("1111aaa") is not None
+
+    second, _, restarter = _service(
+        tmp_path, contract_identity="e" * 64, head="1111aaa", store=store
+    )
+    with pytest.raises(ConfigError, match="RELEASE_CONTRACT_IDENTITY_MISMATCH"):
+        second.upgrade(tmp_path, activate=True)
+    # `current` already points at 1111aaa from the first activation, so the meaningful
+    # assertion is that the drift was detected without any restart.
     assert restarter.calls == 0
 
 
