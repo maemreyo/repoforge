@@ -278,6 +278,14 @@ class ConfigError(RepoForgeError):
     default_code = ErrorCode.CONFIG_INVALID
 
 
+class ExecutionWorkerRegistrationError(ConfigError):
+    """A spawned execution worker could not be durably registered (#424).
+
+    Raised only after the worker's process group has been TERM'd, awaited, KILL'd,
+    and confirmed dead -- an untracked worker is never allowed to keep running.
+    """
+
+
 class SecurityError(RepoForgeError):
     default_code = ErrorCode.SECURITY_POLICY_VIOLATION
 

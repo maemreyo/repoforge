@@ -33,3 +33,11 @@ class ExecutionWorkerBindingStore(Protocol):
         would be invisible and a replacement could start on incomplete evidence.
         """
         ...
+
+    def collect_terminal(self, *, max_records: int = 5_000) -> int:
+        """Archive and delete terminal leases left by older releases.
+
+        Keeps the active registry bounded by the number of concurrent workers so the
+        bounded scan can never overflow into a permanent fail-closed block (#424).
+        """
+        ...
