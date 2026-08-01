@@ -322,7 +322,7 @@ class TicketProjectSyncer:
                 if graph is None:
                     raise ConfigError("Ticket graph fixture is unavailable")
             else:
-                graph_snapshot, _ = read_github_ticket_snapshot(
+                graph_snapshot, _, _ = read_github_ticket_snapshot(
                     self.ctx,
                     repo,
                     root_issue=None,

@@ -277,6 +277,7 @@ class RepositoryIssueV2Result:
     workflow: IssueGraphWorkflowResult | None = None
     capability_coverage: tuple[CapabilityCoverageV2, ...] = ()
     graph_unavailable_reason: str | None = None
+    read_stats: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,6 +883,7 @@ class RepositoryIssueV2:
                     raw_graph.coverage.get("capabilities", [])
                 ),
                 graph_unavailable_reason=(None if raw_graph.valid else "evidence_incomplete"),
+                read_stats=raw_graph.read_stats,
             )
         try:
             raw_next = self._next.compute(
@@ -953,6 +955,7 @@ class RepositoryIssueV2:
             None,
             capability_coverage=_capability_coverage(raw_next.capability_coverage),
             graph_unavailable_reason=None if raw_next.valid else "evidence_incomplete",
+            read_stats=raw_next.read_stats,
         )
 
 

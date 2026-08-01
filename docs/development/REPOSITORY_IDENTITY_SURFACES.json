@@ -323,6 +323,47 @@
       "planned_owner": "#288/#292"
     },
     {
+      "path": "src/repoforge/adapters/github/graph_transport.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "issue_graph"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "inherited GitHub environment"
+      ],
+      "target_inputs": [
+        "repository slug",
+        "bounded GraphQL query string"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#288"
+    },
+    {
+      "path": "src/repoforge/adapters/github/project_overlay.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "project_overlay"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "inherited GitHub environment"
+      ],
+      "target_inputs": [
+        "repository slug",
+        "project owner and number",
+        "issue numbers"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#288"
+    },
+    {
       "path": "src/repoforge/adapters/github/repository_observation.py",
       "executables": [
         "gh"

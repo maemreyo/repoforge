@@ -1321,6 +1321,18 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/adapters/github/graph_decode.py": [
+    "tests/test_github_ticket_graph_adapter.py"
+  ],
+  "src/repoforge/adapters/github/graph_query.py": [
+    "tests/test_github_ticket_graph_adapter.py"
+  ],
+  "src/repoforge/adapters/github/graph_transport.py": [
+    "tests/test_github_ticket_graph_adapter.py"
+  ],
+  "src/repoforge/adapters/github/project_overlay.py": [
+    "tests/test_github_ticket_graph_adapter.py"
+  ],
   "src/repoforge/adapters/github/repository_observation.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
@@ -5871,6 +5883,7 @@
     "tests/test_phases1_5_full_lifecycle.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
     "tests/test_service_tools.py",
@@ -11856,6 +11869,7 @@
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
     "tests/test_v2_contract_models.py"
   ],
   "src/repoforge/contracts/registry.py": [
@@ -11904,6 +11918,7 @@
     "tests/test_phase5_mcp_contract.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
     "tests/test_v2_contract_models.py",
     "tests/test_v2_shipping.py"
   ],
@@ -13084,6 +13099,7 @@
     "tests/test_operation_wait_event_loop.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
     "tests/test_v2_reads.py"
@@ -13952,6 +13968,7 @@
     "tests/test_phase8_program_completion.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
     "tests/test_runtime_adapters_and_serve.py",
@@ -14392,6 +14409,7 @@
     "tests/test_operation_wait_event_loop.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
     "tests/test_v2_reads.py"
@@ -14420,6 +14438,7 @@
     "tests/test_phase8_program_completion.py",
     "tests/test_plan_execution.py",
     "tests/test_pr_check_watch.py",
+    "tests/test_repo_issue_graph_tools.py",
     "tests/test_repo_list_selection_v2.py",
     "tests/test_repo_task_context.py",
     "tests/test_rollback_drill.py",

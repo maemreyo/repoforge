@@ -202,6 +202,7 @@ See [SECURITY.md](SECURITY.md) for the detailed threat model and limitations.
 ### GitHub-native ticket graph
 
 - Derive the ticket tree from native GitHub sub-issues and blocked-by relationships.
+- Read the tree with bounded batched GraphQL requests instead of one `gh` process per issue.
 - Overlay optional Project V2 Status, Priority, Type, and Initiative fields.
 - Reuse one bounded graph snapshot for readiness instead of one live call per tracked issue.
 - Keep GitHub authoritative; no checked-in graph needs to be regenerated after ticket edits.

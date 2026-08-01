@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from conftest import create_forge_environment
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from repoforge.application.repository.doctor import Doctor, DoctorCommand
 from repoforge.application.service import CodingService
@@ -17,11 +18,15 @@ from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.tickets import (
     CapabilityCoverage,
+    CapabilityReadStat,
     GraphEvidenceCapability,
+    TicketDiagnostic,
     TicketGraphError,
+    TicketGraphReadStats,
     TicketGraphSnapshot,
     TicketLiveMetadata,
 )
+from repoforge.interfaces.mcp.server import create_server
 
 
 def _write_manifest(
@@ -65,11 +70,12 @@ class FixtureTicketGraphGateway:
         self.source = source
         self.gh_state = gh_state
         self.calls = 0
+        self.read_stats: TicketGraphReadStats | None = None
 
     def read(
-        self, cwd: Path, source: GitHubTicketGraphConfig, *, max_items: int
+        self, cwd: Path, source: GitHubTicketGraphConfig, *, max_items: int, remote: str = "origin"
     ) -> TicketGraphSnapshot:
-        del cwd, source, max_items
+        del cwd, source, max_items, remote
         self.calls += 1
         graph = load_ticket_graph(self.source / "docs" / "roadmaps" / "REPOFORGE_TICKET_GRAPH.json")
         state_payload = (
@@ -105,6 +111,15 @@ class FixtureTicketGraphGateway:
             )
             for item in state_payload.get("capability_coverage", [])
         )
+        diagnostics = tuple(
+            TicketDiagnostic(
+                code=str(item["code"]),
+                issue_number=int(item["issue_number"]),
+                message=str(item.get("message", "")),
+            )
+            for item in state_payload.get("diagnostics", [])
+            if isinstance(item, dict) and isinstance(item.get("issue_number"), int)
+        )
         return TicketGraphSnapshot(
             graph,
             "2026-07-16T00:00:00+00:00",
@@ -113,6 +128,8 @@ class FixtureTicketGraphGateway:
             bool(state_payload.get("truncated", False)),
             live,
             capability_coverage,
+            read_stats=self.read_stats,
+            diagnostics=diagnostics,
         )
 
 
@@ -180,8 +197,9 @@ def test_v2_repo_issue_reports_typed_provider_reason(tmp_path: Path) -> None:
             source: GitHubTicketGraphConfig,
             *,
             max_items: int,
+            remote: str = "origin",
         ) -> TicketGraphSnapshot:
-            del cwd, source, max_items
+            del cwd, source, max_items, remote
             raise ConfigError("GitHub ticket graph transport is offline")
 
     service = CodingService(
@@ -243,6 +261,106 @@ def test_v2_repo_issue_graph_exposes_capability_scoped_coverage(tmp_path: Path) 
     assert coverage["project_overlay"]["complete"] is True
 
 
+def test_v2_repo_issue_graph_exposes_provider_read_stats(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    gateway = service.application.context.ticket_graphs
+    gateway.read_stats = TicketGraphReadStats(
+        source="live_full",
+        provider_processes=2,
+        captured_stdout_bytes=4096,
+        provider_process_duration_ms=18.5,
+        per_capability=(CapabilityReadStat(GraphEvidenceCapability.ISSUE, 2, 4096, 18.5),),
+    )
+
+    result = service.repo_issue_v2("demo", mode="graph", fresh=True)
+
+    assert result["read_stats"] == {
+        "source": "live_full",
+        "provider_processes": 2,
+        "captured_stdout_bytes": 4096,
+        "provider_process_duration_ms": 18.5,
+        "per_capability": [
+            {
+                "capability": "issue",
+                "provider_processes": 2,
+                "captured_stdout_bytes": 4096,
+                "provider_process_duration_ms": 18.5,
+            }
+        ],
+        "cache_miss_reason": "fresh_requested",
+    }
+    V2_TOOL_SPECS["repo_issue"].validate_output(result)
+
+
+@pytest.mark.anyio
+async def test_repo_issue_graph_protocol_exposes_read_stats(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    gateway = service.application.context.ticket_graphs
+    gateway.read_stats = TicketGraphReadStats(
+        source="live_full",
+        provider_processes=3,
+        captured_stdout_bytes=2048,
+        provider_process_duration_ms=22.0,
+    )
+    server = create_server(service=service)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "repo_issue", {"repo_id": "demo", "mode": "graph", "fresh": True}
+        )
+
+    assert result.isError is False
+    payload = result.structuredContent
+    assert payload is not None
+    assert payload["read_stats"]["source"] == "live_full"
+    assert payload["read_stats"]["provider_processes"] == 3
+    assert payload["read_stats"]["captured_stdout_bytes"] == 2048
+    assert payload["read_stats"]["cache_miss_reason"] == "fresh_requested"
+    V2_TOOL_SPECS["repo_issue"].validate_output(payload)
+
+
+@pytest.mark.anyio
+async def test_repo_issue_graph_protocol_exposes_metadata_defaulted_in_drift(
+    tmp_path: Path,
+) -> None:
+    service, environment = _service(tmp_path)
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {},
+                "diagnostics": [
+                    {
+                        "code": "METADATA_DEFAULTED",
+                        "issue_number": 3,
+                        "message": "status metadata is missing; defaulted to backlog for readiness",
+                    },
+                    {
+                        "code": "PROJECT_OVERLAY_UNAVAILABLE",
+                        "issue_number": 3,
+                        "message": "project overlay could not be read",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    server = create_server(service=service)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "repo_issue", {"repo_id": "demo", "mode": "graph", "fresh": True}
+        )
+
+    assert result.isError is False
+    payload = result.structuredContent
+    assert payload is not None
+    codes = {item["code"] for item in payload["drift"]}
+    assert "METADATA_DEFAULTED" in codes
+    assert "PROJECT_OVERLAY_UNAVAILABLE" in codes
+    assert all(item["issue_number"] == 3 for item in payload["drift"] if item["code"] in codes)
+    V2_TOOL_SPECS["repo_issue"].validate_output(payload)
+
+
 def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Path) -> None:
     service, _ = _service(tmp_path, configured=False)
 
@@ -265,6 +383,8 @@ def test_repo_issue_graph_reports_missing_configuration_as_invalid(tmp_path: Pat
         "truncated": False,
         "evidence_complete": False,
         "capabilities": [],
+        "diagnostics_count": 1,
+        "diagnostics_truncated": False,
     }
     assert "rf repo refresh demo" in result["safe_next_action"]
 

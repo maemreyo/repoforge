@@ -1,19 +1,33 @@
-"""Bounded read-only GitHub-native ticket graph snapshots."""
+"""Bounded read-only GitHub-native ticket graph snapshots.
+
+The graph is traversed through batched GraphQL requests instead of one
+``gh api`` subprocess per issue/capability. Aliased root fields give per-node
+partial success, so one failing capability (comments, dependencies, ...) does
+not erase complete evidence for unrelated capabilities, and provider traffic
+is exposed as structured read stats so the batching contract can be verified.
+
+The adapter is split into focused modules: ``graph_query`` (query
+construction), ``graph_transport`` (the constrained ``gh api graphql``
+transport and provider-traffic stats), ``graph_decode`` (payload parsing and
+capability attribution), and ``project_overlay`` (Project V2 reads). This
+module composes them into one traversal.
+"""
 
 from __future__ import annotations
 
 import json
 import re
-from collections import deque
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from ...config import GitHubTicketGraphConfig, ServerConfig
 from ...domain.errors import CommandError
 from ...domain.tickets import (
     CapabilityCoverage,
     GraphEvidenceCapability,
+    TicketDiagnostic,
     TicketGraph,
     TicketGraphError,
     TicketGraphSnapshot,
@@ -22,15 +36,29 @@ from ...domain.tickets import (
     TicketPriority,
     TicketStatus,
     TicketType,
+    github_slug_from_remote_url,
 )
 from ...ports.command import CommandExecutor, CommandResult
+from .graph_decode import (
+    ExpandedIssue,
+    alias_issue,
+    enum_value,
+    failed_capabilities,
+    parse_issue,
+    parse_metadata,
+)
+from .graph_query import FULL_SELECTION, build_query, selection_capabilities, stripped_selection
+from .graph_transport import Stats, run_graphql
+from .project_overlay import read_project_values
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_METADATA_LINE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?P<name>[A-Za-z ]+)\s*:\s*(?P<value>[^\n]+)")
-_API_VERSION = "2022-11-28"
+_MAX_GRAPH_NODES = 200
 _MAX_BODY_CHARS = 200_000
 _MAX_COMMENTS = 20
 _MAX_COMMENT_CHARS = 20_000
+#: Aliased issue queries per expansion request. Keeps worst-case response bytes
+#: bounded while meeting the five-request budget for typical 40-node graphs.
+_ALIAS_CHUNK = 25
 
 
 class CommandGitHubTicketGraphGateway:
@@ -49,144 +77,122 @@ class CommandGitHubTicketGraphGateway:
             output_limit=output_limit or self._output_limit,
         )
 
-    @staticmethod
-    def _json(result: CommandResult, context: str) -> Any:
-        if result.stdout_truncated:
-            raise CommandError(f"{context} returned oversized JSON")
-        try:
-            return json.loads(result.stdout or "null")
-        except json.JSONDecodeError as exc:
-            raise CommandError(f"{context} returned invalid JSON") from exc
+    def _fetch_batch(
+        self,
+        cwd: Path,
+        slug: str,
+        numbers: list[int],
+        stats: Stats,
+    ) -> tuple[dict[int, dict[str, Any]], dict[int, frozenset[GraphEvidenceCapability]]]:
+        """Fetch one frontier level with aliased GraphQL, retrying failed
+        aliases with progressively stripped selections.
 
-    def _object(self, result: CommandResult, context: str) -> dict[str, Any]:
-        payload = self._json(result, context)
-        if not isinstance(payload, dict):
-            raise CommandError(f"{context} returned a non-object JSON value")
-        return cast(dict[str, Any], payload)
+        Returns ``(parsed_issue_dicts, failed_capabilities_by_number)``. A
+        number present in ``parsed`` is usable; its entry in the second dict
+        lists the capabilities that could not be read for it. Core issue
+        identity/metadata is never accepted partially: any error on the issue
+        object itself (including a missing object without an attributable
+        error) fails the whole issue closed.
+        """
+        parsed: dict[int, dict[str, Any]] = {}
+        failed: dict[int, set[GraphEvidenceCapability]] = {}
+        pending: dict[int, str] = {number: FULL_SELECTION for number in numbers}
+        while pending:
+            selection = next(iter(pending.values()))
+            group = [number for number, current in pending.items() if current == selection]
+            query = build_query(slug, group, selection)
+            payload, errors = run_graphql(
+                self._executor,
+                self._server,
+                cwd,
+                query,
+                stats,
+                capabilities=selection_capabilities(selection),
+            )
+            for index, number in enumerate(group):
+                alias = f"r{index}"
+                capabilities = failed_capabilities(errors, alias)
+                issue = alias_issue(payload, alias)
+                if issue is not None and not capabilities:
+                    parsed[number] = issue
+                    pending.pop(number, None)
+                    continue
+                if GraphEvidenceCapability.ISSUE in capabilities:
+                    failed.setdefault(number, set()).add(GraphEvidenceCapability.ISSUE)
+                    pending.pop(number, None)
+                    continue
+                if issue is not None:
+                    # Partial object with optional-capability failures: retry
+                    # stripped so accepted data only carries capabilities that
+                    # actually succeeded.
+                    failed.setdefault(number, set()).update(capabilities)
+                    next_selection = stripped_selection(failed[number])
+                    if next_selection == selection:
+                        parsed[number] = issue
+                        pending.pop(number, None)
+                    else:
+                        pending[number] = next_selection
+                    continue
+                # No issue object, only optional-capability failures: retry
+                # stripped; if stripping changes nothing the object is truly
+                # missing and the core read fails closed.
+                failed.setdefault(number, set()).update(capabilities)
+                next_selection = stripped_selection(failed[number])
+                if next_selection == selection:
+                    failed.setdefault(number, set()).add(GraphEvidenceCapability.ISSUE)
+                    pending.pop(number, None)
+                else:
+                    pending[number] = next_selection
+        return parsed, {number: frozenset(caps) for number, caps in failed.items()}
 
-    def _list(self, result: CommandResult, context: str) -> list[dict[str, Any]]:
-        payload = self._json(result, context)
-        if not isinstance(payload, list):
-            raise CommandError(f"{context} returned a non-list JSON value")
-        return [cast(dict[str, Any], item) for item in payload if isinstance(item, dict)]
+    # -- Slug resolution ----------------------------------------------------
 
-    def _slug(self, cwd: Path) -> str:
-        slug = self._run(
+    def _resolve_slug(
+        self, cwd: Path, source: GitHubTicketGraphConfig, remote: str, stats: Stats
+    ) -> str:
+        if source.repository is not None:
+            if not _REPOSITORY.fullmatch(source.repository):
+                raise CommandError(
+                    f"Unexpected configured GitHub repository name: {source.repository!r}"
+                )
+            return source.repository
+        local = self._slug_from_remote(cwd, remote)
+        if local is not None:
+            return local
+        started = time.monotonic()
+        result = self._run(
             ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
             cwd=cwd,
             output_limit=512,
-        ).stdout.strip()
+        )
+        stats.record(
+            (),
+            processes=1,
+            response_bytes=len(result.stdout.encode("utf-8")),
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+        )
+        slug = result.stdout.strip()
         if not _REPOSITORY.fullmatch(slug):
             raise CommandError(f"Unexpected GitHub repository name: {slug!r}")
         return slug
 
-    def _api(self, cwd: Path, endpoint: str) -> CommandResult:
-        return self._run(
-            [
-                "gh",
-                "api",
-                "--method",
-                "GET",
-                endpoint,
-                "-H",
-                "Accept: application/vnd.github+json",
-                "-H",
-                f"X-GitHub-Api-Version: {_API_VERSION}",
-            ],
-            cwd=cwd,
-        )
-
-    @staticmethod
-    def _labels(raw: object) -> tuple[str, ...]:
-        if not isinstance(raw, list):
-            return ()
-        labels: list[str] = []
-        for value in raw:
-            name = value.get("name") if isinstance(value, dict) else value
-            if isinstance(name, str) and name.strip():
-                labels.append(name.strip())
-        return tuple(labels)
-
-    @staticmethod
-    def _metadata(body: str, labels: tuple[str, ...]) -> dict[str, str]:
-        values: dict[str, str] = {}
-        for label in labels:
-            if ":" in label:
-                key, value = label.split(":", 1)
-                values[key.strip().casefold()] = value.strip()
-        for match in _METADATA_LINE.finditer(body):
-            values.setdefault(match.group("name").strip().casefold(), match.group("value").strip())
-        return values
-
-    @staticmethod
-    def _enum_value(enum_type: type[Any], raw: str | None) -> Any | None:
-        if raw is None:
-            return None
-        normalized = raw.replace("_", " ").replace("-", " ").strip().casefold()
-        for value in enum_type:
-            candidate = str(value.value).replace("_", " ").replace("-", " ").casefold()
-            if candidate == normalized:
-                return value
-        return None
-
-    def _project_values(
-        self,
-        cwd: Path,
-        slug: str,
-        source: GitHubTicketGraphConfig,
-        wanted: set[int],
-    ) -> tuple[dict[int, dict[str, str]], bool]:
-        if source.project_owner is None or source.project_number is None:
-            return {}, True
-        payload = self._object(
-            self._run(
-                [
-                    "gh",
-                    "project",
-                    "item-list",
-                    str(source.project_number),
-                    "--owner",
-                    source.project_owner,
-                    "--format",
-                    "json",
-                    "--limit",
-                    str(min(max(len(wanted) + 100, 100), 1000)),
-                ],
+    def _slug_from_remote(self, cwd: Path, remote: str) -> str | None:
+        try:
+            result = self._executor.run(
+                ["git", "remote", "get-url", remote],
                 cwd=cwd,
-            ),
-            "gh project item-list",
-        )
-        raw_items = payload.get("items")
-        if not isinstance(raw_items, list):
-            raise CommandError("gh project item-list returned no items list")
-        result: dict[int, dict[str, str]] = {}
-        field_names = (
-            source.status_field,
-            source.priority_field,
-            source.initiative_field,
-            source.type_field,
-        )
-        for raw in raw_items:
-            if not isinstance(raw, dict):
-                continue
-            content = raw.get("content")
-            if not isinstance(content, dict):
-                continue
-            number = content.get("number")
-            if not isinstance(number, int) or isinstance(number, bool):
-                continue
-            repository = content.get("repository")
-            if isinstance(repository, dict):
-                repository = repository.get("nameWithOwner")
-            if number not in wanted or repository != slug:
-                continue
-            values: dict[str, str] = {}
-            for field_name in field_names:
-                value = raw.get(field_name)
-                if value is not None:
-                    values[field_name] = str(value)
-            result[int(number)] = values
-        return result, len(raw_items) < min(max(len(wanted) + 100, 100), 1000)
+                check=False,
+                timeout=30,
+                output_limit=4_096,
+            )
+        except CommandError:
+            return None
+        if result.returncode != 0:
+            return None
+        slug = github_slug_from_remote_url(result.stdout.strip())
+        return slug if slug is not None and _REPOSITORY.fullmatch(slug) else None
+
+    # -- Graph read ----------------------------------------------------------
 
     def read(
         self,
@@ -194,16 +200,17 @@ class CommandGitHubTicketGraphGateway:
         source: GitHubTicketGraphConfig,
         *,
         max_items: int,
+        remote: str = "origin",
     ) -> TicketGraphSnapshot:
-        if not 1 <= max_items <= 200:
+        if not 1 <= max_items <= _MAX_GRAPH_NODES:
             raise TicketGraphError(
                 "GitHub ticket graph reads must contain between 1 and 200 issues"
             )
-        slug = self._slug(cwd)
-        queue: deque[int] = deque([source.root_issue])
-        queued = {source.root_issue}
+        stats = Stats()
+        slug = self._resolve_slug(cwd, source, remote, stats)
+
         parent_by_number: dict[int, int | None] = {source.root_issue: None}
-        issues: dict[int, dict[str, Any]] = {}
+        expanded: dict[int, ExpandedIssue] = {}
         unavailable: set[int] = set()
         truncated = False
         issue_unavailable: set[int] = set()
@@ -213,136 +220,137 @@ class CommandGitHubTicketGraphGateway:
         comments_truncated = False
         dependencies_unavailable: set[int] = set()
         dependencies_truncated = False
+        project_unavailable: set[int] = set()
+        diagnostics: list[TicketDiagnostic] = []
 
-        while queue:
-            number = queue.popleft()
-            if len(issues) >= max_items:
+        discovered: set[int] = {source.root_issue}
+        frontier: list[int] = [source.root_issue]
+        while frontier:
+            if len(expanded) >= max_items:
                 truncated = True
-                unavailable.add(number)
-                issue_unavailable.add(number)
+                for number in frontier:
+                    unavailable.add(number)
+                    issue_unavailable.add(number)
                 break
+            batch = frontier[:_ALIAS_CHUNK]
+            frontier = frontier[_ALIAS_CHUNK:]
             try:
-                issue = self._object(
-                    self._api(cwd, f"repos/{slug}/issues/{number}"),
-                    f"GitHub issue #{number}",
-                )
+                parsed, failed = self._fetch_batch(cwd, slug, batch, stats)
             except CommandError:
-                if number == source.root_issue:
+                if source.root_issue in batch:
                     raise
-                unavailable.add(number)
-                issue_unavailable.add(number)
+                for number in batch:
+                    unavailable.add(number)
+                    issue_unavailable.add(number)
                 continue
-            if issue.get("number") != number or "pull_request" in issue:
-                unavailable.add(number)
-                issue_unavailable.add(number)
-                continue
-            title = issue.get("title")
-            state = issue.get("state")
-            body = issue.get("body")
-            if (
-                not isinstance(title, str)
-                or not title.strip()
-                or state not in {"open", "closed", "OPEN", "CLOSED"}
-                or not isinstance(body, str)
-                or len(body) > _MAX_BODY_CHARS
-            ):
-                unavailable.add(number)
-                issue_unavailable.add(number)
-                continue
-            issues[number] = issue
-            try:
-                children = self._list(
-                    self._api(cwd, f"repos/{slug}/issues/{number}/sub_issues?per_page=100"),
-                    f"GitHub sub-issues for #{number}",
-                )
-            except CommandError:
-                unavailable.add(number)
-                sub_issues_unavailable.add(number)
-                continue
-            if len(children) == 100:
-                truncated = True
-                sub_issues_truncated = True
-            for child in children:
-                child_number = child.get("number")
-                if (
-                    not isinstance(child_number, int)
-                    or isinstance(child_number, bool)
-                    or child_number <= 0
-                    or "pull_request" in child
-                ):
+            for number in batch:
+                capabilities = failed.get(number, frozenset())
+                raw_issue = parsed.get(number)
+                issue = parse_issue(raw_issue, number, slug) if raw_issue is not None else None
+                if issue is None or GraphEvidenceCapability.ISSUE in capabilities:
+                    unavailable.add(number)
+                    issue_unavailable.add(number)
                     continue
-                existing_parent = parent_by_number.get(child_number)
-                if existing_parent is not None and existing_parent != number:
-                    unavailable.add(child_number)
-                    continue
-                parent_by_number[child_number] = number
-                if child_number not in queued:
-                    queued.add(child_number)
-                    queue.append(child_number)
+                if issue.labels_malformed or issue.labels_truncated:
+                    unavailable.add(number)
+                    issue_unavailable.add(number)
+                if GraphEvidenceCapability.SUB_ISSUES in capabilities or issue.children_malformed:
+                    unavailable.add(number)
+                    sub_issues_unavailable.add(number)
+                if GraphEvidenceCapability.COMMENTS in capabilities or issue.comments_malformed:
+                    unavailable.add(number)
+                    comments_unavailable.add(number)
+                if GraphEvidenceCapability.DEPENDENCIES in capabilities or issue.blockers_malformed:
+                    unavailable.add(number)
+                    dependencies_unavailable.add(number)
+                if issue.children_external:
+                    unavailable.add(number)
+                    sub_issues_unavailable.add(number)
+                    diagnostics.append(
+                        TicketDiagnostic(
+                            "CROSS_REPOSITORY_RELATION_UNSUPPORTED",
+                            number,
+                            "sub-issue references from another repository are not "
+                            f"expanded: {', '.join(issue.children_external)}",
+                        )
+                    )
+                if issue.blockers_external:
+                    unavailable.add(number)
+                    dependencies_unavailable.add(number)
+                    diagnostics.append(
+                        TicketDiagnostic(
+                            "CROSS_REPOSITORY_RELATION_UNSUPPORTED",
+                            number,
+                            "blocker references from another repository are not "
+                            f"evaluated: {', '.join(issue.blockers_external)}",
+                        )
+                    )
+                expanded[number] = issue
+                if issue.children_truncated:
+                    truncated = True
+                    sub_issues_truncated = True
+                if issue.blockers_truncated:
+                    truncated = True
+                    dependencies_truncated = True
+                if issue.comments_truncated:
+                    truncated = True
+                    comments_truncated = True
+                for child in issue.children:
+                    existing_parent = parent_by_number.get(child)
+                    if existing_parent is not None and existing_parent != number:
+                        unavailable.add(child)
+                        continue
+                    parent_by_number[child] = number
+                    if child in discovered:
+                        continue
+                    if len(discovered) >= max_items:
+                        truncated = True
+                        unavailable.add(child)
+                        issue_unavailable.add(child)
+                        continue
+                    discovered.add(child)
+                    frontier.append(child)
 
-        wanted = set(issues)
-        comments_by_number: dict[int, tuple[str, ...]] = {}
-        for number in sorted(wanted):
-            try:
-                raw_comments = self._list(
-                    self._api(
-                        cwd, f"repos/{slug}/issues/{number}/comments?per_page={_MAX_COMMENTS}"
-                    ),
-                    f"GitHub comments for #{number}",
-                )
-            except CommandError:
-                unavailable.add(number)
-                comments_unavailable.add(number)
-                comments_by_number[number] = ()
-                continue
-            if len(raw_comments) == _MAX_COMMENTS:
-                truncated = True
-                comments_truncated = True
-            comments: list[str] = []
-            malformed = False
-            for raw_comment in raw_comments[:_MAX_COMMENTS]:
-                comment_body = raw_comment.get("body")
-                if not isinstance(comment_body, str) or len(comment_body) > _MAX_COMMENT_CHARS:
-                    malformed = True
-                    continue
-                comments.append(comment_body)
-            if malformed:
-                unavailable.add(number)
-                comments_unavailable.add(number)
-            comments_by_number[number] = tuple(comments)
+        wanted = set(expanded)
+        if source.root_issue not in wanted:
+            raise TicketGraphError(f"GitHub ticket graph root #{source.root_issue} is unavailable")
 
-        blockers_by_number: dict[int, set[int]] = {number: set() for number in wanted}
-        for number in sorted(wanted):
-            try:
-                blockers = self._list(
-                    self._api(
-                        cwd,
-                        f"repos/{slug}/issues/{number}/dependencies/blocked_by?per_page=100",
-                    ),
-                    f"GitHub blockers for #{number}",
+        project_started = time.monotonic()
+        try:
+            project_values, project_complete, project_bytes = read_project_values(
+                self._executor, self._server, cwd, slug, source, wanted
+            )
+        except CommandError as exc:
+            project_values = {}
+            project_complete = False
+            project_bytes = 0
+            project_unavailable.update(wanted)
+            diagnostics.append(
+                TicketDiagnostic(
+                    "PROJECT_OVERLAY_UNAVAILABLE",
+                    source.root_issue,
+                    "project overlay could not be read; GitHub-native graph "
+                    f"evidence remains complete ({type(exc).__name__})",
                 )
-            except CommandError:
-                unavailable.add(number)
-                dependencies_unavailable.add(number)
-                continue
-            if len(blockers) == 100:
-                truncated = True
-                dependencies_truncated = True
-            blockers_by_number[number].update(
-                blocker_number
-                for blocker in blockers
-                if isinstance((blocker_number := blocker.get("number")), int)
-                and not isinstance(blocker_number, bool)
-                and blocker_number in wanted
+            )
+        project_duration_ms = round((time.monotonic() - project_started) * 1000, 3)
+        if source.project_owner is not None and source.project_number is not None:
+            stats.record(
+                (GraphEvidenceCapability.PROJECT_OVERLAY,),
+                processes=1,
+                response_bytes=project_bytes,
+                duration_ms=project_duration_ms,
             )
 
-        project_values, project_complete = self._project_values(cwd, slug, source, wanted)
-        if not project_complete:
-            truncated = True
         children_by_number: dict[int, set[int]] = {number: set() for number in wanted}
         for child_number, parent_number in parent_by_number.items():
             if child_number in wanted and parent_number in wanted:
                 children_by_number[parent_number].add(child_number)
+        blockers_by_number: dict[int, set[int]] = {number: set() for number in wanted}
+        for number in wanted:
+            blockers_by_number[number] = {
+                blocker for blocker in expanded[number].blockers if blocker in wanted
+            }
         blocks_by_number: dict[int, set[int]] = {number: set() for number in wanted}
         for blocked_number, blocker_numbers in blockers_by_number.items():
             for blocker_number in blocker_numbers:
@@ -351,36 +359,35 @@ class CommandGitHubTicketGraphGateway:
         nodes: list[TicketNode] = []
         live: list[TicketLiveMetadata] = []
         for number in sorted(wanted):
-            issue = issues[number]
-            title = str(issue["title"]).strip()
-            state = str(issue["state"]).upper()
-            body = str(issue["body"])
-            metadata = self._metadata(body, self._labels(issue.get("labels")))
+            issue = expanded[number]
+            title = issue.title
+            state = issue.state
+            body = issue.body
+            metadata = parse_metadata(body, issue.labels)
             overlay = project_values.get(number, {})
             status = (
                 TicketStatus.DONE
                 if state == "CLOSED"
-                else self._enum_value(
+                else enum_value(
                     TicketStatus,
                     overlay.get(source.status_field) or metadata.get("status"),
                 )
             )
-            priority = self._enum_value(
+            priority = enum_value(
                 TicketPriority,
                 overlay.get(source.priority_field) or metadata.get("priority"),
             )
-            ticket_type = self._enum_value(
+            ticket_type = enum_value(
                 TicketType,
                 overlay.get(source.type_field) or metadata.get("type"),
             )
+            defaulted_fields: list[str] = []
             if status is None:
                 status = TicketStatus.BACKLOG
-                unavailable.add(number)
-                issue_unavailable.add(number)
+                defaulted_fields.append("status")
             if priority is None:
                 priority = TicketPriority.P3
-                unavailable.add(number)
-                issue_unavailable.add(number)
+                defaulted_fields.append("priority")
             if ticket_type is None:
                 if number == source.root_issue:
                     ticket_type = TicketType.PROGRAM
@@ -388,6 +395,16 @@ class CommandGitHubTicketGraphGateway:
                     ticket_type = TicketType.INITIATIVE
                 else:
                     ticket_type = TicketType.IMPLEMENTATION_TICKET
+            if defaulted_fields:
+                diagnostics.append(
+                    TicketDiagnostic(
+                        "METADATA_DEFAULTED",
+                        number,
+                        "metadata fields "
+                        + ", ".join(defaulted_fields)
+                        + " are missing; defaulted for readiness",
+                    )
+                )
             initiative = overlay.get(source.initiative_field) or metadata.get("initiative")
             roadmap = (
                 (initiative.strip(),)
@@ -414,12 +431,10 @@ class CommandGitHubTicketGraphGateway:
                     title,
                     state,
                     body,
-                    comments_by_number.get(number, ()),
+                    expanded[number].comments,
                 )
             )
 
-        if source.root_issue not in wanted:
-            raise TicketGraphError(f"GitHub ticket graph root #{source.root_issue} is unavailable")
         capability_coverage = (
             CapabilityCoverage(
                 GraphEvidenceCapability.ISSUE,
@@ -448,20 +463,26 @@ class CommandGitHubTicketGraphGateway:
             CapabilityCoverage(
                 GraphEvidenceCapability.PROJECT_OVERLAY,
                 project_complete,
-                (),
-                not project_complete,
+                tuple(sorted(project_unavailable)),
+                False,
             ),
         )
-        snapshot = TicketGraphSnapshot(
+        return TicketGraphSnapshot(
             graph=TicketGraph(1, source.root_issue, tuple(nodes)),
             observed_at=datetime.now(timezone.utc).isoformat(),
-            evidence_complete=not unavailable and not truncated,
+            evidence_complete=(
+                not unavailable
+                and not truncated
+                and all(coverage.complete for coverage in capability_coverage)
+            ),
             unavailable=tuple(sorted(unavailable)),
             truncated=truncated,
             live_issues=tuple(live),
             capability_coverage=capability_coverage,
+            read_stats=stats.snapshot(),
+            diagnostics=tuple(diagnostics),
+            repository_slug=slug,
         )
-        return snapshot
 
 
 class GitHubTicketGraphReader:

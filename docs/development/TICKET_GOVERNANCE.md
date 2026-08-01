@@ -41,13 +41,38 @@ selection.
 
 `repo_issue_graph` traverses the configured root through native sub-issues, reads native
 dependencies, overlays configured Project fields, and returns deterministic bounded
-evidence. `repo_issue_next` derives readiness from the same snapshot, so it does not
-perform a separate live call per issue. Both tools accept `fresh=true` when a caller
-must bypass the short-lived cache.
+evidence. Reads are served through batched GraphQL requests (aliased issue queries)
+rather than one `gh` process per issue, so a fresh 40-node graph uses a handful of
+provider processes; `graph` and `next` results expose `read_stats` with the
+provider-process, captured-stdout-byte, and duration counts by capability (top-level
+totals exact, per-capability entries shared attribution). A provider process is a `gh`
+subprocess launch, not a claim of exactly one HTTPS request, and failed launches are
+still counted. Cache hits report `cache_hit_reason`/`cache_age_ms`; live reads report
+`cache_miss_reason`. `repo_issue_next` derives readiness from the same snapshot, so it
+does not perform a separate live call per issue. Both tools accept `fresh=true` when a
+caller must bypass the short-lived cache.
 
 Graph reads are capped at 200 issues. Missing pages, inaccessible issues, malformed
 metadata, or API failures are reported through `evidence_complete`, `unavailable`,
-and `truncated`; RepoForge does not silently treat partial evidence as complete.
+`capability_coverage`, and `truncated`; RepoForge does not silently treat partial
+evidence as complete. When status or priority metadata is missing, the graph applies a
+safe default (`Backlog`/`P3`) and reports one aggregated `METADATA_DEFAULTED` diagnostic
+listing the missing fields, without marking the issue provider unavailable. A Project
+overlay read failure is isolated to the `project_overlay` capability: GitHub-native
+graph evidence remains complete and a `PROJECT_OVERLAY_UNAVAILABLE` diagnostic is
+reported; the failure degrades the capability and makes the snapshot not fully
+`evidence_complete`, but it is never reported as traversal truncation. Sub-issue or
+blocker references pointing at another repository are never mapped onto the same issue
+number in the local repository: the affected capability is degraded and a
+`CROSS_REPOSITORY_RELATION_UNSUPPORTED` diagnostic is reported instead.
+
+Cached graph snapshots are bound to the resolved GitHub repository slug, a digest of the
+reviewed source configuration (root, project owner/number, field names), the reader
+contract version, and the GitHub API version; a payload checksum is recomputed and
+verified on every cache read. Any binding mismatch — a repointed remote, an edited
+project field, or a reader change — is a cache miss, never stale evidence served as
+current. Signed webhooks invalidate the affected graph cache entries; the next read
+re-traverses the batched graph rather than merging partial state.
 
 ## Update workflow
 
