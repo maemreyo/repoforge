@@ -571,6 +571,63 @@ set +e
 STATUS3_EXIT=$?
 set -e
 
+say "STALE CONTRACT: a release built from a stale artifact must be refused (#367)"
+# Tamper the packaged contract identity and COMMIT it, so the worktree stays clean and the
+# release builds -- exactly the 2026-08-01 incident (built before artifacts regenerated).
+python3 - "$CLONE/src/repoforge/contracts/generated_contract_identity.py" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+stale = '"' + "0" * 64 + '"'
+text, count = re.subn(
+    r'"input_contract_digest": "[0-9a-f]{64}"',
+    f'"input_contract_digest": {stale}',
+    text,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("could not tamper generated_contract_identity.py")
+open(path, "w", encoding="utf-8").write(text)
+PY
+git -C "$CLONE" -c user.email=s@x -c user.name=s commit --quiet -am "stale contract artifact"
+STALE_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+ok "stale-artifact candidate at ${STALE_SHA:0:12} (packaged identity diverges)"
+set +e
+"${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3 2>&1 | tee "$SANDBOX/stale-upgrade.json"
+STALE_EXIT=${PIPESTATUS[0]}
+set -e
+echo "stale upgrade exit=$STALE_EXIT"
+
+say "The refused release must be a forensic artifact, never the active one"
+CURRENT_AFTER_STALE="$(readlink "$SANDBOX/release-root/current" 2>/dev/null || echo none)"
+echo "  current after stale attempt: $CURRENT_AFTER_STALE"
+if [[ -d "$SANDBOX/release-root/releases/$STALE_SHA" ]]; then
+  echo "  stale release retained on disk (forensic artifact)"
+fi
+[[ "$CURRENT_AFTER_STALE" == *"$HEAD_SHA"* ]] \
+  || fail "a stale-contract release moved \`current\`; the gate did not hold"
+
+say "A DIRTY worktree must also be refused (stale artifacts are a dirty-build class)"
+printf 'uncommitted\n' >> "$CLONE/README.md"
+set +e
+"${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3 2>&1 | tee "$SANDBOX/dirty-upgrade.json"
+DIRTY_EXIT=${PIPESTATUS[0]}
+set -e
+git -C "$CLONE" checkout --quiet -- README.md
+echo "dirty upgrade exit=$DIRTY_EXIT"
+
+say "REBUILD from the clean clone: the reviewed head re-activates and health-verifies"
+git -C "$CLONE" reset --hard --quiet HEAD~1
+REBUILD_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+[[ "$REBUILD_SHA" == "$HEAD_SHA" ]] || fail "rebuild clone is not back at the reviewed head"
+set +e
+"${RF[@]}" upgrade --from-worktree "$CLONE" --activate --keep 3 | tee "$SANDBOX/rebuild-upgrade.json"
+REBUILD_EXIT=${PIPESTATUS[0]}
+set -e
+echo "rebuild upgrade exit=$REBUILD_EXIT"
+
 say "The sandbox must not have provisioned a PATH launcher ANYWHERE"
 # The real-home snapshot alone cannot prove this: HOME is redirected, so a regression that
 # provisions `~/.local/bin/rf` from a non-default release root would write into the SANDBOX
@@ -593,7 +650,10 @@ say "Acceptance assertions (#274)"
 python3 - "$HEAD_SHA" "$UPGRADE_EXIT" "$STATUS1_EXIT" "$SANDBOX/upgrade.json" "$SANDBOX/status1.json" \
         "$SECOND_SHA" "$UPGRADE2_EXIT" "$ROLLBACK_EXIT" "$SANDBOX/upgrade2.json" \
         "$SANDBOX/status2.json" "$SANDBOX/rollback.json" "$SANDBOX/status3.json" \
-        "$STATUS2_EXIT" "$STATUS3_EXIT" <<'ASSERT'
+        "$STATUS2_EXIT" "$STATUS3_EXIT" \
+        "$STALE_EXIT" "$SANDBOX/stale-upgrade.json" \
+        "$DIRTY_EXIT" "$SANDBOX/dirty-upgrade.json" \
+        "$REBUILD_EXIT" "$SANDBOX/rebuild-upgrade.json" <<'ASSERT'
 import json
 import sys
 
@@ -601,6 +661,9 @@ head, upgrade_exit, status_exit, upgrade_path, status_path = sys.argv[1:6]
 second, upgrade2_exit, rollback_exit = sys.argv[6:9]
 upgrade2_path, status2_path, rollback_path, status3_path = sys.argv[9:13]
 status2_exit, status3_exit = sys.argv[13:15]
+stale_exit, stale_path = sys.argv[15:17]
+dirty_exit, dirty_path = sys.argv[17:19]
+rebuild_exit, rebuild_path = sys.argv[19:21]
 failures = []
 
 
@@ -663,6 +726,21 @@ want("status3.desired_commit", status3.get("desired_commit"), head)
 want("status3.observed_commit", status3.get("observed_commit"), head)
 want("status3.activation_converged", status3.get("activation_converged"), True)
 want("status3.incomplete_activation", status3.get("incomplete_activation"), None)
+
+# --- stale contract: refused before activation, release retained, current unmoved (#367)
+stale_text = open(stale_path, encoding="utf-8").read()
+want("stale upgrade exit", stale_exit, "2")
+want("stale refused with the typed error", "RELEASE_CONTRACT_IDENTITY_MISMATCH" in stale_text, True)
+dirty_text = open(dirty_path, encoding="utf-8").read()
+want("dirty upgrade exit", dirty_exit, "2")
+want("dirty refused", "WORKTREE_DIRTY" in dirty_text, True)
+# --- rebuild from the clean clone: the reviewed head re-activates and health-verifies
+rebuild = load(rebuild_path)
+want("rebuild exit", rebuild_exit, "0")
+want("rebuild.status", rebuild.get("status"), "activated")
+want("rebuild.converged", rebuild.get("converged"), True)
+want("rebuild.active_sha", rebuild.get("active_sha"), head)
+want("rebuild.observed_sha", rebuild.get("observed_sha"), head)
 
 if failures:
     print("\033[31m✗ acceptance assertions failed:\033[0m")

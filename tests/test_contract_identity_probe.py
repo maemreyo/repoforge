@@ -9,12 +9,16 @@ structured comparison the release smoke tester runs inside the candidate.
 
 from __future__ import annotations
 
+import pytest
+
 from repoforge.contracts import generated_contract_identity
 from repoforge.contracts.registry import (
     contract_identity_digest,
     release_contract_probe,
     render_contract_identity_artifact,
+    validate_generated_contract_identity,
 )
+from repoforge.domain.errors import ConfigError
 
 
 def test_probe_reports_agreement_when_packaged_matches_the_registry() -> None:
@@ -41,6 +45,28 @@ def test_probe_detects_a_stale_packaged_identity(monkeypatch) -> None:
 
     assert probe["agreement"] is False
     assert probe["mismatched_fields"] == ["input_contract_digest"]
+
+
+def test_probe_detects_a_stale_schema_bundle_digest(monkeypatch) -> None:
+    """A stale `tool-schemas-v2.json` is the packaged schema-bundle digest drifting."""
+    stale = dict(generated_contract_identity.CONTRACT_IDENTITY)
+    stale["tool_schema_bundle_digest"] = "1" * 64
+    monkeypatch.setattr(generated_contract_identity, "CONTRACT_IDENTITY", stale)
+
+    probe = release_contract_probe()
+
+    assert probe["agreement"] is False
+    assert probe["mismatched_fields"] == ["tool_schema_bundle_digest"]
+
+
+def test_serve_probe_validation_fails_closed_on_stale_packaged(monkeypatch) -> None:
+    """The serve-time check (and the supervisor preflight) rejects the packaged drift."""
+    stale = dict(generated_contract_identity.CONTRACT_IDENTITY)
+    stale["output_contract_digest"] = "2" * 64
+    monkeypatch.setattr(generated_contract_identity, "CONTRACT_IDENTITY", stale)
+
+    with pytest.raises(ConfigError, match="CONTRACT_ARTIFACT_MISMATCH"):
+        validate_generated_contract_identity()
 
 
 def test_identity_digest_is_stable_and_field_sensitive() -> None:
