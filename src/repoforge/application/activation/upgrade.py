@@ -44,6 +44,13 @@ DEFAULT_HEALTH_INTERVAL_SECONDS = 5.0
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 3
 _RECEIPT_ID_ATTEMPTS = 8
 RECONCILE_COMMAND = "rf upgrade reconcile"
+#: The ONLY failure dispositions `reconcile --repair rollback` may authorize: the
+#: release's own contract identity diverged, so the runtime is deterministically
+#: fail-closed. Anything else (tunnel, worker, handoff, transient) needs its own
+#: investigation -- repair is destructive, so it never acts on a guess (#420).
+_REPAIR_ALLOWLISTED_ERRORS = frozenset(
+    {"CONTRACT_ARTIFACT_MISMATCH", "RELEASE_CONTRACT_IDENTITY_MISMATCH"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,14 +357,27 @@ class UpgradeService:
                 "journal does not describe the live state"
             )
         observed = self._observer.observe()
-        if observed.phase not in {"failed", "fail_closed"} or observed.last_error_code is None:
+        if (
+            observed.phase != "fail_closed"
+            or observed.last_error_code not in _REPAIR_ALLOWLISTED_ERRORS
+            or observed.fail_closed_since is None
+        ):
             raise ConfigError(
-                "ACTIVATION_NOT_REPAIRABLE: the runtime is not in a typed non-retryable "
-                f"failure (phase={observed.phase}, "
-                f"error={observed.last_error_code or 'none'}). Repair rollback only "
-                "applies to a release that provably failed closed; a healthy runtime "
-                "should be reconciled forward, and a stopped one rolled back directly "
-                "with `rf upgrade rollback`."
+                "ACTIVATION_NOT_REPAIRABLE: the runtime is not provably fail-closed on "
+                f"a deterministic contract failure (phase={observed.phase}, "
+                f"error={observed.last_error_code or 'none'}, "
+                f"fail_closed_since={observed.fail_closed_since or 'none'}). Repair "
+                "rollback only applies to a release whose packaged contract identity "
+                "diverged from its registry; a healthy runtime should be reconciled "
+                "forward, and any other failure needs its own investigation before "
+                "`current` moves."
+            )
+        if observed.running_release_sha != to_sha:
+            raise ConfigError(
+                "ACTIVATION_NOT_REPAIRABLE: the live runtime is serving "
+                f"{observed.running_release_sha}, not the journal target {to_sha}; the "
+                "failure this journal describes does not match what is running, so "
+                "repair would move the wrong pointer"
             )
         if self._store.previous_sha() != from_sha:
             raise ConfigError(
