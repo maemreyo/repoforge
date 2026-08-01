@@ -16,7 +16,10 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ...adapters.persistence import JsonExecutionWorkerBindingStore
 
 from repoforge import __version__
 
@@ -79,6 +82,7 @@ from ...bootstrap import (
     build_auth_command_dependencies,
     build_configuration_store,
     build_dev_runtime_service,
+    build_execution_worker_binding_store,
     build_execution_worker_report_section,
     build_lock_manager,
     build_metrics_sink,
@@ -1505,8 +1509,72 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
     }
 
 
+def _pid_is_live(pid: object) -> bool:
+    """Is the described process still present? Best-effort, for quarantine warnings."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    from ...adapters.runtime.state_store import process_identity
+
+    return process_identity(pid) is not None
+
+
+def _worker_registry_store(args: argparse.Namespace) -> JsonExecutionWorkerBindingStore:
+    config_path = Path(args.config).expanduser().resolve()
+    state_root = _state_root(config_path)
+    return build_execution_worker_binding_store(state_root)
+
+
+def _worker_registry_verdict(store: JsonExecutionWorkerBindingStore) -> dict[str, object]:
+    page = store.list_page()
+    return {
+        "scan_complete": page.scan_complete,
+        "active_records": len(page.records),
+        "unreadable_record_ids": list(page.unreadable_ids),
+        "quarantined_count": len(store.list_quarantined()),
+        "restart_permitted": page.scan_complete and not page.unreadable_ids,
+    }
+
+
+def _worker_registry_command(args: argparse.Namespace) -> int:
+    """`rf runtime worker-registry inspect|quarantine|reconcile` (#424)."""
+    store = _worker_registry_store(args)
+    command = getattr(args, "worker_registry_command", None)
+    if command == "inspect":
+        info = store.inspect_record(args.record_id)
+        if info is None:
+            raise ConfigError(f"WORKER_REGISTRY_RECORD_NOT_FOUND: {args.record_id}")
+        info["live_process"] = _pid_is_live(info.get("pid"))
+        _json(info)
+        return 0
+    if command == "quarantine":
+        info = store.inspect_record(args.record_id)
+        if info is None:
+            raise ConfigError(f"WORKER_REGISTRY_RECORD_NOT_FOUND: {args.record_id}")
+        pid = info.get("pid")
+        if isinstance(pid, int) and not getattr(args, "force", False) and _pid_is_live(pid):
+            raise ConfigError(
+                "WORKER_REGISTRY_QUARANTINE_REFUSED: the record describes a live "
+                f"process (pid {pid}); quarantining it would untrack a worker that "
+                "may still hold locks. Re-run with --force only after the process "
+                "is confirmed gone."
+            )
+        reason = getattr(args, "reason", "") or "operator-initiated quarantine"
+        receipt = store.quarantine_record(args.record_id, reason=reason)
+        if receipt is None:
+            raise ConfigError(f"WORKER_REGISTRY_RECORD_NOT_FOUND: {args.record_id}")
+        _json({"quarantine": receipt.to_dict(), "registry": _worker_registry_verdict(store)})
+        return 0
+    if command == "reconcile":
+        verdict = _worker_registry_verdict(store)
+        _json(verdict)
+        return 0 if verdict["restart_permitted"] else 1
+    raise ConfigError(f"WORKER_REGISTRY_COMMAND_UNKNOWN: {command}")
+
+
 def _runtime_command(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
+    if args.runtime_command == "worker-registry":
+        return _worker_registry_command(args)
     if args.runtime_command in {"start", "reload", "restart"}:
         _require_managed_runtime_configuration(config_path)
     store = _ensure_generation(config_path)
@@ -2393,6 +2461,27 @@ def build_parser() -> argparse.ArgumentParser:
                     "start after a reboot."
                 ),
             )
+    worker_registry = runtime_sub.add_parser(
+        "worker-registry",
+        help=(
+            "Inspect or quarantine execution-worker registry records, or re-check "
+            "whether the registry evidence would permit a runtime replacement."
+        ),
+    )
+    worker_registry_sub = worker_registry.add_subparsers(
+        dest="worker_registry_command", required=True
+    )
+    worker_registry_inspect = worker_registry_sub.add_parser("inspect")
+    worker_registry_inspect.add_argument("record_id")
+    worker_registry_quarantine = worker_registry_sub.add_parser("quarantine")
+    worker_registry_quarantine.add_argument("record_id")
+    worker_registry_quarantine.add_argument("--reason", default="")
+    worker_registry_quarantine.add_argument(
+        "--force",
+        action="store_true",
+        help="Quarantine even when the record describes a live process (operator override).",
+    )
+    worker_registry_sub.add_parser("reconcile")
     version = commands.add_parser("version")
     version_sub = version.add_subparsers(dest="version_command", required=True)
     for version_command in ("status", "list"):

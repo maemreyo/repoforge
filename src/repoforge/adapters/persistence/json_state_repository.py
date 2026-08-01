@@ -421,3 +421,28 @@ class JsonStateRepository(Generic[T]):
         safe_id = self._record_id(record_id)
         with self._files.locked(safe_id, operation="delete"):
             self._files.delete_bytes(safe_id)
+
+    def move_to_quarantine(self, record_id: str) -> Path:
+        """Move a record's raw file into a private sibling quarantine dir; never deletes.
+
+        Used by the worker-registry repair workflow (#424): an unreadable or selected
+        record is set aside with its bytes intact -- never destroyed -- so the operator
+        can still prove what it described. The quarantine dir is
+        ``<state_root>/<collection>-quarantine``; returns the target path even when the
+        source was already gone (callers check the source first to distinguish).
+        """
+        safe_id = self._record_id(record_id)
+        source = self._path(safe_id)
+        quarantine_root = source.parent.parent / f"{self.collection}-quarantine"
+        quarantine_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = quarantine_root / source.name
+        with self._files.locked(safe_id, operation="quarantine"):
+            if not source.is_file():
+                return target
+            data = self._files.read_bytes(safe_id)
+            if data is None:
+                return target
+            target.write_bytes(data)
+            os.chmod(target, 0o600)
+            source.unlink()
+        return target

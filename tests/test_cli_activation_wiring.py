@@ -215,3 +215,118 @@ def test_an_upgrade_that_ended_in_a_rollback_does_not_exit_zero(
 
     assert cli_module.main(["upgrade", "--activate", "--watch"]) == 1
     capsys.readouterr()
+
+
+def test_runtime_worker_registry_inspect_and_reconcile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`rf runtime worker-registry inspect|reconcile` reports durable evidence (#424)."""
+    import json
+
+    from repoforge.adapters.persistence import JsonExecutionWorkerBindingStore
+    from repoforge.domain.execution_worker import ExecutionWorkerBinding
+    from repoforge.testing import InMemoryLockManager
+
+    state_root = tmp_path / "state"
+    store = JsonExecutionWorkerBindingStore(state_root, InMemoryLockManager())
+    store.put(
+        ExecutionWorkerBinding(
+            worker_id="worker-0123456789ab",
+            pid=4242,
+            pgid=4242,
+            process_start_token="t",
+            generation=1,
+            release_sha=None,
+            supervisor_pid=1,
+            supervisor_process_identity="a" * 64,
+            correlation_id="c" * 24,
+            started_at="2026-07-29T09:26:21+00:00",
+            state="running",
+        )
+    )
+
+    cli_module = importlib.import_module("repoforge.interfaces.cli.main")
+    monkeypatch.setattr(cli_module, "_state_root", lambda config_path=None: state_root)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REPOFORGE_CONFIG", str(tmp_path / "config.toml"))
+
+    exit_code = cli_module.main(["runtime", "worker-registry", "inspect", "worker-0123456789ab"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["worker_id"] == "worker-0123456789ab"
+    assert payload["parseable"] is True
+    assert payload["pid"] == 4242
+    assert payload["live_process"] is False
+
+    exit_code = cli_module.main(["runtime", "worker-registry", "reconcile"])
+    assert exit_code == 0
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["scan_complete"] is True
+    assert verdict["restart_permitted"] is True
+    assert verdict["unreadable_record_ids"] == []
+
+
+def test_runtime_worker_registry_quarantine_refuses_a_live_pid_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Quarantining a record whose process still lives needs the explicit --force (#424)."""
+    import json
+    import os
+
+    from repoforge.adapters.persistence import JsonExecutionWorkerBindingStore
+    from repoforge.domain.execution_worker import ExecutionWorkerBinding
+    from repoforge.testing import InMemoryLockManager
+
+    state_root = tmp_path / "state"
+    store = JsonExecutionWorkerBindingStore(state_root, InMemoryLockManager())
+    store.put(
+        ExecutionWorkerBinding(
+            worker_id="worker-0123456789ab",
+            pid=os.getpid(),
+            pgid=os.getpid(),
+            process_start_token="t",
+            generation=1,
+            release_sha=None,
+            supervisor_pid=1,
+            supervisor_process_identity="a" * 64,
+            correlation_id="c" * 24,
+            started_at="2026-07-29T09:26:21+00:00",
+            state="running",
+        )
+    )
+
+    cli_module = importlib.import_module("repoforge.interfaces.cli.main")
+    monkeypatch.setattr(cli_module, "_state_root", lambda config_path=None: state_root)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("REPOFORGE_CONFIG", str(tmp_path / "config.toml"))
+
+    refused = cli_module.main(
+        [
+            "runtime",
+            "worker-registry",
+            "quarantine",
+            "worker-0123456789ab",
+            "--reason",
+            "repair",
+        ]
+    )
+    assert refused != 0
+    error = json.loads(capsys.readouterr().out)
+    assert "WORKER_REGISTRY_QUARANTINE_REFUSED" in str(error)
+    assert store.get("worker-0123456789ab") is not None
+
+    forced = cli_module.main(
+        [
+            "runtime",
+            "worker-registry",
+            "quarantine",
+            "worker-0123456789ab",
+            "--reason",
+            "repair",
+            "--force",
+        ]
+    )
+    assert forced == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["quarantine"]["worker_id"] == "worker-0123456789ab"
+    assert store.get("worker-0123456789ab") is None

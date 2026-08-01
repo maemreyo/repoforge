@@ -8,15 +8,21 @@ of them needs its own identity record.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ...domain.durable_state import SchemaVersion, StateCodec
+from ...domain.errors import RepoForgeError
 from ...domain.execution_worker import (
     EXECUTION_WORKER_BINDING_SCHEMA_VERSION,
     ExecutionWorkerBinding,
+    ExecutionWorkerQuarantineReceipt,
     execution_worker_binding_from_payload,
     execution_worker_binding_payload,
     validate_execution_worker_binding,
+    validate_execution_worker_quarantine_receipt,
 )
 from ...ports.execution_worker_store import ExecutionWorkerBindingPage
 from ...ports.locking import LockManager
@@ -107,3 +113,108 @@ class JsonExecutionWorkerBindingStore:
             scan_complete=not page.scan_truncated,
             unreadable_ids=page.unreadable_record_ids,
         )
+
+    @property
+    def quarantine_root(self) -> Path:
+        return self._records.root.parent / "runtime-execution-workers-quarantine"
+
+    def inspect_record(self, worker_id: str) -> dict[str, object] | None:
+        """Bounded evidence about one registry file, or None when it does not exist.
+
+        Works for unreadable files too: the raw bytes are read directly (bounded),
+        the sha256 is reported, and pid/state are recovered only when the envelope is
+        parseable -- so the operator can still prove whether the described process
+        lives before quarantining (#424).
+        """
+        return self._probe_record(worker_id)
+
+    def quarantine_record(
+        self, worker_id: str, *, reason: str
+    ) -> ExecutionWorkerQuarantineReceipt | None:
+        """Move one registry file into the private quarantine with a durable receipt.
+
+        Never deletes: the bytes are moved (under the record lock) to the quarantine
+        directory and a receipt records where they went, the content digest, why, and
+        the pid they described when the metadata was parseable (#424).
+        """
+        info = self._probe_record(worker_id)
+        if info is None:
+            return None
+        safe_id = str(info["worker_id"])
+        target = self._records.move_to_quarantine(safe_id)
+        raw_pid = info["pid"]
+        receipt = ExecutionWorkerQuarantineReceipt(
+            worker_id=safe_id,
+            quarantine_path=str(target),
+            digest=str(info["sha256"]),
+            reason=reason,
+            quarantined_at=datetime.now(timezone.utc).isoformat(),
+            pid=raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else None,
+            parseable=bool(info["parseable"]),
+        )
+        validate_execution_worker_quarantine_receipt(receipt)
+        receipt_path = target.parent / f"{safe_id}.receipt.json"
+        receipt_path.write_text(
+            json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return receipt
+
+    def list_quarantined(self) -> tuple[ExecutionWorkerQuarantineReceipt, ...]:
+        """Every durable quarantine receipt, oldest first."""
+        if not self.quarantine_root.is_dir():
+            return ()
+        receipts: list[ExecutionWorkerQuarantineReceipt] = []
+        for path in sorted(self.quarantine_root.glob("*.receipt.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                pid = raw.get("pid")
+                receipt = ExecutionWorkerQuarantineReceipt(
+                    worker_id=str(raw["worker_id"]),
+                    quarantine_path=str(raw["quarantine_path"]),
+                    digest=str(raw["digest"]),
+                    reason=str(raw["reason"]),
+                    quarantined_at=str(raw["quarantined_at"]),
+                    pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+                    parseable=bool(raw.get("parseable")),
+                )
+                validate_execution_worker_quarantine_receipt(receipt)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            receipts.append(receipt)
+        return tuple(receipts)
+
+    def _probe_record(self, worker_id: str) -> dict[str, object] | None:
+        safe_id = validate_execution_worker_id(worker_id)
+        path = self._records.root / f"{safe_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise RepoForgeError(f"Cannot read state record {path.name}") from exc
+        digest = hashlib.sha256(data).hexdigest()
+        info: dict[str, object] = {
+            "worker_id": safe_id,
+            "path": str(path),
+            "bytes": len(data),
+            "sha256": digest,
+            "parseable": False,
+            "pid": None,
+            "state": None,
+        }
+        try:
+            envelope = self._records.read_raw_envelope(safe_id)
+        except RepoForgeError:
+            envelope = None
+        if envelope is not None:
+            payload = envelope.get("payload")
+            if isinstance(payload, dict):
+                raw_pid = payload.get("pid")
+                raw_state = payload.get("state")
+                if isinstance(raw_pid, int) and not isinstance(raw_pid, bool):
+                    info["pid"] = raw_pid
+                if isinstance(raw_state, str):
+                    info["state"] = raw_state
+                info["parseable"] = True
+        return info
