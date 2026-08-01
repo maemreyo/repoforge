@@ -118,6 +118,11 @@ class JsonRuntimeStore:
                 last_restart_at=(
                     str(raw["last_restart_at"]) if raw.get("last_restart_at") is not None else None
                 ),
+                fail_closed_since=(
+                    str(raw["fail_closed_since"])
+                    if raw.get("fail_closed_since") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"Invalid runtime state fields in {self.path}: {exc}") from exc
