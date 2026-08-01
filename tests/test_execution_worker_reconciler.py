@@ -9,6 +9,8 @@ be proven.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from repoforge.adapters.subprocess.process_tree import ProcessIdentity
 from repoforge.application.runtime.execution_worker_reconciler import (
     ExecutionWorkerReclamationReport,
@@ -31,6 +33,7 @@ def _binding(
     release_sha: str | None = _RELEASE,
     supervisor_pid: int = 4241,
     token: str | None = "worker-start-token",
+    state: str = "running",
 ) -> ExecutionWorkerBinding:
     return ExecutionWorkerBinding(
         worker_id=worker_id,
@@ -43,20 +46,39 @@ def _binding(
         supervisor_process_identity=_SHA,
         correlation_id="c" * 24,
         started_at="2026-07-29T09:26:21+00:00",
-        state="running",
+        state=state,
     )
 
 
 class _Bindings:
-    def __init__(self, *bindings: ExecutionWorkerBinding) -> None:
+    def __init__(
+        self,
+        *bindings: ExecutionWorkerBinding,
+        scan_complete: bool = True,
+        unreadable_ids: tuple[str, ...] = (),
+    ) -> None:
         self.records = {binding.worker_id: binding for binding in bindings}
         self.states: dict[str, list[str]] = {}
+        self.scan_complete = scan_complete
+        self.unreadable_ids = unreadable_ids
 
     def put(self, binding: ExecutionWorkerBinding) -> None:
         self.records[binding.worker_id] = binding
 
     def get(self, worker_id: str) -> ExecutionWorkerBinding | None:
         return self.records.get(worker_id)
+
+    def list_page(self, *, max_records: int = 2_000):
+        del max_records
+        from repoforge.application.runtime.execution_worker_reconciler import (
+            ExecutionWorkerBindingPage,
+        )
+
+        return ExecutionWorkerBindingPage(
+            records=tuple(self.records.values()),
+            scan_complete=self.scan_complete,
+            unreadable_ids=self.unreadable_ids,
+        )
 
     def update_state(self, worker_id: str, state: str) -> ExecutionWorkerBinding | None:
         self.states.setdefault(worker_id, []).append(state)
@@ -143,6 +165,7 @@ def _reconciler(
     owner: _Owner,
     command_lines: _CommandLines,
     tokens: _Tokens,
+    group_gone=None,
 ) -> ExecutionWorkerReconciler:
     return ExecutionWorkerReconciler(
         bindings=bindings,
@@ -150,6 +173,7 @@ def _reconciler(
         owner_identity_reader=owner,
         command_line_reader=command_lines,
         identity_reader=tokens,
+        process_group_gone=group_gone,
     )
 
 
@@ -397,3 +421,173 @@ def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
         assert spawner.is_alive(child) is False
     finally:
         spawner.terminate(child, grace_seconds=3)
+
+
+def test_reconcile_skips_terminal_state_bindings() -> None:
+    """Only `running` bindings are live concerns; terminal ones are history (#420)."""
+    bindings = _Bindings(
+        _binding(state="reclaimed"),
+        _binding(worker_id=_WORKER_OTHER, pid=5252, state="already_gone"),
+    )
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV, 5252: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token", 5252: "worker-start-token"}),
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.inspected == 0
+    assert report.reclaimed == 0
+    assert reaper.calls == []
+
+
+def test_reconcile_never_reaps_a_tokenless_binding() -> None:
+    """A binding without a start token can never prove PID-reuse safety (#420)."""
+    bindings = _Bindings(_binding(token=None))
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+        group_gone=lambda pgid: False,
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.refused_unproven == 1
+    assert report.possibly_alive_unproven == 1
+    assert reaper.calls == []
+    assert bindings.records[_WORKER].state == "refused_unproven"
+
+
+def test_reconcile_marks_provably_gone_unclassified_as_already_gone() -> None:
+    """An unclassifiable worker whose process AND group are proven gone is safe (#420)."""
+    bindings = _Bindings(_binding())
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: None}),
+        tokens=_Tokens({4242: None}),
+        group_gone=lambda pgid: True,
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.already_gone == 1
+    assert report.possibly_alive_unproven == 0
+    assert reaper.calls == []
+
+
+def test_reconcile_reports_possibly_alive_unproven() -> None:
+    """An unclassifiable worker that may still run must be flagged, not ignored (#420)."""
+    bindings = _Bindings(_binding())
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: None}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+        group_gone=lambda pgid: False,
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.refused_unproven == 1
+    assert report.possibly_alive_unproven == 1
+    assert reaper.calls == []
+
+
+def test_reconcile_reports_an_incomplete_registry_scan() -> None:
+    bindings = _Bindings(_binding(), scan_complete=False)
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.scan_complete is False
+
+
+def test_restarter_blocks_on_possibly_alive_unproven() -> None:
+    """Not killing is not safety: an unproven worker blocks the replacement start."""
+    from repoforge.adapters.activation.build import SupervisorRestarter
+
+    class _Reconciler:
+        def reconcile(self, *, departing_releases=frozenset()):
+            del departing_releases
+            return ExecutionWorkerReclamationReport(
+                inspected=1,
+                reclaimed=0,
+                already_gone=0,
+                refused_unproven=1,
+                survived_kill=0,
+                possibly_alive_unproven=1,
+                scan_complete=True,
+                worker_ids=(_WORKER,),
+                pids=(4242,),
+                release_shas=(_RELEASE,),
+                detail="worker identity unproven",
+            )
+
+    restarter = SupervisorRestarter(
+        control=None,
+        runtime=None,
+        launcher=None,
+        config_path=Path("/tmp/config.toml"),
+        correlation_id="c" * 24,
+        worker_reconciler=_Reconciler(),
+    )
+    ok, detail, evidence = restarter._reclaim_departing(_RELEASE)
+
+    assert ok is False
+    assert "STALE_EXECUTION_WORKER_IDENTITY_UNPROVEN" in detail
+    assert evidence is not None and evidence["possibly_alive_unproven"] == 1
+
+
+def test_restarter_blocks_on_an_incomplete_scan() -> None:
+    from repoforge.adapters.activation.build import SupervisorRestarter
+
+    class _Reconciler:
+        def reconcile(self, *, departing_releases=frozenset()):
+            del departing_releases
+            return ExecutionWorkerReclamationReport(
+                inspected=0,
+                reclaimed=0,
+                already_gone=0,
+                refused_unproven=0,
+                survived_kill=0,
+                possibly_alive_unproven=0,
+                scan_complete=False,
+                worker_ids=(),
+                pids=(),
+                release_shas=(),
+                detail="scan truncated",
+            )
+
+    restarter = SupervisorRestarter(
+        control=None,
+        runtime=None,
+        launcher=None,
+        config_path=Path("/tmp/config.toml"),
+        correlation_id="c" * 24,
+        worker_reconciler=_Reconciler(),
+    )
+    ok, detail, evidence = restarter._reclaim_departing(_RELEASE)
+
+    assert ok is False
+    assert "EXECUTION_WORKER_REGISTRY_SCAN_INCOMPLETE" in detail
+    assert evidence is not None and evidence["scan_complete"] is False
