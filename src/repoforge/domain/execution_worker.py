@@ -41,6 +41,19 @@ class ExecutionWorkerBinding:
     started_at: str
     state: str
 
+    @property
+    def child_pid(self) -> int:
+        """Alias for the reaper's structural process-group contract (#368)."""
+        return self.pid
+
+    @property
+    def child_pgid(self) -> int:
+        return self.pgid
+
+    @property
+    def child_start_token(self) -> str | None:
+        return self.process_start_token
+
 
 def _require(value: object, name: str) -> object:
     if not isinstance(value, str) or not value:

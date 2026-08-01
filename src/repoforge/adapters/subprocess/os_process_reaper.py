@@ -18,8 +18,7 @@ import signal
 import time
 from collections.abc import Callable
 
-from ...domain.operation_worker import OperationWorkerBinding
-from ...ports.process_reaper import ReapOutcome
+from ...ports.process_reaper import ProcessGroupTarget, ReapOutcome
 from .process_tree import ProcessIdentity, group_has_live_member, read_identity
 
 
@@ -59,7 +58,7 @@ class OsProcessReaper:
         identity = self._identity_reader(pid)
         return identity.start_token if identity is not None else None
 
-    def _gone(self, binding: OperationWorkerBinding) -> bool:
+    def _gone(self, binding: ProcessGroupTarget) -> bool:
         """Report whether nothing in the bound group can still execute.
 
         `killpg(pgid, 0)` succeeds for a group whose members have all stopped and
@@ -79,7 +78,7 @@ class OsProcessReaper:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             self._killpg(pgid, sig)
 
-    def reap(self, binding: OperationWorkerBinding) -> ReapOutcome:
+    def reap(self, binding: ProcessGroupTarget) -> ReapOutcome:
         current = self._identity_reader(binding.child_pid)
         group_exists = self._group_exists(binding.child_pgid)
         if current is None:
