@@ -63,6 +63,10 @@ class _Smoke:
 
 
 class _Restarter:
+    def preflight_reclaim(self, departing_release: str | None = None):
+        del departing_release
+        return True, "", None
+
     def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         return RestartOutcome(ok=True, detail="fake restart", pid=99)
 

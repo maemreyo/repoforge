@@ -84,12 +84,24 @@ class _Restarter:
         ok: bool = True,
         serving: list[str] | None = None,
         reclamation: dict[str, object] | None = None,
+        preflight_ok: bool = True,
     ) -> None:
         self._ok = ok
         self.calls = 0
+        self.preflight_calls = 0
         self.serving = serving
         self.departing_releases: list[str | None] = []
         self._reclamation = reclamation
+        self._preflight_ok = preflight_ok
+
+    def preflight_reclaim(self, departing_release: str | None = None):
+        del departing_release
+        self.preflight_calls += 1
+        return (
+            self._preflight_ok,
+            "fake preflight detail" if not self._preflight_ok else "",
+            None,
+        )
 
     def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         self.calls += 1
@@ -335,6 +347,47 @@ def test_rollback_passes_the_current_release_as_departing(tmp_path: Path) -> Non
     second.rollback()
 
     assert restarter.departing_releases[-1] == "2222bbb"
+
+
+def test_activation_preflight_failure_aborts_without_swapping_or_restarting(
+    tmp_path: Path,
+) -> None:
+    """A handoff that cannot proceed is refused before `current` moves or the runtime stops."""
+    service, store, restarter = _service(tmp_path, restarter=_Restarter(preflight_ok=False))
+
+    with pytest.raises(ConfigError, match="ACTIVATION_PREFLIGHT_FAILED"):
+        service.upgrade(tmp_path, activate=True)
+
+    assert store.current_sha() is None
+    assert store.read_in_flight_activation() is None
+    assert restarter.calls == 0
+    assert restarter.preflight_calls == 1
+
+
+def test_rollback_preflight_failure_aborts_without_swapping_current(tmp_path: Path) -> None:
+    """A rollback whose reclamation cannot proceed is refused while `current` still serves."""
+
+    class _FailingLaterRestarter(_Restarter):
+        def preflight_reclaim(self, departing_release: str | None = None):
+            self.preflight_calls += 1
+            if self.preflight_calls > 1:
+                return False, "fake preflight detail", None
+            return True, "", None
+
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    restarter = _FailingLaterRestarter()
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store, restarter=restarter)
+    second.upgrade(tmp_path, activate=True)
+    assert store.current_sha() == "2222bbb"
+
+    with pytest.raises(ConfigError, match="ROLLBACK_PREFLIGHT_FAILED"):
+        second.rollback()
+
+    assert store.current_sha() == "2222bbb"
+    # The rollback added no restart: `current` stayed put and the runtime kept serving.
+    assert restarter.calls == 1
+    assert restarter.preflight_calls == 2
 
 
 def test_activation_receipt_records_worker_reclamation(tmp_path: Path) -> None:

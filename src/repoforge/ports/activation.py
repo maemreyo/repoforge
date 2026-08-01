@@ -138,7 +138,18 @@ class RuntimeRestarter(Protocol):
     reload -- the process must be replaced. Implementations stop the running
     supervisor and start it again through the stable launcher, reclaiming execution
     workers of the departing release first (#368).
+
+    ``preflight_reclaim`` is the read-only handoff check (#424): it must answer
+    whether the reclamation can proceed (registry evidence complete, no possibly
+    alive unproven worker, no survived kill) WITHOUT stopping anything, so a caller
+    can refuse a switch/rollback while the healthy runtime keeps serving.
     """
+
+    def preflight_reclaim(
+        self, departing_release: str | None
+    ) -> tuple[bool, str, dict[str, object] | None]:
+        """Read-only handoff preflight: ``(ok, detail, evidence)`` with no side effects."""
+        ...
 
     def restart(self, *, departing_release: str | None = None) -> RestartOutcome: ...
 
