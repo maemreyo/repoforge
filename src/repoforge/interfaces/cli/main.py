@@ -2947,18 +2947,17 @@ def main(argv: list[str] | None = None) -> int:
                 result["execution_workers"] = worker_report
                 raw_stale = worker_report.get("stale_execution_worker_count", 0)
                 stale = raw_stale if isinstance(raw_stale, int) else 0
-                raw_unreadable = worker_report.get("unreadable_record_ids", ())
-                unreadable_ids = (
-                    tuple(raw_unreadable) if isinstance(raw_unreadable, (list, tuple)) else ()
-                )
-                unreadable = len(unreadable_ids)
+                raw_unreadable = worker_report.get("unreadable_record_count", 0)
+                unreadable = raw_unreadable if isinstance(raw_unreadable, int) else 0
+                raw_sample = worker_report.get("unreadable_record_ids_sample", ())
+                sample_ids = tuple(raw_sample) if isinstance(raw_sample, (list, tuple)) else ()
                 reclamation_safe = worker_report.get("reclamation_safe") is True
                 scan_complete = worker_report.get("scan_complete") is True
                 detail = str(worker_report.get("detail", ""))
                 if unreadable:
-                    bounded = ", ".join(unreadable_ids[:8])
-                    if unreadable > 8:
-                        bounded += f", +{unreadable - 8} more"
+                    bounded = ", ".join(sample_ids)
+                    if unreadable > len(sample_ids):
+                        bounded += f", +{unreadable - len(sample_ids)} more"
                     detail = f"{detail}; {unreadable} unreadable record(s): {bounded}"
                 worker_ok = stale == 0 and unreadable == 0 and reclamation_safe and scan_complete
                 result["checks"].append(

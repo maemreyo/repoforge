@@ -210,9 +210,28 @@ def test_report_serializes_all_evidence_fields() -> None:
     assert payload["workers_by_release"] == {_RELEASE: [_WORKER]}
     assert payload["worker_pids"] == [4242]
     assert payload["locks_held"] == {_WORKER: ["runtime-single-instance.lock"]}
-    assert payload["unreadable_record_ids"] == []
+    assert payload["unreadable_record_count"] == 0
+    assert payload["unreadable_record_ids_sample"] == []
+    assert payload["unreadable_record_ids_truncated"] is False
     assert payload["orphaned_group_without_leader"] == []
     assert payload["containment_unproven"] is False
+
+
+def test_report_bounds_unreadable_ids_in_the_json_payload(tmp_path) -> None:
+    """The doctor payload carries a count + ≤8 sample, never the full id list (#424)."""
+    ids = tuple(f"worker-bad-{i}" for i in range(2_000))
+    report = _report(
+        bindings=_Bindings(unreadable_ids=ids),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+    )
+    payload = report.as_dict()
+    assert payload["unreadable_record_count"] == 2_000
+    assert len(payload["unreadable_record_ids_sample"]) == 8
+    assert payload["unreadable_record_ids_truncated"] is True
+    assert report.reclamation_safe is False
 
 
 def test_report_does_not_show_terminal_bindings_as_stale(tmp_path) -> None:

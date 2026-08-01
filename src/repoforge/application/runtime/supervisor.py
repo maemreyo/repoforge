@@ -602,7 +602,11 @@ class RuntimeSupervisor:
                         or reclaim_report.possibly_alive_unproven > 0
                         or reclaim_report.survived_kill > 0
                     ):
-                        code = "STALE_EXECUTION_WORKER_RECLAMATION_UNCERTAIN"
+                        # Propagate the typed blocker so the fail-closed record stays
+                        # machine-actionable instead of one collapsed code (#424).
+                        code = (
+                            reclaim_report.blocker_code if reclaim_report is not None else None
+                        ) or "STALE_EXECUTION_WORKER_RECLAMATION_UNCERTAIN"
                         detail = (
                             "execution workers of a prior supervisor could not be proven reclaimed"
                             if reclaim_report is None
