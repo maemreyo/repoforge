@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..domain.operation_worker import OperationWorkerBinding
-
 
 @dataclass(frozen=True, slots=True)
 class ReapOutcome:
@@ -18,8 +16,24 @@ class ReapOutcome:
     detail: str
 
 
+class ProcessGroupTarget(Protocol):
+    """The process-group identity a reaper can prove and signal.
+
+    Satisfied structurally by both the operation worker binding and the execution
+    worker binding (#368), so one identity-guarded reaper serves both. Read-only:
+    reaping must never mutate the binding it is given.
+    """
+
+    @property
+    def child_pid(self) -> int: ...
+    @property
+    def child_pgid(self) -> int: ...
+    @property
+    def child_start_token(self) -> str | None: ...
+
+
 class ProcessReaper(Protocol):
-    def reap(self, binding: OperationWorkerBinding) -> ReapOutcome:
+    def reap(self, binding: ProcessGroupTarget) -> ReapOutcome:
         """Terminate the bound process group if it is still the same process.
 
         Implementations must fail closed on PID reuse: a recorded pid now held by

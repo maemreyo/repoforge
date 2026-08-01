@@ -9,11 +9,11 @@ be proven.
 
 from __future__ import annotations
 
+from repoforge.adapters.subprocess.process_tree import ProcessIdentity
 from repoforge.application.runtime.execution_worker_reconciler import (
     ExecutionWorkerReclamationReport,
     ExecutionWorkerReconciler,
 )
-
 from repoforge.domain.execution_worker import ExecutionWorkerBinding
 from repoforge.ports.process_reaper import ReapOutcome
 
@@ -99,21 +99,16 @@ class _CommandLines:
 
 
 class _Tokens:
-    """`read_identity(pid)` -> a ProcessIdentity-like with a start_token."""
+    """`read_identity(pid)` -> a ProcessIdentity carrying the start token."""
 
     def __init__(self, tokens: dict[int, str | None]) -> None:
         self.tokens = tokens
 
-    def __call__(self, pid: int) -> object | None:
+    def __call__(self, pid: int) -> ProcessIdentity | None:
         token = self.tokens.get(pid)
         if token is None:
             return None
-        return _Identity(token)
-
-
-class _Identity:
-    def __init__(self, start_token: str) -> None:
-        self.start_token = start_token
+        return ProcessIdentity(pid=pid, ppid=1, start_token=token)
 
 
 class _Reaper:
