@@ -113,6 +113,17 @@ def test_store_archives_and_removes_a_terminal_lease(tmp_path: Path) -> None:
     assert archived[0].terminated_at
 
 
+def test_archiving_an_already_terminal_lease_is_idempotent(tmp_path: Path) -> None:
+    """Re-running a terminal transition after the archive is a no-op, never a duplicate."""
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+    store.update_state(_WORKER_ID, "reclaimed")
+    assert store.get(_WORKER_ID) is None
+
+    assert store.update_state(_WORKER_ID, "already_gone") is None
+    assert len(store.list_archive()) == 1
+
+
 def test_collect_terminal_self_heals_pre_existing_terminal_leases(tmp_path: Path) -> None:
     """Terminal leases left by older releases are archived on the next collect (#424)."""
     store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
