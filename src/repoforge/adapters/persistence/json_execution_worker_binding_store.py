@@ -30,7 +30,7 @@ def validate_execution_worker_id(worker_id: str) -> str:
             worker_id=worker_id,
             pid=1,
             pgid=1,
-            process_start_token=None,
+            process_start_token="unused-id-check-token",
             generation=1,
             release_sha=None,
             supervisor_pid=1,

@@ -18,9 +18,16 @@ them before a new supervisor starts, proving each worker's identity first:
 Fail-closed policy (#420): an unclassifiable worker whose process AND group are
 provably gone is ``already_gone`` (safe); one that may still be running is
 ``refused_unproven`` and counted as ``possibly_alive_unproven`` so the caller can
-block starting a replacement -- not killing is not safety. An incomplete registry
-scan (``scan_complete=False``) is likewise a block, because an orphan past the scan
-limit would be invisible.
+block starting a replacement -- not killing is not safety. Incomplete evidence is
+likewise a block: an incomplete registry scan (``scan_complete=False``) or an
+unreadable registry record (``unreadable_record_ids``) can hide an orphan that is
+holding locks, so ``evidence_complete`` folds both into one fail-closed signal.
+
+Live concerns are not only ``running`` bindings: ``legacy_unproven`` (a pre-token
+record read back without a start token), ``refused_unproven`` and ``survived_kill``
+are re-evaluated each pass -- a process may still be running and holding locks, so
+a later pass that skipped them could start a replacement on unproven evidence.
+Terminal bindings (``reclaimed``, ``already_gone``) are history and never reaped.
 """
 
 from __future__ import annotations
@@ -52,7 +59,7 @@ CommandLineReader = Callable[[int], tuple[str, ...] | None]
 ProcessIdentityReader = Callable[[int], ProcessIdentityLike | None]
 ProcessGroupGoneReader = Callable[[int], bool]
 
-_ACTIVE_STATES = frozenset({"running"})
+_ACTIVE_STATES = frozenset({"running", "legacy_unproven", "refused_unproven", "survived_kill"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,10 +73,16 @@ class ExecutionWorkerReclamationReport:
     survived_kill: int
     possibly_alive_unproven: int
     scan_complete: bool
+    unreadable_record_ids: tuple[str, ...]
     worker_ids: tuple[str, ...]
     pids: tuple[int, ...]
     release_shas: tuple[str, ...]
     detail: str
+
+    @property
+    def evidence_complete(self) -> bool:
+        """Fail-closed evidence: an unreadable record hides an orphan like a truncation."""
+        return self.scan_complete and not self.unreadable_record_ids
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -80,6 +93,8 @@ class ExecutionWorkerReclamationReport:
             "survived_kill": self.survived_kill,
             "possibly_alive_unproven": self.possibly_alive_unproven,
             "scan_complete": self.scan_complete,
+            "unreadable_record_ids": list(self.unreadable_record_ids),
+            "evidence_complete": self.evidence_complete,
             "worker_ids": list(self.worker_ids),
             "pids": list(self.pids),
             "release_shas": list(self.release_shas),
@@ -162,12 +177,14 @@ class ExecutionWorkerReconciler:
             survived_kill=counts["survived_kill"],
             possibly_alive_unproven=possibly_alive_unproven,
             scan_complete=page.scan_complete,
+            unreadable_record_ids=page.unreadable_ids,
             worker_ids=tuple(worker_ids),
             pids=tuple(pids),
             release_shas=tuple(release_shas),
             detail=(
-                f"reconciled {inspected} running execution worker binding(s) "
-                f"(scan complete: {page.scan_complete}): {counts['reclaimed']} reclaimed, "
+                f"reconciled {inspected} live execution worker binding(s) "
+                f"(scan complete: {page.scan_complete}, unreadable records: "
+                f"{len(page.unreadable_ids)}): {counts['reclaimed']} reclaimed, "
                 f"{counts['already_gone']} already gone, {counts['refused_unproven']} "
                 f"refused unproven ({possibly_alive_unproven} possibly alive), "
                 f"{counts['survived_kill']} survived kill"

@@ -82,13 +82,15 @@ class _Bindings:
         self.states.setdefault(worker_id, []).append(state)
         if worker_id not in self.records:
             return None
+        from dataclasses import replace
+
         from repoforge.domain.execution_worker import (
             execution_worker_binding_from_payload,
             execution_worker_binding_payload,
         )
 
         updated = execution_worker_binding_from_payload(
-            execution_worker_binding_payload(self.records[worker_id]) | {"state": state}
+            execution_worker_binding_payload(replace(self.records[worker_id], state=state))
         )
         self.records[worker_id] = updated
         return updated
@@ -339,6 +341,7 @@ def test_report_serializes_the_reclamation_evidence() -> None:
         survived_kill=0,
         possibly_alive_unproven=1,
         scan_complete=True,
+        unreadable_record_ids=(),
         worker_ids=(_WORKER,),
         pids=(4242,),
         release_shas=(_RELEASE,),
@@ -349,6 +352,8 @@ def test_report_serializes_the_reclamation_evidence() -> None:
     assert payload["reclaimed"] == 1
     assert payload["possibly_alive_unproven"] == 1
     assert payload["scan_complete"] is True
+    assert payload["unreadable_record_ids"] == []
+    assert payload["evidence_complete"] is True
     assert payload["worker_ids"] == [_WORKER]
     assert payload["release_shas"] == [_RELEASE]
 
@@ -524,6 +529,67 @@ def test_reconcile_reports_an_incomplete_registry_scan() -> None:
     assert report.scan_complete is False
 
 
+def test_reconcile_flags_unreadable_records_as_incomplete_evidence() -> None:
+    """An unreadable registry record hides an orphan like a truncation does (#420)."""
+    bindings = _Bindings(
+        _binding(), scan_complete=True, unreadable_ids=("worker-bad-1", "worker-bad-2")
+    )
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.scan_complete is True
+    assert report.unreadable_record_ids == ("worker-bad-1", "worker-bad-2")
+    assert report.evidence_complete is False
+
+
+def test_reconcile_re_evaluates_a_refused_binding_that_is_still_alive() -> None:
+    """A previously refused worker that may still run blocks every later pass (#420)."""
+    bindings = _Bindings(_binding(state="refused_unproven", token=None))
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+        group_gone=lambda pgid: False,
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.possibly_alive_unproven == 1
+    assert report.evidence_complete is True
+    assert reaper.calls == []
+
+
+def test_reconcile_marks_a_refused_binding_whose_process_left_as_already_gone() -> None:
+    """A refused worker whose process AND group are now gone becomes already_gone."""
+    bindings = _Bindings(_binding(state="refused_unproven", token=None))
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: None}),
+        tokens=_Tokens({4242: None}),
+        group_gone=lambda pgid: True,
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.already_gone == 1
+    assert report.possibly_alive_unproven == 0
+    assert bindings.records[_WORKER].state == "already_gone"
+
+
 def test_restarter_blocks_on_possibly_alive_unproven() -> None:
     """Not killing is not safety: an unproven worker blocks the replacement start."""
     from repoforge.adapters.activation.build import SupervisorRestarter
@@ -539,6 +605,7 @@ def test_restarter_blocks_on_possibly_alive_unproven() -> None:
                 survived_kill=0,
                 possibly_alive_unproven=1,
                 scan_complete=True,
+                unreadable_record_ids=(),
                 worker_ids=(_WORKER,),
                 pids=(4242,),
                 release_shas=(_RELEASE,),
@@ -574,6 +641,7 @@ def test_restarter_blocks_on_an_incomplete_scan() -> None:
                 survived_kill=0,
                 possibly_alive_unproven=0,
                 scan_complete=False,
+                unreadable_record_ids=(),
                 worker_ids=(),
                 pids=(),
                 release_shas=(),
@@ -593,6 +661,44 @@ def test_restarter_blocks_on_an_incomplete_scan() -> None:
     assert ok is False
     assert "EXECUTION_WORKER_REGISTRY_SCAN_INCOMPLETE" in detail
     assert evidence is not None and evidence["scan_complete"] is False
+
+
+def test_restarter_blocks_on_unreadable_registry_records() -> None:
+    """An unreadable record is incomplete evidence: the replacement must not start."""
+    from repoforge.adapters.activation.build import SupervisorRestarter
+
+    class _Reconciler:
+        def reconcile(self, *, departing_releases=frozenset()):
+            del departing_releases
+            return ExecutionWorkerReclamationReport(
+                inspected=0,
+                reclaimed=0,
+                already_gone=0,
+                refused_unproven=0,
+                survived_kill=0,
+                possibly_alive_unproven=0,
+                scan_complete=True,
+                unreadable_record_ids=("worker-bad-1",),
+                worker_ids=(),
+                pids=(),
+                release_shas=(),
+                detail="registry contains unreadable records",
+            )
+
+    restarter = SupervisorRestarter(
+        control=None,
+        runtime=None,
+        launcher=None,
+        config_path=Path("/tmp/config.toml"),
+        correlation_id="c" * 24,
+        worker_reconciler=_Reconciler(),
+    )
+    ok, detail, evidence = restarter._reclaim_departing(_RELEASE)
+
+    assert ok is False
+    assert "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS" in detail
+    assert evidence is not None and evidence["unreadable_record_ids"] == ["worker-bad-1"]
+    assert evidence["evidence_complete"] is False
 
 
 def test_terminate_marks_reclaimed_only_after_confirmed_death(tmp_path) -> None:

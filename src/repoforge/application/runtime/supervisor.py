@@ -587,10 +587,10 @@ class RuntimeSupervisor:
                 # Reclaim execution workers whose owner supervisor is gone before
                 # spawning this supervisor's own worker (#368). This is NOT
                 # best-effort anymore: an unresolved worker (unproven identity that may
-                # still run, a SIGKILL survivor, or an incomplete registry scan) can
-                # hold the exact locks that deadlocked the last incident, so the
-                # supervisor fails closed in place rather than spawn a contending
-                # replacement (#420).
+                # still run, a SIGKILL survivor, an incomplete registry scan, or an
+                # unreadable registry record) can hold the exact locks that deadlocked
+                # the last incident, so the supervisor fails closed in place rather
+                # than spawn a contending replacement (#420).
                 if self._worker_reconciler is not None:
                     try:
                         reclaim_report = self._worker_reconciler.reconcile()
@@ -598,7 +598,7 @@ class RuntimeSupervisor:
                         reclaim_report = None
                     if (
                         reclaim_report is None
-                        or not reclaim_report.scan_complete
+                        or not reclaim_report.evidence_complete
                         or reclaim_report.possibly_alive_unproven > 0
                         or reclaim_report.survived_kill > 0
                     ):

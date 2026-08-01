@@ -61,9 +61,11 @@ class _Bindings:
         self,
         *bindings: ExecutionWorkerBinding,
         scan_complete: bool = True,
+        unreadable_ids: tuple[str, ...] = (),
     ) -> None:
         self.records = {binding.worker_id: binding for binding in bindings}
         self.scan_complete = scan_complete
+        self.unreadable_ids = unreadable_ids
 
     def list_page(self, *, max_records: int = 2_000):
         del max_records
@@ -72,7 +74,7 @@ class _Bindings:
         return ExecutionWorkerBindingPage(
             records=tuple(self.records.values()),
             scan_complete=self.scan_complete,
-            unreadable_ids=(),
+            unreadable_ids=self.unreadable_ids,
         )
 
 
@@ -196,6 +198,7 @@ def test_report_serializes_all_evidence_fields() -> None:
         locks_held={_WORKER: ["runtime-single-instance.lock"]},
         reclamation_safe=True,
         scan_complete=True,
+        unreadable_record_ids=(),
         detail="1 stale execution worker(s)",
     )
     payload = report.as_dict()
@@ -203,6 +206,7 @@ def test_report_serializes_all_evidence_fields() -> None:
     assert payload["workers_by_release"] == {_RELEASE: [_WORKER]}
     assert payload["worker_pids"] == [4242]
     assert payload["locks_held"] == {_WORKER: ["runtime-single-instance.lock"]}
+    assert payload["unreadable_record_ids"] == []
 
 
 def test_report_does_not_show_terminal_bindings_as_stale(tmp_path) -> None:
@@ -245,4 +249,19 @@ def test_report_flags_an_incomplete_scan_as_unsafe(tmp_path) -> None:
     )
 
     assert report.scan_complete is False
+    assert report.reclamation_safe is False
+
+
+def test_report_flags_unreadable_records_as_unsafe(tmp_path) -> None:
+    """An unreadable record is incomplete evidence for reclamation (#420)."""
+    report = _report(
+        bindings=_Bindings(unreadable_ids=("worker-bad-1",)),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+    )
+
+    assert report.scan_complete is True
+    assert report.unreadable_record_ids == ("worker-bad-1",)
     assert report.reclamation_safe is False
