@@ -619,7 +619,9 @@ git -C "$CLONE" checkout --quiet -- README.md
 echo "dirty upgrade exit=$DIRTY_EXIT"
 
 say "REBUILD from the clean clone: the reviewed head re-activates and health-verifies"
-git -C "$CLONE" reset --hard --quiet HEAD~1
+# The clone's detached HEAD carried both the second candidate and the stale commit, so
+# reset to the exact reviewed sha rather than HEAD~1 (which would land on the second).
+git -C "$CLONE" reset --hard --quiet "$HEAD_SHA"
 REBUILD_SHA="$(git -C "$CLONE" rev-parse HEAD)"
 [[ "$REBUILD_SHA" == "$HEAD_SHA" ]] || fail "rebuild clone is not back at the reviewed head"
 set +e
