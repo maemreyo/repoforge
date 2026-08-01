@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import selectors
+import shlex
 import signal
 import subprocess
 import sys
@@ -15,6 +16,8 @@ from pathlib import Path
 _MAX_PROCESSES = 4_096
 _MAX_PS_BYTES = 1_000_000
 _PS_TIMEOUT_SECONDS = 2.0
+_MAX_CMDLINE_BYTES = 4_096
+_MAX_CMDLINE_TOKENS = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,3 +380,50 @@ def kill_identity(identity: ProcessIdentity, sig: int = signal.SIGKILL) -> bool:
     finally:
         with contextlib.suppress(OSError):
             os.close(fd)
+
+
+def _read_linux_command_line(pid: int) -> tuple[str, ...] | None:
+    """Read ``/proc/<pid>/cmdline``, splitting on NUL and bounding size and tokens."""
+
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (OSError, ValueError):
+        return None
+    if len(raw) > _MAX_CMDLINE_BYTES:
+        return None
+    argv = tuple(raw.decode("utf-8", errors="replace").split("\x00"))
+    if argv and argv[-1] == "":
+        argv = argv[:-1]
+    if not argv or len(argv) > _MAX_CMDLINE_TOKENS:
+        return None
+    return argv
+
+
+def _read_ps_command_line(pid: int) -> tuple[str, ...] | None:
+    """Read ``ps -o args= -p PID`` under the shared bounds, shlex-split into an argv."""
+
+    out = _bounded_ps(["ps", "-o", "args=", "-p", str(pid)])
+    if not out:
+        return None
+    try:
+        argv = tuple(shlex.split(out))
+    except ValueError:
+        return None
+    if not argv or len(argv) > _MAX_CMDLINE_TOKENS:
+        return None
+    return argv
+
+
+def read_command_line(pid: int) -> tuple[str, ...] | None:
+    """Return the bounded argv of one process, or ``None`` when it is unprovable.
+
+    Linux reads ``/proc/<pid>/cmdline`` (the kernel's own answer); other hosts use a
+    bounded ``ps -o args=``. ``None`` means the process table could not be read or the
+    argv exceeded the bounds -- callers must fail closed rather than classify a guess.
+    """
+
+    if os.path.isdir("/proc"):
+        argv = _read_linux_command_line(pid)
+        if argv is not None:
+            return argv
+    return _read_ps_command_line(pid)

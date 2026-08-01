@@ -211,6 +211,28 @@ def _worker_binding(tmp_path: Path) -> tuple[object, object]:
     return written, store.get(written.operation_id)
 
 
+def _execution_worker_binding(tmp_path: Path) -> tuple[object, object]:
+    from repoforge.adapters.persistence import JsonExecutionWorkerBindingStore
+    from repoforge.domain.execution_worker import ExecutionWorkerBinding
+
+    store = JsonExecutionWorkerBindingStore(tmp_path, InMemoryLockManager())
+    written = ExecutionWorkerBinding(
+        worker_id="worker-0123456789ab",
+        pid=4321,
+        pgid=4321,
+        process_start_token="2026-07-29 09:26:21 +0000",
+        generation=15,
+        release_sha="9a96afa68f9c",
+        supervisor_pid=1234,
+        supervisor_process_identity=_SHA,
+        correlation_id="c" * 24,
+        started_at="2026-07-29T09:26:21+00:00",
+        state="running",
+    )
+    store.put(written)
+    return written, store.get(written.worker_id)
+
+
 def _repository_identity_binding(tmp_path: Path) -> tuple[object, object]:
     from repoforge.adapters.persistence import JsonRepositoryBindingStore
     from repoforge.domain.repository_identity import (
@@ -973,6 +995,7 @@ def _register() -> tuple[RoundTripCase, ...]:
     from repoforge.domain.approval import ApprovalRequest
     from repoforge.domain.execution_plan import ExecutionPlan, ExecutionPlanAcceptance
     from repoforge.domain.execution_receipt import EffectReceipt, StageReceipt
+    from repoforge.domain.execution_worker import ExecutionWorkerBinding
     from repoforge.domain.failure_intelligence import FailureEvidence
     from repoforge.domain.issue_graph_proposal import IssueGraphProposal
     from repoforge.domain.issue_graph_publication import (
@@ -991,6 +1014,7 @@ def _register() -> tuple[RoundTripCase, ...]:
     return (
         RoundTripCase(RuntimeRecord, _runtime_record),
         RoundTripCase(OperationWorkerBinding, _worker_binding),
+        RoundTripCase(ExecutionWorkerBinding, _execution_worker_binding),
         RoundTripCase(RepositoryIdentityBinding, _repository_identity_binding),
         RoundTripCase(OperationIdentityRecord, _operation_identity_record),
         RoundTripCase(RuntimeActivationReceipt, _runtime_activation_receipt),

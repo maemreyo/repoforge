@@ -12,17 +12,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from repoforge.adapters.persistence.json_execution_worker_binding_store import (
     JsonExecutionWorkerBindingStore,
 )
+from repoforge.adapters.subprocess.process_tree import read_command_line
 from repoforge.domain.execution_worker import (
     ExecutionWorkerBinding,
     execution_worker_binding_from_payload,
     execution_worker_binding_payload,
     is_execution_worker_entry_point,
+    validate_execution_worker_binding,
 )
-
-from repoforge.adapters.subprocess.process_tree import read_command_line
 from repoforge.testing import InMemoryLockManager
 
 _WORKER_ID = "worker-0123456789ab"
@@ -57,19 +58,19 @@ def test_binding_round_trips_through_a_payload() -> None:
 
 def test_binding_requires_a_positive_pid_and_matching_pgid() -> None:
     with pytest.raises(ValueError, match="pid"):
-        _binding(pid=0)
+        validate_execution_worker_binding(_binding(pid=0))
     with pytest.raises(ValueError, match="pgid"):
-        _binding(pgid=999)
+        validate_execution_worker_binding(_binding(pgid=999))
 
 
 def test_binding_requires_a_known_state() -> None:
     with pytest.raises(ValueError, match="state"):
-        _binding(state="mystery")
+        validate_execution_worker_binding(_binding(state="mystery"))
 
 
 def test_binding_validates_the_owner_supervisor_identity() -> None:
     with pytest.raises(ValueError, match="supervisor_process_identity"):
-        _binding(supervisor_process_identity="not-a-digest")
+        validate_execution_worker_binding(_binding(supervisor_process_identity="not-a-digest"))
 
 
 def test_binding_accepts_a_legacy_missing_release_sha() -> None:
