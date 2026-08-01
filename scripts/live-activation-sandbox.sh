@@ -630,6 +630,60 @@ REBUILD_EXIT=${PIPESTATUS[0]}
 set -e
 echo "rebuild upgrade exit=$REBUILD_EXIT"
 
+say "ORPHAN CHECK: every live execution worker must belong to the current release (#368)"
+CURRENT_SHA="$(readlink "$SANDBOX/release-root/current" 2>/dev/null | grep -o '[0-9a-f]\{40\}' | head -1 || true)"
+[[ -n "$CURRENT_SHA" ]] || fail "could not read the current release for the orphan check"
+set +e
+python3 - "$SANDBOX/release-root/releases" "$CURRENT_SHA" <<'ORPHANASSERT'
+import os
+import re
+import sys
+import subprocess
+
+releases_root, current_sha = sys.argv[1:3]
+argv_by_pid = {}
+if os.path.isdir("/proc"):
+    for name in sorted(os.listdir("/proc")):
+        if not name.isdigit():
+            continue
+        try:
+            raw = open(f"/proc/{name}/cmdline", "rb").read()
+            argv_by_pid[int(name)] = tuple(
+                raw.decode("utf-8", errors="replace").split("\x00")[:-1]
+            )
+        except OSError:
+            continue
+else:
+    completed = subprocess.run(
+        ["ps", "-A", "-o", "pid=,args="], capture_output=True, text=True, check=False
+    )
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(" ", 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            argv_by_pid[int(parts[0])] = tuple(parts[1].split())
+
+stale = []
+for pid, argv in argv_by_pid.items():
+    if (
+        len(argv) >= 3
+        and argv[1] == "-m"
+        and argv[2] == "repoforge.interfaces.runtime.execution_worker"
+    ):
+        match = re.search(r"/releases/([0-9a-f]{7,40})/", argv[0] if argv else "")
+        release = match.group(1) if match else None
+        if release != current_sha:
+            stale.append({"pid": pid, "release": release, "argv": " ".join(argv)[:200]})
+if stale:
+    print("\033[31m✗ execution workers of a non-current release are still alive:\033[0m")
+    for entry in stale[:10]:
+        print(f"    - {entry}")
+    raise SystemExit(1)
+print("\033[32m✓ every live execution worker belongs to the current release\033[0m")
+ORPHANASSERT
+ORPHAN_EXIT=$?
+set -e
+[[ "$ORPHAN_EXIT" == "0" ]] || fail "orphaned execution workers survived the sequence"
+
 say "The sandbox must not have provisioned a PATH launcher ANYWHERE"
 # The real-home snapshot alone cannot prove this: HOME is redirected, so a regression that
 # provisions `~/.local/bin/rf` from a non-default release root would write into the SANDBOX

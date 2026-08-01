@@ -16,7 +16,7 @@ from dataclasses import dataclass
 EXECUTION_WORKER_BINDING_SCHEMA_VERSION = 1
 
 _EXECUTION_WORKER_MODULE = "repoforge.interfaces.runtime.execution_worker"
-_WORKER_ID = re.compile(r"^worker-[0-9a-f]{8,64}$")
+_WORKER_ID = re.compile(r"^worker-[0-9a-f]+(?:-[0-9a-f]{8,64})?$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RELEASE_SHA = re.compile(r"^[0-9a-f]{7,40}$")
 
