@@ -321,3 +321,5 @@ rf upgrade reconcile --repair rollback   # repair a fail-closed activation (neve
 CLI commands are not additional MCP tools. `rf` exits `0` on success, `2` on stable validation/operation failure, and `3` when an explicit operator decision or approval is required.
 
 `rf doctor` additionally reports `runtime_contract_identity` with field-level detail (active `release_sha`, `manifest_contract_identity`, `packaged_contract_identity`, `computed_registry_identity`, `mismatched_fields`, `artifact_paths`, `safe_next_action`) and exits non-zero when a fail-closed runtime or an inconsistent release is detected.
+
+`rf runtime ls` and `rf doctor` also report `execution_workers` evidence: `stale_execution_worker_count`, `workers_by_release`, `worker_pids`, `owner_supervisor_state`, `locks_held` (from lock-file metadata plus PID identity), and `reclamation_safe`. Every release switch, rollback, or upgrade reclaims the departing release's execution workers (PID-reuse-safe, exact entry-point classification, TERM→KILL with bounded wait) before the new supervisor starts; the reclamation evidence rides the activation/rollback receipt (`worker_reclamation`).

@@ -668,8 +668,9 @@ for pid, argv in argv_by_pid.items():
         len(argv) >= 3
         and argv[1] == "-m"
         and argv[2] == "repoforge.interfaces.runtime.execution_worker"
+        and argv[0].startswith(releases_root)
     ):
-        match = re.search(r"/releases/([0-9a-f]{7,40})/", argv[0] if argv else "")
+        match = re.search(r"/releases/([0-9a-f]{7,40})/", argv[0])
         release = match.group(1) if match else None
         if release != current_sha:
             stale.append({"pid": pid, "release": release, "argv": " ".join(argv)[:200]})
