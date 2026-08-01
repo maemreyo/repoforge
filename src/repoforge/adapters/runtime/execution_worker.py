@@ -97,7 +97,12 @@ class SubprocessExecutionWorker:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(child.pid, signal.SIGKILL)
         self._children.pop(child.pid, None)
-        self._mark_state(child.pid, "reclaimed")
+        # State records truth, not intent: a worker whose identity is still readable
+        # after SIGKILL is a survivor, never a silent `reclaimed` (#420).
+        if process_identity(child.pid) is None:
+            self._mark_state(child.pid, "reclaimed")
+        else:
+            self._mark_state(child.pid, "survived_kill")
 
     def _record_binding(
         self, pid: int, generation: int, correlation_id: str, identity: str

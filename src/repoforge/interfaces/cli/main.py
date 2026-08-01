@@ -1833,7 +1833,9 @@ def _upgrade_command(args: argparse.Namespace) -> int:
             receipt = resolve_receipt_id(
                 build_release_store(getattr(args, "release_root", None)), receipt
             )
-        result = service.rollback(receipt, force=args.force)
+        result = service.rollback(
+            receipt, force=args.force, force_unverified=getattr(args, "force_unverified", False)
+        )
         _json(result.as_dict())
         # Fail closed: a rollback that did not converge must not exit 0.
         return 0 if result.status == "rolled_back" else 1
@@ -2444,6 +2446,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Roll back even when `current` no longer matches the receipt's target.",
+    )
+    upgrade_rollback.add_argument(
+        "--force-unverified",
+        action="store_true",
+        help=(
+            "Skip the pre-swap contract re-smoke of the rollback target. Explicit "
+            "escape hatch for a broken probe; the receipt still requires observed "
+            "convergence after restart."
+        ),
     )
     # No --release-root here: `upgrade` already defines it, and re-declaring it on a
     # subparser would reset the parent's value to None when it is passed before the
