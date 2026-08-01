@@ -1226,3 +1226,58 @@ def test_reconcile_repair_requires_fail_closed_since(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="ACTIVATION_NOT_REPAIRABLE"):
         failing.reconcile(repair="rollback")
     assert store.read_in_flight_activation() is not None
+
+
+def test_rollback_re_smokes_the_target_before_swapping(tmp_path: Path) -> None:
+    """A rollback whose target fails contract re-verification must not swap (#420)."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+
+    broken = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(mismatched_fields=("input_contract_digest",)),
+        restarter=_Restarter(),
+        observer=_Observer(store),
+        clock=_Clock(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+    )
+    with pytest.raises(ConfigError, match="RELEASE_CONTRACT_IDENTITY_MISMATCH"):
+        broken.rollback()
+    # `current` must be untouched: the target was not proven safe to serve.
+    assert store.current_sha() == "2222bbb"
+    assert store.read_in_flight_activation() is None
+
+
+def test_rollback_force_unverified_is_an_explicit_escape_hatch(tmp_path: Path) -> None:
+    """--force-unverified skips the pre-swap re-smoke, never the health verification."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+
+    broken = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(mismatched_fields=("input_contract_digest",)),
+        restarter=_Restarter(),
+        observer=_Observer(store),
+        clock=_Clock(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+    )
+    result = broken.rollback(force_unverified=True)
+
+    assert result.status == "rolled_back"
+    assert store.current_sha() == "1111aaa"
+    # The receipt still requires observed convergence -- force-unverified only skips
+    # the pre-swap probe, never the health-verified truthfulness of the receipt.
+    receipt = store.read_receipt(result.activation_receipt)
+    assert receipt is not None and receipt.converged is True
