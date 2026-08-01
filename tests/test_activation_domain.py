@@ -77,6 +77,26 @@ def test_release_manifest_rejects_a_non_sha256_fingerprint() -> None:
         _manifest(build_fingerprint="short")
 
 
+def test_manifest_round_trips_the_contract_identity_proof() -> None:
+    manifest = _manifest(contract_identity="c" * 64)
+    assert ReleaseManifest.from_dict(manifest.to_dict()) == manifest
+
+
+def test_a_manifest_written_before_contract_proof_existed_is_still_readable() -> None:
+    """Releases installed before #367 carry no contract proof; they stay readable."""
+    legacy = _manifest().to_dict()
+    del legacy["contract_identity"]
+
+    manifest = ReleaseManifest.from_dict(legacy)
+
+    assert manifest.contract_identity == ""
+
+
+def test_manifest_rejects_a_non_sha256_contract_identity() -> None:
+    with pytest.raises(ValueError, match="contract_identity"):
+        _manifest(contract_identity="not-a-digest")
+
+
 def test_activation_receipt_round_trips_and_preserves_outcome() -> None:
     receipt = ActivationReceipt(
         receipt_id="act-20260725-001",
