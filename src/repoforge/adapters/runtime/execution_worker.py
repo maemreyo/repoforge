@@ -96,13 +96,17 @@ class SubprocessExecutionWorker:
         if process.poll() is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(child.pid, signal.SIGKILL)
+            # State records truth, not intent: only after SIGKILL is the identity
+            # re-probed. A SIGTERM exit is already confirmed by poll(); re-probing
+            # there would only add latency to every graceful shutdown (#420).
+            self._children.pop(child.pid, None)
+            if process_identity(child.pid) is None:
+                self._mark_state(child.pid, "reclaimed")
+            else:
+                self._mark_state(child.pid, "survived_kill")
+            return
         self._children.pop(child.pid, None)
-        # State records truth, not intent: a worker whose identity is still readable
-        # after SIGKILL is a survivor, never a silent `reclaimed` (#420).
-        if process_identity(child.pid) is None:
-            self._mark_state(child.pid, "reclaimed")
-        else:
-            self._mark_state(child.pid, "survived_kill")
+        self._mark_state(child.pid, "reclaimed")
 
     def _record_binding(
         self, pid: int, generation: int, correlation_id: str, identity: str
