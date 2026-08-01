@@ -115,6 +115,9 @@ def test_runtime_ls_reports_an_empty_release_root_without_failing(
     assert payload["production"]["converged"] is False
     assert payload["production"]["os_resident"] is False
     assert "rf upgrade --from-worktree" in payload["safe_next_action"]
+    # Execution-worker evidence rides along even on an empty install (#368).
+    assert payload["execution_workers"]["stale_execution_worker_count"] == 0
+    assert payload["execution_workers"]["reclamation_safe"] is True
 
 
 def test_version_switch_fails_closed_and_leaves_current_untouched(
