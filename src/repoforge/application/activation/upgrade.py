@@ -883,10 +883,16 @@ class UpgradeService:
         *,
         expected_current: str | None = None,
         force: bool = False,
+        force_unverified: bool = False,
     ) -> UpgradeResult:
         """Public rollback: takes the activation lock, then delegates."""
         with self._activation_lock():
-            return self._rollback_locked(receipt_id, expected_current=expected_current, force=force)
+            return self._rollback_locked(
+                receipt_id,
+                expected_current=expected_current,
+                force=force,
+                force_unverified=force_unverified,
+            )
 
     def _rollback_locked(
         self,
@@ -894,6 +900,7 @@ class UpgradeService:
         *,
         expected_current: str | None = None,
         force: bool = False,
+        force_unverified: bool = False,
     ) -> UpgradeResult:
         """Roll back, targeting the release named by ``receipt_id`` when given.
 
@@ -940,6 +947,13 @@ class UpgradeService:
                 f"ROLLBACK_TARGET_UNUSABLE: {target} has no manifest; refusing to switch "
                 "`current` to a release that cannot be verified"
             )
+        # Re-smoke the target like a switch would: a rollback moving `current` onto a
+        # release whose bits no longer match its reviewed manifest trades one broken
+        # runtime for another (#420). `--force-unverified` is the explicit escape
+        # hatch -- it skips only the pre-swap probe, never the post-restart health
+        # verification the receipt still requires.
+        if not force_unverified:
+            self._verify_installed_contract(manifest)
 
         self._store.swap_current(target)
         restart = self._restarter.restart(departing_release=current)
