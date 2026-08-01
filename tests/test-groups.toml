@@ -610,6 +610,7 @@ test_files = [
   "tests/test_background_run_profile.py",
   "tests/test_ci_failure_evidence.py",
   "tests/test_expensive_profile_guards.py",
+  "tests/test_execution_worker_reconciler.py",
   "tests/test_serve_config_generation.py",
   "tests/test_upgrade_compatibility.py",
   "tests/test_code_intelligence_integration.py",

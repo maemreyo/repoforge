@@ -336,7 +336,9 @@ def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
 
     from repoforge.adapters.persistence import JsonExecutionWorkerBindingStore
     from repoforge.adapters.runtime.execution_worker import SubprocessExecutionWorker
+    from repoforge.adapters.runtime.state_store import process_identity
     from repoforge.adapters.subprocess.os_process_reaper import OsProcessReaper
+    from repoforge.adapters.subprocess.process_tree import read_command_line, read_identity
     from repoforge.bootstrap import build_configuration_store
     from repoforge.domain.execution_worker import (
         execution_worker_binding_from_payload,
@@ -377,7 +379,13 @@ def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
         )
         bindings.put(orphaned)
 
-        reconciler = ExecutionWorkerReconciler(bindings=bindings, reaper=OsProcessReaper())
+        reconciler = ExecutionWorkerReconciler(
+            bindings=bindings,
+            reaper=OsProcessReaper(),
+            owner_identity_reader=process_identity,
+            command_line_reader=read_command_line,
+            identity_reader=read_identity,
+        )
         report = reconciler.reconcile()
 
         assert report.reclaimed == 1

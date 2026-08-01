@@ -20,7 +20,6 @@ from typing import Any
 
 from repoforge import __version__
 
-from ...adapters.persistence import JsonExecutionWorkerBindingStore
 from ...application.activation.contract_identity import (
     ContractIdentityReport,
     build_contract_identity_report,
@@ -64,7 +63,6 @@ from ...application.diagnostics import build_diagnostics_bundle
 from ...application.onboarding.inputs import for_repository, parse_assignments
 from ...application.repository_admin.proposals import RepositoryProposalService
 from ...application.runtime.activation import GenerationActivator
-from ...application.runtime.execution_worker_report import build_execution_worker_report
 from ...application.runtime.hot_reload import (
     AtomicServiceRouter,
     GenerationServiceContainer,
@@ -81,6 +79,7 @@ from ...bootstrap import (
     build_auth_command_dependencies,
     build_configuration_store,
     build_dev_runtime_service,
+    build_execution_worker_report_section,
     build_lock_manager,
     build_metrics_sink,
     build_operation_gate,
@@ -1689,11 +1688,7 @@ def _execution_worker_report(args: argparse.Namespace) -> dict[str, object] | No
     with contextlib.suppress(ConfigError, OSError, ValueError):
         config_path = Path(args.config).expanduser().resolve()
         state_root = _state_root(config_path)
-        bindings = JsonExecutionWorkerBindingStore(state_root, build_lock_manager(state_root))
-        return build_execution_worker_report(
-            bindings=bindings,
-            lock_root=state_root / "locks",
-        ).as_dict()
+        return build_execution_worker_report_section(state_root)
     return None
 
 

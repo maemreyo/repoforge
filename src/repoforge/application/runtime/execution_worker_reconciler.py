@@ -22,21 +22,26 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
-from ...adapters.runtime.state_store import process_identity as _default_owner_reader
-from ...adapters.subprocess.process_tree import (
-    ProcessIdentity,
-)
-from ...adapters.subprocess.process_tree import (
-    read_command_line as _default_command_line_reader,
-)
-from ...adapters.subprocess.process_tree import read_identity as _default_identity_reader
 from ...domain.execution_worker import (
     ExecutionWorkerBinding,
     is_execution_worker_entry_point,
 )
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
 from ...ports.process_reaper import ProcessReaper
+
+
+class ProcessIdentityLike(Protocol):
+    """The one field the reconciler reads off a process identity: the start token."""
+
+    @property
+    def start_token(self) -> str | None: ...
+
+
+OwnerIdentityReader = Callable[[int], str | None]
+CommandLineReader = Callable[[int], tuple[str, ...] | None]
+ProcessIdentityReader = Callable[[int], ProcessIdentityLike | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,11 +78,9 @@ class ExecutionWorkerReconciler:
         *,
         bindings: ExecutionWorkerBindingStore,
         reaper: ProcessReaper,
-        owner_identity_reader: Callable[[int], str | None] = _default_owner_reader,
-        command_line_reader: Callable[[int], tuple[str, ...] | None] = (
-            _default_command_line_reader
-        ),
-        identity_reader: Callable[[int], ProcessIdentity | None] = _default_identity_reader,
+        owner_identity_reader: OwnerIdentityReader,
+        command_line_reader: CommandLineReader,
+        identity_reader: ProcessIdentityReader,
     ) -> None:
         self._bindings = bindings
         self._reaper = reaper

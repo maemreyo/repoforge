@@ -9,23 +9,19 @@ never from inferring that a runtime is "stuck".
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...adapters.runtime.state_store import process_identity as _default_owner_reader
-from ...adapters.subprocess.process_tree import (
-    ProcessIdentity,
-)
-from ...adapters.subprocess.process_tree import (
-    read_command_line as _default_command_line_reader,
-)
-from ...adapters.subprocess.process_tree import read_identity as _default_identity_reader
 from ...domain.execution_worker import (
     ExecutionWorkerBinding,
     is_execution_worker_entry_point,
 )
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
+from .execution_worker_reconciler import (
+    CommandLineReader,
+    OwnerIdentityReader,
+    ProcessIdentityReader,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,9 +73,9 @@ def build_execution_worker_report(
     *,
     bindings: ExecutionWorkerBindingStore,
     lock_root: Path,
-    owner_identity_reader: Callable[[int], str | None] = _default_owner_reader,
-    command_line_reader: Callable[[int], tuple[str, ...] | None] = (_default_command_line_reader),
-    identity_reader: Callable[[int], ProcessIdentity | None] = _default_identity_reader,
+    owner_identity_reader: OwnerIdentityReader,
+    command_line_reader: CommandLineReader,
+    identity_reader: ProcessIdentityReader,
 ) -> ExecutionWorkerReport:
     """Enumerate stale execution workers and the lock evidence against them."""
 
