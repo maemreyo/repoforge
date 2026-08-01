@@ -104,6 +104,34 @@ def test_store_rejects_an_unknown_worker_id(tmp_path: Path) -> None:
         store.put(_binding(worker_id="not-a-worker"))
 
 
+def test_validate_rejects_a_running_binding_without_a_start_token() -> None:
+    """A modern `running` binding must carry the process start token (#420)."""
+    with pytest.raises(ValueError, match="process_start_token"):
+        validate_execution_worker_binding(_binding(process_start_token=None))
+
+
+def test_a_legacy_running_payload_without_a_token_decodes_as_legacy_unproven() -> None:
+    """Pre-token records read back as an unproven concern, never a valid running one."""
+    payload = execution_worker_binding_payload(_binding())
+    payload["process_start_token"] = None
+    binding = execution_worker_binding_from_payload(dict(payload))
+    assert binding.state == "legacy_unproven"
+    assert binding.process_start_token is None
+
+
+def test_store_surfaces_an_unreadable_record_in_list_page(tmp_path: Path) -> None:
+    """An unreadable registry record is reported by id, not silently dropped (#420)."""
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+    (store.root / "worker-999999999999.json").write_text("{corrupt", encoding="utf-8")
+
+    page = store.list_page()
+
+    assert page.scan_complete is True
+    assert page.unreadable_ids == ("worker-999999999999",)
+    assert tuple(item.worker_id for item in page.records) == (_WORKER_ID,)
+
+
 def test_classification_requires_the_exact_entry_point() -> None:
     assert (
         is_execution_worker_entry_point(

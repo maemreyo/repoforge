@@ -156,6 +156,9 @@ class SubprocessExecutionWorker:
             return
         proc_identity = read_identity(pid)
         token = proc_identity.start_token if proc_identity is not None else None
+        # A running binding requires a start token; without one, record the worker as
+        # an unproven concern so a later reconciler still sees it (fail closed) (#420).
+        state = "running" if token is not None else "refused_unproven"
         worker_id = f"worker-{pid}-{hashlib.sha256((token or str(pid)).encode()).hexdigest()[:12]}"
         binding = ExecutionWorkerBinding(
             worker_id=worker_id,
@@ -168,7 +171,7 @@ class SubprocessExecutionWorker:
             supervisor_process_identity=supervisor_identity,
             correlation_id=correlation_id,
             started_at=datetime.now(timezone.utc).isoformat(),
-            state="running",
+            state=state,
         )
         with contextlib.suppress(Exception):
             self._bindings.put(binding)

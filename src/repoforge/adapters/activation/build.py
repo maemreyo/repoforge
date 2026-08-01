@@ -362,8 +362,9 @@ class SupervisorRestarter:
 
         Returns ``(ok, detail, evidence)``. ``ok=False`` means the replacement
         supervisor must not start: a worker survived SIGKILL, a worker's identity
-        could not be proven while it may still be running, or the registry scan was
-        truncated -- each recreates the 2026-08-01 deadlock if we proceed anyway.
+        could not be proven while it may still be running, the registry scan was
+        truncated, or a registry record could not be read -- each recreates the
+        2026-08-01 deadlock if we proceed anyway.
         """
         if self._worker_reconciler is None:
             return True, "", None
@@ -391,7 +392,17 @@ class SupervisorRestarter:
                 "identity",
                 evidence,
             )
-        if not report.scan_complete:
+        if not report.evidence_complete:
+            if report.unreadable_record_ids:
+                return (
+                    False,
+                    "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS: "
+                    f"{len(report.unreadable_record_ids)} worker registry record(s) "
+                    "could not be read; an unreadable record may describe a live "
+                    "orphan holding shared locks; refusing to start a replacement on "
+                    "incomplete evidence",
+                    evidence,
+                )
             return (
                 False,
                 "EXECUTION_WORKER_REGISTRY_SCAN_INCOMPLETE: the worker registry scan "

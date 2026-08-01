@@ -2839,12 +2839,23 @@ def main(argv: list[str] | None = None) -> int:
                 result["execution_workers"] = worker_report
                 raw_stale = worker_report.get("stale_execution_worker_count", 0)
                 stale = raw_stale if isinstance(raw_stale, int) else 0
+                raw_unreadable = worker_report.get("unreadable_record_ids", ())
+                unreadable_ids = (
+                    tuple(raw_unreadable) if isinstance(raw_unreadable, (list, tuple)) else ()
+                )
+                unreadable = len(unreadable_ids)
+                detail = str(worker_report.get("detail", ""))
+                if unreadable:
+                    bounded = ", ".join(unreadable_ids[:8])
+                    if unreadable > 8:
+                        bounded += f", +{unreadable - 8} more"
+                    detail = f"{detail}; {unreadable} unreadable record(s): {bounded}"
                 result["checks"].append(
                     {
                         "name": "execution_workers",
-                        "ok": stale == 0,
-                        "severity": "warning" if stale else "info",
-                        "detail": str(worker_report.get("detail", "")),
+                        "ok": stale == 0 and unreadable == 0,
+                        "severity": "warning" if (stale or unreadable) else "info",
+                        "detail": detail,
                     }
                 )
             _json(result)

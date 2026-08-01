@@ -24,9 +24,9 @@ from .execution_worker_reconciler import (
 )
 
 #: States that describe a live (or possibly live) worker, as opposed to terminal
-#: history. `refused_unproven` and `survived_kill` are active concerns: the process
-#: may still be running and holding locks.
-_ACTIVE_STATES = frozenset({"running", "refused_unproven", "survived_kill"})
+#: history. `refused_unproven`, `survived_kill`, and `legacy_unproven` are active
+#: concerns: the process may still be running and holding locks.
+_ACTIVE_STATES = frozenset({"running", "legacy_unproven", "refused_unproven", "survived_kill"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +38,7 @@ class ExecutionWorkerReport:
     locks_held: dict[str, list[str]]
     reclamation_safe: bool
     scan_complete: bool
+    unreadable_record_ids: tuple[str, ...]
     detail: str
 
     def as_dict(self) -> dict[str, object]:
@@ -49,6 +50,7 @@ class ExecutionWorkerReport:
             "locks_held": dict(self.locks_held),
             "reclamation_safe": self.reclamation_safe,
             "scan_complete": self.scan_complete,
+            "unreadable_record_ids": list(self.unreadable_record_ids),
             "detail": self.detail,
         }
 
@@ -128,7 +130,7 @@ def build_execution_worker_report(
                 unprovable += 1
 
     locks_held = {binding.worker_id: lock_owners.get(binding.pid, []) for binding in stale}
-    reclamation_safe = unprovable == 0 and page.scan_complete
+    reclamation_safe = unprovable == 0 and page.scan_complete and not page.unreadable_ids
     return ExecutionWorkerReport(
         stale_execution_worker_count=len(stale),
         workers_by_release=workers_by_release,
@@ -137,8 +139,10 @@ def build_execution_worker_report(
         locks_held=locks_held,
         reclamation_safe=reclamation_safe,
         scan_complete=page.scan_complete,
+        unreadable_record_ids=page.unreadable_ids,
         detail=(
             f"{len(stale)} stale execution worker(s); reclamation safe: "
-            f"{reclamation_safe} (scan complete: {page.scan_complete})"
+            f"{reclamation_safe} (scan complete: {page.scan_complete}, unreadable "
+            f"records: {len(page.unreadable_ids)})"
         ),
     )

@@ -21,7 +21,14 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RELEASE_SHA = re.compile(r"^[0-9a-f]{7,40}$")
 
 _KNOWN_STATES = frozenset(
-    {"running", "reclaimed", "already_gone", "survived_kill", "refused_unproven"}
+    {
+        "running",
+        "legacy_unproven",
+        "reclaimed",
+        "already_gone",
+        "survived_kill",
+        "refused_unproven",
+    }
 )
 
 
@@ -115,6 +122,9 @@ def validate_execution_worker_binding(
     _text(binding.started_at, "started_at", limit=64)
     if binding.state not in _KNOWN_STATES:
         raise ValueError(f"execution worker state must be one of {sorted(_KNOWN_STATES)}")
+    if binding.state == "running" and binding.process_start_token is None:
+        # Without a start token, PID-reuse safety can never be proven (#420).
+        raise ValueError("execution worker running binding requires a process_start_token")
     return binding
 
 
@@ -161,6 +171,11 @@ def execution_worker_binding_from_payload(
 
     # Optional fields are absent in records written before they existed; absence reads
     # as None (release_sha/process_start_token), never as an unreadable record.
+    state = str(_require(payload["state"], "state"))
+    if state == "running" and payload.get("process_start_token") is None:
+        # Records written before the token was mandatory (#420) are read back as an
+        # unproven live concern, never as a valid modern `running` binding.
+        state = "legacy_unproven"
     binding = ExecutionWorkerBinding(
         worker_id=str(_require(payload["worker_id"], "worker_id")),
         pid=as_int(payload["pid"], "pid"),
@@ -174,7 +189,7 @@ def execution_worker_binding_from_payload(
         ),
         correlation_id=str(_require(payload["correlation_id"], "correlation_id")),
         started_at=str(_require(payload["started_at"], "started_at")),
-        state=str(_require(payload["state"], "state")),
+        state=state,
     )
     return validate_execution_worker_binding(binding)
 
