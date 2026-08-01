@@ -38,6 +38,7 @@ from ...ports.locking import LockManager
 from ...ports.process import ProcessInspector
 from ...ports.runtime_control import RuntimeControlClient, RuntimeControlServer, RuntimeStore
 from ...ports.tunnel import TunnelClient, TunnelProfileStore
+from .execution_worker_reconciler import ExecutionWorkerReconciler
 
 
 def _install_origin() -> str | None:
@@ -80,6 +81,7 @@ class RuntimeSupervisor:
         stable_health_reset_seconds: float = 60.0,
         single_instance_wait_seconds: float = 45.0,
         preflight: Callable[[], None] | None = None,
+        worker_reconciler: ExecutionWorkerReconciler | None = None,
     ) -> None:
         self._store = store
         self._configs = configs
@@ -113,6 +115,7 @@ class RuntimeSupervisor:
         self._health_failure_threshold = health_failure_threshold
         self._stable_health_reset = stable_health_reset_seconds
         self._preflight = preflight
+        self._worker_reconciler = worker_reconciler
         self._stop = threading.Event()
         self._child: ChildProcess | None = None
         self._execution_child: ChildProcess | None = None
@@ -578,6 +581,13 @@ class RuntimeSupervisor:
                     self._clear_target(generation)
                     self._serve_fail_closed(correlation_id)
                     return 0
+
+                # Reclaim execution workers whose owner supervisor is gone before
+                # spawning this supervisor's own worker (#368). Best-effort: startup
+                # must still serve; a survivor's operation leases expire on their own.
+                if self._worker_reconciler is not None:
+                    with contextlib.suppress(Exception):
+                        self._worker_reconciler.reconcile()
 
                 try:
                     initialize_profile = self._profile_store.fingerprint() != profile.fingerprint

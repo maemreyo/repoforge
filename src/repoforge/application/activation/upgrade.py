@@ -561,7 +561,7 @@ class UpgradeService:
         stage = ActivationStage.SYMLINK_SWITCHED
         self._store.record_activation_stage(stage.value)
 
-        restart = self._restarter.restart()
+        restart = self._restarter.restart(departing_release=previous_sha)
         if restart.ok:
             stage = ActivationStage.RUNTIME_RESTARTED
             self._store.record_activation_stage(stage.value)
@@ -598,6 +598,7 @@ class UpgradeService:
             stage=ActivationStage.HEALTH_VERIFIED,
             observed_sha=observed_sha,
             converged=True,
+            worker_reclamation=restart.reclamation,
         )
         # Commit the durable truth FIRST. Everything after this point is convenience:
         # the runtime is already live and verified, so an auxiliary failure must never be
@@ -921,7 +922,7 @@ class UpgradeService:
             )
 
         self._store.swap_current(target)
-        restart = self._restarter.restart()
+        restart = self._restarter.restart(departing_release=current)
         converged, observed_sha, verify_detail = self._verify_serving(target)
         stage = (
             ActivationStage.HEALTH_VERIFIED
@@ -956,6 +957,7 @@ class UpgradeService:
             observed_sha=observed_sha,
             converged=converged,
             cause_receipt_id=cause_receipt_id,
+            worker_reclamation=restart.reclamation,
         )
         receipt = self._write_receipt(receipt)
         self._store.end_activation()

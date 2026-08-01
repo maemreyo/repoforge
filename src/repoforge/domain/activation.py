@@ -7,6 +7,7 @@ the filesystem, a process, or a clock -- adapters supply those.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -182,6 +183,11 @@ class ActivationReceipt:
     observed_sha: str | None = None
     converged: bool = False
     cause_receipt_id: str | None = None
+    # Execution-worker reclamation evidence from the restart that performed the
+    # activation (#368), recorded so a later rollback can be audited. Absent (None)
+    # on receipts written before the field existed or by restarters that do not
+    # reconcile.
+    worker_reclamation: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not _RECEIPT_ID.fullmatch(self.receipt_id):
@@ -203,6 +209,11 @@ class ActivationReceipt:
             raise ValueError("Activation observed_sha must be lowercase hex or null")
         if self.cause_receipt_id is not None and not _RECEIPT_ID.fullmatch(self.cause_receipt_id):
             raise ValueError("Activation cause_receipt_id must look like act-YYYYMMDD-NNN")
+        if (
+            self.worker_reclamation is not None
+            and len(_json_dumps(self.worker_reclamation)) > 4_096
+        ):
+            raise ValueError("Activation worker_reclamation evidence is too large")
         # A terminal *success* -- whether an activation or a rollback -- is only
         # truthful when the live runtime was observed serving the target and
         # health-verified. Legacy receipts predate these fields, so the invariant is
@@ -234,6 +245,7 @@ class ActivationReceipt:
             "observed_sha": self.observed_sha,
             "converged": self.converged,
             "cause_receipt_id": self.cause_receipt_id,
+            "worker_reclamation": self.worker_reclamation,
             "schema_version": ACTIVATION_RECEIPT_SCHEMA_VERSION,
         }
 
@@ -274,6 +286,11 @@ class ActivationReceipt:
                 observed_sha=observed_sha if isinstance(observed_sha, str) else None,
                 converged=bool(raw.get("converged")),
                 cause_receipt_id=cause_receipt_id if isinstance(cause_receipt_id, str) else None,
+                worker_reclamation=(
+                    raw["worker_reclamation"]
+                    if isinstance(raw.get("worker_reclamation"), dict)
+                    else None
+                ),
             )
         except KeyError as exc:
             raise ValueError(f"Activation receipt missing field: {exc}") from exc
@@ -295,3 +312,7 @@ def _optional_str(raw: dict[str, Any], key: str) -> str:
     if key not in raw or raw[key] is None:
         return ""
     return _require_str(raw, key)
+
+
+def _json_dumps(value: dict[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
