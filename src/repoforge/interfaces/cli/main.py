@@ -2844,20 +2844,25 @@ def main(argv: list[str] | None = None) -> int:
                     tuple(raw_unreadable) if isinstance(raw_unreadable, (list, tuple)) else ()
                 )
                 unreadable = len(unreadable_ids)
+                reclamation_safe = worker_report.get("reclamation_safe") is True
+                scan_complete = worker_report.get("scan_complete") is True
                 detail = str(worker_report.get("detail", ""))
                 if unreadable:
                     bounded = ", ".join(unreadable_ids[:8])
                     if unreadable > 8:
                         bounded += f", +{unreadable - 8} more"
                     detail = f"{detail}; {unreadable} unreadable record(s): {bounded}"
+                worker_ok = stale == 0 and unreadable == 0 and reclamation_safe and scan_complete
                 result["checks"].append(
                     {
                         "name": "execution_workers",
-                        "ok": stale == 0 and unreadable == 0,
-                        "severity": "warning" if (stale or unreadable) else "info",
+                        "ok": worker_ok,
+                        "severity": "warning" if not worker_ok else "info",
                         "detail": detail,
                     }
                 )
+                if not worker_ok:
+                    result["ok"] = False
             _json(result)
             return 0 if result["ok"] else 1
         if args.command == "list-workspaces":
