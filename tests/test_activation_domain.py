@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from repoforge.domain.activation import (
@@ -7,6 +9,7 @@ from repoforge.domain.activation import (
     ActivationReceipt,
     ActivationStage,
     ReleaseManifest,
+    worker_reclamation_summary,
 )
 
 _SHA256 = "a" * 64
@@ -184,3 +187,89 @@ def test_failed_receipt_may_record_the_stage_it_reached() -> None:
     restored = ActivationReceipt.from_dict(receipt.to_dict())
     assert restored == receipt
     assert restored.stage is ActivationStage.RUNTIME_RESTARTED
+
+
+# ------------------------------------------- bounded reclamation evidence (#424)
+
+
+def _full_reclamation(n: int, *, unreadable: int = 0) -> dict[str, object]:
+    return {
+        "inspected": n,
+        "reclaimed": n,
+        "already_gone": 0,
+        "refused_unproven": 0,
+        "survived_kill": 0,
+        "possibly_alive_unproven": 0,
+        "scan_complete": True,
+        "unreadable_record_ids": tuple(f"worker-bad-{i}" for i in range(unreadable)),
+        "evidence_complete": unreadable == 0,
+        "worker_ids": tuple(f"worker-{i:012x}" for i in range(n)),
+        "pids": tuple(range(1000, 1000 + n)),
+        "release_shas": ("1111aaa",),
+        "detail": f"reconciled {n} live execution worker binding(s)",
+    }
+
+
+@pytest.mark.parametrize("count", [0, 1, 92, 2_000])
+def test_worker_reclamation_summary_is_bounded_at_any_scale(count: int) -> None:
+    """The receipt summary stays small at incident scale and beyond (#424)."""
+    summary = worker_reclamation_summary(
+        _full_reclamation(count), artifact_id="recl-abcd", digest="d" * 64
+    )
+    assert summary["inspected"] == count
+    assert summary["worker_sample"] == [f"worker-{i:012x}" for i in range(min(count, 8))]
+    assert summary["evidence_reference"] == "worker-reclamation:recl-abcd"
+    assert summary["evidence_digest"] == "d" * 64
+    encoded = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+    assert len(encoded) < 4_096
+
+
+def test_worker_reclamation_summary_ignores_many_unreadable_ids() -> None:
+    """2,000 unreadable ids must not bloat the receipt summary (#424)."""
+    summary = worker_reclamation_summary(
+        _full_reclamation(2_000, unreadable=2_000),
+        artifact_id="recl-abcd",
+        digest="d" * 64,
+    )
+    assert summary["evidence_complete"] is False
+    assert "unreadable_record_ids" not in summary
+    assert len(json.dumps(summary, sort_keys=True, separators=(",", ":"))) < 4_096
+
+
+def test_activation_receipt_accepts_a_bounded_worker_reclamation_summary() -> None:
+    summary = worker_reclamation_summary(
+        _full_reclamation(92), artifact_id="recl-abcd", digest="d" * 64
+    )
+    receipt = ActivationReceipt(
+        receipt_id="act-20260725-001",
+        from_sha=None,
+        to_sha=_COMMIT,
+        to_fingerprint=_SHA256,
+        tool_surface_hash=_OTHER_SHA256,
+        rediscovery_required=False,
+        outcome=ActivationOutcome.ACTIVATED,
+        activated_at="2026-07-25T10:05:00+00:00",
+        stage=ActivationStage.HEALTH_VERIFIED,
+        converged=True,
+        worker_reclamation=summary,
+    )
+    assert receipt.worker_reclamation == summary
+
+
+def test_activation_receipt_still_rejects_an_oversized_raw_reclamation() -> None:
+    """The 4 KiB cap stays enforced; the summary is what makes it satisfiable."""
+    raw = _full_reclamation(2_000)
+    with pytest.raises(ValueError, match="worker_reclamation evidence is too large"):
+        ActivationReceipt(
+            receipt_id="act-20260725-001",
+            from_sha=None,
+            to_sha=_COMMIT,
+            to_fingerprint=_SHA256,
+            tool_surface_hash=_OTHER_SHA256,
+            rediscovery_required=False,
+            outcome=ActivationOutcome.ACTIVATED,
+            activated_at="2026-07-25T10:05:00+00:00",
+            stage=ActivationStage.HEALTH_VERIFIED,
+            converged=True,
+            worker_reclamation=raw,
+        )
