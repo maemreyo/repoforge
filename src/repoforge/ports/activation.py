@@ -75,11 +75,22 @@ class BuildArtifact:
 
 @dataclass(frozen=True, slots=True)
 class SmokeResult:
-    """The verdict of running a candidate release against itself."""
+    """The verdict of running a candidate release against itself.
+
+    ``contract_identity`` is the canonical digest of the release's verified contract
+    identity (packaged == computed). It is empty when the smoke tester did not probe
+    (legacy releases and test fakes); a non-empty value that disagrees with the
+    recorded manifest is a ``RELEASE_CONTRACT_IDENTITY_MISMATCH``.
+    """
 
     ok: bool
     tool_surface_hash: str
     detail: str
+    contract_identity: str = ""
+    contract_mismatched_fields: tuple[str, ...] = ()
+    contract_artifact_paths: tuple[str, ...] = ()
+    contract_packaged_identity: str = ""
+    contract_computed_identity: str = ""
 
 
 class WorktreeInspector(Protocol):

@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
+from ...contracts.registry import contract_identity_digest
 from ...domain.errors import ConfigError
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase, RuntimeRecord
 from ...ports.activation import (
@@ -31,6 +34,17 @@ from ...ports.runtime_control import RuntimeControlClient, RuntimeLauncher, Runt
 from ...ports.sleeper import Sleeper
 
 _VENV = "venv"
+
+
+@dataclass(frozen=True, slots=True)
+class _ContractProbe:
+    """Structured packaged-vs-computed contract identity from the candidate release."""
+
+    packaged: dict[str, object]
+    computed: dict[str, object]
+    mismatched_fields: tuple[str, ...]
+    artifact_paths: tuple[str, ...]
+    agreement: bool
 
 
 def _run(
@@ -156,9 +170,11 @@ class SubprocessReleaseSmokeTester:
     """Smoke-test a candidate release by running the release itself.
 
     Checks, in order: the ``rf`` entry point runs (CLI/parser bootstrap), the runtime
-    worker and supervisor modules import, config loading is importable, and the MCP tool
-    surface can be computed. Everything runs under the candidate's own interpreter, so a
-    release that cannot start is rejected before it can become ``current``.
+    worker and supervisor modules import, config loading is importable, the MCP tool
+    surface can be computed, and the packaged contract identity agrees with the
+    in-process registry (#367). Everything runs under the candidate's own interpreter,
+    so a release that cannot start -- or one built from a stale worktree -- is rejected
+    before it can become ``current``.
     """
 
     def smoke(self, release_path: Path) -> SmokeResult:
@@ -213,10 +229,81 @@ class SubprocessReleaseSmokeTester:
                 tool_surface_hash="",
                 detail=f"tool-surface probe failed: {err.strip() or 'no output'}",
             )
+        probe = self._contract_probe(python)
+        if probe is None:
+            return SmokeResult(
+                ok=False,
+                tool_surface_hash=surface,
+                detail="contract-identity probe failed: the release did not report a "
+                "structured contract identity",
+            )
+        if not probe.agreement:
+            detail_parts = [
+                f"{field}: packaged {probe.packaged.get(field)!r} vs "
+                f"computed {probe.computed.get(field)!r}"
+                for field in probe.mismatched_fields
+            ]
+            return SmokeResult(
+                ok=False,
+                tool_surface_hash=surface,
+                detail="RELEASE_CONTRACT_IDENTITY_MISMATCH: packaged contract identity "
+                f"differs from the in-process registry ({'; '.join(detail_parts)}); "
+                f"offending artifacts: {', '.join(probe.artifact_paths) or 'unknown'}",
+                contract_mismatched_fields=probe.mismatched_fields,
+                contract_artifact_paths=probe.artifact_paths,
+                contract_packaged_identity=contract_identity_digest(probe.packaged),
+                contract_computed_identity=contract_identity_digest(probe.computed),
+            )
         return SmokeResult(
             ok=True,
             tool_surface_hash=surface,
-            detail="entry point, runtime imports, and tool surface verified",
+            detail="entry point, runtime imports, tool surface, and contract identity verified",
+            contract_identity=contract_identity_digest(probe.computed),
+        )
+
+    @staticmethod
+    def _contract_probe(python: Path) -> _ContractProbe | None:
+        """Run the structured contract probe inside the candidate, or ``None`` on failure."""
+
+        code, out, _err = _run(
+            [
+                str(python),
+                "-c",
+                "import json; "
+                "from repoforge.contracts.registry import release_contract_probe; "
+                "print(json.dumps(release_contract_probe(), sort_keys=True))",
+            ],
+            timeout=60.0,
+        )
+        if code != 0:
+            return None
+        try:
+            parsed = json.loads(out.strip())
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        packaged = parsed.get("packaged")
+        computed = parsed.get("computed")
+        raw_mismatched = parsed.get("mismatched_fields")
+        raw_paths = parsed.get("artifact_paths")
+        agreement = parsed.get("agreement")
+        if (
+            not isinstance(packaged, dict)
+            or not isinstance(computed, dict)
+            or not isinstance(raw_mismatched, list)
+            or not isinstance(raw_paths, list)
+            or not isinstance(agreement, bool)
+        ):
+            return None
+        mismatched = tuple(str(field) for field in raw_mismatched)
+        paths = tuple(str(path) for path in raw_paths)
+        return _ContractProbe(
+            packaged=packaged,
+            computed=computed,
+            mismatched_fields=mismatched,
+            artifact_paths=paths,
+            agreement=agreement,
         )
 
 

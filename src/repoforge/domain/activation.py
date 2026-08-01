@@ -89,6 +89,11 @@ class ReleaseManifest:
     tool_surface_hash: str
     source_worktree: str
     built_at: str
+    # Canonical digest of the release's contract identity (packaged generated identity
+    # == in-process registry), recorded by releases installed after #367. Empty on a
+    # legacy release, which must stay readable and switchable -- the absence of the
+    # proof is age, not corruption.
+    contract_identity: str = ""
     # Human-memorable provenance. OPTIONAL and deliberately outside the identity:
     # `build_fingerprint` decides what is installed, so recording a branch name can never
     # change which bits a release is, and two branches at the same commit stay one release
@@ -105,6 +110,10 @@ class ReleaseManifest:
             raise ValueError("Release build_fingerprint must be a sha256 digest")
         if not _SHA256.fullmatch(self.tool_surface_hash):
             raise ValueError("Release tool_surface_hash must be a sha256 digest")
+        # Empty is legitimate (a release installed before #367 recorded no proof), so
+        # only non-empty values are validated.
+        if self.contract_identity and not _SHA256.fullmatch(self.contract_identity):
+            raise ValueError("Release contract_identity must be a sha256 digest")
         _clean(self.package_version, name="package_version", limit=128)
         _clean(self.source_worktree, name="source_worktree")
         _clean(self.built_at, name="built_at", limit=64)
@@ -123,6 +132,7 @@ class ReleaseManifest:
             "tool_surface_hash": self.tool_surface_hash,
             "source_worktree": self.source_worktree,
             "built_at": self.built_at,
+            "contract_identity": self.contract_identity,
             "branch": self.branch,
             "subject": self.subject,
         }
@@ -148,6 +158,7 @@ class ReleaseManifest:
                 # value must read as "unknown" rather than making the release unreadable.
                 branch=_optional_str(raw, "branch"),
                 subject=_optional_str(raw, "subject"),
+                contract_identity=_optional_str(raw, "contract_identity"),
             )
         except KeyError as exc:
             raise ValueError(f"Release manifest missing field: {exc}") from exc

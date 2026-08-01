@@ -206,6 +206,18 @@ class UpgradeService:
             self._installer.install(artifact.wheel_path, destination)
 
         smoke = self._smoke.smoke(destination)
+        # A contract mismatch is a distinct, typed failure: the candidate runs but was
+        # built from a stale worktree, so it would crash-loop as soon as it serves.
+        if smoke.contract_mismatched_fields:
+            raise ConfigError(
+                "RELEASE_CONTRACT_IDENTITY_MISMATCH: candidate "
+                f"{commit_sha} packaged contract identity differs from its in-process "
+                f"registry ({', '.join(smoke.contract_mismatched_fields)}); offending "
+                f"artifacts: {', '.join(smoke.contract_artifact_paths) or 'unknown'}; "
+                f"packaged identity {smoke.contract_packaged_identity or 'unknown'}, "
+                f"computed identity {smoke.contract_computed_identity or 'unknown'}. "
+                f"{smoke.detail}"
+            )
         if not smoke.ok:
             raise ConfigError(f"SMOKE_FAILED: candidate {commit_sha} did not pass: {smoke.detail}")
 
@@ -215,6 +227,7 @@ class UpgradeService:
                 package_version=artifact.package_version,
                 build_fingerprint=artifact.build_fingerprint,
                 tool_surface_hash=smoke.tool_surface_hash,
+                contract_identity=smoke.contract_identity,
                 source_worktree=str(worktree),
                 built_at=self._clock.now_iso(),
                 branch=state.branch,
@@ -233,6 +246,20 @@ class UpgradeService:
                     f"RELEASE_SURFACE_DRIFT: installed {commit_sha} records tool surface "
                     f"{existing.tool_surface_hash} but the release now reports "
                     f"{smoke.tool_surface_hash}"
+                )
+            # Both non-empty is the only comparable case: an empty manifest proof means
+            # the release predates #367, and an empty live probe means the smoke tester
+            # does not probe (a fake) -- neither proves drift.
+            if (
+                existing.contract_identity
+                and smoke.contract_identity
+                and existing.contract_identity != smoke.contract_identity
+            ):
+                raise ConfigError(
+                    "RELEASE_CONTRACT_IDENTITY_MISMATCH: installed "
+                    f"{commit_sha} records contract identity {existing.contract_identity} "
+                    f"but the release now reports {smoke.contract_identity}; the release "
+                    "directory has drifted from its reviewed manifest"
                 )
             manifest = existing
 
@@ -730,7 +757,42 @@ class UpgradeService:
                         "active release; nothing to switch."
                     ),
                 )
+            self._verify_installed_contract(manifest)
             return self._activate(manifest, keep_releases=keep_releases)
+
+    def _verify_installed_contract(self, manifest: ReleaseManifest) -> None:
+        """Re-run the candidate probe against an installed release before switching to it.
+
+        A switch is an activation: nothing about it may be less verified than a fresh
+        one. The release is re-smoked so a directory that drifted after install -- or
+        whose packaged identity no longer matches its registry -- fails closed here
+        rather than crash-looping after the swap.
+        """
+        smoke = self._smoke.smoke(self._store.release_path(manifest.commit_sha))
+        if smoke.contract_mismatched_fields:
+            raise ConfigError(
+                "RELEASE_CONTRACT_IDENTITY_MISMATCH: "
+                f"{manifest.commit_sha} packaged contract identity differs from its "
+                f"in-process registry ({', '.join(smoke.contract_mismatched_fields)}); "
+                f"offending artifacts: {', '.join(smoke.contract_artifact_paths) or 'unknown'}"
+            )
+        if not smoke.ok:
+            raise ConfigError(
+                f"SMOKE_FAILED: release {manifest.commit_sha} did not pass re-verification: "
+                f"{smoke.detail}"
+            )
+        if (
+            manifest.contract_identity
+            and smoke.contract_identity
+            and manifest.contract_identity != smoke.contract_identity
+        ):
+            raise ConfigError(
+                "RELEASE_CONTRACT_IDENTITY_MISMATCH: "
+                f"{manifest.commit_sha} records contract identity "
+                f"{manifest.contract_identity} but the release now reports "
+                f"{smoke.contract_identity}; the release directory has drifted from its "
+                "reviewed manifest"
+            )
 
     def rollback(
         self,
