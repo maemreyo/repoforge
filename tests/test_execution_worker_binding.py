@@ -183,14 +183,18 @@ def test_command_line_reader_returns_the_live_process_argv() -> None:
     )
     try:
         deadline = time.monotonic() + 10
+        argv = None
         while time.monotonic() < deadline:
-            argv = read_command_line(process.pid)
-            if argv is not None:
+            candidate = read_command_line(process.pid)
+            # On macOS a venv's sys.executable is a shim that re-execs onto the
+            # real interpreter, so `ps -o command=` can report a transient argv
+            # during that window (same race as the worker identity settle, #420).
+            # Poll until the post-exec argv -- whose basename is python -- is seen.
+            if candidate is not None and os.path.basename(candidate[0]).startswith("python"):
+                argv = candidate
                 break
             time.sleep(0.05)
         assert argv is not None
-        # On macOS a venv's sys.executable is a shim, but the live argv[0] is the real
-        # interpreter; only the interpreter's identity matters here, not the exact path.
         assert os.path.basename(argv[0]).startswith("python")
         assert "-c" in argv
         assert "time.sleep(30)" in " ".join(argv)
