@@ -92,14 +92,27 @@ class _Observer:
     """Observes whatever the fake release store's `current` points at (converged),
     unless pinned to a specific sha to simulate a runtime that did not adopt."""
 
-    def __init__(self, store, *, pinned: str | None = None, phase: str = "healthy") -> None:
+    def __init__(
+        self,
+        store,
+        *,
+        pinned: str | None = None,
+        phase: str = "healthy",
+        last_error_code: str | None = None,
+    ) -> None:
         self._store = store
         self._pinned = pinned
         self._phase = phase
+        self._last_error_code = last_error_code
 
     def observe(self) -> ObservedRuntime:
         sha = self._pinned if self._pinned is not None else self._store.current_sha()
-        return ObservedRuntime(running_release_sha=sha, phase=self._phase, pid=99)
+        return ObservedRuntime(
+            running_release_sha=sha,
+            phase=self._phase,
+            pid=99,
+            last_error_code=self._last_error_code,
+        )
 
 
 class _Clock:
@@ -818,6 +831,132 @@ def test_reconcile_is_a_no_op_when_nothing_is_in_flight(tmp_path: Path) -> None:
     assert result.status == "nothing_to_reconcile"
     assert result.active_sha == "1111aaa"
     assert restarter.calls == restarts_before
+
+
+def test_reconcile_repair_rollback_recovers_a_fail_closed_target(tmp_path: Path) -> None:
+    """#367 repair: a release that failed closed with a typed non-retryable failure is
+    terminalized as a rollback when the previous release is still usable."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    # The failed activation swapped `current` to the broken release, the runtime went
+    # fail-closed with a typed contract identity error, and no receipt was written.
+    store.begin_activation(receipt_id="act-20260725-910", from_sha="1111aaa", to_sha="2222bbb")
+    store.record_activation_stage("symlink_switched")
+
+    failing = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(surface=_SURFACE_NEW, contract_identity="d" * 64),
+        restarter=_Restarter(),
+        observer=_Observer(
+            store, phase="fail_closed", last_error_code="CONTRACT_ARTIFACT_MISMATCH"
+        ),
+        clock=_Clock(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+    )
+
+    result = failing.reconcile(repair="rollback")
+
+    assert result.status == "rolled_back"
+    assert store.current_sha() == "1111aaa"
+    assert result.active_sha == "1111aaa"
+    assert result.activation_receipt is not None
+    receipt = store.read_receipt(result.activation_receipt)
+    assert receipt is not None and receipt.outcome.value == "rolled_back"
+    assert store.read_in_flight_activation() is None
+
+
+def test_reconcile_repair_refuses_without_a_typed_non_retryable_failure(
+    tmp_path: Path,
+) -> None:
+    """Repair is a mutation; it is only offered when the target provably failed closed."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    store.begin_activation(receipt_id="act-20260725-911", from_sha="1111aaa", to_sha="2222bbb")
+    store.record_activation_stage("symlink_switched")
+
+    degraded = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(store, phase="degraded", last_error_code=None),
+        clock=_Clock(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+    )
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_REPAIRABLE"):
+        degraded.reconcile(repair="rollback")
+    assert store.current_sha() == "2222bbb"
+    assert store.read_in_flight_activation() is not None
+
+
+def test_reconcile_repair_refuses_when_the_previous_release_is_unusable(
+    tmp_path: Path,
+) -> None:
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    store.begin_activation(receipt_id="act-20260725-912", from_sha="1111aaa", to_sha="2222bbb")
+    store.record_activation_stage("symlink_switched")
+    (store.release_path("1111aaa") / ".manifest.json").unlink()
+
+    failing = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(
+            store, phase="fail_closed", last_error_code="CONTRACT_ARTIFACT_MISMATCH"
+        ),
+        clock=_Clock(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+    )
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_REPAIRABLE"):
+        failing.reconcile(repair="rollback")
+    assert store.current_sha() == "2222bbb"
+    assert store.read_in_flight_activation() is not None
+
+
+def test_reconcile_without_repair_still_refuses_a_fail_closed_target(tmp_path: Path) -> None:
+    """Repair is opt-in: plain reconcile keeps its forward-only contract."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+    store.begin_activation(receipt_id="act-20260725-913", from_sha="1111aaa", to_sha="2222bbb")
+    store.record_activation_stage("symlink_switched")
+
+    failing = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(
+            store, phase="fail_closed", last_error_code="CONTRACT_ARTIFACT_MISMATCH"
+        ),
+        clock=_Clock(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+    )
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECONCILABLE"):
+        failing.reconcile()
+    assert store.read_in_flight_activation() is not None
 
 
 def test_a_failed_activation_whose_rollback_also_fails_says_so(tmp_path: Path) -> None:
