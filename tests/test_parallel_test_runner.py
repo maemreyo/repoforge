@@ -62,6 +62,12 @@ def test_lanes_write_separate_coverage_data_files(tmp_path: Path) -> None:
         assert Path(environment["COVERAGE_FILE"]).name.startswith(".coverage.")
 
 
+def test_coverage_lane_records_per_test_context(tmp_path: Path) -> None:
+    command, _ = _lane(tmp_path, "xdist", ("tests/test_one.py",), workers=3)
+
+    assert "--cov-context=test" in command
+
+
 def test_lane_does_not_override_the_repository_pytest_timeout(tmp_path: Path) -> None:
     """pyproject's 120s clears the app's git subprocess budget; a lower one kills healthy calls."""
     command, _ = _lane(tmp_path, "xdist", ("tests/test_one.py",), workers=3)

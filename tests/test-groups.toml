@@ -471,6 +471,7 @@ source_globs = [
 ]
 test_files = [
   "tests/test_conflict_marker_gate.py",
+  "tests/test_coverage_map_reuse.py",
   "tests/test_parallel_test_runner.py",
   "tests/test_select_affected_tests.py",
   "tests/test_syntax_diagnostics.py",

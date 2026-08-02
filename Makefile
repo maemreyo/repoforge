@@ -12,7 +12,7 @@ export
 endif
 
 .PHONY: default start dev-server restart status stop logs doctor
-.PHONY: setup schemas lint typecheck test test-full test-fast test-affected coverage gate test-groups-check test-map test-map-check
+.PHONY: setup schemas lint typecheck test test-full test-fast test-affected coverage gate test-groups-check test-map test-map-check test-map-check-existing
 .PHONY: v2-gates build verify check install release
 .PHONY: smoke clean live-activation
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
@@ -36,6 +36,7 @@ help:  # Show available commands without changing local or runtime state
 	  '  make test-groups-check Verify every test file is mapped by tests/test-groups.toml' \
 	  '  make test-map          Regenerate the coverage map that powers precise test-affected selection' \
 	  '  make test-map-check    Fail if that coverage map has gone stale' \
+	  '  make test-map-check-existing  Validate the map from canonical coverage data' \
 	  '  make v2-gates          Run corpora and control-plane fault gates' \
 	  '  make verify            Verify a change in progress (no coverage floor, build, or wheel smoke)' \
 	  '  make check             Run the full dirty-tree production gate' \
@@ -108,6 +109,10 @@ test-map:  # Regenerate tests/coverage-map.json (source-file -> covering-test-fi
 
 test-map-check:  # Fail if tests/coverage-map.json has gone stale against the current tree
 	uv run --extra dev python scripts/build_coverage_map.py --check
+
+test-map-check-existing:  # Reuse canonical coverage; never spawn another pytest suite.
+	@test -n "$${COVERAGE_FILE:-}" || { echo "COVERAGE_FILE is required" >&2; exit 2; }
+	uv run --extra dev python scripts/build_coverage_map.py --from-existing-coverage --coverage-file "$${COVERAGE_FILE}" --check
 
 v2-gates:  # Execute frozen corpora and production-composition control-plane fault gates
 	@set -eu; \

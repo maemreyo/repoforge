@@ -95,7 +95,15 @@ def lane_command(
     command = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q"]
     if coverage_dir is not None:
         environment["COVERAGE_FILE"] = str(coverage_dir / f".coverage.lane-{name}")
-        command.extend(["--cov=repoforge", "--cov-branch", "--cov-report=", "--cov-fail-under=0"])
+        command.extend(
+            [
+                "--cov=repoforge",
+                "--cov-branch",
+                "--cov-context=test",
+                "--cov-report=",
+                "--cov-fail-under=0",
+            ]
+        )
     if workers is not None:
         command.extend(["-n", str(workers)])
     command.extend(str(path.relative_to(root)) for path in files)
