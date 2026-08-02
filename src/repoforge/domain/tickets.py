@@ -22,7 +22,7 @@ GITHUB_API_VERSION = "2022-11-28"
 #: reader (query field changes, normalizer changes, parser rule changes).
 #: Cache entries bind to it so a reader change is a miss instead of stale
 #: evidence.
-TICKET_GRAPH_READER_VERSION = "1"
+TICKET_GRAPH_READER_VERSION = "2"
 
 _REMOTE_SLUG = re.compile(
     r"(?:github\.com[/:])(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$"

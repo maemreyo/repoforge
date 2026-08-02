@@ -100,8 +100,11 @@ def snapshot_payload(
                 "capability": stamp.capability.value if stamp.capability is not None else None,
                 "source": stamp.source,
                 "observed_at": stamp.observed_at,
+                "revision": stamp.revision,
+                "authority_fingerprint": stamp.authority_fingerprint,
                 "complete": stamp.complete,
                 "truncated": stamp.truncated,
+                "error_codes": list(stamp.error_codes),
                 "item_count": stamp.item_count,
             }
             for stamp in snapshot.observation_stamps
@@ -117,7 +120,7 @@ def snapshot_payload(
         ],
     }
     payload["bindings"] = {
-        "cache_schema_version": 2,
+        "cache_schema_version": 3,
         "reader_contract_version": TICKET_GRAPH_READER_VERSION,
         "api_version": GITHUB_API_VERSION,
         "repository_slug": snapshot.repository_slug,
@@ -154,7 +157,7 @@ def payload_bindings_valid(
     bindings = payload.get("bindings")
     if not isinstance(bindings, dict):
         return False
-    if bindings.get("cache_schema_version") != 2:
+    if bindings.get("cache_schema_version") != 3:
         return False
     if bindings.get("reader_contract_version") != TICKET_GRAPH_READER_VERSION:
         return False
@@ -310,17 +313,44 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
         if not isinstance(raw_stamps, list):
             return None
         observation_stamps: list[ObservationStamp] = []
+        seen_stamp_capabilities: set[GraphEvidenceCapability] = set()
         for index, item in enumerate(raw_stamps):
             if not isinstance(item, dict):
                 raise ValueError(f"observation_stamps[{index}] must be an object")
             raw_capability = item.get("capability")
-            capability = (
-                GraphEvidenceCapability(
-                    _strict_str(raw_capability, f"observation_stamps[{index}].capability")
+            if raw_capability is None:
+                raise ValueError(f"observation_stamps[{index}].capability is required")
+            capability = GraphEvidenceCapability(
+                _strict_str(raw_capability, f"observation_stamps[{index}].capability")
+            )
+            if capability in seen_stamp_capabilities:
+                raise ValueError(
+                    f"observation_stamps[{index}].capability {capability.value} is duplicated"
                 )
-                if raw_capability is not None
+            seen_stamp_capabilities.add(capability)
+            raw_error_codes = item.get("error_codes", [])
+            if not isinstance(raw_error_codes, list):
+                raise ValueError(f"observation_stamps[{index}].error_codes must be a list")
+            error_codes = tuple(
+                _strict_str(code, f"observation_stamps[{index}].error_codes[{code_index}]")
+                for code_index, code in enumerate(raw_error_codes)
+            )
+            raw_revision = item.get("revision")
+            revision = (
+                _strict_str(raw_revision, f"observation_stamps[{index}].revision")
+                if raw_revision is not None
                 else None
             )
+            raw_authority = item.get("authority_fingerprint")
+            authority_fingerprint = (
+                _strict_str(raw_authority, f"observation_stamps[{index}].authority_fingerprint")
+                if raw_authority is not None
+                else None
+            )
+            if not isinstance(item["complete"], bool):
+                raise ValueError(f"observation_stamps[{index}].complete must be a bool")
+            if not isinstance(item["truncated"], bool):
+                raise ValueError(f"observation_stamps[{index}].truncated must be a bool")
             observation_stamps.append(
                 ObservationStamp(
                     capability=capability,
@@ -328,13 +358,34 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
                     observed_at=_strict_str(
                         item["observed_at"], f"observation_stamps[{index}].observed_at"
                     ),
+                    revision=revision,
+                    authority_fingerprint=authority_fingerprint,
                     complete=item["complete"],
                     truncated=item["truncated"],
+                    error_codes=error_codes,
                     item_count=_strict_int(
                         item["item_count"], f"observation_stamps[{index}].item_count"
                     ),
                 )
             )
+        coverage_by_capability = {item.capability: item for item in capability_coverage}
+        if len(coverage_by_capability) != len(capability_coverage):
+            raise ValueError("capability_coverage must not contain duplicate capabilities")
+        for stamp in observation_stamps:
+            stamp_capability = stamp.capability
+            if stamp_capability is None:
+                raise ValueError("observation stamp capability is required")
+            coverage = coverage_by_capability.get(stamp_capability)
+            if coverage is None:
+                raise ValueError(
+                    f"observation stamp for {stamp_capability.value} has no matching coverage entry"
+                )
+            if stamp.complete != coverage.complete or stamp.truncated != coverage.truncated:
+                raise ValueError(
+                    f"observation stamp for {stamp_capability.value} disagrees with coverage "
+                    f"(complete={stamp.complete!r}/{coverage.complete!r}, "
+                    f"truncated={stamp.truncated!r}/{coverage.truncated!r})"
+                )
         raw_refs = payload.get("issue_refs", [])
         if not isinstance(raw_refs, list):
             return None
