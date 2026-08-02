@@ -4,172 +4,29 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import tempfile
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from ...domain.durable_state import Revision, StateCodec, StateEnvelope, StatePage
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...ports.locking import LockManager
+from .json_state_file_store import AtomicJsonFileStore as AtomicJsonFileStore
+from .json_state_file_store import _state_error
 
 T = TypeVar("T")
-_COLLECTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_SAFE_RECORD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-
-
-class AtomicJsonFileStore:
-    """Shared private, bounded, atomic JSON-file mechanics."""
-
-    def __init__(
-        self,
-        state_root: Path,
-        *,
-        collection: str,
-        locks: LockManager,
-        id_validator: Callable[[str], str],
-        max_record_bytes: int = 1_000_000,
-    ) -> None:
-        if _COLLECTION.fullmatch(collection) is None:
-            raise JsonStateRepository._error(
-                "State collection name is unsafe", ErrorCode.STATE_INVALID
-            )
-        if (
-            not isinstance(max_record_bytes, int)
-            or isinstance(max_record_bytes, bool)
-            or not 64 <= max_record_bytes <= 25 * 1024 * 1024
-        ):
-            raise JsonStateRepository._error(
-                "max_record_bytes must be between 64 and 26214400",
-                ErrorCode.STATE_INVALID,
-            )
-        self.root = state_root.expanduser().resolve() / collection
-        self._collection = collection
-        self._locks = locks
-        self._id_validator = id_validator
-        self._max_record_bytes = max_record_bytes
-        try:
-            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(self.root, 0o700)
-        except OSError as exc:
-            raise JsonStateRepository._error(
-                f"Cannot initialize state collection {collection}",
-                ErrorCode.STATE_PERSISTENCE_FAILED,
-                retryable=True,
-            ) from exc
-
-    def record_id(self, value: str) -> str:
-        try:
-            validated = self._id_validator(value)
-        except (TypeError, ValueError, RepoForgeError) as exc:
-            raise JsonStateRepository._error(
-                "State record identifier is invalid", ErrorCode.STATE_INVALID
-            ) from exc
-        if (
-            validated != value
-            or _SAFE_RECORD_ID.fullmatch(validated) is None
-            or "/" in validated
-            or "\\" in validated
-        ):
-            raise JsonStateRepository._error(
-                "State record identifier is unsafe", ErrorCode.STATE_INVALID
-            )
-        return validated
-
-    def path(self, record_id: str) -> Path:
-        return self.root / f"{self.record_id(record_id)}.json"
-
-    def locked(self, record_id: str, *, operation: str) -> AbstractContextManager[None]:
-        safe_id = self.record_id(record_id)
-        return self._locks.lock(
-            f"state-{self._collection}-{safe_id}",
-            timeout_seconds=5,
-            metadata={"operation": operation},
-        )
-
-    @staticmethod
-    def _fsync_dir(path: Path) -> None:
-        try:
-            descriptor = os.open(path, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-        finally:
-            os.close(descriptor)
-
-    def read_bytes(self, record_id: str) -> bytes | None:
-        path = self.path(record_id)
-        if not path.is_file():
-            return None
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            raise JsonStateRepository._error(
-                f"Cannot read state record {path.name}",
-                ErrorCode.STATE_PERSISTENCE_FAILED,
-                retryable=True,
-            ) from exc
-        if len(data) > self._max_record_bytes:
-            raise JsonStateRepository._error(
-                "State record exceeds its encoded size bound", ErrorCode.STATE_TOO_LARGE
-            )
-        return data
-
-    def write_bytes(self, record_id: str, data: bytes) -> None:
-        if len(data) > self._max_record_bytes:
-            raise JsonStateRepository._error(
-                "State record exceeds its encoded size bound", ErrorCode.STATE_TOO_LARGE
-            )
-        path = self.path(record_id)
-        try:
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{path.name}.tmp-", dir=path.parent
-            )
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    os.fchmod(handle.fileno(), 0o600)
-                    handle.write(data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, path)
-                os.chmod(path, 0o600)
-                self._fsync_dir(path.parent)
-            finally:
-                temporary.unlink(missing_ok=True)
-        except OSError as exc:
-            raise JsonStateRepository._error(
-                f"Cannot persist state record {path.name}",
-                ErrorCode.STATE_PERSISTENCE_FAILED,
-                retryable=True,
-            ) from exc
-
-    def delete_bytes(self, record_id: str) -> None:
-        path = self.path(record_id)
-        existed = path.exists()
-        try:
-            path.unlink(missing_ok=True)
-            if existed:
-                self._fsync_dir(path.parent)
-        except OSError as exc:
-            raise JsonStateRepository._error(
-                f"Cannot delete state record {path.name}",
-                ErrorCode.STATE_PERSISTENCE_FAILED,
-                retryable=True,
-            ) from exc
-
-    def list_ids(self, *, pattern: str, max_records: int) -> tuple[tuple[str, ...], bool]:
-        paths = sorted(self.root.glob(pattern))
-        return tuple(path.stem for path in paths[:max_records]), len(paths) > max_records
 
 
 class JsonStateRepository(Generic[T]):
-    """Bounded deterministic storage with private permissions and revision CAS."""
+    """Bounded deterministic storage with private permissions and revision CAS.
+
+    Filesystem mechanics (locking, atomic writes, bounded reads) live in
+    :class:`AtomicJsonFileStore`; this class layers typed envelope encoding and
+    revision compare-and-swap on top.  The compare-and-swap primitives
+    (``save``, ``delete_if_revision``, ``compare_and_delete``) hold the per-record
+    lock for the whole read-compare-mutate section, so a concurrent writer can
+    never observe an intermediate state.
+    """
 
     def __init__(
         self,
@@ -200,14 +57,7 @@ class JsonStateRepository(Generic[T]):
         *,
         retryable: bool = False,
     ) -> RepoForgeError:
-        return RepoForgeError(
-            message,
-            code=code,
-            retryable=retryable,
-            safe_next_action=(
-                "Inspect state ownership, permissions, free space, schema compatibility, and the latest revision before retrying."
-            ),
-        )
+        return _state_error(message, code, retryable=retryable)
 
     def _record_id(self, value: str) -> str:
         return self._files.record_id(value)
@@ -435,6 +285,33 @@ class JsonStateRepository(Generic[T]):
         with self._files.locked(safe_id, operation="delete_if_revision"):
             current = self.read(safe_id)
             if current is None or current.revision != expected_revision:
+                return False
+            self._files.delete_bytes(safe_id)
+            return True
+
+    def compare_and_delete(
+        self,
+        record_id: str,
+        *,
+        expected_revision: Revision,
+        expected_value: T,
+    ) -> bool:
+        """Delete only while the stored revision AND value still match expectations.
+
+        Both comparisons and the delete run under one per-record lock, so a
+        delete-then-recreate that reuses the same revision (an ABA sequence) can
+        never cause a stale caller to remove a record it never inspected. Returns
+        ``False`` without deleting when the record is absent or either the
+        revision or the value has moved.
+        """
+        safe_id = self._record_id(record_id)
+        with self._files.locked(safe_id, operation="compare_and_delete"):
+            current = self.read(safe_id)
+            if (
+                current is None
+                or current.revision != expected_revision
+                or current.value != expected_value
+            ):
                 return False
             self._files.delete_bytes(safe_id)
             return True

@@ -63,21 +63,21 @@ class JsonWorkerBindingStore:
         """Compare-and-delete: only remove the binding while it still matches ``binding``.
 
         Closes the handoff race where a new generation writes a fresh binding between
-        a reconciler's scan and its release. The value comparison and the delete run
-        under one record lock via ``delete_if_revision``.
+        a reconciler's scan and its release. The value and revision comparison and the
+        delete run under one record lock via ``compare_and_delete``, so a
+        delete-then-recreate that reuses the same revision cannot make a stale
+        reconciler remove a binding it never inspected (ABA).
         """
         envelope = self._records.read(binding.operation_id)
         if envelope is None:
             return True
         if envelope.value != binding:
             return False
-        return self._records.delete_if_revision(
-            binding.operation_id, expected_revision=envelope.revision
+        return self._records.compare_and_delete(
+            binding.operation_id,
+            expected_revision=envelope.revision,
+            expected_value=binding,
         )
-        if envelope.value != binding:
-            return False
-        self._records.delete(binding.operation_id)
-        return True
 
     def list_all(self, *, max_records: int = 2_000) -> WorkerBindingPage:
         page = self._records.list_records(max_records=max_records)
