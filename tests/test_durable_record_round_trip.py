@@ -1022,6 +1022,62 @@ def _task_capsule(tmp_path: Path) -> tuple[object, object]:
     return written, _value(store.read(written.task_id))
 
 
+def _process_lease(tmp_path: Path) -> tuple[object, object]:
+    from repoforge.adapters.persistence.json_process_lease_adapter import (
+        JsonProcessLeaseAdapter,
+    )
+    from repoforge.domain.process_lease import (
+        ProcessLease,
+        ProcessLeaseRole,
+        ProcessLeaseStatus,
+    )
+
+    store = JsonProcessLeaseAdapter(tmp_path, InMemoryLockManager())
+    written = ProcessLease(
+        lease_id="worker-" + "0" * 24,
+        status=ProcessLeaseStatus.UNPROVEN,
+        process_identity=_SHA,
+        pid=4321,
+        started_at="2026-07-29T09:26:21+00:00",
+        heartbeat_at="2026-07-29T09:30:00+00:00",
+        correlation_id="e" * 24,
+        created_at="2026-07-29T09:26:21+00:00",
+        updated_at="2026-07-29T09:30:00+00:00",
+        error_code="WORKER_UNPROVEN",
+        error_message="identity not proven yet",
+        role=ProcessLeaseRole.OPERATION_WORKER,
+    )
+    store.create(written)
+    return written, _value(store.read(written.lease_id))
+
+
+def _runtime_transition(tmp_path: Path) -> tuple[object, object]:
+    from repoforge.adapters.persistence.json_runtime_transition_adapter import (
+        JsonRuntimeTransitionAdapter,
+    )
+    from repoforge.domain.runtime_transition import (
+        RuntimeTransition,
+        RuntimeTransitionStatus,
+    )
+
+    store = JsonRuntimeTransitionAdapter(tmp_path, InMemoryLockManager())
+    written = RuntimeTransition(
+        transition_id="tran-" + "a" * 24,
+        status=RuntimeTransitionStatus.ROLLED_BACK,
+        target_generation=15,
+        config_generation=14,
+        correlation_id="e" * 24,
+        started_at="2026-07-29T09:26:21+00:00",
+        updated_at="2026-07-29T09:39:48+00:00",
+        completed_at="2026-07-29T09:39:48+00:00",
+        error_code="HEALTH_FAILED",
+        error_message="Runtime did not report the target generation in time",
+        previous_transition_id="tran-" + "b" * 24,
+    )
+    store.create(written)
+    return written, _value(store.read(written.transition_id))
+
+
 ALL_CASES: tuple[RoundTripCase, ...] = ()
 
 
@@ -1042,15 +1098,19 @@ def _register() -> tuple[RoundTripCase, ...]:
     from repoforge.domain.operation_identity import OperationIdentityRecord
     from repoforge.domain.operation_work import OperationWorkItem
     from repoforge.domain.operation_worker import OperationWorkerBinding
+    from repoforge.domain.process_lease import ProcessLease
     from repoforge.domain.repository_identity import RepositoryIdentityBinding
     from repoforge.domain.runtime import RuntimeRecord
     from repoforge.domain.runtime_activation import RuntimeActivationReceipt
+    from repoforge.domain.runtime_transition import RuntimeTransition
     from repoforge.domain.task_capsule import TaskCapsule
     from repoforge.domain.verification_dag import IterationCacheEntry
 
     return (
         RoundTripCase(RuntimeRecord, _runtime_record),
         RoundTripCase(OperationWorkerBinding, _worker_binding),
+        RoundTripCase(ProcessLease, _process_lease),
+        RoundTripCase(RuntimeTransition, _runtime_transition),
         RoundTripCase(ExecutionWorkerBinding, _execution_worker_binding),
         RoundTripCase(ExecutionWorkerArchiveEntry, _execution_worker_archive),
         RoundTripCase(RepositoryIdentityBinding, _repository_identity_binding),

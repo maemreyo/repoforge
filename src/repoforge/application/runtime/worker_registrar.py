@@ -20,8 +20,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ...adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
-from ...adapters.persistence.sqlite_lease_store import SqliteLeaseStore
 from ...domain.durable_state import Revision
 from ...domain.errors import ConfigError
 from ...domain.process_lease import (
@@ -40,6 +38,7 @@ from ...domain.process_lease import (
 )
 from ...ports.clock import Clock
 from ...ports.ids import IdGenerator
+from ...ports.process_lease_store import LeaseShadowStore, ProcessLeaseStore
 
 
 class WorkerRegistrar:
@@ -48,10 +47,10 @@ class WorkerRegistrar:
     def __init__(
         self,
         *,
-        leases: JsonProcessLeaseAdapter,
+        leases: ProcessLeaseStore,
         ids: IdGenerator,
         clock: Clock,
-        shadow: SqliteLeaseStore | None = None,
+        shadow: LeaseShadowStore | None = None,
     ) -> None:
         self._leases = leases
         self._ids = ids

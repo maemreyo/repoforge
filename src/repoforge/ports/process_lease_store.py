@@ -47,3 +47,15 @@ class ProcessLeaseStore(Protocol):
         role: ProcessLeaseRole | None = None,
         max_records: int = 2_000,
     ) -> ProcessLeasePage: ...
+
+
+class LeaseShadowStore(Protocol):
+    """Write-only mirror for parity checking, never authoritative.
+
+    The authoritative lease writes land in the JSON store; the SQLite shadow is a
+    replica so an operator can diff the two. ``write_shadow`` mirrors one
+    authoritative write. The shadow must never be able to refuse an authoritative
+    write -- the registrar swallows a shadow failure (F-001).
+    """
+
+    def write_shadow(self, lease: ProcessLease, revision: Revision) -> None: ...
