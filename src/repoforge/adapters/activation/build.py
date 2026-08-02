@@ -721,10 +721,11 @@ def _persist_wheel(wheel: Path) -> Path:
     ``uv build`` writes into a scratch ``out_dir`` this module then removes; the
     caller installs the wheel only after ``build`` returns, so the wheel must live
     somewhere that outlives that cleanup. The caller unlinks it after install.
+    The original wheel basename is kept: ``uv pip install`` parses the filename and
+    rejects a random one (no version/platform tags).
     """
-    fd, kept_name = tempfile.mkstemp(prefix="repoforge-upgrade-wheel-", suffix=".whl")
-    os.close(fd)
-    kept = Path(kept_name)
+    kept_dir = Path(tempfile.mkdtemp(prefix="repoforge-upgrade-wheel-"))
+    kept = kept_dir / wheel.name
     shutil.move(str(wheel), str(kept))
     return kept
 

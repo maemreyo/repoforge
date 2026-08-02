@@ -45,6 +45,10 @@ DEFAULT_HEALTH_INTERVAL_SECONDS = 5.0
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 3
 _RECEIPT_ID_ATTEMPTS = 8
 RECONCILE_COMMAND = "rf upgrade reconcile"
+#: Temp-dir prefix used by the wheel builder for the wheel that survives build()
+#: until this service installs (or skips) it; cleanup removes the wheel's own dir,
+#: never a caller-provided path.
+_WHEEL_TMP_PREFIX = "repoforge-upgrade-wheel-"
 #: The ONLY failure dispositions `reconcile --repair rollback` may authorize: the
 #: release's own contract identity diverged, so the runtime is deterministically
 #: fail-closed. Anything else (tunnel, worker, handoff, transient) needs its own
@@ -218,7 +222,11 @@ class UpgradeService:
             smoke = self._smoke.smoke(destination)
         finally:
             # Covers both the consumed wheel and the already-installed (never installed) path.
-            artifact.wheel_path.unlink(missing_ok=True)
+            wheel = artifact.wheel_path
+            wheel.unlink(missing_ok=True)
+            if wheel.parent.name.startswith(_WHEEL_TMP_PREFIX):
+                with suppress(OSError):
+                    wheel.parent.rmdir()
         # A contract mismatch is a distinct, typed failure: the candidate runs but was
         # built from a stale worktree, so it would crash-loop as soon as it serves.
         if smoke.contract_mismatched_fields:

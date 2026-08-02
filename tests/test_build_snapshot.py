@@ -121,6 +121,8 @@ def test_persist_wheel_outlives_the_build_scratch_directory(tmp_path: Path) -> N
         assert kept.exists()
         assert kept.read_bytes() == b"fake wheel bytes"
         assert kept.suffix == ".whl"
+        # uv pip install parses the wheel filename; a random one is rejected.
+        assert kept.name == wheel.name
         # The caller removes the scratch dir; the kept wheel must not live inside it.
         import shutil
 
