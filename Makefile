@@ -12,7 +12,7 @@ export
 endif
 
 .PHONY: default start dev-server restart status stop logs doctor
-.PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check test-map test-map-check
+.PHONY: setup schemas lint typecheck test test-full test-fast test-affected coverage gate test-groups-check test-map test-map-check
 .PHONY: v2-gates build verify check install release
 .PHONY: smoke clean live-activation
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
@@ -27,9 +27,12 @@ help:  # Show available commands without changing local or runtime state
 	  '  make schemas           Regenerate reviewed Forge v2 contract goldens' \
 	  '  make lint              Run Ruff lint' \
 	  '  make typecheck         Run strict Mypy' \
-	  '  make test              Run tests with coverage' \
-	  '  make test-fast         Run tests in parallel (3 workers), no coverage' \
-	  '  make test-affected     Run only test groups affected by changed paths (fails closed to full suite)' \
+	  '  make test              Run affected tests plus the safety bundle, no coverage' \
+	  '  make test-full         Run the complete behavioral suite, no coverage' \
+	  '  make test-fast         Transition alias for make test-full' \
+	  '  make test-affected     Transition alias for make test' \
+	  '  make coverage          Run one canonical full branch-coverage suite' \
+	  '  make gate              Run the clean-tree authoritative production gate' \
 	  '  make test-groups-check Verify every test file is mapped by tests/test-groups.toml' \
 	  '  make test-map          Regenerate the coverage map that powers precise test-affected selection' \
 	  '  make test-map-check    Fail if that coverage map has gone stale' \
@@ -75,10 +78,10 @@ lint:  # Lint all source, tests, and scripts
 typecheck:  # Type-check the full source tree
 	uv run --extra dev mypy src/repoforge
 
-test:  # Run the complete suite with the repository coverage policy
-	uv run --extra dev pytest --cov=repoforge --cov-report=term-missing
+test:  # Fast developer/model feedback: affected tests plus the safety bundle, no coverage
+	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}"
 
-test-fast:  # Run the complete suite in parallel without coverage, for fast local iteration.
+test-full:  # Run the complete behavioral suite without coverage.
 	# -n 3 was measured against -n 2 and -n 4 on this repo: -n 3 is both the
 	# fastest and the only worker count that stayed stable (-n 4 crashed a
 	# worker and produced contention-flaky failures in shared-cache tests).
@@ -88,8 +91,14 @@ test-fast:  # Run the complete suite in parallel without coverage, for fast loca
 	# failures under load even at -n 3.
 	uv run --extra dev python scripts/select_affected_tests.py --full --run
 
-test-affected:  # Run only the tests affected by changed paths (coverage-map precise, group fallback) vs REPOFORGE_TEST_AFFECTED_BASE (default: main); fails closed to the full suite when any changed path is unmapped
-	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}"
+test-fast: test-full  # Transition alias retained for one release.
+
+test-affected: test  # Transition alias retained for one release.
+
+coverage:  # Run the complete suite once with branch coverage and the 80% floor.
+	uv run --extra dev python scripts/run_test_suite.py --coverage-dir "$${REPOFORGE_COVERAGE_DIR:-.cache/verification/coverage}"
+
+gate: production-check  # Operator/CI authority: clean-tree production gate.
 
 test-groups-check:  # Verify tests/test-groups.toml maps every test file to exactly one group
 	uv run --extra dev python scripts/select_affected_tests.py --check-completeness
@@ -111,7 +120,7 @@ v2-gates:  # Execute frozen corpora and production-composition control-plane fau
 			--manifest tests/fixtures/v2_corpora/control_plane_faults.json \
 			--report-dir "$$report_dir"
 
-verify:  # Verification gate for a change in progress: contracts, gates, lint, types, full suite
+verify:  # Verification gate for a change in progress: contracts, gates, lint, types, affected tests
 	scripts/verify-change.sh
 
 check:  # Authoritative full verification gate for dirty development workspaces

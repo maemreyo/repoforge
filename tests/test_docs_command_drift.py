@@ -125,6 +125,20 @@ def test_make_default_is_read_only_and_verification_targets_remain_available() -
     assert re.search(r"^install-hooks:\s*(?:#.*)?$", makefile, re.MULTILINE)
 
 
+def test_make_exposes_distinct_affected_full_coverage_and_gate_intents() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert re.search(r"^test:\s*(?:#.*)?$", makefile, re.MULTILINE)
+    test_body = makefile.split("\ntest:", 1)[1].split("\ntest-fast:", 1)[0]
+    assert "select_affected_tests.py --run" in test_body
+    assert "--cov=repoforge" not in test_body
+    assert re.search(r"^test-full:\s*(?:#.*)?$", makefile, re.MULTILINE)
+    assert "select_affected_tests.py --full --run" in makefile
+    assert re.search(r"^coverage:\s*(?:#.*)?$", makefile, re.MULTILINE)
+    assert "run_test_suite.py --coverage-dir" in makefile
+    assert re.search(r"^gate:\s*(?:#.*)?$", makefile, re.MULTILINE)
+
+
 def test_make_start_does_not_override_control_plane_api_key() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     start_body = makefile.split("start:", 1)[1].split("\ndev-server:", 1)[0]

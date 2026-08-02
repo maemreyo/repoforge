@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 def _load_runner_module() -> Any:
     script = Path(__file__).parents[1] / "scripts/run_test_suite.py"
@@ -92,13 +94,14 @@ test_files = ["tests/test_parallel_one.py"]
     assert serial == {(root / "tests/test_serial_one.py").resolve()}
 
 
-def test_load_serial_test_files_defaults_to_empty_when_manifest_missing(tmp_path: Path) -> None:
-    assert runner_module._load_serial_test_files(tmp_path) == set()
+def test_missing_manifest_refuses_to_build_a_parallel_lane(tmp_path: Path) -> None:
+    with pytest.raises(runner_module.SelectionMetadataError, match="missing"):
+        runner_module.load_lane_plan(tmp_path)
 
 
-def test_load_serial_test_files_survives_an_unreadable_manifest(tmp_path: Path) -> None:
-    """A broken manifest must not fail the gate; every file is then parallel-eligible."""
+def test_unreadable_manifest_refuses_to_build_a_parallel_lane(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test-groups.toml").write_text("not = [valid", encoding="utf-8")
 
-    assert runner_module._load_serial_test_files(tmp_path) == set()
+    with pytest.raises(runner_module.SelectionMetadataError, match="invalid"):
+        runner_module.load_lane_plan(tmp_path)
