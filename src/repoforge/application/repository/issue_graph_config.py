@@ -3,9 +3,9 @@
 ``source`` resolves the ``GitHubTicketGraphConfig`` the reader should use for
 a repository (configured or a bounded ad-hoc root), ``expected_slug``
 resolves the repository slug the reader is observing without any provider
-call, and ``resolve_observation_authority`` derives the cache authority
-fingerprint from the resolved auth profile identity (F-004).  Kept in its own
-module so ``issue_graph`` stays under the 400-line source budget (F-006).
+call, and ``resolve_observation_authority`` resolves the cache authority that
+must bind any cached graph observation (F-004).  Kept in its own module so
+``issue_graph`` stays under the 400-line source budget (F-006).
 """
 
 from __future__ import annotations
@@ -16,10 +16,6 @@ from dataclasses import replace
 
 from ...config import GitHubTicketGraphConfig, RepositoryConfig
 from ...domain.errors import ConfigError, RepoForgeError
-from ...domain.github_api_identity import (
-    GitHubAppInstallationSpec,
-    StoredGhAccountSpec,
-)
 from ...domain.observation import (
     GitHubObservationAuthority,
     ObservationAuthorityOrigin,
@@ -63,53 +59,40 @@ def expected_slug(
     return github_slug_from_remote_url(result.stdout.strip())
 
 
-def _auth_issued_authority(
-    ctx: ApplicationContext, repo: RepositoryConfig
-) -> GitHubObservationAuthority | None:
-    """Derive an auth-issued authority from the repository's resolved auth
-    profile identity, or None when no profile is configured/resolvable.
+def build_auth_issued_authority(
+    *,
+    host: str,
+    profile_id: str,
+    principal_identity: str,
+    credential_generation: str,
+    authorization_scope_digest: str,
+) -> GitHubObservationAuthority:
+    """Build an ``AUTH_ISSUED`` authority from the trust boundary's live
+    credential generation (F-004).
 
-    Only secret-free identity fields (host, login/installation, profile id)
-    feed the fingerprint, so rotating the credential generation changes the
-    digest without the observation code ever touching a token (F-004).
+    ``credential_generation`` must come from the auth lease/material that owns
+    the credential lifecycle — it is never derived from static configuration.
+    The fingerprint covers the host, principal, generation, and authorization
+    scope, so rotating the generation or the scope rotates the fingerprint and
+    every prior cache entry becomes a miss.
     """
-    if repo.commit_identity is None:
-        return None
-    profile = ctx.config.auth_profiles.get(repo.commit_identity.profile_id)
-    if profile is None:
-        return None
-    identity = profile.api_identity
-    if isinstance(identity, StoredGhAccountSpec):
-        canonical = json.dumps(
-            {
-                "kind": "stored_account",
-                "host": identity.host,
-                "login": identity.login,
-                "profile_id": identity.profile_id,
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        principal = identity.login
-    elif isinstance(identity, GitHubAppInstallationSpec):
-        canonical = json.dumps(
-            {
-                "kind": "app_installation",
-                "host": identity.host,
-                "app_id": identity.app_id,
-                "installation_id": identity.installation_id,
-                "profile_id": identity.profile_id,
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        principal = identity.installation_id
-    else:
-        return None
+    canonical = json.dumps(
+        {
+            "kind": "auth_issued",
+            "host": host,
+            "principal_identity": principal_identity,
+            "credential_generation": credential_generation,
+            "authorization_scope_digest": authorization_scope_digest,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
     return GitHubObservationAuthority(
-        host=identity.host,
-        profile_id=identity.profile_id,
-        principal_identity=principal,
+        host=host,
+        profile_id=profile_id,
+        principal_identity=principal_identity,
+        credential_generation=credential_generation,
+        authorization_scope_digest=authorization_scope_digest,
         fingerprint=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         origin=ObservationAuthorityOrigin.AUTH_ISSUED,
     )
@@ -120,14 +103,19 @@ def resolve_observation_authority(
 ) -> GitHubObservationAuthority | None:
     """The authority whose fingerprint must bind any cached graph observation.
 
-    Prefers an auth-issued fingerprint derived from the repository's resolved
-    auth profile; falls back to the operator-pinned manual digest as an
-    explicit legacy mode; returns ``None`` when neither is provable so the
-    caller keeps the cache disabled (fail closed).
+    Prefers an authority issued by the trust boundary that owns the credential
+    lifecycle (the auth broker / lease) when one is wired on the context;
+    falls back to the operator-pinned manual digest as an explicit legacy mode;
+    returns ``None`` when neither is provable so the caller keeps the cache
+    disabled (fail closed).  A static profile hash is never labeled
+    ``AUTH_ISSUED`` — it does not prove the current credential generation
+    (F-004).
     """
-    auth_issued = _auth_issued_authority(ctx, repo)
-    if auth_issued is not None:
-        return auth_issued
+    issued = (
+        ctx.observation_authority_provider(repo) if ctx.observation_authority_provider else None
+    )
+    if issued is not None:
+        return issued
     manual = ctx.config.server.github_read_cache_authority_digest
     if manual is None:
         return None
@@ -135,9 +123,16 @@ def resolve_observation_authority(
         host="github.com",
         profile_id=None,
         principal_identity=None,
+        credential_generation=None,
+        authorization_scope_digest=None,
         fingerprint=manual,
         origin=ObservationAuthorityOrigin.MANUAL_LEGACY,
     )
 
 
-__all__ = ["expected_slug", "resolve_observation_authority", "source"]
+__all__ = [
+    "build_auth_issued_authority",
+    "expected_slug",
+    "resolve_observation_authority",
+    "source",
+]

@@ -91,6 +91,7 @@ def build_observation_stamps(
     """
     return (
         ObservationStamp(
+            capability=GraphEvidenceCapability.ISSUE,
             source="live_full",
             observed_at=observed_at,
             complete=not issue_unavailable,
@@ -98,6 +99,7 @@ def build_observation_stamps(
             item_count=len(wanted - issue_unavailable),
         ),
         ObservationStamp(
+            capability=GraphEvidenceCapability.SUB_ISSUES,
             source="live_full",
             observed_at=observed_at,
             complete=not sub_issues_unavailable and not sub_issues_truncated,
@@ -105,6 +107,7 @@ def build_observation_stamps(
             item_count=len(wanted - sub_issues_unavailable),
         ),
         ObservationStamp(
+            capability=GraphEvidenceCapability.COMMENTS,
             source="live_full",
             observed_at=observed_at,
             complete=not comments_unavailable and not comments_truncated,
@@ -112,6 +115,7 @@ def build_observation_stamps(
             item_count=len(wanted - comments_unavailable),
         ),
         ObservationStamp(
+            capability=GraphEvidenceCapability.DEPENDENCIES,
             source="live_full",
             observed_at=observed_at,
             complete=not dependencies_unavailable and not dependencies_truncated,
@@ -119,6 +123,7 @@ def build_observation_stamps(
             item_count=len(wanted - dependencies_unavailable),
         ),
         ObservationStamp(
+            capability=GraphEvidenceCapability.PROJECT_OVERLAY,
             source="live_full",
             observed_at=observed_at,
             complete=project_complete,

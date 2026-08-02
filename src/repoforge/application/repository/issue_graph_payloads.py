@@ -60,16 +60,28 @@ def is_capability_complete_for_issue(
 ) -> bool:
     """Whether one specific capability's evidence is trustworthy for one issue.
 
-    A capability with no coverage entry (older cached snapshot, or a snapshot
-    that never observed this issue) is treated as complete: absence of
-    evidence about a capability is not evidence the capability failed.
+    Fail-closed and scope-aware (F-001):
+
+    - ``truncated`` is a *global* failure: every candidate that depends on the
+      capability is insufficient, because truncation hides evidence the
+      candidate cannot see.
+    - an issue listed in ``unavailable`` is a *localized* failure: only that
+      candidate is insufficient; others are unaffected.
+    - ``complete=False`` with an empty unavailable list is an inconsistent
+      envelope and fails closed.
+    - a missing coverage entry is *not* treated as complete — for a required
+      capability, absence of evidence is insufficiency, not sufficiency.
     """
     if snapshot is None:
         return False
     for coverage in snapshot.capability_coverage:
         if coverage.capability is capability:
-            return issue_number not in coverage.unavailable
-    return True
+            if coverage.truncated:
+                return False
+            if issue_number in coverage.unavailable:
+                return False
+            return coverage.complete or bool(coverage.unavailable)
+    return False
 
 
 def coverage_payload(

@@ -87,11 +87,14 @@ class GraphMembershipRole(str, Enum):
 class ObservationStamp:
     """Provenance and completeness of one capability observation.
 
-    Every ``CapabilityObservation`` carries one of these so callers can reason
-    about staleness, truncation, and authority independently per capability
-    instead of relying on a single ``observed_at`` for the whole graph.
+    Each stamp is self-describing: it carries the capability it observed, so
+    callers reason about staleness, truncation, and authority per capability
+    without relying on parallel ordering with the coverage tuple (F-003).
     """
 
+    #: The capability this observation covers.  Carried on the stamp itself so
+    #: a stamp is meaningful without its position in a parallel tuple.
+    capability: GraphEvidenceCapability | None = None
     #: Machine-readable description of the source (e.g. ``"gh_api_graphql"``,
     #: ``"cache"``, ``"webhook_delta"``).
     source: str = "live"
@@ -111,6 +114,10 @@ class ObservationStamp:
     item_count: int = 0
 
     def __post_init__(self) -> None:
+        if self.capability is not None and not isinstance(self.capability, GraphEvidenceCapability):
+            raise ValueError(
+                "ObservationStamp.capability must be a GraphEvidenceCapability or None"
+            )
         if not isinstance(self.source, str) or not self.source:
             raise ValueError("ObservationStamp.source must be a non-empty string")
         if not isinstance(self.observed_at, str) or not self.observed_at:
@@ -172,9 +179,6 @@ class EvidenceRequirement:
     #: Maximum acceptable skew between the oldest and newest required
     #: capability in milliseconds.
     max_skew_ms: float | None = None
-    #: Whether to revalidate a candidate's core + dependency evidence before
-    #: returning it (narrow bounded refresh).
-    revalidate_before_return: bool = False
 
     def __post_init__(self) -> None:
         if self.max_age_ms is not None and (
@@ -205,7 +209,6 @@ class EvidenceRequirement:
             ),
             max_age_ms=300_000,
             max_skew_ms=10_000,
-            revalidate_before_return=False,
         )
 
 
@@ -261,9 +264,11 @@ class GraphQLErrorClassification(str, Enum):
 class ObservationAuthorityOrigin(str, Enum):
     """Where an observation authority fingerprint came from.
 
-    ``AUTH_ISSUED`` fingerprints are derived from the resolved auth profile
-    identity (host, login/installation, profile) and rotate automatically when
-    the credential generation changes.  ``MANUAL_LEGACY`` is the operator-pinned
+    ``AUTH_ISSUED`` fingerprints are issued by the trust boundary that owns the
+    credential lifecycle, derived from the *live* credential generation (token
+    or installation lease), not from static configuration fields.  It rotates
+    whenever the credential generation, permission scope, or credential
+    reference changes.  ``MANUAL_LEGACY`` is the operator-pinned
     ``github_read_cache_authority_digest`` kept as an explicit compatibility
     fallback until the auth boundary issues fingerprints everywhere (F-004).
     """
@@ -278,6 +283,12 @@ class GitHubObservationAuthority:
 
     Holds only secret-free identity fields plus an opaque fingerprint; the
     observation code consumes the fingerprint and never touches credentials.
+
+    An ``AUTH_ISSUED`` authority must carry a live ``credential_generation``
+    from the trust boundary that owns the credential lifecycle; a static
+    profile hash is never a generation and must not be labeled ``AUTH_ISSUED``
+    (F-004).  ``MANUAL_LEGACY`` authorities carry no generation — they are the
+    operator's explicit pin.
     """
 
     host: str
@@ -285,9 +296,15 @@ class GitHubObservationAuthority:
     profile_id: str | None
     #: Principal or installation identity when known, else None.
     principal_identity: str | None
-    #: Opaque authority fingerprint that rotates with the credential generation.
+    #: Opaque authority fingerprint that binds cached observations.
     fingerprint: str
     origin: ObservationAuthorityOrigin
+    #: Opaque credential generation from the auth lease, or None for
+    #: MANUAL_LEGACY.  Rotates when the token/installation generation changes.
+    credential_generation: str | None = None
+    #: Digest of the reviewed authorization scope (capability/permission set),
+    #: or None for MANUAL_LEGACY.  Rotates when permissions change.
+    authorization_scope_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.host, str) or not self.host:
@@ -298,6 +315,22 @@ class GitHubObservationAuthority:
             raise ValueError(
                 "GitHubObservationAuthority.origin must be an ObservationAuthorityOrigin"
             )
+        if self.origin is ObservationAuthorityOrigin.AUTH_ISSUED:
+            if (
+                not isinstance(self.credential_generation, str)
+                or len(self.credential_generation) != 64
+            ):
+                raise ValueError(
+                    "AUTH_ISSUED authority requires a live SHA-256 credential_generation "
+                    "from the trust boundary owning the credential lifecycle"
+                )
+            if (
+                not isinstance(self.authorization_scope_digest, str)
+                or len(self.authorization_scope_digest) != 64
+            ):
+                raise ValueError(
+                    "AUTH_ISSUED authority requires a SHA-256 authorization_scope_digest"
+                )
 
 
 __all__ = [

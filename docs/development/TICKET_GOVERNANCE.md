@@ -83,13 +83,15 @@ payload checksum is recomputed and verified on every cache read. Any binding mis
 repointed remote, an edited project field, a reader change, or a rotated authority —
 is a cache miss, never stale evidence served as current. The graph cache is fail-closed
 by default: RepoForge never reads credentials, so it cannot prove the ambient GitHub
-authority is unchanged between a cache write and a later read. When a repository resolves
-a configured auth profile, the cache binds to a secret-free auth-issued fingerprint
-derived from that identity (host, login/installation, profile), so rotating the credential
-generation is automatically a cache miss. The operator-pinned
-`server.github_read_cache_authority_digest` remains an explicit legacy fallback in the
-compatibility window and must name the current credential generation, rotated whenever
-that authority changes. Until an authority is provable the graph cache is neither served
+authority is unchanged between a cache write and a later read. An `auth_issued` fingerprint
+is only emitted by the trust boundary that owns the credential lifecycle — the live
+credential generation (token or installation lease) plus the reviewed authorization-scope
+digest — so rotating the token, private key, credential reference, or permission scope is
+automatically a cache miss; a static profile hash is never treated as a credential
+generation. Until such a provider is wired, the operator-pinned
+`server.github_read_cache_authority_digest` remains the explicit `manual_legacy` mode and
+must name the current credential generation, rotated whenever that authority changes.
+Until an authority is provable the graph cache is neither served
 nor written (`cache_miss_reason=authority_not_pinned`); cache telemetry reports
 `authority_origin` (`auth_issued` vs `manual_legacy`).
 Signed webhooks invalidate the affected graph cache entries; the next read re-traverses

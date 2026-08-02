@@ -97,6 +97,7 @@ def snapshot_payload(
         ],
         "observation_stamps": [
             {
+                "capability": stamp.capability.value if stamp.capability is not None else None,
                 "source": stamp.source,
                 "observed_at": stamp.observed_at,
                 "complete": stamp.complete,
@@ -312,8 +313,17 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
         for index, item in enumerate(raw_stamps):
             if not isinstance(item, dict):
                 raise ValueError(f"observation_stamps[{index}] must be an object")
+            raw_capability = item.get("capability")
+            capability = (
+                GraphEvidenceCapability(
+                    _strict_str(raw_capability, f"observation_stamps[{index}].capability")
+                )
+                if raw_capability is not None
+                else None
+            )
             observation_stamps.append(
                 ObservationStamp(
+                    capability=capability,
                     source=_strict_str(item["source"], f"observation_stamps[{index}].source"),
                     observed_at=_strict_str(
                         item["observed_at"], f"observation_stamps[{index}].observed_at"

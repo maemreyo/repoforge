@@ -15,13 +15,18 @@ from repoforge.adapters.audit import JsonlAuditSink
 from repoforge.adapters.persistence import JsonGitHubReadCache
 from repoforge.application.context import ApplicationContext
 from repoforge.application.repository.doctor import Doctor, DoctorCommand
+from repoforge.application.repository.evidence_evaluator import evaluate_candidate
 from repoforge.application.repository.issue_graph import (
     _observed_age_ms,
+    _payload_bindings_valid,
     _snapshot_payload,
     read_github_ticket_snapshot,
 )
 from repoforge.application.repository.issue_graph_cache import snapshot_from_payload
-from repoforge.application.repository.issue_graph_config import resolve_observation_authority
+from repoforge.application.repository.issue_graph_config import (
+    build_auth_issued_authority,
+    resolve_observation_authority,
+)
 from repoforge.application.service import CodingService
 from repoforge.application.tickets.graph import load_ticket_graph
 from repoforge.config import (
@@ -41,7 +46,11 @@ from repoforge.domain.git_transport_identity import (
     GitTransportSpec,
 )
 from repoforge.domain.github_api_identity import StoredGhAccountSpec
-from repoforge.domain.observation import ObservationAuthorityOrigin
+from repoforge.domain.observation import (
+    EvidenceRequirement,
+    ObservationAuthorityOrigin,
+    ObservationStamp,
+)
 from repoforge.domain.repository_identity import (
     ActorClass,
     CredentialKind,
@@ -148,15 +157,26 @@ class FixtureTicketGraphGateway:
             )
             for node in graph.nodes
         )
-        capability_coverage = tuple(
-            CapabilityCoverage(
-                GraphEvidenceCapability(str(item["capability"])),
-                bool(item["complete"]),
-                tuple(int(number) for number in item.get("unavailable", [])),
-                bool(item.get("truncated", False)),
+        raw_coverage = state_payload.get("capability_coverage")
+        if isinstance(raw_coverage, list):
+            capability_coverage = tuple(
+                CapabilityCoverage(
+                    GraphEvidenceCapability(str(item["capability"])),
+                    bool(item["complete"]),
+                    tuple(int(number) for number in item.get("unavailable", [])),
+                    bool(item.get("truncated", False)),
+                )
+                for item in raw_coverage
             )
-            for item in state_payload.get("capability_coverage", [])
-        )
+        else:
+            # The real adapter always emits one coverage entry per capability.
+            # A fixture that omits it would make every required capability
+            # "missing evidence" under the strict F-001 evaluator, so default
+            # to the same all-complete envelope the adapter produces.
+            capability_coverage = tuple(
+                CapabilityCoverage(capability, True, (), False)
+                for capability in GraphEvidenceCapability
+            )
         diagnostics = tuple(
             TicketDiagnostic(
                 code=str(item["code"]),
@@ -166,9 +186,10 @@ class FixtureTicketGraphGateway:
             for item in state_payload.get("diagnostics", [])
             if isinstance(item, dict) and isinstance(item.get("issue_number"), int)
         )
+        observed_at = datetime.now(timezone.utc).isoformat()
         return TicketGraphSnapshot(
             graph,
-            "2026-07-16T00:00:00+00:00",
+            observed_at,
             bool(state_payload.get("evidence_complete", True)),
             tuple(int(item) for item in state_payload.get("unavailable", [])),
             bool(state_payload.get("truncated", False)),
@@ -176,6 +197,17 @@ class FixtureTicketGraphGateway:
             capability_coverage,
             read_stats=self.read_stats,
             diagnostics=diagnostics,
+            observation_stamps=tuple(
+                ObservationStamp(
+                    capability=coverage.capability,
+                    source="live_full",
+                    observed_at=observed_at,
+                    complete=coverage.complete,
+                    truncated=coverage.truncated,
+                    item_count=len(graph.nodes),
+                )
+                for coverage in capability_coverage
+            ),
         )
 
 
@@ -516,6 +548,25 @@ def test_repo_issue_next_fails_closed_when_graph_evidence_is_incomplete(tmp_path
     ]
 
 
+def _complete_coverage(*, extra: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
+    """Full five-capability coverage, all complete, with optional overrides.
+
+    The F-001 default requirement needs ISSUE, SUB_ISSUES and DEPENDENCIES
+    coverage entries to exist; a fixture that omits them would fail closed on
+    "missing coverage entry", which is a separate test."""
+    capabilities = [item.value for item in GraphEvidenceCapability]
+    coverage = [
+        {"capability": capability, "complete": True, "unavailable": [], "truncated": False}
+        for capability in capabilities
+    ]
+    if extra:
+        by_name = {item["capability"]: item for item in coverage}
+        for override in extra:
+            by_name[override["capability"]] = override
+        coverage = list(by_name.values())
+    return coverage
+
+
 def test_repo_issue_next_comments_gap_does_not_block_selectable_candidate(
     tmp_path: Path,
 ) -> None:
@@ -528,14 +579,16 @@ def test_repo_issue_next_comments_gap_does_not_block_selectable_candidate(
             {
                 "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
                 "evidence_complete": False,
-                "capability_coverage": [
-                    {
-                        "capability": "comments",
-                        "complete": False,
-                        "unavailable": [9],
-                        "truncated": False,
-                    }
-                ],
+                "capability_coverage": _complete_coverage(
+                    extra=[
+                        {
+                            "capability": "comments",
+                            "complete": False,
+                            "unavailable": [9],
+                            "truncated": False,
+                        }
+                    ]
+                ),
             }
         ),
         encoding="utf-8",
@@ -560,14 +613,16 @@ def test_repo_issue_next_project_gap_does_not_block_candidate_with_complete_meta
             {
                 "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
                 "evidence_complete": False,
-                "capability_coverage": [
-                    {
-                        "capability": "project_overlay",
-                        "complete": False,
-                        "unavailable": [9],
-                        "truncated": False,
-                    }
-                ],
+                "capability_coverage": _complete_coverage(
+                    extra=[
+                        {
+                            "capability": "project_overlay",
+                            "complete": False,
+                            "unavailable": [9],
+                            "truncated": False,
+                        }
+                    ]
+                ),
             }
         ),
         encoding="utf-8",
@@ -589,14 +644,16 @@ def test_repo_issue_next_dependency_gap_blocks_affected_candidate(tmp_path: Path
             {
                 "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
                 "evidence_complete": False,
-                "capability_coverage": [
-                    {
-                        "capability": "dependencies",
-                        "complete": False,
-                        "unavailable": [9],
-                        "truncated": False,
-                    }
-                ],
+                "capability_coverage": _complete_coverage(
+                    extra=[
+                        {
+                            "capability": "dependencies",
+                            "complete": False,
+                            "unavailable": [9],
+                            "truncated": False,
+                        }
+                    ]
+                ),
             }
         ),
         encoding="utf-8",
@@ -626,14 +683,16 @@ def test_repo_issue_next_partial_evidence_keeps_selectable_and_diagnoses_blocked
                     "10": {"state": "OPEN"},
                 },
                 "evidence_complete": False,
-                "capability_coverage": [
-                    {
-                        "capability": "dependencies",
-                        "complete": False,
-                        "unavailable": [9],
-                        "truncated": False,
-                    }
-                ],
+                "capability_coverage": _complete_coverage(
+                    extra=[
+                        {
+                            "capability": "dependencies",
+                            "complete": False,
+                            "unavailable": [9],
+                            "truncated": False,
+                        }
+                    ]
+                ),
             }
         ),
         encoding="utf-8",
@@ -647,6 +706,115 @@ def test_repo_issue_next_partial_evidence_keeps_selectable_and_diagnoses_blocked
         item["code"] == "CANDIDATE_EVIDENCE_INSUFFICIENT" and item["issue_number"] == 9
         for item in result["diagnostics"]
     )
+
+
+def test_repo_issue_next_skips_blocked_candidate_to_fill_limit(tmp_path: Path) -> None:
+    """F-001: with limit=1, a blocked first candidate must not fail closed —
+    the evaluator filters evidence over the full ranked list and returns the
+    next selectable candidate."""
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9, 10])
+    blocked = _node(9, status="Ready")
+    selectable = _node(10, status="Ready")
+    _write_manifest(environment.source, [program, blocked, selectable])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "3": {"state": "OPEN"},
+                    "9": {"state": "OPEN"},
+                    "10": {"state": "OPEN"},
+                },
+                "evidence_complete": False,
+                "capability_coverage": _complete_coverage(
+                    extra=[
+                        {
+                            "capability": "dependencies",
+                            "complete": False,
+                            "unavailable": [9],
+                            "truncated": False,
+                        }
+                    ]
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=1)
+
+    assert result["valid"] is True
+    assert [item["number"] for item in result["tickets"]] == [10]
+
+
+def test_repo_issue_next_truncated_dependencies_fail_closed_for_all_candidates(
+    tmp_path: Path,
+) -> None:
+    """F-001: dependencies complete=False, truncated=True, unavailable=[] is a
+    global failure — every candidate depending on dependencies is insufficient."""
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, status="Ready")
+    _write_manifest(environment.source, [program, ready])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
+                "evidence_complete": False,
+                "capability_coverage": _complete_coverage(
+                    extra=[
+                        {
+                            "capability": "dependencies",
+                            "complete": False,
+                            "unavailable": [],
+                            "truncated": True,
+                        }
+                    ]
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is False
+    assert result["tickets"] == []
+    assert any(item["code"] == "GRAPH_EVIDENCE_INCOMPLETE" for item in result["diagnostics"])
+
+
+def test_repo_issue_next_missing_required_coverage_entry_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """F-001: a required capability with no coverage entry is insufficient —
+    absence of evidence is not sufficiency."""
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, status="Ready")
+    _write_manifest(environment.source, [program, ready])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
+                "evidence_complete": False,
+                "capability_coverage": [
+                    {
+                        "capability": "comments",
+                        "complete": True,
+                        "unavailable": [],
+                        "truncated": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is False
+    assert result["tickets"] == []
+    assert any(item["code"] == "GRAPH_EVIDENCE_INCOMPLETE" for item in result["diagnostics"])
 
 
 def test_repo_issue_next_reports_diagnostics_for_an_invalid_manifest(tmp_path: Path) -> None:
@@ -1476,33 +1644,89 @@ def _auth_context(
     return ctx, config.repositories["demo"]
 
 
-def test_resolve_observation_authority_prefers_auth_issued_fingerprint(tmp_path: Path) -> None:
-    """F-004: when the repository resolves an auth profile, the cache authority
-    is auth-issued (derived from secret-free identity fields), not the manual
-    operator digest."""
+def test_resolve_observation_authority_profile_alone_is_not_auth_issued(
+    tmp_path: Path,
+) -> None:
+    """F-004: a configured auth profile is NOT a credential generation. Without
+    a trust-boundary provider wired on the context, the resolver must not label
+    a static profile hash AUTH_ISSUED — it falls back to MANUAL_LEGACY (when
+    the operator pinned the digest) or disables the cache."""
     ctx, repo = _auth_context(tmp_path)
 
     authority = resolve_observation_authority(ctx, repo)
 
     assert authority is not None
-    assert authority.origin is ObservationAuthorityOrigin.AUTH_ISSUED
-    assert authority.profile_id == "personal"
-    assert authority.host == "github.com"
-    assert len(authority.fingerprint) == 64
+    assert authority.origin is ObservationAuthorityOrigin.MANUAL_LEGACY
+    assert authority.credential_generation is None
+    assert authority.authorization_scope_digest is None
+    assert authority.fingerprint == "a" * 64
 
 
-def test_resolve_observation_authority_fingerprint_rotates_with_identity(tmp_path: Path) -> None:
-    """F-004: rotating the credential generation (login) changes the auth-issued
-    fingerprint, so a cache entry from the old generation is a miss."""
-    ctx, repo = _auth_context(tmp_path)
-    first = resolve_observation_authority(ctx, repo)
-    assert first is not None
-    rotated_ctx, _ = _auth_context(tmp_path, login="rotated-login")
+def test_auth_issued_fingerprint_rotates_with_credential_generation() -> None:
+    """F-004: the same principal with a different live credential generation
+    (token rotation, key rotation, credential-reference repoint) must produce a
+    different fingerprint, so a cache entry from the old generation is a miss."""
+    generation_a = "a" * 64
+    generation_b = "b" * 64
+    scope = "c" * 64
+    first = build_auth_issued_authority(
+        host="github.com",
+        profile_id="personal",
+        principal_identity="octocat",
+        credential_generation=generation_a,
+        authorization_scope_digest=scope,
+    )
+    rotated = build_auth_issued_authority(
+        host="github.com",
+        profile_id="personal",
+        principal_identity="octocat",
+        credential_generation=generation_b,
+        authorization_scope_digest=scope,
+    )
 
-    second = resolve_observation_authority(rotated_ctx, repo)
+    assert first.origin is ObservationAuthorityOrigin.AUTH_ISSUED
+    assert rotated.fingerprint != first.fingerprint
 
-    assert second is not None
-    assert second.fingerprint != first.fingerprint
+
+def test_auth_issued_fingerprint_rotates_with_authorization_scope() -> None:
+    """F-004: the same installation with a different permission/capability scope
+    must produce a different fingerprint, so reduced permissions invalidate the
+    cache."""
+    generation = "a" * 64
+    scope_a = "c" * 64
+    scope_b = "d" * 64
+    first = build_auth_issued_authority(
+        host="github.com",
+        profile_id="agent",
+        principal_identity="installation-84",
+        credential_generation=generation,
+        authorization_scope_digest=scope_a,
+    )
+    reduced = build_auth_issued_authority(
+        host="github.com",
+        profile_id="agent",
+        principal_identity="installation-84",
+        credential_generation=generation,
+        authorization_scope_digest=scope_b,
+    )
+
+    assert reduced.fingerprint != first.fingerprint
+
+
+def test_auth_issued_authority_requires_live_generation() -> None:
+    """F-004: an AUTH_ISSUED authority without a live credential generation from
+    the trust boundary is rejected — a static profile hash is never a
+    generation."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="credential_generation"):
+        build_auth_issued_authority(
+            host="github.com",
+            profile_id="personal",
+            principal_identity="octocat",
+            credential_generation="not-a-generation",
+            authorization_scope_digest="c" * 64,
+        )
 
 
 def test_resolve_observation_authority_falls_back_to_manual_legacy_without_profile(
@@ -1607,3 +1831,255 @@ def test_strict_codec_rejects_malformed_observation_stamp(tmp_path: Path) -> Non
     payload["observation_stamps"] = [{"source": "live_full", "observed_at": 5}]
 
     assert snapshot_from_payload(payload) is None
+
+
+def test_auth_issued_generation_rotation_is_a_cache_miss(tmp_path: Path) -> None:
+    """F-004: a cache entry bound to credential generation A must be a miss
+    after generation B (same principal, rotated token/private key)."""
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    gateway = CountingTicketGraphGateway(fresh)
+    ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
+    scope = "c" * 64
+    generation_a = build_auth_issued_authority(
+        host="github.com",
+        profile_id="personal",
+        principal_identity="octocat",
+        credential_generation="a" * 64,
+        authorization_scope_digest=scope,
+    )
+    cached_snapshot = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    ctx.github_read_cache.put(
+        "demo",
+        repo.path,
+        "graph",
+        source.root_issue,
+        _snapshot_payload(cached_snapshot, source, generation_a.fingerprint),
+        now_epoch=ctx.now_epoch(),
+    )
+
+    rotated = build_auth_issued_authority(
+        host="github.com",
+        profile_id="personal",
+        principal_identity="octocat",
+        credential_generation="b" * 64,
+        authorization_scope_digest=scope,
+    )
+    assert (
+        _payload_bindings_valid(
+            ctx.github_read_cache.get(
+                "demo",
+                repo.path,
+                "graph",
+                source.root_issue,
+                ttl_seconds=60,
+                now_epoch=ctx.now_epoch(),
+            ),
+            source,
+            "owner/demo",
+            rotated.fingerprint,
+        )
+        is False
+    )
+
+
+def test_auth_issued_scope_rotation_is_a_cache_miss(tmp_path: Path) -> None:
+    """F-004: a cache entry bound to permission scope A must be a miss after
+    the installation's permission scope is reduced to B."""
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    gateway = CountingTicketGraphGateway(fresh)
+    ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
+    generation = "a" * 64
+    scope_a = build_auth_issued_authority(
+        host="github.com",
+        profile_id="agent",
+        principal_identity="installation-84",
+        credential_generation=generation,
+        authorization_scope_digest="c" * 64,
+    )
+    cached_snapshot = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    ctx.github_read_cache.put(
+        "demo",
+        repo.path,
+        "graph",
+        source.root_issue,
+        _snapshot_payload(cached_snapshot, source, scope_a.fingerprint),
+        now_epoch=ctx.now_epoch(),
+    )
+
+    scope_b = build_auth_issued_authority(
+        host="github.com",
+        profile_id="agent",
+        principal_identity="installation-84",
+        credential_generation=generation,
+        authorization_scope_digest="d" * 64,
+    )
+    assert (
+        _payload_bindings_valid(
+            ctx.github_read_cache.get(
+                "demo",
+                repo.path,
+                "graph",
+                source.root_issue,
+                ttl_seconds=60,
+                now_epoch=ctx.now_epoch(),
+            ),
+            source,
+            "owner/demo",
+            scope_b.fingerprint,
+        )
+        is False
+    )
+
+
+def test_auth_issued_reference_rotation_is_a_cache_miss(tmp_path: Path) -> None:
+    """F-004: repointing the credential reference (same principal, new token
+    backing) rotates the generation and must make the cache a miss."""
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    gateway = CountingTicketGraphGateway(fresh)
+    ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
+    scope = "c" * 64
+    reference_a = build_auth_issued_authority(
+        host="github.com",
+        profile_id="personal",
+        principal_identity="octocat",
+        credential_generation="a" * 64,
+        authorization_scope_digest=scope,
+    )
+    cached_snapshot = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    ctx.github_read_cache.put(
+        "demo",
+        repo.path,
+        "graph",
+        source.root_issue,
+        _snapshot_payload(cached_snapshot, source, reference_a.fingerprint),
+        now_epoch=ctx.now_epoch(),
+    )
+
+    reference_b = build_auth_issued_authority(
+        host="github.com",
+        profile_id="personal",
+        principal_identity="octocat",
+        credential_generation="e" * 64,
+        authorization_scope_digest=scope,
+    )
+    assert (
+        _payload_bindings_valid(
+            ctx.github_read_cache.get(
+                "demo",
+                repo.path,
+                "graph",
+                source.root_issue,
+                ttl_seconds=60,
+                now_epoch=ctx.now_epoch(),
+            ),
+            source,
+            "owner/demo",
+            reference_b.fingerprint,
+        )
+        is False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review regressions (#411) — evidence freshness bounds (F-001)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_with_stamps(
+    *,
+    observed_at: str,
+    capabilities: tuple[GraphEvidenceCapability, ...] = (
+        GraphEvidenceCapability.ISSUE,
+        GraphEvidenceCapability.SUB_ISSUES,
+        GraphEvidenceCapability.DEPENDENCIES,
+    ),
+) -> TicketGraphSnapshot:
+    graph = TicketGraph(
+        1,
+        3,
+        (
+            TicketNode(
+                3,
+                "Program",
+                TicketType.PROGRAM,
+                TicketPriority.P0,
+                TicketStatus.IN_PROGRESS,
+                None,
+                (),
+                (),
+                (),
+                ("github",),
+            ),
+        ),
+    )
+    return TicketGraphSnapshot(
+        graph,
+        observed_at,
+        True,
+        (),
+        False,
+        (TicketLiveMetadata(3, "Program", "OPEN", "body"),),
+        tuple(
+            CapabilityCoverage(capability, True, (), False)
+            for capability in GraphEvidenceCapability
+        ),
+        observation_stamps=tuple(
+            ObservationStamp(capability=capability, source="live_full", observed_at=observed_at)
+            for capability in capabilities
+        ),
+    )
+
+
+def test_evaluate_candidate_enforces_max_age() -> None:
+    """F-001: max_age_ms is real behavior — a candidate whose observation is
+    older than the bound is stale, not selectable."""
+    snapshot = _snapshot_with_stamps(observed_at="2026-01-01T00:00:00+00:00")
+    requirement = EvidenceRequirement(
+        required_capabilities=(
+            GraphEvidenceCapability.ISSUE,
+            GraphEvidenceCapability.SUB_ISSUES,
+            GraphEvidenceCapability.DEPENDENCIES,
+        ),
+        max_age_ms=1_000,
+        max_skew_ms=10_000,
+    )
+
+    now_epoch = 1767225600.0 + 5.0  # 2026-01-01 + 5s
+    verdict = evaluate_candidate(snapshot, requirement, 3, now_epoch=now_epoch)
+
+    assert verdict.sufficient is False
+    assert GraphEvidenceCapability.ISSUE in verdict.stale
+
+
+def test_evaluate_candidate_allows_fresh_within_max_age() -> None:
+    """F-001: a candidate within the max_age bound is selectable."""
+    snapshot = _snapshot_with_stamps(observed_at="2026-01-01T00:00:00+00:00")
+    requirement = EvidenceRequirement(
+        required_capabilities=(
+            GraphEvidenceCapability.ISSUE,
+            GraphEvidenceCapability.SUB_ISSUES,
+            GraphEvidenceCapability.DEPENDENCIES,
+        ),
+        max_age_ms=300_000,
+        max_skew_ms=10_000,
+    )
+
+    now_epoch = 1767225600.0 + 5.0
+    verdict = evaluate_candidate(snapshot, requirement, 3, now_epoch=now_epoch)
+
+    assert verdict.sufficient is True

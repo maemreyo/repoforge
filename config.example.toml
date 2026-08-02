@@ -18,12 +18,12 @@ profile = "repoforge"
 
 # The GitHub ticket-graph cache is fail-closed by default: RepoForge never reads
 # credentials, so it cannot prove the ambient GitHub authority is unchanged between a
-# cache write and a later read. When a repository resolves a configured auth profile,
-# the cache binds to a secret-free auth-issued fingerprint derived from that identity,
-# so rotating the credential generation is automatically a cache miss. This manual
-# digest is the explicit legacy fallback: pin it to an opaque 64-hex-char digest naming
+# cache write and a later read. An auth-issued fingerprint is only produced by the trust
+# boundary that owns the credential lifecycle (the live token/installation generation
+# plus the reviewed permission scope); a static profile hash is never a generation. This
+# manual digest is the explicit legacy mode: pin it to an opaque 64-hex-char digest naming
 # the current credential generation and rotate it whenever that authority changes.
-# Leave it unset (and no auth profile resolvable) to keep the graph cache disabled.
+# Leave it unset to keep the graph cache disabled until a generation provider is wired.
 # [server]
 # github_read_cache_authority_digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 

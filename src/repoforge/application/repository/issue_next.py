@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...domain.observation import EvidenceRequirement
+from ...domain.observation import EvidenceRequirement, EvidenceVerdict
 from ...domain.tickets import (
     TicketDeliveryMetadata,
     TicketDiagnostic,
@@ -301,13 +301,20 @@ class RepositoryIssueNextReader:
 
             nodes = {node.number: node for node in graph.nodes}
             assessments = {item.number: item for item in report.assessments}
-            recommended = [number for number in report.recommended if number in scope][: c.limit]
+            ranked = [number for number in report.recommended if number in scope]
             requirement = EvidenceRequirement.for_next_default()
-            verdicts = {
-                number: evaluate_candidate(snapshot, requirement, number) for number in recommended
-            }
-            selectable = [number for number in recommended if verdicts[number].sufficient]
-            blocked = [number for number in recommended if not verdicts[number].sufficient]
+            selectable: list[int] = []
+            blocked: list[tuple[int, EvidenceVerdict]] = []
+            for number in ranked:
+                verdict = evaluate_candidate(
+                    snapshot, requirement, number, now_epoch=self.ctx.now_epoch()
+                )
+                if verdict.sufficient:
+                    selectable.append(number)
+                    if len(selectable) == c.limit:
+                        break
+                else:
+                    blocked.append((number, verdict))
             if not selectable and blocked:
                 # Every recommended candidate is missing required evidence
                 # (core issue, sub-issues, or dependencies). Fail closed with
@@ -342,9 +349,9 @@ class RepositoryIssueNextReader:
                 {
                     "code": "CANDIDATE_EVIDENCE_INSUFFICIENT",
                     "issue_number": number,
-                    "message": " ".join(verdicts[number].diagnostics),
+                    "message": " ".join(verdict.diagnostics),
                 }
-                for number in blocked
+                for number, verdict in blocked
             ]
             assessment_payloads = [
                 _assessment_payload(item, live_by_number[item.number].delivery)
