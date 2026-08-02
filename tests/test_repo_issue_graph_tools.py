@@ -539,13 +539,14 @@ def test_repo_issue_next_fails_closed_when_graph_evidence_is_incomplete(tmp_path
     assert result["valid"] is False
     assert result["tickets"] == []
     assert result["assessments"] == []
-    assert result["diagnostics"] == [
-        {
-            "code": "GRAPH_EVIDENCE_INCOMPLETE",
-            "issue_number": 3,
-            "message": "GitHub ticket graph evidence is incomplete; unavailable issues: 9",
-        }
-    ]
+    assert any(
+        item["code"] == "GRAPH_EVIDENCE_INCOMPLETE" and item["issue_number"] == 3
+        for item in result["diagnostics"]
+    )
+    assert any(
+        item["code"] == "CANDIDATE_EVIDENCE_INSUFFICIENT" and item["issue_number"] == 9
+        for item in result["diagnostics"]
+    )
 
 
 def _complete_coverage(*, extra: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
@@ -2056,7 +2057,7 @@ def test_evaluate_candidate_enforces_max_age() -> None:
             GraphEvidenceCapability.DEPENDENCIES,
         ),
         max_age_ms=1_000,
-        max_skew_ms=10_000,
+        max_skew_ms=None,
     )
 
     now_epoch = 1767225600.0 + 5.0  # 2026-01-01 + 5s
@@ -2076,10 +2077,361 @@ def test_evaluate_candidate_allows_fresh_within_max_age() -> None:
             GraphEvidenceCapability.DEPENDENCIES,
         ),
         max_age_ms=300_000,
-        max_skew_ms=10_000,
+        max_skew_ms=None,
     )
 
     now_epoch = 1767225600.0 + 5.0
     verdict = evaluate_candidate(snapshot, requirement, 3, now_epoch=now_epoch)
 
     assert verdict.sufficient is True
+
+
+def _snapshot_with_per_capability_stamps(
+    stamp_times: dict[GraphEvidenceCapability, str],
+) -> TicketGraphSnapshot:
+    """Build a snapshot whose stamps use distinct per-capability times."""
+    graph = TicketGraph(
+        1,
+        3,
+        (
+            TicketNode(
+                3,
+                "Program",
+                TicketType.PROGRAM,
+                TicketPriority.P0,
+                TicketStatus.IN_PROGRESS,
+                None,
+                (),
+                (),
+                (),
+                ("github",),
+            ),
+        ),
+    )
+    observed_at = next(iter(stamp_times.values()))
+    return TicketGraphSnapshot(
+        graph,
+        observed_at,
+        True,
+        (),
+        False,
+        (TicketLiveMetadata(3, "Program", "OPEN", "body"),),
+        tuple(
+            CapabilityCoverage(capability, True, (), False)
+            for capability in GraphEvidenceCapability
+        ),
+        observation_stamps=tuple(
+            ObservationStamp(
+                capability=capability,
+                source="live_full",
+                observed_at=observed_at_value,
+            )
+            for capability, observed_at_value in stamp_times.items()
+        ),
+    )
+
+
+def _next_requirement(*, max_age_ms: float | None = 300_000) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        required_capabilities=(
+            GraphEvidenceCapability.ISSUE,
+            GraphEvidenceCapability.SUB_ISSUES,
+            GraphEvidenceCapability.DEPENDENCIES,
+        ),
+        max_age_ms=max_age_ms,
+        max_skew_ms=None,
+    )
+
+
+def test_unrelated_stale_comments_stamp_does_not_block_next() -> None:
+    """Required stamps are fresh; a 10-minute-old comments stamp must not gate next."""
+    fresh = "2026-01-01T00:00:00+00:00"
+    stale_comments = "2025-12-31T23:50:00+00:00"
+    snapshot = _snapshot_with_per_capability_stamps(
+        {
+            GraphEvidenceCapability.ISSUE: fresh,
+            GraphEvidenceCapability.SUB_ISSUES: fresh,
+            GraphEvidenceCapability.DEPENDENCIES: fresh,
+            GraphEvidenceCapability.COMMENTS: stale_comments,
+            GraphEvidenceCapability.PROJECT_OVERLAY: fresh,
+        }
+    )
+    now_epoch = 1767225600.0 + 5.0
+
+    verdict = evaluate_candidate(snapshot, _next_requirement(), 3, now_epoch=now_epoch)
+
+    assert verdict.sufficient is True
+    assert verdict.stale == ()
+
+
+def test_unrelated_stale_project_stamp_does_not_block_next() -> None:
+    """Required stamps are fresh; a stale project_overlay stamp must not gate next."""
+    fresh = "2026-01-01T00:00:00+00:00"
+    stale_project = "2025-12-31T23:50:00+00:00"
+    snapshot = _snapshot_with_per_capability_stamps(
+        {
+            GraphEvidenceCapability.ISSUE: fresh,
+            GraphEvidenceCapability.SUB_ISSUES: fresh,
+            GraphEvidenceCapability.DEPENDENCIES: fresh,
+            GraphEvidenceCapability.COMMENTS: fresh,
+            GraphEvidenceCapability.PROJECT_OVERLAY: stale_project,
+        }
+    )
+    now_epoch = 1767225600.0 + 5.0
+
+    verdict = evaluate_candidate(snapshot, _next_requirement(), 3, now_epoch=now_epoch)
+
+    assert verdict.sufficient is True
+    assert verdict.stale == ()
+
+
+def test_missing_required_dependency_stamp_fails_closed() -> None:
+    """Absence of a required dependency stamp is stale, even with fresh unrelated stamps."""
+    fresh = "2026-01-01T00:00:00+00:00"
+    snapshot = _snapshot_with_per_capability_stamps(
+        {
+            GraphEvidenceCapability.ISSUE: fresh,
+            GraphEvidenceCapability.SUB_ISSUES: fresh,
+            GraphEvidenceCapability.COMMENTS: fresh,
+            GraphEvidenceCapability.PROJECT_OVERLAY: fresh,
+        }
+    )
+    now_epoch = 1767225600.0 + 5.0
+
+    verdict = evaluate_candidate(snapshot, _next_requirement(), 3, now_epoch=now_epoch)
+
+    assert verdict.sufficient is False
+    assert GraphEvidenceCapability.DEPENDENCIES in verdict.stale
+    assert GraphEvidenceCapability.ISSUE not in verdict.stale
+
+
+def test_malformed_required_timestamp_fails_closed() -> None:
+    """A required stamp with a non-parseable timestamp is treated as stale."""
+    fresh = "2026-01-01T00:00:00+00:00"
+    snapshot = _snapshot_with_per_capability_stamps(
+        {
+            GraphEvidenceCapability.ISSUE: fresh,
+            GraphEvidenceCapability.SUB_ISSUES: fresh,
+            GraphEvidenceCapability.DEPENDENCIES: "not-a-timestamp",
+        }
+    )
+    now_epoch = 1767225600.0 + 5.0
+
+    verdict = evaluate_candidate(snapshot, _next_requirement(), 3, now_epoch=now_epoch)
+
+    assert verdict.sufficient is False
+    assert GraphEvidenceCapability.DEPENDENCIES in verdict.stale
+
+
+def test_required_capability_skew_reports_actual_capability() -> None:
+    """When required stamps skew beyond the bound, the oldest capability is reported."""
+    early = "2026-01-01T00:00:00+00:00"
+    late = "2026-01-01T00:00:30+00:00"
+    snapshot = _snapshot_with_per_capability_stamps(
+        {
+            GraphEvidenceCapability.ISSUE: late,
+            GraphEvidenceCapability.SUB_ISSUES: late,
+            GraphEvidenceCapability.DEPENDENCIES: early,
+        }
+    )
+    requirement = EvidenceRequirement(
+        required_capabilities=(
+            GraphEvidenceCapability.ISSUE,
+            GraphEvidenceCapability.SUB_ISSUES,
+            GraphEvidenceCapability.DEPENDENCIES,
+        ),
+        max_age_ms=300_000,
+        max_skew_ms=10_000,
+    )
+    now_epoch = 1767225600.0 + 5.0
+
+    verdict = evaluate_candidate(snapshot, requirement, 3, now_epoch=now_epoch)
+
+    assert verdict.sufficient is False
+    assert GraphEvidenceCapability.DEPENDENCIES in verdict.stale
+    assert GraphEvidenceCapability.ISSUE not in verdict.stale
+
+
+def test_all_blocked_preserves_candidate_evidence_diagnostics(tmp_path: Path) -> None:
+    """All-blocked next must keep per-candidate evidence diagnostics, not only the summary."""
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, status="Ready")
+    _write_manifest(environment.source, [program, ready])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
+                "evidence_complete": False,
+                "capability_coverage": _complete_coverage(
+                    extra=[
+                        {
+                            "capability": "dependencies",
+                            "complete": False,
+                            "unavailable": [9],
+                            "truncated": False,
+                        }
+                    ]
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is False
+    assert result["tickets"] == []
+    assert any(item["code"] == "GRAPH_EVIDENCE_INCOMPLETE" for item in result["diagnostics"])
+    assert any(
+        item["code"] == "CANDIDATE_EVIDENCE_INSUFFICIENT" and item["issue_number"] == 9
+        for item in result["diagnostics"]
+    )
+
+
+def test_cache_round_trip_preserves_all_observation_stamp_fields() -> None:
+    """Cache codec must round-trip revision, authority_fingerprint, and error_codes."""
+    observed_at = "2026-01-01T00:00:00+00:00"
+    coverage = tuple(
+        CapabilityCoverage(capability, True, (), False) for capability in GraphEvidenceCapability
+    )
+    stamps = tuple(
+        ObservationStamp(
+            capability=capability,
+            source="live_full",
+            observed_at=observed_at,
+            revision=f"rev-{capability.value}",
+            authority_fingerprint="a" * 64,
+            complete=True,
+            truncated=False,
+            error_codes=("E_SAMPLE",),
+            item_count=1,
+        )
+        for capability in GraphEvidenceCapability
+    )
+    graph = TicketGraph(
+        1,
+        1,
+        (
+            TicketNode(
+                1,
+                "Program",
+                TicketType.PROGRAM,
+                TicketPriority.P0,
+                TicketStatus.IN_PROGRESS,
+                None,
+                (),
+                (),
+                (),
+                ("github",),
+            ),
+        ),
+    )
+    snapshot = TicketGraphSnapshot(
+        graph,
+        observed_at,
+        True,
+        (),
+        False,
+        (TicketLiveMetadata(1, "Program", "OPEN", "body"),),
+        coverage,
+        repository_slug="owner/demo",
+        observation_stamps=stamps,
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(snapshot, source, "a" * 64)
+
+    restored = snapshot_from_payload(payload)
+
+    assert restored is not None
+    assert len(restored.observation_stamps) == len(GraphEvidenceCapability)
+    by_capability = {
+        stamp.capability: stamp for stamp in restored.observation_stamps if stamp.capability
+    }
+    for capability in GraphEvidenceCapability:
+        stamp = by_capability[capability]
+        assert stamp.revision == f"rev-{capability.value}"
+        assert stamp.authority_fingerprint == "a" * 64
+        assert stamp.error_codes == ("E_SAMPLE",)
+        assert stamp.complete is True
+        assert stamp.truncated is False
+        assert stamp.item_count == 1
+
+
+def test_cache_rejects_duplicate_capability_stamps() -> None:
+    """Two stamps for the same capability reject the envelope."""
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(fresh, source, "a" * 64)
+    stamp = {
+        "capability": "issue",
+        "source": "live_full",
+        "observed_at": "2026-01-01T00:00:00+00:00",
+        "revision": None,
+        "authority_fingerprint": None,
+        "complete": True,
+        "truncated": False,
+        "error_codes": [],
+        "item_count": 1,
+    }
+    payload["observation_stamps"] = [stamp, dict(stamp)]
+
+    assert snapshot_from_payload(payload) is None
+
+
+def test_cache_rejects_coverage_stamp_mismatch() -> None:
+    """A stamp whose complete/truncated disagrees with coverage rejects the envelope."""
+    observed_at = "2026-01-01T00:00:00+00:00"
+    coverage = tuple(
+        CapabilityCoverage(capability, True, (), False) for capability in GraphEvidenceCapability
+    )
+    stamps = tuple(
+        ObservationStamp(
+            capability=capability,
+            source="live_full",
+            observed_at=observed_at,
+            complete=True,
+            truncated=False,
+            item_count=1,
+        )
+        for capability in GraphEvidenceCapability
+    )
+    graph = TicketGraph(
+        1,
+        1,
+        (
+            TicketNode(
+                1,
+                "Program",
+                TicketType.PROGRAM,
+                TicketPriority.P0,
+                TicketStatus.IN_PROGRESS,
+                None,
+                (),
+                (),
+                (),
+                ("github",),
+            ),
+        ),
+    )
+    snapshot = TicketGraphSnapshot(
+        graph,
+        observed_at,
+        True,
+        (),
+        False,
+        (TicketLiveMetadata(1, "Program", "OPEN", "body"),),
+        coverage,
+        repository_slug="owner/demo",
+        observation_stamps=stamps,
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(snapshot, source, "a" * 64)
+    for stamp in payload["observation_stamps"]:
+        if stamp["capability"] == "dependencies":
+            stamp["complete"] = False
+            break
+
+    assert snapshot_from_payload(payload) is None
