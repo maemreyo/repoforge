@@ -5,6 +5,7 @@ Documentation is grouped by purpose so the `docs/` root remains a stable entry p
 ## Getting started
 
 - [Choose local-first, tunnel, or guided onboarding](getting-started/README.md)
+- [Enroll a repository](getting-started/ENROLL_A_REPOSITORY.md)
 - [Connect RepoForge to ChatGPT](getting-started/CHATGPT_SETUP.md)
 - [Interactive onboarding UI](getting-started/INTERACTIVE_ONBOARDING.md)
 
