@@ -37,7 +37,6 @@ from repoforge.adapters.subprocess.process_tree import ProcessIdentity
 from repoforge.application.activation.handoff import GenerationHandoffReconciler, OwnerIdentity
 from repoforge.application.activation.seam import TunnelSeamSwapCoordinator
 from repoforge.application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
-from repoforge.domain.errors import RepoForgeError
 from repoforge.domain.execution_worker import ExecutionWorkerArchiveEntry, ExecutionWorkerBinding
 from repoforge.domain.operation_worker import OperationWorkerBinding
 from repoforge.domain.runtime import ChildProcess, HealthCheck, TunnelProfile
@@ -179,24 +178,23 @@ def test_f001_popen_precedes_durable_registration(
     assert events == ["popen", "put"]
 
 
-def test_f002_death_is_declared_without_reverification(
+def test_f002_death_is_not_claimed_without_reverification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SIGTERM->SIGKILL with no final identity check still claims "confirmed dead".
+    """A worker that survives SIGKILL must fail closed, never "confirmed dead".
 
-    The reaper waits a fixed window and returns; the failure path then raises
-    ``EXECUTION_WORKER_REGISTRATION_FAILED ... terminated and confirmed dead`` even
-    when the process table still reports the process alive (an injected identity
-    reader that never returns None). ``confirmed dead`` is intent, not evidence.
+    The reaper sends TERM and KILL and then must re-verify the process identity is
+    absent before anyone may claim death. With an injected identity reader that
+    never reports the process gone, the fix refuses to report "terminated and
+    confirmed dead" and raises a fail-closed error instead -- a replacement must
+    never start on the claim that an unverified worker is gone.
     """
     import repoforge.adapters.runtime.execution_worker as worker_module
 
     events: list[str] = []
-    identity_checked_after_kill: list[bool] = []
 
     def always_live(pid: int) -> str:
         del pid
-        identity_checked_after_kill.append(True)
         return "still-alive-identity"
 
     monkeypatch.setattr(worker_module.subprocess, "Popen", _FakePopen(pid=4242, events=events))
@@ -222,11 +220,10 @@ def test_f002_death_is_declared_without_reverification(
     from repoforge.domain.errors import ExecutionWorkerRegistrationError
 
     assert isinstance(exc.value, ExecutionWorkerRegistrationError)
-    assert "terminated and confirmed dead" in str(exc.value)
-    # The process was never observed absent: the "confirmed dead" claim rested on
-    # nothing but a sleep window.
-    assert identity_checked_after_kill
-    assert all(identity_checked_after_kill)
+    # The fail-closed disposition names the unproven worker; the old code claimed
+    # "terminated and confirmed dead" on the same evidence.
+    assert "NOT_CONFIRMED_DEAD" in str(exc.value)
+    assert "confirmed dead" not in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -243,13 +240,14 @@ class _NeverCalled:
         raise AssertionError("read-only reconcile must never read process identity")
 
 
-def test_f003_read_only_preflight_archives_terminal_leases(tmp_path: Path) -> None:
-    """``reconcile(read_only=True)`` still mutates durable state (F-003).
+def test_f003_read_only_preflight_does_not_mutate_state(tmp_path: Path) -> None:
+    """``reconcile(read_only=True)`` must be side-effect free (F-003).
 
-    The preflight collects terminal leases (archive + delete) before the read-only
-    scan, so a caller reasoning "this pass has no effect" is wrong: a terminal lease
-    present before the preflight is gone after it. A failure during that cleanup is
-    also suppressed, making the preflight's outcome depend on hidden state.
+    A preflight that archives and deletes terminal leases before its read-only scan
+    is not read-only: a caller reasoning "this pass has no effect" is wrong, and a
+    failure during that cleanup is suppressed, making the preflight's outcome depend
+    on hidden state. The fix moves ``collect_terminal`` out of the preflight path,
+    so terminal leases survive a read-only pass untouched.
     """
     store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     store.put(_binding(state="already_gone"))  # terminal lease in the active registry
@@ -266,9 +264,9 @@ def test_f003_read_only_preflight_archives_terminal_leases(tmp_path: Path) -> No
 
     report = reconciler.reconcile(read_only=True)
 
-    # The preflight was supposed to be read-only, yet the terminal lease was
-    # archived and removed from the active registry.
-    assert store.get(_WORKER) is None
+    # The preflight was read-only: the terminal lease is still in the active
+    # registry, and nothing was inspected or marked.
+    assert store.get(_WORKER) is not None
     assert report.inspected == 0
 
 
@@ -277,16 +275,16 @@ def test_f003_read_only_preflight_archives_terminal_leases(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_f005_archive_checkpoint_is_not_idempotent_across_crash(tmp_path: Path) -> None:
-    """A crash between archive write and active delete cannot be retried (F-005).
+def test_f005_archive_checkpoint_self_heals_across_a_crash(tmp_path: Path) -> None:
+    """A crash between archive write and active delete must be retryable (F-005).
 
     ``_archive_and_delete`` stamps ``terminated_at`` fresh on every attempt, so a
-    retry after the crash builds a different payload than the archive entry that
-    already exists; ``create_or_read_equal`` refuses it. The terminal lease is then
-    never deleted: the active registry keeps accumulating and can eventually fail
-    closed. This is a white-box test: it writes the half-crashed state (archive
-    entry present, active terminal record still present) exactly as a crash would
-    leave it, then runs the retry.
+    naive retry after the crash builds a different payload than the archive entry
+    that already exists. The fix treats an existing archive entry as the completed
+    first half of the checkpoint (a worker_id is unique per pid + start token, so
+    it is archived at most once) and resumes the delete. This test writes the
+    half-crashed state exactly as a crash would leave it, then runs the retry and
+    asserts the lease is removed -- no ALREADY_EXISTS, no stranded record.
     """
     store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     terminal = _binding(state="already_gone")
@@ -298,12 +296,12 @@ def test_f005_archive_checkpoint_is_not_idempotent_across_crash(tmp_path: Path) 
     )
     store._history.create_or_read_equal(_WORKER, first_attempt)
 
-    with pytest.raises(RepoForgeError) as exc:
-        store.collect_terminal()
+    collected = store.collect_terminal()
 
-    assert "already exists" in str(exc.value)
-    # Self-heal failed: the active terminal lease is still there.
-    assert store.get(_WORKER) is not None
+    assert collected == 1
+    # The retry self-healed: the active terminal lease was deleted.
+    assert store.get(_WORKER) is None
+    assert len(store.list_archive()) == 1
 
 
 # ---------------------------------------------------------------------------

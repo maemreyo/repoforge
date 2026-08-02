@@ -162,9 +162,12 @@ class ExecutionWorkerReconciler:
         release_shas: list[str] = []
         # Archive terminal leases left by older releases before scanning, so the
         # bounded scan covers active leases only and cannot overflow into a permanent
-        # fail-closed block (#424).
-        with contextlib.suppress(Exception):
-            self._bindings.collect_terminal()
+        # fail-closed block (#424). This is maintenance, not inspection: a read-only
+        # preflight must be side-effect free, so it is skipped there and the real
+        # pass collects terminal leases first.
+        if not read_only:
+            with contextlib.suppress(Exception):
+                self._bindings.collect_terminal()
         page = self._bindings.list_page()
         for binding in page.records:
             if binding.state not in _ACTIVE_STATES:

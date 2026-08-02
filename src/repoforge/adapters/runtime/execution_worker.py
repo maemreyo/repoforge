@@ -199,8 +199,28 @@ class SubprocessExecutionWorker:
         else:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(pid, signal.SIGKILL)
-            time.sleep(0.1)
+            self._confirm_gone_after_kill(pid)
         self._children.pop(pid, None)
+
+    def _confirm_gone_after_kill(self, pid: int) -> None:
+        """Prove the process is absent after SIGKILL before anyone claims it is dead.
+
+        "Confirmed dead" is a claim, not a hope: a process that survived both
+        SIGTERM and SIGKILL is still running and holding locks, and reporting it
+        terminated would let a replacement start on false evidence. Fail closed
+        instead -- the caller must not proceed as if the worker were gone.
+        """
+        deadline = time.monotonic() + _REGISTRATION_REAP_SECONDS
+        while time.monotonic() < deadline:
+            if process_identity(pid) is None:
+                return
+            time.sleep(0.05)
+        raise ExecutionWorkerRegistrationError(
+            f"EXECUTION_WORKER_NOT_CONFIRMED_DEAD: the spawned worker with pid {pid} "
+            "survived SIGTERM and SIGKILL; refusing to report it as terminated. The "
+            "worker may still be running and holding locks; inspect the process "
+            "table and reclaim it manually before starting a replacement."
+        )
 
     def _mark_state(self, pid: int, state: str) -> None:
         if self._bindings is None:
