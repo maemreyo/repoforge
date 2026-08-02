@@ -206,6 +206,17 @@ def _strict_str(value: object, field: str) -> str:
     return value
 
 
+def _strict_bool(value: object, field: str) -> bool:
+    """Return the value when it is an exact bool; never coerce truthy strings/ints.
+
+    JSON ``"false"``, ``0``, and ``1`` are rejected.  A truthy non-bool would
+    otherwise flip fail-closed coverage into complete evidence (F-006).
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a bool")
+    return value
+
+
 def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
     if not isinstance(payload, dict):
         return None
@@ -256,15 +267,9 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
                     ),
                 )
             )
-        observed_at = payload["observed_at"]
-        evidence_complete = payload["evidence_complete"]
-        truncated = payload["truncated"]
-        if (
-            not isinstance(observed_at, str)
-            or not isinstance(evidence_complete, bool)
-            or not isinstance(truncated, bool)
-        ):
-            return None
+        observed_at = _strict_str(payload["observed_at"], "observed_at")
+        evidence_complete = _strict_bool(payload["evidence_complete"], "evidence_complete")
+        truncated = _strict_bool(payload["truncated"], "truncated")
         raw_coverage = payload.get("capability_coverage", [])
         if not isinstance(raw_coverage, list):
             return None
@@ -277,9 +282,13 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
                     capability=GraphEvidenceCapability(
                         _strict_str(item["capability"], f"capability_coverage[{index}].capability")
                     ),
-                    complete=item["complete"],
+                    complete=_strict_bool(
+                        item["complete"], f"capability_coverage[{index}].complete"
+                    ),
                     unavailable=positive_integer_tuple(item["unavailable"]),
-                    truncated=item["truncated"],
+                    truncated=_strict_bool(
+                        item["truncated"], f"capability_coverage[{index}].truncated"
+                    ),
                 )
             )
         graph = TicketGraph(
@@ -347,10 +356,6 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
                 if raw_authority is not None
                 else None
             )
-            if not isinstance(item["complete"], bool):
-                raise ValueError(f"observation_stamps[{index}].complete must be a bool")
-            if not isinstance(item["truncated"], bool):
-                raise ValueError(f"observation_stamps[{index}].truncated must be a bool")
             observation_stamps.append(
                 ObservationStamp(
                     capability=capability,
@@ -360,8 +365,12 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
                     ),
                     revision=revision,
                     authority_fingerprint=authority_fingerprint,
-                    complete=item["complete"],
-                    truncated=item["truncated"],
+                    complete=_strict_bool(
+                        item["complete"], f"observation_stamps[{index}].complete"
+                    ),
+                    truncated=_strict_bool(
+                        item["truncated"], f"observation_stamps[{index}].truncated"
+                    ),
                     error_codes=error_codes,
                     item_count=_strict_int(
                         item["item_count"], f"observation_stamps[{index}].item_count"

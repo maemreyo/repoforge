@@ -2381,6 +2381,109 @@ def test_cache_rejects_duplicate_capability_stamps() -> None:
     assert snapshot_from_payload(payload) is None
 
 
+def test_strict_codec_rejects_string_false_coverage_complete() -> None:
+    """F-006: JSON string \"false\" must not become truthy complete evidence."""
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(fresh, source, "a" * 64)
+    coverage = list(payload.get("capability_coverage") or [])
+    if not coverage:
+        coverage = [
+            {
+                "capability": capability.value,
+                "complete": True,
+                "unavailable": [],
+                "truncated": False,
+            }
+            for capability in GraphEvidenceCapability
+        ]
+        payload["capability_coverage"] = coverage
+    coverage[0]["complete"] = "false"
+
+    assert snapshot_from_payload(payload) is None
+
+
+def test_strict_codec_rejects_int_truncated_flags() -> None:
+    """F-006: integer 0/1 are not bools and must reject the envelope."""
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(fresh, source, "a" * 64)
+    payload["truncated"] = 0
+    assert snapshot_from_payload(payload) is None
+
+    payload = _snapshot_payload(fresh, source, "a" * 64)
+    payload["evidence_complete"] = 1
+    assert snapshot_from_payload(payload) is None
+
+
+def test_strict_codec_rejects_non_bool_stamp_truncated() -> None:
+    """F-006: ObservationStamp.truncated must be an exact bool."""
+    observed_at = "2026-01-01T00:00:00+00:00"
+    coverage = tuple(
+        CapabilityCoverage(capability, True, (), False) for capability in GraphEvidenceCapability
+    )
+    stamps = tuple(
+        ObservationStamp(
+            capability=capability,
+            source="live_full",
+            observed_at=observed_at,
+            complete=True,
+            truncated=False,
+            item_count=1,
+        )
+        for capability in GraphEvidenceCapability
+    )
+    graph = TicketGraph(
+        1,
+        1,
+        (
+            TicketNode(
+                1,
+                "Program",
+                TicketType.PROGRAM,
+                TicketPriority.P0,
+                TicketStatus.IN_PROGRESS,
+                None,
+                (),
+                (),
+                (),
+                ("github",),
+            ),
+        ),
+    )
+    snapshot = TicketGraphSnapshot(
+        graph,
+        observed_at,
+        True,
+        (),
+        False,
+        (TicketLiveMetadata(1, "Program", "OPEN", "body"),),
+        coverage,
+        repository_slug="owner/demo",
+        observation_stamps=stamps,
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(snapshot, source, "a" * 64)
+    payload["observation_stamps"][0]["truncated"] = "false"
+
+    assert snapshot_from_payload(payload) is None
+
+
+def test_capability_coverage_rejects_non_bool_complete() -> None:
+    """Domain validation: CapabilityCoverage.complete must be an exact bool."""
+    with pytest.raises(ValueError, match="complete must be a bool"):
+        CapabilityCoverage(
+            GraphEvidenceCapability.ISSUE,
+            "false",  # type: ignore[arg-type]
+            (),
+            False,
+        )
+
+
 def test_cache_rejects_coverage_stamp_mismatch() -> None:
     """A stamp whose complete/truncated disagrees with coverage rejects the envelope."""
     observed_at = "2026-01-01T00:00:00+00:00"

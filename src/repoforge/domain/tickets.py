@@ -187,6 +187,21 @@ class CapabilityCoverage:
     unavailable: tuple[int, ...]
     truncated: bool
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.capability, GraphEvidenceCapability):
+            raise ValueError("CapabilityCoverage.capability must be a GraphEvidenceCapability")
+        if not isinstance(self.complete, bool):
+            raise ValueError("CapabilityCoverage.complete must be a bool")
+        if not isinstance(self.truncated, bool):
+            raise ValueError("CapabilityCoverage.truncated must be a bool")
+        if not isinstance(self.unavailable, tuple):
+            raise ValueError("CapabilityCoverage.unavailable must be a tuple of positive ints")
+        if any(
+            not isinstance(item, int) or isinstance(item, bool) or item <= 0
+            for item in self.unavailable
+        ):
+            raise ValueError("CapabilityCoverage.unavailable must be a tuple of positive ints")
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilityReadStat:

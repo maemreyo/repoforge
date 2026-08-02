@@ -124,6 +124,8 @@ class ObservationStamp:
             raise ValueError("ObservationStamp.observed_at must be a non-empty string")
         if not isinstance(self.complete, bool):
             raise ValueError("ObservationStamp.complete must be a bool")
+        if not isinstance(self.truncated, bool):
+            raise ValueError("ObservationStamp.truncated must be a bool")
         if (
             not isinstance(self.item_count, int)
             or isinstance(self.item_count, bool)
