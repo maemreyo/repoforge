@@ -18,36 +18,27 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from ...config import GitHubTicketGraphConfig, ServerConfig
 from ...domain.errors import CommandError
 from ...domain.tickets import (
-    CapabilityCoverage,
     GraphEvidenceCapability,
     TicketDiagnostic,
     TicketGraph,
     TicketGraphError,
     TicketGraphSnapshot,
-    TicketLiveMetadata,
-    TicketNode,
-    TicketPriority,
-    TicketStatus,
-    TicketType,
     github_slug_from_remote_url,
 )
 from ...ports.command import CommandExecutor, CommandResult
+from .graph_assembly import build_adjacency_maps, build_nodes_and_live
+from .graph_batcher import fetch_batch
+from .graph_coverage import build_capability_coverage
 from .graph_decode import (
     _REPOSITORY,
     ExpandedIssue,
-    alias_issue,
-    enum_value,
-    failed_capabilities,
     parse_issue,
-    parse_metadata,
 )
-from .graph_query import FULL_SELECTION, build_query, selection_capabilities, stripped_selection
-from .graph_transport import Stats, run_graphql
+from .graph_transport import Stats
 from .project_overlay import read_project_values
 from .ticket_legacy_reader import (
     GitHubTicketGraphReader,  # noqa: F401 — re-export for compatibility
@@ -77,74 +68,6 @@ class CommandGitHubTicketGraphGateway:
             timeout=self._server.default_command_timeout_seconds,
             output_limit=output_limit or self._output_limit,
         )
-
-    def _fetch_batch(
-        self,
-        cwd: Path,
-        slug: str,
-        numbers: list[int],
-        stats: Stats,
-    ) -> tuple[dict[int, dict[str, Any]], dict[int, frozenset[GraphEvidenceCapability]]]:
-        """Fetch one frontier level with aliased GraphQL, retrying failed
-        aliases with progressively stripped selections.
-
-        Returns ``(parsed_issue_dicts, failed_capabilities_by_number)``. A
-        number present in ``parsed`` is usable; its entry in the second dict
-        lists the capabilities that could not be read for it. Core issue
-        identity/metadata is never accepted partially: any error on the issue
-        object itself (including a missing object without an attributable
-        error) fails the whole issue closed.
-        """
-        parsed: dict[int, dict[str, Any]] = {}
-        failed: dict[int, set[GraphEvidenceCapability]] = {}
-        pending: dict[int, str] = {number: FULL_SELECTION for number in numbers}
-        while pending:
-            selection = next(iter(pending.values()))
-            group = [number for number, current in pending.items() if current == selection]
-            query = build_query(slug, group, selection)
-            payload, errors = run_graphql(
-                self._executor,
-                self._server,
-                cwd,
-                query,
-                stats,
-                capabilities=selection_capabilities(selection),
-            )
-            for index, number in enumerate(group):
-                alias = f"r{index}"
-                capabilities = failed_capabilities(errors, alias)
-                issue = alias_issue(payload, alias)
-                if issue is not None and not capabilities:
-                    parsed[number] = issue
-                    pending.pop(number, None)
-                    continue
-                if GraphEvidenceCapability.ISSUE in capabilities:
-                    failed.setdefault(number, set()).add(GraphEvidenceCapability.ISSUE)
-                    pending.pop(number, None)
-                    continue
-                if issue is not None:
-                    # Partial object with optional-capability failures: retry
-                    # stripped so accepted data only carries capabilities that
-                    # actually succeeded.
-                    failed.setdefault(number, set()).update(capabilities)
-                    next_selection = stripped_selection(failed[number])
-                    if next_selection == selection:
-                        parsed[number] = issue
-                        pending.pop(number, None)
-                    else:
-                        pending[number] = next_selection
-                    continue
-                # No issue object, only optional-capability failures: retry
-                # stripped; if stripping changes nothing the object is truly
-                # missing and the core read fails closed.
-                failed.setdefault(number, set()).update(capabilities)
-                next_selection = stripped_selection(failed[number])
-                if next_selection == selection:
-                    failed.setdefault(number, set()).add(GraphEvidenceCapability.ISSUE)
-                    pending.pop(number, None)
-                else:
-                    pending[number] = next_selection
-        return parsed, {number: frozenset(caps) for number, caps in failed.items()}
 
     # -- Slug resolution ----------------------------------------------------
 
@@ -236,7 +159,7 @@ class CommandGitHubTicketGraphGateway:
             batch = frontier[:_ALIAS_CHUNK]
             frontier = frontier[_ALIAS_CHUNK:]
             try:
-                parsed, failed = self._fetch_batch(cwd, slug, batch, stats)
+                parsed, failed = fetch_batch(self._executor, self._server, cwd, slug, batch, stats)
             except CommandError:
                 if source.root_issue in batch:
                     raise
@@ -397,130 +320,32 @@ class CommandGitHubTicketGraphGateway:
                 duration_ms=project_duration_ms,
             )
 
-        children_by_number: dict[int, set[int]] = {number: set() for number in wanted}
-        for child_number, parent_number in parent_by_number.items():
-            if child_number in wanted and parent_number in wanted:
-                children_by_number[parent_number].add(child_number)
-        blockers_by_number: dict[int, set[int]] = {number: set() for number in wanted}
-        for number in wanted:
-            blockers_by_number[number] = {
-                blocker for blocker in expanded[number].blockers if blocker in wanted
-            }
-        blocks_by_number: dict[int, set[int]] = {number: set() for number in wanted}
-        for blocked_number, blocker_numbers in blockers_by_number.items():
-            for blocker_number in blocker_numbers:
-                blocks_by_number[blocker_number].add(blocked_number)
-
-        nodes: list[TicketNode] = []
-        live: list[TicketLiveMetadata] = []
-        for number in sorted(wanted):
-            issue = expanded[number]
-            title = issue.title
-            state = issue.state
-            body = issue.body
-            metadata = parse_metadata(body, issue.labels)
-            overlay = project_values.get(number, {})
-            status = (
-                TicketStatus.DONE
-                if state == "CLOSED"
-                else enum_value(
-                    TicketStatus,
-                    overlay.get(source.status_field) or metadata.get("status"),
-                )
-            )
-            priority = enum_value(
-                TicketPriority,
-                overlay.get(source.priority_field) or metadata.get("priority"),
-            )
-            ticket_type = enum_value(
-                TicketType,
-                overlay.get(source.type_field) or metadata.get("type"),
-            )
-            defaulted_fields: list[str] = []
-            if status is None:
-                status = TicketStatus.BACKLOG
-                defaulted_fields.append("status")
-            if priority is None:
-                priority = TicketPriority.P3
-                defaulted_fields.append("priority")
-            if ticket_type is None:
-                if number == source.root_issue:
-                    ticket_type = TicketType.PROGRAM
-                elif children_by_number[number]:
-                    ticket_type = TicketType.INITIATIVE
-                else:
-                    ticket_type = TicketType.IMPLEMENTATION_TICKET
-            if defaulted_fields:
-                diagnostics.append(
-                    TicketDiagnostic(
-                        "METADATA_DEFAULTED",
-                        number,
-                        "metadata fields "
-                        + ", ".join(defaulted_fields)
-                        + " are missing; defaulted for readiness",
-                    )
-                )
-            initiative = overlay.get(source.initiative_field) or metadata.get("initiative")
-            roadmap = (
-                (initiative.strip(),)
-                if isinstance(initiative, str) and initiative.strip()
-                else ("github",)
-            )
-            nodes.append(
-                TicketNode(
-                    number=number,
-                    title=title,
-                    ticket_type=ticket_type,
-                    priority=priority,
-                    status=status,
-                    parent=parent_by_number.get(number),
-                    blockers=tuple(sorted(blockers_by_number[number])),
-                    blocks=tuple(sorted(blocks_by_number[number])),
-                    children=tuple(sorted(children_by_number[number])),
-                    roadmap=roadmap,
-                )
-            )
-            live.append(
-                TicketLiveMetadata(
-                    number,
-                    title,
-                    state,
-                    body,
-                    expanded[number].comments,
-                )
-            )
-
-        capability_coverage = (
-            CapabilityCoverage(
-                GraphEvidenceCapability.ISSUE,
-                not issue_unavailable,
-                tuple(sorted(issue_unavailable)),
-                False,
-            ),
-            CapabilityCoverage(
-                GraphEvidenceCapability.SUB_ISSUES,
-                not sub_issues_unavailable and not sub_issues_truncated,
-                tuple(sorted(sub_issues_unavailable)),
-                sub_issues_truncated,
-            ),
-            CapabilityCoverage(
-                GraphEvidenceCapability.COMMENTS,
-                not comments_unavailable and not comments_truncated,
-                tuple(sorted(comments_unavailable)),
-                comments_truncated,
-            ),
-            CapabilityCoverage(
-                GraphEvidenceCapability.DEPENDENCIES,
-                not dependencies_unavailable and not dependencies_truncated,
-                tuple(sorted(dependencies_unavailable)),
-                dependencies_truncated,
-            ),
-            CapabilityCoverage(
-                GraphEvidenceCapability.PROJECT_OVERLAY,
-                project_complete,
-                tuple(sorted(project_unavailable)),
-                False,
-            ),
+        children_by_number, blockers_by_number, blocks_by_number = build_adjacency_maps(
+            wanted,
+            parent_by_number,
+            expanded,
+        )
+        nodes, live = build_nodes_and_live(
+            wanted,
+            expanded,
+            parent_by_number,
+            children_by_number,
+            blockers_by_number,
+            blocks_by_number,
+            project_values,
+            source,
+            diagnostics,
+        )
+        capability_coverage = build_capability_coverage(
+            issue_unavailable,
+            sub_issues_unavailable,
+            sub_issues_truncated,
+            comments_unavailable,
+            comments_truncated,
+            dependencies_unavailable,
+            dependencies_truncated,
+            project_unavailable,
+            project_complete,
         )
         return TicketGraphSnapshot(
             graph=TicketGraph(1, source.root_issue, tuple(nodes)),
