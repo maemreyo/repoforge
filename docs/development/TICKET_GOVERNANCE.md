@@ -78,15 +78,20 @@ the unseen children are not enumerated into the schema-bounded `unavailable` set
 
 Cached graph snapshots are bound to the resolved GitHub repository slug, a digest of the
 reviewed source configuration (root, project owner/number, field names), the reader
-contract version, the GitHub API version, and the pinned authority digest; a payload
-checksum is recomputed and verified on every cache read. Any binding mismatch — a
+contract version, the GitHub API version, and the observation authority fingerprint; a
+payload checksum is recomputed and verified on every cache read. Any binding mismatch — a
 repointed remote, an edited project field, a reader change, or a rotated authority —
 is a cache miss, never stale evidence served as current. The graph cache is fail-closed
 by default: RepoForge never reads credentials, so it cannot prove the ambient GitHub
-authority is unchanged between a cache write and a later read. The operator must pin
-`server.github_read_cache_authority_digest` to an opaque 64-hex-char digest naming the
-current credential generation and rotate it whenever that authority changes; until then
-the graph cache is neither served nor written (`cache_miss_reason=authority_not_pinned`).
+authority is unchanged between a cache write and a later read. When a repository resolves
+a configured auth profile, the cache binds to a secret-free auth-issued fingerprint
+derived from that identity (host, login/installation, profile), so rotating the credential
+generation is automatically a cache miss. The operator-pinned
+`server.github_read_cache_authority_digest` remains an explicit legacy fallback in the
+compatibility window and must name the current credential generation, rotated whenever
+that authority changes. Until an authority is provable the graph cache is neither served
+nor written (`cache_miss_reason=authority_not_pinned`); cache telemetry reports
+`authority_origin` (`auth_issued` vs `manual_legacy`).
 Signed webhooks invalidate the affected graph cache entries; the next read re-traverses
 the batched graph rather than merging partial state.
 

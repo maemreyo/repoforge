@@ -424,6 +424,26 @@
       "planned_owner": "#288"
     },
     {
+      "path": "src/repoforge/adapters/github/ticket_legacy_reader.py",
+      "executables": [
+        "gh"
+      ],
+      "surfaces": [
+        "github_api",
+        "issue_graph"
+      ],
+      "credential_inputs": [
+        "globally active gh account",
+        "inherited GitHub environment"
+      ],
+      "target_inputs": [
+        "repository slug",
+        "issue numbers"
+      ],
+      "current_risk": "ambient_or_implicit",
+      "planned_owner": "#288"
+    },
+    {
       "path": "src/repoforge/adapters/github/ticket_project.py",
       "executables": [
         "gh"
