@@ -1,4 +1,4 @@
-"""JSON ProcessLeaseAdapter (real, Phase 4) and RuntimeTransitionAdapter (still stubs)."""
+"""JSON ProcessLeaseAdapter and RuntimeTransitionAdapter (both real, Phase 4/5)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from repoforge.adapters.persistence.json_process_lease_adapter import (
 )
 from repoforge.adapters.persistence.json_runtime_transition_adapter import (
     JsonRuntimeTransitionAdapter,
+    validate_transition_id,
 )
 from repoforge.domain.durable_state import Revision
 from repoforge.domain.process_lease import (
@@ -187,30 +188,112 @@ class TestLeaseIdValidation:
 # --------------------------------------------------------------------------- JsonRuntimeTransitionAdapter
 
 
+class TestTransitionPayload:
+    def test_payload_round_trip_preserves_status(self) -> None:
+        transition = _transition()
+        from repoforge.domain.runtime_transition import (
+            runtime_transition_from_payload,
+            runtime_transition_payload,
+        )
+
+        decoded = runtime_transition_from_payload(runtime_transition_payload(transition))
+
+        assert decoded == transition
+
+    def test_from_payload_rejects_an_unknown_status(self) -> None:
+        from repoforge.domain.runtime_transition import (
+            runtime_transition_from_payload,
+            runtime_transition_payload,
+        )
+
+        payload = runtime_transition_payload(_transition())
+        payload["status"] = "mystery"
+
+        with pytest.raises(ValueError):
+            runtime_transition_from_payload(payload)
+
+
+class TestTransitionIdValidation:
+    def test_accepts_a_valid_transition_id(self) -> None:
+        assert (
+            validate_transition_id("tran-000000000000000000000001")
+            == "tran-000000000000000000000001"
+        )
+
+    def test_rejects_a_malformed_id(self) -> None:
+        with pytest.raises(ValueError):
+            validate_transition_id("tran-not-hex")
+        with pytest.raises(ValueError):
+            validate_transition_id("worker-000000000000000000000001")
+
+
 class TestJsonRuntimeTransitionAdapter:
-    """The runtime transition adapter remains a stub until Phase 5."""
+    def test_create_and_read_round_trip(self, tmp_path: Path) -> None:
+        adapter = JsonRuntimeTransitionAdapter(tmp_path / "state", InMemoryLockManager())
+        envelope = adapter.create(_transition())
 
-    def test_create_raises_not_implemented(self) -> None:
-        adapter = JsonRuntimeTransitionAdapter()
-        with pytest.raises(NotImplementedError):
-            adapter.create(_transition())
+        assert envelope.revision == Revision(1)
+        stored = adapter.read(_TID)
+        assert stored is not None and stored.value == _transition()
 
-    def test_read_raises_not_implemented(self) -> None:
-        adapter = JsonRuntimeTransitionAdapter()
-        with pytest.raises(NotImplementedError):
-            adapter.read(_TID)
+    def test_save_advances_with_cas(self, tmp_path: Path) -> None:
+        adapter = JsonRuntimeTransitionAdapter(tmp_path / "state", InMemoryLockManager())
+        envelope = adapter.create(_transition())
+        advanced = (
+            _transition()
+            .config_generated(updated_at=_ISO)
+            .resolve_dependencies(updated_at=_ISO)
+            .validate(updated_at=_ISO)
+            .stage(updated_at=_ISO)
+            .activate(updated_at=_ISO)
+            .health_checked(updated_at=_ISO)
+            .mark_ready(updated_at=_ISO)
+        )
 
-    def test_save_raises_not_implemented(self) -> None:
-        adapter = JsonRuntimeTransitionAdapter()
-        with pytest.raises(NotImplementedError):
-            adapter.save(_transition(), expected_revision=Revision(1))
+        updated = adapter.save(advanced, expected_revision=envelope.revision)
 
-    def test_list_all_raises_not_implemented(self) -> None:
-        adapter = JsonRuntimeTransitionAdapter()
-        with pytest.raises(NotImplementedError):
-            adapter.list_all()
+        assert updated.revision == Revision(2)
+        from repoforge.domain.runtime_transition import RuntimeTransitionStatus
 
-    def test_list_by_generation_raises_not_implemented(self) -> None:
-        adapter = JsonRuntimeTransitionAdapter()
-        with pytest.raises(NotImplementedError):
-            adapter.list_by_generation(1)
+        assert adapter.read(_TID).value.status is RuntimeTransitionStatus.READY
+
+    def test_save_rejects_a_stale_revision(self, tmp_path: Path) -> None:
+        adapter = JsonRuntimeTransitionAdapter(tmp_path / "state", InMemoryLockManager())
+        adapter.create(_transition())
+
+        from repoforge.domain.errors import RepoForgeError
+
+        with pytest.raises(RepoForgeError):
+            adapter.save(_transition(), expected_revision=Revision(99))
+
+    def test_list_all_returns_every_transition(self, tmp_path: Path) -> None:
+        adapter = JsonRuntimeTransitionAdapter(tmp_path / "state", InMemoryLockManager())
+        adapter.create(_transition())
+        adapter.create(
+            new_runtime_transition(
+                transition_id="tran-000000000000000000000002",
+                target_generation=2,
+                correlation_id="corr-001",
+                started_at=_ISO,
+            )
+        )
+
+        page = adapter.list_all()
+
+        assert len(page.records) == 2
+
+    def test_list_by_generation_filters_on_the_target(self, tmp_path: Path) -> None:
+        adapter = JsonRuntimeTransitionAdapter(tmp_path / "state", InMemoryLockManager())
+        adapter.create(_transition())  # target_generation=1
+        adapter.create(
+            new_runtime_transition(
+                transition_id="tran-000000000000000000000002",
+                target_generation=2,
+                correlation_id="corr-001",
+                started_at=_ISO,
+            )
+        )
+
+        page = adapter.list_by_generation(2)
+
+        assert [item.record_id for item in page.records] == ["tran-000000000000000000000002"]

@@ -997,6 +997,21 @@ class UpgradeService:
         if not preflight_ok:
             raise ConfigError(f"ROLLBACK_PREFLIGHT_FAILED: {preflight_detail}")
 
+        # Journal the rollback attempt BEFORE any pointer mutation, exactly like an
+        # activation (F-006). A crash between the swap and the receipt previously
+        # left `current` moved with no record that a rollback was in flight -- and
+        # `reconcile()` only understands the activation journal -- so the deployment
+        # became unrecoverable without guessing. The journal is written first and
+        # cleared only when the terminal receipt exists, so every failure after the
+        # swap leaves a trace reconciliation can act on. When a journal is already
+        # in flight (repair-rollback of a fail-closed activation), that journal is
+        # the trace and must not be overwritten.
+        if self._store.read_in_flight_activation() is None:
+            journal_receipt_id = self._store.allocate_receipt_id(date_stamp=self._date_stamp())
+            self._store.begin_activation(
+                receipt_id=journal_receipt_id, from_sha=current, to_sha=target
+            )
+
         self._store.swap_current(target)
         restart = self._restarter.restart(departing_release=current)
         converged, observed_sha, verify_detail = self._verify_serving(target)
