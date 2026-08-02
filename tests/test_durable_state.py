@@ -1285,14 +1285,17 @@ def test_compare_and_delete_removes_when_revision_and_value_still_match(
     assert store.read("demo-1") is None
 
 
-def test_compare_and_delete_returns_false_when_value_changed_within_revision(
+def test_compare_and_delete_returns_false_when_revision_advanced(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
     store.create("demo-1", DemoRecord("alpha"))
     snapshot = store.read("demo-1")
     assert snapshot is not None
-    # Same revision number but the record was replaced in place by a save.
+    # save() advances the revision (1 -> 2), so the stale expectation fails on
+    # the revision check before the value check. Same-revision/different-value
+    # staleness is covered by the ABA recreate test above, because a write that
+    # keeps the revision number is not a supported operation.
     store.save("demo-1", DemoRecord("bravo"), expected_revision=snapshot.revision)
 
     deleted = store.compare_and_delete(
