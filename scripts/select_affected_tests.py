@@ -31,11 +31,13 @@ import json
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli as tomllib
+from verification_artifact import LaneTiming, VerificationArtifact, write_artifact
 
 DEFAULT_MANIFEST = Path("tests/test-groups.toml")
 DEFAULT_TESTS_DIR = Path("tests")
@@ -576,7 +578,9 @@ def _all_files_selection(manifest: Manifest) -> Selection:
     )
 
 
-def _run_in_lanes(root: Path, files: Sequence[str], manifest: Manifest) -> int:
+def _run_in_lanes(
+    root: Path, files: Sequence[str], manifest: Manifest
+) -> tuple[int, tuple[LaneTiming, ...]]:
     """Run `files` split into a serial lane and an xdist lane.
 
     Files owned by a `parallel = false` group carry a known worker-contention
@@ -589,19 +593,52 @@ def _run_in_lanes(root: Path, files: Sequence[str], manifest: Manifest) -> int:
     parallel = sorted(f for f in files if f not in serial_files)
 
     returncode = 0
+    timings: list[LaneTiming] = []
     if serial:
         print(f"[select-affected-tests] serial lane: {len(serial)} test files")
+        started = time.monotonic()
         completed = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", *serial], cwd=root, check=False
+        )
+        timings.append(
+            LaneTiming(
+                "serial",
+                len(serial),
+                (time.monotonic() - started) * 1_000,
+                completed.returncode,
+            )
         )
         returncode = returncode or completed.returncode
     if parallel:
         print(f"[select-affected-tests] xdist lane: {len(parallel)} test files")
+        started = time.monotonic()
         completed = subprocess.run(
             [sys.executable, "-m", "pytest", "-n", "3", "-q", *parallel], cwd=root, check=False
         )
+        timings.append(
+            LaneTiming(
+                "parallel",
+                len(parallel),
+                (time.monotonic() - started) * 1_000,
+                completed.returncode,
+            )
+        )
         returncode = returncode or completed.returncode
-    return returncode
+    return returncode, tuple(timings)
+
+
+def _head_sha(root: Path) -> str:
+    return (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        .stdout.strip()
+        .lower()
+    )
 
 
 def changed_paths_from_git(root: Path, base_ref: str) -> list[str]:
@@ -676,6 +713,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Select every test file, bypassing git diff (for fast full-suite runs)",
     )
+    parser.add_argument(
+        "--report-path",
+        type=Path,
+        default=None,
+        help="Write bounded canonical JSON evidence for this selection/run.",
+    )
     args = parser.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
@@ -704,13 +747,28 @@ def main(argv: list[str] | None = None) -> int:
         selection = select_affected_tests(manifest, changed)
     _print_report(selection)
 
+    lanes: tuple[LaneTiming, ...] = ()
+    returncode = 0
     if args.run:
         # Coverage-gated authoritative runs belong to `make test`; this tool's
         # job is fast affected-test feedback, split into a serial lane (files
         # from `parallel = false` groups) and an xdist lane, same split
         # `run_test_suite.py` already uses for `make check`.
-        return _run_in_lanes(root, selection.selected_files, manifest)
-    return 0
+        returncode, lanes = _run_in_lanes(root, selection.selected_files, manifest)
+    if args.report_path is not None:
+        write_artifact(
+            args.report_path,
+            VerificationArtifact(
+                schema_version=1,
+                intent="full" if args.full else "affected",
+                head_sha=_head_sha(root),
+                selected_count=len(selection.selected_files),
+                escalated=selection.escalated_to_wide,
+                escalation_reason=selection.escalation_reason,
+                lanes=lanes,
+            ),
+        )
+    return returncode
 
 
 if __name__ == "__main__":

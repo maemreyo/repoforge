@@ -79,7 +79,7 @@ typecheck:  # Type-check the full source tree
 	uv run --extra dev mypy src/repoforge
 
 test:  # Fast developer/model feedback: affected tests plus the safety bundle, no coverage
-	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}"
+	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}" --report-path "$${REPOFORGE_VERIFICATION_REPORT:-.cache/verification/affected.json}"
 
 test-full:  # Run the complete behavioral suite without coverage.
 	# -n 3 was measured against -n 2 and -n 4 on this repo: -n 3 is both the
@@ -89,14 +89,14 @@ test-full:  # Run the complete behavioral suite without coverage.
 	# first, then the rest under -n 3 -- mixing subprocess/git-heavy serial-lane
 	# tests into the same xdist run is what produced 60s pytest-timeout
 	# failures under load even at -n 3.
-	uv run --extra dev python scripts/select_affected_tests.py --full --run
+	uv run --extra dev python scripts/select_affected_tests.py --full --run --report-path "$${REPOFORGE_VERIFICATION_REPORT:-.cache/verification/full.json}"
 
 test-fast: test-full  # Transition alias retained for one release.
 
 test-affected: test  # Transition alias retained for one release.
 
 coverage:  # Run the complete suite once with branch coverage and the 80% floor.
-	uv run --extra dev python scripts/run_test_suite.py --coverage-dir "$${REPOFORGE_COVERAGE_DIR:-.cache/verification/coverage}"
+	uv run --extra dev python scripts/run_test_suite.py --coverage-dir "$${REPOFORGE_COVERAGE_DIR:-.cache/verification/coverage}" --report-path "$${REPOFORGE_VERIFICATION_REPORT:-.cache/verification/coverage.json}"
 
 gate: production-check  # Operator/CI authority: clean-tree production gate.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -489,3 +490,22 @@ def test_a_module_with_real_function_bodies_is_mappable() -> None:
     module = "def add(a: int, b: int) -> int:\n    return a + b\n"
 
     assert selector.is_mappable_module(module, "src/repoforge/domain/math.py") is True
+
+
+def test_report_path_records_a_wide_selection(tmp_path: Path) -> None:
+    report = tmp_path / "affected-report.json"
+
+    returncode = selector.main(
+        [
+            "--path",
+            "pyproject.toml",
+            "--report-path",
+            str(report),
+        ]
+    )
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert returncode == 0
+    assert payload["intent"] == "affected"
+    assert payload["escalated"] is True
+    assert payload["selected_count"] > 0

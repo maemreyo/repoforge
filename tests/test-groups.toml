@@ -458,6 +458,7 @@ source_globs = [
   "src/repoforge/benchmark/**",
   "scripts/run_test_shards.py",
   "scripts/select_affected_tests.py",
+  "scripts/verification_artifact.py",
   "scripts/check_release_contracts.py",
   "scripts/check_conflict_markers.py",
   "scripts/run_v2_release_gates.py",
@@ -470,6 +471,7 @@ test_files = [
   "tests/test_select_affected_tests.py",
   "tests/test_syntax_diagnostics.py",
   "tests/test_v2_benchmark_harness.py",
+  "tests/test_verification_artifact.py",
   "tests/test_workspace_diagnostics.py",
 ]
 

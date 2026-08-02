@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -105,3 +106,26 @@ def test_unreadable_manifest_refuses_to_build_a_parallel_lane(tmp_path: Path) ->
 
     with pytest.raises(runner_module.SelectionMetadataError, match="invalid"):
         runner_module.load_lane_plan(tmp_path)
+
+
+def test_full_runner_writes_lane_failure_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_file = tmp_path / "tests" / "test_one.py"
+    test_file.parent.mkdir()
+    test_file.write_text("def test_one(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner_module,
+        "load_lane_plan",
+        lambda _root: runner_module.LanePlan(serial=(), parallel=(test_file,)),
+    )
+    monkeypatch.setattr(runner_module, "_run_lane", lambda *_args, **_kwargs: 1)
+    report = tmp_path / "full-report.json"
+
+    returncode = runner_module.run(tmp_path, None, 3, report_path=report)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert returncode == 1
+    assert payload["intent"] == "full"
+    assert payload["lanes"][0]["returncode"] == 1
