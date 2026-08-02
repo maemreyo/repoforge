@@ -45,6 +45,10 @@ DEFAULT_HEALTH_INTERVAL_SECONDS = 5.0
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 3
 _RECEIPT_ID_ATTEMPTS = 8
 RECONCILE_COMMAND = "rf upgrade reconcile"
+#: Temp-dir prefix used by the wheel builder for the wheel that survives build()
+#: until this service installs (or skips) it; cleanup removes the wheel's own dir,
+#: never a caller-provided path.
+_WHEEL_TMP_PREFIX = "repoforge-upgrade-wheel-"
 #: The ONLY failure dispositions `reconcile --repair rollback` may authorize: the
 #: release's own contract identity diverged, so the runtime is deterministically
 #: fail-closed. Anything else (tunnel, worker, handoff, transient) needs its own
@@ -203,17 +207,26 @@ class UpgradeService:
             )
         commit_sha = state.head_sha
 
-        artifact = self._builder.build(worktree)
+        artifact = self._builder.build(worktree, commit_sha=commit_sha)
         destination = self._store.release_path(commit_sha)
-        # Releases are immutable: only install when this commit is not already present
-        # with identical bits (reserve_release raises on a fingerprint conflict).
-        fresh = self._store.reserve_release(
-            commit_sha, build_fingerprint=artifact.build_fingerprint
-        )
-        if fresh:
-            self._installer.install(artifact.wheel_path, destination)
+        try:
+            # Releases are immutable: only install when this commit is not already
+            # present with identical bits (reserve_release raises on a fingerprint
+            # conflict).
+            fresh = self._store.reserve_release(
+                commit_sha, build_fingerprint=artifact.build_fingerprint
+            )
+            if fresh:
+                self._installer.install(artifact.wheel_path, destination)
 
-        smoke = self._smoke.smoke(destination)
+            smoke = self._smoke.smoke(destination)
+        finally:
+            # Covers both the consumed wheel and the already-installed (never installed) path.
+            wheel = artifact.wheel_path
+            wheel.unlink(missing_ok=True)
+            if wheel.parent.name.startswith(_WHEEL_TMP_PREFIX):
+                with suppress(OSError):
+                    wheel.parent.rmdir()
         # A contract mismatch is a distinct, typed failure: the candidate runs but was
         # built from a stale worktree, so it would crash-loop as soon as it serves.
         if smoke.contract_mismatched_fields:
@@ -237,6 +250,7 @@ class UpgradeService:
                 tool_surface_hash=smoke.tool_surface_hash,
                 contract_identity=smoke.contract_identity,
                 source_worktree=str(worktree),
+                source_digest=artifact.source_digest,
                 built_at=self._clock.now_iso(),
                 branch=state.branch,
                 subject=state.subject,
@@ -995,6 +1009,21 @@ class UpgradeService:
         preflight_ok, preflight_detail, _ = self._restarter.preflight_reclaim(current)
         if not preflight_ok:
             raise ConfigError(f"ROLLBACK_PREFLIGHT_FAILED: {preflight_detail}")
+
+        # Journal the rollback attempt BEFORE any pointer mutation, exactly like an
+        # activation (F-006). A crash between the swap and the receipt previously
+        # left `current` moved with no record that a rollback was in flight -- and
+        # `reconcile()` only understands the activation journal -- so the deployment
+        # became unrecoverable without guessing. The journal is written first and
+        # cleared only when the terminal receipt exists, so every failure after the
+        # swap leaves a trace reconciliation can act on. When a journal is already
+        # in flight (repair-rollback of a fail-closed activation), that journal is
+        # the trace and must not be overwritten.
+        if self._store.read_in_flight_activation() is None:
+            journal_receipt_id = self._store.allocate_receipt_id(date_stamp=self._date_stamp())
+            self._store.begin_activation(
+                receipt_id=journal_receipt_id, from_sha=current, to_sha=target
+            )
 
         self._store.swap_current(target)
         restart = self._restarter.restart(departing_release=current)

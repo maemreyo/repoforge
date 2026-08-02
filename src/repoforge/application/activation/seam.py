@@ -116,14 +116,32 @@ class TunnelSeamSwapCoordinator:
         report = self._reconciler.reconcile(current_owner=current_owner, is_resumable=is_resumable)
         if not report.ok:
             # Ownership could not be transferred (a prior worker survived), so the
-            # candidate must not take over that work: abort and keep the old child.
+            # candidate must not take over that work: the old child was already
+            # drained, and "retained" means serving again, not merely alive. RESUME
+            # it and prove it healthy before retiring the candidate; if it cannot be
+            # resumed, the runtime is not available and the swap fails closed.
+            resumed, resume_detail = self._resume_and_verify(old_child)
             self._tunnel.terminate(candidate, grace_seconds=self._grace)
+            if not resumed:
+                return SwapResult(
+                    status="fail_closed",
+                    rediscovery_required=False,
+                    detail=(
+                        "Generation handoff could not transfer worker ownership AND "
+                        f"the old child could not be resumed ({resume_detail}); "
+                        f"{len(report.conflicts)} conflict(s). The old child may not "
+                        "be serving; do not assume the runtime is available."
+                    ),
+                    candidate_pid=candidate.pid,
+                    handoff=report,
+                )
             return SwapResult(
                 status="aborted",
                 rediscovery_required=False,
                 detail=(
                     "Generation handoff could not transfer worker ownership; swap "
-                    f"aborted, old child retained ({len(report.conflicts)} conflict(s))."
+                    "aborted, old child resumed and health-verified "
+                    f"({len(report.conflicts)} conflict(s))."
                 ),
                 candidate_pid=candidate.pid,
                 handoff=report,
@@ -173,4 +191,34 @@ class TunnelSeamSwapCoordinator:
             return False, f"drain request failed: {exc}"
         if not response.ok:
             return False, f"drain refused: {response.error_code or response.status}"
+        return True, response.status
+
+    def _resume_and_verify(self, old_child: ChildProcess) -> tuple[bool, str]:
+        """RESUME a drained child and prove it serves again before retiring the candidate.
+
+        A drained child may still be alive yet refuse new work; "retained" must mean
+        serving, so the resume is only accepted after the child is observed alive and
+        healthy again. Failure here fails the swap closed -- the caller must not
+        report the old service as available.
+        """
+        if self._control is None or self._ids is None:
+            return False, "no control channel configured to request a resume"
+        try:
+            response = self._control.request(
+                ControlRequest(
+                    1,
+                    ControlCommand.RESUME,
+                    self._ids.new_hex(24),
+                ),
+                timeout_seconds=self._drain_timeout + 5.0,
+            )
+        except ConfigError as exc:
+            return False, f"resume request failed: {exc}"
+        if not response.ok:
+            return False, f"resume refused: {response.error_code or response.status}"
+        if not self._tunnel.is_alive(old_child):
+            return False, "old child exited after resume"
+        checks = self._tunnel.health(old_child, timeout_seconds=2.0)
+        if not checks or not all(check.ok for check in checks):
+            return False, "old child alive but unhealthy after resume"
         return True, response.status

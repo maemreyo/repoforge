@@ -35,11 +35,13 @@ class _Builder:
     def __init__(self, fingerprint: str = _FINGERPRINT) -> None:
         self._fingerprint = fingerprint
 
-    def build(self, worktree: Path) -> BuildArtifact:
+    def build(self, worktree: Path, *, commit_sha: str) -> BuildArtifact:
+        del commit_sha
         return BuildArtifact(
             wheel_path=worktree / "dist" / "wheel.whl",
             build_fingerprint=self._fingerprint,
             package_version="2.2.0",
+            source_digest="c" * 64,
         )
 
 
@@ -388,6 +390,56 @@ def test_rollback_preflight_failure_aborts_without_swapping_current(tmp_path: Pa
     # The rollback added no restart: `current` stayed put and the runtime kept serving.
     assert restarter.calls == 1
     assert restarter.preflight_calls == 2
+
+
+def test_rollback_opens_and_closes_the_activation_journal(tmp_path: Path) -> None:
+    """A successful rollback journals the attempt and clears it at the receipt (F-006)."""
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store)
+    second.upgrade(tmp_path, activate=True)
+
+    result = second.rollback()
+
+    assert result.status == "rolled_back"
+    # The journal was opened before the swap and cleared when the receipt was written.
+    assert store.read_in_flight_activation() is None
+
+
+def test_a_crash_after_the_rollback_swap_leaves_a_recoverable_journal(
+    tmp_path: Path,
+) -> None:
+    """A crash between the rollback swap and the receipt leaves a journal (F-006).
+
+    Previously the rollback moved `current` with no journal at all, so a crash left
+    the deployment unrecoverable without guessing. The journal is written before
+    the swap and survives the crash, so reconciliation has a record of the
+    in-flight rollback instead of a moved pointer with no explanation.
+    """
+
+    class _CrashRestarter(_Restarter):
+        def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
+            self.calls += 1
+            self.departing_releases.append(departing_release)
+            if self.calls > 1:
+                raise RuntimeError("simulated crash after the symlink swap")
+            return RestartOutcome(ok=True, detail="fake restart", pid=99, reclamation=None)
+
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    restarter = _CrashRestarter()
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store, restarter=restarter)
+    second.upgrade(tmp_path, activate=True)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        second.rollback()
+
+    # `current` moved, and the journal records exactly what was in flight.
+    assert store.current_sha() == "1111aaa"
+    journal = store.read_in_flight_activation()
+    assert journal is not None
+    assert journal["to_sha"] == "1111aaa"
+    assert journal["from_sha"] == "2222bbb"
 
 
 def test_activation_receipt_records_worker_reclamation(tmp_path: Path) -> None:

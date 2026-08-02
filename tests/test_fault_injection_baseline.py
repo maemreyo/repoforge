@@ -1,0 +1,577 @@
+"""Phase 0: freeze the crash-safety contracts of the CURRENT runtime control plane.
+
+The subsystem review of the release/activation/runtime control planes found crash
+windows that the existing suite does not model. This file pins each one as a
+deterministic, injection-based fault test -- no production code is changed, no real
+subprocess is spawned, and every assertion documents the exact failure shape that a
+later phase (3-9 of the migration) must close:
+
+- F-001: the durable lease intent is written BEFORE the worker is spawned, the
+  pid is persisted the moment Popen returns, and the lease is durably RUNNING
+  before the parent returns the worker.
+- F-002: a worker that survives SIGKILL must fail closed, never be declared dead
+  without a final identity/group-liveness re-verification.
+- F-003: ``reconcile(read_only=True)`` must be side-effect free (no terminal-lease
+  collection during a read-only preflight).
+- F-005: the archive checkpoint must be idempotent across a crash between archive
+  write and active-record delete, so a retry self-heals instead of failing.
+- F-007: a seam-swap abort after a successful drain must RESUME and health-verify
+  the old child before retiring the candidate, and fail closed when the resume
+  cannot be proven.
+- F-008: the operation-worker store silently truncates its scan; the handoff
+  reconciler has no completeness signal, so an orphan past the limit is invisible.
+
+The F-001/F-002/F-003/F-005/F-007 tests now assert the fixed invariants (the
+finding is closed). F-008 still pins the unfixed vulnerability at the operation-
+worker store level: the unified shadow registry already exposes completeness, but
+the operation-worker handoff reader has not migrated to it yet.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from repoforge.adapters.persistence.json_execution_worker_binding_store import (
+    JsonExecutionWorkerBindingStore,
+)
+from repoforge.adapters.persistence.json_worker_binding_store import JsonWorkerBindingStore
+from repoforge.adapters.subprocess.process_tree import ProcessIdentity
+from repoforge.application.activation.handoff import GenerationHandoffReconciler, OwnerIdentity
+from repoforge.application.activation.seam import TunnelSeamSwapCoordinator
+from repoforge.application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
+from repoforge.domain.durable_state import Revision
+from repoforge.domain.execution_worker import ExecutionWorkerArchiveEntry, ExecutionWorkerBinding
+from repoforge.domain.operation_worker import OperationWorkerBinding
+from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+from repoforge.domain.runtime import ChildProcess, HealthCheck, TunnelProfile
+from repoforge.ports.process_reaper import ReapOutcome
+from repoforge.testing import InMemoryLockManager
+from repoforge.testing.fakes import InMemoryWorkerBindingStore, RecordingProcessReaper
+
+_SHA = "a" * 64
+_WORKER = "worker-000000000001"
+_EXECUTION_WORKER_ARGV = (
+    "/opt/repoforge/venv/bin/python",
+    "-m",
+    "repoforge.interfaces.runtime.execution_worker",
+    "--config",
+    "/home/dev/config.toml",
+    "--generation",
+    "12",
+)
+
+
+def _binding(*, state: str = "running") -> ExecutionWorkerBinding:
+    return ExecutionWorkerBinding(
+        worker_id=_WORKER,
+        pid=4242,
+        pgid=4242,
+        process_start_token="worker-start-token",
+        generation=12,
+        release_sha="0123abc",
+        supervisor_pid=4241,
+        supervisor_process_identity=_SHA,
+        correlation_id="c" * 24,
+        started_at="2026-07-29T09:26:21+00:00",
+        state=state,
+    )
+
+
+def _op_binding(op: str, *, generation: int) -> OperationWorkerBinding:
+    return OperationWorkerBinding(
+        operation_id=op,
+        child_pid=4321,
+        child_pgid=4321,
+        child_start_token="tok-child",
+        server_pid=111,
+        server_start_token="tok-server",
+        created_at="2026-07-25T00:00:00+00:00",
+        owner_generation=generation,
+    )
+
+
+# ---------------------------------------------------------------------------
+# F-001 / F-002: spawn precedes durable registration; death is declared
+# without re-verification.
+# ---------------------------------------------------------------------------
+
+
+class _FakeProcess:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def poll(self) -> None:
+        return None
+
+    @property
+    def stdout(self):
+        return None
+
+
+class _FakePopen:
+    """Records the moment Popen is invoked on a shared event list."""
+
+    def __init__(self, pid: int, events: list[str]) -> None:
+        self._pid = pid
+        self._events = events
+
+    def __call__(self, argv, **kwargs):
+        del argv, kwargs
+        self._events.append("popen")
+        return _FakeProcess(self._pid)
+
+
+class _RecordingBindings:
+    """Records store writes on a shared event list; put can be scripted to fail."""
+
+    def __init__(self, events: list[str], *, fail_put: bool = False) -> None:
+        self._events = events
+        self._fail_put = fail_put
+        self.put_called = 0
+
+    def put(self, binding: ExecutionWorkerBinding) -> None:
+        del binding
+        self.put_called += 1
+        self._events.append("put")
+        if self._fail_put:
+            raise OSError("simulated crash before the durable lease was written")
+
+    def update_state(self, worker_id: str, state: str):
+        del worker_id, state
+        return None
+
+    def list_page(self, *, max_records: int = 2_000):
+        del max_records
+        from repoforge.ports.execution_worker_store import ExecutionWorkerBindingPage
+
+        return ExecutionWorkerBindingPage(records=(), scan_complete=True, unreadable_ids=())
+
+
+class _RecordingRegistrar:
+    """WorkerRegistrar fake recording the lifecycle order on a shared event list."""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self.lease = ProcessLease(
+            lease_id="worker-" + "0" * 24,
+            status=ProcessLeaseStatus.REGISTERED,
+            role=ProcessLeaseRole.EXECUTION_DAEMON,
+            process_identity=None,
+            pid=None,
+            started_at=None,
+            heartbeat_at=None,
+            correlation_id="c" * 24,
+            created_at="2026-07-29T09:26:21+00:00",
+            updated_at="2026-07-29T09:26:21+00:00",
+        )
+
+    def create_intent(self, *, role, correlation_id) -> tuple[ProcessLease, Revision]:
+        del role, correlation_id
+        self._events.append("intent")
+        return self.lease, Revision(1)
+
+    def record_pid(
+        self, lease, *, pid: int, expected_revision: Revision
+    ) -> tuple[ProcessLease, Revision]:
+        del expected_revision
+        self._events.append("record_pid")
+        return replace(lease, pid=pid, updated_at="2026-07-29T09:26:22+00:00"), Revision(2)
+
+    def complete_registration(
+        self, lease, *, process_identity: str, expected_revision: Revision
+    ) -> tuple[ProcessLease, Revision]:
+        del expected_revision
+        self._events.append("running")
+        return (
+            replace(
+                lease,
+                status=ProcessLeaseStatus.RUNNING,
+                process_identity=process_identity,
+                updated_at="2026-07-29T09:26:22+00:00",
+            ),
+            Revision(3),
+        )
+
+    def abort_intent(
+        self, lease, *, error_code: str, error_message: str, expected_revision: Revision
+    ) -> None:
+        del lease, error_code, error_message, expected_revision
+        self._events.append("abort")
+
+
+def test_f001_pre_spawn_intent_precedes_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The durable lease intent is written BEFORE the worker is spawned (F-001).
+
+    The worker can no longer exist with no durable record: the REGISTERED intent
+    is durably committed first, the spawned pid is persisted the moment Popen
+    returns, and the lease only becomes RUNNING after identity is proven -- so no
+    crash point leaves an invisible orphan.
+    """
+    import repoforge.adapters.runtime.execution_worker as worker_module
+
+    events: list[str] = []
+    monkeypatch.setattr(worker_module.subprocess, "Popen", _FakePopen(pid=4242, events=events))
+    monkeypatch.setattr(worker_module, "process_identity", lambda pid: _SHA)
+    monkeypatch.setattr(
+        worker_module,
+        "read_identity",
+        lambda pid: ProcessIdentity(pid=pid, ppid=1, start_token="worker-start-token"),
+    )
+    monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
+    bindings = _RecordingBindings(events)
+    registrar = _RecordingRegistrar(events)
+    worker = worker_module.SubprocessExecutionWorker(
+        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
+    )
+
+    child = worker.start(
+        generation=12,
+        env={"REPOFORGE_RUNNING_RELEASE_SHA": "0123abc"},
+        log_path=Path("/tmp/worker.log"),
+        correlation_id="c" * 24,
+    )
+
+    assert child.pid == 4242
+    # Durable intent strictly before spawn; pid persisted at spawn; the lease is
+    # RUNNING before the parent returns the worker.
+    assert events == ["intent", "popen", "record_pid", "put", "running"]
+
+
+def test_f002_death_is_not_claimed_without_reverification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that survives SIGKILL must fail closed, never "confirmed dead".
+
+    The reaper sends TERM and KILL and then must re-verify the process identity is
+    absent before anyone may claim death. With an injected identity reader that
+    never reports the process gone, the fix refuses to report "terminated and
+    confirmed dead" and raises a fail-closed error instead -- a replacement must
+    never start on the claim that an unverified worker is gone.
+    """
+    import repoforge.adapters.runtime.execution_worker as worker_module
+
+    events: list[str] = []
+
+    def always_live(pid: int) -> str:
+        del pid
+        return "still-alive-identity"
+
+    monkeypatch.setattr(worker_module.subprocess, "Popen", _FakePopen(pid=4242, events=events))
+    monkeypatch.setattr(worker_module, "process_identity", always_live)
+    monkeypatch.setattr(
+        worker_module,
+        "read_identity",
+        lambda pid: ProcessIdentity(pid=pid, ppid=1, start_token="worker-start-token"),
+    )
+    monkeypatch.setattr(worker_module.os, "killpg", lambda pid, sig: None)
+    monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(worker_module, "_REGISTRATION_REAP_SECONDS", 0.01)
+    bindings = _RecordingBindings(events, fail_put=True)
+    registrar = _RecordingRegistrar(events)
+    worker = worker_module.SubprocessExecutionWorker(
+        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
+    )
+
+    with pytest.raises(Exception) as exc:
+        worker.start(
+            generation=12,
+            env={"REPOFORGE_RUNNING_RELEASE_SHA": "0123abc"},
+            log_path=Path("/tmp/worker.log"),
+            correlation_id="c" * 24,
+        )
+
+    from repoforge.domain.errors import ExecutionWorkerRegistrationError
+
+    assert isinstance(exc.value, ExecutionWorkerRegistrationError)
+    # The fail-closed disposition names the unproven worker; the old code claimed
+    # "terminated and confirmed dead" on the same evidence.
+    assert "NOT_CONFIRMED_DEAD" in str(exc.value)
+    assert "confirmed dead" not in str(exc.value)
+    # The pre-spawn intent was terminalized, never left dangling as REGISTERED.
+    assert "abort" in events
+
+
+# ---------------------------------------------------------------------------
+# F-003: read-only preflight mutates durable state.
+# ---------------------------------------------------------------------------
+
+
+class _NeverCalled:
+    def reap(self, binding: object) -> ReapOutcome:
+        raise AssertionError("read-only reconcile must never reap")
+
+    def __call__(self, pid: int) -> None:
+        del pid
+        raise AssertionError("read-only reconcile must never read process identity")
+
+
+def test_f003_read_only_preflight_does_not_mutate_state(tmp_path: Path) -> None:
+    """``reconcile(read_only=True)`` must be side-effect free (F-003).
+
+    A preflight that archives and deletes terminal leases before its read-only scan
+    is not read-only: a caller reasoning "this pass has no effect" is wrong, and a
+    failure during that cleanup is suppressed, making the preflight's outcome depend
+    on hidden state. The fix moves ``collect_terminal`` out of the preflight path,
+    so terminal leases survive a read-only pass untouched.
+    """
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding(state="already_gone"))  # terminal lease in the active registry
+
+    reaper = _NeverCalled()
+    reconciler = ExecutionWorkerReconciler(
+        bindings=store,
+        reaper=reaper,
+        owner_identity_reader=_NeverCalled(),
+        command_line_reader=_NeverCalled(),
+        identity_reader=_NeverCalled(),
+        process_group_gone=None,
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    # The preflight was read-only: the terminal lease is still in the active
+    # registry, and nothing was inspected or marked.
+    assert store.get(_WORKER) is not None
+    assert report.inspected == 0
+
+
+# ---------------------------------------------------------------------------
+# F-005: the archive checkpoint is not idempotent across a crash.
+# ---------------------------------------------------------------------------
+
+
+def test_f005_archive_checkpoint_self_heals_across_a_crash(tmp_path: Path) -> None:
+    """A crash between archive write and active delete must be retryable (F-005).
+
+    ``_archive_and_delete`` stamps ``terminated_at`` fresh on every attempt, so a
+    naive retry after the crash builds a different payload than the archive entry
+    that already exists. The fix treats an existing archive entry as the completed
+    first half of the checkpoint (a worker_id is unique per pid + start token, so
+    it is archived at most once) and resumes the delete. This test writes the
+    half-crashed state exactly as a crash would leave it, then runs the retry and
+    asserts the lease is removed -- no ALREADY_EXISTS, no stranded record.
+    """
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    terminal = _binding(state="already_gone")
+    store.put(terminal)
+    # Half of a crashed `_archive_and_delete`: the archive entry exists with the
+    # first attempt's timestamp, the active terminal record is still present.
+    first_attempt = ExecutionWorkerArchiveEntry.from_binding(
+        terminal, terminated_at="2026-07-30T00:00:00+00:00"
+    )
+    store._history.create_or_read_equal(_WORKER, first_attempt)
+
+    collected = store.collect_terminal()
+
+    assert collected == 1
+    # The retry self-healed: the active terminal lease was deleted.
+    assert store.get(_WORKER) is None
+    assert len(store.list_archive()) == 1
+
+
+# ---------------------------------------------------------------------------
+# F-007: a seam-swap abort after a successful drain never resumes the old child.
+# ---------------------------------------------------------------------------
+
+
+class _Sleeper:
+    def sleep(self, seconds: float) -> None:
+        del seconds
+
+
+class _FakeTunnel:
+    def __init__(self, *, healthy_after_resume: bool = True) -> None:
+        self.terminated: list[int] = []
+        self.health_calls = 0
+        self._healthy_after_resume = healthy_after_resume
+
+    def start(self, profile: TunnelProfile, *, env: dict[str, str], log_path: Path) -> ChildProcess:
+        del profile, env, log_path
+        return ChildProcess(pid=999, process_identity=_SHA, started_at="2026-07-25T00:00:00+00:00")
+
+    def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None:
+        del grace_seconds
+        self.terminated.append(child.pid)
+
+    def is_alive(self, child: ChildProcess) -> bool:
+        del child
+        return True
+
+    def health(self, child: ChildProcess, *, timeout_seconds: float) -> tuple[HealthCheck, ...]:
+        del timeout_seconds
+        self.health_calls += 1
+        # The candidate (pid 999) must pass the health gate before the drain; only
+        # the old child (pid 111) is controlled by `healthy_after_resume`.
+        ok = self._healthy_after_resume or child.pid != 111
+        return (HealthCheck(name="tunnel", ok=ok, detail="ok" if ok else "down"),)
+
+
+class _Control:
+    def __init__(self, *, resume_ok: bool = True) -> None:
+        self.commands: list[str] = []
+        self._resume_ok = resume_ok
+
+    def request(self, request, *, timeout_seconds: float = 10.0):
+        from repoforge.domain.runtime import ControlResponse
+
+        del timeout_seconds
+        self.commands.append(request.command.value)
+        ok = self._resume_ok or request.command.value != "resume"
+        return ControlResponse(1, ok, request.correlation_id, "drained")
+
+
+class _Ids:
+    def new_hex(self, length: int = 10) -> str:
+        del length
+        return "c" * 24
+
+
+def test_f007_handoff_abort_resumes_and_verifies_the_drained_old_child() -> None:
+    """An abort after a successful drain must RESUME and verify the old child (F-007).
+
+    The drain is not reversible by default: ``ControlCommand.RESUME`` exists in the
+    protocol, and the conflict-abort path must use it. A child that drained is not a
+    child that serves -- it may still be alive yet refuse new work, which is a
+    logical outage with a healthy-looking process tree. The fix sends RESUME,
+    proves the old child is alive and healthy again, and only then retires the
+    candidate.
+    """
+    store = InMemoryWorkerBindingStore()
+    # A prior generation's worker that survives termination: the handoff must fail
+    # closed, aborting the swap.
+    store.put(_op_binding("op-000000000000000000000001", generation=6))
+    reaper = RecordingProcessReaper(
+        outcome=ReapOutcome(attempted=True, reaped=False, still_alive=True, detail="survived")
+    )
+    reconciler = GenerationHandoffReconciler(bindings=store, reaper=reaper)
+    tunnel = _FakeTunnel()
+    control = _Control()
+    coordinator = TunnelSeamSwapCoordinator(
+        tunnel=tunnel,
+        reconciler=reconciler,
+        sleeper=_Sleeper(),
+        control=control,
+        ids=_Ids(),
+        health_attempts=3,
+        health_interval_seconds=0.0,
+    )
+
+    result = coordinator.swap(
+        old_child=ChildProcess(
+            pid=111, process_identity=_SHA, started_at="2026-07-25T00:00:00+00:00"
+        ),
+        candidate_profile=TunnelProfile(
+            tunnel_id_fingerprint=_SHA,
+            profile="tunnel",
+            executable="rf",
+            executable_version="2.2.0",
+            mcp_argv=("rf", "serve"),
+        ),
+        env={},
+        log_path=Path("/tmp/tunnel.log"),
+        current_owner=OwnerIdentity(server_pid=222, server_start_token="tok", generation=7),
+        old_surface_hash="old",
+        new_surface_hash="new",
+    )
+
+    assert result.status == "aborted"
+    # The drained old child was told to serve again and then health-verified.
+    assert control.commands == ["drain", "resume"]
+    assert tunnel.health_calls >= 1
+    assert tunnel.terminated == [999]
+
+
+def test_f007_resume_failure_fails_closed() -> None:
+    """If the drained old child cannot be resumed, the swap fails closed (F-007).
+
+    "Old child retained" must never be reported when the old service is not
+    provably serving again: a resume that is refused, or a child that comes back
+    unhealthy, means the runtime may be unavailable, and the caller must not assume
+    otherwise.
+    """
+    store = InMemoryWorkerBindingStore()
+    store.put(_op_binding("op-000000000000000000000001", generation=6))
+    reaper = RecordingProcessReaper(
+        outcome=ReapOutcome(attempted=True, reaped=False, still_alive=True, detail="survived")
+    )
+    reconciler = GenerationHandoffReconciler(bindings=store, reaper=reaper)
+    tunnel = _FakeTunnel(healthy_after_resume=False)
+    control = _Control()
+    coordinator = TunnelSeamSwapCoordinator(
+        tunnel=tunnel,
+        reconciler=reconciler,
+        sleeper=_Sleeper(),
+        control=control,
+        ids=_Ids(),
+        health_attempts=3,
+        health_interval_seconds=0.0,
+    )
+
+    result = coordinator.swap(
+        old_child=ChildProcess(
+            pid=111, process_identity=_SHA, started_at="2026-07-25T00:00:00+00:00"
+        ),
+        candidate_profile=TunnelProfile(
+            tunnel_id_fingerprint=_SHA,
+            profile="tunnel",
+            executable="rf",
+            executable_version="2.2.0",
+            mcp_argv=("rf", "serve"),
+        ),
+        env={},
+        log_path=Path("/tmp/tunnel.log"),
+        current_owner=OwnerIdentity(server_pid=222, server_start_token="tok", generation=7),
+        old_surface_hash="old",
+        new_surface_hash="new",
+    )
+
+    assert result.status == "fail_closed"
+    assert "do not assume the runtime is available" in result.detail
+    assert control.commands == ["drain", "resume"]
+    assert tunnel.terminated == [999]
+
+
+# ---------------------------------------------------------------------------
+# F-008: operation-worker scan truncation is silent.
+# ---------------------------------------------------------------------------
+
+
+def test_f008_operation_worker_scan_truncation_fails_closed(tmp_path: Path) -> None:
+    """An operation-worker scan truncated at ``max_records`` fails the handoff closed.
+
+    The execution-worker registry exposes ``scan_complete`` and ``unreadable_ids``
+    so a reconciler fails closed on an incomplete scan. The operation-worker store
+    now carries the same signals through ``WorkerBindingPage``; a handoff that
+    cannot prove it saw every binding must not report ok while a prior generation's
+    worker past the limit may still be producing side effects.
+    """
+    store = JsonWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    # The filesystem scan truncates by ascending lexicographic filename, so with
+    # max_records=5 the record truncated is op-...06 -- which is exactly the prior
+    # generation's orphan whose side effects the handoff must not miss.
+    for index in range(1, 7):
+        store.put(_op_binding(f"op-{index:024x}", generation=6 if index == 6 else 7))
+
+    reconciler = GenerationHandoffReconciler(
+        bindings=store, reaper=RecordingProcessReaper(), max_records=5
+    )
+    report = reconciler.reconcile(
+        current_owner=OwnerIdentity(server_pid=111, server_start_token="tok-server", generation=7)
+    )
+
+    # Five of six records seen, and the report now says the scan was incomplete:
+    # the truncated prior-generation binding must not be silently absent from the
+    # outcome -- the handoff fails closed instead of claiming success.
+    assert report.scanned == 5
+    assert report.scan_complete is False
+    assert report.ok is False
+    assert (
+        "<store>",
+        "worker-binding scan exceeded the record budget; unseen "
+        "bindings may still own running prior-generation workers",
+    ) in report.conflicts

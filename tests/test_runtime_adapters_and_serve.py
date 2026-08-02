@@ -27,6 +27,7 @@ from repoforge.domain.runtime import (
 )
 from repoforge.domain.runtime_events import RuntimeEventV1
 from repoforge.testing import InMemoryLockManager, InMemoryOperationGate
+from repoforge.testing.fakes import InMemoryWorkerRegistrar
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
 
@@ -273,7 +274,9 @@ def test_execution_worker_adapter_launches_exact_generation_in_own_process_group
     )
     monkeypatch.setattr(module, "read_identity", lambda pid: None)
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
-    worker = SubprocessExecutionWorker(tmp_path / "config.toml", bindings=bindings)
+    worker = SubprocessExecutionWorker(
+        tmp_path / "config.toml", bindings=bindings, registrar=InMemoryWorkerRegistrar()
+    )
 
     child = worker.start(
         12,
@@ -285,7 +288,9 @@ def test_execution_worker_adapter_launches_exact_generation_in_own_process_group
     assert child.pid == 456
     assert calls[0][0][-4:] == ["--config", str(tmp_path / "config.toml"), "--generation", "12"]
     assert calls[0][1]["start_new_session"] is True
-    assert calls[0][1]["env"] == {"PATH": "/usr/bin"}
+    # The caller env is preserved and the pre-spawn lease id is handed to the child.
+    assert calls[0][1]["env"]["PATH"] == "/usr/bin"
+    assert calls[0][1]["env"]["REPOFORGE_EXECUTION_WORKER_LEASE_ID"] == "worker-" + "0" * 24
     assert worker.is_alive(child) is True
     # The durable lease is mandatory and was written before start() returned (#424).
     assert any(item.pid == 456 for item in bindings.list_all())
@@ -321,7 +326,9 @@ def test_execution_worker_adapter_records_a_stable_identity_across_the_exec_flap
     )
     monkeypatch.setattr(module, "read_identity", lambda pid: None)
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
-    worker = SubprocessExecutionWorker(tmp_path / "config.toml", bindings=bindings)
+    worker = SubprocessExecutionWorker(
+        tmp_path / "config.toml", bindings=bindings, registrar=InMemoryWorkerRegistrar()
+    )
 
     child = worker.start(
         3,
@@ -388,7 +395,9 @@ def test_execution_worker_adapter_terminates_a_worker_it_cannot_register(
             del max_records
             return 0
 
-    worker = SubprocessExecutionWorker(tmp_path / "config.toml", bindings=FailingBindings())
+    worker = SubprocessExecutionWorker(
+        tmp_path / "config.toml", bindings=FailingBindings(), registrar=InMemoryWorkerRegistrar()
+    )
 
     with pytest.raises(
         ExecutionWorkerRegistrationError, match="EXECUTION_WORKER_REGISTRATION_FAILED"

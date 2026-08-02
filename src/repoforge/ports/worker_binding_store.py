@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from ..domain.operation_worker import OperationWorkerBinding
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerBindingPage:
+    """One bounded scan of the worker-binding store.
+
+    ``scan_complete`` is ``False`` when the store held more records than the
+    scan budget, and ``unreadable_ids`` lists records that could not be
+    decoded. A handoff that cannot prove it saw every binding must fail
+    closed rather than assume the unseen records are safe (F-008).
+    """
+
+    records: tuple[OperationWorkerBinding, ...]
+    scan_complete: bool = True
+    unreadable_ids: tuple[str, ...] = ()
 
 
 class WorkerBindingStore(Protocol):
@@ -27,4 +43,6 @@ class WorkerBindingStore(Protocol):
         """
         ...
 
-    def list_all(self, *, max_records: int = 2_000) -> tuple[OperationWorkerBinding, ...]: ...
+    def list_all(self, *, max_records: int = 2_000) -> WorkerBindingPage:
+        """Scan every binding within ``max_records``, reporting scan completeness."""
+        ...

@@ -459,3 +459,131 @@ def test_a_missing_current_release_sha_does_not_latch_either(tmp_path: Path, mon
     _shutdown_and_join(server, thread, result)
 
     assert preflight_calls == [1]
+
+
+def test_watchdog_registration_failure_fails_closed(tmp_path: Path) -> None:
+    """A registration failure during a watchdog restart fails closed (F-013).
+
+    Startup and the watchdog must apply the same disposition to a worker that cannot
+    be durably registered: fail closed, never a silent blip. The old watchdog path
+    suppressed every exception, so the typed ``EXECUTION_WORKER_REGISTRATION_FAILED``
+    vanished and the runtime kept serving degraded instead of recording the
+    fail-closed truth the doctor and CLI rely on.
+    """
+    from repoforge.domain.runtime import ChildProcess, ControlResponse, HealthCheck
+
+    store = _Store()
+
+    class _LiveTunnel:
+        def __init__(self) -> None:
+            self.starts = 0
+            self.terminated = 0
+
+        def initialize(self, profile, *, env) -> None:
+            del profile, env
+
+        def doctor(self, profile, *, env):
+            del profile, env
+            return True, "ok"
+
+        def start(self, profile, *, env, log_path, correlation_id):
+            del profile, env, log_path, correlation_id
+            self.starts += 1
+            return ChildProcess(300, "3" * 64, "now")
+
+        def is_alive(self, child):
+            del child
+            return True
+
+        def health(self, child, *, timeout_seconds):
+            del child, timeout_seconds
+            return (HealthCheck("tunnel", True, "ok"),)
+
+        def terminate(self, child, *, grace_seconds):
+            del child, grace_seconds
+            self.terminated += 1
+
+    class _FailingRestartWorker:
+        def __init__(self) -> None:
+            self.started = 0
+            self.alive_checks = 0
+
+        def start(self, generation, *, env, log_path, correlation_id):
+            del env, log_path, correlation_id
+            self.started += 1
+            if self.started > 1:
+                raise ExecutionWorkerRegistrationError(
+                    "EXECUTION_WORKER_REGISTRATION_FAILED: the durable worker lease "
+                    "could not be written on watchdog restart"
+                )
+            return ChildProcess(400, "4" * 64, "now")
+
+        def is_alive(self, child):
+            del child
+            self.alive_checks += 1
+            # Alive through the startup health probe only; the first watchdog tick
+            # sees the worker gone and attempts the restart that fails.
+            return self.alive_checks == 1
+
+        def terminate(self, child, *, grace_seconds):
+            del child, grace_seconds
+
+    class _HealthyConfigs:
+        def __init__(self) -> None:
+            self.cleared: list[int] = []
+            self.activated: list[int] = []
+
+        def active(self):
+            return None
+
+        def activate(self, generation, *, expected_active=None):
+            del expected_active
+            self.activated.append(generation)
+
+        def clear_activation_target(self, *, expected_generation: int) -> None:
+            self.cleared.append(expected_generation)
+
+    class _HealthyMcp:
+        def request(self, request, *, timeout_seconds=10.0):
+            del request, timeout_seconds
+            return ControlResponse(1, True, "corr", "healthy")
+
+    tunnel = _LiveTunnel()
+    worker = _FailingRestartWorker()
+    mcp_runtime_path = tmp_path / "runtime.json"
+    mcp_runtime_path.write_text(
+        '{"pid":999,"process_identity":"' + "a" * 64 + '","active_generation":1}',
+        encoding="utf-8",
+    )
+    server = _Server()
+    supervisor = RuntimeSupervisor(
+        store=store,
+        configs=_HealthyConfigs(),
+        locks=_Locks(),
+        control=server,
+        mcp_control=_HealthyMcp(),
+        tunnel=tunnel,
+        profile_store=_ProfileStore(),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        ids=SequenceIdGenerator(("supervisor", "health")),
+        processes=_Processes(),
+        mcp_runtime_path=mcp_runtime_path,
+        log_path=tmp_path / "runtime.log",
+        execution_worker=worker,
+        execution_worker_log_path=tmp_path / "execution-worker.log",
+        preflight=lambda: None,
+        watchdog_interval_seconds=0.01,
+        health_timeout_seconds=0.2,
+        health_failure_threshold=2,
+        max_restarts=1,
+    )
+
+    result, thread = _run_and_wait_fail_closed(supervisor, store)
+
+    record = store.record
+    assert record.last_error_code == "EXECUTION_WORKER_REGISTRATION_FAILED"
+    assert record.fail_closed_since is not None
+    assert worker.started == 2
+    assert tunnel.terminated == 1
+
+    _shutdown_and_join(server, thread, result)
