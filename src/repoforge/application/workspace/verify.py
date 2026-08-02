@@ -28,7 +28,7 @@ from ...domain.operation_task import (
 from ...domain.operation_work import OperationWorkRequest
 from ...domain.policy import assert_path_allowed, resolve_workspace_path
 from ...domain.redaction import sanitize_persisted_data
-from ...domain.verification import VerificationIntent
+from ...domain.verification import VerificationIntent, select_verification_profile
 from ..audit_context import current_audit_attribution
 from ..context import ApplicationContext
 from ..dto import to_data
@@ -53,6 +53,7 @@ from .run_profile import (
     WorkspaceRunProfileBackgroundResult,
     WorkspaceRunProfileResult,
 )
+from .snapshot import WorkspaceSnapshotReader
 
 VerifyMode = Literal["plan", "auto", "diagnostic", "profile", "adhoc"]
 VerifyRerun = Literal["failed"]
@@ -375,6 +376,7 @@ class WorkspaceVerifier:
         ctx: ApplicationContext,
         *,
         assessment: WorkspaceAssessmentReader,
+        snapshot: WorkspaceSnapshotReader,
         profile: WorkspaceProfileRunner,
         diagnostic: WorkspaceDiagnosticRunner,
         adhoc: WorkspaceAdhocRunner,
@@ -383,6 +385,7 @@ class WorkspaceVerifier:
     ) -> None:
         self.ctx = ctx
         self._assessment = assessment
+        self._snapshot = snapshot
         self._profile = profile
         self._diagnostic = diagnostic
         self._adhoc = adhoc
@@ -578,20 +581,44 @@ class WorkspaceVerifier:
             raise ConfigError(
                 "Background workspace_verify cannot write a synchronous artifact output"
             )
-        assessment = self._assessment.execute(
-            WorkspaceAssessmentCommand(command.workspace_id, command.impact_paths)
-        )
+        assessment: Any | None = None
+        assessment_projection: dict[str, object] | None = None
+        impact_evidence: dict[str, object] | None = None
+        recommendations: list[dict[str, object]] = []
+        warning: str | None = None
+        final_profile = ""
+        if command.mode in {"plan", "auto"}:
+            assessment = self._assessment.execute(
+                WorkspaceAssessmentCommand(command.workspace_id, command.impact_paths)
+            )
+            assessment_projection, impact_evidence = _assessment_projection(assessment)
+            recommendations = _recommendations(assessment)
+            warning = _staleness_warning(assessment)
+            recommendation = assessment.verification_recommendation
+            if recommendation is None:
+                raise WorkspaceError("Workspace assessment did not produce a final profile")
+            final_profile = recommendation.final_profile
+            head_sha = assessment.snapshot.head_sha
+            workspace_fingerprint = assessment.snapshot.workspace_fingerprint
+        else:
+            snapshot = self._snapshot.capture(command.workspace_id, command.impact_paths)
+            head_sha = snapshot.head_sha
+            workspace_fingerprint = snapshot.workspace_fingerprint
+            if command.mode == "profile":
+                _record, repo, _path = self.ctx.workspace(command.workspace_id)
+                selected_profile, _used_default = select_verification_profile(
+                    repo, command.profile_name
+                )
+                final_profile = selected_profile.name
+
         if (
             command.expected_fingerprint is not None
-            and command.expected_fingerprint != assessment.snapshot.workspace_fingerprint
+            and command.expected_fingerprint != workspace_fingerprint
         ):
             raise WorkspaceError(
                 "Workspace changed since the requested verification snapshot was reviewed"
             )
-        if (
-            command.expected_head_sha is not None
-            and command.expected_head_sha != assessment.snapshot.head_sha
-        ):
+        if command.expected_head_sha is not None and command.expected_head_sha != head_sha:
             raise WorkspaceError(
                 "STALE_STATE: workspace HEAD changed since the requested verification snapshot "
                 "was reviewed",
@@ -599,16 +626,9 @@ class WorkspaceVerifier:
                 retryable=True,
                 details={
                     "expected_head_sha": command.expected_head_sha,
-                    "actual_head_sha": assessment.snapshot.head_sha,
+                    "actual_head_sha": head_sha,
                 },
             )
-        assessment_projection, impact_evidence = _assessment_projection(assessment)
-        recommendations = _recommendations(assessment)
-        warning = _staleness_warning(assessment)
-        recommendation = assessment.verification_recommendation
-        if recommendation is None:
-            raise WorkspaceError("Workspace assessment did not produce a final profile")
-        final_profile = recommendation.final_profile
 
         if command.mode == "plan":
             return WorkspaceVerifyResult(
@@ -634,8 +654,8 @@ class WorkspaceVerifier:
                 artifact_paths=[],
                 outcome="planned",
                 satisfies_commit_gate=False,
-                head_sha=assessment.snapshot.head_sha,
-                workspace_fingerprint=assessment.snapshot.workspace_fingerprint,
+                head_sha=head_sha,
+                workspace_fingerprint=workspace_fingerprint,
             )
 
         selected_mode = command.mode
@@ -645,6 +665,7 @@ class WorkspaceVerifier:
         selector: SelectorInput = command.selector
         profile_name = command.profile_name
         if command.mode == "auto":
+            assert assessment is not None
             targeted = _auto_target(assessment)
             if targeted is not None:
                 diagnostic_id, selector, routing_reason = targeted
@@ -673,8 +694,8 @@ class WorkspaceVerifier:
                     expected_failure_class=_enum_value(command.expected_failure_class),
                     force_rerun=command.force_rerun,
                     rerun_failed=command.rerun == "failed",
-                    expected_head_sha=assessment.snapshot.head_sha,
-                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
+                    expected_head_sha=head_sha,
+                    expected_fingerprint=workspace_fingerprint,
                     config_generation=self.ctx.config_generation,
                 ),
                 operation_kind="workspace_run_diagnostic",
@@ -714,8 +735,8 @@ class WorkspaceVerifier:
                 impact_evidence,
                 recommendations,
                 warning,
-                head_sha=assessment.snapshot.head_sha,
-                workspace_fingerprint=assessment.snapshot.workspace_fingerprint,
+                head_sha=head_sha,
+                workspace_fingerprint=workspace_fingerprint,
             )
             if isinstance(diagnostic_result, WorkspaceRunDiagnosticBackgroundResult):
                 result = self._project_operation(result, durable_task)
@@ -729,8 +750,8 @@ class WorkspaceVerifier:
                 OperationWorkRequest.profile(
                     workspace_id=command.workspace_id,
                     profile_name=profile_name or final_profile,
-                    expected_head_sha=assessment.snapshot.head_sha,
-                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
+                    expected_head_sha=head_sha,
+                    expected_fingerprint=workspace_fingerprint,
                     config_generation=self.ctx.config_generation,
                 ),
                 operation_kind="workspace_run_profile",
@@ -767,8 +788,8 @@ class WorkspaceVerifier:
                 impact_evidence,
                 recommendations,
                 warning,
-                head_sha=assessment.snapshot.head_sha,
-                workspace_fingerprint=assessment.snapshot.workspace_fingerprint,
+                head_sha=head_sha,
+                workspace_fingerprint=workspace_fingerprint,
                 fallback_full=fallback_full,
             )
             if isinstance(profile_result, WorkspaceRunProfileBackgroundResult):
@@ -782,8 +803,8 @@ class WorkspaceVerifier:
                     argv=command.argv,
                     working_directory=command.working_directory,
                     mutability=command.mutability,
-                    expected_head_sha=assessment.snapshot.head_sha,
-                    expected_fingerprint=assessment.snapshot.workspace_fingerprint,
+                    expected_head_sha=head_sha,
+                    expected_fingerprint=workspace_fingerprint,
                     config_generation=self.ctx.config_generation,
                     stdin_text=command.stdin_text,
                 ),
@@ -819,8 +840,8 @@ class WorkspaceVerifier:
                 impact_evidence,
                 recommendations,
                 warning,
-                head_sha=assessment.snapshot.head_sha,
-                workspace_fingerprint=assessment.snapshot.workspace_fingerprint,
+                head_sha=head_sha,
+                workspace_fingerprint=workspace_fingerprint,
             )
             if isinstance(adhoc_result, WorkspaceRunAdhocBackgroundResult):
                 result = self._project_operation(result, durable_task)
@@ -841,7 +862,7 @@ class WorkspaceVerifier:
         command: WorkspaceVerifyCommand,
         delegated: WorkspaceRunDiagnosticResult | WorkspaceRunDiagnosticBackgroundResult,
         reason: str,
-        assessment: dict[str, object],
+        assessment: dict[str, object] | None,
         impact: dict[str, object] | None,
         recommendations: list[dict[str, object]],
         warning: str | None,
@@ -931,7 +952,7 @@ class WorkspaceVerifier:
         command: WorkspaceVerifyCommand,
         delegated: WorkspaceRunProfileResult | WorkspaceRunProfileBackgroundResult,
         reason: str,
-        assessment: dict[str, object],
+        assessment: dict[str, object] | None,
         impact: dict[str, object] | None,
         recommendations: list[dict[str, object]],
         warning: str | None,
@@ -1006,7 +1027,7 @@ class WorkspaceVerifier:
         command: WorkspaceVerifyCommand,
         delegated: WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult,
         reason: str,
-        assessment: dict[str, object],
+        assessment: dict[str, object] | None,
         impact: dict[str, object] | None,
         recommendations: list[dict[str, object]],
         warning: str | None,

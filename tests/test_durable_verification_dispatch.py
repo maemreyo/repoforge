@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from conftest import TEST_CONFIG_GENERATION, create_forge_environment
 
 from repoforge.adapters.persistence.json_operation_work_queue import (
@@ -157,6 +158,52 @@ def test_public_background_diagnostic_is_durable_and_preserves_selectors(tmp_pat
     assert work.request.selector == ("hello.txt",)
     assert work.request.intent == "tdd_green"
     assert work.request.expectation == "pass"
+
+
+@pytest.mark.parametrize(
+    ("mode", "arguments"),
+    [
+        ("profile", {"profile_name": "quick"}),
+        (
+            "diagnostic",
+            {
+                "diagnostic_id": "pytest-target",
+                "selector": "hello.txt",
+                "intent": "tdd_green",
+                "expectation": "pass",
+            },
+        ),
+    ],
+)
+def test_explicit_verification_bypasses_rich_assessment(
+    tmp_path,
+    monkeypatch,
+    mode,
+    arguments,
+) -> None:
+    env = create_forge_environment(tmp_path)
+    config = load_config(env.config_path)
+    application = build_application(config, config_generation=TEST_CONFIG_GENERATION)
+    service = CodingService(config, application=application)
+    workspace_id = service.workspace_create("demo", f"minimal {mode} preflight")["workspace_id"]
+
+    def unexpected_assessment(_command):
+        raise AssertionError("explicit verification must not collect rich assessment evidence")
+
+    monkeypatch.setattr(service._verify._assessment, "execute", unexpected_assessment)
+
+    result = service.workspace_verify(
+        workspace_id,
+        mode=mode,
+        background=True,
+        **arguments,
+    )
+
+    assert result["assessment"] is None
+    assert result["impact_evidence"] is None
+    assert result["recommendations"] == []
+    assert result["staleness_warning"] is None
+    assert result["operation"]["state"] == "pending"
 
 
 def test_foreground_profile_only_bounded_waits_on_durable_operation(

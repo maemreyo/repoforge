@@ -443,9 +443,7 @@ def test_workspace_verify_staleness_warning_does_not_block_execution(
             assessment.snapshot.head_sha,
         ),
     ) as handlers:
-        result = forge_env.service.workspace_verify(
-            workspace_id, mode="profile", profile_name="full"
-        )
+        result = forge_env.service.workspace_verify(workspace_id, mode="auto")
 
     assert handlers.claimed
     assert "3 commit(s) behind" in result["staleness_warning"]

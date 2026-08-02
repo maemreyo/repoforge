@@ -170,3 +170,26 @@ def test_apply_patch_primes_cached_post_mutation_fingerprint(tmp_path: Path) -> 
 
     assert status_after["workspace_fingerprint"] == applied["workspace_fingerprint"]
     assert executor.full_fingerprint_scans == 1
+
+
+def test_explicit_diagnostic_preflight_uses_at_most_one_full_fingerprint_scan(
+    tmp_path: Path,
+) -> None:
+    service, executor = _service_with_counting_executor(tmp_path)
+    workspace_id = service.workspace_create("demo", "minimal diagnostic fingerprint")[
+        "workspace_id"
+    ]
+    executor.full_fingerprint_scans = 0
+
+    result = service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id="pytest-target",
+        selector="hello.txt",
+        background=True,
+        intent="tdd_green",
+        expectation="pass",
+    )
+
+    assert result["assessment"] is None
+    assert executor.full_fingerprint_scans <= 1
