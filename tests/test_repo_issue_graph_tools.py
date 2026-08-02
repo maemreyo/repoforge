@@ -20,17 +20,36 @@ from repoforge.application.repository.issue_graph import (
     _snapshot_payload,
     read_github_ticket_snapshot,
 )
+from repoforge.application.repository.issue_graph_cache import snapshot_from_payload
+from repoforge.application.repository.issue_graph_config import resolve_observation_authority
 from repoforge.application.service import CodingService
 from repoforge.application.tickets.graph import load_ticket_graph
 from repoforge.config import (
     AppConfig,
+    AuthProfileConfig,
     GitHubTicketGraphConfig,
     RepositoryConfig,
     ServerConfig,
     load_config,
 )
 from repoforge.contracts.registry import V2_TOOL_SPECS
+from repoforge.domain.commit_identity import CommitIdentityPolicy, CommitSigningMode
 from repoforge.domain.errors import ConfigError
+from repoforge.domain.git_transport_identity import (
+    GitTransportAccess,
+    GitTransportKind,
+    GitTransportSpec,
+)
+from repoforge.domain.github_api_identity import StoredGhAccountSpec
+from repoforge.domain.observation import ObservationAuthorityOrigin
+from repoforge.domain.repository_identity import (
+    ActorClass,
+    CredentialKind,
+    CredentialProfile,
+    OpaqueCredentialReference,
+    RepositoryProvider,
+)
+from repoforge.domain.repository_identity_resolution import CredentialProfileEligibility
 from repoforge.domain.tickets import (
     CapabilityCoverage,
     CapabilityReadStat,
@@ -1345,3 +1364,246 @@ def test_graph_cache_hit_requires_matching_pinned_authority(tmp_path: Path) -> N
     assert gateway.calls == 0, "a valid pinned authority cache hit must not call the provider"
     assert snapshot is not None
     assert snapshot.repository_slug == "owner/demo"
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review regressions (#411) — auth-issued authority (F-004)
+# ---------------------------------------------------------------------------
+
+
+def _auth_profile_config(profile_id: str, *, login: str | None = None) -> AuthProfileConfig:
+    reference_id = f"{profile_id}-credential-v1"
+    profile = CredentialProfile(
+        profile_id=profile_id,
+        provider=RepositoryProvider.GITHUB,
+        credential_kind=CredentialKind.STORED_ACCOUNT,
+        credential_ref=OpaqueCredentialReference("gh-account", reference_id),
+        actor_class=ActorClass.HUMAN_OPERATED,
+        expected_actor_id=f"actor-{profile_id}",
+        capability_ids=("github.contents.read",),
+        revision="a" * 64,
+    )
+    api_identity = StoredGhAccountSpec(
+        reference_id=reference_id,
+        profile_id=profile_id,
+        host="github.com",
+        login=login or f"{profile_id}-login",
+        actor_id=f"actor-{profile_id}",
+        actor_class=ActorClass.HUMAN_OPERATED,
+        repository_id="111111",
+        capability_ids=("github.contents.read",),
+    )
+    return AuthProfileConfig(
+        profile=profile,
+        eligibility=CredentialProfileEligibility(
+            profile=profile,
+            enabled=True,
+            repository_patterns=("github.com/acme/demo",),
+            boundary_id=f"boundary-{profile_id}",
+        ),
+        api_identity=api_identity,
+        transport=GitTransportSpec(
+            profile_id=profile_id,
+            repository_id="111111",
+            target_id="111111",
+            provider_host="github.com",
+            kind=GitTransportKind.HTTPS,
+            credential_fingerprint="a" * 64,
+            allowed_access=(GitTransportAccess.READ, GitTransportAccess.WRITE),
+            https_token_environment="REPOFORGE_GIT_HTTPS_TOKEN",
+        ),
+    )
+
+
+def _auth_context(
+    tmp_path: Path, *, profile_id: str = "personal", login: str | None = None
+) -> tuple[ApplicationContext, RepositoryConfig]:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(exist_ok=True)
+    (repo_path / ".git").mkdir(exist_ok=True)
+    state_root = tmp_path / "state"
+    commit_identity = CommitIdentityPolicy(
+        profile_id=profile_id,
+        actor_class=ActorClass.HUMAN_OPERATED,
+        author_name="Name",
+        author_email="name@example.com",
+        committer_name="Name",
+        committer_email="name@example.com",
+        signing_mode=CommitSigningMode.UNSIGNED_ATTESTED,
+    )
+    config = AppConfig(
+        tmp_path / "config.toml",
+        ServerConfig(
+            tmp_path / "workspaces",
+            state_root,
+            github_read_cache_ttl_seconds=60,
+            github_read_cache_authority_digest="a" * 64,
+        ),
+        {
+            "demo": RepositoryConfig(
+                "demo",
+                repo_path,
+                ticket_graph=GitHubTicketGraphConfig(root_issue=1, repository="owner/demo"),
+                commit_identity=commit_identity,
+            )
+        },
+        auth_profiles={profile_id: _auth_profile_config(profile_id, login=login)},
+    )
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    locks = InMemoryLockManager()
+    audit = JsonlAuditSink(state_root, clock)
+    ctx = ApplicationContext(
+        config=config,
+        commands=object(),
+        git=object(),
+        github=object(),
+        filesystem=object(),
+        store=InMemoryWorkspaceStore(),
+        locks=locks,
+        gate=InMemoryOperationGate(),
+        audit=audit,
+        clock=clock,
+        ids=SequenceIdGenerator(),
+        executables=object(),
+        execution=execution_coordinator_for_tests(),
+        github_read_cache=JsonGitHubReadCache(state_root, locks),
+        ticket_graphs=CountingTicketGraphGateway(
+            _single_node_snapshot(
+                repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+            )
+        ),
+    )
+    return ctx, config.repositories["demo"]
+
+
+def test_resolve_observation_authority_prefers_auth_issued_fingerprint(tmp_path: Path) -> None:
+    """F-004: when the repository resolves an auth profile, the cache authority
+    is auth-issued (derived from secret-free identity fields), not the manual
+    operator digest."""
+    ctx, repo = _auth_context(tmp_path)
+
+    authority = resolve_observation_authority(ctx, repo)
+
+    assert authority is not None
+    assert authority.origin is ObservationAuthorityOrigin.AUTH_ISSUED
+    assert authority.profile_id == "personal"
+    assert authority.host == "github.com"
+    assert len(authority.fingerprint) == 64
+
+
+def test_resolve_observation_authority_fingerprint_rotates_with_identity(tmp_path: Path) -> None:
+    """F-004: rotating the credential generation (login) changes the auth-issued
+    fingerprint, so a cache entry from the old generation is a miss."""
+    ctx, repo = _auth_context(tmp_path)
+    first = resolve_observation_authority(ctx, repo)
+    assert first is not None
+    rotated_ctx, _ = _auth_context(tmp_path, login="rotated-login")
+
+    second = resolve_observation_authority(rotated_ctx, repo)
+
+    assert second is not None
+    assert second.fingerprint != first.fingerprint
+
+
+def test_resolve_observation_authority_falls_back_to_manual_legacy_without_profile(
+    tmp_path: Path,
+) -> None:
+    """F-004: without a resolvable auth profile, the manual operator digest is
+    used as an explicit legacy authority (compatibility window)."""
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    gateway = CountingTicketGraphGateway(fresh)
+    ctx, repo, _ = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
+
+    authority = resolve_observation_authority(ctx, repo)
+
+    assert authority is not None
+    assert authority.origin is ObservationAuthorityOrigin.MANUAL_LEGACY
+    assert authority.fingerprint == "a" * 64
+    assert authority.profile_id is None
+
+
+def test_resolve_observation_authority_returns_none_when_unprovable(tmp_path: Path) -> None:
+    """F-004: with no auth profile and no manual digest, no authority is
+    provable and the cache stays disabled (fail closed)."""
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(exist_ok=True)
+    (repo_path / ".git").mkdir(exist_ok=True)
+    state_root = tmp_path / "state"
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    config = AppConfig(
+        tmp_path / "config.toml",
+        ServerConfig(tmp_path / "workspaces", state_root, github_read_cache_ttl_seconds=60),
+        {"demo": RepositoryConfig("demo", repo_path, ticket_graph=source)},
+    )
+    clock = FixedClock("2026-01-01T00:00:00+00:00")
+    locks = InMemoryLockManager()
+    ctx = ApplicationContext(
+        config=config,
+        commands=object(),
+        git=object(),
+        github=object(),
+        filesystem=object(),
+        store=InMemoryWorkspaceStore(),
+        locks=locks,
+        gate=InMemoryOperationGate(),
+        audit=JsonlAuditSink(state_root, clock),
+        clock=clock,
+        ids=SequenceIdGenerator(),
+        executables=object(),
+        execution=execution_coordinator_for_tests(),
+        github_read_cache=JsonGitHubReadCache(state_root, locks),
+        ticket_graphs=CountingTicketGraphGateway(
+            _single_node_snapshot(
+                repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+            )
+        ),
+    )
+    repo = config.repositories["demo"]
+
+    assert resolve_observation_authority(ctx, repo) is None
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review regressions (#411) — strict cache codec (F-006)
+# ---------------------------------------------------------------------------
+
+
+def test_strict_codec_rejects_non_dict_node_entry(tmp_path: Path) -> None:
+    """F-006: the cache codec rejects the whole envelope when a node entry is
+    not an object instead of silently skipping it."""
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(fresh, source, "a" * 64)
+    payload["nodes"] = ["not-a-dict"]
+
+    assert snapshot_from_payload(payload) is None
+
+
+def test_strict_codec_rejects_coerced_string_number(tmp_path: Path) -> None:
+    """F-006: a node number stored as a string must reject the envelope, not
+    be coerced with int(...)."""
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(fresh, source, "a" * 64)
+    payload["nodes"][0]["number"] = "5"
+
+    assert snapshot_from_payload(payload) is None
+
+
+def test_strict_codec_rejects_malformed_observation_stamp(tmp_path: Path) -> None:
+    """F-006: a malformed per-capability stamp entry rejects the envelope."""
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
+    source = GitHubTicketGraphConfig(root_issue=1, repository="owner/demo")
+    payload = _snapshot_payload(fresh, source, "a" * 64)
+    payload["observation_stamps"] = [{"source": "live_full", "observed_at": 5}]
+
+    assert snapshot_from_payload(payload) is None

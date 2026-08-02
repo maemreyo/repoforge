@@ -184,6 +184,24 @@ def positive_integer_tuple(value: object) -> tuple[int, ...]:
     return tuple(sorted(set(result)))
 
 
+def _strict_int(value: object, field: str) -> int:
+    """Return the value when it is an exact int (not a bool); else raise.
+
+    The strict codec never coerces (``int("5")``, ``int(True)``) and never
+    silently skips a malformed element: a semantically wrong envelope is
+    rejected as a whole (F-006).
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer")
+    return value
+
+
+def _strict_str(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    return value
+
+
 def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
     if not isinstance(payload, dict):
         return None
@@ -192,33 +210,48 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
         raw_live = payload["live_issues"]
         if not isinstance(raw_nodes, list) or not isinstance(raw_live, list):
             return None
-        nodes = tuple(
-            TicketNode(
-                number=int(raw["number"]),
-                title=str(raw["title"]),
-                ticket_type=TicketType(str(raw["type"])),
-                priority=TicketPriority(str(raw["priority"])),
-                status=TicketStatus(str(raw["status"])),
-                parent=int(raw["parent"]) if raw.get("parent") is not None else None,
-                blockers=positive_integer_tuple(raw["blockers"]),
-                blocks=positive_integer_tuple(raw["blocks"]),
-                children=positive_integer_tuple(raw["children"]),
-                roadmap=tuple(str(item) for item in raw["roadmap"]),
+        nodes: list[TicketNode] = []
+        for index, raw in enumerate(raw_nodes):
+            if not isinstance(raw, dict):
+                raise ValueError(f"nodes[{index}] must be an object")
+            nodes.append(
+                TicketNode(
+                    number=_strict_int(raw["number"], f"nodes[{index}].number"),
+                    title=_strict_str(raw["title"], f"nodes[{index}].title"),
+                    ticket_type=TicketType(_strict_str(raw["type"], f"nodes[{index}].type")),
+                    priority=TicketPriority(
+                        _strict_str(raw["priority"], f"nodes[{index}].priority")
+                    ),
+                    status=TicketStatus(_strict_str(raw["status"], f"nodes[{index}].status")),
+                    parent=(
+                        _strict_int(raw["parent"], f"nodes[{index}].parent")
+                        if raw.get("parent") is not None
+                        else None
+                    ),
+                    blockers=positive_integer_tuple(raw["blockers"]),
+                    blocks=positive_integer_tuple(raw["blocks"]),
+                    children=positive_integer_tuple(raw["children"]),
+                    roadmap=tuple(
+                        _strict_str(item, f"nodes[{index}].roadmap") for item in raw["roadmap"]
+                    ),
+                )
             )
-            for raw in raw_nodes
-            if isinstance(raw, dict)
-        )
-        live = tuple(
-            TicketLiveMetadata(
-                int(raw["number"]),
-                str(raw["title"]),
-                str(raw["state"]),
-                str(raw["body"]),
-                tuple(str(item) for item in raw.get("comments", [])),
+        live: list[TicketLiveMetadata] = []
+        for index, raw in enumerate(raw_live):
+            if not isinstance(raw, dict):
+                raise ValueError(f"live_issues[{index}] must be an object")
+            live.append(
+                TicketLiveMetadata(
+                    _strict_int(raw["number"], f"live_issues[{index}].number"),
+                    _strict_str(raw["title"], f"live_issues[{index}].title"),
+                    _strict_str(raw["state"], f"live_issues[{index}].state"),
+                    _strict_str(raw["body"], f"live_issues[{index}].body"),
+                    tuple(
+                        _strict_str(item, f"live_issues[{index}].comments")
+                        for item in raw.get("comments", [])
+                    ),
+                )
             )
-            for raw in raw_live
-            if isinstance(raw, dict)
-        )
         observed_at = payload["observed_at"]
         evidence_complete = payload["evidence_complete"]
         truncated = payload["truncated"]
@@ -231,26 +264,39 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
         raw_coverage = payload.get("capability_coverage", [])
         if not isinstance(raw_coverage, list):
             return None
-        capability_coverage = tuple(
-            CapabilityCoverage(
-                capability=GraphEvidenceCapability(str(item["capability"])),
-                complete=bool(item["complete"]),
-                unavailable=positive_integer_tuple(item["unavailable"]),
-                truncated=bool(item["truncated"]),
+        capability_coverage: list[CapabilityCoverage] = []
+        for index, item in enumerate(raw_coverage):
+            if not isinstance(item, dict):
+                raise ValueError(f"capability_coverage[{index}] must be an object")
+            capability_coverage.append(
+                CapabilityCoverage(
+                    capability=GraphEvidenceCapability(
+                        _strict_str(item["capability"], f"capability_coverage[{index}].capability")
+                    ),
+                    complete=item["complete"],
+                    unavailable=positive_integer_tuple(item["unavailable"]),
+                    truncated=item["truncated"],
+                )
             )
-            for item in raw_coverage
-            if isinstance(item, dict)
+        graph = TicketGraph(
+            _strict_int(payload["schema_version"], "schema_version"),
+            _strict_int(payload["program_issue"], "program_issue"),
+            tuple(nodes),
         )
-        graph = TicketGraph(int(payload["schema_version"]), int(payload["program_issue"]), nodes)
         diagnostics: list[TicketDiagnostic] = []
-        for item in payload.get("diagnostics", []):
-            if not isinstance(item, dict) or not isinstance(item.get("issue_number"), int):
-                continue
+        raw_diagnostics = payload.get("diagnostics", [])
+        if not isinstance(raw_diagnostics, list):
+            return None
+        for index, item in enumerate(raw_diagnostics):
+            if not isinstance(item, dict):
+                raise ValueError(f"diagnostics[{index}] must be an object")
             diagnostics.append(
                 TicketDiagnostic(
-                    code=str(item.get("code", "")),
-                    issue_number=int(item["issue_number"]),
-                    message=str(item.get("message", "")),
+                    code=_strict_str(item.get("code", ""), f"diagnostics[{index}].code"),
+                    issue_number=_strict_int(
+                        item["issue_number"], f"diagnostics[{index}].issue_number"
+                    ),
+                    message=_strict_str(item.get("message", ""), f"diagnostics[{index}].message"),
                 )
             )
         bindings = payload.get("bindings")
@@ -263,31 +309,35 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
         if not isinstance(raw_stamps, list):
             return None
         observation_stamps: list[ObservationStamp] = []
-        for item in raw_stamps:
+        for index, item in enumerate(raw_stamps):
             if not isinstance(item, dict):
-                return None
+                raise ValueError(f"observation_stamps[{index}] must be an object")
             observation_stamps.append(
                 ObservationStamp(
-                    source=item["source"],
-                    observed_at=item["observed_at"],
+                    source=_strict_str(item["source"], f"observation_stamps[{index}].source"),
+                    observed_at=_strict_str(
+                        item["observed_at"], f"observation_stamps[{index}].observed_at"
+                    ),
                     complete=item["complete"],
                     truncated=item["truncated"],
-                    item_count=item["item_count"],
+                    item_count=_strict_int(
+                        item["item_count"], f"observation_stamps[{index}].item_count"
+                    ),
                 )
             )
         raw_refs = payload.get("issue_refs", [])
         if not isinstance(raw_refs, list):
             return None
         issue_refs: list[IssueRef] = []
-        for item in raw_refs:
+        for index, item in enumerate(raw_refs):
             if not isinstance(item, dict):
-                return None
+                raise ValueError(f"issue_refs[{index}] must be an object")
             issue_refs.append(
                 IssueRef(
-                    host=item["host"],
-                    owner=item["owner"],
-                    repository=item["repository"],
-                    number=item["number"],
+                    host=_strict_str(item["host"], f"issue_refs[{index}].host"),
+                    owner=_strict_str(item["owner"], f"issue_refs[{index}].owner"),
+                    repository=_strict_str(item["repository"], f"issue_refs[{index}].repository"),
+                    number=_strict_int(item["number"], f"issue_refs[{index}].number"),
                 )
             )
         return TicketGraphSnapshot(
@@ -296,8 +346,8 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
             evidence_complete=evidence_complete,
             unavailable=positive_integer_tuple(payload["unavailable"]),
             truncated=truncated,
-            live_issues=live,
-            capability_coverage=capability_coverage,
+            live_issues=tuple(live),
+            capability_coverage=tuple(capability_coverage),
             diagnostics=tuple(diagnostics),
             repository_slug=repository_slug,
             observation_stamps=tuple(observation_stamps),

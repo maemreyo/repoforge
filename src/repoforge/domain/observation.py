@@ -258,6 +258,48 @@ class GraphQLErrorClassification(str, Enum):
     GLOBAL_BATCH_FAILURE = "global_batch_failure"
 
 
+class ObservationAuthorityOrigin(str, Enum):
+    """Where an observation authority fingerprint came from.
+
+    ``AUTH_ISSUED`` fingerprints are derived from the resolved auth profile
+    identity (host, login/installation, profile) and rotate automatically when
+    the credential generation changes.  ``MANUAL_LEGACY`` is the operator-pinned
+    ``github_read_cache_authority_digest`` kept as an explicit compatibility
+    fallback until the auth boundary issues fingerprints everywhere (F-004).
+    """
+
+    AUTH_ISSUED = "auth_issued"
+    MANUAL_LEGACY = "manual_legacy"
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubObservationAuthority:
+    """Immutable authority identity for one ticket-graph observation.
+
+    Holds only secret-free identity fields plus an opaque fingerprint; the
+    observation code consumes the fingerprint and never touches credentials.
+    """
+
+    host: str
+    #: Auth profile id when the fingerprint is auth-issued, else None.
+    profile_id: str | None
+    #: Principal or installation identity when known, else None.
+    principal_identity: str | None
+    #: Opaque authority fingerprint that rotates with the credential generation.
+    fingerprint: str
+    origin: ObservationAuthorityOrigin
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host, str) or not self.host:
+            raise ValueError("GitHubObservationAuthority.host must be a non-empty string")
+        if not isinstance(self.fingerprint, str) or len(self.fingerprint) != 64:
+            raise ValueError("GitHubObservationAuthority.fingerprint must be a SHA-256 hex digest")
+        if not isinstance(self.origin, ObservationAuthorityOrigin):
+            raise ValueError(
+                "GitHubObservationAuthority.origin must be an ObservationAuthorityOrigin"
+            )
+
+
 __all__ = [
     "GITHUB_COM_HOST",
     "CapabilityObservation",

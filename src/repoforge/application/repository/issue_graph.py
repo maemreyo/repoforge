@@ -39,6 +39,7 @@ from .issue_graph_cache import (
     snapshot_payload as _snapshot_payload,
 )
 from .issue_graph_config import expected_slug as resolve_expected_slug
+from .issue_graph_config import resolve_observation_authority
 from .issue_graph_config import source as resolve_source
 from .issue_graph_payloads import (
     cache_hit_read_stats as _cache_hit_read_stats,
@@ -128,8 +129,11 @@ def read_github_ticket_snapshot(
     cache = ctx.github_read_cache
     now_epoch = ctx.now_epoch()
     expected_slug = resolve_expected_slug(ctx, repo, source)
-    authority_digest = ctx.config.server.github_read_cache_authority_digest
+    authority = resolve_observation_authority(ctx, repo)
+    authority_digest = authority.fingerprint if authority is not None else None
     cache_context: dict[str, object] = {"hit_reason": None, "miss_reason": None, "age_ms": None}
+    if authority is not None:
+        cache_context["authority_origin"] = authority.origin.value
     if not fresh and cache is not None and authority_digest is not None:
         cached = cache.get(
             repo.repo_id,
