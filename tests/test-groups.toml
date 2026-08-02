@@ -125,7 +125,11 @@ test_files = [
 
 [groups.operations]
 description = "Idempotency, effect receipts, operation lifecycle, background progress, reconciliation, crash recovery, failure evidence."
-parallel = false
+# The group is tmp_path/state-root isolated. A measured 375-test xdist run with
+# three workers passed the control-plane responsiveness SLO and cut this lane
+# from roughly 458s serial to 222s. Keep genuinely host-global runtime and
+# ticket publication effects in their dedicated exclusive groups below.
+parallel = true
 source_globs = [
   "src/repoforge/application/operations/**",
   "src/repoforge/application/tasks/**",

@@ -447,7 +447,8 @@ def test_workspace_verify_staleness_warning_does_not_block_execution(
 
     assert handlers.claimed
     assert "3 commit(s) behind" in result["staleness_warning"]
-    assert result["outcome"] == "passed"
+    assert result["selected_mode"] == "profile"
+    assert result["outcome"] == "fallback_full"
     assert result["steps"][0]["status"] == "completed"
     assert result["steps"][0]["duration_ms"] == 12.5
 

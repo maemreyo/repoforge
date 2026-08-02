@@ -99,7 +99,8 @@ test-affected: test  # Transition alias retained for one release.
 coverage:  # Run the complete suite once with branch coverage and the 80% floor.
 	uv run --extra dev python scripts/run_test_suite.py --coverage-dir "$${REPOFORGE_COVERAGE_DIR:-.cache/verification/coverage}" --report-path "$${REPOFORGE_VERIFICATION_REPORT:-.cache/verification/coverage.json}"
 
-gate: production-check  # Operator/CI authority: clean-tree production gate.
+gate:  # Operator/CI authority: clean-tree production gate.
+	scripts/verify-production.sh
 
 test-groups-check:  # Verify tests/test-groups.toml maps every test file to exactly one group
 	uv run --extra dev python scripts/select_affected_tests.py --check-completeness
@@ -131,8 +132,8 @@ verify:  # Verification gate for a change in progress: contracts, gates, lint, t
 check:  # Authoritative full verification gate for dirty development workspaces
 	scripts/verify-production.sh --allow-dirty
 
-production-check:  # Run the authoritative production gate on a clean committed tree
-	scripts/verify-production.sh
+production-check:  # Compatibility name retained for existing operator workflows
+	$(MAKE) gate
 
 tickets:  # Validate GitHub-native ticket graph contracts deterministically
 	uv run --extra dev pytest -q \

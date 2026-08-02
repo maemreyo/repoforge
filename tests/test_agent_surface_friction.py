@@ -239,7 +239,7 @@ class TestFieldsActuallyReachTheToolSurface:
                 {
                     "workspace_id": workspace_id,
                     "mode": "profile",
-                    "profile_name": "quick",
+                    "profile_name": "full",
                     "background": True,
                 },
             )

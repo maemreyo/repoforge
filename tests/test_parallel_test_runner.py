@@ -101,6 +101,19 @@ test_files = ["tests/test_parallel_one.py"]
     assert serial == {(root / "tests/test_serial_one.py").resolve()}
 
 
+def test_operations_group_runs_in_the_xdist_lane() -> None:
+    """Operations tests are tmp-isolated and must not rebuild the serial bottleneck."""
+
+    root = Path(__file__).parents[1]
+    manifest = runner_module._load_manifest(root)
+    operations = next(group for group in manifest.groups if group.name == "operations")
+
+    assert operations.parallel is True
+    assert not {
+        (root / test_file).resolve() for test_file in operations.test_files
+    } & runner_module._load_serial_test_files(root)
+
+
 def test_missing_manifest_refuses_to_build_a_parallel_lane(tmp_path: Path) -> None:
     with pytest.raises(runner_module.SelectionMetadataError, match="missing"):
         runner_module.load_lane_plan(tmp_path)
