@@ -28,11 +28,18 @@ JUNIT_DIR = Path(".cache/verification/junit")
 
 
 @dataclass(frozen=True, slots=True)
+class ParallelShard:
+    name: str
+    files: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LanePlan:
     """Exact full-suite file partition derived from validated metadata."""
 
     serial: tuple[Path, ...]
     parallel: tuple[Path, ...]
+    parallel_shards: tuple[ParallelShard, ...] = ()
 
 
 class SelectionMetadataError(ValueError):
@@ -78,9 +85,17 @@ def load_lane_plan(root: Path) -> LanePlan:
         if not group.parallel
         for test_file in group.test_files
     }
+    serial = tuple(path for path in tests if path.resolve() in serial_files)
+    parallel = tuple(path for path in tests if path.resolve() not in serial_files)
+    relative_parallel = tuple(str(path.relative_to(root)) for path in parallel)
+    parallel_shards = tuple(
+        ParallelShard(name, tuple(root / test_file for test_file in shard_files))
+        for name, shard_files in manifest.parallel_shards(relative_parallel)
+    )
     return LanePlan(
-        serial=tuple(path for path in tests if path.resolve() in serial_files),
-        parallel=tuple(path for path in tests if path.resolve() not in serial_files),
+        serial=serial,
+        parallel=parallel,
+        parallel_shards=parallel_shards,
     )
 
 
@@ -175,17 +190,19 @@ def run(
 
     failed = False
     timings: list[LaneTiming] = []
-    for name, files, lane_workers in (
-        ("serial", plan.serial, None),
-        ("parallel", plan.parallel, workers),
-    ):
-        if not files:
-            continue
+    parallel_shards = plan.parallel_shards or (
+        (ParallelShard("xdist", plan.parallel),) if plan.parallel else ()
+    )
+    lane_specs: list[tuple[str, tuple[Path, ...], int | None]] = []
+    if plan.serial:
+        lane_specs.append(("serial", plan.serial, None))
+    lane_specs.extend((shard.name, shard.files, workers) for shard in parallel_shards)
+    for name, files, lane_workers in lane_specs:
         started = time.monotonic()
         returncode = _run_lane(
             root,
             resolved_coverage_dir,
-            "xdist" if name == "parallel" else name,
+            name,
             files,
             workers=lane_workers,
         )

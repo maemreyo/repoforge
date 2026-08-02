@@ -107,6 +107,7 @@ def _group(
     source_globs: tuple[str, ...],
     test_files: tuple[str, ...],
     parallel: bool = True,
+    parallel_shard_sizes: tuple[int, ...] = (),
 ) -> Any:
     return selector.Group(
         name=name,
@@ -114,6 +115,7 @@ def _group(
         parallel=parallel,
         source_globs=source_globs,
         test_files=test_files,
+        parallel_shard_sizes=parallel_shard_sizes,
     )
 
 
@@ -139,6 +141,62 @@ def test_the_shipped_manifest_is_complete_against_the_real_tests_directory() -> 
     violations = selector.check_completeness(manifest, root / "tests")
 
     assert violations == []
+
+
+def test_lane_runner_runs_reviewed_parallel_shards_sequentially(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "platform",
+                source_globs=(),
+                test_files=("tests/test_alpha.py", "tests/test_beta.py"),
+                parallel_shard_sizes=(1, 1),
+            ),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(selector.subprocess, "run", run)
+
+    returncode, timings = selector._run_in_lanes(
+        tmp_path,
+        ("tests/test_alpha.py", "tests/test_beta.py"),
+        manifest,
+    )
+
+    assert returncode == 0
+    assert len(calls) == 2
+    assert "tests/test_alpha.py" in calls[0]
+    assert "tests/test_beta.py" not in calls[0]
+    assert "tests/test_beta.py" in calls[1]
+    assert "--junitxml=.cache/verification/junit/affected-platform-1.xml" in calls[0]
+    assert "--junitxml=.cache/verification/junit/affected-platform-2.xml" in calls[1]
+    assert [timing.name for timing in timings] == ["platform-1", "platform-2"]
+
+
+def test_manifest_rejects_invalid_parallel_shard_sizes(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "test-groups.toml"
+    manifest_path.write_text(
+        """
+[groups.platform]
+description = "platform"
+parallel = true
+parallel_shard_sizes = [1]
+source_globs = []
+test_files = ["tests/test_alpha.py", "tests/test_beta.py"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="parallel_shard_sizes"):
+        selector.load_manifest(manifest_path)
 
 
 @pytest.mark.parametrize(

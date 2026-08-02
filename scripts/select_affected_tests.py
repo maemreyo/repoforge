@@ -131,6 +131,7 @@ class Group:
     parallel: bool
     source_globs: tuple[str, ...]
     test_files: tuple[str, ...]
+    parallel_shard_sizes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +164,34 @@ class Manifest:
             if not group.parallel
             for test_file in group.test_files
         )
+
+    def parallel_shards(self, files: Sequence[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Partition selected parallel tests into reviewed sequential xdist shards."""
+
+        selected = set(files)
+        assigned: set[str] = set()
+        shards: list[tuple[str, tuple[str, ...]]] = []
+        for group in self.groups:
+            if not group.parallel:
+                continue
+            sizes = _validated_parallel_shard_sizes(group)
+            offset = 0
+            for index, size in enumerate(sizes, start=1):
+                group_slice = group.test_files[offset : offset + size]
+                offset += size
+                shard_files = tuple(test_file for test_file in group_slice if test_file in selected)
+                if not shard_files:
+                    continue
+                assigned.update(shard_files)
+                name = group.name if len(sizes) == 1 else f"{group.name}-{index}"
+                shards.append((name, shard_files))
+        unassigned = selected - assigned
+        if unassigned:
+            raise ValueError(
+                "parallel tests are not owned by reviewed shard metadata: "
+                + ", ".join(sorted(unassigned))
+            )
+        return tuple(shards)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,20 +231,38 @@ def _matches_any(path: str, globs: tuple[str, ...]) -> bool:
     return any(_glob_to_regex(glob).match(path) for glob in globs)
 
 
+def _validated_parallel_shard_sizes(group: Group) -> tuple[int, ...]:
+    sizes = group.parallel_shard_sizes or (len(group.test_files),)
+    if group.parallel_shard_sizes and not group.parallel:
+        raise ValueError(f"group {group.name!r} cannot shard a serial capability")
+    if any(type(size) is not int or size <= 0 for size in sizes):
+        raise ValueError(f"group {group.name!r} parallel_shard_sizes must be positive integers")
+    if sum(sizes) != len(group.test_files):
+        raise ValueError(
+            f"group {group.name!r} parallel_shard_sizes must cover exactly "
+            f"{len(group.test_files)} test files"
+        )
+    return sizes
+
+
 def load_manifest(path: Path = DEFAULT_MANIFEST) -> Manifest:
     with path.open("rb") as handle:
         raw = tomllib.load(handle)
     groups = []
     for name, payload in raw.get("groups", {}).items():
-        groups.append(
-            Group(
-                name=name,
-                description=str(payload.get("description", "")),
-                parallel=bool(payload.get("parallel", False)),
-                source_globs=tuple(payload.get("source_globs", [])),
-                test_files=tuple(payload.get("test_files", [])),
-            )
+        raw_shard_sizes = payload.get("parallel_shard_sizes", [])
+        if not isinstance(raw_shard_sizes, list):
+            raise ValueError(f"group {name!r} parallel_shard_sizes must be a list")
+        group = Group(
+            name=name,
+            description=str(payload.get("description", "")),
+            parallel=bool(payload.get("parallel", False)),
+            source_globs=tuple(payload.get("source_globs", [])),
+            test_files=tuple(payload.get("test_files", [])),
+            parallel_shard_sizes=tuple(raw_shard_sizes),
         )
+        _validated_parallel_shard_sizes(group)
+        groups.append(group)
     safety_bundle = tuple(raw.get("safety_bundle", {}).get("test_files", []))
     conftest_consumers = tuple(raw.get("conftest_consumers", {}).get("test_files", []))
     coverage_map = _load_coverage_map(path.parent / DEFAULT_COVERAGE_MAP.name)
@@ -586,16 +633,12 @@ def _all_files_selection(manifest: Manifest) -> Selection:
 def _run_in_lanes(
     root: Path, files: Sequence[str], manifest: Manifest
 ) -> tuple[int, tuple[LaneTiming, ...]]:
-    """Run `files` split into a serial lane and an xdist lane.
+    """Run serial tests first, then reviewed sequential xdist shards."""
 
-    Files owned by a `parallel = false` group carry a known worker-contention
-    risk under xdist (see Group.serial_files) and must never share a pytest
-    process with `-n`. They run first, alone; the rest run under `-n 3`.
-    Mirrors the split `run_test_suite.py` already does for `make check`.
-    """
     serial_files = manifest.serial_files()
     serial = sorted(f for f in files if f in serial_files)
     parallel = sorted(f for f in files if f not in serial_files)
+    parallel_shards = manifest.parallel_shards(parallel)
     junit_dir = root / JUNIT_DIR
     junit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -629,10 +672,10 @@ def _run_in_lanes(
         returncode = returncode or completed.returncode
         if returncode != 0:
             return returncode, tuple(timings)
-    if parallel:
-        print(f"[select-affected-tests] xdist lane: {len(parallel)} test files")
-        junit_path = JUNIT_DIR / "affected-parallel.xml"
-        print(f"[select-affected-tests] parallel junit: {junit_path}")
+    for shard_name, shard_files in parallel_shards:
+        print(f"[select-affected-tests] {shard_name} xdist shard: {len(shard_files)} test files")
+        junit_path = JUNIT_DIR / f"affected-{shard_name}.xml"
+        print(f"[select-affected-tests] {shard_name} junit: {junit_path}")
         started = time.monotonic()
         completed = subprocess.run(
             [
@@ -643,20 +686,22 @@ def _run_in_lanes(
                 "3",
                 "-q",
                 f"--junitxml={junit_path.as_posix()}",
-                *parallel,
+                *shard_files,
             ],
             cwd=root,
             check=False,
         )
         timings.append(
             LaneTiming(
-                "parallel",
-                len(parallel),
+                shard_name,
+                len(shard_files),
                 (time.monotonic() - started) * 1_000,
                 completed.returncode,
             )
         )
         returncode = returncode or completed.returncode
+        if completed.returncode != 0:
+            return returncode, tuple(timings)
     return returncode, tuple(timings)
 
 
