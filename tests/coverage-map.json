@@ -1,6 +1,7 @@
 {
   "src/repoforge/adapters/activation/build.py": [
     "tests/test_activation_restart_semantics.py",
+    "tests/test_build_snapshot.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_execution_worker_reconciler.py",
@@ -2339,6 +2340,8 @@
     "tests/test_durable_record_round_trip.py",
     "tests/test_execution_worker_binding.py",
     "tests/test_execution_worker_reconciler.py",
+    "tests/test_fault_injection_baseline.py",
+    "tests/test_lease_registry.py",
     "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/adapters/persistence/json_external_mutation_ledger.py": [
@@ -3348,6 +3351,11 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/adapters/persistence/json_process_lease_adapter.py": [
+    "tests/test_durable_record_round_trip.py",
+    "tests/test_json_adapter.py",
+    "tests/test_lease_registry.py"
+  ],
   "src/repoforge/adapters/persistence/json_repository_binding_store.py": [
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
@@ -3508,6 +3516,10 @@
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
   ],
+  "src/repoforge/adapters/persistence/json_runtime_transition_adapter.py": [
+    "tests/test_durable_record_round_trip.py",
+    "tests/test_json_adapter.py"
+  ],
   "src/repoforge/adapters/persistence/json_state_lifecycle.py": [
     "tests/test_durable_state.py",
     "tests/test_task_capsule_v2_persistence.py"
@@ -3542,6 +3554,7 @@
     "tests/test_execution_worker_reconciler.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_fingerprint_cache.py",
     "tests/test_git_diff_summary.py",
     "tests/test_github_read_cache.py",
@@ -3551,6 +3564,8 @@
     "tests/test_issue_graph_publication.py",
     "tests/test_issue_graph_publication_executor.py",
     "tests/test_issue_graph_workflow.py",
+    "tests/test_json_adapter.py",
+    "tests/test_lease_registry.py",
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_mcp_payload_v2.py",
@@ -3634,6 +3649,7 @@
     "tests/test_execution_worker_reconciler.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_fingerprint_cache.py",
     "tests/test_git_diff_summary.py",
     "tests/test_github_read_cache.py",
@@ -3842,6 +3858,19 @@
     "tests/test_workspace_mutate.py",
     "tests/test_workspace_refresh.py",
     "tests/test_workspace_stale_cleanup.py"
+  ],
+  "src/repoforge/adapters/persistence/parity.py": [
+    "tests/test_lease_registry.py"
+  ],
+  "src/repoforge/adapters/persistence/sqlite_db.py": [
+    "tests/test_json_adapter.py",
+    "tests/test_lease_registry.py"
+  ],
+  "src/repoforge/adapters/persistence/sqlite_lease_store.py": [
+    "tests/test_lease_registry.py"
+  ],
+  "src/repoforge/adapters/persistence/sqlite_transition_store.py": [
+    "tests/test_json_adapter.py"
   ],
   "src/repoforge/adapters/provider/config_registry.py": [
     "tests/test_adoption_nudges.py",
@@ -4086,6 +4115,8 @@
   ],
   "src/repoforge/adapters/runtime/execution_worker.py": [
     "tests/test_execution_worker_reconciler.py",
+    "tests/test_fault_injection_baseline.py",
+    "tests/test_lease_registry.py",
     "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/adapters/runtime/launcher.py": [
@@ -4556,6 +4587,7 @@
     "tests/test_dev_runtime.py"
   ],
   "src/repoforge/application/activation/handoff.py": [
+    "tests/test_fault_injection_baseline.py",
     "tests/test_generation_handoff.py",
     "tests/test_tunnel_seam_swap.py"
   ],
@@ -4565,6 +4597,7 @@
     "tests/test_release_selection.py"
   ],
   "src/repoforge/application/activation/seam.py": [
+    "tests/test_fault_injection_baseline.py",
     "tests/test_tunnel_seam_swap.py"
   ],
   "src/repoforge/application/activation/selection.py": [
@@ -8142,7 +8175,9 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/application/runtime/execution_worker_reconciler.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_execution_worker_reconciler.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_supervisor_preflight_fail_closed.py"
   ],
   "src/repoforge/application/runtime/execution_worker_report.py": [
@@ -8162,6 +8197,9 @@
     "tests/test_phase7_atomic_hot_reload.py",
     "tests/test_supervisor_handoff_lock.py",
     "tests/test_supervisor_preflight_fail_closed.py"
+  ],
+  "src/repoforge/application/runtime/worker_registrar.py": [
+    "tests/test_lease_registry.py"
   ],
   "src/repoforge/application/service.py": [
     "tests/test_adoption_nudges.py",
@@ -12819,6 +12857,7 @@
     "tests/test_auth_repository_observation.py",
     "tests/test_auth_ux_service.py",
     "tests/test_background_run_profile.py",
+    "tests/test_build_snapshot.py",
     "tests/test_ci_failure_evidence.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_agent_auth_material.py",
@@ -12849,6 +12888,7 @@
     "tests/test_execution_worker_binding.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_fingerprint_cache.py",
     "tests/test_git_diff_summary.py",
     "tests/test_git_transport_identity.py",
@@ -12862,7 +12902,9 @@
     "tests/test_issue_graph_publication_adapter.py",
     "tests/test_issue_graph_publication_executor.py",
     "tests/test_issue_graph_workflow.py",
+    "tests/test_json_adapter.py",
     "tests/test_launchd_registrar.py",
+    "tests/test_lease_registry.py",
     "tests/test_local_setup.py",
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py",
@@ -12911,6 +12953,7 @@
     "tests/test_rules_section.py",
     "tests/test_runtime.py",
     "tests/test_runtime_adapters_and_serve.py",
+    "tests/test_runtime_transition_domain.py",
     "tests/test_security.py",
     "tests/test_serve_config_generation.py",
     "tests/test_service_tools.py",
@@ -13050,6 +13093,8 @@
     "tests/test_execution_worker_binding.py",
     "tests/test_execution_worker_reconciler.py",
     "tests/test_execution_worker_report.py",
+    "tests/test_fault_injection_baseline.py",
+    "tests/test_lease_registry.py",
     "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/domain/failed_selectors.py": [
@@ -13577,6 +13622,7 @@
     "tests/test_durable_verification_dispatch.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_generation_handoff.py",
     "tests/test_integration.py",
     "tests/test_issue_graph_publication.py",
@@ -13638,6 +13684,7 @@
     "tests/test_control_plane_responsiveness.py",
     "tests/test_durable_record_round_trip.py",
     "tests/test_expensive_profile_guards.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_generation_handoff.py",
     "tests/test_operation_execution_worker.py",
     "tests/test_operation_identity_leases.py",
@@ -13797,6 +13844,16 @@
   "src/repoforge/domain/pr_remote_version.py": [
     "tests/test_pr_check_watch.py",
     "tests/test_v2_shipping.py"
+  ],
+  "src/repoforge/domain/process_lease.py": [
+    "tests/test_durable_record_round_trip.py",
+    "tests/test_execution_worker_reconciler.py",
+    "tests/test_fakes_store.py",
+    "tests/test_fault_injection_baseline.py",
+    "tests/test_json_adapter.py",
+    "tests/test_lease_registry.py",
+    "tests/test_process_lease_domain.py",
+    "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/domain/profile_drift.py": [
     "tests/test_expensive_profile_guards.py",
@@ -14300,6 +14357,8 @@
     "tests/test_control_plane_resilience.py",
     "tests/test_durable_record_round_trip.py",
     "tests/test_execution_worker_reconciler.py",
+    "tests/test_fault_injection_baseline.py",
+    "tests/test_lease_registry.py",
     "tests/test_phase4_runtime_control.py",
     "tests/test_phase6_operational_hardening.py",
     "tests/test_phase7_atomic_hot_reload.py",
@@ -14337,6 +14396,9 @@
     "tests/test_runtime_adapters_and_serve.py",
     "tests/test_v2_reads.py"
   ],
+  "src/repoforge/domain/runtime_epoch.py": [
+    "tests/test_runtime_epoch_domain.py"
+  ],
   "src/repoforge/domain/runtime_events.py": [
     "tests/test_config_admin.py",
     "tests/test_phase6_operational_hardening.py",
@@ -14346,6 +14408,12 @@
   "src/repoforge/domain/runtime_health.py": [
     "tests/test_cli_runtime_commands.py",
     "tests/test_cli_surface_coverage.py"
+  ],
+  "src/repoforge/domain/runtime_transition.py": [
+    "tests/test_durable_record_round_trip.py",
+    "tests/test_fakes_store.py",
+    "tests/test_json_adapter.py",
+    "tests/test_runtime_transition_domain.py"
   ],
   "src/repoforge/domain/skills.py": [
     "tests/test_constitution_source.py",
@@ -14532,11 +14600,15 @@
     "tests/test_execution_worker_reconciler.py",
     "tests/test_expensive_profile_guards.py",
     "tests/test_failure_intelligence.py",
+    "tests/test_fakes_store.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_integration.py",
     "tests/test_issue_graph_proposals.py",
     "tests/test_issue_graph_publication.py",
     "tests/test_issue_graph_publication_executor.py",
     "tests/test_issue_graph_workflow.py",
+    "tests/test_json_adapter.py",
+    "tests/test_lease_registry.py",
     "tests/test_mcp_contract.py",
     "tests/test_mcp_contract_v2.py",
     "tests/test_mutation_idempotency.py",
@@ -15050,11 +15122,14 @@
     "tests/test_execution_worker_binding.py",
     "tests/test_execution_worker_reconciler.py",
     "tests/test_failure_intelligence.py",
+    "tests/test_fault_injection_baseline.py",
     "tests/test_generation_handoff.py",
     "tests/test_github_api_identity.py",
     "tests/test_github_read_cache.py",
     "tests/test_github_ticket_project_adapter.py",
+    "tests/test_json_adapter.py",
     "tests/test_latency_tracing.py",
+    "tests/test_lease_registry.py",
     "tests/test_nested_identity_coordinator.py",
     "tests/test_operation_identity_leases.py",
     "tests/test_operation_tasks.py",
@@ -15082,5 +15157,8 @@
     "tests/test_workflow_recording.py",
     "tests/test_workspace_publication_factory.py",
     "tests/test_workspace_stale_cleanup.py"
+  ],
+  "src/repoforge/testing/fakes_ext.py": [
+    "tests/test_fakes_store.py"
   ]
 }

@@ -19,6 +19,7 @@ import pytest
 from repoforge.adapters.activation.build import (
     _commit_tree_sha,
     _materialize_snapshot,
+    _persist_wheel,
 )
 from repoforge.domain.errors import ConfigError
 
@@ -100,3 +101,30 @@ def test_materialize_snapshot_rejects_an_unknown_commit_and_cleans_up(tmp_path: 
 
     after = set(Path(tempfile.gettempdir()).glob("repoforge-upgrade-snapshot-*"))
     assert after == before
+
+
+def test_persist_wheel_outlives_the_build_scratch_directory(tmp_path: Path) -> None:
+    """A built wheel must survive the build() cleanup the caller installs it after.
+
+    Regression for the live-activation failure where the builder returned a wheel
+    inside a tempdir its own ``finally`` deleted, so ``uv pip install`` found
+    "Distribution not found at: file:...".
+    """
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    wheel = scratch / "repoforge-2.2.0-py3-none-any.whl"
+    wheel.write_bytes(b"fake wheel bytes")
+
+    kept = _persist_wheel(wheel)
+
+    try:
+        assert kept.exists()
+        assert kept.read_bytes() == b"fake wheel bytes"
+        assert kept.suffix == ".whl"
+        # The caller removes the scratch dir; the kept wheel must not live inside it.
+        import shutil
+
+        shutil.rmtree(scratch, ignore_errors=True)
+        assert kept.exists()
+    finally:
+        kept.unlink(missing_ok=True)

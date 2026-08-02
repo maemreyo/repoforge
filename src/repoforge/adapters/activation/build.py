@@ -139,10 +139,13 @@ class UvWheelBuilder:
             if len(wheels) != 1:
                 raise ConfigError(f"BUILD_AMBIGUOUS: expected one wheel, found {len(wheels)}")
             wheel = wheels[0]
+            # The caller installs this wheel after build() returns, so it must not
+            # live in a directory this method removes.
+            kept_wheel = _persist_wheel(wheel)
             return BuildArtifact(
-                wheel_path=wheel,
-                build_fingerprint=_sha256_file(wheel),
-                package_version=_version_from_wheel(wheel.name),
+                wheel_path=kept_wheel,
+                build_fingerprint=_sha256_file(kept_wheel),
+                package_version=_version_from_wheel(kept_wheel.name),
                 source_digest=source_digest,
             )
         finally:
@@ -710,6 +713,20 @@ class SupervisorHealthProbe:
 def _remove_tree(path: Path) -> None:
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _persist_wheel(wheel: Path) -> Path:
+    """Move a built wheel to a temp file that survives the build cleanup.
+
+    ``uv build`` writes into a scratch ``out_dir`` this module then removes; the
+    caller installs the wheel only after ``build`` returns, so the wheel must live
+    somewhere that outlives that cleanup. The caller unlinks it after install.
+    """
+    fd, kept_name = tempfile.mkstemp(prefix="repoforge-upgrade-wheel-", suffix=".whl")
+    os.close(fd)
+    kept = Path(kept_name)
+    shutil.move(str(wheel), str(kept))
+    return kept
 
 
 def _commit_tree_sha(worktree: Path, commit_sha: str) -> str:

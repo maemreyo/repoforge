@@ -297,3 +297,44 @@ class TestJsonRuntimeTransitionAdapter:
         page = adapter.list_by_generation(2)
 
         assert [item.record_id for item in page.records] == ["tran-000000000000000000000002"]
+
+
+# ----------------------------------------------------------------------- SqliteTransitionStore
+
+
+class TestSqliteTransitionStore:
+    """The SQLite transition shadow mirrors authoritative JSON writes."""
+
+    def test_write_shadow_and_list_shadow_round_trip(self, tmp_path: Path) -> None:
+        from repoforge.adapters.persistence.sqlite_transition_store import (
+            SqliteTransitionStore,
+        )
+
+        store = SqliteTransitionStore(tmp_path / "shadow.db")
+        try:
+            store.write_shadow(_transition(), Revision(1))
+
+            entries = store.list_shadow()
+
+            assert entries == [(_transition(), Revision(1))]
+        finally:
+            store.close()
+
+    def test_write_shadow_upserts_and_delete_removes(self, tmp_path: Path) -> None:
+        from repoforge.adapters.persistence.sqlite_transition_store import (
+            SqliteTransitionStore,
+        )
+
+        store = SqliteTransitionStore(tmp_path / "shadow.db")
+        try:
+            store.write_shadow(_transition(), Revision(1))
+            store.write_shadow(_transition(), Revision(2))
+
+            entries = store.list_shadow()
+            assert entries == [(_transition(), Revision(2))]
+
+            store.delete_shadow(_TID)
+
+            assert store.list_shadow() == []
+        finally:
+            store.close()

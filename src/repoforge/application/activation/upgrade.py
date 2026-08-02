@@ -205,15 +205,20 @@ class UpgradeService:
 
         artifact = self._builder.build(worktree, commit_sha=commit_sha)
         destination = self._store.release_path(commit_sha)
-        # Releases are immutable: only install when this commit is not already present
-        # with identical bits (reserve_release raises on a fingerprint conflict).
-        fresh = self._store.reserve_release(
-            commit_sha, build_fingerprint=artifact.build_fingerprint
-        )
-        if fresh:
-            self._installer.install(artifact.wheel_path, destination)
+        try:
+            # Releases are immutable: only install when this commit is not already
+            # present with identical bits (reserve_release raises on a fingerprint
+            # conflict).
+            fresh = self._store.reserve_release(
+                commit_sha, build_fingerprint=artifact.build_fingerprint
+            )
+            if fresh:
+                self._installer.install(artifact.wheel_path, destination)
 
-        smoke = self._smoke.smoke(destination)
+            smoke = self._smoke.smoke(destination)
+        finally:
+            # Covers both the consumed wheel and the already-installed (never installed) path.
+            artifact.wheel_path.unlink(missing_ok=True)
         # A contract mismatch is a distinct, typed failure: the candidate runs but was
         # built from a stale worktree, so it would crash-loop as soon as it serves.
         if smoke.contract_mismatched_fields:
