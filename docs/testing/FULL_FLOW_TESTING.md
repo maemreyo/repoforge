@@ -51,8 +51,17 @@ From the RepoForge source root:
 ```sh
 uv sync --extra dev --frozen
 make v2-gates
-make check
+make test
+make test-full
+make coverage
+make verify
+make gate
 ```
+
+These commands document distinct intents; they are not a recommendation to run all five before every
+commit. Iterate with `make test`, use `make test-full` for broad no-coverage confidence, and use
+`make verify` as the change-facing gate. `make coverage` creates the canonical coverage observation;
+`make gate` is the clean-tree operator authority and already includes equivalent full coverage.
 
 `make v2-gates` executes the frozen generated-change, patch, seeded-bug, and read/truncation corpora.
 The blocking expectations are:
@@ -64,7 +73,7 @@ The blocking expectations are:
 - primary Tree-sitter routed-test recall passes its per-language threshold;
 - reports are written only to the temporary gate directory during `make check`.
 
-`make check` additionally requires:
+`make gate` additionally requires:
 
 - release-contract and tool-schema golden files match generated output;
 - Ruff formatting and lint are clean;
@@ -74,6 +83,11 @@ The blocking expectations are:
 - an isolated installed-wheel lifecycle succeeds;
 - `forge_v2` exposes exactly 28 tools and the expected surface hash;
 - the verification process leaves no unreviewed repository artifact.
+
+Selection metadata is validated before test execution. `tests/test-groups.toml` remains execution
+authority while `tests/catalog.toml` runs in shadow mode. Verification JSON and the canonical
+coverage database are retained under `.cache/verification`; CI may restore the broad compatibility
+matrix without duplicate coverage by setting `REPOFORGE_CI_FULL_MATRIX=1`.
 
 A failure at L0 blocks every later level.
 

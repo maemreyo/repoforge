@@ -139,6 +139,27 @@ def test_make_exposes_distinct_affected_full_coverage_and_gate_intents() -> None
     assert re.search(r"^gate:\s*(?:#.*)?$", makefile, re.MULTILINE)
 
 
+def test_verification_docs_publish_intents_evidence_and_rollbacks() -> None:
+    development = (ROOT / "docs/development/DEVELOPMENT.md").read_text(encoding="utf-8")
+    testing = (ROOT / "docs/testing/TESTING.md").read_text(encoding="utf-8")
+    full_flow = (ROOT / "docs/testing/FULL_FLOW_TESTING.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    example = (ROOT / "config.example.toml").read_text(encoding="utf-8")
+    combined = "\n".join((development, testing, full_flow, readme, example))
+
+    for command in ("make test", "make test-full", "make coverage", "make verify", "make gate"):
+        assert command in testing
+        assert command in combined
+    assert "tests/catalog.toml" in testing
+    assert "shadow" in testing.lower()
+    assert ".cache/verification" in testing
+    assert "REPOFORGE_CI_FULL_MATRIX=1" in testing
+    assert "one canonical" in testing.lower()
+    assert "model_invocable = false" in example
+    assert 'commands = [["make", "test"]]' in example
+    assert "lint, strict types, and the whole test suite" not in example
+
+
 def test_make_start_does_not_override_control_plane_api_key() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     start_body = makefile.split("start:", 1)[1].split("\ndev-server:", 1)[0]
