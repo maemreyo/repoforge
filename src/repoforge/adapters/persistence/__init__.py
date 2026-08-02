@@ -24,6 +24,7 @@ from .json_task_store import JsonTaskStore
 from .json_worker_binding_store import JsonWorkerBindingStore
 from .json_workflow_recording_store import JsonWorkflowRecordingStore
 from .json_workspace_store import JsonWorkspaceStore
+from .sqlite_lease_store import SqliteLeaseStore
 
 __all__ = [
     "FileFailureOutputArtifactStore",
@@ -54,4 +55,5 @@ __all__ = [
     "JsonWorkerBindingStore",
     "JsonWorkflowRecordingStore",
     "JsonWorkspaceStore",
+    "SqliteLeaseStore",
 ]

@@ -11,6 +11,32 @@ from typing_extensions import assert_never
 LeaseId = NewType("LeaseId", str)
 
 
+class ProcessLeaseRole(str, Enum):
+    """Which subsystem a lease's process belongs to.
+
+    One registry serves every managed process kind so completeness, pagination,
+    quarantine, and reconciliation use a common substrate (F-008): the execution
+    daemon, short-lived operation workers, and the serve-child of a generation all
+    live in the same lease table distinguished by role.
+    """
+
+    EXECUTION_DAEMON = "execution_daemon"
+    OPERATION_WORKER = "operation_worker"
+    TUNNEL_CHILD = "tunnel_child"
+
+
+def _validate_role(role: ProcessLeaseRole) -> ProcessLeaseRole:
+    match role:
+        case (
+            ProcessLeaseRole.EXECUTION_DAEMON
+            | ProcessLeaseRole.OPERATION_WORKER
+            | ProcessLeaseRole.TUNNEL_CHILD
+        ):
+            return role
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class ProcessLeaseStatus(str, Enum):
     REGISTERED = "registered"
     READY = "ready"
@@ -91,6 +117,7 @@ class ProcessLease:
     updated_at: str
     error_code: str | None = None
     error_message: str | None = None
+    role: ProcessLeaseRole = ProcessLeaseRole.EXECUTION_DAEMON
 
     def __post_init__(self) -> None:
         _require_non_empty(self.lease_id, "lease_id")
@@ -98,6 +125,7 @@ class ProcessLease:
         _require_non_empty(self.created_at, "created_at")
         _require_non_empty(self.updated_at, "updated_at")
         _validate_status(self.status)
+        _validate_role(self.role)
         if self.pid is not None and self.pid <= 0:
             raise ValueError("Process lease pid must be a positive integer")
         for field, value in (
@@ -243,6 +271,7 @@ def quarantine(
 __all__ = [
     "LeaseId",
     "ProcessLease",
+    "ProcessLeaseRole",
     "ProcessLeaseStatus",
     "archive",
     "begin_termination",

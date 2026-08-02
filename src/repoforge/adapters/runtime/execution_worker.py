@@ -17,6 +17,7 @@ from ...domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from ...domain.execution_worker import ExecutionWorkerBinding
 from ...domain.runtime import ChildProcess
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
+from ..persistence.sqlite_lease_store import SqliteLeaseStore
 from ..subprocess.process_tree import read_identity
 from .state_store import process_identity
 
@@ -35,11 +36,13 @@ class SubprocessExecutionWorker:
         config_path: Path,
         *,
         bindings: ExecutionWorkerBindingStore,
+        lease_shadow: SqliteLeaseStore | None = None,
     ) -> None:
         self._config_path = config_path.expanduser().resolve()
         self._children: dict[int, subprocess.Popen[bytes]] = {}
         self._worker_ids: dict[int, str] = {}
         self._bindings = bindings
+        self._lease_shadow = lease_shadow
 
     def start(
         self,
@@ -177,7 +180,41 @@ class SubprocessExecutionWorker:
             self._bindings.put(binding)
         except Exception as exc:
             self._fail_registration(pid, f"the durable worker lease could not be written: {exc}")
+        self._mirror_shadow(binding)
         return worker_id
+
+    def _mirror_shadow(self, binding: ExecutionWorkerBinding) -> None:
+        """Mirror the authoritative JSON binding into the shadow lease registry.
+
+        The shadow is parity evidence only -- no safety gate reads it -- so a shadow
+        write failure must never fail the registration that already durably
+        committed the JSON lease. It degrades to "parity unavailable", not to a
+        refused worker.
+        """
+        if self._lease_shadow is None:
+            return
+        from ...domain.durable_state import Revision
+        from ...domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+        try:
+            self._lease_shadow.write_shadow(
+                ProcessLease(
+                    lease_id=binding.worker_id,
+                    role=ProcessLeaseRole.EXECUTION_DAEMON,
+                    status=ProcessLeaseStatus.RUNNING,
+                    process_identity=binding.process_start_token,
+                    pid=binding.pid,
+                    started_at=binding.started_at,
+                    heartbeat_at=binding.started_at,
+                    correlation_id=binding.correlation_id,
+                    created_at=binding.started_at,
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                ),
+                Revision(1),
+            )
+        except Exception:
+            # Shadow is best-effort parity, never part of the safety decision.
+            return
 
     def _fail_registration(self, pid: int, reason: str) -> NoReturn:
         """TERM -> wait -> KILL the unregistered worker, verify death, then raise."""
