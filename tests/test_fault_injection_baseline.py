@@ -7,20 +7,22 @@ subprocess is spawned, and every assertion documents the exact failure shape tha
 later phase (3-9 of the migration) must close:
 
 - F-001: a worker is spawned (Popen) before any durable lease exists.
-- F-002: an unregistered worker is declared "terminated and confirmed dead" without
-  a final identity/group-liveness re-verification after SIGKILL.
-- F-003: ``reconcile(read_only=True)`` still mutates durable state (it archives and
-  deletes terminal leases before the read-only scan).
-- F-005: the archive checkpoint is not idempotent across a crash between archive
-  write and active-record delete, because ``terminated_at`` is re-stamped on retry.
-- F-007: a seam-swap abort after a successful drain never sends ``RESUME`` to the
-  old child, so "old child retained" does not mean "old service resumed".
+- F-002: a worker that survives SIGKILL must fail closed, never be declared dead
+  without a final identity/group-liveness re-verification.
+- F-003: ``reconcile(read_only=True)`` must be side-effect free (no terminal-lease
+  collection during a read-only preflight).
+- F-005: the archive checkpoint must be idempotent across a crash between archive
+  write and active-record delete, so a retry self-heals instead of failing.
+- F-007: a seam-swap abort after a successful drain must RESUME and health-verify
+  the old child before retiring the candidate, and fail closed when the resume
+  cannot be proven.
 - F-008: the operation-worker store silently truncates its scan; the handoff
   reconciler has no completeness signal, so an orphan past the limit is invisible.
 
-These tests pass on the current code -- passing is the proof that the vulnerability
-exists, not that it is fixed. When a later phase closes a finding, the corresponding
-test here must be tightened to assert the fixed invariant instead.
+The F-002/F-003/F-005/F-007 tests now assert the fixed invariants (the finding is
+closed). F-001 and F-008 still pin the unfixed vulnerability: F-001's pre-spawn
+lease protocol and F-008's unified registry are architecture-scale changes of the
+later migration phases.
 """
 
 from __future__ import annotations
@@ -315,8 +317,10 @@ class _Sleeper:
 
 
 class _FakeTunnel:
-    def __init__(self) -> None:
+    def __init__(self, *, healthy_after_resume: bool = True) -> None:
         self.terminated: list[int] = []
+        self.health_calls = 0
+        self._healthy_after_resume = healthy_after_resume
 
     def start(self, profile: TunnelProfile, *, env: dict[str, str], log_path: Path) -> ChildProcess:
         del profile, env, log_path
@@ -332,19 +336,25 @@ class _FakeTunnel:
 
     def health(self, child: ChildProcess, *, timeout_seconds: float) -> tuple[HealthCheck, ...]:
         del timeout_seconds
-        return (HealthCheck(name="tunnel", ok=True, detail="ok"),)
+        self.health_calls += 1
+        # The candidate (pid 999) must pass the health gate before the drain; only
+        # the old child (pid 111) is controlled by `healthy_after_resume`.
+        ok = self._healthy_after_resume or child.pid != 111
+        return (HealthCheck(name="tunnel", ok=ok, detail="ok" if ok else "down"),)
 
 
 class _Control:
-    def __init__(self) -> None:
+    def __init__(self, *, resume_ok: bool = True) -> None:
         self.commands: list[str] = []
+        self._resume_ok = resume_ok
 
     def request(self, request, *, timeout_seconds: float = 10.0):
         from repoforge.domain.runtime import ControlResponse
 
         del timeout_seconds
         self.commands.append(request.command.value)
-        return ControlResponse(1, True, request.correlation_id, "drained")
+        ok = self._resume_ok or request.command.value != "resume"
+        return ControlResponse(1, ok, request.correlation_id, "drained")
 
 
 class _Ids:
@@ -353,15 +363,15 @@ class _Ids:
         return "c" * 24
 
 
-def test_f007_handoff_abort_never_resumes_the_drained_old_child() -> None:
-    """An abort after a successful drain drops the old child without RESUME (F-007).
+def test_f007_handoff_abort_resumes_and_verifies_the_drained_old_child() -> None:
+    """An abort after a successful drain must RESUME and verify the old child (F-007).
 
-    The drain is not reversible: ``ControlCommand.RESUME`` exists in the protocol,
-    but the conflict-abort path only terminates the candidate and reports "old
-    child retained". A child that drained is not a child that serves: it may still
-    be alive yet refuse new work, which is a logical outage with a healthy-looking
-    process tree. The report must prove the old service was resumed, not just that
-    its pid was not killed.
+    The drain is not reversible by default: ``ControlCommand.RESUME`` exists in the
+    protocol, and the conflict-abort path must use it. A child that drained is not a
+    child that serves -- it may still be alive yet refuse new work, which is a
+    logical outage with a healthy-looking process tree. The fix sends RESUME,
+    proves the old child is alive and healthy again, and only then retires the
+    candidate.
     """
     store = InMemoryWorkerBindingStore()
     # A prior generation's worker that survives termination: the handoff must fail
@@ -402,10 +412,59 @@ def test_f007_handoff_abort_never_resumes_the_drained_old_child() -> None:
     )
 
     assert result.status == "aborted"
-    assert control.commands == ["drain"]
-    # RESUME exists in the protocol but is never sent: the old child was drained
-    # and never told to serve again.
-    assert "resume" not in control.commands
+    # The drained old child was told to serve again and then health-verified.
+    assert control.commands == ["drain", "resume"]
+    assert tunnel.health_calls >= 1
+    assert tunnel.terminated == [999]
+
+
+def test_f007_resume_failure_fails_closed() -> None:
+    """If the drained old child cannot be resumed, the swap fails closed (F-007).
+
+    "Old child retained" must never be reported when the old service is not
+    provably serving again: a resume that is refused, or a child that comes back
+    unhealthy, means the runtime may be unavailable, and the caller must not assume
+    otherwise.
+    """
+    store = InMemoryWorkerBindingStore()
+    store.put(_op_binding("op-000000000000000000000001", generation=6))
+    reaper = RecordingProcessReaper(
+        outcome=ReapOutcome(attempted=True, reaped=False, still_alive=True, detail="survived")
+    )
+    reconciler = GenerationHandoffReconciler(bindings=store, reaper=reaper)
+    tunnel = _FakeTunnel(healthy_after_resume=False)
+    control = _Control()
+    coordinator = TunnelSeamSwapCoordinator(
+        tunnel=tunnel,
+        reconciler=reconciler,
+        sleeper=_Sleeper(),
+        control=control,
+        ids=_Ids(),
+        health_attempts=3,
+        health_interval_seconds=0.0,
+    )
+
+    result = coordinator.swap(
+        old_child=ChildProcess(
+            pid=111, process_identity=_SHA, started_at="2026-07-25T00:00:00+00:00"
+        ),
+        candidate_profile=TunnelProfile(
+            tunnel_id_fingerprint=_SHA,
+            profile="tunnel",
+            executable="rf",
+            executable_version="2.2.0",
+            mcp_argv=("rf", "serve"),
+        ),
+        env={},
+        log_path=Path("/tmp/tunnel.log"),
+        current_owner=OwnerIdentity(server_pid=222, server_start_token="tok", generation=7),
+        old_surface_hash="old",
+        new_surface_hash="new",
+    )
+
+    assert result.status == "fail_closed"
+    assert "do not assume the runtime is available" in result.detail
+    assert control.commands == ["drain", "resume"]
     assert tunnel.terminated == [999]
 
 
