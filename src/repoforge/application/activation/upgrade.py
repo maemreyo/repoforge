@@ -203,7 +203,7 @@ class UpgradeService:
             )
         commit_sha = state.head_sha
 
-        artifact = self._builder.build(worktree)
+        artifact = self._builder.build(worktree, commit_sha=commit_sha)
         destination = self._store.release_path(commit_sha)
         # Releases are immutable: only install when this commit is not already present
         # with identical bits (reserve_release raises on a fingerprint conflict).
@@ -237,6 +237,7 @@ class UpgradeService:
                 tool_surface_hash=smoke.tool_surface_hash,
                 contract_identity=smoke.contract_identity,
                 source_worktree=str(worktree),
+                source_digest=artifact.source_digest,
                 built_at=self._clock.now_iso(),
                 branch=state.branch,
                 subject=state.subject,

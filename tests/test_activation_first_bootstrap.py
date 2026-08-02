@@ -41,11 +41,13 @@ class _Inspector:
 
 
 class _Builder:
-    def build(self, worktree: Path) -> BuildArtifact:
+    def build(self, worktree: Path, *, commit_sha: str) -> BuildArtifact:
+        del commit_sha
         return BuildArtifact(
             wheel_path=worktree / "wheel.whl",
             build_fingerprint=_FINGERPRINT,
             package_version="2.2.0",
+            source_digest="c" * 64,
         )
 
 
