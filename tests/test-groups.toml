@@ -459,6 +459,7 @@ source_globs = [
   "src/repoforge/domain/verification_steps.py",
   "src/repoforge/benchmark/**",
   "scripts/run_test_shards.py",
+  "scripts/run_compatibility_tests.py",
   "scripts/select_affected_tests.py",
   "scripts/test_catalog.py",
   "scripts/verification_artifact.py",
@@ -471,6 +472,7 @@ source_globs = [
 ]
 test_files = [
   "tests/test_conflict_marker_gate.py",
+  "tests/test_ci_verification_topology.py",
   "tests/test_coverage_map_reuse.py",
   "tests/test_parallel_test_runner.py",
   "tests/test_select_affected_tests.py",
