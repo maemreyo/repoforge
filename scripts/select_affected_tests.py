@@ -613,6 +613,8 @@ def _run_in_lanes(
             )
         )
         returncode = returncode or completed.returncode
+        if returncode != 0:
+            return returncode, tuple(timings)
     if parallel:
         print(f"[select-affected-tests] xdist lane: {len(parallel)} test files")
         started = time.monotonic()

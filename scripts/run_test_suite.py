@@ -180,7 +180,9 @@ def run(
         timings.append(
             LaneTiming(name, len(files), (time.monotonic() - started) * 1_000, returncode)
         )
-        failed = returncode != 0 or failed
+        if returncode != 0:
+            failed = True
+            break
 
     outcome = 1 if failed else 0
     if outcome == 0 and resolved_coverage_dir is not None:

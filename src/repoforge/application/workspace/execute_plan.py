@@ -518,7 +518,7 @@ class WorkspacePlanExecutor:
         cache = self._cache_store()
         for ordinal, stage in enumerate(selected):
             self._check_cancelled(operation_id, token)
-            self.plan_service.require_current(plan)
+            self.plan_service.require_local_binding(plan)
             self.operations.progress(
                 operation_id,
                 phase=f"stage-{ordinal + 1}",

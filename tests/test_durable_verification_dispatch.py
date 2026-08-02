@@ -111,7 +111,7 @@ def test_public_background_profile_admits_queued_work_without_daemon_closure(tmp
     result = service.workspace_verify(
         workspace_id,
         mode="profile",
-        profile_name="quick",
+        profile_name="full",
         background=True,
     )
 
@@ -163,7 +163,7 @@ def test_public_background_diagnostic_is_durable_and_preserves_selectors(tmp_pat
 @pytest.mark.parametrize(
     ("mode", "arguments"),
     [
-        ("profile", {"profile_name": "quick"}),
+        ("profile", {"profile_name": "full"}),
         (
             "diagnostic",
             {
@@ -230,7 +230,7 @@ def test_foreground_profile_only_bounded_waits_on_durable_operation(
     result = service.workspace_verify(
         workspace_id,
         mode="profile",
-        profile_name="quick",
+        profile_name="full",
         background=False,
         artifact_output_path=artifact_path,
     )
@@ -259,7 +259,7 @@ def test_public_cancel_terminalizes_queued_work_and_is_idempotent(tmp_path) -> N
     dispatched = service.workspace_verify(
         workspace_id,
         mode="profile",
-        profile_name="quick",
+        profile_name="full",
         background=True,
     )
     operation_id = dispatched["operation"]["operation_id"]

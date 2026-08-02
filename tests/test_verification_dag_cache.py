@@ -417,9 +417,9 @@ def _audit_count(env: ForgeEnvironment, action: str) -> int:
     return sum(record.get("action") == action for record in records)
 
 
-def test_plan_executor_reuses_only_read_only_iteration_stage_and_always_runs_final(
+def _accepted_cache_plan(
     forge_env: ForgeEnvironment,
-) -> None:
+) -> tuple[CodingService, ManualBackgroundTaskRunner, str, dict[str, object]]:
     service, runner = _cache_service(forge_env)
     workspace_id = service.workspace_create("demo", "cache integration")["workspace_id"]
     current = service.workspace_read_file(workspace_id, "hello.txt")
@@ -435,6 +435,62 @@ def test_plan_executor_reuses_only_read_only_iteration_stage_and_always_runs_fin
         plan["plan_id"],
         task_id="task-cache-integration",
     )
+    return service, runner, workspace_id, plan
+
+
+def test_plan_execution_collects_rich_currency_once_then_rechecks_local_binding_per_stage(
+    forge_env: ForgeEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, runner, workspace_id, plan = _accepted_cache_plan(forge_env)
+    plan_service = service._plan_executor.plan_service
+    rich_checks = 0
+    local_checks = 0
+
+    def rich_check(_plan: object) -> None:
+        nonlocal rich_checks
+        rich_checks += 1
+
+    def local_check(_plan: object) -> None:
+        nonlocal local_checks
+        local_checks += 1
+
+    monkeypatch.setattr(plan_service, "require_current", rich_check)
+    monkeypatch.setattr(plan_service, "require_local_binding", local_check, raising=False)
+
+    admitted = service.workspace_execute_plan(workspace_id, str(plan["plan_id"]), through="full")
+    runner.run(admitted["operation_id"])
+
+    assert rich_checks == 1
+    assert local_checks == 2
+
+
+def test_plan_local_binding_recheck_rejects_workspace_mutation(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service, _runner, workspace_id, plan = _accepted_cache_plan(forge_env)
+    plan_service = service._plan_executor.plan_service
+    accepted = plan_service.read_accepted(workspace_id, str(plan["plan_id"]))
+    plan_service.require_local_binding(accepted)
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "mutated after acceptance\n",
+        current["sha256"],
+    )
+
+    with pytest.raises(RepoForgeError) as stale:
+        plan_service.require_local_binding(accepted)
+
+    assert stale.value.code is ErrorCode.STATE_STALE
+    assert "workspace_fingerprint" in stale.value.details["stale_reasons"]
+
+
+def test_plan_executor_reuses_only_read_only_iteration_stage_and_always_runs_final(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service, runner, workspace_id, plan = _accepted_cache_plan(forge_env)
     assert [stage["target"] for stage in plan["ordered_stages"]] == ["cache-smoke", "full"]
 
     first = service.workspace_execute_plan(workspace_id, plan["plan_id"], through="iteration")

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,6 +21,46 @@ def _load_selector_module() -> Any:
 
 
 selector = _load_selector_module()
+
+
+def test_lane_runner_stops_before_parallel_lane_when_serial_lane_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "serial",
+                source_globs=(),
+                test_files=("tests/test_serial.py",),
+                parallel=False,
+            ),
+            _group(
+                "parallel",
+                source_globs=(),
+                test_files=("tests/test_parallel.py",),
+            ),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(selector.subprocess, "run", run)
+
+    returncode, timings = selector._run_in_lanes(
+        tmp_path,
+        ("tests/test_serial.py", "tests/test_parallel.py"),
+        manifest,
+    )
+
+    assert returncode == 1
+    assert len(calls) == 1
+    assert "tests/test_serial.py" in calls[0]
+    assert "tests/test_parallel.py" not in calls[0]
+    assert [timing.name for timing in timings] == ["serial"]
 
 
 def _group(

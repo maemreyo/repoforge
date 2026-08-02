@@ -136,3 +136,39 @@ def test_full_runner_writes_lane_failure_evidence(
     assert returncode == 1
     assert payload["intent"] == "full"
     assert payload["lanes"][0]["returncode"] == 1
+
+
+def test_full_runner_stops_before_parallel_lane_when_serial_lane_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serial_file = tmp_path / "tests" / "test_serial.py"
+    parallel_file = tmp_path / "tests" / "test_parallel.py"
+    serial_file.parent.mkdir()
+    for path in (serial_file, parallel_file):
+        path.write_text("def test_one(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner_module,
+        "load_lane_plan",
+        lambda _root: runner_module.LanePlan(
+            serial=(serial_file,),
+            parallel=(parallel_file,),
+        ),
+    )
+    calls: list[str] = []
+
+    def run_lane(_root, _coverage_dir, name, _files, *, workers):
+        del workers
+        calls.append(name)
+        return 1 if name == "serial" else 0
+
+    monkeypatch.setattr(runner_module, "_run_lane", run_lane)
+    monkeypatch.setattr(runner_module, "_head_sha", lambda _root: "a" * 40)
+    report = tmp_path / "full-report.json"
+
+    returncode = runner_module.run(tmp_path, None, 3, report_path=report)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert returncode == 1
+    assert calls == ["serial"]
+    assert [lane["name"] for lane in payload["lanes"]] == ["serial"]
