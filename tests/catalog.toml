@@ -445,9 +445,18 @@ platforms = ["linux", "macos"]
 python_versions = ["3.10", "3.11", "3.12", "3.13"]
 cost = "large"
 
+[capabilities.ticket_graph_domain]
+source_globs = ["src/repoforge/application/tickets/__init__.py", "src/repoforge/application/tickets/graph.py", "src/repoforge/application/tickets/live.py", "src/repoforge/application/tickets/readiness.py", "src/repoforge/application/repository/issue_graph_proposal.py", "src/repoforge/domain/issue_graph_proposal.py", "src/repoforge/domain/tickets.py", "scripts/validate_ticket_graph.py", "docs/roadmaps/**"]
+test_files = ["tests/test_issue_graph_proposals.py", "tests/test_ticket_graph.py", "tests/test_ticket_readiness.py"]
+isolation = "pure"
+resources = []
+platforms = ["linux", "macos"]
+python_versions = ["3.10", "3.11", "3.12", "3.13"]
+cost = "medium"
+
 [capabilities.ticket_graph_release_e2e]
-source_globs = ["src/repoforge/application/tickets/**", "src/repoforge/application/repository/issue_graph_proposal.py", "src/repoforge/application/repository/issue_graph_publication.py", "src/repoforge/adapters/github/gh_cli.py", "src/repoforge/adapters/github/ticket_graph.py", "src/repoforge/adapters/github/ticket_project*.py", "src/repoforge/domain/issue_graph_proposal.py", "src/repoforge/domain/issue_graph_publication.py", "src/repoforge/domain/ticket_sync.py", "src/repoforge/domain/tickets.py", "src/repoforge/adapters/persistence/json_issue_graph_proposal_store.py", "src/repoforge/adapters/persistence/json_issue_graph_publication_store.py", "scripts/validate_ticket_graph.py", "docs/roadmaps/**"]
-test_files = ["tests/test_github_ticket_graph_adapter.py", "tests/test_github_ticket_project_adapter.py", "tests/test_issue_graph_proposals.py", "tests/test_issue_graph_publication.py", "tests/test_issue_graph_publication_adapter.py", "tests/test_issue_graph_publication_executor.py", "tests/test_issue_graph_workflow.py", "tests/test_repo_issue_graph_tools.py", "tests/test_ticket_graph.py", "tests/test_ticket_project_sync.py", "tests/test_ticket_readiness.py", "tests/test_ticket_sync_cli.py"]
+source_globs = ["src/repoforge/application/tickets/project_sync.py", "src/repoforge/application/repository/issue_graph_publication.py", "src/repoforge/adapters/github/gh_cli.py", "src/repoforge/adapters/github/ticket_graph.py", "src/repoforge/adapters/github/ticket_project*.py", "src/repoforge/domain/issue_graph_publication.py", "src/repoforge/domain/ticket_sync.py", "src/repoforge/adapters/persistence/json_issue_graph_proposal_store.py", "src/repoforge/adapters/persistence/json_issue_graph_publication_store.py"]
+test_files = ["tests/test_github_ticket_graph_adapter.py", "tests/test_github_ticket_project_adapter.py", "tests/test_issue_graph_publication.py", "tests/test_issue_graph_publication_adapter.py", "tests/test_issue_graph_publication_executor.py", "tests/test_issue_graph_workflow.py", "tests/test_repo_issue_graph_tools.py", "tests/test_ticket_project_sync.py", "tests/test_ticket_sync_cli.py"]
 isolation = "exclusive:ticket_graph_release_e2e"
 resources = ["ticket_graph_release_e2e"]
 platforms = ["linux", "macos"]
@@ -456,7 +465,7 @@ cost = "large"
 
 [capabilities.verification_diagnostics]
 source_globs = ["src/repoforge/application/diagnostics/**", "src/repoforge/application/workspace/diagnostic_parser.py", "src/repoforge/application/workspace/diagnostic_selector.py", "src/repoforge/application/workspace/format_changed.py", "src/repoforge/application/workspace/run_adhoc.py", "src/repoforge/application/workspace/run_diagnostic.py", "src/repoforge/application/workspace/run_profile.py", "src/repoforge/application/workspace/snapshot.py", "src/repoforge/application/workspace/verify.py", "src/repoforge/domain/adhoc.py", "src/repoforge/domain/diagnostic_packs.py", "src/repoforge/domain/diagnostics.py", "src/repoforge/domain/failed_selectors.py", "src/repoforge/domain/profile_drift.py", "src/repoforge/domain/syntax_diagnostics.py", "src/repoforge/domain/verification.py", "src/repoforge/domain/workspace_snapshot.py", "src/repoforge/domain/verification_steps.py", "src/repoforge/benchmark/**", "scripts/run_test_shards.py", "scripts/run_compatibility_tests.py", "scripts/select_affected_tests.py", "scripts/test_catalog.py", "scripts/verification_artifact.py", "scripts/check_release_contracts.py", "scripts/check_conflict_markers.py", "scripts/run_v2_release_gates.py", "scripts/v2_release_reference.py", "tests/test-groups.toml", "tests/catalog.toml"]
-test_files = ["tests/test_conflict_marker_gate.py", "tests/test_ci_verification_topology.py", "tests/test_coverage_map_reuse.py", "tests/test_parallel_test_runner.py", "tests/test_select_affected_tests.py", "tests/test_syntax_diagnostics.py", "tests/test_test_catalog.py", "tests/test_v2_benchmark_harness.py", "tests/test_verification_artifact.py", "tests/test_workspace_diagnostics.py"]
+test_files = ["tests/test_conflict_marker_gate.py", "tests/test_ci_verification_topology.py", "tests/test_coverage_map_reuse.py", "tests/test_parallel_test_runner.py", "tests/test_select_affected_tests.py", "tests/test_syntax_diagnostics.py", "tests/test_test_catalog.py", "tests/test_ticket_graph_resource_isolation.py", "tests/test_v2_benchmark_harness.py", "tests/test_verification_artifact.py", "tests/test_workspace_diagnostics.py"]
 isolation = "pure"
 resources = []
 platforms = ["linux", "macos"]
