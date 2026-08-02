@@ -405,8 +405,10 @@ def _boolean(value: Any, default: bool, context: str) -> bool:
 def _optional_sha256_digest(value: Any, context: str) -> str | None:
     if value is None or value == "":
         return None
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdefABCDEF" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdefABCDEF" for character in value)
     ):
         raise ConfigError(f"{context} must be a 64-character SHA-256 hex digest")
     return value.lower()

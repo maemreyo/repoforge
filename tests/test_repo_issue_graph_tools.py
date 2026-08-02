@@ -1061,7 +1061,9 @@ def test_observed_age_ms_clamps_negative_and_rejects_skew() -> None:
 
 def test_negative_cache_age_ms_treated_as_miss(tmp_path: Path) -> None:
     clock = FixedClock("2026-01-01T00:00:00+00:00")
-    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-02T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-02T00:00:00+00:00"
+    )
     gateway = CountingTicketGraphGateway(fresh)
     ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
 
@@ -1105,7 +1107,9 @@ def test_graph_cache_fails_closed_without_pinned_authority(tmp_path: Path) -> No
         {"demo": RepositoryConfig("demo", repo_path, ticket_graph=source)},
     )
     clock = FixedClock("2026-01-01T00:00:00+00:00")
-    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
     gateway = CountingTicketGraphGateway(fresh)
     locks = InMemoryLockManager()
     audit = JsonlAuditSink(state_root, clock)
@@ -1154,7 +1158,9 @@ def test_graph_cache_digest_mismatch_is_a_miss(tmp_path: Path) -> None:
     """Rotating the pinned authority digest invalidates every prior cache entry
     instead of serving private evidence under the wrong credential context."""
     clock = FixedClock("2026-01-01T00:00:00+00:00")
-    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
     gateway = CountingTicketGraphGateway(fresh)
     ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
     cached_snapshot = _single_node_snapshot(
@@ -1169,9 +1175,7 @@ def test_graph_cache_digest_mismatch_is_a_miss(tmp_path: Path) -> None:
         now_epoch=ctx.now_epoch(),
     )
 
-    _, cache_hit, cache_context = read_github_ticket_snapshot(
-        ctx, repo, root_issue=1, fresh=False
-    )
+    _, cache_hit, cache_context = read_github_ticket_snapshot(ctx, repo, root_issue=1, fresh=False)
 
     assert cache_hit is False
     assert cache_context["miss_reason"] == "bindings_mismatch"
@@ -1182,7 +1186,9 @@ def test_graph_cache_hit_requires_matching_pinned_authority(tmp_path: Path) -> N
     """A cache entry pinned to the current authority digest and fresh under the
     TTL is served without provider traffic."""
     clock = FixedClock("2026-01-01T00:00:00+00:00")
-    fresh = _single_node_snapshot(repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00")
+    fresh = _single_node_snapshot(
+        repository_slug="owner/demo", observed_at="2026-01-01T00:00:00+00:00"
+    )
     gateway = CountingTicketGraphGateway(fresh)
     ctx, repo, source = _graph_context_with_cache(tmp_path, clock=clock, gateway=gateway)
     cached_snapshot = _single_node_snapshot(

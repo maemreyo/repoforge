@@ -812,8 +812,7 @@ def test_subissue_missing_repository_fails_closed(tmp_path: Path) -> None:
     assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is False
     assert 1 in coverage[GraphEvidenceCapability.SUB_ISSUES].unavailable
     assert any(
-        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING"
-        and diagnostic.issue_number == 1
+        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING" and diagnostic.issue_number == 1
         for diagnostic in snapshot.diagnostics
     )
 
@@ -871,8 +870,7 @@ def test_repository_missing_name_with_owner_fails_closed(tmp_path: Path) -> None
     assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is False
     assert 1 in coverage[GraphEvidenceCapability.SUB_ISSUES].unavailable
     assert any(
-        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING"
-        and diagnostic.issue_number == 1
+        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING" and diagnostic.issue_number == 1
         for diagnostic in snapshot.diagnostics
     )
 
@@ -903,8 +901,7 @@ def test_repository_name_with_owner_wrong_type_fails_closed(tmp_path: Path) -> N
     assert coverage[GraphEvidenceCapability.SUB_ISSUES].complete is False
     assert 1 in coverage[GraphEvidenceCapability.SUB_ISSUES].unavailable
     assert any(
-        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING"
-        and diagnostic.issue_number == 1
+        diagnostic.code == "EDGE_REPOSITORY_IDENTITY_MISSING" and diagnostic.issue_number == 1
         for diagnostic in snapshot.diagnostics
     )
 
