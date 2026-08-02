@@ -201,6 +201,56 @@ def test_store_quarantine_of_a_missing_record_returns_none(tmp_path: Path) -> No
     assert store.quarantine_record(_WORKER_ID, reason="x") is None
 
 
+def test_quarantine_writes_the_receipt_before_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt is durable before the bytes move (F-011).
+
+    A crash after the receipt but before the move leaves an attempted-quarantine
+    receipt and an untouched active record -- recoverable by re-running. The old
+    ordering (move first, receipt second) could strand quarantined bytes with no
+    evidence at all.
+    """
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+    real_move = store._records.move_to_quarantine
+    receipt_existed_at_move: list[bool] = []
+
+    def spy(safe_id: str):
+        receipt_path = store.quarantine_root / f"{safe_id}.receipt.json"
+        receipt_existed_at_move.append(receipt_path.is_file())
+        return real_move(safe_id)
+
+    monkeypatch.setattr(store._records, "move_to_quarantine", spy)
+
+    receipt = store.quarantine_record(_WORKER_ID, reason="operator repair")
+
+    assert receipt is not None
+    assert receipt_existed_at_move == [True]
+
+
+def test_quarantine_move_failure_removes_the_receipt_and_keeps_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed move leaves no false receipt and never loses the source bytes."""
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+
+    def fail_move(safe_id: str):
+        del safe_id
+        raise OSError("simulated crash during the move")
+
+    monkeypatch.setattr(store._records, "move_to_quarantine", fail_move)
+
+    with pytest.raises(OSError, match="simulated crash"):
+        store.quarantine_record(_WORKER_ID, reason="operator repair")
+
+    # No false "quarantined at <path>" evidence survives, and the active record
+    # is untouched -- the operator can re-run or repair.
+    assert store.list_quarantined() == ()
+    assert store.get(_WORKER_ID) is not None
+
+
 def test_store_rejects_an_unknown_worker_id(tmp_path: Path) -> None:
     store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     assert store.get("worker-ffffffffffff") is None

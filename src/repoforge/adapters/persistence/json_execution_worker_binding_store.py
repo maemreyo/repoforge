@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -244,12 +245,18 @@ class JsonExecutionWorkerBindingStore:
         Never deletes: the bytes are moved (under the record lock) to the quarantine
         directory and a receipt records where they went, the content digest, why, and
         the pid they described when the metadata was parseable (#424).
+
+        The receipt is written BEFORE the move (F-011): a crash between the two can
+        then never leave quarantined bytes with no evidence of what/why they were
+        set aside -- the worst case is a receipt whose move never happened, which a
+        re-run completes and overwrites. If the move itself fails, the receipt is
+        removed so no false "quarantined at <path>" claim survives.
         """
         info = self._probe_record(worker_id)
         if info is None:
             return None
         safe_id = str(info["worker_id"])
-        target = self._records.move_to_quarantine(safe_id)
+        target = self.quarantine_root / f"{safe_id}.json"
         raw_pid = info["pid"]
         receipt = ExecutionWorkerQuarantineReceipt(
             worker_id=safe_id,
@@ -262,11 +269,31 @@ class JsonExecutionWorkerBindingStore:
         )
         validate_execution_worker_quarantine_receipt(receipt)
         receipt_path = target.parent / f"{safe_id}.receipt.json"
-        receipt_path.write_text(
-            json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        self._write_quarantine_receipt(receipt_path, receipt)
+        try:
+            self._records.move_to_quarantine(safe_id)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                receipt_path.unlink()
+            raise
         return receipt
+
+    @staticmethod
+    def _write_quarantine_receipt(path: Path, receipt: ExecutionWorkerQuarantineReceipt) -> None:
+        """Persist the receipt durably (atomic replace + fsync) before the move."""
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload = json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n"
+        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            with tmp.open("wb") as handle:
+                handle.write(payload.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
     def list_quarantined(self) -> tuple[ExecutionWorkerQuarantineReceipt, ...]:
         """Every durable quarantine receipt, oldest first."""
