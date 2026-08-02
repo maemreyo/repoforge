@@ -481,6 +481,37 @@ class SupervisorRestarter:
                 detail=preflight_detail,
                 reclamation=preflight_evidence,
             )
+        plan_digest = str(preflight_evidence["registry_digest"]) if preflight_evidence else None
+
+        # F-004: the plan is fenced to the registry snapshot it was read from. A lease
+        # that appeared or transitioned since the preflight could become a blocker once
+        # the incumbent is stopped, so before ANY stop the registry is re-scanned and a
+        # changed digest refuses the handoff -- the healthy runtime stays up and the
+        # caller replans instead of stopping on stale evidence.
+        verify_ok, verify_detail, verify_evidence = self.preflight_reclaim(departing_release)
+        if not verify_ok:
+            return RestartOutcome(
+                ok=False,
+                detail=(
+                    "handoff registry changed since the preflight plan and cannot "
+                    f"proceed ({verify_detail}); replan before stopping the incumbent"
+                ),
+                reclamation=verify_evidence,
+            )
+        if (
+            plan_digest is not None
+            and verify_evidence is not None
+            and str(verify_evidence.get("registry_digest")) != plan_digest
+        ):
+            return RestartOutcome(
+                ok=False,
+                detail=(
+                    "handoff registry changed since the preflight plan (registry "
+                    "digest changed); refusing to stop the incumbent on stale "
+                    "evidence -- replan before stopping"
+                ),
+                reclamation=verify_evidence,
+            )
 
         # Prefer the OS process manager so an upgrade never orphans the supervisor from
         # launchd. `kickstart -k` stops and restarts the registered job in one step.

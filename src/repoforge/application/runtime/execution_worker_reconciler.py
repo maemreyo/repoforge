@@ -33,6 +33,7 @@ Terminal bindings (``reclaimed``, ``already_gone``) are history and never reaped
 from __future__ import annotations
 
 import contextlib
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -78,6 +79,11 @@ class ExecutionWorkerReclamationReport:
     pids: tuple[int, ...]
     release_shas: tuple[str, ...]
     detail: str
+    #: Fence token (F-004): a digest of the live-concern lease set seen by this pass.
+    #: A preflight caller compares it to a re-scan immediately before stopping the
+    #: incumbent; a change means a lease appeared or transitioned since the plan,
+    #: so the handoff must be replanned, never executed against stale evidence.
+    registry_digest: str = ""
 
     @property
     def evidence_complete(self) -> bool:
@@ -113,6 +119,7 @@ class ExecutionWorkerReclamationReport:
             "unreadable_record_ids": list(self.unreadable_record_ids),
             "evidence_complete": self.evidence_complete,
             "blocker_code": self.blocker_code,
+            "registry_digest": self.registry_digest,
             "worker_ids": list(self.worker_ids),
             "pids": list(self.pids),
             "release_shas": list(self.release_shas),
@@ -169,6 +176,7 @@ class ExecutionWorkerReconciler:
             with contextlib.suppress(Exception):
                 self._bindings.collect_terminal()
         page = self._bindings.list_page()
+        registry_digest = _registry_digest(page.records)
         for binding in page.records:
             if binding.state not in _ACTIVE_STATES:
                 continue
@@ -227,6 +235,7 @@ class ExecutionWorkerReconciler:
             worker_ids=tuple(worker_ids),
             pids=tuple(pids),
             release_shas=tuple(release_shas),
+            registry_digest=registry_digest,
             detail=(
                 f"{prefix}reconciled {inspected} live execution worker binding(s) "
                 f"(scan complete: {page.scan_complete}, unreadable records: "
@@ -281,3 +290,19 @@ class ExecutionWorkerReconciler:
     def _mark(self, worker_id: str, state: str) -> None:
         with contextlib.suppress(Exception):
             self._bindings.update_state(worker_id, state)
+
+
+def _registry_digest(records: tuple[ExecutionWorkerBinding, ...]) -> str:
+    """A fence digest of the live-concern lease set.
+
+    Only live concerns are digested: those are what can block a replacement, so a
+    change in any of them (a new worker registered, a state transition, a removal)
+    makes the preflight fence stale. Metadata-only churn on terminal history is
+    deliberately excluded -- it cannot create a blocker.
+    """
+    entries = sorted(
+        f"{binding.worker_id}:{binding.state}"
+        for binding in records
+        if binding.state in _ACTIVE_STATES
+    )
+    return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()

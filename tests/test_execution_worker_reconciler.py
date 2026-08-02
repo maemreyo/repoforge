@@ -199,6 +199,39 @@ def test_reconcile_leaves_workers_of_a_live_owner_alone() -> None:
     assert reaper.calls == []
 
 
+def test_registry_digest_changes_when_the_lease_set_changes() -> None:
+    """The fence digest must detect any live-concern change (F-004)."""
+    bindings = _Bindings(_binding())
+    reaper = _Reaper([])
+    owner = _Owner({4241})
+    command_lines = _CommandLines({4242: _EXECUTION_WORKER_ARGV})
+    tokens = _Tokens({4242: "worker-start-token"})
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=owner,
+        command_lines=command_lines,
+        tokens=tokens,
+    )
+
+    first = reconciler.reconcile(read_only=True)
+
+    # A second worker registered after the first scan must change the digest.
+    bindings.put(_binding(worker_id=_WORKER_OTHER, pid=4243, supervisor_pid=4244))
+    second = reconciler.reconcile(read_only=True)
+
+    assert first.registry_digest
+    assert second.registry_digest != first.registry_digest
+
+    # Terminal history does not participate: a collected terminal lease is not a
+    # live concern and must not invalidate the fence.
+    bindings = _Bindings(_binding(worker_id=_WORKER_OTHER, state="already_gone"))
+    base = reconciler.reconcile(read_only=True)
+    bindings.put(_binding(worker_id=_WORKER_OTHER, state="reclaimed"))
+    changed = reconciler.reconcile(read_only=True)
+    assert changed.registry_digest == base.registry_digest
+
+
 def test_reconcile_reaps_an_orphaned_execution_worker() -> None:
     bindings = _Bindings(_binding())
     reaper = _Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")])
