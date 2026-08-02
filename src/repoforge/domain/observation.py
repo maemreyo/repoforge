@@ -200,6 +200,12 @@ class EvidenceRequirement:
         required.  Comments and project overlay are not — they are only needed
         when the readiness or evolution semantics require them (the core F-001
         fix).
+
+        ``max_skew_ms`` is ``None`` until the full reader captures real
+        per-capability observation times.  Today's full-read path stamps every
+        capability with a single assembly-completion timestamp, so a non-None
+        skew bound would always read zero and falsely claim per-capability
+        skew enforcement.  Age is still enforced against those stamps.
         """
         return cls(
             required_capabilities=(
@@ -208,7 +214,7 @@ class EvidenceRequirement:
                 GraphEvidenceCapability.DEPENDENCIES,
             ),
             max_age_ms=300_000,
-            max_skew_ms=10_000,
+            max_skew_ms=None,
         )
 
 

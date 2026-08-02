@@ -14,15 +14,16 @@ Fail-closed rules (F-001):
 - a truncated capability is insufficient for every candidate (global);
 - an issue listed in a capability's ``unavailable`` is insufficient for that
   capability only (localized);
-- ``max_age_ms`` / ``max_skew_ms`` are enforced against the per-capability
-  observation stamps when a ``now_epoch`` is supplied.
+- ``max_age_ms`` / ``max_skew_ms`` are enforced only against stamps whose
+  ``capability`` is in the requirement's required set — unrelated stamps
+  (comments, project overlay, ...) never participate in age or skew.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from ...domain.observation import EvidenceRequirement, EvidenceVerdict
+from ...domain.observation import EvidenceRequirement, EvidenceVerdict, ObservationStamp
 from ...domain.tickets import GraphEvidenceCapability, TicketGraphSnapshot
 from .issue_graph_payloads import is_capability_complete_for_issue
 
@@ -37,6 +38,22 @@ def _stamp_epoch(observed_at: str) -> float | None:
     return parsed.timestamp()
 
 
+def _stamps_by_capability(
+    stamps: tuple[ObservationStamp, ...],
+) -> dict[GraphEvidenceCapability, ObservationStamp]:
+    """Map each capability to its stamp; later duplicates overwrite earlier ones.
+
+    Callers that need uniqueness must validate at the codec boundary.  The
+    evaluator takes the last stamp per capability so a well-formed snapshot
+    (one stamp each) is unambiguous.
+    """
+    by_capability: dict[GraphEvidenceCapability, ObservationStamp] = {}
+    for stamp in stamps:
+        if stamp.capability is not None:
+            by_capability[stamp.capability] = stamp
+    return by_capability
+
+
 def evaluate_candidate(
     snapshot: TicketGraphSnapshot | None,
     requirement: EvidenceRequirement,
@@ -47,8 +64,9 @@ def evaluate_candidate(
     """Whether one candidate issue has the evidence this operation needs.
 
     ``now_epoch`` enables ``max_age_ms`` / ``max_skew_ms`` enforcement against
-    the observation stamps; when it is ``None`` those bounds are not applied
-    (a caller that cannot supply a trusted clock must set them to ``None``).
+    the observation stamps of *required* capabilities only; when it is
+    ``None`` those bounds are not applied (a caller that cannot supply a
+    trusted clock must set them to ``None``).
     """
     if snapshot is None:
         return EvidenceVerdict(
@@ -74,21 +92,34 @@ def evaluate_candidate(
     ):
         missing.append(GraphEvidenceCapability.ISSUE)
 
-    stamp_epochs = [
-        epoch
-        for stamp in snapshot.observation_stamps
-        if (epoch := _stamp_epoch(stamp.observed_at)) is not None
-    ]
-    if stamp_epochs:
+    if requirement.max_age_ms is not None or requirement.max_skew_ms is not None:
+        stamps_by_capability = _stamps_by_capability(snapshot.observation_stamps)
+        required_epochs: list[tuple[GraphEvidenceCapability, float]] = []
+        for capability in requirement.required_capabilities:
+            stamp = stamps_by_capability.get(capability)
+            if stamp is None:
+                stale.append(capability)
+                continue
+            epoch = _stamp_epoch(stamp.observed_at)
+            if epoch is None:
+                stale.append(capability)
+                continue
+            required_epochs.append((capability, epoch))
+
         if requirement.max_age_ms is not None and now_epoch is not None:
-            oldest = min(stamp_epochs)
-            age_ms = (now_epoch - oldest) * 1000
-            if age_ms > requirement.max_age_ms:
-                stale.append(GraphEvidenceCapability.ISSUE)
-        if requirement.max_skew_ms is not None:
-            skew_ms = (max(stamp_epochs) - min(stamp_epochs)) * 1000
+            for capability, epoch in required_epochs:
+                age_ms = (now_epoch - epoch) * 1000
+                if age_ms > requirement.max_age_ms:
+                    stale.append(capability)
+
+        if requirement.max_skew_ms is not None and len(required_epochs) >= 2:
+            epochs = [epoch for _, epoch in required_epochs]
+            skew_ms = (max(epochs) - min(epochs)) * 1000
             if skew_ms > requirement.max_skew_ms:
-                stale.append(GraphEvidenceCapability.ISSUE)
+                oldest_epoch = min(epochs)
+                for capability, epoch in required_epochs:
+                    if epoch == oldest_epoch:
+                        stale.append(capability)
 
     unique_missing = list(dict.fromkeys(missing))
     unique_stale = list(dict.fromkeys(stale))
