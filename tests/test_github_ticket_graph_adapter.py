@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from conftest import create_forge_environment
 
-from repoforge.adapters.github.graph_decode import failed_capabilities
+from repoforge.adapters.github.graph_decode import classify_graphql_errors, failed_capabilities
 from repoforge.adapters.github.ticket_graph import CommandGitHubTicketGraphGateway
 from repoforge.application.service import CodingService
 from repoforge.config import (
@@ -19,6 +19,7 @@ from repoforge.config import (
 )
 from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import CommandError
+from repoforge.domain.observation import GraphQLErrorClassification
 from repoforge.domain.tickets import (
     GraphEvidenceCapability,
     TicketGraphError,
@@ -82,6 +83,10 @@ class GraphQLExecutor:
         self.partial_on_failure: bool = False
         self.project_failure: bool = False
         self.missing_without_error: set[int] = set()
+        #: Global GraphQL errors that are not attributable to any alias
+        #: (e.g. RATE_LIMITED without a path). Mixed with alias errors they
+        #: must make the whole batch fail closed (F-002).
+        self.global_errors: list[dict[str, object]] = []
         #: When True, local edge nodes missing an explicit `repository` are
         #: given the local slug so malformed-identity fixtures can opt out.
         self.inject_repository_identity: bool = True
@@ -184,12 +189,12 @@ class GraphQLExecutor:
             else:
                 data[alias] = {"issue": stripped}
         payload: dict[str, object] = {"data": data}
-        if errors:
-            payload["errors"] = errors
+        if errors or self.global_errors:
+            payload["errors"] = [*errors, *self.global_errors]
         return CommandResult(
             command,
             str(Path(".").resolve()),
-            1 if errors else 0,
+            1 if errors or self.global_errors else 0,
             json.dumps(payload),
             "",
             stdout_truncated=self.truncate_after_first and len(self.calls) > 1,
@@ -990,3 +995,87 @@ def test_high_fanout_unavailable_set_is_schema_bound(tmp_path: Path) -> None:
     service = CodingService(config, ticket_graphs=gateway)
     result = service.repo_issue_v2("demo", mode="graph", fresh=True)
     V2_TOOL_SPECS["repo_issue"].validate_output(result)
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review regressions (#411) — GraphQLErrorClassifier (F-002)
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_global_and_alias_errors_fail_the_whole_batch(tmp_path: Path) -> None:
+    """A response that mixes an attributable alias error with an
+    unattributable global error (no path, unknown alias, rate limit) must be
+    rejected entirely — the global error makes the whole payload's data
+    untrustworthy even though one alias failed cleanly.
+    """
+    executor = GraphQLExecutor(_fixture_issues())
+    executor.failing[2] = {"comments"}
+    executor.global_errors = [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]
+    gateway = _gateway(executor, tmp_path)
+
+    with pytest.raises(CommandError, match="GitHub GraphQL batch failed"):
+        gateway.read(tmp_path, GitHubTicketGraphConfig(root_issue=1), max_items=20)
+
+
+def test_mixed_global_and_alias_errors_reject_unknown_alias(tmp_path: Path) -> None:
+    """An alias-shaped path outside the sent alias count is unattributable and
+    must fail the batch like any other global error (F-002 boundary)."""
+    executor = GraphQLExecutor(_fixture_issues())
+    executor.global_errors = [{"path": ["r99", "issue"], "message": "unknown alias"}]
+    gateway = _gateway(executor, tmp_path)
+
+    with pytest.raises(CommandError, match="GitHub GraphQL batch failed"):
+        gateway.read(tmp_path, GitHubTicketGraphConfig(root_issue=1), max_items=20)
+
+
+def test_pure_alias_errors_still_degrade_per_alias(tmp_path: Path) -> None:
+    """Only-alias errors keep partial success: one failing capability on one
+    issue must not erase complete evidence for unrelated aliases."""
+    executor = GraphQLExecutor(_fixture_issues())
+    executor.failing[3] = {"comments"}
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(tmp_path, GitHubTicketGraphConfig(root_issue=1), max_items=20)
+
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.COMMENTS].complete is False
+    assert coverage[GraphEvidenceCapability.ISSUE].complete is True
+    assert {node.number for node in snapshot.graph.nodes} == {1, 2, 3}
+
+
+def test_classify_graphql_errors_batch_and_by_alias() -> None:
+    batch, by_alias = classify_graphql_errors(
+        [
+            {"path": ["r0", "issue", "comments"], "message": "comments failed"},
+            {"path": ["r1", "issue"], "message": "core failed"},
+        ],
+        alias_count=3,
+    )
+    assert batch is GraphQLErrorClassification.ALIAS_CORE_FAILURE
+    assert by_alias["r0"] is GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE
+    assert by_alias["r1"] is GraphQLErrorClassification.ALIAS_CORE_FAILURE
+
+
+def test_classify_graphql_errors_global_beats_alias() -> None:
+    batch, by_alias = classify_graphql_errors(
+        [
+            {"path": ["r0", "issue", "comments"], "message": "comments failed"},
+            {"type": "RATE_LIMITED", "message": "rate limit"},
+        ],
+        alias_count=2,
+    )
+    assert batch is GraphQLErrorClassification.GLOBAL_BATCH_FAILURE
+    assert by_alias == {}
+
+
+def test_classify_graphql_errors_empty_and_unknown_alias() -> None:
+    batch, by_alias = classify_graphql_errors([], alias_count=2)
+    assert batch is GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE
+    assert by_alias == {}
+
+    batch, by_alias = classify_graphql_errors(
+        [{"path": ["unknown", "issue"], "message": "not an alias"}],
+        alias_count=2,
+    )
+    assert batch is GraphQLErrorClassification.GLOBAL_BATCH_FAILURE
+    assert by_alias == {}

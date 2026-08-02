@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ...domain.observation import GraphQLErrorClassification
 from ...domain.tickets import GraphEvidenceCapability
 
 _MAX_BODY_CHARS = 200_000
@@ -22,6 +23,63 @@ _METADATA_LINE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?P<name>[A-Za-z ]+)\s*:\s*(?
 #: node without a valid repository can never be mapped onto a local issue
 #: number (silent cross-repository identity substitution).
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def classify_graphql_errors(
+    errors: list[dict[str, Any]],
+    alias_count: int,
+) -> tuple[GraphQLErrorClassification, dict[str, GraphQLErrorClassification]]:
+    """Strictly classify every error in one batched GraphQL response.
+
+    Returns ``(batch_classification, by_alias)``.  ``by_alias`` maps each
+    *known* alias (``r0``..``r{alias_count-1}``) to the worst classification
+    seen for it.  ``batch_classification`` is ``GLOBAL_BATCH_FAILURE`` when
+    any error cannot be attributed to a known alias (auth, schema, rate
+    limit, missing ``path``, unknown alias, or an alias index outside the
+    batch); otherwise it is the most severe alias classification present
+    (``ALIAS_CORE_FAILURE`` > ``ALIAS_CAPABILITY_FAILURE``).
+
+    F-002: a response that mixes an attributable alias error with an
+    unattributable global error must never be published as partial success —
+    the global error makes the whole payload's data untrustworthy.
+    """
+    if not errors:
+        return GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE, {}
+    by_alias: dict[str, GraphQLErrorClassification] = {}
+    batch: GraphQLErrorClassification = GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE
+    for error in errors:
+        if not isinstance(error, dict):
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        path = error.get("path")
+        if not isinstance(path, list) or not path or not isinstance(path[0], str):
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        alias = path[0]
+        if not (alias.startswith("r") and alias[1:].isdigit()):
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        alias_index = int(alias[1:])
+        if alias_index >= alias_count:
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        segments = [str(item) for item in path[1:]]
+        if "subIssues" in segments or "blockedBy" in segments or "comments" in segments:
+            classification = GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE
+        else:
+            classification = GraphQLErrorClassification.ALIAS_CORE_FAILURE
+        previous = by_alias.get(alias)
+        if previous is None or _classification_severity(classification) > _classification_severity(
+            previous
+        ):
+            by_alias[alias] = classification
+        if _classification_severity(classification) > _classification_severity(batch):
+            batch = classification
+    return batch, by_alias
+
+
+def _classification_severity(classification: GraphQLErrorClassification) -> int:
+    return {
+        GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE: 1,
+        GraphQLErrorClassification.ALIAS_CORE_FAILURE: 2,
+        GraphQLErrorClassification.GLOBAL_BATCH_FAILURE: 3,
+    }[classification]
 
 
 @dataclass(frozen=True, slots=True)

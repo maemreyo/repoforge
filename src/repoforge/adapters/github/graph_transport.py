@@ -17,6 +17,7 @@ from typing import Any
 
 from ...config import ServerConfig
 from ...domain.errors import CommandError
+from ...domain.observation import GraphQLErrorClassification
 from ...domain.tickets import (
     GITHUB_API_VERSION,
     CapabilityReadStat,
@@ -24,6 +25,7 @@ from ...domain.tickets import (
     TicketGraphReadStats,
 )
 from ...ports.command import CommandExecutor
+from .graph_decode import classify_graphql_errors
 
 _API_VERSION = GITHUB_API_VERSION
 #: Bounded ceiling for one batched GraphQL response. Graph reads are cached and
@@ -138,15 +140,17 @@ def run_graphql(
     if not isinstance(errors, list):
         errors = []
     alias_count = query.count("repository(owner:")
-    if result.returncode != 0 and not any(
-        isinstance(error, dict)
-        and isinstance(error.get("path"), list)
-        and error["path"]
-        and isinstance(error["path"][0], str)
-        and error["path"][0].startswith("r")
-        and error["path"][0][1:].isdigit()
-        and int(error["path"][0][1:]) < alias_count
-        for error in errors
-    ):
-        raise CommandError(f"GitHub GraphQL batch failed (exit {result.returncode})")
+    if result.returncode != 0:
+        if not errors:
+            # Error-free non-zero output is a transport failure: gh failed
+            # before returning a usable GraphQL payload, so there are no
+            # aliases to attribute anything to.
+            raise CommandError(f"GitHub GraphQL batch failed (exit {result.returncode})")
+        batch_classification, _ = classify_graphql_errors(errors, alias_count)
+        # A non-zero exit is tolerated only when every error is attributable
+        # to a known alias.  Any global / unattributed error (auth, schema,
+        # rate limit, unknown alias, missing path) makes the whole payload's
+        # data untrustworthy, so the batch fails closed (F-002).
+        if batch_classification is GraphQLErrorClassification.GLOBAL_BATCH_FAILURE:
+            raise CommandError(f"GitHub GraphQL batch failed (exit {result.returncode})")
     return payload, errors

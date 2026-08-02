@@ -497,6 +497,139 @@ def test_repo_issue_next_fails_closed_when_graph_evidence_is_incomplete(tmp_path
     ]
 
 
+def test_repo_issue_next_comments_gap_does_not_block_selectable_candidate(
+    tmp_path: Path,
+) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, status="Ready")
+    _write_manifest(environment.source, [program, ready])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
+                "evidence_complete": False,
+                "capability_coverage": [
+                    {
+                        "capability": "comments",
+                        "complete": False,
+                        "unavailable": [9],
+                        "truncated": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is True
+    assert [item["number"] for item in result["tickets"]] == [9]
+    assert result["diagnostics"] == []
+
+
+def test_repo_issue_next_project_gap_does_not_block_candidate_with_complete_metadata(
+    tmp_path: Path,
+) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, status="Ready")
+    _write_manifest(environment.source, [program, ready])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
+                "evidence_complete": False,
+                "capability_coverage": [
+                    {
+                        "capability": "project_overlay",
+                        "complete": False,
+                        "unavailable": [9],
+                        "truncated": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is True
+    assert [item["number"] for item in result["tickets"]] == [9]
+
+
+def test_repo_issue_next_dependency_gap_blocks_affected_candidate(tmp_path: Path) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])
+    ready = _node(9, status="Ready")
+    _write_manifest(environment.source, [program, ready])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {"3": {"state": "OPEN"}, "9": {"state": "OPEN"}},
+                "evidence_complete": False,
+                "capability_coverage": [
+                    {
+                        "capability": "dependencies",
+                        "complete": False,
+                        "unavailable": [9],
+                        "truncated": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is False
+    assert result["tickets"] == []
+    assert any(item["code"] == "GRAPH_EVIDENCE_INCOMPLETE" for item in result["diagnostics"])
+
+
+def test_repo_issue_next_partial_evidence_keeps_selectable_and_diagnoses_blocked(
+    tmp_path: Path,
+) -> None:
+    service, environment = _service(tmp_path)
+    program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9, 10])
+    blocked = _node(9, status="Ready")
+    selectable = _node(10, status="Ready")
+    _write_manifest(environment.source, [program, blocked, selectable])
+    environment.gh_state.write_text(
+        json.dumps(
+            {
+                "issues": {
+                    "3": {"state": "OPEN"},
+                    "9": {"state": "OPEN"},
+                    "10": {"state": "OPEN"},
+                },
+                "evidence_complete": False,
+                "capability_coverage": [
+                    {
+                        "capability": "dependencies",
+                        "complete": False,
+                        "unavailable": [9],
+                        "truncated": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.repo_issue_next("demo", limit=10)
+
+    assert result["valid"] is True
+    assert [item["number"] for item in result["tickets"]] == [10]
+    assert any(
+        item["code"] == "CANDIDATE_EVIDENCE_INSUFFICIENT" and item["issue_number"] == 9
+        for item in result["diagnostics"]
+    )
+
+
 def test_repo_issue_next_reports_diagnostics_for_an_invalid_manifest(tmp_path: Path) -> None:
     service, environment = _service(tmp_path)
     program = _node(3, ticket_type="program", status="In progress", parent=None, children=[9])

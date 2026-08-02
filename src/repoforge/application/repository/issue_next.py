@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...domain.observation import EvidenceRequirement
 from ...domain.tickets import (
     TicketDeliveryMetadata,
     TicketDiagnostic,
@@ -16,6 +17,7 @@ from ..context import ApplicationContext
 from ..tickets.graph import ticket_subtree_numbers, validate_ticket_graph
 from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
 from ..tickets.readiness import derive_ticket_readiness
+from .evidence_evaluator import evaluate_candidate
 from .issue_graph import (
     _cache_hit_read_stats,
     _incomplete_graph_diagnostic,
@@ -229,22 +231,6 @@ class RepositoryIssueNextReader:
             details["source"] = "github"
             details["cache_hit"] = cache_hit
             details["evidence_complete"] = snapshot.evidence_complete
-            if not snapshot.evidence_complete:
-                incomplete_diagnostic = _incomplete_graph_diagnostic(snapshot)
-                snapshot_diagnostics = [_diagnostic_payload(item) for item in snapshot.diagnostics]
-                details["valid"] = False
-                details["diagnostic_count"] = len(snapshot_diagnostics) + 1
-                details["ticket_count"] = 0
-                return result(
-                    snapshot,
-                    cache_hit,
-                    cache_context,
-                    valid=False,
-                    diagnostics=[*snapshot_diagnostics, incomplete_diagnostic],
-                    tickets=[],
-                    assessments=[],
-                    repairs=[],
-                )
             diagnostics = validate_ticket_graph(graph)
             if diagnostics:
                 details["valid"] = False
@@ -316,6 +302,32 @@ class RepositoryIssueNextReader:
             nodes = {node.number: node for node in graph.nodes}
             assessments = {item.number: item for item in report.assessments}
             recommended = [number for number in report.recommended if number in scope][: c.limit]
+            requirement = EvidenceRequirement.for_next_default()
+            verdicts = {
+                number: evaluate_candidate(snapshot, requirement, number) for number in recommended
+            }
+            selectable = [number for number in recommended if verdicts[number].sufficient]
+            blocked = [number for number in recommended if not verdicts[number].sufficient]
+            if not selectable and blocked:
+                # Every recommended candidate is missing required evidence
+                # (core issue, sub-issues, or dependencies). Fail closed with
+                # the same diagnostic the blanket gate produced, so a caller
+                # never sees an empty result that looks like "nothing ready".
+                incomplete_diagnostic = _incomplete_graph_diagnostic(snapshot)
+                snapshot_diagnostics = [_diagnostic_payload(item) for item in snapshot.diagnostics]
+                details["valid"] = False
+                details["diagnostic_count"] = len(snapshot_diagnostics) + 1
+                details["ticket_count"] = 0
+                return result(
+                    snapshot,
+                    cache_hit,
+                    cache_context,
+                    valid=False,
+                    diagnostics=[*snapshot_diagnostics, incomplete_diagnostic],
+                    tickets=[],
+                    assessments=[],
+                    repairs=[],
+                )
             tickets = [
                 {
                     **node_payload(nodes[number]),
@@ -324,7 +336,15 @@ class RepositoryIssueNextReader:
                         assessments[number], live_by_number[number].delivery
                     ),
                 }
-                for number in recommended
+                for number in selectable
+            ]
+            blocked_diagnostics = [
+                {
+                    "code": "CANDIDATE_EVIDENCE_INSUFFICIENT",
+                    "issue_number": number,
+                    "message": " ".join(verdicts[number].diagnostics),
+                }
+                for number in blocked
             ]
             assessment_payloads = [
                 _assessment_payload(item, live_by_number[item.number].delivery)
@@ -343,7 +363,7 @@ class RepositoryIssueNextReader:
                 cache_hit,
                 cache_context,
                 valid=True,
-                diagnostics=[],
+                diagnostics=blocked_diagnostics,
                 tickets=tickets,
                 assessments=assessment_payloads,
                 repairs=repairs,
