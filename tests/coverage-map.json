@@ -6824,6 +6824,12 @@
   "src/repoforge/application/repository/issue_graph_cache.py": [
     "tests/test_repo_issue_graph_tools.py"
   ],
+  "src/repoforge/application/repository/issue_graph_cache_bindings.py": [
+    "tests/test_repo_issue_graph_tools.py"
+  ],
+  "src/repoforge/application/repository/issue_graph_cache_codec.py": [
+    "tests/test_repo_issue_graph_tools.py"
+  ],
   "src/repoforge/application/repository/issue_graph_config.py": [
     "tests/test_github_ticket_graph_adapter.py",
     "tests/test_repo_issue_graph_tools.py"
