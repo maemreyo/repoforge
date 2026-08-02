@@ -63,6 +63,44 @@ def test_lane_runner_stops_before_parallel_lane_when_serial_lane_fails(
     assert [timing.name for timing in timings] == ["serial"]
 
 
+def test_lane_runner_writes_deterministic_junit_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "serial",
+                source_globs=(),
+                test_files=("tests/test_serial.py",),
+                parallel=False,
+            ),
+            _group(
+                "parallel",
+                source_globs=(),
+                test_files=("tests/test_parallel.py",),
+            ),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(selector.subprocess, "run", run)
+
+    returncode, _timings = selector._run_in_lanes(
+        tmp_path,
+        ("tests/test_serial.py", "tests/test_parallel.py"),
+        manifest,
+    )
+
+    assert returncode == 0
+    assert "--junitxml=.cache/verification/junit/affected-serial.xml" in calls[0]
+    assert "--junitxml=.cache/verification/junit/affected-parallel.xml" in calls[1]
+
+
 def _group(
     name: str,
     *,

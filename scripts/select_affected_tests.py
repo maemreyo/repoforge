@@ -46,6 +46,7 @@ DEFAULT_MANIFEST = Path("tests/test-groups.toml")
 DEFAULT_TESTS_DIR = Path("tests")
 DEFAULT_COVERAGE_MAP = Path("tests/coverage-map.json")
 DEFAULT_CATALOG = Path("tests/catalog.toml")
+JUNIT_DIR = Path(".cache/verification/junit")
 
 # Source paths that are Python modules under the package: a change here should
 # be selectable through the coverage map. One that is NOT in the map is a new or
@@ -595,14 +596,27 @@ def _run_in_lanes(
     serial_files = manifest.serial_files()
     serial = sorted(f for f in files if f in serial_files)
     parallel = sorted(f for f in files if f not in serial_files)
+    junit_dir = root / JUNIT_DIR
+    junit_dir.mkdir(parents=True, exist_ok=True)
 
     returncode = 0
     timings: list[LaneTiming] = []
     if serial:
         print(f"[select-affected-tests] serial lane: {len(serial)} test files")
+        junit_path = JUNIT_DIR / "affected-serial.xml"
+        print(f"[select-affected-tests] serial junit: {junit_path}")
         started = time.monotonic()
         completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", *serial], cwd=root, check=False
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                f"--junitxml={junit_path.as_posix()}",
+                *serial,
+            ],
+            cwd=root,
+            check=False,
         )
         timings.append(
             LaneTiming(
@@ -617,9 +631,22 @@ def _run_in_lanes(
             return returncode, tuple(timings)
     if parallel:
         print(f"[select-affected-tests] xdist lane: {len(parallel)} test files")
+        junit_path = JUNIT_DIR / "affected-parallel.xml"
+        print(f"[select-affected-tests] parallel junit: {junit_path}")
         started = time.monotonic()
         completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "-n", "3", "-q", *parallel], cwd=root, check=False
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-n",
+                "3",
+                "-q",
+                f"--junitxml={junit_path.as_posix()}",
+                *parallel,
+            ],
+            cwd=root,
+            check=False,
         )
         timings.append(
             LaneTiming(

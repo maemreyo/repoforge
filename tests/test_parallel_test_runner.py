@@ -47,6 +47,14 @@ def test_parallel_lane_runs_under_xdist_at_the_requested_worker_count(tmp_path: 
     assert command[command.index("-n") + 1] == "3"
 
 
+def test_full_lanes_write_deterministic_junit_evidence(tmp_path: Path) -> None:
+    serial, _ = _lane(tmp_path, "serial", ("tests/test_one.py",), workers=None)
+    parallel, _ = _lane(tmp_path, "xdist", ("tests/test_two.py",), workers=3)
+
+    assert "--junitxml=.cache/verification/junit/full-serial.xml" in serial
+    assert "--junitxml=.cache/verification/junit/full-xdist.xml" in parallel
+
+
 def test_default_worker_count_is_the_measured_machine_cap() -> None:
     """`-n 4` crashed a worker and produced contention-flaky failures; 3 is the cap."""
     assert runner_module.DEFAULT_WORKERS == 3

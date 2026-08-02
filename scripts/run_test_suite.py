@@ -24,6 +24,7 @@ from verification_artifact import LaneTiming, VerificationArtifact, write_artifa
 
 DEFAULT_WORKERS = 3
 COVERAGE_FLOOR = "80"
+JUNIT_DIR = Path(".cache/verification/junit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +93,16 @@ def lane_command(
     workers: int | None,
 ) -> tuple[list[str], dict[str, str]]:
     environment = dict(os.environ)
-    command = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q"]
+    junit_path = JUNIT_DIR / f"full-{name}.xml"
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-q",
+        f"--junitxml={junit_path.as_posix()}",
+    ]
     if coverage_dir is not None:
         environment["COVERAGE_FILE"] = str(coverage_dir / f".coverage.lane-{name}")
         command.extend(
@@ -118,8 +128,10 @@ def _run_lane(
     *,
     workers: int | None,
 ) -> int:
+    (root / JUNIT_DIR).mkdir(parents=True, exist_ok=True)
     command, environment = lane_command(root, coverage_dir, name, files, workers=workers)
     print(f"[test-suite] {name} lane: {len(files)} test files", flush=True)
+    print(f"[test-suite] {name} junit: {JUNIT_DIR / f'full-{name}.xml'}", flush=True)
     return subprocess.run(command, cwd=root, env=environment, check=False).returncode
 
 
