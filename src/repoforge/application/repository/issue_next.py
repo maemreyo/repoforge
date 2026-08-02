@@ -315,22 +315,31 @@ class RepositoryIssueNextReader:
                         break
                 else:
                     blocked.append((number, verdict))
+            blocked_diagnostics = [
+                {
+                    "code": "CANDIDATE_EVIDENCE_INSUFFICIENT",
+                    "issue_number": number,
+                    "message": " ".join(verdict.diagnostics),
+                }
+                for number, verdict in blocked
+            ]
             if not selectable and blocked:
-                # Every recommended candidate is missing required evidence
-                # (core issue, sub-issues, or dependencies). Fail closed with
-                # the same diagnostic the blanket gate produced, so a caller
-                # never sees an empty result that looks like "nothing ready".
                 incomplete_diagnostic = _incomplete_graph_diagnostic(snapshot)
                 snapshot_diagnostics = [_diagnostic_payload(item) for item in snapshot.diagnostics]
+                combined = [
+                    *snapshot_diagnostics,
+                    incomplete_diagnostic,
+                    *blocked_diagnostics,
+                ]
                 details["valid"] = False
-                details["diagnostic_count"] = len(snapshot_diagnostics) + 1
+                details["diagnostic_count"] = len(combined)
                 details["ticket_count"] = 0
                 return result(
                     snapshot,
                     cache_hit,
                     cache_context,
                     valid=False,
-                    diagnostics=[*snapshot_diagnostics, incomplete_diagnostic],
+                    diagnostics=combined,
                     tickets=[],
                     assessments=[],
                     repairs=[],
@@ -344,14 +353,6 @@ class RepositoryIssueNextReader:
                     ),
                 }
                 for number in selectable
-            ]
-            blocked_diagnostics = [
-                {
-                    "code": "CANDIDATE_EVIDENCE_INSUFFICIENT",
-                    "issue_number": number,
-                    "message": " ".join(verdict.diagnostics),
-                }
-                for number, verdict in blocked
             ]
             assessment_payloads = [
                 _assessment_payload(item, live_by_number[item.number].delivery)
