@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...domain.observation import EvidenceRequirement, EvidenceVerdict
 from ...domain.tickets import (
     TicketDeliveryMetadata,
     TicketDiagnostic,
@@ -16,8 +17,11 @@ from ..context import ApplicationContext
 from ..tickets.graph import ticket_subtree_numbers, validate_ticket_graph
 from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
 from ..tickets.readiness import derive_ticket_readiness
+from .evidence_evaluator import evaluate_candidate
 from .issue_graph import (
+    _cache_hit_read_stats,
     _incomplete_graph_diagnostic,
+    _read_stats_payload,
     capability_coverage_payload,
     node_payload,
     read_github_ticket_snapshot,
@@ -111,6 +115,7 @@ class RepositoryIssueNextResult:
     assessments: list[dict[str, Any]]
     metadata_repairs: list[dict[str, Any]]
     capability_coverage: list[dict[str, Any]] = field(default_factory=list)
+    read_stats: dict[str, Any] | None = None
 
 
 class RepositoryIssueNextReader:
@@ -142,6 +147,7 @@ class RepositoryIssueNextReader:
         def result(
             snapshot: TicketGraphSnapshot,
             cache_hit: bool,
+            cache_context: dict[str, object],
             *,
             valid: bool,
             diagnostics: list[dict[str, Any]],
@@ -149,6 +155,10 @@ class RepositoryIssueNextReader:
             assessments: list[dict[str, Any]],
             repairs: list[dict[str, Any]],
         ) -> RepositoryIssueNextResult:
+            cache_age_ms = cache_context.get("age_ms")
+            cache_age_value = (
+                float(cache_age_ms) if isinstance(cache_age_ms, (int, float)) else None
+            )
             return RepositoryIssueNextResult(
                 c.repo_id,
                 "github",
@@ -162,6 +172,21 @@ class RepositoryIssueNextReader:
                 assessments,
                 repairs,
                 capability_coverage_payload(snapshot),
+                read_stats=(
+                    _cache_hit_read_stats(
+                        cache_hit_reason=str(cache_context.get("hit_reason") or "cache_hit"),
+                        cache_age_ms=cache_age_value,
+                    )
+                    if cache_hit
+                    else _read_stats_payload(
+                        snapshot.read_stats,
+                        cache_miss_reason=(
+                            str(cache_context.get("miss_reason"))
+                            if cache_context.get("miss_reason")
+                            else None
+                        ),
+                    )
+                ),
             )
 
         def op() -> RepositoryIssueNextResult:
@@ -196,7 +221,7 @@ class RepositoryIssueNextReader:
                     [],
                     [],
                 )
-            snapshot, cache_hit = read_github_ticket_snapshot(
+            snapshot, cache_hit, cache_context = read_github_ticket_snapshot(
                 self.ctx,
                 repo,
                 root_issue=c.root_issue,
@@ -206,20 +231,6 @@ class RepositoryIssueNextReader:
             details["source"] = "github"
             details["cache_hit"] = cache_hit
             details["evidence_complete"] = snapshot.evidence_complete
-            if not snapshot.evidence_complete:
-                incomplete_diagnostic = _incomplete_graph_diagnostic(snapshot)
-                details["valid"] = False
-                details["diagnostic_count"] = 1
-                details["ticket_count"] = 0
-                return result(
-                    snapshot,
-                    cache_hit,
-                    valid=False,
-                    diagnostics=[incomplete_diagnostic],
-                    tickets=[],
-                    assessments=[],
-                    repairs=[],
-                )
             diagnostics = validate_ticket_graph(graph)
             if diagnostics:
                 details["valid"] = False
@@ -228,6 +239,7 @@ class RepositoryIssueNextReader:
                 return result(
                     snapshot,
                     cache_hit,
+                    cache_context,
                     valid=False,
                     diagnostics=[_diagnostic_payload(item) for item in diagnostics],
                     tickets=[],
@@ -249,6 +261,7 @@ class RepositoryIssueNextReader:
                 return result(
                     snapshot,
                     cache_hit,
+                    cache_context,
                     valid=False,
                     diagnostics=[_diagnostic_payload(diagnostic)],
                     tickets=[],
@@ -278,6 +291,7 @@ class RepositoryIssueNextReader:
                 return result(
                     snapshot,
                     cache_hit,
+                    cache_context,
                     valid=False,
                     diagnostics=[_diagnostic_payload(item) for item in report.diagnostics],
                     tickets=[],
@@ -287,7 +301,49 @@ class RepositoryIssueNextReader:
 
             nodes = {node.number: node for node in graph.nodes}
             assessments = {item.number: item for item in report.assessments}
-            recommended = [number for number in report.recommended if number in scope][: c.limit]
+            ranked = [number for number in report.recommended if number in scope]
+            requirement = EvidenceRequirement.for_next_default()
+            selectable: list[int] = []
+            blocked: list[tuple[int, EvidenceVerdict]] = []
+            for number in ranked:
+                verdict = evaluate_candidate(
+                    snapshot, requirement, number, now_epoch=self.ctx.now_epoch()
+                )
+                if verdict.sufficient:
+                    selectable.append(number)
+                    if len(selectable) == c.limit:
+                        break
+                else:
+                    blocked.append((number, verdict))
+            blocked_diagnostics = [
+                {
+                    "code": "CANDIDATE_EVIDENCE_INSUFFICIENT",
+                    "issue_number": number,
+                    "message": " ".join(verdict.diagnostics),
+                }
+                for number, verdict in blocked
+            ]
+            if not selectable and blocked:
+                incomplete_diagnostic = _incomplete_graph_diagnostic(snapshot)
+                snapshot_diagnostics = [_diagnostic_payload(item) for item in snapshot.diagnostics]
+                combined = [
+                    *snapshot_diagnostics,
+                    incomplete_diagnostic,
+                    *blocked_diagnostics,
+                ]
+                details["valid"] = False
+                details["diagnostic_count"] = len(combined)
+                details["ticket_count"] = 0
+                return result(
+                    snapshot,
+                    cache_hit,
+                    cache_context,
+                    valid=False,
+                    diagnostics=combined,
+                    tickets=[],
+                    assessments=[],
+                    repairs=[],
+                )
             tickets = [
                 {
                     **node_payload(nodes[number]),
@@ -296,7 +352,7 @@ class RepositoryIssueNextReader:
                         assessments[number], live_by_number[number].delivery
                     ),
                 }
-                for number in recommended
+                for number in selectable
             ]
             assessment_payloads = [
                 _assessment_payload(item, live_by_number[item.number].delivery)
@@ -313,8 +369,9 @@ class RepositoryIssueNextReader:
             return result(
                 snapshot,
                 cache_hit,
+                cache_context,
                 valid=True,
-                diagnostics=[],
+                diagnostics=blocked_diagnostics,
                 tickets=tickets,
                 assessments=assessment_payloads,
                 repairs=repairs,

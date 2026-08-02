@@ -2,8 +2,45 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .observation import IssueRef, ObservationStamp
+
+#: Date-based GitHub API version sent as ``X-GitHub-Api-Version``. GitHub
+#: documents this versioning for the REST API; the GraphQL schema has its own
+#: changelog, so this value never claims to pin a GraphQL schema. Cache
+#: entries bind to it so a provider contract change is a miss.
+GITHUB_API_VERSION = "2022-11-28"
+
+#: Version of the ticket-graph reader contract: the GraphQL query shape, the
+#: metadata normalization rules, and the parsing semantics. Bump this on any
+#: change that would make a cached snapshot stale or wrong under the current
+#: reader (query field changes, normalizer changes, parser rule changes).
+#: Cache entries bind to it so a reader change is a miss instead of stale
+#: evidence.
+TICKET_GRAPH_READER_VERSION = "2"
+
+_REMOTE_SLUG = re.compile(
+    r"(?:github\.com[/:])(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$"
+)
+
+
+def github_slug_from_remote_url(remote_url: str) -> str | None:
+    """Parse an ``owner/name`` GitHub slug out of a remote URL, if any.
+
+    Understands both ``https://github.com/owner/name[.git]`` and the
+    ``git@github.com:owner/name.git`` SCP form. Returns ``None`` when the
+    remote does not name a github.com repository, so callers fail closed
+    rather than guessing a repository identity.
+    """
+    if not isinstance(remote_url, str) or not remote_url or len(remote_url) > 4096:
+        return None
+    match = _REMOTE_SLUG.search(remote_url.strip())
+    return match.group("slug") if match is not None else None
 
 
 class TicketType(str, Enum):
@@ -150,6 +187,54 @@ class CapabilityCoverage:
     unavailable: tuple[int, ...]
     truncated: bool
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.capability, GraphEvidenceCapability):
+            raise ValueError("CapabilityCoverage.capability must be a GraphEvidenceCapability")
+        if not isinstance(self.complete, bool):
+            raise ValueError("CapabilityCoverage.complete must be a bool")
+        if not isinstance(self.truncated, bool):
+            raise ValueError("CapabilityCoverage.truncated must be a bool")
+        if not isinstance(self.unavailable, tuple):
+            raise ValueError("CapabilityCoverage.unavailable must be a tuple of positive ints")
+        if any(
+            not isinstance(item, int) or isinstance(item, bool) or item <= 0
+            for item in self.unavailable
+        ):
+            raise ValueError("CapabilityCoverage.unavailable must be a tuple of positive ints")
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityReadStat:
+    """Provider traffic one capability participated in for one observation."""
+
+    capability: GraphEvidenceCapability
+    provider_processes: int
+    captured_stdout_bytes: int
+    provider_process_duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class TicketGraphReadStats:
+    """Bounded provider-traffic evidence for one graph observation.
+
+    ``provider_processes`` counts ``gh`` subprocess launches against the
+    provider; it is a process count, not an HTTPS request count (the transport
+    is not directly instrumented, and higher-level operations such as
+    ``gh project item-list`` may perform more than one network request).
+    ``captured_stdout_bytes`` is the size of the stdout actually captured for
+    the payload, and ``provider_process_duration_ms`` is the elapsed wall time
+    of the launches, so benchmark claims never overstate request evidence.
+    Per-capability entries are shared attribution: one batched request is
+    counted for every capability it carried, so they overlap and must not be
+    summed.
+    """
+
+    source: str = "live_full"
+    provider_processes: int = 0
+    captured_stdout_bytes: int = 0
+    provider_process_duration_ms: float = 0.0
+    per_capability: tuple[CapabilityReadStat, ...] = ()
+
 
 @dataclass(frozen=True, slots=True)
 class TicketGraphSnapshot:
@@ -162,6 +247,17 @@ class TicketGraphSnapshot:
     truncated: bool
     live_issues: tuple[TicketLiveMetadata, ...] = ()
     capability_coverage: tuple[CapabilityCoverage, ...] = ()
+    read_stats: TicketGraphReadStats | None = None
+    diagnostics: tuple[TicketDiagnostic, ...] = ()
+    repository_slug: str | None = None
+    #: Per-capability observation provenance (F-003), parallel to
+    #: ``capability_coverage``. Additive so legacy consumers that never set it
+    #: keep working.
+    observation_stamps: tuple[ObservationStamp, ...] = ()
+    #: Global ``IssueRef`` per graph node, aligned with ``graph.nodes`` order
+    #: (F-005). Additive; empty when the observation did not resolve global
+    #: identity (e.g. legacy file-backed snapshots).
+    issue_refs: tuple[IssueRef, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

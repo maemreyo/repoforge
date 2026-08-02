@@ -627,6 +627,7 @@ test_files = [
   "tests/test_fingerprint_cache.py",
   "tests/test_git_diff_summary.py",
   "tests/test_github_read_cache.py",
+  "tests/test_github_ticket_graph_adapter.py",
   "tests/test_integration.py",
   "tests/test_mcp_contract.py",
   "tests/test_mcp_contract_v2.py",

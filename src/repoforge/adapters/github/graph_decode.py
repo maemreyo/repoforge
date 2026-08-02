@@ -1,0 +1,327 @@
+"""Parsing of one batched GraphQL issue payload into expanded issues.
+
+Core issue identity/metadata is never accepted partially: any error on the
+issue object itself, or a missing object without an attributable error, fails
+the whole issue closed. Optional capabilities (sub-issues, dependencies,
+comments) degrade independently.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from ...domain.observation import GraphQLErrorClassification
+from ...domain.tickets import GraphEvidenceCapability
+
+_MAX_BODY_CHARS = 200_000
+_MAX_COMMENTS = 20
+_MAX_COMMENT_CHARS = 20_000
+_METADATA_LINE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?P<name>[A-Za-z ]+)\s*:\s*(?P<value>[^\n]+)")
+#: ``owner/name`` shape GitHub repository identities must match so an edge
+#: node without a valid repository can never be mapped onto a local issue
+#: number (silent cross-repository identity substitution).
+_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def classify_graphql_errors(
+    errors: list[dict[str, Any]],
+    alias_count: int,
+) -> tuple[GraphQLErrorClassification, dict[str, GraphQLErrorClassification]]:
+    """Strictly classify every error in one batched GraphQL response.
+
+    Returns ``(batch_classification, by_alias)``.  ``by_alias`` maps each
+    *known* alias (``r0``..``r{alias_count-1}``) to the worst classification
+    seen for it.  ``batch_classification`` is ``GLOBAL_BATCH_FAILURE`` when
+    any error cannot be attributed to a known alias (auth, schema, rate
+    limit, missing ``path``, unknown alias, or an alias index outside the
+    batch); otherwise it is the most severe alias classification present
+    (``ALIAS_CORE_FAILURE`` > ``ALIAS_CAPABILITY_FAILURE``).
+
+    F-002: a response that mixes an attributable alias error with an
+    unattributable global error must never be published as partial success —
+    the global error makes the whole payload's data untrustworthy.
+    """
+    if not errors:
+        return GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE, {}
+    by_alias: dict[str, GraphQLErrorClassification] = {}
+    batch: GraphQLErrorClassification = GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE
+    for error in errors:
+        if not isinstance(error, dict):
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        path = error.get("path")
+        if not isinstance(path, list) or not path or not isinstance(path[0], str):
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        alias = path[0]
+        if not (alias.startswith("r") and alias[1:].isdigit()):
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        alias_index = int(alias[1:])
+        if alias_index >= alias_count:
+            return GraphQLErrorClassification.GLOBAL_BATCH_FAILURE, {}
+        segments = [str(item) for item in path[1:]]
+        if "subIssues" in segments or "blockedBy" in segments or "comments" in segments:
+            classification = GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE
+        else:
+            classification = GraphQLErrorClassification.ALIAS_CORE_FAILURE
+        previous = by_alias.get(alias)
+        if previous is None or _classification_severity(classification) > _classification_severity(
+            previous
+        ):
+            by_alias[alias] = classification
+        if _classification_severity(classification) > _classification_severity(batch):
+            batch = classification
+    return batch, by_alias
+
+
+def _classification_severity(classification: GraphQLErrorClassification) -> int:
+    return {
+        GraphQLErrorClassification.ALIAS_CAPABILITY_FAILURE: 1,
+        GraphQLErrorClassification.ALIAS_CORE_FAILURE: 2,
+        GraphQLErrorClassification.GLOBAL_BATCH_FAILURE: 3,
+    }[classification]
+
+
+@dataclass(frozen=True, slots=True)
+class ExpandedIssue:
+    """One parsed issue fetched by a batched GraphQL expansion."""
+
+    number: int
+    title: str
+    state: str
+    body: str
+    labels: tuple[str, ...]
+    labels_truncated: bool
+    labels_malformed: bool
+    children: tuple[int, ...]
+    children_truncated: bool
+    children_malformed: bool
+    children_external: tuple[str, ...]
+    blockers: tuple[int, ...]
+    blockers_truncated: bool
+    blockers_malformed: bool
+    blockers_external: tuple[str, ...]
+    comments: tuple[str, ...]
+    comments_truncated: bool
+    comments_malformed: bool
+    #: Why an edge connection was malformed (``None`` when well-formed):
+    #: ``"connection"``, ``"number"``, or ``"repository"``. Lets the caller
+    #: emit a diagnostic that distinguishes a missing repository identity
+    #: from an otherwise-invalid edge.
+    children_malformed_reason: str | None = None
+    blockers_malformed_reason: str | None = None
+
+
+def failed_capabilities(errors: list[dict[str, Any]], alias: str) -> set[GraphEvidenceCapability]:
+    capabilities: set[GraphEvidenceCapability] = set()
+    for error in errors:
+        path = error.get("path")
+        if not isinstance(path, list) or not path or path[0] != alias:
+            continue
+        segments = [str(item) for item in path]
+        if "subIssues" in segments:
+            capabilities.add(GraphEvidenceCapability.SUB_ISSUES)
+        elif "blockedBy" in segments:
+            capabilities.add(GraphEvidenceCapability.DEPENDENCIES)
+        elif "comments" in segments:
+            capabilities.add(GraphEvidenceCapability.COMMENTS)
+        else:
+            capabilities.add(GraphEvidenceCapability.ISSUE)
+    return capabilities
+
+
+def alias_issue(payload: dict[str, Any], alias: str) -> dict[str, Any] | None:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    raw = data.get(alias)
+    if not isinstance(raw, dict):
+        return None
+    issue = raw.get("issue")
+    return issue if isinstance(issue, dict) else None
+
+
+def parse_labels(raw: object) -> tuple[tuple[str, ...], bool]:
+    """Return ``(labels, malformed)`` for one ``nodes`` list.
+
+    Any non-list input or invalid label node (not a dict, missing ``name``,
+    ``name`` not a string, or empty after strip) is malformed: skipping it
+    silently would let a truncated/partial label read report complete
+    metadata.
+    """
+    if not isinstance(raw, list):
+        return (), True
+    labels: list[str] = []
+    malformed = False
+    for value in raw:
+        name = value.get("name") if isinstance(value, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            malformed = True
+            continue
+        labels.append(name.strip())
+    return tuple(labels), malformed
+
+
+def parse_metadata(body: str, labels: tuple[str, ...]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for label in labels:
+        if ":" in label:
+            key, value = label.split(":", 1)
+            values[key.strip().casefold()] = value.strip()
+    for match in _METADATA_LINE.finditer(body):
+        values.setdefault(match.group("name").strip().casefold(), match.group("value").strip())
+    return values
+
+
+def enum_value(enum_type: type[Any], raw: str | None) -> Any | None:
+    if raw is None:
+        return None
+    normalized = raw.replace("_", " ").replace("-", " ").strip().casefold()
+    for value in enum_type:
+        candidate = str(value.value).replace("_", " ").replace("-", " ").casefold()
+        if candidate == normalized:
+            return value
+    return None
+
+
+def graphql_labels(raw: dict[str, Any]) -> tuple[tuple[str, ...], bool, bool]:
+    """Return ``(labels, truncated, malformed)`` for one label connection.
+
+    The query always requests ``totalCount``, so a connection without it
+    is malformed rather than "empty and complete"; truncation is decided
+    from ``totalCount`` when present.
+    """
+    connection = raw.get("labels")
+    if not isinstance(connection, dict):
+        return (), False, True
+    nodes = connection.get("nodes")
+    if not isinstance(nodes, list):
+        return (), False, True
+    total_count = connection.get("totalCount")
+    if not isinstance(total_count, int) or isinstance(total_count, bool):
+        return (), False, True
+    labels, malformed = parse_labels(nodes)
+    truncated = total_count > len(nodes)
+    return labels, truncated, malformed
+
+
+def edge_numbers(
+    raw: dict[str, Any], field: str, slug: str
+) -> tuple[tuple[int, ...], bool, str | None, tuple[str, ...]]:
+    """Return ``(numbers, truncated, malformed_reason, external_refs)`` for one edge.
+
+    Relationship nodes carry ``repository { nameWithOwner }`` so a
+    cross-repository sub-issue or blocker is never mapped onto the same
+    number in the local repository (silent identity substitution). External
+    references are returned separately and the caller must degrade the
+    capability instead of hydrating the wrong issue.
+
+    ``malformed_reason`` is ``None`` for a well-formed connection, or one of
+    ``"connection"`` (missing/invalid connection metadata), ``"number"`` (an
+    invalid node shape or number), or ``"repository"`` (a missing, null, or
+    malformed repository identity that makes local vs cross-repository
+    impossible to distinguish). The caller fails the capability closed and may
+    emit a diagnostic that separates identity failures from valid external
+    references.
+    """
+    connection = raw.get(field)
+    if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+        return (), False, "connection", ()
+    nodes = connection["nodes"]
+    total_count = connection.get("totalCount")
+    page_info = connection.get("pageInfo")
+    has_next_page = page_info.get("hasNextPage") if isinstance(page_info, dict) else None
+    if isinstance(total_count, int) and not isinstance(total_count, bool):
+        truncated = total_count > len(nodes)
+    elif isinstance(has_next_page, bool):
+        truncated = has_next_page
+    else:
+        return (), False, "connection", ()
+    raw_numbers: list[int] = []
+    external: list[str] = []
+    for item in nodes:
+        if not isinstance(item, dict):
+            return (), False, "number", ()
+        number = item.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            return (), False, "number", ()
+        repository = item.get("repository")
+        name_with_owner = repository.get("nameWithOwner") if isinstance(repository, dict) else None
+        if not isinstance(name_with_owner, str) or _REPOSITORY.fullmatch(name_with_owner) is None:
+            return (), False, "repository", ()
+        if name_with_owner == slug:
+            raw_numbers.append(number)
+            continue
+        external.append(f"{name_with_owner}#{number}")
+    return tuple(sorted(set(raw_numbers))), truncated, None, tuple(sorted(set(external)))
+
+
+def comment_bodies(raw: dict[str, Any]) -> tuple[tuple[str, ...], bool, bool]:
+    """Return ``(comment_bodies, truncated, malformed)`` for one issue."""
+    connection = raw.get("comments")
+    if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+        return (), False, True
+    nodes = connection["nodes"]
+    total_count = connection.get("totalCount")
+    page_info = connection.get("pageInfo")
+    has_next_page = page_info.get("hasNextPage") if isinstance(page_info, dict) else None
+    if isinstance(total_count, int) and not isinstance(total_count, bool):
+        truncated = total_count > len(nodes)
+    elif isinstance(has_next_page, bool):
+        truncated = has_next_page
+    else:
+        return (), False, True
+    bodies: list[str] = []
+    malformed = False
+    for node in nodes[:_MAX_COMMENTS]:
+        comment_body = node.get("body") if isinstance(node, dict) else None
+        if not isinstance(comment_body, str) or len(comment_body) > _MAX_COMMENT_CHARS:
+            malformed = True
+            continue
+        bodies.append(comment_body)
+    return tuple(bodies), truncated, malformed
+
+
+def parse_issue(raw: dict[str, Any], number: int, slug: str) -> ExpandedIssue | None:
+    title = raw.get("title")
+    state = raw.get("state")
+    body = raw.get("body")
+    if (
+        raw.get("number") != number
+        or not isinstance(title, str)
+        or not title.strip()
+        or state not in {"open", "closed", "OPEN", "CLOSED"}
+        or not isinstance(body, str)
+        or len(body) > _MAX_BODY_CHARS
+    ):
+        return None
+    children, children_truncated, children_malformed_reason, children_external = edge_numbers(
+        raw, "subIssues", slug
+    )
+    blockers, blockers_truncated, blockers_malformed_reason, blockers_external = edge_numbers(
+        raw, "blockedBy", slug
+    )
+    comments, comments_truncated, comments_malformed = comment_bodies(raw)
+    labels, labels_truncated, labels_malformed = graphql_labels(raw)
+    return ExpandedIssue(
+        number=number,
+        title=title.strip(),
+        state=str(state).upper(),
+        body=body,
+        labels=labels,
+        labels_truncated=labels_truncated,
+        labels_malformed=labels_malformed,
+        children=children,
+        children_truncated=children_truncated,
+        children_malformed=children_malformed_reason is not None,
+        children_external=children_external,
+        blockers=blockers,
+        blockers_truncated=blockers_truncated,
+        blockers_malformed=blockers_malformed_reason is not None,
+        blockers_external=blockers_external,
+        comments=comments,
+        comments_truncated=comments_truncated,
+        comments_malformed=comments_malformed,
+        children_malformed_reason=children_malformed_reason,
+        blockers_malformed_reason=blockers_malformed_reason,
+    )

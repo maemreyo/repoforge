@@ -54,7 +54,10 @@ Create a repository, organization, or GitHub App webhook with:
 
 Project webhook events are currently described by GitHub as public preview and may
 change. Repository and organization event availability also depends on account and app
-permissions.
+permissions. `projects_v2_item` is delivered by **organization** webhooks (not
+repository webhooks), and it routes to repositories by the configured
+`project_owner`; if you cannot install an organization webhook, Project field changes
+are still covered by the short graph-cache TTL and by `fresh=true` bypassing the cache.
 
 ## Security and behavior
 

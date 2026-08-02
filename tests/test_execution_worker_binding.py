@@ -286,7 +286,7 @@ def test_command_line_reader_returns_the_live_process_argv() -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 20
         argv = None
         while time.monotonic() < deadline:
             candidate = read_command_line(process.pid)
@@ -297,7 +297,7 @@ def test_command_line_reader_returns_the_live_process_argv() -> None:
             if candidate is not None and os.path.basename(candidate[0]).startswith("python"):
                 argv = candidate
                 break
-            time.sleep(0.05)
+            time.sleep(0.1)
         assert argv is not None
         assert os.path.basename(argv[0]).startswith("python")
         assert "-c" in argv

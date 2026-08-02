@@ -136,7 +136,7 @@ class RepositoryIssueSpecReader:
         snapshot = None
         graph_cache_hit = False
         if repo.ticket_graph is not None and self.ctx.ticket_graphs is not None:
-            snapshot, graph_cache_hit = read_github_ticket_snapshot(
+            snapshot, graph_cache_hit, _graph_cache_context = read_github_ticket_snapshot(
                 self.ctx,
                 repo,
                 root_issue=None,

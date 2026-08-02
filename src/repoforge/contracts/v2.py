@@ -325,6 +325,44 @@ class GraphEvidenceCapabilityCoverage(StrictModel):
     truncated: bool = False
 
 
+class CapabilityReadStat(StrictModel):
+    """Shared participation of one capability in the graph observation.
+
+    The process/byte/duration values are shared attribution: one batched
+    GraphQL request is counted for every capability it carried, so
+    per-capability values overlap and must not be summed."""
+
+    capability: GraphEvidenceCapability
+    provider_processes: int = Field(ge=0)
+    captured_stdout_bytes: int = Field(ge=0)
+    provider_process_duration_ms: float = Field(ge=0)
+
+
+class TicketGraphReadStats(StrictModel):
+    """Bounded provider-traffic evidence for one graph observation.
+
+    ``source`` is ``live_full`` for a fresh batched read or ``cache`` for a
+    TTL cache hit that performed no provider calls. ``provider_processes``
+    counts ``gh`` subprocess launches against the provider; it is a process
+    count, not an HTTPS request count (the transport is not directly
+    instrumented, and higher-level operations such as ``gh project
+    item-list`` may perform more than one network request).
+    ``captured_stdout_bytes`` is the size of the stdout captured for the
+    payload and ``provider_process_duration_ms`` the elapsed wall time of the
+    launches, so benchmark claims never overstate request evidence.
+    Per-capability entries are shared participation counts for the batched
+    requests that carried each capability's evidence."""
+
+    source: Literal["live_full", "cache"] = "live_full"
+    provider_processes: int = Field(ge=0)
+    captured_stdout_bytes: int = Field(ge=0)
+    provider_process_duration_ms: float = Field(ge=0)
+    per_capability: tuple[CapabilityReadStat, ...] = Field(default=(), max_length=5)
+    cache_hit_reason: str | None = Field(default=None, max_length=60)
+    cache_miss_reason: str | None = Field(default=None, max_length=60)
+    cache_age_ms: float | None = Field(default=None, ge=0)
+
+
 class RepoIssueInput(AuthSelectionInput):
     repo_id: RepoId
     mode: IssueMode
@@ -498,6 +536,7 @@ class RepoIssueOutput(ToolResponse):
     capability_coverage: tuple[GraphEvidenceCapabilityCoverage, ...] = Field(
         default=(), max_length=5
     )
+    read_stats: TicketGraphReadStats | None = None
 
 
 class PullRequestEvidence(StrictModel):

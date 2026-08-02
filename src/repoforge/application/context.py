@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 from ..config import AppConfig, RepositoryConfig
 from ..domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
+from ..domain.observation import GitHubObservationAuthority
 from ..domain.operations import automatic_retry_allowed, unchanged_state_for
 from ..domain.policy import validate_adopted_branch, validate_branch
 from ..domain.workspace import WorkspaceRecord
@@ -315,6 +316,13 @@ class ApplicationContext:
     auth_transport_inspector: TransportInspector | None = None
     auth_commit_inspector: CommitIdentityInspector | None = None
     auth_publication_inspector: PublicationTargetInspector | None = None
+    #: Optional trust-boundary provider that issues the observation authority
+    #: (credential generation) for a repository's graph cache (F-004).  When
+    #: absent, the resolver falls back to MANUAL_LEGACY or disables the cache —
+    #: a static profile hash is never labeled AUTH_ISSUED.
+    observation_authority_provider: (
+        Callable[[RepositoryConfig], GitHubObservationAuthority | None] | None
+    ) = None
     config_generation: int = 0
 
     def now_epoch(self) -> float:
