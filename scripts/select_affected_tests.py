@@ -37,11 +37,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli as tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_catalog import compare_shadow, compile_plan, load_catalog, validate_catalog
 from verification_artifact import LaneTiming, VerificationArtifact, write_artifact
 
 DEFAULT_MANIFEST = Path("tests/test-groups.toml")
 DEFAULT_TESTS_DIR = Path("tests")
 DEFAULT_COVERAGE_MAP = Path("tests/coverage-map.json")
+DEFAULT_CATALOG = Path("tests/catalog.toml")
 
 # Source paths that are Python modules under the package: a change here should
 # be selectable through the coverage map. One that is NOT in the map is a new or
@@ -686,7 +690,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--tests-dir", type=Path, default=DEFAULT_TESTS_DIR)
+    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--check-completeness", action="store_true")
+    parser.add_argument("--check-catalog", action="store_true")
     parser.add_argument(
         "--check-map-freshness",
         action="store_true",
@@ -719,9 +725,31 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Write bounded canonical JSON evidence for this selection/run.",
     )
+    parser.add_argument(
+        "--shadow-catalog",
+        type=Path,
+        default=None,
+        help="Compile and compare a report-only catalog plan against the authoritative selection.",
+    )
     args = parser.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
+    root = Path.cwd()
+
+    checked_catalog = None
+    if args.check_catalog:
+        checked_catalog = load_catalog(args.catalog)
+        catalog_violations = validate_catalog(checked_catalog, root)
+        if catalog_violations:
+            for violation in catalog_violations:
+                print(f"[select-affected-tests] CATALOG VIOLATION: {violation}", file=sys.stderr)
+            return 1
+        print(
+            f"[select-affected-tests] catalog is complete: {len(checked_catalog.owned_tests)} "
+            f"tests; digest={checked_catalog.digest}"
+        )
+        if args.paths is None and not args.full and not args.run:
+            return 0
 
     if args.check_completeness:
         violations = check_completeness(manifest, args.tests_dir)
@@ -735,17 +763,44 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.check_map_freshness:
-        root = Path.cwd()
         changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
         return check_map_freshness(manifest, changed, root)
 
-    root = Path.cwd()
+    changed: list[str] = []
     if args.full:
         selection = _all_files_selection(manifest)
     else:
         changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
         selection = select_affected_tests(manifest, changed)
     _print_report(selection)
+
+    shadow_path = args.shadow_catalog
+    if shadow_path is not None or checked_catalog is not None:
+        catalog = checked_catalog or load_catalog(shadow_path)
+        assert catalog is not None
+        violations = validate_catalog(catalog, root)
+        if violations:
+            for violation in violations:
+                print(f"[select-affected-tests] CATALOG VIOLATION: {violation}", file=sys.stderr)
+            return 1
+        shadow = compile_plan(catalog, changed, intent="full" if args.full else "affected")
+        comparison = compare_shadow(
+            authoritative_files=selection.selected_files,
+            shadow_files=shadow.selected_files,
+        )
+        print(
+            "[select-affected-tests] shadow catalog: "
+            f"selected={len(shadow.selected_files)} false_negatives={len(comparison.false_negatives)} "
+            f"extras={len(comparison.extras)} digest={shadow.catalog_digest}"
+        )
+        if comparison.false_negatives:
+            print(
+                "[select-affected-tests] shadow false negatives: "
+                + ", ".join(comparison.false_negatives),
+                file=sys.stderr,
+            )
+            if args.check_catalog:
+                return 1
 
     lanes: tuple[LaneTiming, ...] = ()
     returncode = 0

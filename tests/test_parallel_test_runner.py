@@ -121,6 +121,7 @@ def test_full_runner_writes_lane_failure_evidence(
         lambda _root: runner_module.LanePlan(serial=(), parallel=(test_file,)),
     )
     monkeypatch.setattr(runner_module, "_run_lane", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runner_module, "_head_sha", lambda _root: "a" * 40)
     report = tmp_path / "full-report.json"
 
     returncode = runner_module.run(tmp_path, None, 3, report_path=report)
