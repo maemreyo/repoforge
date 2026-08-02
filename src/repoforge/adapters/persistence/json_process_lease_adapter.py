@@ -84,15 +84,14 @@ class JsonProcessLeaseAdapter:
         return self._records.list_records(max_records=max_records)
 
     def delete(self, lease_id: str, *, expected_revision: Revision) -> bool:
-        """Delete only while the stored revision still matches ``expected_revision``."""
+        """Delete only while the stored revision still matches ``expected_revision``.
+
+        Atomic under the per-record lock via ``JsonStateRepository.delete_if_revision``
+        so a concurrent save between compare and delete cannot cause a stale writer
+        to remove a lease that has since moved on (#424 follow-up).
+        """
         validate_lease_id(lease_id)
-        envelope = self._records.read(lease_id)
-        if envelope is None:
-            return False
-        if envelope.revision != expected_revision:
-            return False
-        self._records.delete(lease_id)
-        return True
+        return self._records.delete_if_revision(lease_id, expected_revision=expected_revision)
 
     def list_page(
         self,

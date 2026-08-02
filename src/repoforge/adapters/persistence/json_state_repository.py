@@ -422,6 +422,23 @@ class JsonStateRepository(Generic[T]):
         with self._files.locked(safe_id, operation="delete"):
             self._files.delete_bytes(safe_id)
 
+    def delete_if_revision(self, record_id: str, *, expected_revision: Revision) -> bool:
+        """Delete only while the stored revision still equals ``expected_revision``.
+
+        Atomic under the per-record lock: read, compare, and delete happen in one
+        critical section, so a concurrent ``save`` between compare and delete can
+        never cause a stale writer to remove a record that has since advanced.
+        Returns ``False`` without deleting when the record is absent or its
+        revision has moved.
+        """
+        safe_id = self._record_id(record_id)
+        with self._files.locked(safe_id, operation="delete_if_revision"):
+            current = self.read(safe_id)
+            if current is None or current.revision != expected_revision:
+                return False
+            self._files.delete_bytes(safe_id)
+            return True
+
     def move_to_quarantine(self, record_id: str) -> Path:
         """Move a record's raw file into a private sibling quarantine dir; never deletes.
 
