@@ -82,6 +82,10 @@ class GraphQLExecutor:
         self.truncate_after_first: bool = False
         self.partial_on_failure: bool = False
         self.project_failure: bool = False
+        #: When True, ``gh project item-list`` returns exactly the requested
+        #: limit so the listing is truncated and wanted issues beyond it are
+        #: reported as not-reached (F-003).
+        self.project_truncated: bool = False
         self.missing_without_error: set[int] = set()
         #: Global GraphQL errors that are not attributable to any alias
         #: (e.g. RATE_LIMITED without a path). Mixed with alias errors they
@@ -223,6 +227,19 @@ class GraphQLExecutor:
         if command[:4] == ("gh", "project", "item-list"):
             if self.project_failure:
                 raise CommandError("project item-list failed")
+            if self.project_truncated:
+                limit_index = command.index("--limit") + 1
+                limit = int(command[limit_index])
+                items = [
+                    {
+                        "content": {
+                            "number": 9000 + index,
+                            "repository": {"nameWithOwner": "acme/widgets"},
+                        }
+                    }
+                    for index in range(limit)
+                ]
+                return CommandResult(command, str(cwd), 0, json.dumps({"items": items}), "")
             return CommandResult(command, str(cwd), 0, json.dumps({"items": []}), "")
         raise CommandError(f"unhandled command: {command}")
 
@@ -1079,3 +1096,52 @@ def test_classify_graphql_errors_empty_and_unknown_alias() -> None:
     )
     assert batch is GraphQLErrorClassification.GLOBAL_BATCH_FAILURE
     assert by_alias == {}
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review regressions (#411) — observation stamps + issue refs (F-003/F-005)
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_carries_observation_stamps_and_issue_refs(tmp_path: Path) -> None:
+    executor = GraphQLExecutor(_fixture_issues())
+    gateway = _gateway(executor, tmp_path)
+
+    snapshot = gateway.read(
+        tmp_path,
+        GitHubTicketGraphConfig(root_issue=1, repository="acme/widgets"),
+        max_items=20,
+    )
+
+    assert len(snapshot.observation_stamps) == len(snapshot.capability_coverage) == 5
+    stamps_by_capability = {stamp.source: stamp for stamp in snapshot.observation_stamps}
+    assert set(stamps_by_capability) == {"live_full"}
+    assert all(stamp.complete for stamp in snapshot.observation_stamps)
+    assert all(stamp.item_count == 3 for stamp in snapshot.observation_stamps)
+    assert len(snapshot.issue_refs) == len(snapshot.graph.nodes) == 3
+    assert all(ref.host == "github.com" for ref in snapshot.issue_refs)
+    assert all(ref.slug == "acme/widgets" for ref in snapshot.issue_refs)
+    assert [ref.number for ref in snapshot.issue_refs] == [1, 2, 3]
+
+
+def test_project_overlay_truncated_marks_not_reached(tmp_path: Path) -> None:
+    """A project listing that stops before the wanted issues must be reported
+    as not-reached (PROJECT_ITEM_NOT_REACHED), not silently complete — the
+    F-003 fix keys completeness to wanted-item coverage."""
+    executor = GraphQLExecutor(_fixture_issues())
+    executor.project_truncated = True
+    gateway = _gateway(executor, tmp_path)
+    source = GitHubTicketGraphConfig(
+        root_issue=1,
+        repository="acme/widgets",
+        project_owner="acme",
+        project_number=7,
+    )
+
+    snapshot = gateway.read(tmp_path, source, max_items=20)
+
+    coverage = {item.capability: item for item in snapshot.capability_coverage}
+    assert coverage[GraphEvidenceCapability.PROJECT_OVERLAY].complete is False
+    assert any(diagnostic.code == "PROJECT_ITEM_NOT_REACHED" for diagnostic in snapshot.diagnostics)
+    stamps = {item.source: item for item in snapshot.observation_stamps}
+    assert stamps["live_full"].complete is False

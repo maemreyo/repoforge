@@ -41,15 +41,19 @@ def read_project_values(
     slug: str,
     source: GitHubTicketGraphConfig,
     wanted: set[int],
-) -> tuple[dict[int, dict[str, str]], bool, int]:
+) -> tuple[dict[int, dict[str, str]], tuple[int, ...], int]:
     """Read Project V2 field values for the wanted issue numbers.
 
-    Returns ``(values_by_number, complete, stdout_bytes)``. ``complete`` is
-    false only when the item listing itself was truncated; the caller
-    isolates any read failure as an unavailable capability.
+    Returns ``(values_by_number, not_reached, stdout_bytes)``.
+    ``not_reached`` lists wanted issues that may exist in the project but were
+    not covered because the item listing was truncated.  When the listing is
+    not truncated, a wanted issue absent from it is genuinely missing from the
+    project (a default/repairable metadata state) and is *not* reported as an
+    evidence gap.  This is the F-003 fix: completeness is keyed to wanted-item
+    coverage, not to whether the listing happened to hit its limit.
     """
     if source.project_owner is None or source.project_number is None:
-        return {}, True, 0
+        return {}, (), 0
     result = _run(
         executor,
         server,
@@ -98,8 +102,12 @@ def read_project_values(
             if value is not None:
                 values[field_name] = str(value)
         result_values[int(number)] = values
+    listing_limit = min(max(len(wanted) + 100, 100), 1000)
+    listing_truncated = len(raw_items) >= listing_limit
+    seen = set(result_values)
+    not_reached = tuple(sorted(wanted - seen)) if listing_truncated else ()
     return (
         result_values,
-        len(raw_items) < min(max(len(wanted) + 100, 100), 1000),
+        not_reached,
         len(result.stdout.encode("utf-8")),
     )

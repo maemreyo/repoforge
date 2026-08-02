@@ -16,11 +16,11 @@ module composes them into one traversal.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from ...config import GitHubTicketGraphConfig, ServerConfig
 from ...domain.errors import CommandError
+from ...domain.observation import GITHUB_COM_HOST, IssueRef
 from ...domain.tickets import (
     GraphEvidenceCapability,
     TicketDiagnostic,
@@ -32,7 +32,11 @@ from ...domain.tickets import (
 from ...ports.command import CommandExecutor, CommandResult
 from .graph_assembly import build_adjacency_maps, build_nodes_and_live
 from .graph_batcher import fetch_batch
-from .graph_coverage import build_capability_coverage
+from .graph_coverage import (
+    build_capability_coverage,
+    build_observation_stamps,
+    current_utc_iso,
+)
 from .graph_decode import (
     _REPOSITORY,
     ExpandedIssue,
@@ -295,20 +299,30 @@ class CommandGitHubTicketGraphGateway:
 
         project_started = time.monotonic()
         try:
-            project_values, project_complete, project_bytes = read_project_values(
+            project_values, project_not_reached, project_bytes = read_project_values(
                 self._executor, self._server, cwd, slug, source, wanted
             )
         except CommandError as exc:
             project_values = {}
-            project_complete = False
+            project_not_reached = tuple(sorted(wanted))
             project_bytes = 0
-            project_unavailable.update(wanted)
             diagnostics.append(
                 TicketDiagnostic(
                     "PROJECT_OVERLAY_UNAVAILABLE",
                     source.root_issue,
                     "project overlay could not be read; GitHub-native graph "
                     f"evidence remains complete ({type(exc).__name__})",
+                )
+            )
+        project_complete = not project_not_reached
+        if project_not_reached:
+            project_unavailable.update(project_not_reached)
+            diagnostics.append(
+                TicketDiagnostic(
+                    "PROJECT_ITEM_NOT_REACHED",
+                    source.root_issue,
+                    "project overlay listing stopped before wanted issues: "
+                    + ", ".join(sorted(map(str, project_not_reached))),
                 )
             )
         project_duration_ms = round((time.monotonic() - project_started) * 1000, 3)
@@ -347,9 +361,28 @@ class CommandGitHubTicketGraphGateway:
             project_unavailable,
             project_complete,
         )
+        observed_at = current_utc_iso()
+        observation_stamps = build_observation_stamps(
+            issue_unavailable,
+            sub_issues_unavailable,
+            sub_issues_truncated,
+            comments_unavailable,
+            comments_truncated,
+            dependencies_unavailable,
+            dependencies_truncated,
+            project_unavailable,
+            project_complete,
+            observed_at=observed_at,
+            wanted=wanted,
+        )
+        owner, _, name = slug.partition("/")
+        issue_refs = tuple(
+            IssueRef(host=GITHUB_COM_HOST, owner=owner, repository=name, number=number)
+            for number in sorted(wanted)
+        )
         return TicketGraphSnapshot(
             graph=TicketGraph(1, source.root_issue, tuple(nodes)),
-            observed_at=datetime.now(timezone.utc).isoformat(),
+            observed_at=observed_at,
             evidence_complete=(
                 not unavailable
                 and not truncated
@@ -362,4 +395,6 @@ class CommandGitHubTicketGraphGateway:
             read_stats=stats.snapshot(),
             diagnostics=tuple(diagnostics),
             repository_slug=slug,
+            observation_stamps=observation_stamps,
+            issue_refs=issue_refs,
         )

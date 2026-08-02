@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from ...config import GitHubTicketGraphConfig
+from ...domain.observation import IssueRef, ObservationStamp
 from ...domain.tickets import (
     GITHUB_API_VERSION,
     TICKET_GRAPH_READER_VERSION,
@@ -93,6 +94,25 @@ def snapshot_payload(
                 "message": diagnostic.message,
             }
             for diagnostic in snapshot.diagnostics
+        ],
+        "observation_stamps": [
+            {
+                "source": stamp.source,
+                "observed_at": stamp.observed_at,
+                "complete": stamp.complete,
+                "truncated": stamp.truncated,
+                "item_count": stamp.item_count,
+            }
+            for stamp in snapshot.observation_stamps
+        ],
+        "issue_refs": [
+            {
+                "host": ref.host,
+                "owner": ref.owner,
+                "repository": ref.repository,
+                "number": ref.number,
+            }
+            for ref in snapshot.issue_refs
         ],
     }
     payload["bindings"] = {
@@ -239,6 +259,37 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
             if isinstance(bindings, dict) and isinstance(bindings.get("repository_slug"), str)
             else None
         )
+        raw_stamps = payload.get("observation_stamps", [])
+        if not isinstance(raw_stamps, list):
+            return None
+        observation_stamps: list[ObservationStamp] = []
+        for item in raw_stamps:
+            if not isinstance(item, dict):
+                return None
+            observation_stamps.append(
+                ObservationStamp(
+                    source=item["source"],
+                    observed_at=item["observed_at"],
+                    complete=item["complete"],
+                    truncated=item["truncated"],
+                    item_count=item["item_count"],
+                )
+            )
+        raw_refs = payload.get("issue_refs", [])
+        if not isinstance(raw_refs, list):
+            return None
+        issue_refs: list[IssueRef] = []
+        for item in raw_refs:
+            if not isinstance(item, dict):
+                return None
+            issue_refs.append(
+                IssueRef(
+                    host=item["host"],
+                    owner=item["owner"],
+                    repository=item["repository"],
+                    number=item["number"],
+                )
+            )
         return TicketGraphSnapshot(
             graph=graph,
             observed_at=observed_at,
@@ -249,6 +300,8 @@ def snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
             capability_coverage=capability_coverage,
             diagnostics=tuple(diagnostics),
             repository_slug=repository_slug,
+            observation_stamps=tuple(observation_stamps),
+            issue_refs=tuple(issue_refs),
         )
     except (KeyError, TypeError, ValueError):
         return None

@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .observation import IssueRef, ObservationStamp
 
 #: Date-based GitHub API version sent as ``X-GitHub-Api-Version``. GitHub
 #: documents this versioning for the REST API; the GraphQL schema has its own
@@ -231,6 +235,14 @@ class TicketGraphSnapshot:
     read_stats: TicketGraphReadStats | None = None
     diagnostics: tuple[TicketDiagnostic, ...] = ()
     repository_slug: str | None = None
+    #: Per-capability observation provenance (F-003), parallel to
+    #: ``capability_coverage``. Additive so legacy consumers that never set it
+    #: keep working.
+    observation_stamps: tuple[ObservationStamp, ...] = ()
+    #: Global ``IssueRef`` per graph node, aligned with ``graph.nodes`` order
+    #: (F-005). Additive; empty when the observation did not resolve global
+    #: identity (e.g. legacy file-backed snapshots).
+    issue_refs: tuple[IssueRef, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
