@@ -14,18 +14,21 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ..domain.durable_state import Revision
 from ..domain.errors import ConfigError, ErrorCode, RepoForgeError
 from ..domain.operation_task import OperationTask
 from ..domain.operation_worker import (
     OperationWorkerBinding,
     validate_operation_worker_binding,
 )
+from ..domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
 from ..domain.workspace import WorkspaceRecord
 from ..ports.cancellation import CancellationToken
 from ..ports.command import CommandResult
 from ..ports.operation_gate import GateState
 from ..ports.operation_store import OperationRecordPage
 from ..ports.process_reaper import ReapOutcome
+from ..ports.worker_binding_store import WorkerBindingPage
 
 
 class FixedClock:
@@ -463,8 +466,13 @@ class InMemoryWorkerBindingStore:
         del self._records[binding.operation_id]
         return True
 
-    def list_all(self, *, max_records: int = 2_000) -> tuple[OperationWorkerBinding, ...]:
-        return tuple(list(self._records.values())[:max_records])
+    def list_all(self, *, max_records: int = 2_000) -> WorkerBindingPage:
+        values = tuple(self._records.values())
+        return WorkerBindingPage(
+            records=values[:max_records],
+            scan_complete=len(values) <= max_records,
+            unreadable_ids=(),
+        )
 
 
 class RecordingProcessReaper:
@@ -488,6 +496,74 @@ class RecordingProcessReaper:
 
     def read_start_token(self, pid: int) -> str | None:
         return self._start_tokens.get(pid)
+
+
+class InMemoryWorkerRegistrar:
+    """WorkerRegistrar fake: an in-memory intent -> running lease lifecycle.
+
+    Deterministic for tests that spawn real workers but do not need durable lease
+    persistence: the intent is a fixed REGISTERED lease, record_pid sets the pid,
+    complete_registration marks RUNNING, and abort is a no-op.
+    """
+
+    def __init__(self) -> None:
+        self.completed: list[str] = []
+        self.lease = ProcessLease(
+            lease_id="worker-" + "0" * 24,
+            status=ProcessLeaseStatus.REGISTERED,
+            role=ProcessLeaseRole.EXECUTION_DAEMON,
+            process_identity=None,
+            pid=None,
+            started_at=None,
+            heartbeat_at=None,
+            correlation_id="c" * 24,
+            created_at="2026-07-29T00:00:00+00:00",
+            updated_at="2026-07-29T00:00:00+00:00",
+        )
+
+    def create_intent(
+        self, *, role: ProcessLeaseRole, correlation_id: str
+    ) -> tuple[ProcessLease, Revision]:
+        del role, correlation_id
+        return self.lease, Revision(1)
+
+    def record_pid(
+        self,
+        lease: ProcessLease,
+        *,
+        pid: int,
+        expected_revision: Revision,
+    ) -> tuple[ProcessLease, Revision]:
+        del expected_revision
+        return replace(lease, pid=pid), Revision(2)
+
+    def complete_registration(
+        self,
+        lease: ProcessLease,
+        *,
+        process_identity: str,
+        expected_revision: Revision,
+    ) -> tuple[ProcessLease, Revision]:
+        del expected_revision
+        self.completed.append(lease.lease_id)
+        return (
+            replace(
+                lease,
+                status=ProcessLeaseStatus.RUNNING,
+                process_identity=process_identity,
+            ),
+            Revision(3),
+        )
+
+    def abort_intent(
+        self,
+        lease: ProcessLease,
+        *,
+        error_code: str,
+        error_message: str,
+        expected_revision: Revision,
+    ) -> None:
+        del lease, error_code, error_message, expected_revision
 
 
 class NullCommitIdentityGateway:

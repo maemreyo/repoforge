@@ -1237,3 +1237,73 @@ def test_restore_recovers_interrupted_apply_after_restart(tmp_path: Path) -> Non
     report = restarted.apply_restore(preview, backup_root=backup_root)
     assert report.restored_records == 2
     assert restarted.apply_restore(preview, backup_root=backup_root) == report
+
+
+def test_compare_and_delete_rejects_an_aba_recreate(tmp_path: Path) -> None:
+    """A delete-then-recreate reusing revision 1 must not be deleted by a stale caller.
+
+    read A@rev1 -> concurrent delete A -> concurrent create B@rev1 -> stale
+    compare_and_delete(A@rev1) must return False and leave B intact. Revision
+    alone is not enough when records are deleted and recreated; the value must
+    be compared under the same lock (ABA).
+    """
+    store = _store(tmp_path)
+    store.create("demo-1", DemoRecord("alpha"))
+    snapshot = store.read("demo-1")
+    assert snapshot is not None and snapshot.revision == Revision(1)
+
+    store.delete("demo-1")
+    store.create("demo-1", DemoRecord("bravo"))
+
+    deleted = store.compare_and_delete(
+        "demo-1",
+        expected_revision=snapshot.revision,
+        expected_value=snapshot.value,
+    )
+
+    assert deleted is False
+    current = store.read("demo-1")
+    assert current is not None
+    assert current.value == DemoRecord("bravo")
+
+
+def test_compare_and_delete_removes_when_revision_and_value_still_match(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.create("demo-1", DemoRecord("alpha"))
+    snapshot = store.read("demo-1")
+    assert snapshot is not None
+
+    deleted = store.compare_and_delete(
+        "demo-1",
+        expected_revision=snapshot.revision,
+        expected_value=snapshot.value,
+    )
+
+    assert deleted is True
+    assert store.read("demo-1") is None
+
+
+def test_compare_and_delete_returns_false_when_revision_advanced(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.create("demo-1", DemoRecord("alpha"))
+    snapshot = store.read("demo-1")
+    assert snapshot is not None
+    # save() advances the revision (1 -> 2), so the stale expectation fails on
+    # the revision check before the value check. Same-revision/different-value
+    # staleness is covered by the ABA recreate test above, because a write that
+    # keeps the revision number is not a supported operation.
+    store.save("demo-1", DemoRecord("bravo"), expected_revision=snapshot.revision)
+
+    deleted = store.compare_and_delete(
+        "demo-1",
+        expected_revision=snapshot.revision,
+        expected_value=snapshot.value,
+    )
+
+    assert deleted is False
+    current = store.read("demo-1")
+    assert current is not None and current.value == DemoRecord("bravo")

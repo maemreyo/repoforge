@@ -113,22 +113,45 @@ class GitWorktreeInspector:
 
 
 class UvWheelBuilder:
-    """Build exactly one wheel from the worktree using ``uv build``."""
+    """Build exactly one wheel from the immutable snapshot of a commit.
 
-    def build(self, worktree: Path) -> BuildArtifact:
-        out_dir = Path(tempfile.mkdtemp(prefix="repoforge-upgrade-build-"))
-        code, out, err = _run(["uv", "build", "--wheel", "--out-dir", str(out_dir)], cwd=worktree)
-        if code != 0:
-            raise ConfigError(f"BUILD_FAILED: uv build exited {code}: {err.strip() or out.strip()}")
-        wheels = sorted(out_dir.glob("*.whl"))
-        if len(wheels) != 1:
-            raise ConfigError(f"BUILD_AMBIGUOUS: expected one wheel, found {len(wheels)}")
-        wheel = wheels[0]
-        return BuildArtifact(
-            wheel_path=wheel,
-            build_fingerprint=_sha256_file(wheel),
-            package_version=_version_from_wheel(wheel.name),
-        )
+    The worktree only selects the commit; ``uv build`` runs against a detached
+    materialization of that commit's tree, never the mutable working directory. A
+    concurrent edit after the clean check can otherwise ship a wheel carrying the
+    commit's sha but not the commit's bytes -- a release whose directory claims SHA A
+    while the wheel holds the bytes of a modified tree (F-012).
+    """
+
+    def build(self, worktree: Path, *, commit_sha: str) -> BuildArtifact:
+        source_digest = _commit_tree_sha(worktree, commit_sha)
+        snapshot = _materialize_snapshot(worktree, commit_sha)
+        out_dir: Path | None = None
+        try:
+            out_dir = Path(tempfile.mkdtemp(prefix="repoforge-upgrade-build-"))
+            code, out, err = _run(
+                ["uv", "build", "--wheel", "--out-dir", str(out_dir)], cwd=snapshot
+            )
+            if code != 0:
+                raise ConfigError(
+                    f"BUILD_FAILED: uv build exited {code}: {err.strip() or out.strip()}"
+                )
+            wheels = sorted(out_dir.glob("*.whl"))
+            if len(wheels) != 1:
+                raise ConfigError(f"BUILD_AMBIGUOUS: expected one wheel, found {len(wheels)}")
+            wheel = wheels[0]
+            # The caller installs this wheel after build() returns, so it must not
+            # live in a directory this method removes.
+            kept_wheel = _persist_wheel(wheel)
+            return BuildArtifact(
+                wheel_path=kept_wheel,
+                build_fingerprint=_sha256_file(kept_wheel),
+                package_version=_version_from_wheel(kept_wheel.name),
+                source_digest=source_digest,
+            )
+        finally:
+            _remove_tree(snapshot)
+            if out_dir is not None:
+                _remove_tree(out_dir)
 
 
 class UvVenvReleaseInstaller:
@@ -461,6 +484,37 @@ class SupervisorRestarter:
                 detail=preflight_detail,
                 reclamation=preflight_evidence,
             )
+        plan_digest = str(preflight_evidence["registry_digest"]) if preflight_evidence else None
+
+        # F-004: the plan is fenced to the registry snapshot it was read from. A lease
+        # that appeared or transitioned since the preflight could become a blocker once
+        # the incumbent is stopped, so before ANY stop the registry is re-scanned and a
+        # changed digest refuses the handoff -- the healthy runtime stays up and the
+        # caller replans instead of stopping on stale evidence.
+        verify_ok, verify_detail, verify_evidence = self.preflight_reclaim(departing_release)
+        if not verify_ok:
+            return RestartOutcome(
+                ok=False,
+                detail=(
+                    "handoff registry changed since the preflight plan and cannot "
+                    f"proceed ({verify_detail}); replan before stopping the incumbent"
+                ),
+                reclamation=verify_evidence,
+            )
+        if (
+            plan_digest is not None
+            and verify_evidence is not None
+            and str(verify_evidence.get("registry_digest")) != plan_digest
+        ):
+            return RestartOutcome(
+                ok=False,
+                detail=(
+                    "handoff registry changed since the preflight plan (registry "
+                    "digest changed); refusing to stop the incumbent on stale "
+                    "evidence -- replan before stopping"
+                ),
+                reclamation=verify_evidence,
+            )
 
         # Prefer the OS process manager so an upgrade never orphans the supervisor from
         # launchd. `kickstart -k` stops and restarts the registered job in one step.
@@ -659,6 +713,80 @@ class SupervisorHealthProbe:
 def _remove_tree(path: Path) -> None:
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _persist_wheel(wheel: Path) -> Path:
+    """Move a built wheel to a temp file that survives the build cleanup.
+
+    ``uv build`` writes into a scratch ``out_dir`` this module then removes; the
+    caller installs the wheel only after ``build`` returns, so the wheel must live
+    somewhere that outlives that cleanup. The caller unlinks it after install.
+    The original wheel basename is kept: ``uv pip install`` parses the filename and
+    rejects a random one (no version/platform tags).
+    """
+    kept_dir = Path(tempfile.mkdtemp(prefix="repoforge-upgrade-wheel-"))
+    kept = kept_dir / wheel.name
+    shutil.move(str(wheel), str(kept))
+    return kept
+
+
+def _commit_tree_sha(worktree: Path, commit_sha: str) -> str:
+    """The immutable content digest of ``commit_sha``'s tree.
+
+    ``rev-parse <sha>^{tree}`` resolves the tree object the commit points at, which
+    is a canonical digest of exactly the bytes the commit contains -- independent of
+    any later edit to the working directory. Tree object ids are SHA-1 (40 hex) on
+    standard repositories and SHA-256 (64 hex) on sha256 repositories; either is a
+    valid immutable digest.
+    """
+    code, out, err = _run(
+        ["git", "-C", str(worktree), "rev-parse", "--verify", f"{commit_sha}^{{tree}}"],
+        timeout=30.0,
+    )
+    if code != 0:
+        raise ConfigError(
+            f"SOURCE_DIGEST_UNKNOWN: cannot resolve the tree of {commit_sha}: "
+            f"{err.strip() or out.strip()}"
+        )
+    digest = out.strip().lower()
+    if len(digest) not in (40, 64) or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ConfigError(f"SOURCE_DIGEST_INVALID: {commit_sha} tree is not a git object id")
+    return digest
+
+
+def _materialize_snapshot(worktree: Path, commit_sha: str) -> Path:
+    """Materialize exactly ``commit_sha``'s tree into a fresh directory.
+
+    ``git archive`` exports the committed tree, never the mutable working directory,
+    and leaves no worktree metadata behind in the source repository. The caller owns
+    the returned directory and must remove it.
+    """
+    snapshot = Path(tempfile.mkdtemp(prefix="repoforge-upgrade-snapshot-"))
+    archive = snapshot.with_name(f"{snapshot.name}.tar")
+    try:
+        code, out, err = _run(
+            ["git", "-C", str(worktree), "archive", "--format=tar", "-o", str(archive), commit_sha],
+            timeout=120.0,
+        )
+        if code != 0:
+            raise ConfigError(
+                f"SNAPSHOT_FAILED: cannot archive {commit_sha}: {err.strip() or out.strip()}"
+            )
+        code, out, err = _run(["tar", "-xf", str(archive), "-C", str(snapshot)], timeout=120.0)
+        if code != 0:
+            raise ConfigError(
+                f"SNAPSHOT_EXTRACT_FAILED: cannot extract {commit_sha} tree: "
+                f"{err.strip() or out.strip()}"
+            )
+        return snapshot
+    except BaseException:
+        _remove_tree(snapshot)
+        raise
+    finally:
+        with contextlib.suppress(OSError):
+            archive.unlink()
 
 
 def _sha256_file(path: Path) -> str:

@@ -118,7 +118,7 @@ def test_json_worker_binding_store_crud(tmp_path) -> None:
     # put is idempotent overwrite
     store.put(binding)
     assert store.get(binding.operation_id) == binding
-    assert store.list_all() == (binding,)
+    assert store.list_all().records == (binding,)
     store.delete(binding.operation_id)
     assert store.get(binding.operation_id) is None
     # delete is idempotent
@@ -401,3 +401,29 @@ def test_service_shutdown_leaves_work_owned_by_the_execution_worker(
 
     assert service.reap_background_workers(reason="runtime shutdown") == 0
     assert manager.status(running.operation_id).state is OperationState.RUNNING
+
+
+def test_delete_if_unchanged_rejects_an_aba_recreate(tmp_path) -> None:
+    """A delete-then-recreate reusing revision 1 must not be deleted by a stale reconciler.
+
+    The reconciler reads binding A, then the record is deleted and recreated as
+    B under the same operation id (revision resets to 1). A stale
+    delete_if_unchanged(A) must return False and leave B intact, so a generation
+    handoff never releases an owner it never inspected (ABA).
+    """
+    store = JsonWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    binding_a = _binding()
+    store.put(binding_a)
+    stale_snapshot = store.get(binding_a.operation_id)
+    assert stale_snapshot == binding_a
+
+    store.delete(binding_a.operation_id)
+    binding_b = _binding(
+        operation_id=binding_a.operation_id, child_pid=5555, child_start_token="tok-b"
+    )
+    store.put(binding_b)
+
+    deleted = store.delete_if_unchanged(binding_a)
+
+    assert deleted is False
+    assert store.get(binding_a.operation_id) == binding_b

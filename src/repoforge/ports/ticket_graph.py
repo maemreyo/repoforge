@@ -16,4 +16,5 @@ class TicketGraphGateway(Protocol):
         source: GitHubTicketGraphConfig,
         *,
         max_items: int,
+        remote: str = "origin",
     ) -> TicketGraphSnapshot: ...

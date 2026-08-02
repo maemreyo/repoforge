@@ -18,11 +18,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ...domain.durable_state import SchemaVersion, StateCodec
-from ...domain.errors import RepoForgeError
+from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.execution_worker import (
     EXECUTION_WORKER_ARCHIVE_SCHEMA_VERSION,
     EXECUTION_WORKER_BINDING_SCHEMA_VERSION,
@@ -160,7 +161,17 @@ class JsonExecutionWorkerBindingStore:
             binding,
             terminated_at=datetime.now(timezone.utc).isoformat(),
         )
-        self._history.create_or_read_equal(worker_id, entry)
+        try:
+            self._history.create_or_read_equal(worker_id, entry)
+        except RepoForgeError as exc:
+            if exc.code is not ErrorCode.ALREADY_EXISTS:
+                raise
+            # Crash checkpoint: the archive half of a previous attempt completed and
+            # the process died before the active delete. The retry re-stamps
+            # terminated_at, so the payload differs only by that timestamp -- an
+            # existing entry is exactly the durable checkpoint, not a conflict.
+            # A worker_id is unique per pid + start token, so it is archived at most
+            # once and an existing entry can never belong to a different worker.
         self._prune_history()
         current = self._records.read(worker_id)
         if current is not None and current.value.state in TERMINAL_STATES:
@@ -234,12 +245,18 @@ class JsonExecutionWorkerBindingStore:
         Never deletes: the bytes are moved (under the record lock) to the quarantine
         directory and a receipt records where they went, the content digest, why, and
         the pid they described when the metadata was parseable (#424).
+
+        The receipt is written BEFORE the move (F-011): a crash between the two can
+        then never leave quarantined bytes with no evidence of what/why they were
+        set aside -- the worst case is a receipt whose move never happened, which a
+        re-run completes and overwrites. If the move itself fails, the receipt is
+        removed so no false "quarantined at <path>" claim survives.
         """
         info = self._probe_record(worker_id)
         if info is None:
             return None
         safe_id = str(info["worker_id"])
-        target = self._records.move_to_quarantine(safe_id)
+        target = self.quarantine_root / f"{safe_id}.json"
         raw_pid = info["pid"]
         receipt = ExecutionWorkerQuarantineReceipt(
             worker_id=safe_id,
@@ -252,11 +269,31 @@ class JsonExecutionWorkerBindingStore:
         )
         validate_execution_worker_quarantine_receipt(receipt)
         receipt_path = target.parent / f"{safe_id}.receipt.json"
-        receipt_path.write_text(
-            json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        self._write_quarantine_receipt(receipt_path, receipt)
+        try:
+            self._records.move_to_quarantine(safe_id)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                receipt_path.unlink()
+            raise
         return receipt
+
+    @staticmethod
+    def _write_quarantine_receipt(path: Path, receipt: ExecutionWorkerQuarantineReceipt) -> None:
+        """Persist the receipt durably (atomic replace + fsync) before the move."""
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload = json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n"
+        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            with tmp.open("wb") as handle:
+                handle.write(payload.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
     def list_quarantined(self) -> tuple[ExecutionWorkerQuarantineReceipt, ...]:
         """Every durable quarantine receipt, oldest first."""

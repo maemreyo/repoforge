@@ -15,6 +15,9 @@ from repoforge.adapters.activation.build import RuntimeRecordReleaseObserver, Su
 from repoforge.adapters.activation.launcher import ReleaseAwareRuntimeLauncher
 from repoforge.adapters.runtime import JsonRuntimeStore
 from repoforge.adapters.runtime.state_store import process_identity
+from repoforge.application.runtime.execution_worker_reconciler import (
+    ExecutionWorkerReclamationReport,
+)
 from repoforge.domain.errors import ConfigError
 from repoforge.domain.runtime import (
     ControlResponse,
@@ -149,6 +152,78 @@ def test_graceful_shutdown_is_recognised_even_though_the_record_survives(
 
     assert outcome.ok is True, outcome.detail
     assert launcher.starts, "the restarter must start a replacement process"
+
+
+class _DigestReconciler:
+    """Scripted reconciler: one digest for the first scan, another for later scans."""
+
+    def __init__(self, *, second_digest: str | None = None) -> None:
+        self.calls = 0
+        self._second_digest = second_digest
+
+    def reconcile(self, *, departing_releases=frozenset(), read_only: bool = False):
+        del departing_releases, read_only
+        self.calls += 1
+        digest = "a" * 64
+        if self.calls > 1 and self._second_digest is not None:
+            digest = self._second_digest
+        return ExecutionWorkerReclamationReport(
+            inspected=0,
+            reclaimed=0,
+            already_gone=0,
+            refused_unproven=0,
+            survived_kill=0,
+            possibly_alive_unproven=0,
+            scan_complete=True,
+            unreadable_record_ids=(),
+            worker_ids=(),
+            pids=(),
+            release_shas=(),
+            registry_digest=digest,
+            detail="registry healthy",
+        )
+
+
+def test_restart_proceeds_when_the_registry_fence_is_stable(tmp_path: Path) -> None:
+    """A stable registry between the preflight plan and the stop is a green light."""
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    reconciler = _DigestReconciler(second_digest="a" * 64)  # unchanged on re-scan
+
+    outcome = _restarter(
+        store, _Control(store), launcher, tmp_path, worker_reconciler=reconciler
+    ).restart()
+
+    assert outcome.ok is True, outcome.detail
+    assert launcher.starts, "the restarter must start a replacement process"
+
+
+def test_restart_refuses_to_stop_when_the_registry_changed_since_the_plan(
+    tmp_path: Path,
+) -> None:
+    """A lease that appeared after the preflight must not be stopped past (F-004).
+
+    The plan is fenced to the registry snapshot it was read from. If the registry
+    changed between the preflight and the stop -- a new worker or a state
+    transition that could become a blocker -- the incumbent is NOT stopped: the
+    healthy runtime stays up and the caller replans instead of stopping on stale
+    evidence.
+    """
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    reconciler = _DigestReconciler(second_digest="b" * 64)  # registry changed
+
+    outcome = _restarter(
+        store, _Control(store), launcher, tmp_path, worker_reconciler=reconciler
+    ).restart()
+
+    assert outcome.ok is False
+    assert "digest changed" in outcome.detail
+    assert launcher.starts == []
+    # The healthy runtime record was not touched: no stop was attempted.
+    assert store.read().phase is RuntimePhase.HEALTHY
 
 
 def test_restart_requires_a_live_record_for_a_new_process(tmp_path: Path) -> None:

@@ -229,8 +229,20 @@ source_globs = [
   "src/repoforge/domain/runtime.py",
   "src/repoforge/domain/runtime_health.py",
   "src/repoforge/domain/activation.py",
+  "src/repoforge/domain/process_lease.py",
+  "src/repoforge/domain/runtime_epoch.py",
+  "src/repoforge/domain/runtime_transition.py",
   "src/repoforge/ports/activation.py",
   "src/repoforge/ports/process_supervisor.py",
+  "src/repoforge/ports/process_lease_store.py",
+  "src/repoforge/ports/runtime_transition_store.py",
+  "src/repoforge/ports/worker_registrar.py",
+  "src/repoforge/adapters/persistence/json_process_lease_adapter.py",
+  "src/repoforge/adapters/persistence/json_runtime_transition_adapter.py",
+  "src/repoforge/adapters/persistence/sqlite_db.py",
+  "src/repoforge/adapters/persistence/sqlite_lease_store.py",
+  "src/repoforge/adapters/persistence/sqlite_transition_store.py",
+  "src/repoforge/adapters/persistence/parity.py",
 ]
 test_files = [
   "tests/test_activation_domain.py",
@@ -267,6 +279,14 @@ test_files = [
   "tests/test_version_status.py",
   "tests/test_worker_agent_auth_material.py",
   "tests/test_worktree_provenance.py",
+  "tests/test_build_snapshot.py",
+  "tests/test_fakes_store.py",
+  "tests/test_fault_injection_baseline.py",
+  "tests/test_json_adapter.py",
+  "tests/test_lease_registry.py",
+  "tests/test_process_lease_domain.py",
+  "tests/test_runtime_epoch_domain.py",
+  "tests/test_runtime_transition_domain.py",
 ]
 
 [groups.policy_configuration]
@@ -657,6 +677,7 @@ test_files = [
   "tests/test_fingerprint_cache.py",
   "tests/test_git_diff_summary.py",
   "tests/test_github_read_cache.py",
+  "tests/test_github_ticket_graph_adapter.py",
   "tests/test_integration.py",
   "tests/test_mcp_contract.py",
   "tests/test_mcp_contract_v2.py",

@@ -1,40 +1,85 @@
+"""Repository ticket-graph use case: bounded read and audit-wrapped execution.
+
+Kept focused on orchestration after the F-006 split:
+
+- ``issue_graph_payloads`` owns dict-payload serialization and coverage helpers;
+- ``issue_graph_cache`` owns the versioned cache envelope codec and bindings.
+
+This module re-exports the names historical consumers import
+(``node_payload``, ``capability_coverage_payload``,
+``is_capability_complete_for_issue``, ``read_github_ticket_snapshot`` and the
+private ``_*`` helpers used by ``issue_next`` and tests).
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
-from ...config import GitHubTicketGraphConfig, RepositoryConfig
-from ...domain.errors import ConfigError, ErrorCode, RepoForgeError
+from ...config import RepositoryConfig
+from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.tickets import (
-    CapabilityCoverage,
-    GraphEvidenceCapability,
-    TicketGraph,
     TicketGraphError,
     TicketGraphSnapshot,
-    TicketLiveMetadata,
-    TicketNode,
     TicketPriority,
     TicketStatus,
-    TicketType,
 )
 from ..context import ApplicationContext
 from ..tickets.graph import select_ticket_nodes
-from ..tickets.live import ticket_delivery_payload, ticket_live_state_from_issue
+from .issue_graph_cache import (
+    observed_age_ms as _observed_age_ms,
+)
+from .issue_graph_cache import (
+    payload_bindings_valid as _payload_bindings_valid,
+)
+from .issue_graph_cache import (
+    snapshot_from_payload as _snapshot_from_payload,
+)
+from .issue_graph_cache import (
+    snapshot_payload as _snapshot_payload,
+)
+from .issue_graph_config import expected_slug as resolve_expected_slug
+from .issue_graph_config import resolve_observation_authority
+from .issue_graph_config import source as resolve_source
+from .issue_graph_payloads import (
+    cache_hit_read_stats as _cache_hit_read_stats,
+)
+from .issue_graph_payloads import (
+    capability_coverage_payload,
+    is_capability_complete_for_issue,
+    node_payload,
+)
+from .issue_graph_payloads import (
+    coverage_payload as _coverage,
+)
+from .issue_graph_payloads import (
+    evolution_by_number as _evolution_by_number,
+)
+from .issue_graph_payloads import (
+    incomplete_graph_diagnostic as _incomplete_graph_diagnostic,
+)
+from .issue_graph_payloads import (
+    read_stats_payload as _read_stats_payload,
+)
 
+_DIAGNOSTICS_LIMIT = 100
 
-def node_payload(node: TicketNode) -> dict[str, Any]:
-    return {
-        "number": node.number,
-        "title": node.title,
-        "type": node.ticket_type.value,
-        "priority": node.priority.value,
-        "status": node.status.value,
-        "parent": node.parent,
-        "blockers": list(node.blockers),
-        "blocks": list(node.blocks),
-        "children": list(node.children),
-        "roadmap": list(node.roadmap),
-    }
+__all__ = [
+    "RepositoryIssueGraphCommand",
+    "RepositoryIssueGraphReader",
+    "RepositoryIssueGraphResult",
+    "_cache_hit_read_stats",
+    "_coverage",
+    "_evolution_by_number",
+    "_incomplete_graph_diagnostic",
+    "_observed_age_ms",
+    "_read_stats_payload",
+    "_snapshot_payload",
+    "capability_coverage_payload",
+    "is_capability_complete_for_issue",
+    "node_payload",
+    "read_github_ticket_snapshot",
+]
 
 
 def _parse_status(value: str | None) -> TicketStatus | None:
@@ -57,222 +102,20 @@ def _parse_priority(value: str | None) -> TicketPriority | None:
         raise TicketGraphError(f"priority must be one of: {allowed}") from exc
 
 
-def _capability_payload(coverage: CapabilityCoverage) -> dict[str, Any]:
-    return {
-        "capability": coverage.capability.value,
-        "complete": coverage.complete,
-        "unavailable": list(coverage.unavailable),
-        "truncated": coverage.truncated,
-    }
-
-
-def capability_coverage_payload(snapshot: TicketGraphSnapshot | None) -> list[dict[str, Any]]:
-    """Per-capability completeness (issue, comments, sub_issues, dependencies,
-    project_overlay) so a caller can tell exactly which GitHub read is missing
-    instead of one blanket `evidence_complete` flag."""
-    if snapshot is None:
-        return []
-    return [_capability_payload(item) for item in snapshot.capability_coverage]
-
-
-def is_capability_complete_for_issue(
-    snapshot: TicketGraphSnapshot | None,
-    capability: GraphEvidenceCapability,
-    issue_number: int,
-) -> bool:
-    """Whether one specific capability's evidence is trustworthy for one issue.
-
-    A capability with no coverage entry (older cached snapshot, or a snapshot
-    that never observed this issue) is treated as complete: absence of
-    evidence about a capability is not evidence the capability failed.
-    """
-    if snapshot is None:
-        return False
-    for coverage in snapshot.capability_coverage:
-        if coverage.capability is capability:
-            return issue_number not in coverage.unavailable
-    return True
-
-
-def _coverage(
-    configured_root: int | None, snapshot: TicketGraphSnapshot | None = None
-) -> dict[str, Any]:
-    return {
-        "configured_root": configured_root,
-        "observed_root": snapshot.graph.program_issue if snapshot is not None else None,
-        "observed_nodes": len(snapshot.graph.nodes) if snapshot is not None else 0,
-        "unavailable": list(snapshot.unavailable) if snapshot is not None else [],
-        "truncated": snapshot.truncated if snapshot is not None else False,
-        "evidence_complete": snapshot.evidence_complete if snapshot is not None else False,
-        "capabilities": capability_coverage_payload(snapshot),
-    }
-
-
-def _incomplete_graph_diagnostic(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
-    reasons: list[str] = []
-    incomplete_capabilities = [
-        item.capability.value for item in snapshot.capability_coverage if not item.complete
-    ]
-    if incomplete_capabilities:
-        reasons.append("incomplete capabilities: " + ", ".join(incomplete_capabilities))
-    if snapshot.unavailable:
-        reasons.append(
-            "unavailable issues: " + ", ".join(str(item) for item in snapshot.unavailable)
-        )
-    if snapshot.truncated:
-        reasons.append("the bounded traversal was truncated")
-    if not reasons:
-        reasons.append("one or more GitHub relationships could not be verified")
-    return {
-        "code": "GRAPH_EVIDENCE_INCOMPLETE",
-        "issue_number": snapshot.graph.program_issue,
-        "message": "GitHub ticket graph evidence is incomplete; " + "; ".join(reasons),
-    }
-
-
-def _evolution_by_number(snapshot: TicketGraphSnapshot) -> dict[int, dict[str, object]]:
-    return {
-        issue.number: ticket_delivery_payload(
-            ticket_live_state_from_issue(
-                {
-                    "number": issue.number,
-                    "state": issue.state,
-                    "body": issue.body,
-                    "comments": [{"body": body} for body in issue.comments],
-                },
-                expected_number=issue.number,
-            ).delivery
-        )
-        for issue in snapshot.live_issues
-    }
-
-
-def _snapshot_payload(snapshot: TicketGraphSnapshot) -> dict[str, Any]:
-    return {
-        "schema_version": snapshot.graph.schema_version,
-        "program_issue": snapshot.graph.program_issue,
-        "nodes": [node_payload(node) for node in snapshot.graph.nodes],
-        "observed_at": snapshot.observed_at,
-        "evidence_complete": snapshot.evidence_complete,
-        "unavailable": list(snapshot.unavailable),
-        "truncated": snapshot.truncated,
-        "capability_coverage": capability_coverage_payload(snapshot),
-        "live_issues": [
-            {
-                "number": issue.number,
-                "title": issue.title,
-                "state": issue.state,
-                "body": issue.body,
-                "comments": list(issue.comments),
-            }
-            for issue in snapshot.live_issues
-        ],
-    }
-
-
-def _positive_integer_tuple(value: object) -> tuple[int, ...]:
-    if not isinstance(value, list):
-        raise ValueError
-    result = tuple(value)
-    if any(not isinstance(item, int) or isinstance(item, bool) or item <= 0 for item in result):
-        raise ValueError
-    return tuple(sorted(set(result)))
-
-
-def _snapshot_from_payload(payload: object) -> TicketGraphSnapshot | None:
-    if not isinstance(payload, dict):
-        return None
-    try:
-        raw_nodes = payload["nodes"]
-        raw_live = payload["live_issues"]
-        if not isinstance(raw_nodes, list) or not isinstance(raw_live, list):
-            return None
-        nodes = tuple(
-            TicketNode(
-                number=int(raw["number"]),
-                title=str(raw["title"]),
-                ticket_type=TicketType(str(raw["type"])),
-                priority=TicketPriority(str(raw["priority"])),
-                status=TicketStatus(str(raw["status"])),
-                parent=int(raw["parent"]) if raw.get("parent") is not None else None,
-                blockers=_positive_integer_tuple(raw["blockers"]),
-                blocks=_positive_integer_tuple(raw["blocks"]),
-                children=_positive_integer_tuple(raw["children"]),
-                roadmap=tuple(str(item) for item in raw["roadmap"]),
-            )
-            for raw in raw_nodes
-            if isinstance(raw, dict)
-        )
-        live = tuple(
-            TicketLiveMetadata(
-                int(raw["number"]),
-                str(raw["title"]),
-                str(raw["state"]),
-                str(raw["body"]),
-                tuple(str(item) for item in raw.get("comments", [])),
-            )
-            for raw in raw_live
-            if isinstance(raw, dict)
-        )
-        observed_at = payload["observed_at"]
-        evidence_complete = payload["evidence_complete"]
-        truncated = payload["truncated"]
-        if (
-            not isinstance(observed_at, str)
-            or not isinstance(evidence_complete, bool)
-            or not isinstance(truncated, bool)
-        ):
-            return None
-        raw_coverage = payload.get("capability_coverage", [])
-        if not isinstance(raw_coverage, list):
-            return None
-        capability_coverage = tuple(
-            CapabilityCoverage(
-                capability=GraphEvidenceCapability(str(item["capability"])),
-                complete=bool(item["complete"]),
-                unavailable=_positive_integer_tuple(item["unavailable"]),
-                truncated=bool(item["truncated"]),
-            )
-            for item in raw_coverage
-            if isinstance(item, dict)
-        )
-        graph = TicketGraph(int(payload["schema_version"]), int(payload["program_issue"]), nodes)
-        return TicketGraphSnapshot(
-            graph=graph,
-            observed_at=observed_at,
-            evidence_complete=evidence_complete,
-            unavailable=_positive_integer_tuple(payload["unavailable"]),
-            truncated=truncated,
-            live_issues=live,
-            capability_coverage=capability_coverage,
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _source(repo: RepositoryConfig, root_issue: int | None) -> GitHubTicketGraphConfig:
-    configured = repo.ticket_graph
-    if configured is None:
-        if root_issue is None:
-            raise ConfigError(
-                f"Repository {repo.repo_id!r} has no GitHub ticket_graph.root_issue configured"
-            )
-        return GitHubTicketGraphConfig(root_issue=root_issue)
-    if root_issue is None or root_issue == configured.root_issue:
-        return configured
-    if not isinstance(root_issue, int) or isinstance(root_issue, bool) or root_issue <= 0:
-        raise TicketGraphError("root_issue must be a positive issue number")
-    return replace(configured, root_issue=root_issue)
-
-
 def read_github_ticket_snapshot(
     ctx: ApplicationContext,
     repo: RepositoryConfig,
     *,
     root_issue: int | None,
     fresh: bool,
-) -> tuple[TicketGraphSnapshot, bool]:
-    source = _source(repo, root_issue)
+) -> tuple[TicketGraphSnapshot, bool, dict[str, object]]:
+    """Read (or reuse) one bounded graph snapshot for the repository.
+
+    Returns ``(snapshot, cache_hit, cache_context)`` where ``cache_context``
+    reports why the cache was hit or missed and the cached snapshot's age, so
+    telemetry never has to guess whether a result was fresh provider evidence.
+    """
+    source = resolve_source(repo, root_issue)
     if ctx.ticket_graphs is None:
         raise RepoForgeError(
             "TICKET_GRAPH_PROVIDER_UNAVAILABLE: GitHub ticket graph adapter is unavailable",
@@ -285,7 +128,13 @@ def read_github_ticket_snapshot(
         )
     cache = ctx.github_read_cache
     now_epoch = ctx.now_epoch()
-    if not fresh and cache is not None:
+    expected_slug = resolve_expected_slug(ctx, repo, source)
+    authority = resolve_observation_authority(ctx, repo)
+    authority_digest = authority.fingerprint if authority is not None else None
+    cache_context: dict[str, object] = {"hit_reason": None, "miss_reason": None, "age_ms": None}
+    if authority is not None:
+        cache_context["authority_origin"] = authority.origin.value
+    if not fresh and cache is not None and authority_digest is not None:
         cached = cache.get(
             repo.repo_id,
             repo.path,
@@ -294,11 +143,40 @@ def read_github_ticket_snapshot(
             ttl_seconds=ctx.config.server.github_read_cache_ttl_seconds,
             now_epoch=now_epoch,
         )
-        snapshot = _snapshot_from_payload(cached)
-        if snapshot is not None:
-            return snapshot, True
+        if cached is None:
+            cache_context["miss_reason"] = "no_cache_entry"
+        else:
+            snapshot = (
+                _snapshot_from_payload(cached)
+                if _payload_bindings_valid(cached, source, expected_slug, authority_digest)
+                else None
+            )
+            if snapshot is not None:
+                age_ms = _observed_age_ms(now_epoch, snapshot.observed_at)
+                if age_ms is None:
+                    # The cached envelope's age cannot be trusted (future
+                    # timestamp beyond the allowed skew, or unparseable):
+                    # fall through and force a fresh read instead of serving
+                    # evidence whose age would violate the output contract.
+                    cache_context["miss_reason"] = "clock_skew"
+                else:
+                    cache_context["hit_reason"] = "valid_bindings_ttl_fresh"
+                    cache_context["age_ms"] = age_ms
+                    return snapshot, True, cache_context
+            else:
+                cache_context["miss_reason"] = (
+                    "bindings_mismatch"
+                    if isinstance(cached.get("bindings"), dict)
+                    else "corrupt_payload"
+                )
+    elif fresh:
+        cache_context["miss_reason"] = "fresh_requested"
+    elif cache is None:
+        cache_context["miss_reason"] = "cache_disabled"
+    else:
+        cache_context["miss_reason"] = "authority_not_pinned"
     try:
-        snapshot = ctx.ticket_graphs.read(repo.path, source, max_items=200)
+        snapshot = ctx.ticket_graphs.read(repo.path, source, max_items=200, remote=repo.remote)
     except RepoForgeError as exc:
         if exc.code is ErrorCode.TICKET_GRAPH_PROVIDER_UNAVAILABLE:
             raise
@@ -321,16 +199,16 @@ def read_github_ticket_snapshot(
                 "do not rewrite the reviewed graph root."
             ),
         ) from exc
-    if cache is not None:
+    if cache is not None and authority_digest is not None:
         cache.put(
             repo.repo_id,
             repo.path,
             "graph",
             source.root_issue,
-            _snapshot_payload(snapshot),
+            _snapshot_payload(snapshot, source, authority_digest),
             now_epoch=now_epoch,
         )
-    return snapshot, False
+    return snapshot, False, cache_context
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +235,7 @@ class RepositoryIssueGraphResult:
     truncated: bool
     valid: bool = True
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    read_stats: dict[str, Any] | None = None
     coverage: dict[str, Any] = field(default_factory=dict)
     safe_next_action: str | None = None
 
@@ -420,13 +299,18 @@ class RepositoryIssueGraphReader:
                             ),
                         }
                     ],
-                    _coverage(None),
-                    (
+                    read_stats=None,
+                    coverage=_coverage(
+                        None,
+                        diagnostics_count=1,
+                        diagnostics_truncated=False,
+                    ),
+                    safe_next_action=(
                         f"Run `rf repo refresh {c.repo_id} --accept` after adding the reviewed "
                         "ticket_graph root to the source configuration."
                     ),
                 )
-            snapshot, cache_hit = read_github_ticket_snapshot(
+            snapshot, cache_hit, cache_context = read_github_ticket_snapshot(
                 self.ctx,
                 repo,
                 root_issue=c.root_issue,
@@ -447,10 +331,23 @@ class RepositoryIssueGraphReader:
             details["node_count"] = len(nodes)
             details["truncated"] = truncated
             details["evidence_complete"] = snapshot.evidence_complete
-            diagnostics = (
-                [] if snapshot.evidence_complete else [_incomplete_graph_diagnostic(snapshot)]
-            )
+            diagnostics = [
+                {
+                    "code": diagnostic.code,
+                    "issue_number": diagnostic.issue_number,
+                    "message": diagnostic.message,
+                }
+                for diagnostic in snapshot.diagnostics
+            ]
+            if not snapshot.evidence_complete:
+                diagnostics.append(_incomplete_graph_diagnostic(snapshot))
+            diagnostics_truncated = len(diagnostics) > _DIAGNOSTICS_LIMIT
+            diagnostics = diagnostics[:_DIAGNOSTICS_LIMIT]
             evolution = _evolution_by_number(snapshot)
+            cache_age_ms = cache_context.get("age_ms")
+            cache_age_value = (
+                float(cache_age_ms) if isinstance(cache_age_ms, (int, float)) else None
+            )
             return RepositoryIssueGraphResult(
                 c.repo_id,
                 "github",
@@ -464,10 +361,28 @@ class RepositoryIssueGraphReader:
                 truncated,
                 snapshot.evidence_complete,
                 diagnostics,
-                _coverage(
-                    repo.ticket_graph.root_issue if repo.ticket_graph else c.root_issue, snapshot
+                read_stats=(
+                    _cache_hit_read_stats(
+                        cache_hit_reason=str(cache_context.get("hit_reason") or "cache_hit"),
+                        cache_age_ms=cache_age_value,
+                    )
+                    if cache_hit
+                    else _read_stats_payload(
+                        snapshot.read_stats,
+                        cache_miss_reason=(
+                            str(cache_context.get("miss_reason"))
+                            if cache_context.get("miss_reason")
+                            else None
+                        ),
+                    )
                 ),
-                (
+                coverage=_coverage(
+                    repo.ticket_graph.root_issue if repo.ticket_graph else c.root_issue,
+                    snapshot,
+                    diagnostics_count=len(diagnostics),
+                    diagnostics_truncated=diagnostics_truncated,
+                ),
+                safe_next_action=(
                     None
                     if snapshot.evidence_complete
                     else (

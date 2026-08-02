@@ -66,11 +66,18 @@ class WorktreeState:
 
 @dataclass(frozen=True, slots=True)
 class BuildArtifact:
-    """A wheel built from a worktree, with the fingerprint that identifies it."""
+    """A wheel built from an immutable commit snapshot, with its identity digests.
+
+    ``build_fingerprint`` is the SHA-256 of the wheel bytes. ``source_digest`` is the
+    Git tree object id of the exact commit the wheel was built from -- the immutable
+    content digest of the source tree, so the release's commit SHA provably names the
+    bytes inside the wheel instead of merely the directory the build was run from.
+    """
 
     wheel_path: Path
     build_fingerprint: str
     package_version: str
+    source_digest: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,9 +107,15 @@ class WorktreeInspector(Protocol):
 
 
 class ReleaseBuilder(Protocol):
-    """Build exactly one wheel from a clean worktree."""
+    """Build exactly one wheel from the immutable snapshot of ``commit_sha``.
 
-    def build(self, worktree: Path) -> BuildArtifact: ...
+    The worktree only SELECTS the commit; the wheel must be built from a detached
+    materialization of that commit's tree, never from the mutable working directory.
+    Otherwise a concurrent edit between the clean check and ``uv build`` ships a wheel
+    carrying the commit's sha but not the commit's bytes.
+    """
+
+    def build(self, worktree: Path, *, commit_sha: str) -> BuildArtifact: ...
 
 
 class ReleaseInstaller(Protocol):

@@ -95,6 +95,10 @@ class ReleaseManifest:
     # legacy release, which must stay readable and switchable -- the absence of the
     # proof is age, not corruption.
     contract_identity: str = ""
+    # Git tree object id of the exact commit the wheel was built from, so the
+    # release's commit SHA names the bytes inside the wheel. Empty on a legacy
+    # release (built before snapshot builds); still readable and switchable.
+    source_digest: str = ""
     # Human-memorable provenance. OPTIONAL and deliberately outside the identity:
     # `build_fingerprint` decides what is installed, so recording a branch name can never
     # change which bits a release is, and two branches at the same commit stay one release
@@ -132,6 +136,7 @@ class ReleaseManifest:
             "build_fingerprint": self.build_fingerprint,
             "tool_surface_hash": self.tool_surface_hash,
             "source_worktree": self.source_worktree,
+            "source_digest": self.source_digest,
             "built_at": self.built_at,
             "contract_identity": self.contract_identity,
             "branch": self.branch,
@@ -160,6 +165,7 @@ class ReleaseManifest:
                 branch=_optional_str(raw, "branch"),
                 subject=_optional_str(raw, "subject"),
                 contract_identity=_optional_str(raw, "contract_identity"),
+                source_digest=_optional_str(raw, "source_digest"),
             )
         except KeyError as exc:
             raise ValueError(f"Release manifest missing field: {exc}") from exc
