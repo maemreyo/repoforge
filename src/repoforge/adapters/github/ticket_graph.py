@@ -15,7 +15,6 @@ module composes them into one traversal.
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +49,9 @@ from .graph_decode import (
 from .graph_query import FULL_SELECTION, build_query, selection_capabilities, stripped_selection
 from .graph_transport import Stats, run_graphql
 from .project_overlay import read_project_values
+from .ticket_legacy_reader import (
+    GitHubTicketGraphReader,  # noqa: F401 — re-export for compatibility
+)
 
 _MAX_GRAPH_NODES = 200
 _MAX_BODY_CHARS = 200_000
@@ -536,79 +538,3 @@ class CommandGitHubTicketGraphGateway:
             diagnostics=tuple(diagnostics),
             repository_slug=slug,
         )
-
-
-class GitHubTicketGraphReader:
-    """Legacy bounded metadata reader retained for fixture and API compatibility."""
-
-    def __init__(self, executor: CommandExecutor, *, cwd: Path) -> None:
-        self._executor = executor
-        self._cwd = cwd
-
-    def read(
-        self, repository: str, issue_numbers: tuple[int, ...]
-    ) -> tuple[TicketLiveMetadata, ...]:
-        if _REPOSITORY.fullmatch(repository) is None:
-            raise TicketGraphError("live repository must use owner/name format")
-        if not issue_numbers or len(issue_numbers) > 100:
-            raise TicketGraphError("live issue read must contain between 1 and 100 issues")
-        if tuple(sorted(set(issue_numbers))) != issue_numbers:
-            raise TicketGraphError("live issue numbers must be sorted and unique")
-        snapshots: list[TicketLiveMetadata] = []
-        for issue_number in issue_numbers:
-            if (
-                not isinstance(issue_number, int)
-                or isinstance(issue_number, bool)
-                or issue_number <= 0
-            ):
-                raise TicketGraphError("live issue numbers must be positive integers")
-            try:
-                result = self._executor.run(
-                    (
-                        "gh",
-                        "issue",
-                        "view",
-                        str(issue_number),
-                        "--repo",
-                        repository,
-                        "--json",
-                        "number,title,state,body,comments",
-                    ),
-                    cwd=self._cwd,
-                    timeout=30,
-                    output_limit=_MAX_BODY_CHARS + 10_000,
-                )
-            except CommandError:
-                continue
-            try:
-                payload: Any = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            live_number = payload.get("number")
-            title = payload.get("title")
-            state = payload.get("state")
-            body = payload.get("body")
-            raw_comments = payload.get("comments")
-            comments: list[str] = []
-            if isinstance(raw_comments, list):
-                for raw_comment in raw_comments[:_MAX_COMMENTS]:
-                    comment_body = (
-                        raw_comment.get("body") if isinstance(raw_comment, dict) else None
-                    )
-                    if isinstance(comment_body, str) and len(comment_body) <= _MAX_COMMENT_CHARS:
-                        comments.append(comment_body)
-            if (
-                live_number != issue_number
-                or not isinstance(title, str)
-                or not title.strip()
-                or state not in {"OPEN", "CLOSED"}
-                or not isinstance(body, str)
-                or len(body) > _MAX_BODY_CHARS
-            ):
-                continue
-            snapshots.append(
-                TicketLiveMetadata(issue_number, title.strip(), state, body, tuple(comments))
-            )
-        return tuple(snapshots)
