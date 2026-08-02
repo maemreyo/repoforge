@@ -833,12 +833,44 @@ class RuntimeSupervisor:
                     while not self._stop.is_set() and self._tunnel.is_alive(child):
                         time.sleep(self._watchdog_interval)
                         generation = self._adopt_committed_runtime_generation(generation)
-                        with contextlib.suppress(Exception):
+                        try:
                             self._ensure_execution_worker(
                                 generation,
                                 environment=environment,
                                 correlation_id=correlation_id,
                             )
+                        except ExecutionWorkerRegistrationError as exc:
+                            # Same disposition as startup: a worker that cannot be
+                            # durably registered is a fail-closed condition, never a
+                            # silent blip. Swallowing it here would let the runtime
+                            # keep serving while an unregistered (possibly running)
+                            # worker holds locks it can never be proven to own, and
+                            # the typed failure would vanish from the record.
+                            self._store.write(
+                                self._record(
+                                    RuntimePhase.FAIL_CLOSED,
+                                    accepted_generation=generation,
+                                    active_generation=None,
+                                    profile=profile,
+                                    tool_surface_hash=tool_surface_hash,
+                                    correlation_id=correlation_id,
+                                    child=None,
+                                    error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
+                                    error=redact_text(str(exc)),
+                                    fail_closed_since=self._clock.now_iso(),
+                                )
+                            )
+                            self._tunnel.terminate(child, grace_seconds=3)
+                            self._child = None
+                            self._clear_target(generation)
+                            self._serve_fail_closed(correlation_id)
+                            return 0
+                        except Exception:
+                            # A transient store failure is not a registration or
+                            # ownership failure: leave the worker to the bounded
+                            # restart policy rather than failing the whole runtime
+                            # on a blip.
+                            pass
                         observed_ok, observed_health = self._observe_health(generation, child)
                         current = self._store.read()
                         if observed_ok:
