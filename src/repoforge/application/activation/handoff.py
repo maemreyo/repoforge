@@ -39,8 +39,12 @@ class HandoffReport:
 
     ``conflicts`` is the fail-closed signal: a prior generation's worker survived
     termination (or its binding was replaced mid-scan), so ownership could not be
-    transferred. ``ok`` is False whenever any conflict was recorded, and the caller
-    must abort the handoff rather than let a second generation claim that work.
+    transferred. ``scan_complete`` reports whether every binding was seen; a
+    truncated scan or unreadable records means unseen prior-generation workers may
+    still run, which must also fail the handoff. ``ok`` is False whenever any
+    conflict was recorded, the scan was incomplete, or a record was unreadable,
+    and the caller must abort the handoff rather than let a second generation
+    claim that work.
     """
 
     scanned: int
@@ -49,15 +53,19 @@ class HandoffReport:
     released: tuple[str, ...] = ()
     resumable_kept: tuple[str, ...] = ()
     conflicts: tuple[tuple[str, str], ...] = ()
+    scan_complete: bool = True
+    unreadable: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
-        return not self.conflicts
+        return not self.conflicts and self.scan_complete and not self.unreadable
 
     def as_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
             "scanned": self.scanned,
+            "scan_complete": self.scan_complete,
+            "unreadable": list(self.unreadable),
             "retained": list(self.retained),
             "reaped": list(self.reaped),
             "released": list(self.released),
@@ -87,8 +95,18 @@ class GenerationHandoffReconciler:
         released: list[str] = []
         resumable_kept: list[str] = []
         conflicts: list[tuple[str, str]] = []
-        records = self._bindings.list_all(max_records=self._max_records)
-        for binding in records:
+        page = self._bindings.list_all(max_records=self._max_records)
+        if not page.scan_complete:
+            conflicts.append(
+                (
+                    "<store>",
+                    "worker-binding scan exceeded the record budget; unseen "
+                    "bindings may still own running prior-generation workers",
+                )
+            )
+        for unreadable_id in page.unreadable_ids:
+            conflicts.append((unreadable_id, "worker binding record could not be decoded"))
+        for binding in page.records:
             if self._owned_by_current(binding, current_owner):
                 retained.append(binding.operation_id)
                 continue
@@ -119,12 +137,14 @@ class GenerationHandoffReconciler:
             else:
                 released.append(binding.operation_id)
         return HandoffReport(
-            scanned=len(records),
+            scanned=len(page.records),
             retained=tuple(retained),
             reaped=tuple(reaped),
             released=tuple(released),
             resumable_kept=tuple(resumable_kept),
             conflicts=tuple(conflicts),
+            scan_complete=page.scan_complete,
+            unreadable=page.unreadable_ids,
         )
 
     @staticmethod

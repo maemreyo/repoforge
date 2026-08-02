@@ -121,7 +121,7 @@ def _prune_bindings(
     pruned = 0
     bindings: tuple[OperationWorkerBinding, ...] = ()
     with contextlib.suppress(RepoForgeError):
-        bindings = worker_bindings.list_all()
+        bindings = worker_bindings.list_all().records
     for binding in bindings:
         stale = True
         with contextlib.suppress(RepoForgeError):

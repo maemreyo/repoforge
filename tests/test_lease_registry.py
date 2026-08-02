@@ -286,20 +286,25 @@ def _registrar(tmp_path: Path, *, shadow: object | None = None) -> tuple[object,
 def test_create_intent_records_a_registered_lease_before_any_pid(tmp_path: Path) -> None:
     registrar, leases = _registrar(tmp_path)
 
-    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
 
     assert lease.lease_id == "worker-" + "0" * 24
     assert lease.status is ProcessLeaseStatus.REGISTERED
     assert lease.pid is None
     stored = leases.read(lease.lease_id)
     assert stored is not None and stored.value == lease
+    assert revision == stored.revision
 
 
 def test_record_pid_persists_the_pid_immediately(tmp_path: Path) -> None:
     registrar, leases = _registrar(tmp_path)
-    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
 
-    updated = registrar.record_pid(lease, pid=4242)
+    updated, _ = registrar.record_pid(lease, pid=4242, expected_revision=revision)
 
     assert updated.pid == 4242
     assert updated.status is ProcessLeaseStatus.REGISTERED
@@ -308,10 +313,14 @@ def test_record_pid_persists_the_pid_immediately(tmp_path: Path) -> None:
 
 def test_complete_registration_reaches_running_via_ready(tmp_path: Path) -> None:
     registrar, leases = _registrar(tmp_path)
-    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
-    lease = registrar.record_pid(lease, pid=4242)
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+    lease, revision = registrar.record_pid(lease, pid=4242, expected_revision=revision)
 
-    running = registrar.complete_registration(lease, process_identity="worker-start-token")
+    running, _ = registrar.complete_registration(
+        lease, process_identity="worker-start-token", expected_revision=revision
+    )
 
     assert running.status is ProcessLeaseStatus.RUNNING
     assert running.pid == 4242
@@ -320,22 +329,31 @@ def test_complete_registration_reaches_running_via_ready(tmp_path: Path) -> None
 
 def test_complete_registration_requires_a_pid(tmp_path: Path) -> None:
     registrar, _ = _registrar(tmp_path)
-    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
 
     from repoforge.domain.errors import ConfigError
 
     with pytest.raises(ConfigError, match="PID_MISSING"):
-        registrar.complete_registration(lease, process_identity="worker-start-token")
+        registrar.complete_registration(
+            lease,
+            process_identity="worker-start-token",
+            expected_revision=revision,
+        )
 
 
 def test_abort_intent_terminalizes_a_registered_lease(tmp_path: Path) -> None:
     registrar, leases = _registrar(tmp_path)
-    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
 
     registrar.abort_intent(
         lease,
         error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
         error_message="identity could not be proven",
+        expected_revision=revision,
     )
 
     stored = leases.read(lease.lease_id)
@@ -346,9 +364,13 @@ def test_abort_intent_terminalizes_a_registered_lease(tmp_path: Path) -> None:
 def test_registrar_mirrors_every_write_into_the_shadow(tmp_path: Path) -> None:
     shadow = SqliteLeaseStore(tmp_path / "shadow.db")
     registrar, _ = _registrar(tmp_path, shadow=shadow)
-    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
-    lease = registrar.record_pid(lease, pid=4242)
-    registrar.complete_registration(lease, process_identity="worker-start-token")
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+    lease, revision = registrar.record_pid(lease, pid=4242, expected_revision=revision)
+    registrar.complete_registration(
+        lease, process_identity="worker-start-token", expected_revision=revision
+    )
 
     page = shadow.list_page()
     assert len(page.records) == 1
@@ -482,3 +504,56 @@ def test_shadow_write_failure_never_fails_registration(
     assert child.pid == 4242
     assert len(bindings.list_all()) == 1
     assert len(leases.list_all().records) == 1
+
+
+def test_record_pid_failure_reaps_the_spawned_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed durable pid write after Popen must reap the child and raise typed.
+
+    The process is alive the instant Popen returns; if the pid cannot be persisted
+    the lease stays REGISTERED without a pid and the process must not be left
+    running untraceable. The adapter TERMs and KILLs it and raises the typed
+    registration error so the supervisor fails closed.
+    """
+    import repoforge.adapters.runtime.execution_worker as worker_module
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.domain.errors import ExecutionWorkerRegistrationError
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    class _FailingPidLeases(JsonProcessLeaseAdapter):
+        def save(self, lease, *, expected_revision):
+            del lease, expected_revision
+            raise OSError("durable pid write failed")
+
+    leases = _FailingPidLeases(tmp_path / "leases", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+    )
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    reaped: list[int] = []
+    monkeypatch.setattr(worker_module.subprocess, "Popen", lambda *a, **k: _fake_popen(4242))
+    monkeypatch.setattr(
+        worker_module,
+        "process_identity",
+        lambda pid: None if pid in reaped else _SHA,
+    )
+    monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(worker_module.os, "killpg", lambda pid, sig: reaped.append(pid))
+    worker = worker_module.SubprocessExecutionWorker(
+        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
+    )
+
+    with pytest.raises(ExecutionWorkerRegistrationError, match="REGISTRATION_FAILED"):
+        worker.start(
+            generation=12,
+            env={},
+            log_path=Path("/tmp/worker.log"),
+            correlation_id="c" * 24,
+        )
+
+    assert reaped == [4242]
+    # The spawned worker was never handed to the parent or bound.
+    assert len(bindings.list_all()) == 0

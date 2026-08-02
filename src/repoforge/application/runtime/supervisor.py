@@ -866,10 +866,11 @@ class RuntimeSupervisor:
                             self._serve_fail_closed(correlation_id)
                             return 0
                         except Exception:
-                            # A transient store failure is not a registration or
-                            # ownership failure: leave the worker to the bounded
-                            # restart policy rather than failing the whole runtime
-                            # on a blip.
+                            # Only pre-spawn failures land here: the adapter converts
+                            # every failure after Popen into
+                            # ExecutionWorkerRegistrationError (which fails closed
+                            # above) and reaps the child, so this branch never
+                            # swallows a live, untraceable worker.
                             pass
                         observed_ok, observed_health = self._observe_health(generation, child)
                         current = self._store.read()

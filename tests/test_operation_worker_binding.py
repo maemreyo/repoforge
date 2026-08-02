@@ -118,7 +118,7 @@ def test_json_worker_binding_store_crud(tmp_path) -> None:
     # put is idempotent overwrite
     store.put(binding)
     assert store.get(binding.operation_id) == binding
-    assert store.list_all() == (binding,)
+    assert store.list_all().records == (binding,)
     store.delete(binding.operation_id)
     assert store.get(binding.operation_id) is None
     # delete is idempotent

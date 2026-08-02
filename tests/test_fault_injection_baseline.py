@@ -42,6 +42,7 @@ from repoforge.adapters.subprocess.process_tree import ProcessIdentity
 from repoforge.application.activation.handoff import GenerationHandoffReconciler, OwnerIdentity
 from repoforge.application.activation.seam import TunnelSeamSwapCoordinator
 from repoforge.application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
+from repoforge.domain.durable_state import Revision
 from repoforge.domain.execution_worker import ExecutionWorkerArchiveEntry, ExecutionWorkerBinding
 from repoforge.domain.operation_worker import OperationWorkerBinding
 from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
@@ -167,26 +168,37 @@ class _RecordingRegistrar:
             updated_at="2026-07-29T09:26:21+00:00",
         )
 
-    def create_intent(self, *, role, correlation_id) -> ProcessLease:
+    def create_intent(self, *, role, correlation_id) -> tuple[ProcessLease, Revision]:
         del role, correlation_id
         self._events.append("intent")
-        return self.lease
+        return self.lease, Revision(1)
 
-    def record_pid(self, lease, *, pid: int) -> ProcessLease:
+    def record_pid(
+        self, lease, *, pid: int, expected_revision: Revision
+    ) -> tuple[ProcessLease, Revision]:
+        del expected_revision
         self._events.append("record_pid")
-        return replace(lease, pid=pid, updated_at="2026-07-29T09:26:22+00:00")
+        return replace(lease, pid=pid, updated_at="2026-07-29T09:26:22+00:00"), Revision(2)
 
-    def complete_registration(self, lease, *, process_identity: str) -> ProcessLease:
+    def complete_registration(
+        self, lease, *, process_identity: str, expected_revision: Revision
+    ) -> tuple[ProcessLease, Revision]:
+        del expected_revision
         self._events.append("running")
-        return replace(
-            lease,
-            status=ProcessLeaseStatus.RUNNING,
-            process_identity=process_identity,
-            updated_at="2026-07-29T09:26:22+00:00",
+        return (
+            replace(
+                lease,
+                status=ProcessLeaseStatus.RUNNING,
+                process_identity=process_identity,
+                updated_at="2026-07-29T09:26:22+00:00",
+            ),
+            Revision(3),
         )
 
-    def abort_intent(self, lease, *, error_code: str, error_message: str) -> None:
-        del lease, error_code, error_message
+    def abort_intent(
+        self, lease, *, error_code: str, error_message: str, expected_revision: Revision
+    ) -> None:
+        del lease, error_code, error_message, expected_revision
         self._events.append("abort")
 
 
@@ -529,14 +541,14 @@ def test_f007_resume_failure_fails_closed() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_f008_operation_worker_scan_truncation_is_silent(tmp_path: Path) -> None:
-    """A scan truncated at ``max_records`` carries no completeness signal (F-008).
+def test_f008_operation_worker_scan_truncation_fails_closed(tmp_path: Path) -> None:
+    """An operation-worker scan truncated at ``max_records`` fails the handoff closed.
 
     The execution-worker registry exposes ``scan_complete`` and ``unreadable_ids``
     so a reconciler fails closed on an incomplete scan. The operation-worker store
-    discards those signals and returns a bare tuple, so the handoff reconciler
-    believes it reconciled the whole registry when an orphan past the limit -- a
-    prior generation's worker still producing side effects -- was never seen.
+    now carries the same signals through ``WorkerBindingPage``; a handoff that
+    cannot prove it saw every binding must not report ok while a prior generation's
+    worker past the limit may still be producing side effects.
     """
     store = JsonWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     # The filesystem scan truncates by ascending lexicographic filename, so with
@@ -552,12 +564,14 @@ def test_f008_operation_worker_scan_truncation_is_silent(tmp_path: Path) -> None
         current_owner=OwnerIdentity(server_pid=111, server_start_token="tok-server", generation=7)
     )
 
-    # Five of six records seen; the truncated prior-generation binding is absent
-    # from every field, and no field says the scan was incomplete.
+    # Five of six records seen, and the report now says the scan was incomplete:
+    # the truncated prior-generation binding must not be silently absent from the
+    # outcome -- the handoff fails closed instead of claiming success.
     assert report.scanned == 5
-    assert report.ok
-    assert "op-000000000000000000000006" not in report.retained
-    assert "op-000000000000000000000006" not in report.reaped
-    assert "op-000000000000000000000006" not in report.released
-    assert "op-000000000000000000000006" not in report.resumable_kept
-    assert "op-000000000000000000000006" not in [op for op, _ in report.conflicts]
+    assert report.scan_complete is False
+    assert report.ok is False
+    assert (
+        "<store>",
+        "worker-binding scan exceeded the record budget; unseen "
+        "bindings may still own running prior-generation workers",
+    ) in report.conflicts

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
+from ...domain.durable_state import Revision
 from ...domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from ...domain.execution_worker import ExecutionWorkerBinding
 from ...domain.process_lease import ProcessLease, ProcessLeaseRole
@@ -63,7 +64,7 @@ class SubprocessExecutionWorker:
         # F-001: the durable REGISTERED intent is written BEFORE any process exists,
         # so a crash at any later point leaves a discoverable record instead of an
         # invisible orphan.
-        lease = self._registrar.create_intent(
+        lease, revision = self._registrar.create_intent(
             role=ProcessLeaseRole.EXECUTION_DAEMON,
             correlation_id=correlation,
         )
@@ -78,32 +79,59 @@ class SubprocessExecutionWorker:
         ]
         worker_env = dict(env)
         worker_env[LEASE_ID_ENV] = lease.lease_id
-        with log_path.open("ab") as log:
-            process = subprocess.Popen(
-                argv,
-                env=worker_env,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            with log_path.open("ab") as log:
+                process = subprocess.Popen(
+                    argv,
+                    env=worker_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            # Persist the pid the instant Popen returns: the process now has a lease AND
+            # a pid, so a crash here leaves a record a later supervisor can probe.
+            lease, revision = self._registrar.record_pid(
+                lease, pid=process.pid, expected_revision=revision
             )
-        # Persist the pid the instant Popen returns: the process now has a lease AND
-        # a pid, so a crash here leaves a record a later supervisor can probe.
-        lease = self._registrar.record_pid(lease, pid=process.pid)
-        identity = self._establish_stable_identity(process)
-        if identity is None:
-            self._fail_registration(
-                lease,
-                process.pid,
-                "the execution worker process identity could not be established",
+            identity = self._establish_stable_identity(process)
+            if identity is None:
+                self._fail_registration(
+                    lease,
+                    process.pid,
+                    revision,
+                    "the execution worker process identity could not be established",
+                )
+            self._children[process.pid] = process
+            # Registration is mandatory: without a durable lease the worker could not be
+            # reclaimed later, so an unregistered worker is terminated, never left to run.
+            worker_id = self._register_binding(
+                lease, process.pid, generation, correlation, identity, revision
             )
-        self._children[process.pid] = process
-        # Registration is mandatory: without a durable lease the worker could not be
-        # reclaimed later, so an unregistered worker is terminated, never left to run.
-        worker_id = self._register_binding(lease, process.pid, generation, correlation, identity)
-        self._worker_ids[process.pid] = worker_id
-        # The parent returns a worker only after the lease is durably RUNNING.
-        self._registrar.complete_registration(lease, process_identity=identity)
+            self._worker_ids[process.pid] = worker_id
+            # The parent returns a worker only after the lease is durably RUNNING.
+            lease, revision = self._registrar.complete_registration(
+                lease, process_identity=identity, expected_revision=revision
+            )
+        except Exception as exc:
+            # Any failure after Popen must never leave a live, untraceable worker:
+            # terminalize the intent (best effort), TERM -> KILL the child, confirm
+            # it is gone, then raise the typed registration error so the supervisor
+            # fails closed instead of treating it as a transient blip (F-001).
+            if process is not None and process.poll() is None:
+                self._reap_unregistered(process.pid)
+            with contextlib.suppress(Exception):
+                self._registrar.abort_intent(
+                    lease,
+                    error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
+                    error_message=f"{type(exc).__name__}: {exc}",
+                    expected_revision=revision,
+                )
+            raise ExecutionWorkerRegistrationError(
+                f"EXECUTION_WORKER_REGISTRATION_FAILED: {type(exc).__name__}: {exc}; "
+                "the spawned worker was terminated and confirmed dead"
+            ) from exc
         return ChildProcess(
             process.pid,
             identity,
@@ -174,6 +202,7 @@ class SubprocessExecutionWorker:
         generation: int,
         correlation_id: str,
         identity: str,
+        expected_revision: Revision,
     ) -> str:
         """Persist the durable per-worker binding; mandatory for a live worker (#424).
 
@@ -188,6 +217,7 @@ class SubprocessExecutionWorker:
             self._fail_registration(
                 lease,
                 pid,
+                expected_revision,
                 "the supervisor process identity could not be established",
             )
         proc_identity = read_identity(pid)
@@ -215,11 +245,18 @@ class SubprocessExecutionWorker:
             self._fail_registration(
                 lease,
                 pid,
+                expected_revision,
                 f"the durable worker lease could not be written: {exc}",
             )
         return worker_id
 
-    def _fail_registration(self, lease: ProcessLease, pid: int, reason: str) -> NoReturn:
+    def _fail_registration(
+        self,
+        lease: ProcessLease,
+        pid: int,
+        expected_revision: Revision,
+        reason: str,
+    ) -> NoReturn:
         """Abort the intent lease, TERM -> wait -> KILL, verify death, then raise.
 
         The pre-spawn lease is terminalized so it never dangles as a REGISTERED
@@ -231,6 +268,7 @@ class SubprocessExecutionWorker:
                 lease,
                 error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
                 error_message=reason,
+                expected_revision=expected_revision,
             )
         self._reap_unregistered(pid)
         raise ExecutionWorkerRegistrationError(

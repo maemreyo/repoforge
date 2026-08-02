@@ -141,7 +141,10 @@ def test_a_binding_replaced_during_reconciliation_is_not_deleted() -> None:
             self._inner = inner
 
         def list_all(self, *, max_records: int = 2_000):
-            return (stale,)
+            from repoforge.ports.worker_binding_store import WorkerBindingPage
+
+            del max_records
+            return WorkerBindingPage(records=(stale,), scan_complete=True, unreadable_ids=())
 
         def get(self, operation_id: str):
             return self._inner.get(operation_id)

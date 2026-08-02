@@ -57,8 +57,15 @@ class WorkerRegistrar:
         self._clock = clock
         self._shadow = shadow
 
-    def create_intent(self, *, role: ProcessLeaseRole, correlation_id: str) -> ProcessLease:
-        """Durably record the REGISTERED intent BEFORE any process is spawned."""
+    def create_intent(
+        self, *, role: ProcessLeaseRole, correlation_id: str
+    ) -> tuple[ProcessLease, Revision]:
+        """Durably record the REGISTERED intent BEFORE any process is spawned.
+
+        Returns the lease together with the revision this caller now owns; every
+        later transition must CAS on that owned revision, never on a fresh store
+        read, so a concurrent terminalize cannot be resurrected (F-001).
+        """
         now = self._clock.now_iso()
         lease = ProcessLease(
             lease_id=f"worker-{self._ids.new_hex(24)}",
@@ -74,26 +81,35 @@ class WorkerRegistrar:
         )
         envelope = self._leases.create(lease)
         self._mirror(lease, envelope.revision)
-        return lease
+        return lease, envelope.revision
 
-    def record_pid(self, lease: ProcessLease, *, pid: int) -> ProcessLease:
+    def record_pid(
+        self,
+        lease: ProcessLease,
+        *,
+        pid: int,
+        expected_revision: Revision,
+    ) -> tuple[ProcessLease, Revision]:
         """Persist the pid the instant Popen returns.
 
         This is the write that makes a post-crash process discoverable: the lease
         exists before the process, and the pid lands in it before any further work,
         so no crash point leaves a live process with neither a lease nor a pid.
+        CAS uses the caller's owned revision; a stale writer fails instead of
+        resurrecting a terminalized lease.
         """
         updated = replace(lease, pid=pid, updated_at=self._clock.now_iso())
-        envelope = self._leases.save(updated, expected_revision=self._revision(lease))
+        envelope = self._leases.save(updated, expected_revision=expected_revision)
         self._mirror(updated, envelope.revision)
-        return updated
+        return updated, envelope.revision
 
     def complete_registration(
         self,
         lease: ProcessLease,
         *,
         process_identity: str,
-    ) -> ProcessLease:
+        expected_revision: Revision,
+    ) -> tuple[ProcessLease, Revision]:
         """READY -> RUNNING after identity is proven; the durable handshake end."""
         now = self._clock.now_iso()
         if lease.pid is None:
@@ -106,14 +122,21 @@ class WorkerRegistrar:
             process_identity=process_identity,
             pid=lease.pid,
         )
-        envelope = self._leases.save(ready, expected_revision=self._revision(lease))
+        envelope = self._leases.save(ready, expected_revision=expected_revision)
         self._mirror(ready, envelope.revision)
         running = _mark_running(ready, updated_at=now)
         envelope = self._leases.save(running, expected_revision=envelope.revision)
         self._mirror(running, envelope.revision)
-        return running
+        return running, envelope.revision
 
-    def abort_intent(self, lease: ProcessLease, *, error_code: str, error_message: str) -> None:
+    def abort_intent(
+        self,
+        lease: ProcessLease,
+        *,
+        error_code: str,
+        error_message: str,
+        expected_revision: Revision,
+    ) -> None:
         """Terminalize a REGISTERED intent that will never become a worker."""
         terminated = _abort_intent(
             lease,
@@ -121,15 +144,8 @@ class WorkerRegistrar:
             error_code=error_code,
             error_message=error_message,
         )
-        envelope = self._leases.save(terminated, expected_revision=self._revision(lease))
+        envelope = self._leases.save(terminated, expected_revision=expected_revision)
         self._mirror(terminated, envelope.revision)
-
-    def _revision(self, lease: ProcessLease) -> Revision:
-        """The current revision of ``lease``, or fail closed if it vanished."""
-        envelope = self._leases.read(lease.lease_id)
-        if envelope is None:
-            raise ConfigError(f"WORKER_LEASE_MISSING: the pre-spawn lease {lease.lease_id} is gone")
-        return envelope.revision
 
     def _mirror(self, lease: ProcessLease, revision: Revision) -> None:
         """Mirror one authoritative write into the shadow; never fail the write."""

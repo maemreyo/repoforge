@@ -14,6 +14,7 @@ from ...domain.operation_worker import (
     worker_binding_payload,
 )
 from ...ports.locking import LockManager
+from ...ports.worker_binding_store import WorkerBindingPage
 from .json_state_repository import JsonStateRepository
 
 
@@ -59,19 +60,29 @@ class JsonWorkerBindingStore:
         self._records.delete(operation_id)
 
     def delete_if_unchanged(self, binding: OperationWorkerBinding) -> bool:
-        """Compare-and-delete: only remove the record while it still equals ``binding``.
+        """Compare-and-delete: only remove the binding while it still matches ``binding``.
 
         Closes the handoff race where a new generation writes a fresh binding between
-        a reconciler's scan and its release.
+        a reconciler's scan and its release. The value comparison and the delete run
+        under one record lock via ``delete_if_revision``.
         """
         envelope = self._records.read(binding.operation_id)
         if envelope is None:
             return True
         if envelope.value != binding:
             return False
+        return self._records.delete_if_revision(
+            binding.operation_id, expected_revision=envelope.revision
+        )
+        if envelope.value != binding:
+            return False
         self._records.delete(binding.operation_id)
         return True
 
-    def list_all(self, *, max_records: int = 2_000) -> tuple[OperationWorkerBinding, ...]:
+    def list_all(self, *, max_records: int = 2_000) -> WorkerBindingPage:
         page = self._records.list_records(max_records=max_records)
-        return tuple(item.value for item in page.records)
+        return WorkerBindingPage(
+            records=tuple(item.value for item in page.records),
+            scan_complete=not page.scan_truncated,
+            unreadable_ids=page.unreadable_record_ids,
+        )
