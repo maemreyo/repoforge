@@ -36,20 +36,20 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from repoforge.adapters.persistence.json_execution_worker_binding_store import (
-        JsonExecutionWorkerBindingStore,
+    from repoforge.adapters.persistence.json_process_lease_adapter import (
+        JsonProcessLeaseAdapter,
     )
     from repoforge.adapters.persistence.parity import compare_lease_parity
     from repoforge.adapters.persistence.sqlite_lease_store import SqliteLeaseStore
     from repoforge.testing import InMemoryLockManager
 
     state_root = Path(args.state_root)
-    bindings = JsonExecutionWorkerBindingStore(state_root, InMemoryLockManager())
+    leases = JsonProcessLeaseAdapter(state_root, InMemoryLockManager())
     shadow = SqliteLeaseStore(
         Path(args.db_path) if args.db_path else state_root / "runtime-leases-shadow.db"
     )
     try:
-        report = compare_lease_parity(bindings, shadow)
+        report = compare_lease_parity(leases, shadow)
     finally:
         shadow.close()
 

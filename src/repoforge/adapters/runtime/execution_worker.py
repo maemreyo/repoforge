@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import os
 import signal
 import subprocess
@@ -15,9 +14,10 @@ from typing import NoReturn
 
 from ...domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from ...domain.execution_worker import ExecutionWorkerBinding
+from ...domain.process_lease import ProcessLease, ProcessLeaseRole
 from ...domain.runtime import ChildProcess
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
-from ..persistence.sqlite_lease_store import SqliteLeaseStore
+from ...ports.worker_registrar import WorkerRegistrar
 from ..subprocess.process_tree import read_identity
 from .state_store import process_identity
 
@@ -29,6 +29,10 @@ _IDENTITY_SETTLE_SECONDS = 10.0
 _IDENTITY_POLL_INTERVAL = 0.02
 _REGISTRATION_REAP_SECONDS = 5.0
 
+#: Env var carrying the pre-spawn lease id to the worker, so a later child-side
+#: handshake can claim the same lease (F-001 protocol).
+LEASE_ID_ENV = "REPOFORGE_EXECUTION_WORKER_LEASE_ID"
+
 
 class SubprocessExecutionWorker:
     def __init__(
@@ -36,13 +40,13 @@ class SubprocessExecutionWorker:
         config_path: Path,
         *,
         bindings: ExecutionWorkerBindingStore,
-        lease_shadow: SqliteLeaseStore | None = None,
+        registrar: WorkerRegistrar,
     ) -> None:
         self._config_path = config_path.expanduser().resolve()
         self._children: dict[int, subprocess.Popen[bytes]] = {}
         self._worker_ids: dict[int, str] = {}
         self._bindings = bindings
-        self._lease_shadow = lease_shadow
+        self._registrar = registrar
 
     def start(
         self,
@@ -55,6 +59,14 @@ class SubprocessExecutionWorker:
         if generation <= 0:
             raise ConfigError("Execution worker generation must be positive")
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        correlation = correlation_id or ""
+        # F-001: the durable REGISTERED intent is written BEFORE any process exists,
+        # so a crash at any later point leaves a discoverable record instead of an
+        # invisible orphan.
+        lease = self._registrar.create_intent(
+            role=ProcessLeaseRole.EXECUTION_DAEMON,
+            correlation_id=correlation,
+        )
         argv = [
             sys.executable,
             "-m",
@@ -64,24 +76,34 @@ class SubprocessExecutionWorker:
             "--generation",
             str(generation),
         ]
+        worker_env = dict(env)
+        worker_env[LEASE_ID_ENV] = lease.lease_id
         with log_path.open("ab") as log:
             process = subprocess.Popen(
                 argv,
-                env=dict(env),
+                env=worker_env,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        # Persist the pid the instant Popen returns: the process now has a lease AND
+        # a pid, so a crash here leaves a record a later supervisor can probe.
+        lease = self._registrar.record_pid(lease, pid=process.pid)
         identity = self._establish_stable_identity(process)
         if identity is None:
-            self._reap_unregistered(process.pid)
-            raise ConfigError("Could not establish execution worker process identity")
+            self._fail_registration(
+                lease,
+                process.pid,
+                "the execution worker process identity could not be established",
+            )
         self._children[process.pid] = process
         # Registration is mandatory: without a durable lease the worker could not be
         # reclaimed later, so an unregistered worker is terminated, never left to run.
-        worker_id = self._register_binding(process.pid, generation, correlation_id or "", identity)
+        worker_id = self._register_binding(lease, process.pid, generation, correlation, identity)
         self._worker_ids[process.pid] = worker_id
+        # The parent returns a worker only after the lease is durably RUNNING.
+        self._registrar.complete_registration(lease, process_identity=identity)
         return ChildProcess(
             process.pid,
             identity,
@@ -146,23 +168,34 @@ class SubprocessExecutionWorker:
         return None
 
     def _register_binding(
-        self, pid: int, generation: int, correlation_id: str, identity: str
+        self,
+        lease: ProcessLease,
+        pid: int,
+        generation: int,
+        correlation_id: str,
+        identity: str,
     ) -> str:
         """Persist the durable per-worker binding; mandatory for a live worker (#424).
 
-        Every failure path terminates the spawned worker and raises
+        The binding shares the pre-spawn lease's id so the reconciler's record and
+        the registrar's lease name the same worker. Every failure path aborts the
+        intent lease, terminates the spawned worker, and raises
         ``ExecutionWorkerRegistrationError`` -- a worker is never returned as started
         without a durable lease a later supervisor could prove and reclaim.
         """
         supervisor_identity = process_identity(os.getpid())
         if supervisor_identity is None:
-            self._fail_registration(pid, "the supervisor process identity could not be established")
+            self._fail_registration(
+                lease,
+                pid,
+                "the supervisor process identity could not be established",
+            )
         proc_identity = read_identity(pid)
         token = proc_identity.start_token if proc_identity is not None else None
         # A running binding requires a start token; without one, record the worker as
         # an unproven concern so a later reconciler still sees it (fail closed) (#420).
         state = "running" if token is not None else "refused_unproven"
-        worker_id = f"worker-{pid}-{hashlib.sha256((token or str(pid)).encode()).hexdigest()[:12]}"
+        worker_id = lease.lease_id
         binding = ExecutionWorkerBinding(
             worker_id=worker_id,
             pid=pid,
@@ -179,45 +212,26 @@ class SubprocessExecutionWorker:
         try:
             self._bindings.put(binding)
         except Exception as exc:
-            self._fail_registration(pid, f"the durable worker lease could not be written: {exc}")
-        self._mirror_shadow(binding)
+            self._fail_registration(
+                lease,
+                pid,
+                f"the durable worker lease could not be written: {exc}",
+            )
         return worker_id
 
-    def _mirror_shadow(self, binding: ExecutionWorkerBinding) -> None:
-        """Mirror the authoritative JSON binding into the shadow lease registry.
+    def _fail_registration(self, lease: ProcessLease, pid: int, reason: str) -> NoReturn:
+        """Abort the intent lease, TERM -> wait -> KILL, verify death, then raise.
 
-        The shadow is parity evidence only -- no safety gate reads it -- so a shadow
-        write failure must never fail the registration that already durably
-        committed the JSON lease. It degrades to "parity unavailable", not to a
-        refused worker.
+        The pre-spawn lease is terminalized so it never dangles as a REGISTERED
+        anomaly, then the unregistered worker is reaped with death verified (F-002)
+        before the typed failure is raised.
         """
-        if self._lease_shadow is None:
-            return
-        from ...domain.durable_state import Revision
-        from ...domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
-
-        try:
-            self._lease_shadow.write_shadow(
-                ProcessLease(
-                    lease_id=binding.worker_id,
-                    role=ProcessLeaseRole.EXECUTION_DAEMON,
-                    status=ProcessLeaseStatus.RUNNING,
-                    process_identity=binding.process_start_token,
-                    pid=binding.pid,
-                    started_at=binding.started_at,
-                    heartbeat_at=binding.started_at,
-                    correlation_id=binding.correlation_id,
-                    created_at=binding.started_at,
-                    updated_at=datetime.now(timezone.utc).isoformat(),
-                ),
-                Revision(1),
+        with contextlib.suppress(Exception):
+            self._registrar.abort_intent(
+                lease,
+                error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
+                error_message=reason,
             )
-        except Exception:
-            # Shadow is best-effort parity, never part of the safety decision.
-            return
-
-    def _fail_registration(self, pid: int, reason: str) -> NoReturn:
-        """TERM -> wait -> KILL the unregistered worker, verify death, then raise."""
         self._reap_unregistered(pid)
         raise ExecutionWorkerRegistrationError(
             f"EXECUTION_WORKER_REGISTRATION_FAILED: {reason}; the spawned worker "

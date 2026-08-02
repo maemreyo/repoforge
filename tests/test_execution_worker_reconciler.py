@@ -411,6 +411,7 @@ def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
         execution_worker_binding_payload,
     )
     from repoforge.testing import InMemoryLockManager
+    from repoforge.testing.fakes import InMemoryWorkerRegistrar
 
     env = create_forge_environment(tmp_path)
     home = tmp_path / "home"
@@ -422,7 +423,9 @@ def test_reconciler_reaps_a_real_orphaned_execution_worker(tmp_path) -> None:
         created_at="2026-07-29T00:00:00+00:00",
     )
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
-    spawner = SubprocessExecutionWorker(env.config_path, bindings=bindings)
+    spawner = SubprocessExecutionWorker(
+        env.config_path, bindings=bindings, registrar=InMemoryWorkerRegistrar()
+    )
     child = spawner.start(
         1,
         env=dict(os.environ, HOME=str(home)),
@@ -831,6 +834,7 @@ def test_terminate_marks_reclaimed_only_after_confirmed_death(tmp_path) -> None:
     from repoforge.adapters.runtime.execution_worker import SubprocessExecutionWorker
     from repoforge.bootstrap import build_configuration_store
     from repoforge.testing import InMemoryLockManager
+    from repoforge.testing.fakes import InMemoryWorkerRegistrar
 
     env = create_forge_environment(tmp_path)
     home = tmp_path / "home"
@@ -842,7 +846,9 @@ def test_terminate_marks_reclaimed_only_after_confirmed_death(tmp_path) -> None:
         created_at="2026-07-29T00:00:00+00:00",
     )
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
-    spawner = SubprocessExecutionWorker(env.config_path, bindings=bindings)
+    spawner = SubprocessExecutionWorker(
+        env.config_path, bindings=bindings, registrar=InMemoryWorkerRegistrar()
+    )
     child = spawner.start(
         1,
         env=dict(os.environ, HOME=str(home)),

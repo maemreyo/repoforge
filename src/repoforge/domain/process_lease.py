@@ -50,7 +50,9 @@ class ProcessLeaseStatus(str, Enum):
 
 
 _ALLOWED_TRANSITIONS: dict[ProcessLeaseStatus, frozenset[ProcessLeaseStatus]] = {
-    ProcessLeaseStatus.REGISTERED: frozenset({ProcessLeaseStatus.READY}),
+    ProcessLeaseStatus.REGISTERED: frozenset(
+        {ProcessLeaseStatus.READY, ProcessLeaseStatus.TERMINATED}
+    ),
     ProcessLeaseStatus.READY: frozenset({ProcessLeaseStatus.UNPROVEN, ProcessLeaseStatus.RUNNING}),
     ProcessLeaseStatus.UNPROVEN: frozenset(
         {ProcessLeaseStatus.RUNNING, ProcessLeaseStatus.TERMINATED}
@@ -147,6 +149,66 @@ class ProcessLease:
         return LeaseId(self.lease_id)
 
 
+def process_lease_payload(lease: ProcessLease) -> dict[str, object]:
+    """Serialize a lease for durable storage; enums become their string values."""
+    return {
+        "lease_id": lease.lease_id,
+        "status": lease.status.value,
+        "role": lease.role.value,
+        "process_identity": lease.process_identity,
+        "pid": lease.pid,
+        "started_at": lease.started_at,
+        "heartbeat_at": lease.heartbeat_at,
+        "correlation_id": lease.correlation_id,
+        "created_at": lease.created_at,
+        "updated_at": lease.updated_at,
+        "error_code": lease.error_code,
+        "error_message": lease.error_message,
+    }
+
+
+def process_lease_from_payload(payload: dict[str, object]) -> ProcessLease:
+    """Decode a stored payload; unknown status or role raises ValueError."""
+    required = {
+        "lease_id",
+        "status",
+        "role",
+        "correlation_id",
+        "created_at",
+        "updated_at",
+    }
+    if not required.issubset(payload):
+        raise ValueError("process lease payload is missing required fields")
+    return ProcessLease(
+        lease_id=str(payload["lease_id"]),
+        status=ProcessLeaseStatus(str(payload["status"])),
+        role=ProcessLeaseRole(str(payload["role"])),
+        process_identity=_optional_str(payload.get("process_identity")),
+        pid=_optional_int(payload.get("pid")),
+        started_at=_optional_str(payload.get("started_at")),
+        heartbeat_at=_optional_str(payload.get("heartbeat_at")),
+        correlation_id=str(payload["correlation_id"]),
+        created_at=str(payload["created_at"]),
+        updated_at=str(payload["updated_at"]),
+        error_code=_optional_str(payload.get("error_code")),
+        error_message=_optional_str(payload.get("error_message")),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("process lease pid must be an integer")
+    return value
+
+
 def _transition(
     lease: ProcessLease,
     target: ProcessLeaseStatus,
@@ -189,6 +251,41 @@ def register_ready(
         updated_at=updated_at,
         process_identity=process_identity,
         pid=pid,
+    )
+
+
+def mark_running(
+    lease: ProcessLease,
+    *,
+    updated_at: str,
+) -> ProcessLease:
+    """READY -> RUNNING once the worker is durably registered and live."""
+    return _transition(
+        lease,
+        ProcessLeaseStatus.RUNNING,
+        updated_at=updated_at,
+    )
+
+
+def abort_intent(
+    lease: ProcessLease,
+    *,
+    updated_at: str,
+    error_code: str,
+    error_message: str,
+) -> ProcessLease:
+    """REGISTERED -> TERMINATED when the pre-spawn intent is abandoned.
+
+    A pre-spawn lease can be aborted before any process exists (identity could not
+    be proven, the durable write failed, the spawn was refused). It is terminal so
+    the intent can never dangle as a permanent anomaly.
+    """
+    return _transition(
+        lease,
+        ProcessLeaseStatus.TERMINATED,
+        updated_at=updated_at,
+        error_code=error_code,
+        error_message=error_message,
     )
 
 
@@ -273,10 +370,14 @@ __all__ = [
     "ProcessLease",
     "ProcessLeaseRole",
     "ProcessLeaseStatus",
+    "abort_intent",
     "archive",
     "begin_termination",
     "confirm_terminated",
+    "mark_running",
     "mark_unproven",
+    "process_lease_from_payload",
+    "process_lease_payload",
     "quarantine",
     "register_ready",
     "survive_kill",

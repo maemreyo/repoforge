@@ -201,6 +201,7 @@ from .application.runtime.activation import GenerationActivator
 from .application.runtime.activation_journal import RuntimeActivationJournal
 from .application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
 from .application.runtime.supervisor import RuntimeSupervisor
+from .application.runtime.worker_registrar import WorkerRegistrar
 from .application.tasks import TaskCapsuleService
 from .application.workflow import (
     RecordedCategoryReplayAdapter,
@@ -1177,6 +1178,22 @@ def build_lease_shadow_store(state_root: Path) -> SqliteLeaseStore:
     return SqliteLeaseStore(state_root / "runtime-leases-shadow.db")
 
 
+def build_worker_registrar(state_root: Path) -> WorkerRegistrar:
+    """The pre-spawn worker registrar: authoritative JSON lease + shadow mirror.
+
+    The JSON ProcessLease store is authoritative for the intent -> running lease
+    lifecycle (F-001); the SQLite shadow mirrors it for parity checking.
+    """
+    from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
+
+    return WorkerRegistrar(
+        leases=JsonProcessLeaseAdapter(state_root, build_lock_manager(state_root)),
+        ids=id_generator(),
+        clock=system_clock(),
+        shadow=build_lease_shadow_store(state_root),
+    )
+
+
 def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconciler:
     """Reclaim orphaned execution workers of departed releases before a new start."""
     from .adapters.runtime.state_store import process_identity
@@ -2126,7 +2143,7 @@ def run_runtime_worker(
         execution_worker=SubprocessExecutionWorker(
             config_path,
             bindings=build_execution_worker_binding_store(root),
-            lease_shadow=build_lease_shadow_store(root),
+            registrar=build_worker_registrar(root),
         ),
         execution_worker_log_path=root / "execution-worker.log",
         preflight=validate_generated_contract_identity,

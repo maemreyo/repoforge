@@ -11,7 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ...domain.execution_worker import ExecutionWorkerBinding
+from ...domain.process_lease import ProcessLeaseRole
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
+from .json_process_lease_adapter import JsonProcessLeaseAdapter
 from .sqlite_lease_store import SqliteLeaseStore
 
 
@@ -43,17 +45,17 @@ class ParityReport:
 
 
 def compare_lease_parity(
-    bindings: ExecutionWorkerBindingStore,
+    leases: JsonProcessLeaseAdapter,
     shadow: SqliteLeaseStore,
 ) -> ParityReport:
-    """Compare active execution-worker JSON records against shadow leases.
+    """Compare authoritative JSON leases against shadow leases.
 
-    Only active JSON records are compared: terminal leases are archived and removed
-    from the active JSON registry, while the shadow keeps one row per lease written
-    at registration, so a terminal JSON record has no shadow twin by design.
+    The shadow mirrors every authoritative lease write, so the two should agree.
+    A divergence means a write reached only one side -- evidence for the operator
+    that the mirror or the authoritative store lagged behind.
     """
-    page = bindings.list_page()
-    json_ids = {binding.worker_id for binding in page.records}
+    page = leases.list_page()
+    json_ids = {lease.lease_id for lease in page.records}
     shadow_ids = {lease.lease_id for lease, _ in shadow.list_all()}
     return ParityReport(
         json_count=len(json_ids),
@@ -67,42 +69,43 @@ def compare_lease_parity(
 
 def import_active_bindings(
     bindings: ExecutionWorkerBindingStore,
+    leases: JsonProcessLeaseAdapter,
     shadow: SqliteLeaseStore,
     *,
     now: str,
 ) -> int:
-    """Mirror every active JSON binding into the shadow lease table.
+    """Migrate existing active execution-worker bindings into the lease registry.
 
-    Phase 3 migration step: existing active execution-worker records are imported
-    into the unified shadow registry so parity starts from a populated shadow
-    instead of an empty one. Returns the number of leases written. Read-only with
-    respect to the authoritative JSON store.
+    Phase 3 migration step: active bindings written before the pre-spawn lease
+    protocol are imported as RUNNING leases into the authoritative JSON lease
+    store (and mirrored to the shadow), so parity starts from a populated lease
+    registry instead of an empty one. Returns the number of leases written.
     """
-    from ...domain.durable_state import Revision
-    from ...domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+    from ...domain.process_lease import ProcessLease, ProcessLeaseStatus
 
     imported = 0
     for binding in _active_bindings(bindings):
-        shadow.write_shadow(
-            ProcessLease(
-                lease_id=binding.worker_id,
-                role=ProcessLeaseRole.EXECUTION_DAEMON,
-                status=ProcessLeaseStatus.RUNNING,
-                process_identity=binding.process_start_token,
-                pid=binding.pid,
-                started_at=binding.started_at,
-                heartbeat_at=binding.started_at,
-                correlation_id=binding.correlation_id,
-                created_at=binding.started_at,
-                updated_at=now,
-            ),
-            Revision(1),
+        lease = ProcessLease(
+            lease_id=binding.worker_id,
+            role=ProcessLeaseRole.EXECUTION_DAEMON,
+            status=ProcessLeaseStatus.RUNNING,
+            process_identity=binding.process_start_token,
+            pid=binding.pid,
+            started_at=binding.started_at,
+            heartbeat_at=binding.started_at,
+            correlation_id=binding.correlation_id,
+            created_at=binding.started_at,
+            updated_at=now,
         )
+        envelope = leases.create(lease)
+        shadow.write_shadow(lease, envelope.revision)
         imported += 1
     return imported
 
 
-def _active_bindings(bindings: ExecutionWorkerBindingStore) -> tuple[ExecutionWorkerBinding, ...]:
+def _active_bindings(
+    bindings: ExecutionWorkerBindingStore,
+) -> tuple[ExecutionWorkerBinding, ...]:
     page = bindings.list_page()
     active_states = frozenset({"running", "legacy_unproven", "refused_unproven", "survived_kill"})
     return tuple(binding for binding in page.records if binding.state in active_states)

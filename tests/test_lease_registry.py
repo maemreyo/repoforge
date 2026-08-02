@@ -16,6 +16,9 @@ import pytest
 from repoforge.adapters.persistence.json_execution_worker_binding_store import (
     JsonExecutionWorkerBindingStore,
 )
+from repoforge.adapters.persistence.json_process_lease_adapter import (
+    JsonProcessLeaseAdapter,
+)
 from repoforge.adapters.persistence.parity import compare_lease_parity, import_active_bindings
 from repoforge.adapters.persistence.sqlite_db import migrate, open_db
 from repoforge.adapters.persistence.sqlite_lease_store import SqliteLeaseStore
@@ -195,10 +198,11 @@ def test_list_page_names_unreadable_records(tmp_path: Path) -> None:
 def test_parity_in_sync_when_both_sides_agree(tmp_path: Path) -> None:
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     bindings.put(_binding())
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
     shadow = SqliteLeaseStore(tmp_path / "shadow.db")
-    import_active_bindings(bindings, shadow, now="2026-07-30T00:00:00+00:00")
+    import_active_bindings(bindings, leases, shadow, now="2026-07-30T00:00:00+00:00")
 
-    report = compare_lease_parity(bindings, shadow)
+    report = compare_lease_parity(leases, shadow)
 
     assert report.in_sync is True
     assert report.json_count == 1
@@ -206,11 +210,11 @@ def test_parity_in_sync_when_both_sides_agree(tmp_path: Path) -> None:
 
 
 def test_parity_reports_a_lease_missing_from_the_shadow(tmp_path: Path) -> None:
-    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
-    bindings.put(_binding())
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    leases.create(_lease())
     shadow = SqliteLeaseStore(tmp_path / "shadow.db")  # shadow never mirrored
 
-    report = compare_lease_parity(bindings, shadow)
+    report = compare_lease_parity(leases, shadow)
 
     assert report.in_sync is False
     assert report.only_in_json == (_WORKER,)
@@ -218,11 +222,11 @@ def test_parity_reports_a_lease_missing_from_the_shadow(tmp_path: Path) -> None:
 
 
 def test_parity_reports_a_stale_shadow_lease(tmp_path: Path) -> None:
-    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
     shadow = SqliteLeaseStore(tmp_path / "shadow.db")
     shadow.write_shadow(_lease(), Revision(1))  # shadow has a lease JSON never wrote
 
-    report = compare_lease_parity(bindings, shadow)
+    report = compare_lease_parity(leases, shadow)
 
     assert report.in_sync is False
     assert report.only_in_json == ()
@@ -230,14 +234,14 @@ def test_parity_reports_a_stale_shadow_lease(tmp_path: Path) -> None:
 
 
 def test_parity_surfaces_json_scan_truncation(tmp_path: Path) -> None:
-    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
     shadow = SqliteLeaseStore(tmp_path / "shadow.db")
     for index in range(1, 3):
         worker_id = f"worker-{index:012x}"
-        bindings.put(_binding(worker_id=worker_id))
+        leases.create(_lease(worker_id=worker_id))
         shadow.write_shadow(_lease(worker_id=worker_id), Revision(1))
 
-    report = compare_lease_parity(bindings, shadow)
+    report = compare_lease_parity(leases, shadow)
 
     # The comparison is honest about the authoritative side being truncated.
     assert report.json_scan_complete is True  # 2 records is under the scan bound
@@ -247,13 +251,109 @@ def test_import_active_bindings_mirrors_only_active_records(tmp_path: Path) -> N
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     bindings.put(_binding(worker_id="worker-000000000001", state="running"))
     bindings.put(_binding(worker_id="worker-000000000002", state="already_gone"))
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
     shadow = SqliteLeaseStore(tmp_path / "shadow.db")
 
-    imported = import_active_bindings(bindings, shadow, now="2026-07-30T00:00:00+00:00")
+    imported = import_active_bindings(bindings, leases, shadow, now="2026-07-30T00:00:00+00:00")
 
     assert imported == 1
     page = shadow.list_page()
     assert [lease.lease_id for lease in page.records] == ["worker-000000000001"]
+
+
+# ---------------------------------------------------------------------------
+# WorkerRegistrar: the pre-spawn intent -> RUNNING lifecycle (F-001).
+# ---------------------------------------------------------------------------
+
+
+def _registrar(tmp_path: Path, *, shadow: object | None = None) -> tuple[object, object]:
+    from repoforge.adapters.persistence.json_process_lease_adapter import (
+        JsonProcessLeaseAdapter,
+    )
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        shadow=shadow,
+    )
+    return registrar, leases
+
+
+def test_create_intent_records_a_registered_lease_before_any_pid(tmp_path: Path) -> None:
+    registrar, leases = _registrar(tmp_path)
+
+    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+
+    assert lease.lease_id == "worker-" + "0" * 24
+    assert lease.status is ProcessLeaseStatus.REGISTERED
+    assert lease.pid is None
+    stored = leases.read(lease.lease_id)
+    assert stored is not None and stored.value == lease
+
+
+def test_record_pid_persists_the_pid_immediately(tmp_path: Path) -> None:
+    registrar, leases = _registrar(tmp_path)
+    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+
+    updated = registrar.record_pid(lease, pid=4242)
+
+    assert updated.pid == 4242
+    assert updated.status is ProcessLeaseStatus.REGISTERED
+    assert leases.read(lease.lease_id).value.pid == 4242
+
+
+def test_complete_registration_reaches_running_via_ready(tmp_path: Path) -> None:
+    registrar, leases = _registrar(tmp_path)
+    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    lease = registrar.record_pid(lease, pid=4242)
+
+    running = registrar.complete_registration(lease, process_identity="worker-start-token")
+
+    assert running.status is ProcessLeaseStatus.RUNNING
+    assert running.pid == 4242
+    assert leases.read(lease.lease_id).value.status is ProcessLeaseStatus.RUNNING
+
+
+def test_complete_registration_requires_a_pid(tmp_path: Path) -> None:
+    registrar, _ = _registrar(tmp_path)
+    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+
+    from repoforge.domain.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="PID_MISSING"):
+        registrar.complete_registration(lease, process_identity="worker-start-token")
+
+
+def test_abort_intent_terminalizes_a_registered_lease(tmp_path: Path) -> None:
+    registrar, leases = _registrar(tmp_path)
+    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+
+    registrar.abort_intent(
+        lease,
+        error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
+        error_message="identity could not be proven",
+    )
+
+    stored = leases.read(lease.lease_id)
+    assert stored.value.status is ProcessLeaseStatus.TERMINATED
+    assert stored.value.error_code == "EXECUTION_WORKER_REGISTRATION_FAILED"
+
+
+def test_registrar_mirrors_every_write_into_the_shadow(tmp_path: Path) -> None:
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    registrar, _ = _registrar(tmp_path, shadow=shadow)
+    lease = registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    lease = registrar.record_pid(lease, pid=4242)
+    registrar.complete_registration(lease, process_identity="worker-start-token")
+
+    page = shadow.list_page()
+    assert len(page.records) == 1
+    assert page.records[0].status is ProcessLeaseStatus.RUNNING
+    assert page.records[0].pid == 4242
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +379,23 @@ def _fake_popen(pid: int) -> object:
 def test_registered_worker_mirrors_into_the_shadow_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A worker registration writes both the authoritative JSON lease and the shadow."""
+    """A worker registration writes the authoritative lease, the binding, and the shadow."""
     import repoforge.adapters.runtime.execution_worker as worker_module
+    from repoforge.adapters.persistence.json_process_lease_adapter import (
+        JsonProcessLeaseAdapter,
+    )
     from repoforge.adapters.subprocess.process_tree import ProcessIdentity
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
 
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
     shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        shadow=shadow,
+    )
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
 
     monkeypatch.setattr(worker_module.subprocess, "Popen", lambda *a, **k: _fake_popen(4242))
@@ -295,7 +407,7 @@ def test_registered_worker_mirrors_into_the_shadow_registry(
     )
     monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
     worker = worker_module.SubprocessExecutionWorker(
-        Path("/tmp/config.toml"), bindings=bindings, lease_shadow=shadow
+        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
     )
 
     child = worker.start(
@@ -306,12 +418,20 @@ def test_registered_worker_mirrors_into_the_shadow_registry(
     )
 
     assert child.pid == 4242
-    json_ids = {b.worker_id for b in bindings.list_all()}
-    assert len(json_ids) == 1
-    page = shadow.list_page()
+    # The authoritative JSON lease is durably RUNNING with the pid before return.
+    page = leases.list_all()
     assert len(page.records) == 1
-    assert page.records[0].lease_id in json_ids
-    assert page.records[0].role is ProcessLeaseRole.EXECUTION_DAEMON
+    lease = page.records[0].value
+    assert lease.lease_id == "worker-" + "0" * 24
+    assert lease.status is ProcessLeaseStatus.RUNNING
+    assert lease.pid == 4242
+    # The reconciler's binding shares the lease id, so both name the same worker.
+    assert {b.worker_id for b in bindings.list_all()} == {lease.lease_id}
+    # The shadow mirrors the authoritative lease.
+    shadow_page = shadow.list_page()
+    assert len(shadow_page.records) == 1
+    assert shadow_page.records[0].lease_id == lease.lease_id
+    assert shadow_page.records[0].role is ProcessLeaseRole.EXECUTION_DAEMON
 
 
 def test_shadow_write_failure_never_fails_registration(
@@ -319,14 +439,26 @@ def test_shadow_write_failure_never_fails_registration(
 ) -> None:
     """The shadow is parity evidence: a broken shadow must not refuse the worker."""
     import repoforge.adapters.runtime.execution_worker as worker_module
+    from repoforge.adapters.persistence.json_process_lease_adapter import (
+        JsonProcessLeaseAdapter,
+    )
     from repoforge.adapters.subprocess.process_tree import ProcessIdentity
-
-    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
 
     class _BrokenShadow:
         def write_shadow(self, lease: ProcessLease, revision: Revision) -> None:
             del lease, revision
             raise RuntimeError("shadow disk full")
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        shadow=_BrokenShadow(),
+    )
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
 
     monkeypatch.setattr(worker_module.subprocess, "Popen", lambda *a, **k: _fake_popen(4242))
     monkeypatch.setattr(worker_module, "process_identity", lambda pid: _SHA)
@@ -337,7 +469,7 @@ def test_shadow_write_failure_never_fails_registration(
     )
     monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
     worker = worker_module.SubprocessExecutionWorker(
-        Path("/tmp/config.toml"), bindings=bindings, lease_shadow=_BrokenShadow()
+        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
     )
 
     child = worker.start(
@@ -349,3 +481,4 @@ def test_shadow_write_failure_never_fails_registration(
 
     assert child.pid == 4242
     assert len(bindings.list_all()) == 1
+    assert len(leases.list_all().records) == 1

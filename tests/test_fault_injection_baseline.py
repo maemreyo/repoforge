@@ -6,7 +6,9 @@ deterministic, injection-based fault test -- no production code is changed, no r
 subprocess is spawned, and every assertion documents the exact failure shape that a
 later phase (3-9 of the migration) must close:
 
-- F-001: a worker is spawned (Popen) before any durable lease exists.
+- F-001: the durable lease intent is written BEFORE the worker is spawned, the
+  pid is persisted the moment Popen returns, and the lease is durably RUNNING
+  before the parent returns the worker.
 - F-002: a worker that survives SIGKILL must fail closed, never be declared dead
   without a final identity/group-liveness re-verification.
 - F-003: ``reconcile(read_only=True)`` must be side-effect free (no terminal-lease
@@ -19,14 +21,15 @@ later phase (3-9 of the migration) must close:
 - F-008: the operation-worker store silently truncates its scan; the handoff
   reconciler has no completeness signal, so an orphan past the limit is invisible.
 
-The F-002/F-003/F-005/F-007 tests now assert the fixed invariants (the finding is
-closed). F-001 and F-008 still pin the unfixed vulnerability: F-001's pre-spawn
-lease protocol and F-008's unified registry are architecture-scale changes of the
-later migration phases.
+The F-001/F-002/F-003/F-005/F-007 tests now assert the fixed invariants (the
+finding is closed). F-008 still pins the unfixed vulnerability at the operation-
+worker store level: the unified shadow registry already exposes completeness, but
+the operation-worker handoff reader has not migrated to it yet.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -41,6 +44,7 @@ from repoforge.application.activation.seam import TunnelSeamSwapCoordinator
 from repoforge.application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
 from repoforge.domain.execution_worker import ExecutionWorkerArchiveEntry, ExecutionWorkerBinding
 from repoforge.domain.operation_worker import OperationWorkerBinding
+from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
 from repoforge.domain.runtime import ChildProcess, HealthCheck, TunnelProfile
 from repoforge.ports.process_reaper import ReapOutcome
 from repoforge.testing import InMemoryLockManager
@@ -145,14 +149,56 @@ class _RecordingBindings:
         return ExecutionWorkerBindingPage(records=(), scan_complete=True, unreadable_ids=())
 
 
-def test_f001_popen_precedes_durable_registration(
+class _RecordingRegistrar:
+    """WorkerRegistrar fake recording the lifecycle order on a shared event list."""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self.lease = ProcessLease(
+            lease_id="worker-" + "0" * 24,
+            status=ProcessLeaseStatus.REGISTERED,
+            role=ProcessLeaseRole.EXECUTION_DAEMON,
+            process_identity=None,
+            pid=None,
+            started_at=None,
+            heartbeat_at=None,
+            correlation_id="c" * 24,
+            created_at="2026-07-29T09:26:21+00:00",
+            updated_at="2026-07-29T09:26:21+00:00",
+        )
+
+    def create_intent(self, *, role, correlation_id) -> ProcessLease:
+        del role, correlation_id
+        self._events.append("intent")
+        return self.lease
+
+    def record_pid(self, lease, *, pid: int) -> ProcessLease:
+        self._events.append("record_pid")
+        return replace(lease, pid=pid, updated_at="2026-07-29T09:26:22+00:00")
+
+    def complete_registration(self, lease, *, process_identity: str) -> ProcessLease:
+        self._events.append("running")
+        return replace(
+            lease,
+            status=ProcessLeaseStatus.RUNNING,
+            process_identity=process_identity,
+            updated_at="2026-07-29T09:26:22+00:00",
+        )
+
+    def abort_intent(self, lease, *, error_code: str, error_message: str) -> None:
+        del lease, error_code, error_message
+        self._events.append("abort")
+
+
+def test_f001_pre_spawn_intent_precedes_popen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The worker is spawned before its durable lease exists (F-001).
+    """The durable lease intent is written BEFORE the worker is spawned (F-001).
 
-    If the supervisor is SIGKILLed between these two events, the worker runs with
-    no active-registry record: no later supervisor can discover, archive, or
-    quarantine it, and it can hold operation locks indefinitely.
+    The worker can no longer exist with no durable record: the REGISTERED intent
+    is durably committed first, the spawned pid is persisted the moment Popen
+    returns, and the lease only becomes RUNNING after identity is proven -- so no
+    crash point leaves an invisible orphan.
     """
     import repoforge.adapters.runtime.execution_worker as worker_module
 
@@ -166,18 +212,22 @@ def test_f001_popen_precedes_durable_registration(
     )
     monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
     bindings = _RecordingBindings(events)
-    worker = worker_module.SubprocessExecutionWorker(Path("/tmp/config.toml"), bindings=bindings)
+    registrar = _RecordingRegistrar(events)
+    worker = worker_module.SubprocessExecutionWorker(
+        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
+    )
 
     child = worker.start(
         generation=12,
         env={"REPOFORGE_RUNNING_RELEASE_SHA": "0123abc"},
         log_path=Path("/tmp/worker.log"),
+        correlation_id="c" * 24,
     )
 
     assert child.pid == 4242
-    # Durable registration strictly after spawn: the crash window exists by
-    # construction and this ordering is what makes it dangerous.
-    assert events == ["popen", "put"]
+    # Durable intent strictly before spawn; pid persisted at spawn; the lease is
+    # RUNNING before the parent returns the worker.
+    assert events == ["intent", "popen", "record_pid", "put", "running"]
 
 
 def test_f002_death_is_not_claimed_without_reverification(
@@ -210,13 +260,17 @@ def test_f002_death_is_not_claimed_without_reverification(
     monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(worker_module, "_REGISTRATION_REAP_SECONDS", 0.01)
     bindings = _RecordingBindings(events, fail_put=True)
-    worker = worker_module.SubprocessExecutionWorker(Path("/tmp/config.toml"), bindings=bindings)
+    registrar = _RecordingRegistrar(events)
+    worker = worker_module.SubprocessExecutionWorker(
+        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
+    )
 
     with pytest.raises(Exception) as exc:
         worker.start(
             generation=12,
             env={"REPOFORGE_RUNNING_RELEASE_SHA": "0123abc"},
             log_path=Path("/tmp/worker.log"),
+            correlation_id="c" * 24,
         )
 
     from repoforge.domain.errors import ExecutionWorkerRegistrationError
@@ -226,6 +280,8 @@ def test_f002_death_is_not_claimed_without_reverification(
     # "terminated and confirmed dead" on the same evidence.
     assert "NOT_CONFIRMED_DEAD" in str(exc.value)
     assert "confirmed dead" not in str(exc.value)
+    # The pre-spawn intent was terminalized, never left dangling as REGISTERED.
+    assert "abort" in events
 
 
 # ---------------------------------------------------------------------------
