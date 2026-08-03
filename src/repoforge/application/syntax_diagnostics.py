@@ -57,7 +57,10 @@ class SyntaxDiagnosticAnalyzer:
         self,
         *,
         file_budget_seconds: float = _DEFAULT_FILE_BUDGET_SECONDS,
-        monotonic: Callable[[], float] = time.monotonic,
+        # Bound parser CPU consumption without treating scheduler preemption as
+        # parser work. Wall-clock timing produced false UNKNOWN results under
+        # xdist contention for tiny, deterministically parseable files.
+        monotonic: Callable[[], float] = time.thread_time,
     ) -> None:
         if file_budget_seconds <= 0:
             raise ValueError("file_budget_seconds must be positive")
