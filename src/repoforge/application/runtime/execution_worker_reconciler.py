@@ -42,9 +42,17 @@ from ...domain.execution_worker import (
     ExecutionWorkerBinding,
     is_execution_worker_entry_point,
 )
+from ...domain.process_lease import (
+    ProcessLeaseRole,
+    ProcessLeaseStatus,
+    begin_termination,
+    confirm_terminated,
+    survive_kill,
+)
 from ...ports.execution_worker_store import (
     ExecutionWorkerBindingStore,
 )
+from ...ports.process_lease_store import ProcessLeaseStore
 from ...ports.process_reaper import ProcessReaper
 
 
@@ -59,8 +67,22 @@ OwnerIdentityReader = Callable[[int], str | None]
 CommandLineReader = Callable[[int], tuple[str, ...] | None]
 ProcessIdentityReader = Callable[[int], ProcessIdentityLike | None]
 ProcessGroupGoneReader = Callable[[int], bool]
+NowIso = Callable[[], str]
 
 _ACTIVE_STATES = frozenset({"running", "legacy_unproven", "refused_unproven", "survived_kill"})
+
+#: ProcessLease statuses that remain a live safety concern for containment.
+_ACTIVE_LEASE_STATUSES = frozenset(
+    {
+        ProcessLeaseStatus.REGISTERED,
+        ProcessLeaseStatus.READY,
+        ProcessLeaseStatus.UNPROVEN,
+        ProcessLeaseStatus.RUNNING,
+        ProcessLeaseStatus.TERMINATING,
+        ProcessLeaseStatus.KILLED,
+        ProcessLeaseStatus.QUARANTINED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,11 +106,20 @@ class ExecutionWorkerReclamationReport:
     #: incumbent; a change means a lease appeared or transitioned since the plan,
     #: so the handoff must be replanned, never executed against stale evidence.
     registry_digest: str = ""
+    process_lease_incomplete: int = 0
+    process_lease_binding_divergence: int = 0
+    process_lease_scan_complete: bool = True
+    process_lease_unreadable_ids: tuple[str, ...] = ()
 
     @property
     def evidence_complete(self) -> bool:
         """Fail-closed evidence: an unreadable record hides an orphan like a truncation."""
-        return self.scan_complete and not self.unreadable_record_ids
+        return (
+            self.scan_complete
+            and not self.unreadable_record_ids
+            and self.process_lease_scan_complete
+            and not self.process_lease_unreadable_ids
+        )
 
     @property
     def blocker_code(self) -> str | None:
@@ -101,8 +132,12 @@ class ExecutionWorkerReclamationReport:
             return "STALE_EXECUTION_WORKER_RECLAMATION_FAILED"
         if self.possibly_alive_unproven > 0:
             return "STALE_EXECUTION_WORKER_IDENTITY_UNPROVEN"
+        if self.process_lease_incomplete > 0:
+            return "PROCESS_LEASE_INCOMPLETE"
+        if self.process_lease_binding_divergence > 0:
+            return "PROCESS_LEASE_BINDING_DIVERGENCE"
         if not self.evidence_complete:
-            if self.unreadable_record_ids:
+            if self.unreadable_record_ids or self.process_lease_unreadable_ids:
                 return "EXECUTION_WORKER_REGISTRY_UNREADABLE_RECORDS"
             return "EXECUTION_WORKER_REGISTRY_SCAN_INCOMPLETE"
         return None
@@ -124,6 +159,10 @@ class ExecutionWorkerReclamationReport:
             "pids": list(self.pids),
             "release_shas": list(self.release_shas),
             "detail": self.detail,
+            "process_lease_incomplete": self.process_lease_incomplete,
+            "process_lease_binding_divergence": self.process_lease_binding_divergence,
+            "process_lease_scan_complete": self.process_lease_scan_complete,
+            "process_lease_unreadable_ids": list(self.process_lease_unreadable_ids),
         }
 
 
@@ -137,6 +176,8 @@ class ExecutionWorkerReconciler:
         command_line_reader: CommandLineReader,
         identity_reader: ProcessIdentityReader,
         process_group_gone: ProcessGroupGoneReader | None = None,
+        leases: ProcessLeaseStore | None = None,
+        now_iso: NowIso | None = None,
     ) -> None:
         self._bindings = bindings
         self._reaper = reaper
@@ -144,6 +185,8 @@ class ExecutionWorkerReconciler:
         self._command_line_reader = command_line_reader
         self._identity_reader = identity_reader
         self._process_group_gone = process_group_gone
+        self._leases = leases
+        self._now_iso = now_iso
 
     def reconcile(
         self,
@@ -176,6 +219,9 @@ class ExecutionWorkerReconciler:
             with contextlib.suppress(Exception):
                 self._bindings.collect_terminal()
         page = self._bindings.list_page()
+        lease_incomplete, lease_divergence, lease_scan_complete, lease_unreadable = (
+            self._scan_process_leases(page.records)
+        )
         registry_digest = _registry_digest(page.records)
         for binding in page.records:
             if binding.state not in _ACTIVE_STATES:
@@ -236,13 +282,19 @@ class ExecutionWorkerReconciler:
             pids=tuple(pids),
             release_shas=tuple(release_shas),
             registry_digest=registry_digest,
+            process_lease_incomplete=lease_incomplete,
+            process_lease_binding_divergence=lease_divergence,
+            process_lease_scan_complete=lease_scan_complete,
+            process_lease_unreadable_ids=lease_unreadable,
             detail=(
                 f"{prefix}reconciled {inspected} live execution worker binding(s) "
                 f"(scan complete: {page.scan_complete}, unreadable records: "
                 f"{len(page.unreadable_ids)}): {counts['reclaimed']} reclaimed, "
                 f"{counts['already_gone']} already gone, {counts['refused_unproven']} "
                 f"refused unproven ({possibly_alive_unproven} possibly alive), "
-                f"{counts['survived_kill']} survived kill"
+                f"{counts['survived_kill']} survived kill; "
+                f"process-lease incomplete={lease_incomplete}, "
+                f"divergence={lease_divergence}"
             ),
         )
 
@@ -290,18 +342,87 @@ class ExecutionWorkerReconciler:
     def _mark(self, worker_id: str, state: str) -> None:
         with contextlib.suppress(Exception):
             self._bindings.update_state(worker_id, state)
+        self._terminalize_lease(worker_id, state)
+
+    def _terminalize_lease(self, worker_id: str, state: str) -> None:
+        if self._leases is None or self._now_iso is None:
+            return
+        if state not in {"reclaimed", "already_gone", "survived_kill", "refused_unproven"}:
+            return
+        with contextlib.suppress(Exception):
+            envelope = self._leases.read(worker_id)
+            if envelope is None:
+                return
+            lease = envelope.value
+            revision = envelope.revision
+            now = self._now_iso()
+            match (lease.status, state):
+                case (ProcessLeaseStatus.RUNNING, "survived_kill"):
+                    lease = survive_kill(lease, updated_at=now)
+                    envelope = self._leases.save(lease, expected_revision=revision)
+                    lease = confirm_terminated(envelope.value, updated_at=now)
+                    self._leases.save(lease, expected_revision=envelope.revision)
+                case (ProcessLeaseStatus.RUNNING, _):
+                    lease = begin_termination(lease, updated_at=now)
+                    envelope = self._leases.save(lease, expected_revision=revision)
+                    lease = confirm_terminated(envelope.value, updated_at=now)
+                    self._leases.save(lease, expected_revision=envelope.revision)
+                case (ProcessLeaseStatus.TERMINATING, "survived_kill"):
+                    lease = survive_kill(lease, updated_at=now)
+                    envelope = self._leases.save(lease, expected_revision=revision)
+                    lease = confirm_terminated(envelope.value, updated_at=now)
+                    self._leases.save(lease, expected_revision=envelope.revision)
+                case (
+                    ProcessLeaseStatus.TERMINATING
+                    | ProcessLeaseStatus.KILLED
+                    | ProcessLeaseStatus.QUARANTINED
+                    | ProcessLeaseStatus.UNPROVEN,
+                    _,
+                ):
+                    lease = confirm_terminated(lease, updated_at=now)
+                    self._leases.save(lease, expected_revision=revision)
+                case _:
+                    return
+
+    def _scan_process_leases(
+        self,
+        bindings: tuple[ExecutionWorkerBinding, ...],
+    ) -> tuple[int, int, bool, tuple[str, ...]]:
+        if self._leases is None:
+            return 0, 0, True, ()
+        page = self._leases.list_page(role=ProcessLeaseRole.EXECUTION_DAEMON)
+        by_binding = {binding.worker_id: binding for binding in bindings}
+        incomplete = 0
+        divergence = 0
+        for lease in page.records:
+            if lease.status not in _ACTIVE_LEASE_STATUSES:
+                continue
+            if lease.status is ProcessLeaseStatus.REGISTERED and lease.pid is None:
+                incomplete += 1
+                continue
+            binding = by_binding.get(lease.lease_id)
+            if binding is None:
+                divergence += 1
+                continue
+            if lease.pid is not None and lease.pid != binding.pid:
+                divergence += 1
+                continue
+            if binding.state not in _ACTIVE_STATES and lease.status in {
+                ProcessLeaseStatus.RUNNING,
+                ProcessLeaseStatus.READY,
+                ProcessLeaseStatus.REGISTERED,
+            }:
+                divergence += 1
+        return incomplete, divergence, page.scan_complete, page.unreadable_ids
 
 
 def _registry_digest(records: tuple[ExecutionWorkerBinding, ...]) -> str:
-    """A fence digest of the live-concern lease set.
-
-    Only live concerns are digested: those are what can block a replacement, so a
-    change in any of them (a new worker registered, a state transition, a removal)
-    makes the preflight fence stale. Metadata-only churn on terminal history is
-    deliberately excluded -- it cannot create a blocker.
-    """
     entries = sorted(
-        f"{binding.worker_id}:{binding.state}"
+        (
+            f"{binding.worker_id}:{binding.state}:{binding.pid}:{binding.pgid}:"
+            f"{binding.process_start_token or ''}:{binding.generation}:"
+            f"{binding.release_sha or ''}:{binding.supervisor_process_identity}"
+        )
         for binding in records
         if binding.state in _ACTIVE_STATES
     )

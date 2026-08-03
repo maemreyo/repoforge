@@ -447,6 +447,24 @@ class SupervisorRestarter:
                 "identity",
                 evidence,
             )
+        if report.process_lease_incomplete > 0:
+            return (
+                False,
+                "PROCESS_LEASE_INCOMPLETE: "
+                f"{report.process_lease_incomplete} process lease(s) are REGISTERED "
+                "with no pid (pre-spawn crash window); refusing to start a replacement "
+                "on incomplete lease evidence",
+                evidence,
+            )
+        if report.process_lease_binding_divergence > 0:
+            return (
+                False,
+                "PROCESS_LEASE_BINDING_DIVERGENCE: "
+                f"{report.process_lease_binding_divergence} process lease(s) diverge "
+                "from the execution-worker binding registry (missing binding, pid "
+                "mismatch, or status split-brain); refusing to start a replacement",
+                evidence,
+            )
         if not report.evidence_complete:
             if report.unreadable_record_ids:
                 return (

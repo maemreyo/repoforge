@@ -1,17 +1,18 @@
 """Parity checking between authoritative JSON state and the SQLite shadow.
 
 JSON is authoritative; the SQLite lease table is a shadow replica for fast
-diffing. The parity check compares the logical snapshot of each side and reports
-which lease ids exist on only one side -- drift, not a verdict: no safety gate
-reads SQLite, so a divergence is evidence for the operator, never a state change.
+diffing. The parity check compares the logical snapshot of each side -- identity
+sets *and* per-lease content/revision -- and reports drift. No safety gate reads
+SQLite, so a divergence is evidence for the operator, never a state change.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ...domain.durable_state import Revision
 from ...domain.execution_worker import ExecutionWorkerBinding
-from ...domain.process_lease import ProcessLeaseRole
+from ...domain.process_lease import ProcessLease, ProcessLeaseRole
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
 from .json_process_lease_adapter import JsonProcessLeaseAdapter
 from .sqlite_lease_store import SqliteLeaseStore
@@ -25,12 +26,23 @@ class ParityReport:
     shadow_count: int
     only_in_json: tuple[str, ...]
     only_in_shadow: tuple[str, ...]
+    content_mismatch: tuple[str, ...]
+    revision_mismatch: tuple[str, ...]
     json_scan_complete: bool
     json_unreadable_ids: tuple[str, ...]
 
     @property
     def in_sync(self) -> bool:
-        return not (self.only_in_json or self.only_in_shadow) and self.json_scan_complete
+        return (
+            not (
+                self.only_in_json
+                or self.only_in_shadow
+                or self.content_mismatch
+                or self.revision_mismatch
+            )
+            and self.json_scan_complete
+            and not self.json_unreadable_ids
+        )
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -38,10 +50,34 @@ class ParityReport:
             "shadow_count": self.shadow_count,
             "only_in_json": list(self.only_in_json),
             "only_in_shadow": list(self.only_in_shadow),
+            "content_mismatch": list(self.content_mismatch),
+            "revision_mismatch": list(self.revision_mismatch),
             "json_scan_complete": self.json_scan_complete,
             "json_unreadable_ids": list(self.json_unreadable_ids),
             "in_sync": self.in_sync,
         }
+
+
+def _lease_content_digest(lease: ProcessLease) -> str:
+    """Canonical logical content of one lease, excluding revision and timestamps.
+
+    Timestamps (created_at/updated_at/started_at/heartbeat_at) can legitimately
+    differ across mirror lag without meaning a safety divergence; the safety-
+    relevant identity is status, role, pid, process_identity, correlation, and
+    error disposition.
+    """
+    return "|".join(
+        (
+            lease.lease_id,
+            lease.status.value,
+            lease.role.value,
+            "" if lease.pid is None else str(lease.pid),
+            lease.process_identity or "",
+            lease.correlation_id,
+            lease.error_code or "",
+            lease.error_message or "",
+        )
+    )
 
 
 def compare_lease_parity(
@@ -50,18 +86,44 @@ def compare_lease_parity(
 ) -> ParityReport:
     """Compare authoritative JSON leases against shadow leases.
 
-    The shadow mirrors every authoritative lease write, so the two should agree.
-    A divergence means a write reached only one side -- evidence for the operator
-    that the mirror or the authoritative store lagged behind.
+    The shadow mirrors every authoritative lease write, so the two should agree
+    on both membership and logical content. A divergence means a write reached
+    only one side, or a final transition failed on the shadow -- evidence for
+    the operator that the mirror lagged behind.
     """
     page = leases.list_page()
-    json_ids = {lease.lease_id for lease in page.records}
-    shadow_ids = {lease.lease_id for lease, _ in shadow.list_all()}
+    json_by_id: dict[str, tuple[ProcessLease, Revision]] = {}
+    for lease in page.records:
+        envelope = leases.read(lease.lease_id)
+        if envelope is None:
+            continue
+        json_by_id[lease.lease_id] = (envelope.value, envelope.revision)
+
+    shadow_by_id: dict[str, tuple[ProcessLease, Revision]] = {
+        lease.lease_id: (lease, revision) for lease, revision in shadow.list_all()
+    }
+
+    json_ids = set(json_by_id)
+    shadow_ids = set(shadow_by_id)
+    shared = json_ids & shadow_ids
+
+    content_mismatch: list[str] = []
+    revision_mismatch: list[str] = []
+    for lease_id in sorted(shared):
+        json_lease, json_revision = json_by_id[lease_id]
+        shadow_lease, shadow_revision = shadow_by_id[lease_id]
+        if _lease_content_digest(json_lease) != _lease_content_digest(shadow_lease):
+            content_mismatch.append(lease_id)
+        if json_revision != shadow_revision:
+            revision_mismatch.append(lease_id)
+
     return ParityReport(
         json_count=len(json_ids),
         shadow_count=len(shadow_ids),
         only_in_json=tuple(sorted(json_ids - shadow_ids)),
         only_in_shadow=tuple(sorted(shadow_ids - json_ids)),
+        content_mismatch=tuple(content_mismatch),
+        revision_mismatch=tuple(revision_mismatch),
         json_scan_complete=page.scan_complete,
         json_unreadable_ids=page.unreadable_ids,
     )
@@ -81,7 +143,7 @@ def import_active_bindings(
     store (and mirrored to the shadow), so parity starts from a populated lease
     registry instead of an empty one. Returns the number of leases written.
     """
-    from ...domain.process_lease import ProcessLease, ProcessLeaseStatus
+    from ...domain.process_lease import ProcessLeaseStatus
 
     imported = 0
     for binding in _active_bindings(bindings):
@@ -109,3 +171,10 @@ def _active_bindings(
     page = bindings.list_page()
     active_states = frozenset({"running", "legacy_unproven", "refused_unproven", "survived_kill"})
     return tuple(binding for binding in page.records if binding.state in active_states)
+
+
+__all__ = [
+    "ParityReport",
+    "compare_lease_parity",
+    "import_active_bindings",
+]

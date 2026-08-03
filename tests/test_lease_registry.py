@@ -247,6 +247,42 @@ def test_parity_surfaces_json_scan_truncation(tmp_path: Path) -> None:
     assert report.json_scan_complete is True  # 2 records is under the scan bound
 
 
+def test_parity_detects_same_id_different_status(tmp_path: Path) -> None:
+    """Same lease id on both sides but different status is not in_sync."""
+    from dataclasses import replace
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    envelope = leases.create(_lease())
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    # Shadow lags: still shows TERMINATING while JSON advanced to RUNNING.
+    shadow.write_shadow(
+        replace(envelope.value, status=ProcessLeaseStatus.TERMINATING),
+        envelope.revision,
+    )
+
+    report = compare_lease_parity(leases, shadow)
+
+    assert report.in_sync is False
+    assert report.content_mismatch == (_WORKER,)
+    assert report.only_in_json == ()
+    assert report.only_in_shadow == ()
+
+
+def test_parity_detects_same_id_different_revision(tmp_path: Path) -> None:
+    """Same logical content but different revision is not in_sync."""
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    envelope = leases.create(_lease())
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    # Shadow has the same payload but a stale revision number.
+    shadow.write_shadow(envelope.value, Revision(envelope.revision.value + 5))
+
+    report = compare_lease_parity(leases, shadow)
+
+    assert report.in_sync is False
+    assert report.revision_mismatch == (_WORKER,)
+    assert report.content_mismatch == ()
+
+
 def test_import_active_bindings_mirrors_only_active_records(tmp_path: Path) -> None:
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
     bindings.put(_binding(worker_id="worker-000000000001", state="running"))
@@ -513,18 +549,34 @@ def test_record_pid_failure_reaps_the_spawned_worker(
 
     The process is alive the instant Popen returns; if the pid cannot be persisted
     the lease stays REGISTERED without a pid and the process must not be left
-    running untraceable. The adapter TERMs and KILLs it and raises the typed
-    registration error so the supervisor fails closed.
+    running untraceable. The adapter reaps via the group-aware reaper and raises
+    the typed registration error so the supervisor fails closed.
     """
     import repoforge.adapters.runtime.execution_worker as worker_module
     from repoforge.application.runtime.worker_registrar import WorkerRegistrar
     from repoforge.domain.errors import ExecutionWorkerRegistrationError
+    from repoforge.ports.process_reaper import ReapOutcome
     from repoforge.testing import FixedClock, SequenceIdGenerator
 
     class _FailingPidLeases(JsonProcessLeaseAdapter):
         def save(self, lease, *, expected_revision):
             del lease, expected_revision
             raise OSError("durable pid write failed")
+
+    class _ReapingReaper:
+        def __init__(self) -> None:
+            self.reaped_pids: list[int] = []
+
+        def reap(self, binding: object) -> ReapOutcome:
+            pid = getattr(binding, "child_pid", 0)
+            self.reaped_pids.append(int(pid))
+            return ReapOutcome(
+                attempted=True, reaped=True, still_alive=False, detail="reaped via SIGKILL"
+            )
+
+        def read_start_token(self, pid: int) -> str | None:
+            del pid
+            return None
 
     leases = _FailingPidLeases(tmp_path / "leases", InMemoryLockManager())
     registrar = WorkerRegistrar(
@@ -533,17 +585,15 @@ def test_record_pid_failure_reaps_the_spawned_worker(
         clock=FixedClock("2026-07-30T00:00:00+00:00"),
     )
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
-    reaped: list[int] = []
+    reaper = _ReapingReaper()
     monkeypatch.setattr(worker_module.subprocess, "Popen", lambda *a, **k: _fake_popen(4242))
-    monkeypatch.setattr(
-        worker_module,
-        "process_identity",
-        lambda pid: None if pid in reaped else _SHA,
-    )
+    monkeypatch.setattr(worker_module, "process_identity", lambda pid: _SHA)
     monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(worker_module.os, "killpg", lambda pid, sig: reaped.append(pid))
     worker = worker_module.SubprocessExecutionWorker(
-        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
+        Path("/tmp/config.toml"),
+        bindings=bindings,
+        registrar=registrar,
+        reaper=reaper,
     )
 
     with pytest.raises(ExecutionWorkerRegistrationError, match="REGISTRATION_FAILED"):
@@ -554,6 +604,5 @@ def test_record_pid_failure_reaps_the_spawned_worker(
             correlation_id="c" * 24,
         )
 
-    assert reaped == [4242]
-    # The spawned worker was never handed to the parent or bound.
+    assert reaper.reaped_pids == [4242]
     assert len(bindings.list_all()) == 0

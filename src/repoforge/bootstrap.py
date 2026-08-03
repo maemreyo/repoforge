@@ -1196,6 +1196,7 @@ def build_worker_registrar(state_root: Path) -> WorkerRegistrar:
 
 def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconciler:
     """Reclaim orphaned execution workers of departed releases before a new start."""
+    from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
     from .adapters.runtime.state_store import process_identity
     from .adapters.subprocess.os_process_reaper import OsProcessReaper
     from .adapters.subprocess.process_tree import (
@@ -1212,6 +1213,8 @@ def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconc
         command_line_reader=read_command_line,
         identity_reader=read_identity,
         process_group_gone=lambda pgid: group_has_live_member(pgid) is False,
+        leases=JsonProcessLeaseAdapter(state_root, build_lock_manager(state_root)),
+        now_iso=system_clock().now_iso,
     )
 
 

@@ -906,3 +906,198 @@ def test_terminate_marks_reclaimed_only_after_confirmed_death(tmp_path) -> None:
         assert spawner.is_alive(child) is False
     finally:
         spawner.terminate(child, grace_seconds=1)
+
+
+# ---------------------------------------------------------------------------
+# Hotfix 1: ProcessLease containment gate.
+# ---------------------------------------------------------------------------
+
+
+def _lease_envelope(lease, *, revision: int = 1):
+    from repoforge.domain.durable_state import Revision, StateEnvelope
+
+    return StateEnvelope(
+        value=lease, revision=Revision(revision), updated_at="2026-07-30T00:00:00+00:00"
+    )
+
+
+def _lease_store(leases):
+
+    class _LeaseStore:
+        def __init__(self, records):
+            self._records = records
+
+        def list_page(self, *, role=None, max_records=2_000):
+            from repoforge.ports.process_lease_store import ProcessLeasePage
+
+            if role is not None:
+                filtered = tuple(lease for lease in self._records if lease.role is role)
+            else:
+                filtered = self._records
+            return ProcessLeasePage(records=filtered, scan_complete=True, unreadable_ids=())
+
+        def read(self, lease_id):
+
+            for lease in self._records:
+                if lease.lease_id == lease_id:
+                    return _lease_envelope(lease, revision=1)
+            return None
+
+        def save(self, lease, *, expected_revision):
+            return _lease_envelope(lease, revision=expected_revision.value + 1)
+
+    return _LeaseStore(leases)
+
+
+def test_startup_blocks_on_registered_lease_without_pid() -> None:
+    """A REGISTERED ProcessLease with no pid is an incomplete safety concern.
+
+    Pre-spawn crash window: parent died after create_intent and never reached
+    record_pid. The reconciler must surface this as a blocker before a
+    replacement can be started.
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.REGISTERED,
+        process_identity=None,
+        pid=None,
+        started_at=None,
+        heartbeat_at=None,
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+    )
+    bindings = _Bindings()
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({}),
+        identity_reader=_Tokens({}),
+        leases=_lease_store([lease]),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_incomplete == 1
+    assert report.blocker_code == "PROCESS_LEASE_INCOMPLETE"
+
+
+def test_startup_blocks_on_process_lease_without_binding() -> None:
+    """An active ProcessLease without a matching binding diverges from the registry."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-aaaaaaaaaaaa",
+        status=ProcessLeaseStatus.RUNNING,
+        process_identity="worker-start-token",
+        pid=9999,
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+    )
+    bindings = _Bindings()
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({}),
+        identity_reader=_Tokens({}),
+        leases=_lease_store([lease]),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_binding_divergence == 1
+    assert report.blocker_code == "PROCESS_LEASE_BINDING_DIVERGENCE"
+
+
+def test_process_lease_terminalized_and_archived_with_binding() -> None:
+    """Marking a binding reclaimed advances the matching ProcessLease to TERMINATED."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+    )
+    recorded_saves: list[object] = []
+
+    class _RecordingLeaseStore:
+        def list_page(self, *, role=None, max_records=2_000):
+            from repoforge.ports.process_lease_store import ProcessLeasePage
+
+            return ProcessLeasePage(records=(lease,), scan_complete=True, unreadable_ids=())
+
+        def read(self, lease_id):
+            if lease_id == lease.lease_id:
+                return _lease_envelope(lease, revision=3)
+            return None
+
+        def save(self, lease, *, expected_revision):
+            recorded_saves.append(lease)
+            return _lease_envelope(lease, revision=expected_revision.value + 1)
+
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=_RecordingLeaseStore(),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 1
+    # RUNNING -> TERMINATING -> TERMINATED.
+    statuses = [getattr(lease_candidate, "status", None) for lease_candidate in recorded_saves]
+    assert ProcessLeaseStatus.TERMINATING in statuses
+    assert ProcessLeaseStatus.TERMINATED in statuses
+
+
+def test_same_worker_id_same_state_changed_pid_changes_registry_digest() -> None:
+    """Hotfix 3: digest must invalidate when pid/start_token of a live binding changes."""
+    bindings = _Bindings(_binding())
+    reaper = _Reaper([])
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+
+    base = reconciler.reconcile(read_only=True).registry_digest
+
+    # Same worker_id + state but pid changed (the same logical worker could not be
+    # the same process). The handoff fence must detect this.
+    bindings = _Bindings(_binding(pid=5500))
+    reconciler2 = _reconciler(
+        bindings=bindings,
+        reaper=reaper,
+        owner=_Owner(set()),
+        command_lines=_CommandLines({5500: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({5500: "worker-start-token"}),
+    )
+    changed = reconciler2.reconcile(read_only=True).registry_digest
+
+    assert base
+    assert base != changed

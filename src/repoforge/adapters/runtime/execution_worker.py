@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import os
-import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
@@ -18,7 +18,9 @@ from ...domain.execution_worker import ExecutionWorkerBinding
 from ...domain.process_lease import ProcessLease, ProcessLeaseRole
 from ...domain.runtime import ChildProcess
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
+from ...ports.process_reaper import ProcessReaper
 from ...ports.worker_registrar import WorkerRegistrar
+from ..subprocess.os_process_reaper import OsProcessReaper
 from ..subprocess.process_tree import read_identity
 from .state_store import process_identity
 
@@ -35,6 +37,15 @@ _REGISTRATION_REAP_SECONDS = 5.0
 LEASE_ID_ENV = "REPOFORGE_EXECUTION_WORKER_LEASE_ID"
 
 
+@dataclass(frozen=True, slots=True)
+class _ReapTarget:
+    """Ad-hoc ProcessGroupTarget for spawn-time and normal-termination reaps."""
+
+    child_pid: int
+    child_pgid: int
+    child_start_token: str | None
+
+
 class SubprocessExecutionWorker:
     def __init__(
         self,
@@ -42,12 +53,14 @@ class SubprocessExecutionWorker:
         *,
         bindings: ExecutionWorkerBindingStore,
         registrar: WorkerRegistrar,
+        reaper: ProcessReaper | None = None,
     ) -> None:
         self._config_path = config_path.expanduser().resolve()
         self._children: dict[int, subprocess.Popen[bytes]] = {}
         self._worker_ids: dict[int, str] = {}
         self._bindings = bindings
         self._registrar = registrar
+        self._reaper = reaper if reaper is not None else OsProcessReaper()
 
     def start(
         self,
@@ -147,30 +160,39 @@ class SubprocessExecutionWorker:
         )
 
     def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None:
+        """Group-aware termination: same death semantics as the reconciler reaper.
+
+        Leader-only ``poll()`` is not proof the process group is gone: a descendant
+        can survive SIGTERM after the leader exits. All worker termination goes
+        through ``OsProcessReaper`` so a live group member never becomes
+        ``reclaimed``.
+        """
         process = self._children.get(child.pid)
         if process is None or process_identity(child.pid) != child.process_identity:
             self._children.pop(child.pid, None)
             self._mark_state(child.pid, "already_gone")
             return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(child.pid, signal.SIGTERM)
-        deadline = time.monotonic() + max(0.0, grace_seconds)
-        while time.monotonic() < deadline and process.poll() is None:
-            time.sleep(0.05)
-        if process.poll() is None:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(child.pid, signal.SIGKILL)
-            # State records truth, not intent: only after SIGKILL is the identity
-            # re-probed. A SIGTERM exit is already confirmed by poll(); re-probing
-            # there would only add latency to every graceful shutdown (#420).
-            self._children.pop(child.pid, None)
-            if process_identity(child.pid) is None:
-                self._mark_state(child.pid, "reclaimed")
-            else:
-                self._mark_state(child.pid, "survived_kill")
-            return
+        identity = read_identity(child.pid)
+        start_token = identity.start_token if identity is not None else None
+        if isinstance(self._reaper, OsProcessReaper):
+            reaper: ProcessReaper = OsProcessReaper(term_grace_seconds=max(0.0, grace_seconds))
+        else:
+            reaper = self._reaper
+        outcome = reaper.reap(
+            _ReapTarget(
+                child_pid=child.pid,
+                child_pgid=child.pid,
+                child_start_token=start_token,
+            )
+        )
         self._children.pop(child.pid, None)
-        self._mark_state(child.pid, "reclaimed")
+        if outcome.reaped:
+            self._mark_state(child.pid, "reclaimed" if outcome.attempted else "already_gone")
+        elif outcome.still_alive:
+            self._mark_state(child.pid, "survived_kill")
+        else:
+            # PID reuse or unproven containment without a live claim: refuse reclaimed.
+            self._mark_state(child.pid, "refused_unproven")
 
     def _establish_stable_identity(self, process: subprocess.Popen[bytes]) -> str | None:
         """Wait for the worker's process identity to settle, then record it.
@@ -277,38 +299,29 @@ class SubprocessExecutionWorker:
         )
 
     def _reap_unregistered(self, pid: int) -> None:
-        """Boundedly terminate a worker that must not keep running (#424)."""
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(pid, signal.SIGTERM)
-        deadline = time.monotonic() + _REGISTRATION_REAP_SECONDS
-        while time.monotonic() < deadline:
-            if process_identity(pid) is None:
-                break
-            time.sleep(0.05)
-        else:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(pid, signal.SIGKILL)
-            self._confirm_gone_after_kill(pid)
-        self._children.pop(pid, None)
+        """Boundedly terminate a worker that must not keep running (#424).
 
-    def _confirm_gone_after_kill(self, pid: int) -> None:
-        """Prove the process is absent after SIGKILL before anyone claims it is dead.
-
-        "Confirmed dead" is a claim, not a hope: a process that survived both
-        SIGTERM and SIGKILL is still running and holding locks, and reporting it
-        terminated would let a replacement start on false evidence. Fail closed
-        instead -- the caller must not proceed as if the worker were gone.
+        Uses the same group-aware reaper as normal termination and the reconciler
+        so a leader-exit with live descendants never counts as confirmed dead.
         """
-        deadline = time.monotonic() + _REGISTRATION_REAP_SECONDS
-        while time.monotonic() < deadline:
-            if process_identity(pid) is None:
-                return
-            time.sleep(0.05)
+        identity = read_identity(pid)
+        start_token = identity.start_token if identity is not None else None
+        reaper = (
+            OsProcessReaper(term_grace_seconds=_REGISTRATION_REAP_SECONDS)
+            if isinstance(self._reaper, OsProcessReaper)
+            else self._reaper
+        )
+        outcome = reaper.reap(
+            _ReapTarget(child_pid=pid, child_pgid=pid, child_start_token=start_token)
+        )
+        self._children.pop(pid, None)
+        if outcome.reaped:
+            return
         raise ExecutionWorkerRegistrationError(
             f"EXECUTION_WORKER_NOT_CONFIRMED_DEAD: the spawned worker with pid {pid} "
-            "survived SIGTERM and SIGKILL; refusing to report it as terminated. The "
-            "worker may still be running and holding locks; inspect the process "
-            "table and reclaim it manually before starting a replacement."
+            f"was not proven gone ({outcome.detail}); refusing to report it as "
+            "terminated. The worker may still be running and holding locks; inspect "
+            "the process table and reclaim it manually before starting a replacement."
         )
 
     def _mark_state(self, pid: int, state: str) -> None:
