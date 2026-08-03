@@ -352,15 +352,19 @@ class ApplicationContext:
         record = self.store.load(workspace_id)
         repo = self.repository_for_workspace(record)
         path = Path(record.path).resolve()
-        root = self.config.server.workspace_root.resolve()
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise WorkspaceError(
-                f"Workspace {workspace_id} is outside the configured workspace root",
-                code=ErrorCode.WORKSPACE_OUTSIDE_ROOT,
-                details={"workspace_id": workspace_id},
-            ) from exc
+        # An attached-shared workspace is, by definition, the operator's own existing
+        # checkout: it was never expected to live under workspace_root, and never will.
+        # containment is meaningful for the kinds RepoForge itself materialized.
+        if record.kind.owns_worktree_lifecycle:
+            root = self.config.server.workspace_root.resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise WorkspaceError(
+                    f"Workspace {workspace_id} is outside the configured workspace root",
+                    code=ErrorCode.WORKSPACE_OUTSIDE_ROOT,
+                    details={"workspace_id": workspace_id},
+                ) from exc
         if not path.is_dir():
             raise WorkspaceError(
                 f"Workspace directory is missing: {workspace_id}",

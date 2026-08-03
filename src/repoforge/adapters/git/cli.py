@@ -9,7 +9,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
@@ -27,6 +27,7 @@ from ...ports.git import (
     GitMergeResult,
     GitSearchLocation,
     GitSnapshotBlob,
+    GitWorktreeEntry,
     ResolvedRepositoryRef,
 )
 from .diff_summary import parse_diff_summary
@@ -1817,6 +1818,56 @@ class GitCliRepository:
         if delete_branch:
             self._executor.run(["git", "branch", "-D", branch], cwd=repo.path)
         return delete_branch
+
+    def list_worktrees(self, repo_path: Path) -> tuple[GitWorktreeEntry, ...]:
+        """Enumerate every worktree git already tracks for this repository's own git dir.
+
+        Bounded to what ``git worktree list --porcelain`` reports -- never a
+        model-supplied host path (#372's discovery boundary).
+        """
+        result = self._executor.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=repo_path, check=False
+        )
+        if result.returncode != 0:
+            return ()
+        entries: list[GitWorktreeEntry] = []
+        current: dict[str, object] = {}
+
+        def flush() -> None:
+            if "path" in current:
+                entries.append(
+                    GitWorktreeEntry(
+                        path=str(current["path"]),
+                        head_sha=cast(str | None, current.get("head_sha")),
+                        branch=cast(str | None, current.get("branch")),
+                        detached=bool(current.get("detached", False)),
+                        locked=bool(current.get("locked", False)),
+                        prunable=bool(current.get("prunable", False)),
+                    )
+                )
+            current.clear()
+
+        for line in result.stdout.splitlines():
+            if not line:
+                flush()
+            elif line.startswith("worktree "):
+                flush()
+                current["path"] = line.removeprefix("worktree ")
+            elif line.startswith("HEAD "):
+                current["head_sha"] = line.removeprefix("HEAD ")
+            elif line.startswith("branch refs/heads/"):
+                current["branch"] = line.removeprefix("branch refs/heads/")
+            elif line.startswith("branch "):
+                # A branch ref outside refs/heads/ (unexpected but not our call to hide).
+                current["branch"] = line.removeprefix("branch ")
+            elif line == "detached":
+                current["detached"] = True
+            elif line == "locked" or line.startswith("locked "):
+                current["locked"] = True
+            elif line == "prunable" or line.startswith("prunable "):
+                current["prunable"] = True
+        flush()
+        return tuple(entries)
 
     def local_branch_exists(self, repo: RepositoryConfig, branch: str) -> bool:
         result = self._executor.run(

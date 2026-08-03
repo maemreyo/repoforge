@@ -28,6 +28,7 @@ class WorkspaceCreateV2Command:
     idempotency_key: str | None = None
     issue_ids: tuple[str, ...] = ()
     adopt_branch: str | None = None
+    attach_branch: str | None = None
     selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
@@ -44,6 +45,7 @@ class WorkspaceCreateV2Result:
     workspace_fingerprint: str
     issue_ids: tuple[str, ...]
     adopted_branch: bool = False
+    attached: bool = False
     warnings: tuple[str, ...] = ()
 
 
@@ -62,6 +64,7 @@ class WorkspaceCreatorV2:
                 command.idempotency_key,
                 command.issue_ids,
                 command.adopt_branch,
+                command.attach_branch,
                 command.selector,
             )
         )
@@ -78,6 +81,7 @@ class WorkspaceCreatorV2:
             status.workspace_fingerprint,
             created.issue_ids,
             created.adopted_branch,
+            created.attached,
             created.warnings,
         )
 

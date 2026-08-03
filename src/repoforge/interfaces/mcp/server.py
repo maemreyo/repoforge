@@ -254,10 +254,13 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "Create one worktree for a task: a fresh ai/* branch, or -- with adopt_branch -- an "
         "existing branch the instruction named. This writes: it cuts a branch and materializes "
         "a worktree on disk, with no preview mode and no dry run, from repo_id and task_slug "
-        "alone. Call it only when you intend that. To see what already exists, or to check that "
-        "this surface is reachable, use workspace_list or workspace_status -- neither creates "
-        "anything. Pass idempotency_key when resuming, so a retry rejoins the same workspace "
-        "instead of cutting a second one."
+        "alone. Call it only when you intend that. Pass attach_branch instead when the "
+        "instruction means the operator's own existing checkout -- 'work on what I have open' -- "
+        "not a new one: it creates nothing and reuses the checkout git already tracks for that "
+        "branch. To see what already exists, or to check that this surface is reachable, use "
+        "workspace_list or workspace_status -- neither creates anything. Pass idempotency_key "
+        "when resuming a fresh/adopted create, so a retry rejoins the same workspace instead of "
+        "cutting a second one; attach_branch is already idempotent on its own."
     ),
     "workspace_remove": "Remove a clean local worktree without touching remote data.",
     "workspace_list": "List bounded workspace lifecycle and cleanup evidence.",

@@ -749,6 +749,18 @@ class WorkspaceCreateInput(AuthSelectionInput):
             "it. A protected branch is still refused."
         ),
     )
+    attach_branch: GitRef | None = Field(
+        default=None,
+        description=(
+            "Attach to a worktree this repository's own git already tracks with this "
+            "branch checked out -- typically the operator's primary checkout -- instead of "
+            "creating or adopting anything. Mutually exclusive with `base` and "
+            "`adopt_branch`. Creates no branch, worktree, or file. Reattaching the same "
+            "checkout returns the same workspace_id. Fails with actionable evidence if the "
+            "branch is not checked out anywhere, is checked out in more than one worktree, "
+            "the checkout is missing on disk, or the branch is protected."
+        ),
+    )
 
 
 class WorkspaceCreateOutput(ToolResponse):
@@ -764,12 +776,20 @@ class WorkspaceCreateOutput(ToolResponse):
         default=False,
         description="True when `branch` is a pre-existing branch this workspace adopted.",
     )
+    attached: bool = Field(
+        default=False,
+        description=(
+            "True when this workspace operates on an existing checkout it attached to "
+            "rather than one it created or adopted a branch into."
+        ),
+    )
     warnings: tuple[str, ...] = Field(
         default=(),
         max_length=20,
         description=(
-            "Non-blocking advisories about reduced guarantees, e.g. an adopted branch. The "
-            "call succeeded; these are conditions the caller should carry forward."
+            "Non-blocking advisories about reduced guarantees, e.g. an adopted or attached "
+            "branch. The call succeeded; these are conditions the caller should carry "
+            "forward."
         ),
     )
 
