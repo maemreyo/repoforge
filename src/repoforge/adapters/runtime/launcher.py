@@ -42,6 +42,10 @@ class SubprocessRuntimeLauncher:
             # worker publish no release identity, so the runtime could come up healthy
             # while `rf version status` reported an unidentifiable release.
             "REPOFORGE_RUNNING_RELEASE_SHA",
+            # F-012: the handoff restarter's single-use replacement permit must reach
+            # the supervisor's registrar; without it the first worker spawn is refused
+            # while admission is CLOSING.
+            "REPOFORGE_ADMISSION_PERMIT",
             # Under launchd the credential exists only as a file path; the worker opens
             # and re-validates it itself.
             AGENT_SECRET_FILE_ENV_VAR,

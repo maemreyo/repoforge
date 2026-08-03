@@ -11,6 +11,8 @@ import dataclasses
 import os
 from pathlib import Path
 
+import pytest
+
 from repoforge.adapters.activation.build import RuntimeRecordReleaseObserver, SupervisorRestarter
 from repoforge.adapters.activation.launcher import ReleaseAwareRuntimeLauncher
 from repoforge.adapters.runtime import JsonRuntimeStore
@@ -800,3 +802,27 @@ def test_replacement_spawn_claims_permit_while_admission_is_closing(
     assert outcome.ok, outcome.detail
     assert launcher.lease_ids, "the replacement's worker must claim the permit and spawn"
     assert len(leases.list_all().records) == 1
+
+
+def test_runtime_environment_forwards_the_replacement_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-012: the shim -> supervisor env hop must carry the handoff permit.
+
+    The restarter launches the replacement through the stable shim; without this
+    forwarding the supervisor's registrar never sees the permit and the first
+    worker spawn is refused while admission is CLOSING (the live-activation
+    deadlock, reproduced with a real sandbox on the fix head).
+    """
+    from repoforge.interfaces.cli.main import _runtime_environment
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    monkeypatch.setenv(ADMISSION_PERMIT_ENV, "handoff-token")
+    args = type("Args", (), {"tunnel_id": None, "profile": None})()
+    env = _runtime_environment(args)
+    assert env.get(ADMISSION_PERMIT_ENV) == "handoff-token"
+
+    monkeypatch.delenv(ADMISSION_PERMIT_ENV, raising=False)
+    args = type("Args", (), {"tunnel_id": None, "profile": None})()
+    env = _runtime_environment(args)
+    assert ADMISSION_PERMIT_ENV not in env
