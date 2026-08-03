@@ -350,6 +350,31 @@ def test_always_wide_path_escalates_even_when_it_would_otherwise_map_narrowly() 
     assert selection.selected_files == ("tests/test_alpha.py",)
 
 
+def test_reviewed_verification_control_plane_path_uses_group_mapping() -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "verification_diagnostics",
+                source_globs=(".github/workflows/**",),
+                test_files=("tests/test_ci_verification_topology.py",),
+            ),
+            _group(
+                "unrelated", source_globs=("src/other/**",), test_files=("tests/test_other.py",)
+            ),
+        ),
+        safety_bundle=("tests/test_smoke.py",),
+    )
+
+    selection = selector.select_affected_tests(manifest, [".github/workflows/ci.yml"])
+
+    assert selection.escalated_to_wide is False
+    assert selection.selected_groups == ("verification_diagnostics",)
+    assert selection.selected_files == (
+        "tests/test_ci_verification_topology.py",
+        "tests/test_smoke.py",
+    )
+
+
 @pytest.mark.parametrize(
     "changed_paths",
     [
@@ -475,6 +500,49 @@ def test_coverage_map_unmapped_package_module_fails_closed() -> None:
     assert "fail-closed" in (selection.escalation_reason or "")
 
 
+def test_coverage_map_uses_exact_reviewed_group_fallback_for_uncovered_module() -> None:
+    path = "src/repoforge/application/workspace/snapshot.py"
+    manifest = _manifest(
+        groups=(
+            _group(
+                "verification_diagnostics",
+                source_globs=(path,),
+                test_files=("tests/test_workspace_diagnostics.py",),
+            ),
+            _group(
+                "unrelated", source_globs=("src/other/**",), test_files=("tests/test_other.py",)
+            ),
+        ),
+        safety_bundle=("tests/test_smoke.py",),
+        coverage_map={"src/repoforge/existing.py": ("tests/test_existing.py",)},
+    )
+
+    selection = selector.select_affected_tests(manifest, [path])
+
+    assert selection.escalated_to_wide is False
+    assert selection.selected_files == (
+        "tests/test_smoke.py",
+        "tests/test_workspace_diagnostics.py",
+    )
+    assert "exact reviewed group" in selection.reasons[0]
+
+
+def test_coverage_map_ambiguous_exact_group_fallback_still_fails_closed() -> None:
+    path = "src/repoforge/application/workspace/snapshot.py"
+    manifest = _manifest(
+        groups=(
+            _group("alpha", source_globs=(path,), test_files=("tests/test_alpha.py",)),
+            _group("beta", source_globs=(path,), test_files=("tests/test_beta.py",)),
+        ),
+        coverage_map={"src/repoforge/existing.py": ("tests/test_existing.py",)},
+    )
+
+    selection = selector.select_affected_tests(manifest, [path])
+
+    assert selection.escalated_to_wide is True
+    assert path in (selection.escalation_reason or "")
+
+
 def test_coverage_map_changed_test_file_runs_itself() -> None:
     manifest = _coverage_manifest()
 
@@ -549,6 +617,23 @@ def test_map_freshness_passes_when_changed_modules_are_mapped(tmp_path: Path) ->
         )
         == 0
     )
+
+
+def test_map_freshness_accepts_unique_exact_reviewed_group_fallback(tmp_path: Path) -> None:
+    path = "src/repoforge/application/workspace/snapshot.py"
+    root = _tree(tmp_path, **{path: _REAL_BODY})
+    manifest = _manifest(
+        groups=(
+            _group(
+                "verification_diagnostics",
+                source_globs=(path,),
+                test_files=("tests/test_workspace_diagnostics.py",),
+            ),
+        ),
+        coverage_map={"src/repoforge/existing.py": ("tests/test_existing.py",)},
+    )
+
+    assert selector.check_map_freshness(manifest, [path], root) == 0
 
 
 def test_map_freshness_fails_on_a_package_module_missing_from_the_map(tmp_path: Path) -> None:

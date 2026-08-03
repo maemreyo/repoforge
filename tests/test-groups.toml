@@ -293,6 +293,11 @@ test_files = [
 description = "repo_policy, config_inspect, generation rendering, approval, source/accepted/active projections."
 parallel = true
 source_globs = [
+  "README.md",
+  "config.example.toml",
+  "docs/development/**",
+  "docs/testing/**",
+  "docs/superpowers/**",
   "src/repoforge/application/config_admin/**",
   "src/repoforge/application/configuration/**",
   "src/repoforge/adapters/configuration/**",
@@ -315,7 +320,6 @@ source_globs = [
   "src/repoforge/domain/resource_budget.py",
   "src/repoforge/domain/risk.py",
   "src/repoforge/adapters/persistence/json_approval_store.py",
-  "docs/development/INTEGRITY_POLICY.md",
 ]
 test_files = [
   "tests/test_adhoc_command_guard.py",
@@ -463,6 +467,8 @@ test_files = [
 description = "Profiles, diagnostic routing, parsers, artifacts, test selection, formatters, verification receipts."
 parallel = true
 source_globs = [
+  "Makefile",
+  ".github/workflows/**",
   "src/repoforge/application/diagnostics/**",
   "src/repoforge/application/workspace/diagnostic_parser.py",
   "src/repoforge/application/workspace/diagnostic_selector.py",
@@ -484,9 +490,12 @@ source_globs = [
   "src/repoforge/benchmark/**",
   "scripts/run_test_shards.py",
   "scripts/run_compatibility_tests.py",
+  "scripts/run_test_suite.py",
   "scripts/select_affected_tests.py",
   "scripts/test_catalog.py",
   "scripts/verification_artifact.py",
+  "scripts/verify-change.sh",
+  "scripts/verify-production.sh",
   "scripts/check_release_contracts.py",
   "scripts/check_conflict_markers.py",
   "scripts/run_v2_release_gates.py",

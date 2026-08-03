@@ -11,10 +11,10 @@ Two selection strategies, in order of precision:
    mapping, used for non-package paths (docs, data) and as the whole-selector
    fallback when the coverage map is absent.
 
-Both strategies fail closed: an always-wide path (build/verification config), a
-package module missing from the coverage map (new/uncovered), or any path with
-no mapping at all escalates to the full suite -- this tool never silently
-narrows a run it cannot justify.
+Both strategies fail closed: dependency/runtime-global inputs stay always-wide;
+an uncovered package module may use only one exact reviewed group owner; and any
+path with no unambiguous mapping escalates to the full suite. The selector never
+silently narrows a run it cannot justify.
 
 This selection is load-bearing in CI: production-gate.yml uses it for pull
 requests, and runs the full suite with coverage on every push to a protected
@@ -53,9 +53,11 @@ JUNIT_DIR = Path(".cache/verification/junit")
 # uncovered module whose blast radius is unknown -> fail closed to the full suite.
 _PACKAGE_SRC_PREFIX = "src/repoforge/"
 
-# Changes to these paths affect verification/build/selection itself and can
-# invalidate any group mapping, so they always force a full-suite run rather
-# than trusting the (possibly stale) manifest to select narrowly.
+# Dependency/runtime-global inputs can invalidate every test's environment, so
+# they remain always-wide. Reviewed verification-control-plane files are mapped
+# explicitly in tests/test-groups.toml: their selector, topology, docs-drift,
+# and runner contracts are the justified PR-time blast radius, while the
+# protected-branch production gate remains full-suite.
 #
 # tests/conftest.py is deliberately NOT here: its blast radius is precisely
 # the checked-in `conftest_consumers` list (see CONFTEST_PATH below), not the
@@ -66,12 +68,6 @@ _PACKAGE_SRC_PREFIX = "src/repoforge/"
 ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
     "pyproject.toml",
     "uv.lock",
-    "Makefile",
-    "tests/test-groups.toml",
-    "scripts/select_affected_tests.py",
-    "scripts/run_test_suite.py",
-    "scripts/verify-production.sh",
-    ".github/workflows/**",
 )
 
 CONFTEST_PATH = "tests/conftest.py"
@@ -231,6 +227,13 @@ def _matches_any(path: str, globs: tuple[str, ...]) -> bool:
     return any(_glob_to_regex(glob).match(path) for glob in globs)
 
 
+def _exact_reviewed_group_owner(manifest: Manifest, path: str) -> Group | None:
+    """Return the sole group that names ``path`` exactly, never by wildcard."""
+
+    owners = tuple(group for group in manifest.groups if path in group.source_globs)
+    return owners[0] if len(owners) == 1 else None
+
+
 def _validated_parallel_shard_sizes(group: Group) -> tuple[int, ...]:
     sizes = group.parallel_shard_sizes or (len(group.test_files),)
     if group.parallel_shard_sizes and not group.parallel:
@@ -364,7 +367,7 @@ def check_map_freshness(manifest: Manifest, changed_paths: Sequence[str], root: 
     for path in sorted(set(changed_paths)):
         if not path.startswith(_PACKAGE_SRC_PREFIX) or not path.endswith(".py"):
             continue
-        if path in manifest.coverage_map:
+        if path in manifest.coverage_map or _exact_reviewed_group_owner(manifest, path):
             continue
         source_path = root / path
         if not source_path.exists():
@@ -514,10 +517,10 @@ def _select_via_coverage(
 ) -> Selection:
     """Select the exact test files that execute each changed source module.
 
-    A changed test file runs itself. A package module (src/repoforge/**.py) not
-    present in the coverage map is new or uncovered -- its blast radius is
-    unknown, so we fail closed to the full suite. Non-package or non-.py paths
-    (docs, data) fall back to the group source_globs.
+    A changed test file runs itself. An uncovered package module may fall back
+    only to one group that names the module by exact path; wildcard, missing, or
+    ambiguous ownership remains unknown and fails closed. Non-package or non-.py
+    paths (docs, data) fall back to reviewed group source_globs.
     """
     selected_files: set[str] = set(manifest.safety_bundle)
     reasons: list[str] = []
@@ -531,7 +534,14 @@ def _select_via_coverage(
             covering = manifest.coverage_map.get(path)
             direct_consumers = _GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS.get(path, ())
             if covering is None and not direct_consumers:
-                unmapped.append(path)
+                exact_owner = _exact_reviewed_group_owner(manifest, path)
+                if exact_owner is None:
+                    unmapped.append(path)
+                else:
+                    selected_files.update(exact_owner.test_files)
+                    reasons.append(
+                        f"{path!r} -> {exact_owner.name!r} (exact reviewed group fallback)"
+                    )
             else:
                 selected_files.update(covering or ())
                 selected_files.update(direct_consumers)
