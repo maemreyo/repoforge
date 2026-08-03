@@ -189,9 +189,19 @@ class _RecordingRegistrar:
         return replace(lease, pid=pid, updated_at="2026-07-29T09:26:22+00:00"), Revision(2)
 
     def complete_registration(
-        self, lease, *, process_identity: str, expected_revision: Revision
+        self,
+        lease,
+        *,
+        process_identity: str,
+        expected_revision: Revision,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
+        release_sha: str | None = None,
+        generation: int | None = None,
+        process_start_token: str | None = None,
     ) -> tuple[ProcessLease, Revision]:
-        del expected_revision
+        del expected_revision, owner_pid, owner_process_identity, release_sha
+        del generation, process_start_token
         self._events.append("running")
         return (
             replace(

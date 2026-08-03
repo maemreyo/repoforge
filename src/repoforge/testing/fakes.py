@@ -547,8 +547,14 @@ class InMemoryWorkerRegistrar:
         *,
         process_identity: str,
         expected_revision: Revision,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
+        release_sha: str | None = None,
+        generation: int | None = None,
+        process_start_token: str | None = None,
     ) -> tuple[ProcessLease, Revision]:
-        del expected_revision
+        del expected_revision, owner_pid, owner_process_identity, release_sha
+        del generation, process_start_token
         self.completed.append(lease.lease_id)
         return (
             replace(

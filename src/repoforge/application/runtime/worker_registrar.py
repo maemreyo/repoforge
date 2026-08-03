@@ -232,6 +232,7 @@ class WorkerRegistrar:
         owner_process_identity: str | None = None,
         release_sha: str | None = None,
         generation: int | None = None,
+        process_start_token: str | None = None,
     ) -> tuple[ProcessLease, Revision]:
         """READY -> RUNNING after identity is proven; the durable handshake end."""
         now = self._clock.now_iso()
@@ -245,7 +246,11 @@ class WorkerRegistrar:
             process_identity=process_identity,
             pid=lease.pid,
             pgid=lease.pgid,
-            process_start_token=lease.process_start_token,
+            process_start_token=(
+                process_start_token
+                if process_start_token is not None
+                else lease.process_start_token
+            ),
         )
         ready = replace(
             ready,

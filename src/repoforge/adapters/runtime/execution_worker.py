@@ -165,9 +165,17 @@ class SubprocessExecutionWorker:
                 lease, process.pid, generation, correlation, identity, revision
             )
             self._worker_ids[process.pid] = worker_id
-            # The parent returns a worker only after the lease is durably RUNNING.
+            # The parent returns a worker only after the lease is durably RUNNING. The
+            # lease carries the worker's start token too (single authority, F-008): a
+            # RUNNING lease without a token is incomplete evidence, so the token that
+            # the binding carries must land on the canonical lease as well.
+            proc_identity = read_identity(process.pid)
+            token = proc_identity.start_token if proc_identity is not None else None
             lease, revision = self._registrar.complete_registration(
-                lease, process_identity=identity, expected_revision=revision
+                lease,
+                process_identity=identity,
+                expected_revision=revision,
+                process_start_token=token,
             )
         except Exception as exc:
             # Any failure after Popen must never leave a live, untraceable worker:

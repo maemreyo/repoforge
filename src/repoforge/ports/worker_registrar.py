@@ -56,6 +56,7 @@ class WorkerRegistrar(Protocol):
         owner_process_identity: str | None = None,
         release_sha: str | None = None,
         generation: int | None = None,
+        process_start_token: str | None = None,
     ) -> tuple[ProcessLease, Revision]: ...
 
     def abort_intent(
