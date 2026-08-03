@@ -697,7 +697,7 @@ class UpgradeService:
         self._store.record_activation_stage(stage.value)
         self._mark_effect(transition_id, status="staged")
 
-        restart = self._restarter.restart(departing_release=previous_sha)
+        restart = self._restarter.restart(departing_release=previous_sha, target_release=commit_sha)
         if restart.ok:
             stage = ActivationStage.RUNTIME_RESTARTED
             self._store.record_activation_stage(stage.value)
@@ -1157,7 +1157,7 @@ class UpgradeService:
             )
 
         self._store.swap_current(target)
-        restart = self._restarter.restart(departing_release=current)
+        restart = self._restarter.restart(departing_release=current, target_release=target)
         converged, observed_sha, verify_detail = self._verify_serving(target)
         stage = (
             ActivationStage.HEALTH_VERIFIED

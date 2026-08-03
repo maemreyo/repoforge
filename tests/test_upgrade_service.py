@@ -106,7 +106,12 @@ class _Restarter:
             None,
         )
 
-    def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
+    def restart(
+        self,
+        *,
+        departing_release: str | None = None,
+        target_release: str | None = None,
+    ) -> RestartOutcome:
         self.calls += 1
         self.departing_releases.append(departing_release)
         return RestartOutcome(
@@ -421,7 +426,12 @@ def test_a_crash_after_the_rollback_swap_leaves_a_recoverable_journal(
     """
 
     class _CrashRestarter(_Restarter):
-        def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
+        def restart(
+            self,
+            *,
+            departing_release: str | None = None,
+            target_release: str | None = None,
+        ) -> RestartOutcome:
             self.calls += 1
             self.departing_releases.append(departing_release)
             if self.calls > 1:

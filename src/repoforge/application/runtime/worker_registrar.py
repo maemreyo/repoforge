@@ -25,6 +25,7 @@ restarter's fence scan can see which spawns belong to the current epoch.
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Iterator
 from dataclasses import replace
 
@@ -44,12 +45,17 @@ from ...domain.process_lease import (
 from ...domain.process_lease import (
     register_ready as _register_ready,
 )
-from ...ports.admission_epoch import ADMISSION_OPEN, AdmissionEpochStore
+from ...ports.admission_epoch import ADMISSION_OPEN, ADMISSION_PERMIT_ENV, AdmissionEpochStore
 from ...ports.clock import Clock
 from ...ports.ids import IdGenerator
 from ...ports.locking import LockManager
 from ...ports.process_lease_store import LeaseShadowStore, ProcessLeaseStore
 from ...ports.worker_registrar import WORKER_ADMISSION_LOCK
+
+#: The release-identity env the launcher shim stamps on the process it serves; the
+#: replacement permit is bound to this so a permit for one release cannot admit a
+#: spawn for another.
+_RUNNING_RELEASE_SHA_ENV = "REPOFORGE_RUNNING_RELEASE_SHA"
 
 
 class WorkerRegistrar:
@@ -97,11 +103,16 @@ class WorkerRegistrar:
             epoch: int | None = None
             if self._epochs is not None:
                 current, state = self._epochs.read()
-                if state is not ADMISSION_OPEN:
+                # F-012: admission is CLOSING for a handoff. The ONLY spawn allowed
+                # is the replacement supervisor the restarter issued a single-use
+                # permit to; everything else (the incumbent, an unrelated process,
+                # or a stale permit from a previous handoff) is refused exactly as
+                # before. The claim is atomic under the shared admission lock.
+                if state != ADMISSION_OPEN and not self._claim_replacement_permit(current):
                     raise ConfigError(
                         "WORKER_ADMISSION_REFUSED: worker admission is fenced "
-                        f"(epoch {current} is {state}); a restart is in progress, so no "
-                        "new execution worker may be spawned until the replacement is up"
+                        f"(epoch {current} is {state}); no valid replacement "
+                        "permit for this spawn"
                     )
                 epoch = current
             now = self._clock.now_iso()
@@ -141,6 +152,27 @@ class WorkerRegistrar:
             metadata={"owner": "worker-registrar"},
         ):
             yield
+
+    def _claim_replacement_permit(self, epoch: int) -> bool:
+        """Claim the single-use replacement permit for the CLOSING handoff (F-012).
+
+        The replacement supervisor carries the restarter-issued permit token in its
+        environment; ``create_intent`` presents it with the release it actually
+        serves. Any mismatch (no token, wrong token, wrong target, stale epoch, or
+        an already-used permit) fails closed -- exactly like the pre-permit refusal
+        -- so the incumbent and unrelated processes stay blocked while CLOSING.
+        """
+        token = os.environ.get(ADMISSION_PERMIT_ENV, "")
+        if not token:
+            return False
+        epochs = self._epochs
+        if epochs is None:
+            return False
+        target = os.environ.get(_RUNNING_RELEASE_SHA_ENV)
+        try:
+            return bool(epochs.claim_permit(epoch, token=token, target=target))
+        except Exception:
+            return False
 
     def record_pid(
         self,

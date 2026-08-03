@@ -164,7 +164,20 @@ class RuntimeRestarter(Protocol):
         """Read-only handoff preflight: ``(ok, detail, evidence)`` with no side effects."""
         ...
 
-    def restart(self, *, departing_release: str | None = None) -> RestartOutcome: ...
+    def restart(
+        self,
+        *,
+        departing_release: str | None = None,
+        target_release: str | None = None,
+    ) -> RestartOutcome:
+        """Replace the live runtime so it adopts whatever ``current`` points at.
+
+        ``target_release`` is the release the replacement will serve; the restarter
+        binds the replacement-scoped admission permit (F-012) to it so the permit
+        for one release can never admit a spawn for another. ``None`` means the
+        permit stays epoch-bound only (a same-release restart).
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)

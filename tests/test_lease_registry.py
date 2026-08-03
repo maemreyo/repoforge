@@ -1298,3 +1298,128 @@ def test_running_lease_ack_requires_matching_start_token(tmp_path: Path) -> None
     )
     assert ack.acked is True
     assert ack.exit_code is None
+
+
+# ---------------------------------------------------------------------------
+# Re-review F-012: replacement-scoped admission permit (TDD — RED first).
+# ---------------------------------------------------------------------------
+
+
+def _permit_registrar(tmp_path: Path, *, locks=None, epochs=None):
+    """A registrar wired to a JSON admission epoch store and a shared lock manager."""
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    shared_locks = locks if locks is not None else InMemoryLockManager()
+    epoch_store = epochs if epochs is not None else JsonAdmissionEpochStore(tmp_path / "state")
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epoch_store,
+        locks=shared_locks,
+    )
+    return registrar, leases, epoch_store
+
+
+def test_replacement_can_claim_single_use_permit_while_admission_is_closing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-012: the replacement spawn may proceed while admission is CLOSING.
+
+    The restarter closes admission, issues a single-use permit bound to the
+    replacement's release, and launches it; the replacement's ``create_intent``
+    claims that permit atomically instead of being refused. A lease must be
+    created under the CLOSING epoch.
+    """
+    from repoforge.domain.process_lease import ProcessLeaseStatus
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    token = epochs.issue_permit(target="deadbeef")
+    monkeypatch.setenv(ADMISSION_PERMIT_ENV, token)
+    monkeypatch.setenv("REPOFORGE_RUNNING_RELEASE_SHA", "deadbeef")
+
+    lease, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+
+    assert lease.admission_epoch == 1, "the lease is stamped with the CLOSING epoch"
+    stored = leases.read(lease.lease_id)
+    assert stored is not None and stored.value.status is ProcessLeaseStatus.REGISTERED
+
+
+def test_unrelated_spawn_remains_refused_during_replacement_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-012: an unrelated spawn without a valid permit is still refused."""
+    from repoforge.domain.errors import ConfigError
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    epochs.issue_permit(target="deadbeef")
+    monkeypatch.delenv("REPOFORGE_ADMISSION_PERMIT", raising=False)
+
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    assert len(leases.list_all().records) == 0, "no lease may be created without a permit"
+
+
+def test_replacement_permit_is_single_use(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F-012: a permit consumed by one spawn cannot spawn a second worker."""
+    from repoforge.domain.errors import ConfigError
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    token = epochs.issue_permit(target="deadbeef")
+    monkeypatch.setenv(ADMISSION_PERMIT_ENV, token)
+    monkeypatch.setenv("REPOFORGE_RUNNING_RELEASE_SHA", "deadbeef")
+
+    first, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+    assert first.admission_epoch == 1
+
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    assert len(leases.list_all().records) == 1, "only one lease may claim the permit"
+
+
+def test_stale_or_wrong_target_permit_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-012: wrong token, wrong target, or a stale epoch permit are all refused."""
+    from repoforge.domain.errors import ConfigError
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    token = epochs.issue_permit(target="deadbeef")
+
+    def attempt(*, env_token: str, sha: str):
+        monkeypatch.setenv(ADMISSION_PERMIT_ENV, env_token)
+        monkeypatch.setenv("REPOFORGE_RUNNING_RELEASE_SHA", sha)
+        return registrar.create_intent(
+            role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+        )
+
+    # Wrong token.
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        attempt(env_token="bogus-token", sha="deadbeef")
+    # Wrong target release.
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        attempt(env_token=token, sha="another-release")
+    assert len(leases.list_all().records) == 0, "no lease may be created with a bad permit"
+
+    # A permit from a previous (reopened) epoch is stale: reopen then close a new
+    # handoff and try to reuse the old token.
+    epochs.open_next()
+    epochs.close()
+    epochs.issue_permit(target="fresh-release")
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        attempt(env_token=token, sha="deadbeef")
+    assert len(leases.list_all().records) == 0

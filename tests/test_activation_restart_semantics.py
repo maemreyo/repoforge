@@ -557,6 +557,14 @@ class _ReopenFailingEpoch:
         self.close_calls += 1
         return 1
 
+    def issue_permit(self, *, target: str | None) -> str:
+        del target
+        return "permit-token"
+
+    def claim_permit(self, epoch: int, *, token: str, target: str | None) -> bool:
+        del epoch, token, target
+        return False
+
 
 def test_restart_reports_reopen_failure_instead_of_silently_swallowing(
     tmp_path: Path,
@@ -588,3 +596,207 @@ def test_restart_reports_reopen_failure_instead_of_silently_swallowing(
     assert epochs.close_calls == 1
     assert epochs.open_calls == 1
     assert launcher.starts, "the replacement is live before the reopen is attempted"
+
+
+# ---------------------------------------------------------------------------
+# F-012: replacement-scoped admission permit (TDD — RED first).
+# ---------------------------------------------------------------------------
+
+
+class _RecordingEpochs:
+    """AdmissionEpochStore fake recording the handoff call order."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self._epoch = 1
+
+    def read(self) -> tuple[int, str]:
+        return self._epoch, "open"
+
+    def open_next(self) -> int:
+        self.events.append("open")
+        self._epoch += 1
+        return self._epoch
+
+    def close(self) -> int:
+        self.events.append("close")
+        return self._epoch
+
+    def issue_permit(self, *, target: str | None) -> str:
+        self.events.append(f"issue:{target}")
+        return f"permit-token-{len(self.events)}"
+
+    def claim_permit(self, epoch: int, *, token: str, target: str | None) -> bool:
+        del epoch, token, target
+        return False
+
+
+class _PermitCaptureLauncher(_RecordingLauncher):
+    """Launcher that captures the extra_env handed to the replacement."""
+
+    def __init__(self, store, *, new_pid: int = 4242) -> None:
+        super().__init__(store, new_pid=new_pid)
+        self.extra_envs: list[dict[str, str]] = []
+
+    def start(self, config_path: Path, *, foreground: bool, extra_env: dict[str, str]) -> int:
+        self.extra_envs.append(dict(extra_env))
+        return super().start(config_path, foreground=foreground, extra_env=extra_env)
+
+
+def test_restarter_fenced_orders_close_stop_issue_launch_open(tmp_path: Path) -> None:
+    """F-012: the fenced handoff issues the permit AFTER the stop, BEFORE the launch."""
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+    from repoforge.testing import InMemoryLockManager
+
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    epochs = _RecordingEpochs()
+    launcher = _PermitCaptureLauncher(store)
+    events = epochs.events
+
+    outcome = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        admission_epochs=epochs,
+        locks=InMemoryLockManager(),
+        admission_timeout_seconds=0.05,
+    ).restart(target_release="abc123")
+
+    assert outcome.ok, outcome.detail
+    assert launcher.extra_envs, "the replacement must be launched with the permit env"
+    assert ADMISSION_PERMIT_ENV in launcher.extra_envs[0]
+    assert events.index("issue:abc123") > events.index("close"), "permit AFTER close"
+    assert events.index("issue:abc123") < events.index("open"), "permit BEFORE reopen"
+    assert events[-1] == "open", "reopen is the final handoff step"
+
+
+def test_rollback_launch_receives_a_fresh_permit(tmp_path: Path) -> None:
+    """F-012: a rollback rotates the permit; the failed candidate's is not reused."""
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+    from repoforge.testing import InMemoryLockManager
+
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    epochs = _RecordingEpochs()
+
+    def restart_for(target: str, launcher: _PermitCaptureLauncher) -> None:
+        outcome = _restarter(
+            store,
+            _Control(store),
+            launcher,
+            tmp_path,
+            admission_epochs=epochs,
+            locks=InMemoryLockManager(),
+            admission_timeout_seconds=0.05,
+        ).restart(target_release=target)
+        assert outcome.ok, outcome.detail
+
+    first_launcher = _PermitCaptureLauncher(store, new_pid=4242)
+    restart_for("candidate-sha", first_launcher)
+    rollback_launcher = _PermitCaptureLauncher(store, new_pid=4243)
+    restart_for("previous-sha", rollback_launcher)  # the rollback launch
+
+    assert first_launcher.extra_envs and rollback_launcher.extra_envs
+    first = first_launcher.extra_envs[0][ADMISSION_PERMIT_ENV]
+    second = rollback_launcher.extra_envs[0][ADMISSION_PERMIT_ENV]
+    assert first != second, "a rollback must rotate to a fresh permit, never reuse"
+
+
+class _SpawnClaimingLauncher:
+    """Launcher simulating the replacement booting and claiming the permit mid-handoff.
+
+    The restarter issues the permit, releases the admission lock, and launches the
+    replacement; the replacement (here) immediately calls ``create_intent`` while
+    admission is still CLOSING. With a valid permit this must succeed and create a
+    lease; without one it must be refused (the pre-fix RED behavior).
+    """
+
+    def __init__(self, store, registrar, *, new_pid: int = 4242) -> None:
+        self._store = store
+        self._registrar = registrar
+        self._new_pid = new_pid
+        self.extra_env: dict[str, str] = {}
+        self.lease_ids: list[str] = []
+
+    def start(self, config_path: Path, *, foreground: bool, extra_env: dict[str, str]) -> int:
+        del config_path, foreground
+        self.extra_env = dict(extra_env)
+        from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+        keys = (ADMISSION_PERMIT_ENV, "REPOFORGE_RUNNING_RELEASE_SHA")
+        previous = {key: os.environ.get(key) for key in keys}
+        os.environ[ADMISSION_PERMIT_ENV] = extra_env.get(ADMISSION_PERMIT_ENV, "")
+        os.environ["REPOFORGE_RUNNING_RELEASE_SHA"] = extra_env.get(
+            "REPOFORGE_RUNNING_RELEASE_SHA", "abc123"
+        )
+        try:
+            lease, _ = self._registrar.create_intent(
+                role=__import__(
+                    "repoforge.domain.process_lease", fromlist=["ProcessLeaseRole"]
+                ).ProcessLeaseRole.EXECUTION_DAEMON,
+                correlation_id="c" * 24,
+            )
+            self.lease_ids.append(lease.lease_id)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        self._store.write(
+            _record(phase=RuntimePhase.HEALTHY, pid=self._new_pid, identity=_IDENTITY_NEW)
+        )
+        return self._new_pid
+
+    def force_stop(self, record: RuntimeRecord, *, grace_seconds: float = 5.0) -> bool:
+        del record, grace_seconds
+        return False
+
+
+def test_replacement_spawn_claims_permit_while_admission_is_closing(
+    tmp_path: Path,
+) -> None:
+    """F-012: the replacement's create_intent succeeds during the CLOSING handoff.
+
+    This is the exact timing that deadlocked the live-activation gate: the new
+    supervisor boots (launcher.start) and spawns its execution worker while
+    admission is still CLOSING, so without a permit the spawn is refused and the
+    supervisor never publishes a live record.
+    """
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.adapters.persistence.json_process_lease_adapter import (
+        JsonProcessLeaseAdapter,
+    )
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, InMemoryLockManager, SequenceIdGenerator
+
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    shared_locks = InMemoryLockManager()
+    epochs = JsonAdmissionEpochStore(tmp_path / "state")
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epochs,
+        locks=shared_locks,
+        admission_timeout_seconds=0.05,
+    )
+    launcher = _SpawnClaimingLauncher(store, registrar)
+
+    outcome = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        admission_epochs=epochs,
+        locks=shared_locks,
+        admission_timeout_seconds=0.05,
+    ).restart(target_release="abc123")
+
+    assert outcome.ok, outcome.detail
+    assert launcher.lease_ids, "the replacement's worker must claim the permit and spawn"
+    assert len(leases.list_all().records) == 1

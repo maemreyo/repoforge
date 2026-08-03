@@ -24,6 +24,13 @@ from typing import Protocol
 ADMISSION_OPEN = "open"
 #: The closing state: new spawns are refused; in-flight intents may still settle.
 ADMISSION_CLOSING = "closing"
+#: Env var carrying the replacement-scoped admission permit to the supervisor being
+#: launched in a handoff (F-012). The restarter issues a single-use permit bound to
+#: the current (CLOSING) epoch and the target release, and passes it to the
+#: replacement via this env var; ``WorkerRegistrar.create_intent`` claims it
+#: atomically so the replacement's first worker spawn succeeds while every
+#: unrelated spawn stays refused.
+ADMISSION_PERMIT_ENV = "REPOFORGE_ADMISSION_PERMIT"
 
 
 class AdmissionEpochStore(Protocol):
@@ -39,4 +46,24 @@ class AdmissionEpochStore(Protocol):
 
     def close(self) -> int:
         """Durably close the current epoch; return the (unchanged) epoch number."""
+        ...
+
+    def issue_permit(self, *, target: str | None) -> str:
+        """Issue a single-use replacement permit for the current epoch (F-012).
+
+        Called by the restarter while admission is CLOSING, after the incumbent is
+        drained, bound to the replacement's target release (or transition). The
+        returned token is transported to the replacement, which must present it to
+        ``claim_permit`` before it may spawn. Issuing rotates the slot: a previous
+        handoff's permit is invalidated.
+        """
+        ...
+
+    def claim_permit(self, epoch: int, *, token: str, target: str | None) -> bool:
+        """Atomically claim the current epoch's permit; ``False`` if absent/used/wrong.
+
+        Only valid while the epoch is CLOSING and the permit matches ``epoch``,
+        ``token``, and (when bound) ``target``; a used permit is never reusable.
+        A successful claim marks the permit used before returning.
+        """
         ...

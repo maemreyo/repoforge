@@ -69,7 +69,12 @@ class _Restarter:
         del departing_release
         return True, "", None
 
-    def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
+    def restart(
+        self,
+        *,
+        departing_release: str | None = None,
+        target_release: str | None = None,
+    ) -> RestartOutcome:
         return RestartOutcome(ok=True, detail="fake restart", pid=99)
 
 

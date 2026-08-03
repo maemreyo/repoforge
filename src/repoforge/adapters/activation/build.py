@@ -35,7 +35,7 @@ from ...ports.activation import (
     SupervisorKickstarter,
     WorktreeState,
 )
-from ...ports.admission_epoch import AdmissionEpochStore
+from ...ports.admission_epoch import ADMISSION_PERMIT_ENV, AdmissionEpochStore
 from ...ports.locking import LockManager
 from ...ports.runtime_control import RuntimeControlClient, RuntimeLauncher, RuntimeStore
 from ...ports.sleeper import Sleeper
@@ -548,7 +548,12 @@ class SupervisorRestarter:
                 f"after the handoff: {exc}"
             ) from exc
 
-    def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
+    def restart(
+        self,
+        *,
+        departing_release: str | None = None,
+        target_release: str | None = None,
+    ) -> RestartOutcome:
         before = self._runtime.read()
         old_pid = before.pid if before else None
         old_identity = before.process_identity if before else None
@@ -581,6 +586,7 @@ class SupervisorRestarter:
                 old_identity=old_identity,
                 departing_release=departing_release,
                 plan_digest=plan_digest,
+                target_release=target_release,
             )
         except ConfigError as exc:
             if "LOCK_TIMEOUT" in str(exc):
@@ -610,8 +616,18 @@ class SupervisorRestarter:
         old_identity: str | None,
         departing_release: str | None,
         plan_digest: str | None,
+        target_release: str | None = None,
     ) -> RestartOutcome:
-        """The stop/start sequence, held under the shared worker-admission lock."""
+        """The stop/start sequence for one handoff (F-012).
+
+        Phase A runs under the shared worker-admission lock: fence the epoch, re-verify
+        the plan, drain and reclaim the incumbent, then issue the replacement-scoped
+        single-use permit. The lock is RELEASED before the replacement is launched, so
+        the new supervisor can acquire it and claim the permit when it spawns its first
+        worker while admission is still CLOSING -- the exact timing the live-activation
+        gate deadlocked on (the spawn was refused and no live record was ever
+        published). The lock is re-acquired only to reopen the next epoch.
+        """
         with self._admission_lock():
             fence_ok, fence_detail = self._admission_fence()
             if not fence_ok:
@@ -651,7 +667,8 @@ class SupervisorRestarter:
 
             # Prefer the OS process manager so an upgrade never orphans the supervisor
             # from launchd. `kickstart -k` stops and restarts the registered job in one
-            # step.
+            # step. The OS manager owns the replacement's environment, so the permit
+            # cannot be transported on this path; it keeps the pre-fence behavior.
             if self._kickstarter is not None and self._kickstarter.available():
                 # Drain the incumbent FIRST, by identity. `kickstart -k` only replaces
                 # the process launchd itself owns, so a supervisor started outside
@@ -695,8 +712,6 @@ class SupervisorRestarter:
                         detail="OS-managed supervisor did not publish a live record after kickstart",
                     )
                 record = self._live_record(exclude_pid=old_pid)
-                # The replacement is live; reopen admission BEFORE releasing the lock so
-                # the replacement's first worker spawn is admitted, not refused.
                 self._reopen_admission()
                 return RestartOutcome(
                     ok=True,
@@ -705,7 +720,8 @@ class SupervisorRestarter:
                     reclamation=reclamation,
                 )
 
-            # Phase 2 -- drain the incumbent, then reclaim on fresh evidence and start.
+            # Launcher path Phase A -- drain the incumbent, reclaim on fresh evidence,
+            # then issue the replacement permit, all under the admission lock.
             stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
             if not stopped:
                 self._reopen_admission()
@@ -718,29 +734,56 @@ class SupervisorRestarter:
                     detail=reclaim_detail,
                     reclamation=reclamation,
                 )
-            try:
-                pid = self._launcher.start(
-                    self._config_path, foreground=False, extra_env=self._extra_env
-                )
-            except (ConfigError, OSError) as exc:
-                self._reopen_admission()
-                return RestartOutcome(ok=False, detail=f"launcher failed to start: {exc}")
-            # A STOPPED record from the old process is still on disk, so "a record
-            # exists" proves nothing: require a live record that is not the old process.
-            if not self._await(
-                lambda: self._live_record(exclude_pid=old_pid) is not None,
-                self._start_timeout,
-            ):
-                self._reopen_admission()
-                return RestartOutcome(
-                    ok=False, detail="runtime did not publish a live record after restart", pid=pid
-                )
-            # The replacement is live; reopen admission BEFORE releasing the lock so the
-            # replacement's first worker spawn is admitted, not refused.
-            self._reopen_admission()
-            return RestartOutcome(
-                ok=True, detail=f"restarted (pid {pid})", pid=pid, reclamation=reclamation
+            permit_token = self._issue_admission_permit(target_release)
+
+        # Phase B -- launch the replacement OUTSIDE the admission lock so its first
+        # worker spawn can acquire the lock and claim the permit while CLOSING (F-012).
+        try:
+            pid = self._launcher.start(
+                self._config_path, foreground=False, extra_env=self._replacement_env(permit_token)
             )
+        except (ConfigError, OSError) as exc:
+            with self._admission_lock():
+                self._reopen_admission()
+            return RestartOutcome(ok=False, detail=f"launcher failed to start: {exc}")
+        # A STOPPED record from the old process is still on disk, so "a record
+        # exists" proves nothing: require a live record that is not the old process.
+        if not self._await(
+            lambda: self._live_record(exclude_pid=old_pid) is not None,
+            self._start_timeout,
+        ):
+            with self._admission_lock():
+                self._reopen_admission()
+            return RestartOutcome(
+                ok=False, detail="runtime did not publish a live record after restart", pid=pid
+            )
+        record = self._live_record(exclude_pid=old_pid)
+        with self._admission_lock():
+            self._reopen_admission()
+        return RestartOutcome(
+            ok=True,
+            detail=f"restarted (pid {pid})",
+            pid=record.pid if record else pid,
+            reclamation=reclamation,
+        )
+
+    def _issue_admission_permit(self, target_release: str | None) -> str | None:
+        """Issue the replacement-scoped single-use permit for this handoff (F-012).
+
+        Returns ``None`` when no admission fence is wired (the caller opted out of
+        cross-process fencing); otherwise the token the replacement must present to
+        ``claim_permit`` before its first spawn is admitted.
+        """
+        if self._admission_epochs is None:
+            return None
+        return self._admission_epochs.issue_permit(target=target_release)
+
+    def _replacement_env(self, permit_token: str | None) -> dict[str, str]:
+        """The launch environment; the permit is injected only when a fence is wired."""
+        env = dict(self._extra_env)
+        if permit_token is not None:
+            env[ADMISSION_PERMIT_ENV] = permit_token
+        return env
 
     def _admission_lock(self) -> AbstractContextManager[None]:
         """The shared worker-admission fence (P1-3), bounded.
