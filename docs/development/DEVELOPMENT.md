@@ -24,8 +24,11 @@ The supported Make targets are:
 make lint
 make typecheck
 make test
+make test-full
 make test-fast
 make test-affected
+make coverage
+make gate
 make test-groups-check
 make build
 make check
@@ -37,7 +40,9 @@ Equivalent direct commands are:
 ```bash
 uv run ruff check .
 uv run mypy src/repoforge
-uv run pytest --cov=repoforge --cov-report=term-missing
+uv run python scripts/select_affected_tests.py --run
+uv run python scripts/select_affected_tests.py --full --run
+uv run python scripts/run_test_suite.py --coverage-dir .cache/verification/coverage
 uv build
 ```
 
@@ -47,24 +52,31 @@ Run the complete project gate with:
 ./scripts/test-all.sh
 ```
 
-`make check` and `make production-check` both run the same authoritative gate,
+`make test` is the default development loop: affected tests plus the safety bundle, without
+coverage. `make test-full` runs every behavioral test without coverage, while `make coverage`
+runs the single canonical full branch-coverage suite. `make test-fast` and
+`make test-affected` are transition aliases for `test-full` and `test` respectively.
+
+`make gate` and `make production-check` run the clean-tree authoritative gate. `make check`
+runs the same gate with a dirty-tree allowance for development. They delegate to
 `scripts/verify-production.sh` (dirty vs. clean tree); there is no separate lightweight
 variant. The production authority is `scripts/verify-production.sh`; use `--allow-dirty`
 only while iterating. Its ordered guarantees are documented in
 [INTEGRITY_POLICY.md](INTEGRITY_POLICY.md), while issue metadata and tracking rules are
 documented in [TICKET_GOVERNANCE.md](TICKET_GOVERNANCE.md).
 
-A change is not complete until ticket and release contracts, linting, strict typing, tests with the
-configured branch-coverage threshold, clean package builds, and installed-wheel smoke all pass.
-The production gate runs the suite in two lanes and combines their coverage data: a dedicated serial
-lane for the stateful (`parallel = false`) groups, then everything else in one xdist run. Set
+A change is not release-ready until ticket and release contracts, linting, strict typing, the
+canonical branch-coverage run, clean package builds, and installed-wheel smoke all pass. During
+iteration, `make verify` deliberately stops at affected tests so it does not duplicate release work.
+The production gate runs the suite in validated lanes and combines their coverage data: exclusive
+lanes for stateful (`parallel = false`) groups, then everything proven isolated in one xdist run. Set
 `REPOFORGE_TEST_WORKERS` to a positive integer to tune local parallelism without changing scope; the
 default of 3 is the measured cap for this suite, above which git child processes oversubscribe cores
 and produce contention-flaky failures.
 
 ### Module-aware test selection
 
-`tests/test-groups.toml` is a checked-in manifest that maps every `tests/test_*.py` file to one
+`tests/test-groups.toml` is the current execution authority and maps every `tests/test_*.py` file to one
 capability group (contracts, workspace core, operations, runtime/activation,
 policy/configuration, GitHub provider, verification/diagnostics, ticket-graph/release-e2e, or the
 cross-cutting `platform` catch-all), plus a small always-on safety bundle. `make test-groups-check`
@@ -72,18 +84,26 @@ cross-cutting `platform` catch-all), plus a small always-on safety bundle. `make
 to more than one group, or stale; this runs as part of the normal test suite too
 (`tests/test_select_affected_tests.py`).
 
-`make test-affected` (`scripts/select_affected_tests.py --run`) maps the paths changed since
+`tests/catalog.toml` is the declarative shadow catalog. It adds source-to-test edges, isolation and
+named resources, platform/Python support, and cost classes. Validate it with
+`uv run python scripts/test_catalog.py --check tests/catalog.toml`. The catalog does not execute tests
+yet; shadow comparison must remain free of false negatives before any capability cuts over.
+
+`make test` (`scripts/select_affected_tests.py --run`) maps the paths changed since
 `REPOFORGE_TEST_AFFECTED_BASE` (default `main`), plus the current working tree, to test groups and
 runs only the selected groups' tests plus the safety bundle. It **fails closed**: any changed path
 that does not match a group's `source_globs` (or matches a small always-wide list such as
 `pyproject.toml`, `Makefile`, or `.github/workflows/**`) escalates the run
 to the full suite rather than silently skipping something it cannot map.
 
-Do not run `make test` immediately before `make check` / `make production-check` / the `full`
-verification profile on the same tree: `full` already runs the complete suite via
-`scripts/verify-production.sh`, so running `test` first only duplicates that work. Use `quick` for
-lint/type feedback, `test-affected` for a fast targeted pass, and `full` as the single authoritative
-run before a PR is ready.
+Use `make test` throughout iteration, `make test-full` when broad behavioral confidence is needed,
+and one `make coverage` observation when branch coverage is the question. Do not run canonical
+coverage immediately before `make gate`: the production gate already records and enforces the same
+full-suite coverage evidence.
+
+Run evidence is written under `.cache/verification/`. Protected CI runs one canonical coverage job
+and reuses its `.coverage` data for map validation. Set `REPOFORGE_CI_FULL_MATRIX=1` only as an
+emergency rollback to full no-coverage execution in every compatibility matrix cell.
 
 ## Local MCP debugging
 

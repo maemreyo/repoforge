@@ -89,13 +89,11 @@ path = "/absolute/path/to/repository"
 # commands = [["scripts/verify-production.sh", "--allow-dirty"]]
 
 # The rung between them is what a model should reach for before opening a pull request: it
-# runs everything a change can break -- contracts, corpora and control-plane fault gates,
-# lint, strict types, and the whole test suite -- and leaves the branch-coverage floor, the
-# builds and the installed-wheel smoke to the release gate and to CI, which already run them
-# on every push. Time it on your own machine before choosing `timeout_seconds`: this suite is
-# git-subprocess-bound, so it is far more sensitive to what else is running than to core count.
+# runs contracts, metadata validation, corpora and control-plane fault gates, formatting,
+# lint, strict types, and affected tests. It leaves the full behavioral suite, branch-coverage
+# floor, builds, and installed-wheel smoke to the operator gate and protected-branch CI.
 # [repo.policy_patch.profiles.verify]
-# description = "Everything a change can break; no coverage floor, build, or wheel smoke"
+# description = "Change-facing contracts, static checks, and affected tests"
 # verification = true
 # timeout_seconds = 1800
 # commands = [["scripts/verify-change.sh"]]
@@ -103,7 +101,7 @@ path = "/absolute/path/to/repository"
 # description = "Affected tests only, no coverage: the profile a model should reach for"
 # verification = true
 # timeout_seconds = 600
-# commands = [["uv", "run", "python", "scripts/select_affected_tests.py", "--run"]]
+# commands = [["make", "test"]]
 
 # Generated paths name an approved regeneration command. Refresh conflict evidence points agents
 # at this command instead of encouraging hand-merges.

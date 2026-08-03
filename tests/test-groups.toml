@@ -125,7 +125,11 @@ test_files = [
 
 [groups.operations]
 description = "Idempotency, effect receipts, operation lifecycle, background progress, reconciliation, crash recovery, failure evidence."
-parallel = false
+# The group is tmp_path/state-root isolated. A measured 375-test xdist run with
+# three workers passed the control-plane responsiveness SLO and cut this lane
+# from roughly 458s serial to 222s. Keep genuinely host-global runtime and
+# ticket publication effects in their dedicated exclusive groups below.
+parallel = true
 source_globs = [
   "src/repoforge/application/operations/**",
   "src/repoforge/application/tasks/**",
@@ -289,6 +293,11 @@ test_files = [
 description = "repo_policy, config_inspect, generation rendering, approval, source/accepted/active projections."
 parallel = true
 source_globs = [
+  "README.md",
+  "config.example.toml",
+  "docs/development/**",
+  "docs/testing/**",
+  "docs/superpowers/**",
   "src/repoforge/application/config_admin/**",
   "src/repoforge/application/configuration/**",
   "src/repoforge/adapters/configuration/**",
@@ -311,7 +320,6 @@ source_globs = [
   "src/repoforge/domain/resource_budget.py",
   "src/repoforge/domain/risk.py",
   "src/repoforge/adapters/persistence/json_approval_store.py",
-  "docs/development/INTEGRITY_POLICY.md",
 ]
 test_files = [
   "tests/test_adhoc_command_guard.py",
@@ -459,6 +467,8 @@ test_files = [
 description = "Profiles, diagnostic routing, parsers, artifacts, test selection, formatters, verification receipts."
 parallel = true
 source_globs = [
+  "Makefile",
+  ".github/workflows/**",
   "src/repoforge/application/diagnostics/**",
   "src/repoforge/application/workspace/diagnostic_parser.py",
   "src/repoforge/application/workspace/diagnostic_selector.py",
@@ -466,6 +476,7 @@ source_globs = [
   "src/repoforge/application/workspace/run_adhoc.py",
   "src/repoforge/application/workspace/run_diagnostic.py",
   "src/repoforge/application/workspace/run_profile.py",
+  "src/repoforge/application/workspace/snapshot.py",
   "src/repoforge/application/workspace/verify.py",
   "src/repoforge/domain/adhoc.py",
   "src/repoforge/domain/diagnostic_packs.py",
@@ -474,56 +485,81 @@ source_globs = [
   "src/repoforge/domain/profile_drift.py",
   "src/repoforge/domain/syntax_diagnostics.py",
   "src/repoforge/domain/verification.py",
+  "src/repoforge/domain/workspace_snapshot.py",
   "src/repoforge/domain/verification_steps.py",
   "src/repoforge/benchmark/**",
   "scripts/run_test_shards.py",
+  "scripts/run_compatibility_tests.py",
+  "scripts/run_test_suite.py",
   "scripts/select_affected_tests.py",
+  "scripts/test_catalog.py",
+  "scripts/verification_artifact.py",
+  "scripts/verify-change.sh",
+  "scripts/verify-production.sh",
   "scripts/check_release_contracts.py",
   "scripts/check_conflict_markers.py",
   "scripts/run_v2_release_gates.py",
   "scripts/v2_release_reference.py",
   "tests/test-groups.toml",
+  "tests/catalog.toml",
 ]
 test_files = [
   "tests/test_conflict_marker_gate.py",
+  "tests/test_ci_verification_topology.py",
+  "tests/test_coverage_map_reuse.py",
   "tests/test_parallel_test_runner.py",
   "tests/test_select_affected_tests.py",
   "tests/test_syntax_diagnostics.py",
+  "tests/test_test_catalog.py",
+  "tests/test_ticket_graph_resource_isolation.py",
   "tests/test_v2_benchmark_harness.py",
+  "tests/test_verification_artifact.py",
   "tests/test_workspace_diagnostics.py",
 ]
 
-[groups.ticket_graph_release_e2e]
-description = "Ticket graph and release E2E. Always serial."
-parallel = false
+[groups.ticket_graph_domain]
+description = "Pure ticket graph, readiness, and proposal planning over isolated fixtures."
+parallel = true
 source_globs = [
-  "src/repoforge/application/tickets/**",
+  "src/repoforge/application/tickets/__init__.py",
+  "src/repoforge/application/tickets/graph.py",
+  "src/repoforge/application/tickets/live.py",
+  "src/repoforge/application/tickets/readiness.py",
   "src/repoforge/application/repository/issue_graph_proposal.py",
-  "src/repoforge/application/repository/issue_graph_publication.py",
-  "src/repoforge/adapters/github/gh_cli.py",
-  "src/repoforge/adapters/github/ticket_graph.py",
-  "src/repoforge/adapters/github/ticket_project*.py",
   "src/repoforge/domain/issue_graph_proposal.py",
-  "src/repoforge/domain/issue_graph_publication.py",
-  "src/repoforge/domain/ticket_sync.py",
   "src/repoforge/domain/tickets.py",
-  "src/repoforge/adapters/persistence/json_issue_graph_proposal_store.py",
-  "src/repoforge/adapters/persistence/json_issue_graph_publication_store.py",
   "scripts/validate_ticket_graph.py",
   "docs/roadmaps/**",
 ]
 test_files = [
+  "tests/test_issue_graph_proposals.py",
+  "tests/test_ticket_graph.py",
+  "tests/test_ticket_readiness.py",
+]
+
+[groups.ticket_graph_release_e2e]
+description = "Ticket provider, publication, project-sync, workflow, and CLI effects. Always exclusive."
+parallel = false
+source_globs = [
+  "src/repoforge/application/tickets/project_sync.py",
+  "src/repoforge/application/repository/issue_graph_publication.py",
+  "src/repoforge/adapters/github/gh_cli.py",
+  "src/repoforge/adapters/github/ticket_graph.py",
+  "src/repoforge/adapters/github/ticket_project*.py",
+  "src/repoforge/domain/issue_graph_publication.py",
+  "src/repoforge/domain/ticket_sync.py",
+  "src/repoforge/adapters/persistence/json_issue_graph_proposal_store.py",
+  "src/repoforge/adapters/persistence/json_issue_graph_publication_store.py",
+]
+test_files = [
   "tests/test_github_ticket_graph_adapter.py",
   "tests/test_github_ticket_project_adapter.py",
-  "tests/test_issue_graph_proposals.py",
   "tests/test_issue_graph_publication.py",
   "tests/test_issue_graph_publication_adapter.py",
   "tests/test_issue_graph_publication_executor.py",
   "tests/test_issue_graph_workflow.py",
   "tests/test_repo_issue_graph_tools.py",
-  "tests/test_ticket_graph.py",
   "tests/test_ticket_project_sync.py",
-  "tests/test_ticket_readiness.py",
   "tests/test_ticket_sync_cli.py",
 ]
 
@@ -535,6 +571,9 @@ description = "Cross-cutting agent-facing subsystems that do not map to a single
 # a net time loss; their contention flakiness is addressed by the raised
 # pytest --timeout (see contracts note), not by the serial lane.
 parallel = true
+# A single 39-file xdist process exceeded 600s. These reviewed contiguous
+# resource families completed independently without increasing worker count.
+parallel_shard_sizes = [12, 13, 6, 8]
 source_globs = [
   "src/repoforge/application/onboarding/**",
   "src/repoforge/application/skills/**",

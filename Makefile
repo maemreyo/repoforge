@@ -12,7 +12,7 @@ export
 endif
 
 .PHONY: default start dev-server restart status stop logs doctor
-.PHONY: setup schemas lint typecheck test test-fast test-affected test-groups-check test-map test-map-check
+.PHONY: setup schemas lint typecheck test test-full test-fast test-affected coverage gate test-groups-check test-map test-map-check test-map-check-existing
 .PHONY: v2-gates build verify check install release
 .PHONY: smoke clean live-activation
 .PHONY: help production-check tickets install-hooks inspector clean-dist watch
@@ -27,12 +27,16 @@ help:  # Show available commands without changing local or runtime state
 	  '  make schemas           Regenerate reviewed Forge v2 contract goldens' \
 	  '  make lint              Run Ruff lint' \
 	  '  make typecheck         Run strict Mypy' \
-	  '  make test              Run tests with coverage' \
-	  '  make test-fast         Run tests in parallel (3 workers), no coverage' \
-	  '  make test-affected     Run only test groups affected by changed paths (fails closed to full suite)' \
+	  '  make test              Run affected tests plus the safety bundle, no coverage' \
+	  '  make test-full         Run the complete behavioral suite, no coverage' \
+	  '  make test-fast         Transition alias for make test-full' \
+	  '  make test-affected     Transition alias for make test' \
+	  '  make coverage          Run one canonical full branch-coverage suite' \
+	  '  make gate              Run the clean-tree authoritative production gate' \
 	  '  make test-groups-check Verify every test file is mapped by tests/test-groups.toml' \
 	  '  make test-map          Regenerate the coverage map that powers precise test-affected selection' \
 	  '  make test-map-check    Fail if that coverage map has gone stale' \
+	  '  make test-map-check-existing  Validate the map from canonical coverage data' \
 	  '  make v2-gates          Run corpora and control-plane fault gates' \
 	  '  make verify            Verify a change in progress (no coverage floor, build, or wheel smoke)' \
 	  '  make check             Run the full dirty-tree production gate' \
@@ -75,10 +79,10 @@ lint:  # Lint all source, tests, and scripts
 typecheck:  # Type-check the full source tree
 	uv run --extra dev mypy src/repoforge
 
-test:  # Run the complete suite with the repository coverage policy
-	uv run --extra dev pytest --cov=repoforge --cov-report=term-missing
+test:  # Fast developer/model feedback: affected tests plus the safety bundle, no coverage
+	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}" --report-path "$${REPOFORGE_VERIFICATION_REPORT:-.cache/verification/affected.json}"
 
-test-fast:  # Run the complete suite in parallel without coverage, for fast local iteration.
+test-full:  # Run the complete behavioral suite without coverage.
 	# -n 3 was measured against -n 2 and -n 4 on this repo: -n 3 is both the
 	# fastest and the only worker count that stayed stable (-n 4 crashed a
 	# worker and produced contention-flaky failures in shared-cache tests).
@@ -86,10 +90,17 @@ test-fast:  # Run the complete suite in parallel without coverage, for fast loca
 	# first, then the rest under -n 3 -- mixing subprocess/git-heavy serial-lane
 	# tests into the same xdist run is what produced 60s pytest-timeout
 	# failures under load even at -n 3.
-	uv run --extra dev python scripts/select_affected_tests.py --full --run
+	uv run --extra dev python scripts/select_affected_tests.py --full --run --report-path "$${REPOFORGE_VERIFICATION_REPORT:-.cache/verification/full.json}"
 
-test-affected:  # Run only the tests affected by changed paths (coverage-map precise, group fallback) vs REPOFORGE_TEST_AFFECTED_BASE (default: main); fails closed to the full suite when any changed path is unmapped
-	uv run --extra dev python scripts/select_affected_tests.py --run --base "$${REPOFORGE_TEST_AFFECTED_BASE:-main}"
+test-fast: test-full  # Transition alias retained for one release.
+
+test-affected: test  # Transition alias retained for one release.
+
+coverage:  # Run the complete suite once with branch coverage and the 80% floor.
+	uv run --extra dev python scripts/run_test_suite.py --coverage-dir "$${REPOFORGE_COVERAGE_DIR:-.cache/verification/coverage}" --report-path "$${REPOFORGE_VERIFICATION_REPORT:-.cache/verification/coverage.json}"
+
+gate:  # Operator/CI authority: clean-tree production gate.
+	scripts/verify-production.sh
 
 test-groups-check:  # Verify tests/test-groups.toml maps every test file to exactly one group
 	uv run --extra dev python scripts/select_affected_tests.py --check-completeness
@@ -99,6 +110,10 @@ test-map:  # Regenerate tests/coverage-map.json (source-file -> covering-test-fi
 
 test-map-check:  # Fail if tests/coverage-map.json has gone stale against the current tree
 	uv run --extra dev python scripts/build_coverage_map.py --check
+
+test-map-check-existing:  # Reuse canonical coverage; never spawn another pytest suite.
+	@test -n "$${COVERAGE_FILE:-}" || { echo "COVERAGE_FILE is required" >&2; exit 2; }
+	uv run --extra dev python scripts/build_coverage_map.py --from-existing-coverage --coverage-file "$${COVERAGE_FILE}" --check
 
 v2-gates:  # Execute frozen corpora and production-composition control-plane fault gates
 	@set -eu; \
@@ -111,14 +126,14 @@ v2-gates:  # Execute frozen corpora and production-composition control-plane fau
 			--manifest tests/fixtures/v2_corpora/control_plane_faults.json \
 			--report-dir "$$report_dir"
 
-verify:  # Verification gate for a change in progress: contracts, gates, lint, types, full suite
+verify:  # Verification gate for a change in progress: contracts, gates, lint, types, affected tests
 	scripts/verify-change.sh
 
 check:  # Authoritative full verification gate for dirty development workspaces
 	scripts/verify-production.sh --allow-dirty
 
-production-check:  # Run the authoritative production gate on a clean committed tree
-	scripts/verify-production.sh
+production-check:  # Compatibility name retained for existing operator workflows
+	$(MAKE) gate
 
 tickets:  # Validate GitHub-native ticket graph contracts deterministically
 	uv run --extra dev pytest -q \

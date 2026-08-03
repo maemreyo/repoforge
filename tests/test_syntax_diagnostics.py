@@ -113,6 +113,36 @@ def test_observed_parse_budget_overrun_reports_unknown() -> None:
     assert result.diagnostics == ()
 
 
+def test_scheduler_delay_does_not_consume_parse_cpu_budget(monkeypatch) -> None:
+    class RootNode:
+        is_error = False
+        is_missing = False
+        has_error = False
+        children: tuple[object, ...] = ()
+
+    class Tree:
+        root_node = RootNode()
+
+    class DelayedParser:
+        def __init__(self, _language: object) -> None:
+            pass
+
+        def parse(self, _source: bytes) -> Tree:
+            time.sleep(0.12)
+            return Tree()
+
+    monkeypatch.setattr("repoforge.application.syntax_diagnostics.Parser", DelayedParser)
+
+    result = SyntaxDiagnosticAnalyzer(file_budget_seconds=0.1).analyze(
+        {"src/value.py": b"value = 1\n"}
+    )
+
+    assert result.state is SyntaxDiagnosticState.OK
+    assert result.parse_ok is True
+    assert result.analyzed_paths == ("src/value.py",)
+    assert result.unknown_paths == ()
+
+
 def test_syntax_gate_p95_stays_within_declared_budget_on_generated_changes_corpus() -> None:
     corpus_path = Path(__file__).parent / "fixtures/v2_corpora/generated_changes.json"
     corpus = json.loads(corpus_path.read_text(encoding="utf-8"))

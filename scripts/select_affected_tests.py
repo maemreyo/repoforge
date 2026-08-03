@@ -11,10 +11,10 @@ Two selection strategies, in order of precision:
    mapping, used for non-package paths (docs, data) and as the whole-selector
    fallback when the coverage map is absent.
 
-Both strategies fail closed: an always-wide path (build/verification config), a
-package module missing from the coverage map (new/uncovered), or any path with
-no mapping at all escalates to the full suite -- this tool never silently
-narrows a run it cannot justify.
+Both strategies fail closed: dependency/runtime-global inputs stay always-wide;
+an uncovered package module may use only one exact reviewed group owner; and any
+path with no unambiguous mapping escalates to the full suite. The selector never
+silently narrows a run it cannot justify.
 
 This selection is load-bearing in CI: production-gate.yml uses it for pull
 requests, and runs the full suite with coverage on every push to a protected
@@ -31,24 +31,33 @@ import json
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli as tomllib
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_catalog import compare_shadow, compile_plan, load_catalog, validate_catalog
+from verification_artifact import LaneTiming, VerificationArtifact, write_artifact
+
 DEFAULT_MANIFEST = Path("tests/test-groups.toml")
 DEFAULT_TESTS_DIR = Path("tests")
 DEFAULT_COVERAGE_MAP = Path("tests/coverage-map.json")
+DEFAULT_CATALOG = Path("tests/catalog.toml")
+JUNIT_DIR = Path(".cache/verification/junit")
 
 # Source paths that are Python modules under the package: a change here should
 # be selectable through the coverage map. One that is NOT in the map is a new or
 # uncovered module whose blast radius is unknown -> fail closed to the full suite.
 _PACKAGE_SRC_PREFIX = "src/repoforge/"
 
-# Changes to these paths affect verification/build/selection itself and can
-# invalidate any group mapping, so they always force a full-suite run rather
-# than trusting the (possibly stale) manifest to select narrowly.
+# Dependency/runtime-global inputs can invalidate every test's environment, so
+# they remain always-wide. Reviewed verification-control-plane files are mapped
+# explicitly in tests/test-groups.toml: their selector, topology, docs-drift,
+# and runner contracts are the justified PR-time blast radius, while the
+# protected-branch production gate remains full-suite.
 #
 # tests/conftest.py is deliberately NOT here: its blast radius is precisely
 # the checked-in `conftest_consumers` list (see CONFTEST_PATH below), not the
@@ -59,12 +68,6 @@ _PACKAGE_SRC_PREFIX = "src/repoforge/"
 ALWAYS_WIDE_GLOBS: tuple[str, ...] = (
     "pyproject.toml",
     "uv.lock",
-    "Makefile",
-    "tests/test-groups.toml",
-    "scripts/select_affected_tests.py",
-    "scripts/run_test_suite.py",
-    "scripts/verify-production.sh",
-    ".github/workflows/**",
 )
 
 CONFTEST_PATH = "tests/conftest.py"
@@ -124,6 +127,7 @@ class Group:
     parallel: bool
     source_globs: tuple[str, ...]
     test_files: tuple[str, ...]
+    parallel_shard_sizes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +160,34 @@ class Manifest:
             if not group.parallel
             for test_file in group.test_files
         )
+
+    def parallel_shards(self, files: Sequence[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Partition selected parallel tests into reviewed sequential xdist shards."""
+
+        selected = set(files)
+        assigned: set[str] = set()
+        shards: list[tuple[str, tuple[str, ...]]] = []
+        for group in self.groups:
+            if not group.parallel:
+                continue
+            sizes = _validated_parallel_shard_sizes(group)
+            offset = 0
+            for index, size in enumerate(sizes, start=1):
+                group_slice = group.test_files[offset : offset + size]
+                offset += size
+                shard_files = tuple(test_file for test_file in group_slice if test_file in selected)
+                if not shard_files:
+                    continue
+                assigned.update(shard_files)
+                name = group.name if len(sizes) == 1 else f"{group.name}-{index}"
+                shards.append((name, shard_files))
+        unassigned = selected - assigned
+        if unassigned:
+            raise ValueError(
+                "parallel tests are not owned by reviewed shard metadata: "
+                + ", ".join(sorted(unassigned))
+            )
+        return tuple(shards)
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,20 +227,45 @@ def _matches_any(path: str, globs: tuple[str, ...]) -> bool:
     return any(_glob_to_regex(glob).match(path) for glob in globs)
 
 
+def _exact_reviewed_group_owner(manifest: Manifest, path: str) -> Group | None:
+    """Return the sole group that names ``path`` exactly, never by wildcard."""
+
+    owners = tuple(group for group in manifest.groups if path in group.source_globs)
+    return owners[0] if len(owners) == 1 else None
+
+
+def _validated_parallel_shard_sizes(group: Group) -> tuple[int, ...]:
+    sizes = group.parallel_shard_sizes or (len(group.test_files),)
+    if group.parallel_shard_sizes and not group.parallel:
+        raise ValueError(f"group {group.name!r} cannot shard a serial capability")
+    if any(type(size) is not int or size <= 0 for size in sizes):
+        raise ValueError(f"group {group.name!r} parallel_shard_sizes must be positive integers")
+    if sum(sizes) != len(group.test_files):
+        raise ValueError(
+            f"group {group.name!r} parallel_shard_sizes must cover exactly "
+            f"{len(group.test_files)} test files"
+        )
+    return sizes
+
+
 def load_manifest(path: Path = DEFAULT_MANIFEST) -> Manifest:
     with path.open("rb") as handle:
         raw = tomllib.load(handle)
     groups = []
     for name, payload in raw.get("groups", {}).items():
-        groups.append(
-            Group(
-                name=name,
-                description=str(payload.get("description", "")),
-                parallel=bool(payload.get("parallel", False)),
-                source_globs=tuple(payload.get("source_globs", [])),
-                test_files=tuple(payload.get("test_files", [])),
-            )
+        raw_shard_sizes = payload.get("parallel_shard_sizes", [])
+        if not isinstance(raw_shard_sizes, list):
+            raise ValueError(f"group {name!r} parallel_shard_sizes must be a list")
+        group = Group(
+            name=name,
+            description=str(payload.get("description", "")),
+            parallel=bool(payload.get("parallel", False)),
+            source_globs=tuple(payload.get("source_globs", [])),
+            test_files=tuple(payload.get("test_files", [])),
+            parallel_shard_sizes=tuple(raw_shard_sizes),
         )
+        _validated_parallel_shard_sizes(group)
+        groups.append(group)
     safety_bundle = tuple(raw.get("safety_bundle", {}).get("test_files", []))
     conftest_consumers = tuple(raw.get("conftest_consumers", {}).get("test_files", []))
     coverage_map = _load_coverage_map(path.parent / DEFAULT_COVERAGE_MAP.name)
@@ -310,7 +367,7 @@ def check_map_freshness(manifest: Manifest, changed_paths: Sequence[str], root: 
     for path in sorted(set(changed_paths)):
         if not path.startswith(_PACKAGE_SRC_PREFIX) or not path.endswith(".py"):
             continue
-        if path in manifest.coverage_map:
+        if path in manifest.coverage_map or _exact_reviewed_group_owner(manifest, path):
             continue
         source_path = root / path
         if not source_path.exists():
@@ -460,10 +517,10 @@ def _select_via_coverage(
 ) -> Selection:
     """Select the exact test files that execute each changed source module.
 
-    A changed test file runs itself. A package module (src/repoforge/**.py) not
-    present in the coverage map is new or uncovered -- its blast radius is
-    unknown, so we fail closed to the full suite. Non-package or non-.py paths
-    (docs, data) fall back to the group source_globs.
+    A changed test file runs itself. An uncovered package module may fall back
+    only to one group that names the module by exact path; wildcard, missing, or
+    ambiguous ownership remains unknown and fails closed. Non-package or non-.py
+    paths (docs, data) fall back to reviewed group source_globs.
     """
     selected_files: set[str] = set(manifest.safety_bundle)
     reasons: list[str] = []
@@ -477,7 +534,14 @@ def _select_via_coverage(
             covering = manifest.coverage_map.get(path)
             direct_consumers = _GITHUB_CAPABILITY_PREFLIGHT_CONSUMERS.get(path, ())
             if covering is None and not direct_consumers:
-                unmapped.append(path)
+                exact_owner = _exact_reviewed_group_owner(manifest, path)
+                if exact_owner is None:
+                    unmapped.append(path)
+                else:
+                    selected_files.update(exact_owner.test_files)
+                    reasons.append(
+                        f"{path!r} -> {exact_owner.name!r} (exact reviewed group fallback)"
+                    )
             else:
                 selected_files.update(covering or ())
                 selected_files.update(direct_consumers)
@@ -576,32 +640,93 @@ def _all_files_selection(manifest: Manifest) -> Selection:
     )
 
 
-def _run_in_lanes(root: Path, files: Sequence[str], manifest: Manifest) -> int:
-    """Run `files` split into a serial lane and an xdist lane.
+def _run_in_lanes(
+    root: Path, files: Sequence[str], manifest: Manifest
+) -> tuple[int, tuple[LaneTiming, ...]]:
+    """Run serial tests first, then reviewed sequential xdist shards."""
 
-    Files owned by a `parallel = false` group carry a known worker-contention
-    risk under xdist (see Group.serial_files) and must never share a pytest
-    process with `-n`. They run first, alone; the rest run under `-n 3`.
-    Mirrors the split `run_test_suite.py` already does for `make check`.
-    """
     serial_files = manifest.serial_files()
     serial = sorted(f for f in files if f in serial_files)
     parallel = sorted(f for f in files if f not in serial_files)
+    parallel_shards = manifest.parallel_shards(parallel)
+    junit_dir = root / JUNIT_DIR
+    junit_dir.mkdir(parents=True, exist_ok=True)
 
     returncode = 0
+    timings: list[LaneTiming] = []
     if serial:
         print(f"[select-affected-tests] serial lane: {len(serial)} test files")
+        junit_path = JUNIT_DIR / "affected-serial.xml"
+        print(f"[select-affected-tests] serial junit: {junit_path}")
+        started = time.monotonic()
         completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", *serial], cwd=root, check=False
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                f"--junitxml={junit_path.as_posix()}",
+                *serial,
+            ],
+            cwd=root,
+            check=False,
+        )
+        timings.append(
+            LaneTiming(
+                "serial",
+                len(serial),
+                (time.monotonic() - started) * 1_000,
+                completed.returncode,
+            )
         )
         returncode = returncode or completed.returncode
-    if parallel:
-        print(f"[select-affected-tests] xdist lane: {len(parallel)} test files")
+        if returncode != 0:
+            return returncode, tuple(timings)
+    for shard_name, shard_files in parallel_shards:
+        print(f"[select-affected-tests] {shard_name} xdist shard: {len(shard_files)} test files")
+        junit_path = JUNIT_DIR / f"affected-{shard_name}.xml"
+        print(f"[select-affected-tests] {shard_name} junit: {junit_path}")
+        started = time.monotonic()
         completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "-n", "3", "-q", *parallel], cwd=root, check=False
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-n",
+                "3",
+                "-q",
+                f"--junitxml={junit_path.as_posix()}",
+                *shard_files,
+            ],
+            cwd=root,
+            check=False,
+        )
+        timings.append(
+            LaneTiming(
+                shard_name,
+                len(shard_files),
+                (time.monotonic() - started) * 1_000,
+                completed.returncode,
+            )
         )
         returncode = returncode or completed.returncode
-    return returncode
+        if completed.returncode != 0:
+            return returncode, tuple(timings)
+    return returncode, tuple(timings)
+
+
+def _head_sha(root: Path) -> str:
+    return (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        .stdout.strip()
+        .lower()
+    )
 
 
 def changed_paths_from_git(root: Path, base_ref: str) -> list[str]:
@@ -649,7 +774,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--tests-dir", type=Path, default=DEFAULT_TESTS_DIR)
+    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--check-completeness", action="store_true")
+    parser.add_argument("--check-catalog", action="store_true")
     parser.add_argument(
         "--check-map-freshness",
         action="store_true",
@@ -676,9 +803,37 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Select every test file, bypassing git diff (for fast full-suite runs)",
     )
+    parser.add_argument(
+        "--report-path",
+        type=Path,
+        default=None,
+        help="Write bounded canonical JSON evidence for this selection/run.",
+    )
+    parser.add_argument(
+        "--shadow-catalog",
+        type=Path,
+        default=None,
+        help="Compile and compare a report-only catalog plan against the authoritative selection.",
+    )
     args = parser.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
+    root = Path.cwd()
+
+    checked_catalog = None
+    if args.check_catalog:
+        checked_catalog = load_catalog(args.catalog)
+        catalog_violations = validate_catalog(checked_catalog, root)
+        if catalog_violations:
+            for violation in catalog_violations:
+                print(f"[select-affected-tests] CATALOG VIOLATION: {violation}", file=sys.stderr)
+            return 1
+        print(
+            f"[select-affected-tests] catalog is complete: {len(checked_catalog.owned_tests)} "
+            f"tests; digest={checked_catalog.digest}"
+        )
+        if args.paths is None and not args.full and not args.run:
+            return 0
 
     if args.check_completeness:
         violations = check_completeness(manifest, args.tests_dir)
@@ -692,11 +847,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.check_map_freshness:
-        root = Path.cwd()
         changed = args.paths if args.paths is not None else changed_paths_from_git(root, args.base)
         return check_map_freshness(manifest, changed, root)
 
-    root = Path.cwd()
+    changed: list[str] = []
     if args.full:
         selection = _all_files_selection(manifest)
     else:
@@ -704,13 +858,56 @@ def main(argv: list[str] | None = None) -> int:
         selection = select_affected_tests(manifest, changed)
     _print_report(selection)
 
+    shadow_path = args.shadow_catalog
+    if shadow_path is not None or checked_catalog is not None:
+        catalog = checked_catalog or load_catalog(shadow_path)
+        assert catalog is not None
+        violations = validate_catalog(catalog, root)
+        if violations:
+            for violation in violations:
+                print(f"[select-affected-tests] CATALOG VIOLATION: {violation}", file=sys.stderr)
+            return 1
+        shadow = compile_plan(catalog, changed, intent="full" if args.full else "affected")
+        comparison = compare_shadow(
+            authoritative_files=selection.selected_files,
+            shadow_files=shadow.selected_files,
+        )
+        print(
+            "[select-affected-tests] shadow catalog: "
+            f"selected={len(shadow.selected_files)} false_negatives={len(comparison.false_negatives)} "
+            f"extras={len(comparison.extras)} digest={shadow.catalog_digest}"
+        )
+        if comparison.false_negatives:
+            print(
+                "[select-affected-tests] shadow false negatives: "
+                + ", ".join(comparison.false_negatives),
+                file=sys.stderr,
+            )
+            if args.check_catalog:
+                return 1
+
+    lanes: tuple[LaneTiming, ...] = ()
+    returncode = 0
     if args.run:
         # Coverage-gated authoritative runs belong to `make test`; this tool's
         # job is fast affected-test feedback, split into a serial lane (files
         # from `parallel = false` groups) and an xdist lane, same split
         # `run_test_suite.py` already uses for `make check`.
-        return _run_in_lanes(root, selection.selected_files, manifest)
-    return 0
+        returncode, lanes = _run_in_lanes(root, selection.selected_files, manifest)
+    if args.report_path is not None:
+        write_artifact(
+            args.report_path,
+            VerificationArtifact(
+                schema_version=1,
+                intent="full" if args.full else "affected",
+                head_sha=_head_sha(root),
+                selected_count=len(selection.selected_files),
+                escalated=selection.escalated_to_wide,
+                escalation_reason=selection.escalation_reason,
+                lanes=lanes,
+            ),
+        )
+    return returncode
 
 
 if __name__ == "__main__":

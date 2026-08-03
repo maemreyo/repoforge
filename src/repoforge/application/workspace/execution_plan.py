@@ -26,7 +26,7 @@ from ...ports.execution_plan_store import (
     ExecutionPlanAcceptanceStore,
     ExecutionPlanStore,
 )
-from ..context import ApplicationContext
+from ..context import ApplicationContext, repository_policy_snapshot
 from .assessment import WorkspaceAssessmentCommand, WorkspaceAssessmentReader
 
 
@@ -279,13 +279,47 @@ class ExecutionPlanService:
         if reasons:
             self._raise_stale(plan, reasons)
 
-    def _assert_local_binding_locked(self, plan: ExecutionPlan) -> None:
+    def _local_binding_state(self, plan: ExecutionPlan) -> ExecutionPlanState:
         _, repo, path = self.ctx.workspace(plan.workspace_id)
+        try:
+            config_generation = hashlib.sha256(self.ctx.config.source_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise RepoForgeError(
+                "Active configuration generation cannot be read during plan execution",
+                code=ErrorCode.STATE_PERSISTENCE_FAILED,
+                retryable=True,
+            ) from exc
+        policy_hash = repository_policy_snapshot(repo).get("sha256")
+        if not isinstance(policy_hash, str) or len(policy_hash) != 64:
+            raise RepoForgeError(
+                "Repository policy hash is unavailable during plan execution",
+                code=ErrorCode.STATE_INVALID,
+            )
+        return ExecutionPlanState(
+            head_sha=self.ctx.git.head_sha(path).lower(),
+            workspace_fingerprint=self.ctx.git.fingerprint(path),
+            config_generation=config_generation,
+            policy_hash=policy_hash,
+            risk_assessment_hash=plan.binding.risk_assessment_hash,
+            recommendation_hash=plan.binding.recommendation_hash,
+            stage_definition_hash=plan.stage_definition_hash,
+            now=self.ctx.clock.now_iso(),
+        )
+
+    def require_local_binding(self, plan: ExecutionPlan) -> None:
+        """Revalidate exact local identity without rebuilding planning evidence."""
+
+        reasons = validate_plan_current(plan, self._local_binding_state(plan))
+        if reasons:
+            self._raise_stale(plan, reasons)
+
+    def _assert_local_binding_locked(self, plan: ExecutionPlan) -> None:
+        current = self._local_binding_state(plan)
         actual = {
-            "head_sha": self.ctx.git.head_sha(path).lower(),
-            "workspace_fingerprint": self.ctx.git.fingerprint(path),
-            "config_generation": self._assessment._config_generation(),
-            "policy_hash": self._assessment._policy_hash(repo),
+            "head_sha": current.head_sha,
+            "workspace_fingerprint": current.workspace_fingerprint,
+            "config_generation": current.config_generation,
+            "policy_hash": current.policy_hash,
         }
         expected = {
             "head_sha": plan.binding.head_sha,

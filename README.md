@@ -243,6 +243,14 @@ See [ticket governance](docs/development/TICKET_GOVERNANCE.md),
 
 - `workspace_verify` consolidates planning, affected-test auto-routing, typed diagnostics, reviewed
   profiles, and policy-gated ad-hoc evidence.
+- Explicit profile, diagnostic, and ad-hoc runs use minimal snapshot preflight; rich PR/CI/code
+  assessment remains a planning and auto-routing read model rather than a tax on every command.
+- Repository development intents are separate: `make test` for affected feedback, `make test-full`
+  for full no-coverage behavior, `make coverage` for one canonical branch-coverage observation,
+  `make verify` for the change gate, and `make gate` for operator/CI release authority.
+- Bounded verification artifacts under `.cache/verification` explain selected scope, widening, lane
+  duration, and outcomes; the declarative test catalog remains shadow-only until it proves zero
+  false negatives.
 - Low-confidence impact evidence falls back to the full profile; inference never weakens the final
   exact-tree gate.
 - Report completed, failed, and not-run typed steps, timings, failure domains, and whether business

@@ -879,7 +879,7 @@ def test_run_profile_default_and_workspace_verify_profile_share_execution_contra
     assert consolidated["selected_mode"] == "profile"
     assert consolidated["outcome"] == "passed"
     assert consolidated["satisfies_commit_gate"] is True
-    assert consolidated["assessment"]["final_profile"] == canonical["profile"]
+    assert consolidated["assessment"] is None
     assert consolidated["execution_evidence"] == canonical["execution_evidence"]
     assert len(consolidated["commands"]) == len(canonical["commands"])
     for verify_command, canonical_command in zip(

@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from conftest import create_forge_environment
+from conftest import TEST_CONFIG_GENERATION, create_forge_environment
 
 from repoforge.application.fingerprint_cache import read_fingerprint
 from repoforge.application.service import CodingService
+from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.ports.command import CommandExecutor, CommandResult
 
@@ -58,7 +59,13 @@ class CountingExecutor:
 def _service_with_counting_executor(tmp_path: Path) -> tuple[CodingService, CountingExecutor]:
     environment = create_forge_environment(tmp_path)
     executor = CountingExecutor(environment.service.runner)
-    return CodingService(load_config(environment.config_path), runner=executor), executor
+    config = load_config(environment.config_path)
+    application = build_application(
+        config,
+        overrides=AdapterOverrides(command=executor),
+        config_generation=TEST_CONFIG_GENERATION,
+    )
+    return CodingService(config, application=application), executor
 
 
 def test_workspace_status_reuses_fingerprint_after_matching_validity_token(tmp_path: Path) -> None:
@@ -170,3 +177,26 @@ def test_apply_patch_primes_cached_post_mutation_fingerprint(tmp_path: Path) -> 
 
     assert status_after["workspace_fingerprint"] == applied["workspace_fingerprint"]
     assert executor.full_fingerprint_scans == 1
+
+
+def test_explicit_diagnostic_preflight_uses_at_most_one_full_fingerprint_scan(
+    tmp_path: Path,
+) -> None:
+    service, executor = _service_with_counting_executor(tmp_path)
+    workspace_id = service.workspace_create("demo", "minimal diagnostic fingerprint")[
+        "workspace_id"
+    ]
+    executor.full_fingerprint_scans = 0
+
+    result = service.workspace_verify(
+        workspace_id,
+        mode="diagnostic",
+        diagnostic_id="pytest-target",
+        selector="hello.txt",
+        background=True,
+        intent="tdd_green",
+        expectation="pass",
+    )
+
+    assert result["assessment"] is None
+    assert executor.full_fingerprint_scans <= 1

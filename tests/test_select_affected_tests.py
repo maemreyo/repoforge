@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,12 +23,91 @@ def _load_selector_module() -> Any:
 selector = _load_selector_module()
 
 
+def test_lane_runner_stops_before_parallel_lane_when_serial_lane_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "serial",
+                source_globs=(),
+                test_files=("tests/test_serial.py",),
+                parallel=False,
+            ),
+            _group(
+                "parallel",
+                source_globs=(),
+                test_files=("tests/test_parallel.py",),
+            ),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(selector.subprocess, "run", run)
+
+    returncode, timings = selector._run_in_lanes(
+        tmp_path,
+        ("tests/test_serial.py", "tests/test_parallel.py"),
+        manifest,
+    )
+
+    assert returncode == 1
+    assert len(calls) == 1
+    assert "tests/test_serial.py" in calls[0]
+    assert "tests/test_parallel.py" not in calls[0]
+    assert [timing.name for timing in timings] == ["serial"]
+
+
+def test_lane_runner_writes_deterministic_junit_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "serial",
+                source_globs=(),
+                test_files=("tests/test_serial.py",),
+                parallel=False,
+            ),
+            _group(
+                "parallel",
+                source_globs=(),
+                test_files=("tests/test_parallel.py",),
+            ),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(selector.subprocess, "run", run)
+
+    returncode, _timings = selector._run_in_lanes(
+        tmp_path,
+        ("tests/test_serial.py", "tests/test_parallel.py"),
+        manifest,
+    )
+
+    assert returncode == 0
+    assert "--junitxml=.cache/verification/junit/affected-serial.xml" in calls[0]
+    assert "--junitxml=.cache/verification/junit/affected-parallel.xml" in calls[1]
+
+
 def _group(
     name: str,
     *,
     source_globs: tuple[str, ...],
     test_files: tuple[str, ...],
     parallel: bool = True,
+    parallel_shard_sizes: tuple[int, ...] = (),
 ) -> Any:
     return selector.Group(
         name=name,
@@ -34,6 +115,7 @@ def _group(
         parallel=parallel,
         source_globs=source_globs,
         test_files=test_files,
+        parallel_shard_sizes=parallel_shard_sizes,
     )
 
 
@@ -59,6 +141,62 @@ def test_the_shipped_manifest_is_complete_against_the_real_tests_directory() -> 
     violations = selector.check_completeness(manifest, root / "tests")
 
     assert violations == []
+
+
+def test_lane_runner_runs_reviewed_parallel_shards_sequentially(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "platform",
+                source_globs=(),
+                test_files=("tests/test_alpha.py", "tests/test_beta.py"),
+                parallel_shard_sizes=(1, 1),
+            ),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(selector.subprocess, "run", run)
+
+    returncode, timings = selector._run_in_lanes(
+        tmp_path,
+        ("tests/test_alpha.py", "tests/test_beta.py"),
+        manifest,
+    )
+
+    assert returncode == 0
+    assert len(calls) == 2
+    assert "tests/test_alpha.py" in calls[0]
+    assert "tests/test_beta.py" not in calls[0]
+    assert "tests/test_beta.py" in calls[1]
+    assert "--junitxml=.cache/verification/junit/affected-platform-1.xml" in calls[0]
+    assert "--junitxml=.cache/verification/junit/affected-platform-2.xml" in calls[1]
+    assert [timing.name for timing in timings] == ["platform-1", "platform-2"]
+
+
+def test_manifest_rejects_invalid_parallel_shard_sizes(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "test-groups.toml"
+    manifest_path.write_text(
+        """
+[groups.platform]
+description = "platform"
+parallel = true
+parallel_shard_sizes = [1]
+source_globs = []
+test_files = ["tests/test_alpha.py", "tests/test_beta.py"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="parallel_shard_sizes"):
+        selector.load_manifest(manifest_path)
 
 
 @pytest.mark.parametrize(
@@ -212,6 +350,31 @@ def test_always_wide_path_escalates_even_when_it_would_otherwise_map_narrowly() 
     assert selection.selected_files == ("tests/test_alpha.py",)
 
 
+def test_reviewed_verification_control_plane_path_uses_group_mapping() -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "verification_diagnostics",
+                source_globs=(".github/workflows/**",),
+                test_files=("tests/test_ci_verification_topology.py",),
+            ),
+            _group(
+                "unrelated", source_globs=("src/other/**",), test_files=("tests/test_other.py",)
+            ),
+        ),
+        safety_bundle=("tests/test_smoke.py",),
+    )
+
+    selection = selector.select_affected_tests(manifest, [".github/workflows/ci.yml"])
+
+    assert selection.escalated_to_wide is False
+    assert selection.selected_groups == ("verification_diagnostics",)
+    assert selection.selected_files == (
+        "tests/test_ci_verification_topology.py",
+        "tests/test_smoke.py",
+    )
+
+
 @pytest.mark.parametrize(
     "changed_paths",
     [
@@ -337,6 +500,49 @@ def test_coverage_map_unmapped_package_module_fails_closed() -> None:
     assert "fail-closed" in (selection.escalation_reason or "")
 
 
+def test_coverage_map_uses_exact_reviewed_group_fallback_for_uncovered_module() -> None:
+    path = "src/repoforge/application/workspace/snapshot.py"
+    manifest = _manifest(
+        groups=(
+            _group(
+                "verification_diagnostics",
+                source_globs=(path,),
+                test_files=("tests/test_workspace_diagnostics.py",),
+            ),
+            _group(
+                "unrelated", source_globs=("src/other/**",), test_files=("tests/test_other.py",)
+            ),
+        ),
+        safety_bundle=("tests/test_smoke.py",),
+        coverage_map={"src/repoforge/existing.py": ("tests/test_existing.py",)},
+    )
+
+    selection = selector.select_affected_tests(manifest, [path])
+
+    assert selection.escalated_to_wide is False
+    assert selection.selected_files == (
+        "tests/test_smoke.py",
+        "tests/test_workspace_diagnostics.py",
+    )
+    assert "exact reviewed group" in selection.reasons[0]
+
+
+def test_coverage_map_ambiguous_exact_group_fallback_still_fails_closed() -> None:
+    path = "src/repoforge/application/workspace/snapshot.py"
+    manifest = _manifest(
+        groups=(
+            _group("alpha", source_globs=(path,), test_files=("tests/test_alpha.py",)),
+            _group("beta", source_globs=(path,), test_files=("tests/test_beta.py",)),
+        ),
+        coverage_map={"src/repoforge/existing.py": ("tests/test_existing.py",)},
+    )
+
+    selection = selector.select_affected_tests(manifest, [path])
+
+    assert selection.escalated_to_wide is True
+    assert path in (selection.escalation_reason or "")
+
+
 def test_coverage_map_changed_test_file_runs_itself() -> None:
     manifest = _coverage_manifest()
 
@@ -411,6 +617,23 @@ def test_map_freshness_passes_when_changed_modules_are_mapped(tmp_path: Path) ->
         )
         == 0
     )
+
+
+def test_map_freshness_accepts_unique_exact_reviewed_group_fallback(tmp_path: Path) -> None:
+    path = "src/repoforge/application/workspace/snapshot.py"
+    root = _tree(tmp_path, **{path: _REAL_BODY})
+    manifest = _manifest(
+        groups=(
+            _group(
+                "verification_diagnostics",
+                source_globs=(path,),
+                test_files=("tests/test_workspace_diagnostics.py",),
+            ),
+        ),
+        coverage_map={"src/repoforge/existing.py": ("tests/test_existing.py",)},
+    )
+
+    assert selector.check_map_freshness(manifest, [path], root) == 0
 
 
 def test_map_freshness_fails_on_a_package_module_missing_from_the_map(tmp_path: Path) -> None:
@@ -489,3 +712,22 @@ def test_a_module_with_real_function_bodies_is_mappable() -> None:
     module = "def add(a: int, b: int) -> int:\n    return a + b\n"
 
     assert selector.is_mappable_module(module, "src/repoforge/domain/math.py") is True
+
+
+def test_report_path_records_a_wide_selection(tmp_path: Path) -> None:
+    report = tmp_path / "affected-report.json"
+
+    returncode = selector.main(
+        [
+            "--path",
+            "pyproject.toml",
+            "--report-path",
+            str(report),
+        ]
+    )
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert returncode == 0
+    assert payload["intent"] == "affected"
+    assert payload["escalated"] is True
+    assert payload["selected_count"] > 0

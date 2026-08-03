@@ -210,6 +210,7 @@ from .workspace.run_profile import (
     WorkspaceRunProfileCommand,
 )
 from .workspace.search import WorkspaceSearchCommand, WorkspaceSearcher
+from .workspace.snapshot import WorkspaceSnapshotReader
 from .workspace.status import WorkspaceStatusCommand, WorkspaceStatusReader
 from .workspace.tree import WorkspaceTreeCommand, WorkspaceTreeReader
 from .workspace.update_draft_pr import (
@@ -413,6 +414,7 @@ class CodingService:
         self._status = WorkspaceStatusReader(ctx)
         self._status_v2 = WorkspaceStatusV2(ctx)
         self._assessment = WorkspaceAssessmentReader(ctx)
+        self._snapshot = WorkspaceSnapshotReader(ctx)
         self._execution_plans = ExecutionPlanService(ctx)
         self._base_status = WorkspaceBaseStatusReader(ctx)
         self._tree = WorkspaceTreeReader(ctx)
@@ -465,6 +467,7 @@ class CodingService:
         self._verify = WorkspaceVerifier(
             ctx,
             assessment=self._assessment,
+            snapshot=self._snapshot,
             profile=self._profile,
             diagnostic=self._diagnostic,
             adhoc=self._adhoc,

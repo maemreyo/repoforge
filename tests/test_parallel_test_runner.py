@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 
 def _load_runner_module() -> Any:
@@ -44,6 +47,14 @@ def test_parallel_lane_runs_under_xdist_at_the_requested_worker_count(tmp_path: 
     assert command[command.index("-n") + 1] == "3"
 
 
+def test_full_lanes_write_deterministic_junit_evidence(tmp_path: Path) -> None:
+    serial, _ = _lane(tmp_path, "serial", ("tests/test_one.py",), workers=None)
+    parallel, _ = _lane(tmp_path, "xdist", ("tests/test_two.py",), workers=3)
+
+    assert "--junitxml=.cache/verification/junit/full-serial.xml" in serial
+    assert "--junitxml=.cache/verification/junit/full-xdist.xml" in parallel
+
+
 def test_default_worker_count_is_the_measured_machine_cap() -> None:
     """`-n 4` crashed a worker and produced contention-flaky failures; 3 is the cap."""
     assert runner_module.DEFAULT_WORKERS == 3
@@ -57,6 +68,12 @@ def test_lanes_write_separate_coverage_data_files(tmp_path: Path) -> None:
     assert serial_env["COVERAGE_FILE"] != xdist_env["COVERAGE_FILE"]
     for environment in (serial_env, xdist_env):
         assert Path(environment["COVERAGE_FILE"]).name.startswith(".coverage.")
+
+
+def test_coverage_lane_records_per_test_context(tmp_path: Path) -> None:
+    command, _ = _lane(tmp_path, "xdist", ("tests/test_one.py",), workers=3)
+
+    assert "--cov-context=test" in command
 
 
 def test_lane_does_not_override_the_repository_pytest_timeout(tmp_path: Path) -> None:
@@ -92,13 +109,127 @@ test_files = ["tests/test_parallel_one.py"]
     assert serial == {(root / "tests/test_serial_one.py").resolve()}
 
 
-def test_load_serial_test_files_defaults_to_empty_when_manifest_missing(tmp_path: Path) -> None:
-    assert runner_module._load_serial_test_files(tmp_path) == set()
+def test_operations_group_runs_in_the_xdist_lane() -> None:
+    """Operations tests are tmp-isolated and must not rebuild the serial bottleneck."""
+
+    root = Path(__file__).parents[1]
+    manifest = runner_module._load_manifest(root)
+    operations = next(group for group in manifest.groups if group.name == "operations")
+
+    assert operations.parallel is True
+    assert not {
+        (root / test_file).resolve() for test_file in operations.test_files
+    } & runner_module._load_serial_test_files(root)
 
 
-def test_load_serial_test_files_survives_an_unreadable_manifest(tmp_path: Path) -> None:
-    """A broken manifest must not fail the gate; every file is then parallel-eligible."""
+def test_missing_manifest_refuses_to_build_a_parallel_lane(tmp_path: Path) -> None:
+    with pytest.raises(runner_module.SelectionMetadataError, match="missing"):
+        runner_module.load_lane_plan(tmp_path)
+
+
+def test_unreadable_manifest_refuses_to_build_a_parallel_lane(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test-groups.toml").write_text("not = [valid", encoding="utf-8")
 
-    assert runner_module._load_serial_test_files(tmp_path) == set()
+    with pytest.raises(runner_module.SelectionMetadataError, match="invalid"):
+        runner_module.load_lane_plan(tmp_path)
+
+
+def test_full_runner_writes_lane_failure_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_file = tmp_path / "tests" / "test_one.py"
+    test_file.parent.mkdir()
+    test_file.write_text("def test_one(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner_module,
+        "load_lane_plan",
+        lambda _root: runner_module.LanePlan(serial=(), parallel=(test_file,)),
+    )
+    monkeypatch.setattr(runner_module, "_run_lane", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(runner_module, "_head_sha", lambda _root: "a" * 40)
+    report = tmp_path / "full-report.json"
+
+    returncode = runner_module.run(tmp_path, None, 3, report_path=report)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert returncode == 1
+    assert payload["intent"] == "full"
+    assert payload["lanes"][0]["returncode"] == 1
+
+
+def test_full_runner_stops_before_parallel_lane_when_serial_lane_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serial_file = tmp_path / "tests" / "test_serial.py"
+    parallel_file = tmp_path / "tests" / "test_parallel.py"
+    serial_file.parent.mkdir()
+    for path in (serial_file, parallel_file):
+        path.write_text("def test_one(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner_module,
+        "load_lane_plan",
+        lambda _root: runner_module.LanePlan(
+            serial=(serial_file,),
+            parallel=(parallel_file,),
+        ),
+    )
+    calls: list[str] = []
+
+    def run_lane(_root, _coverage_dir, name, _files, *, workers):
+        del workers
+        calls.append(name)
+        return 1 if name == "serial" else 0
+
+    monkeypatch.setattr(runner_module, "_run_lane", run_lane)
+    monkeypatch.setattr(runner_module, "_head_sha", lambda _root: "a" * 40)
+    report = tmp_path / "full-report.json"
+
+    returncode = runner_module.run(tmp_path, None, 3, report_path=report)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert returncode == 1
+    assert calls == ["serial"]
+    assert [lane["name"] for lane in payload["lanes"]] == ["serial"]
+
+
+def test_full_runner_stops_before_later_parallel_shard_when_one_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "tests" / "test_first.py"
+    second = tmp_path / "tests" / "test_second.py"
+    first.parent.mkdir()
+    for path in (first, second):
+        path.write_text("def test_one(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner_module,
+        "load_lane_plan",
+        lambda _root: runner_module.LanePlan(
+            serial=(),
+            parallel=(first, second),
+            parallel_shards=(
+                runner_module.ParallelShard("platform-1", (first,)),
+                runner_module.ParallelShard("platform-2", (second,)),
+            ),
+        ),
+    )
+    calls: list[str] = []
+
+    def run_lane(_root, _coverage_dir, name, _files, *, workers):
+        del workers
+        calls.append(name)
+        return 1 if name == "platform-1" else 0
+
+    monkeypatch.setattr(runner_module, "_run_lane", run_lane)
+    monkeypatch.setattr(runner_module, "_head_sha", lambda _root: "a" * 40)
+    report = tmp_path / "full-report.json"
+
+    returncode = runner_module.run(tmp_path, None, 3, report_path=report)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert returncode == 1
+    assert calls == ["platform-1"]
+    assert [lane["name"] for lane in payload["lanes"]] == ["platform-1"]

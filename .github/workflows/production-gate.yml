@@ -17,27 +17,87 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.10"
+          python-version: "3.13"
           enable-cache: true
       - run: uv sync --extra dev --frozen
       - run: uv run python scripts/check_release_contracts.py
       - run: uv run ruff format --check src tests scripts
       - run: uv run ruff check src tests scripts
       - run: uv run mypy --strict src/repoforge
-      # Manifest completeness + coverage-map staleness (map must not reference
-      # deleted/renamed test files). The full suite still runs below, so this is
-      # a fast correctness guard on the test-selection metadata, not a gate on
-      # the map being perfectly fresh.
       - run: uv run python scripts/select_affected_tests.py --check-completeness
+      - run: uv run python scripts/test_catalog.py --check tests/catalog.toml
       - name: Record exact HEAD and require tracked cleanliness
         run: |
           git rev-parse HEAD
           git diff --exit-code
           git diff --cached --exit-code
 
-  tests:
+  affected-tests:
+    if: github.event_name == 'pull_request'
+    needs: [static-contracts]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - name: Changed package modules remain selectable
+        run: |
+          uv run python scripts/select_affected_tests.py \
+            --check-map-freshness --base "origin/${{ github.base_ref }}"
+      - name: Affected tests and shadow catalog
+        run: |
+          uv run python scripts/select_affected_tests.py \
+            --run --base "origin/${{ github.base_ref }}" \
+            --shadow-catalog tests/catalog.toml \
+            --report-path .cache/verification/affected.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: affected-verification
+          path: .cache/verification/affected.json
+          if-no-files-found: warn
+
+  canonical-coverage:
+    if: github.event_name != 'pull_request'
+    needs: [static-contracts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra dev --frozen
+      - name: Canonical full branch coverage
+        run: make coverage
+      - name: Coverage map from canonical observations
+        env:
+          COVERAGE_FILE: .cache/verification/coverage/.coverage
+        run: make test-map-check-existing
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canonical-coverage-evidence
+          path: |
+            .cache/verification/coverage/.coverage
+            .cache/verification/coverage.json
+          if-no-files-found: warn
+
+  compatibility:
+    if: github.event_name != 'pull_request'
+    needs: [static-contracts]
     strategy:
       fail-fast: false
       matrix:
@@ -55,68 +115,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Full history: selecting affected tests diffs against the base branch, and a
-          # shallow clone has no merge base to diff from.
-          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
       - run: uv sync --extra dev --frozen
-      - name: Guided onboarding real-Git regressions
-        run: uv run pytest tests/test_onboarding_real_git.py tests/test_repository_discovery.py
-      # A pull request runs only the tests its own changes can affect. The selector fails
-      # closed: an always-wide path, a package module missing from the coverage map, or any
-      # unmapped path escalates to the whole suite, so a narrow run is only ever a run it
-      # could justify. Coverage is deliberately not enforced here -- a subset cannot meet a
-      # whole-repository threshold, and pretending otherwise would make the number a lie.
-      # Static, sub-second: reads the diff and the map, runs nothing. The authoritative
-      # map check needs a full recording run and so is push-only -- by which point a stale
-      # entry is already on main. This catches the common case (a new module nobody
-      # remapped) while it is still a pull request.
-      - name: Coverage map covers the changed modules (pull request)
-        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
-        run: |
-          uv run python scripts/select_affected_tests.py \
-            --check-map-freshness --base "origin/${{ github.base_ref }}"
-      - name: Affected tests (pull request)
-        if: github.event_name == 'pull_request'
-        run: |
-          uv run python scripts/select_affected_tests.py \
-            --run --base "origin/${{ github.base_ref }}"
-      # Every push to a protected branch still runs everything with coverage. This is what
-      # keeps the narrow PR run honest: a cross-module regression a stale coverage map failed
-      # to select is caught here, before it can be built into a release.
-      - name: Full suite with coverage (push)
-        if: github.event_name != 'pull_request'
-        run: uv run pytest --cov=repoforge --cov-branch --cov-report=term-missing
+      - name: Reviewed compatibility subset without coverage
+        env:
+          REPOFORGE_CI_FULL_MATRIX: ${{ vars.REPOFORGE_CI_FULL_MATRIX || '0' }}
+        run: uv run python scripts/run_compatibility_tests.py
 
-  # The coverage map decides how narrow a pull-request run may be, and nothing was
-  # watching it: it went eight days without a rebuild, accumulated 170 unmapped source
-  # files, and quietly sent five of eight commits to the whole suite -- the behaviour it
-  # exists to avoid. Recording it needs a full run, so this stays off the pull-request
-  # path and off the matrix: one runner, on push, after the map can no longer be fixed
-  # by review alone.
-  coverage-map:
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.13"
-          enable-cache: true
-      - run: uv sync --extra dev --frozen
-      - name: Coverage map is current
-        run: make test-map-check
-
-  # A release gate that no unit test can replace: it performs a REAL `rf upgrade
-  # --activate` (real wheel build, real per-release venv, real smoke, real supervisor
-  # process), a second activation, and a receipted rollback, asserting the JSON payloads
-  # and `rf version status` at every stage. Five production defects reached `main`-bound
-  # branches invisible to the unit suite and were caught only here, so this runs on the
-  # gate rather than on demand.
   live-activation:
     needs: [static-contracts]
     runs-on: ubuntu-latest
@@ -129,16 +137,11 @@ jobs:
           enable-cache: true
       - run: uv sync --extra dev --frozen
       - name: Live activation, second activation, and receipted rollback
-        # The harness provisions its own stub tunnel-client and an isolated HOME, config,
-        # state root and release root, so it never contacts a control plane and never
-        # touches an installation outside its sandbox.
         run: scripts/live-activation-sandbox.sh
 
   package:
-    # `live-activation` is a dependency, not just a sibling: a DAG where the live gate
-    # fails while `package` still succeeds is a valid DAG, so any branch rule that
-    # requires only `package` would let a broken activation merge.
-    needs: [static-contracts, tests, live-activation]
+    if: always() && needs.static-contracts.result == 'success' && needs.live-activation.result == 'success'
+    needs: [static-contracts, live-activation]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -152,40 +155,40 @@ jobs:
       - name: Ensure build did not rewrite tracked files
         run: git diff --exit-code
 
-  # THE required check. One stable name that fails unless every job above succeeded, so
-  # adding a job to this workflow can never silently fall outside the gate: `if: always()`
-  # means this job runs even when a dependency failed or was skipped, and an explicitly
-  # asserted `success` for each result is what makes a skipped job a failure here too.
-  # Branch protection should require `production-gate` and nothing else.
   production-gate:
     if: always()
-    needs: [static-contracts, tests, coverage-map, live-activation, package]
+    needs:
+      [static-contracts, affected-tests, canonical-coverage, compatibility, live-activation, package]
     runs-on: ubuntu-latest
     steps:
-      - name: Require every gate job to have succeeded
+      - name: Require the event-specific verification topology
         run: |
           set -eu
           status=0
           for entry in \
             'static-contracts=${{ needs.static-contracts.result }}' \
-            'tests=${{ needs.tests.result }}' \
             'live-activation=${{ needs.live-activation.result }}' \
             'package=${{ needs.package.result }}'; do
             name=${entry%%=*}
             result=${entry#*=}
-            printf '%-18s %s\n' "$name" "$result"
+            printf '%-20s %s\n' "$name" "$result"
             [ "$result" = success ] || status=1
           done
-          # Recording the coverage map needs a full run, so it is a push-only job and is
-          # legitimately `skipped` on a pull request. Accepting only `success` here would
-          # fail every pull request; accepting anything would let a stale map through on
-          # push. Both states are named, so a new one is a failure rather than a silent pass.
-          map='${{ needs.coverage-map.result }}'
-          printf '%-18s %s\n' coverage-map "$map"
-          case "$map" in
-            success) ;;
-            skipped)
-              [ '${{ github.event_name }}' = pull_request ] || status=1 ;;
-            *) status=1 ;;
-          esac
+
+          affected='${{ needs.affected-tests.result }}'
+          coverage='${{ needs.canonical-coverage.result }}'
+          compatibility='${{ needs.compatibility.result }}'
+          printf '%-20s %s\n' affected-tests "$affected"
+          printf '%-20s %s\n' canonical-coverage "$coverage"
+          printf '%-20s %s\n' compatibility "$compatibility"
+
+          if [ '${{ github.event_name }}' = pull_request ]; then
+            [ "$affected" = success ] || status=1
+            [ "$coverage" = skipped ] || status=1
+            [ "$compatibility" = skipped ] || status=1
+          else
+            [ "$affected" = skipped ] || status=1
+            [ "$coverage" = success ] || status=1
+            [ "$compatibility" = success ] || status=1
+          fi
           exit "$status"

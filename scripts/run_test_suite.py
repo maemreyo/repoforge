@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
-"""Run the whole pytest suite in two lanes and report combined branch coverage.
+"""Run the complete pytest suite with validated serial and parallel lanes.
 
-This used to partition the suite across four independent pytest processes, balanced from a
-recorded-duration cache. That was measured to be far slower than running the same tests
-under xdist, because these tests are dominated by git subprocess spawns: four concurrent
-pytest processes oversubscribe a machine whose measured stable worker cap is three, and a
-fixed partition cannot rebalance when one side runs long. One file recorded at 322.8s
-inside that runner took 33s alone under identical coverage flags.
-
-The lanes here are the same split `select_affected_tests.py` uses, which is what `make
-test-fast` runs:
-
-* the serial lane holds `parallel = false` groups from `tests/test-groups.toml` -- genuine
-  shared-state tests (fixed-path sockets, runtime state) that must never share a process
-  with `-n`; they run first, alone;
-* the xdist lane runs everything else in one pytest process at the measured worker cap.
-
-Each lane writes its own coverage data file so the two can be combined at the end.
+Without ``--coverage-dir`` this runs the full behavioral suite without coverage.
+With ``--coverage-dir`` it records and enforces branch coverage. Lane metadata is
+correctness-critical: missing or invalid metadata is refused before pytest starts.
 """
 
 from __future__ import annotations
@@ -25,70 +12,123 @@ import argparse
 import os
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
-import tomli as tomllib  # stdlib `tomllib` is 3.11+; this package supports 3.10.
+import tomli as tomllib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import select_affected_tests as selector
+from verification_artifact import LaneTiming, VerificationArtifact, write_artifact
 
 DEFAULT_WORKERS = 3
-"""Measured cap for this suite: `-n 4` crashed a worker and produced contention-flaky
-failures, and the git child processes these tests spawn oversubscribe cores well before
-pytest itself does."""
-
 COVERAGE_FLOOR = "80"
+JUNIT_DIR = Path(".cache/verification/junit")
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelShard:
+    name: str
+    files: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LanePlan:
+    """Exact full-suite file partition derived from validated metadata."""
+
+    serial: tuple[Path, ...]
+    parallel: tuple[Path, ...]
+    parallel_shards: tuple[ParallelShard, ...] = ()
+
+
+class SelectionMetadataError(ValueError):
+    """The reviewed metadata cannot safely determine test isolation."""
+
+
+def _load_manifest(root: Path) -> selector.Manifest:
+    manifest_path = root / "tests" / "test-groups.toml"
+    if not manifest_path.is_file():
+        raise SelectionMetadataError(f"selection metadata missing: {manifest_path}")
+    try:
+        return selector.load_manifest(manifest_path)
+    except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as exc:
+        raise SelectionMetadataError(f"selection metadata invalid: {exc}") from exc
 
 
 def _load_serial_test_files(root: Path) -> set[Path]:
-    """Resolve absolute paths of test files in non-parallel (serial-lane) groups.
+    manifest = _load_manifest(root)
+    return {
+        (root / test_file).resolve()
+        for group in manifest.groups
+        if not group.parallel
+        for test_file in group.test_files
+    }
 
-    Falls back to an empty set (all files parallel-eligible, matching prior behavior)
-    when the manifest is missing or invalid, rather than failing the whole run.
-    """
-    manifest_path = root / "tests" / "test-groups.toml"
-    if not manifest_path.exists():
-        return set()
-    try:
-        manifest = selector.load_manifest(manifest_path)
-    except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as exc:
-        print(f"[warn] could not load {manifest_path}: {exc}", file=sys.stderr)
-        return set()
-    serial: set[Path] = set()
-    for group in manifest.groups:
-        if group.parallel:
-            continue
-        for relative in group.test_files:
-            serial.add((root / relative).resolve())
-    return serial
+
+def load_lane_plan(root: Path) -> LanePlan:
+    """Build a complete lane plan or fail before widening concurrency."""
+
+    root = root.resolve()
+    manifest = _load_manifest(root)
+    violations = selector.check_completeness(manifest, root / "tests")
+    if violations:
+        detail = "; ".join(violations[:10])
+        suffix = "" if len(violations) <= 10 else f"; ... and {len(violations) - 10} more"
+        raise SelectionMetadataError(f"selection metadata incomplete: {detail}{suffix}")
+    tests = tuple(sorted((root / "tests").rglob("test_*.py")))
+    if not tests:
+        raise SelectionMetadataError("selection metadata has no pytest files to schedule")
+    serial_files = {
+        (root / test_file).resolve()
+        for group in manifest.groups
+        if not group.parallel
+        for test_file in group.test_files
+    }
+    serial = tuple(path for path in tests if path.resolve() in serial_files)
+    parallel = tuple(path for path in tests if path.resolve() not in serial_files)
+    relative_parallel = tuple(str(path.relative_to(root)) for path in parallel)
+    parallel_shards = tuple(
+        ParallelShard(name, tuple(root / test_file for test_file in shard_files))
+        for name, shard_files in manifest.parallel_shards(relative_parallel)
+    )
+    return LanePlan(
+        serial=serial,
+        parallel=parallel,
+        parallel_shards=parallel_shards,
+    )
 
 
 def lane_command(
     root: Path,
-    coverage_dir: Path,
+    coverage_dir: Path | None,
     name: str,
     files: tuple[Path, ...],
     *,
     workers: int | None,
 ) -> tuple[list[str], dict[str, str]]:
-    """Build one lane's pytest argv and environment."""
     environment = dict(os.environ)
-    environment["COVERAGE_FILE"] = str(coverage_dir / f".coverage.lane-{name}")
+    junit_path = JUNIT_DIR / f"full-{name}.xml"
     command = [
         sys.executable,
         "-m",
         "pytest",
-        # No --timeout here on purpose: pyproject sets 120 to clear the app's own git
-        # subprocess budget, and a lower ceiling kills healthy-but-slow git calls under
-        # contention -- the inversion 546cf52 removed.
         "-p",
         "no:cacheprovider",
         "-q",
-        "--cov=repoforge",
-        "--cov-branch",
-        "--cov-report=",
-        "--cov-fail-under=0",
+        f"--junitxml={junit_path.as_posix()}",
     ]
+    if coverage_dir is not None:
+        environment["COVERAGE_FILE"] = str(coverage_dir / f".coverage.lane-{name}")
+        command.extend(
+            [
+                "--cov=repoforge",
+                "--cov-branch",
+                "--cov-context=test",
+                "--cov-report=",
+                "--cov-fail-under=0",
+            ]
+        )
     if workers is not None:
         command.extend(["-n", str(workers)])
     command.extend(str(path.relative_to(root)) for path in files)
@@ -97,72 +137,131 @@ def lane_command(
 
 def _run_lane(
     root: Path,
-    coverage_dir: Path,
+    coverage_dir: Path | None,
     name: str,
     files: tuple[Path, ...],
     *,
     workers: int | None,
 ) -> int:
-    """Run one lane, streaming pytest's own output so a long gate stays observable."""
+    (root / JUNIT_DIR).mkdir(parents=True, exist_ok=True)
     command, environment = lane_command(root, coverage_dir, name, files, workers=workers)
     print(f"[test-suite] {name} lane: {len(files)} test files", flush=True)
+    print(f"[test-suite] {name} junit: {JUNIT_DIR / f'full-{name}.xml'}", flush=True)
     return subprocess.run(command, cwd=root, env=environment, check=False).returncode
 
 
 def _run_coverage_command(root: Path, coverage_dir: Path, arguments: list[str]) -> int:
     environment = dict(os.environ)
     environment["COVERAGE_FILE"] = str(coverage_dir / ".coverage")
-    completed = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-m", "coverage", *arguments],
         cwd=root,
         env=environment,
         check=False,
+    ).returncode
+
+
+def _head_sha(root: Path) -> str:
+    return (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        .stdout.strip()
+        .lower()
     )
-    return completed.returncode
 
 
-def run(root: Path, coverage_dir: Path, workers: int) -> int:
+def run(
+    root: Path,
+    coverage_dir: Path | None,
+    workers: int,
+    *,
+    report_path: Path | None = None,
+) -> int:
     root = root.resolve()
-    coverage_dir = coverage_dir.resolve()
-    tests = sorted((root / "tests").rglob("test_*.py"))
-    if not tests:
-        print("no pytest files found", file=sys.stderr)
-        return 2
-
-    serial_files = _load_serial_test_files(root)
-    serial = tuple(path for path in tests if path.resolve() in serial_files)
-    parallel = tuple(path for path in tests if path.resolve() not in serial_files)
-
-    coverage_dir.mkdir(parents=True, exist_ok=True)
+    plan = load_lane_plan(root)
+    resolved_coverage_dir = coverage_dir.resolve() if coverage_dir is not None else None
+    if resolved_coverage_dir is not None:
+        resolved_coverage_dir.mkdir(parents=True, exist_ok=True)
 
     failed = False
-    if serial:
-        failed = _run_lane(root, coverage_dir, "serial", serial, workers=None) != 0
-    if parallel:
-        # Both lanes always run: a serial-lane failure must not hide the rest of the suite,
-        # which is what the gate is being asked to report on.
-        failed = _run_lane(root, coverage_dir, "xdist", parallel, workers=workers) != 0 or failed
-
-    if failed:
-        return 1
-    if _run_coverage_command(root, coverage_dir, ["combine", "--keep", str(coverage_dir)]):
-        return 1
-    return _run_coverage_command(
-        root,
-        coverage_dir,
-        ["report", "--show-missing", f"--fail-under={COVERAGE_FLOOR}"],
+    timings: list[LaneTiming] = []
+    parallel_shards = plan.parallel_shards or (
+        (ParallelShard("xdist", plan.parallel),) if plan.parallel else ()
     )
+    lane_specs: list[tuple[str, tuple[Path, ...], int | None]] = []
+    if plan.serial:
+        lane_specs.append(("serial", plan.serial, None))
+    lane_specs.extend((shard.name, shard.files, workers) for shard in parallel_shards)
+    for name, files, lane_workers in lane_specs:
+        started = time.monotonic()
+        returncode = _run_lane(
+            root,
+            resolved_coverage_dir,
+            name,
+            files,
+            workers=lane_workers,
+        )
+        timings.append(
+            LaneTiming(name, len(files), (time.monotonic() - started) * 1_000, returncode)
+        )
+        if returncode != 0:
+            failed = True
+            break
+
+    outcome = 1 if failed else 0
+    if outcome == 0 and resolved_coverage_dir is not None:
+        outcome = _run_coverage_command(
+            root,
+            resolved_coverage_dir,
+            ["combine", "--keep", str(resolved_coverage_dir)],
+        )
+        if outcome == 0:
+            outcome = _run_coverage_command(
+                root,
+                resolved_coverage_dir,
+                ["report", "--show-missing", f"--fail-under={COVERAGE_FLOOR}"],
+            )
+
+    if report_path is not None:
+        write_artifact(
+            report_path,
+            VerificationArtifact(
+                schema_version=1,
+                intent="coverage" if resolved_coverage_dir is not None else "full",
+                head_sha=_head_sha(root),
+                selected_count=len(plan.serial) + len(plan.parallel),
+                escalated=False,
+                escalation_reason=None,
+                lanes=tuple(timings),
+            ),
+        )
+    return outcome
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
-    parser.add_argument("--coverage-dir", type=Path, required=True)
+    parser.add_argument(
+        "--coverage-dir",
+        type=Path,
+        default=None,
+        help="Record and enforce branch coverage in this directory; omit for no coverage.",
+    )
     parser.add_argument(
         "--workers",
         type=int,
         default=int(os.environ.get("REPOFORGE_TEST_WORKERS", str(DEFAULT_WORKERS))),
-        help=f"xdist workers for the parallel lane (default {DEFAULT_WORKERS}, the measured cap)",
+    )
+    parser.add_argument(
+        "--report-path",
+        type=Path,
+        default=None,
+        help="Write bounded canonical JSON evidence for this full-suite run.",
     )
     return parser
 
@@ -173,8 +272,13 @@ def main() -> int:
         print("--workers must be a positive integer", file=sys.stderr)
         return 2
     try:
-        return run(args.root, args.coverage_dir, args.workers)
-    except (OSError, ValueError) as exc:
+        return run(
+            args.root,
+            args.coverage_dir,
+            args.workers,
+            report_path=args.report_path,
+        )
+    except (OSError, SelectionMetadataError, ValueError) as exc:
         print(f"test suite run failed: {exc}", file=sys.stderr)
         return 2
 
