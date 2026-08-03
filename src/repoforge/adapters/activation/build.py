@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,8 +35,11 @@ from ...ports.activation import (
     SupervisorKickstarter,
     WorktreeState,
 )
+from ...ports.admission_epoch import AdmissionEpochStore
+from ...ports.locking import LockManager
 from ...ports.runtime_control import RuntimeControlClient, RuntimeLauncher, RuntimeStore
 from ...ports.sleeper import Sleeper
+from ...ports.worker_registrar import WORKER_ADMISSION_LOCK
 
 _VENV = "venv"
 
@@ -364,6 +368,9 @@ class SupervisorRestarter:
         sleeper: Sleeper | None = None,
         kickstarter: SupervisorKickstarter | None = None,
         worker_reconciler: ExecutionWorkerReconciler | None = None,
+        admission_epochs: AdmissionEpochStore | None = None,
+        locks: LockManager | None = None,
+        admission_timeout_seconds: float = 5.0,
         stop_timeout_seconds: float = 20.0,
         start_timeout_seconds: float = 60.0,
         poll_interval_seconds: float = 0.2,
@@ -377,6 +384,9 @@ class SupervisorRestarter:
         self._sleeper = sleeper
         self._kickstarter = kickstarter
         self._worker_reconciler = worker_reconciler
+        self._admission_epochs = admission_epochs
+        self._locks = locks
+        self._admission_timeout_seconds = max(0.0, admission_timeout_seconds)
         self._stop_timeout = stop_timeout_seconds
         self._start_timeout = start_timeout_seconds
         self._poll = max(0.01, poll_interval_seconds)
@@ -465,6 +475,17 @@ class SupervisorRestarter:
                 "mismatch, or status split-brain); refusing to start a replacement",
                 evidence,
             )
+        if report.persistence_failures > 0:
+            return (
+                False,
+                "PROCESS_LEASE_PERSISTENCE_FAILURE: "
+                f"{report.persistence_failures} lifecycle outcome(s) "
+                f"({report.persistence_failure_ids or 'unknown workers'}) could not "
+                "be persisted durably; the registry may still show an active worker "
+                "that was reaped -- refusing to start a replacement until the repair "
+                "path reconciles the durable state",
+                evidence,
+            )
         if not report.evidence_complete:
             if report.unreadable_record_ids:
                 return (
@@ -485,6 +506,48 @@ class SupervisorRestarter:
             )
         return True, "", evidence
 
+    def _admission_fence(
+        self,
+    ) -> tuple[bool, str]:
+        """Close the durable worker-admission epoch so no NEW spawn can start.
+
+        Returns ``(ok, detail)``. This is the durable half of P1-3: once closed,
+        ``WorkerRegistrar.create_intent`` refuses new intents with a typed error,
+        so a spawn can never appear between this final observation and the stop
+        of the incumbent. A fence that cannot be closed fails closed -- the
+        incumbent is not stopped on unprovable admission state.
+        """
+        if self._admission_epochs is None:
+            return True, ""
+        try:
+            self._admission_epochs.close()
+        except Exception as exc:
+            return (
+                False,
+                f"WORKER_ADMISSION_FENCE_FAILED: could not close worker admission "
+                f"before stopping the incumbent: {exc}",
+            )
+        return True, ""
+
+    def _reopen_admission(self) -> None:
+        """Open the next admission epoch so the replacement can spawn workers.
+
+        A reopen that cannot be durably written is a fail-closed error, never a
+        silent no-op: leaving admission stuck in CLOSING would refuse every future
+        worker spawn while the restarter reports success (P1-3). The caller turns
+        this into a typed failure outcome instead of pretending the handoff
+        completed.
+        """
+        if self._admission_epochs is None:
+            return
+        try:
+            self._admission_epochs.open_next()
+        except Exception as exc:
+            raise ConfigError(
+                f"WORKER_ADMISSION_REOPEN_FAILED: could not reopen worker admission "
+                f"after the handoff: {exc}"
+            ) from exc
+
     def restart(self, *, departing_release: str | None = None) -> RestartOutcome:
         before = self._runtime.read()
         old_pid = before.pid if before else None
@@ -504,106 +567,196 @@ class SupervisorRestarter:
             )
         plan_digest = str(preflight_evidence["registry_digest"]) if preflight_evidence else None
 
-        # F-004: the plan is fenced to the registry snapshot it was read from. A lease
-        # that appeared or transitioned since the preflight could become a blocker once
-        # the incumbent is stopped, so before ANY stop the registry is re-scanned and a
-        # changed digest refuses the handoff -- the healthy runtime stays up and the
-        # caller replans instead of stopping on stale evidence.
-        verify_ok, verify_detail, verify_evidence = self.preflight_reclaim(departing_release)
-        if not verify_ok:
-            return RestartOutcome(
-                ok=False,
-                detail=(
-                    "handoff registry changed since the preflight plan and cannot "
-                    f"proceed ({verify_detail}); replan before stopping the incumbent"
-                ),
-                reclamation=verify_evidence,
+        # P1-3: the fence -> final observation -> stop -> reopen window is ONE atomic
+        # section under the shared worker-admission lock. The registrar holds the same
+        # lock across its OPEN check + intent create, so a spawn can never interleave
+        # between this fence and the stop of the incumbent. The lock is released BEFORE
+        # the launcher starts the replacement: the new supervisor spawns its own worker
+        # at boot through the same registrar, and holding the fence across that launch
+        # would block the replacement's first spawn (bounded LOCK_TIMEOUT) instead of
+        # admitting it. A wedged holder surfaces a typed fail-closed outcome.
+        try:
+            return self._restart_fenced(
+                old_pid=old_pid,
+                old_identity=old_identity,
+                departing_release=departing_release,
+                plan_digest=plan_digest,
             )
-        if (
-            plan_digest is not None
-            and verify_evidence is not None
-            and str(verify_evidence.get("registry_digest")) != plan_digest
-        ):
-            return RestartOutcome(
-                ok=False,
-                detail=(
-                    "handoff registry changed since the preflight plan (registry "
-                    "digest changed); refusing to stop the incumbent on stale "
-                    "evidence -- replan before stopping"
-                ),
-                reclamation=verify_evidence,
-            )
-
-        # Prefer the OS process manager so an upgrade never orphans the supervisor from
-        # launchd. `kickstart -k` stops and restarts the registered job in one step.
-        if self._kickstarter is not None and self._kickstarter.available():
-            # Drain the incumbent FIRST, by identity. `kickstart -k` only replaces the
-            # process launchd itself owns, so a supervisor started outside launchd -- a
-            # manual `rf start`, or a leftover from an earlier release -- survives it and
-            # keeps holding `runtime-single-instance`. The incoming process then dies on
-            # that lock and an otherwise fine activation is reported as a failure. Observed
-            # on a real activation: two supervisors alive at once, one per release.
-            stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
-            if not stopped:
+        except ConfigError as exc:
+            if "LOCK_TIMEOUT" in str(exc):
                 return RestartOutcome(
                     ok=False,
                     detail=(
-                        "could not stop the outgoing supervisor, so an OS-managed "
-                        f"replacement would race it for the runtime lock: {stop_detail}"
+                        "WORKER_ADMISSION_LOCK_TIMEOUT: could not acquire the worker-"
+                        f"admission lock ({exc}); a spawn may be in flight, so the "
+                        "incumbent is not stopped"
                     ),
                 )
+            if "WORKER_ADMISSION_REOPEN_FAILED" in str(exc):
+                return RestartOutcome(
+                    ok=False,
+                    detail=(
+                        "WORKER_ADMISSION_REOPEN_FAILED: the runtime was stopped but "
+                        f"worker admission could not be reopened ({exc}); the "
+                        "replacement cannot spawn workers until admission is open"
+                    ),
+                )
+            raise
+
+    def _restart_fenced(
+        self,
+        *,
+        old_pid: int | None,
+        old_identity: str | None,
+        departing_release: str | None,
+        plan_digest: str | None,
+    ) -> RestartOutcome:
+        """The stop/start sequence, held under the shared worker-admission lock."""
+        with self._admission_lock():
+            fence_ok, fence_detail = self._admission_fence()
+            if not fence_ok:
+                return RestartOutcome(ok=False, detail=fence_detail)
+
+            # F-004: the plan is fenced to the registry snapshot it was read from. A
+            # lease that appeared or transitioned since the preflight could become a
+            # blocker once the incumbent is stopped, so before ANY stop the registry is
+            # re-scanned and a changed digest refuses the handoff -- the healthy runtime
+            # stays up and the caller replans instead of stopping on stale evidence.
+            verify_ok, verify_detail, verify_evidence = self.preflight_reclaim(departing_release)
+            if not verify_ok:
+                self._reopen_admission()
+                return RestartOutcome(
+                    ok=False,
+                    detail=(
+                        "handoff registry changed since the preflight plan and cannot "
+                        f"proceed ({verify_detail}); replan before stopping the incumbent"
+                    ),
+                    reclamation=verify_evidence,
+                )
+            if (
+                plan_digest is not None
+                and verify_evidence is not None
+                and str(verify_evidence.get("registry_digest")) != plan_digest
+            ):
+                self._reopen_admission()
+                return RestartOutcome(
+                    ok=False,
+                    detail=(
+                        "handoff registry changed since the preflight plan (registry "
+                        "digest changed); refusing to stop the incumbent on stale "
+                        "evidence -- replan before stopping"
+                    ),
+                    reclamation=verify_evidence,
+                )
+
+            # Prefer the OS process manager so an upgrade never orphans the supervisor
+            # from launchd. `kickstart -k` stops and restarts the registered job in one
+            # step.
+            if self._kickstarter is not None and self._kickstarter.available():
+                # Drain the incumbent FIRST, by identity. `kickstart -k` only replaces
+                # the process launchd itself owns, so a supervisor started outside
+                # launchd -- a manual `rf start`, or a leftover from an earlier release
+                # -- survives it and keeps holding `runtime-single-instance`. The
+                # incoming process then dies on that lock and an otherwise fine
+                # activation is reported as a failure. Observed on a real activation:
+                # two supervisors alive at once, one per release.
+                stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
+                if not stopped:
+                    self._reopen_admission()
+                    return RestartOutcome(
+                        ok=False,
+                        detail=(
+                            "could not stop the outgoing supervisor, so an OS-managed "
+                            f"replacement would race it for the runtime lock: {stop_detail}"
+                        ),
+                    )
+                reclaim_ok, reclaim_detail, reclamation = self._reclaim_departing(departing_release)
+                if not reclaim_ok:
+                    self._reopen_admission()
+                    return RestartOutcome(
+                        ok=False,
+                        detail=reclaim_detail,
+                        reclamation=reclamation,
+                    )
+                outcome = self._kickstarter.kickstart()
+                if not outcome.ok:
+                    self._reopen_admission()
+                    return outcome
+                # A STOPPED record from the old process is still on disk, so "a record
+                # exists" proves nothing: require a live record that is not the old
+                # process.
+                if not self._await(
+                    lambda: self._live_record(exclude_pid=old_pid) is not None,
+                    self._start_timeout,
+                ):
+                    self._reopen_admission()
+                    return RestartOutcome(
+                        ok=False,
+                        detail="OS-managed supervisor did not publish a live record after kickstart",
+                    )
+                record = self._live_record(exclude_pid=old_pid)
+                # The replacement is live; reopen admission BEFORE releasing the lock so
+                # the replacement's first worker spawn is admitted, not refused.
+                self._reopen_admission()
+                return RestartOutcome(
+                    ok=True,
+                    detail="restarted via the OS process manager",
+                    pid=record.pid if record else None,
+                    reclamation=reclamation,
+                )
+
+            # Phase 2 -- drain the incumbent, then reclaim on fresh evidence and start.
+            stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
+            if not stopped:
+                self._reopen_admission()
+                return RestartOutcome(ok=False, detail=f"could not stop the runtime: {stop_detail}")
             reclaim_ok, reclaim_detail, reclamation = self._reclaim_departing(departing_release)
             if not reclaim_ok:
+                self._reopen_admission()
                 return RestartOutcome(
                     ok=False,
                     detail=reclaim_detail,
                     reclamation=reclamation,
                 )
-            outcome = self._kickstarter.kickstart()
-            if not outcome.ok:
-                return outcome
-            if not self._await(
-                lambda: self._live_record(exclude_pid=old_pid) is not None, self._start_timeout
-            ):
-                return RestartOutcome(
-                    ok=False,
-                    detail="OS-managed supervisor did not publish a live record after kickstart",
+            try:
+                pid = self._launcher.start(
+                    self._config_path, foreground=False, extra_env=self._extra_env
                 )
-            record = self._live_record(exclude_pid=old_pid)
+            except (ConfigError, OSError) as exc:
+                self._reopen_admission()
+                return RestartOutcome(ok=False, detail=f"launcher failed to start: {exc}")
+            # A STOPPED record from the old process is still on disk, so "a record
+            # exists" proves nothing: require a live record that is not the old process.
+            if not self._await(
+                lambda: self._live_record(exclude_pid=old_pid) is not None,
+                self._start_timeout,
+            ):
+                self._reopen_admission()
+                return RestartOutcome(
+                    ok=False, detail="runtime did not publish a live record after restart", pid=pid
+                )
+            # The replacement is live; reopen admission BEFORE releasing the lock so the
+            # replacement's first worker spawn is admitted, not refused.
+            self._reopen_admission()
             return RestartOutcome(
-                ok=True,
-                detail="restarted via the OS process manager",
-                pid=record.pid if record else None,
-                reclamation=reclamation,
+                ok=True, detail=f"restarted (pid {pid})", pid=pid, reclamation=reclamation
             )
 
-        # Phase 2 -- drain the incumbent, then reclaim on fresh evidence and start.
-        stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
-        if not stopped:
-            return RestartOutcome(ok=False, detail=f"could not stop the runtime: {stop_detail}")
-        reclaim_ok, reclaim_detail, reclamation = self._reclaim_departing(departing_release)
-        if not reclaim_ok:
-            return RestartOutcome(
-                ok=False,
-                detail=reclaim_detail,
-                reclamation=reclamation,
-            )
-        try:
-            pid = self._launcher.start(
-                self._config_path, foreground=False, extra_env=self._extra_env
-            )
-        except (ConfigError, OSError) as exc:
-            return RestartOutcome(ok=False, detail=f"launcher failed to start: {exc}")
-        # A STOPPED record from the old process is still on disk, so "a record exists"
-        # proves nothing: require a live record that is not the old process.
-        if not self._await(
-            lambda: self._live_record(exclude_pid=old_pid) is not None, self._start_timeout
-        ):
-            return RestartOutcome(
-                ok=False, detail="runtime did not publish a live record after restart", pid=pid
-            )
-        return RestartOutcome(
-            ok=True, detail=f"restarted (pid {pid})", pid=pid, reclamation=reclamation
+    def _admission_lock(self) -> AbstractContextManager[None]:
+        """The shared worker-admission fence (P1-3), bounded.
+
+        Both the registrar and the restarter acquire the same lock name on the
+        same lock root, so the registrar's OPEN-check + intent-create and this
+        fence -> final observation -> stop -> reopen window are mutually
+        exclusive across processes. When no lock manager is wired, admission is
+        unlocked -- the caller opted out of cross-process fencing.
+        """
+        if self._locks is None:
+            return contextlib.nullcontext()
+        return self._locks.lock(
+            WORKER_ADMISSION_LOCK,
+            timeout_seconds=self._admission_timeout_seconds,
+            metadata={"owner": "supervisor-restarter"},
         )
 
     def _live_record(self, *, exclude_pid: int | None) -> RuntimeRecord | None:

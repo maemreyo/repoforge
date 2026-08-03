@@ -35,6 +35,7 @@ from ...ports import (
 )
 from ...ports.clock import Clock
 from ...ports.locking import LockManager
+from ...ports.runtime_transition_coordinator import RuntimeTransitionCoordinator
 from ...ports.sleeper import Sleeper
 from .selection import resolve_release
 
@@ -132,6 +133,7 @@ class UpgradeService:
         locks: LockManager | None = None,
         lock_timeout_seconds: float = 900.0,
         release_processes: ReleaseProcessInspector | None = None,
+        transitions: RuntimeTransitionCoordinator | None = None,
     ) -> None:
         self._store = store
         self._inspector = inspector
@@ -149,6 +151,7 @@ class UpgradeService:
         self._locks = locks
         self._lock_timeout = lock_timeout_seconds
         self._release_processes = release_processes
+        self._transitions = transitions
 
     @contextmanager
     def _activation_lock(self) -> Iterator[None]:
@@ -320,10 +323,18 @@ class UpgradeService:
         release that failed closed with a typed non-retryable failure and cannot serve.
         It is never the default -- reconciliation stays forward-only -- because moving
         ``current`` is a high-impact mutation that must be asked for.
+
+        The transition ledger is the recovery authority (F-009): when no journal
+        exists, a non-terminal transition left by a crash is still a stranded durable
+        tail and is recovered here, so a crash between the ledger create and the
+        journal write can never leave an unrecoverable activation record.
         """
         with self._activation_lock():
             in_flight = self._store.read_in_flight_activation()
             if in_flight is None:
+                stranded = self._reconcile_stranded_transition()
+                if stranded is not None:
+                    return stranded
                 current = self._store.current_sha()
                 return UpgradeResult(
                     status="nothing_to_reconcile",
@@ -486,6 +497,20 @@ class UpgradeService:
             with suppress(ValueError):
                 receipt = replace(receipt, receipt_id=journal_receipt_id)
         receipt = self._write_receipt(receipt)
+        # F-009: terminalize the transition as COMPLETED before clearing the journal --
+        # reconciliation completes the durable tail (receipt AND terminal transition),
+        # never just the receipt. A terminal-save failure is NOT a reconciled state:
+        # the receipt exists but the transition is still non-terminal, so the journal
+        # stays and the caller sees a typed failure, never a false "reconciled".
+        raw_transition = in_flight.get("transition_id")
+        transition_id = str(raw_transition) if isinstance(raw_transition, str) else None
+        if transition_id is not None and not self._mark_outcome(transition_id, outcome="completed"):
+            raise ConfigError(
+                "ACTIVATION_RECONCILIATION_INCOMPLETE: the receipt "
+                f"{receipt.receipt_id} was written but the transition could not be "
+                "terminalized; the journal remains so reconciliation can complete "
+                "the durable tail once the ledger is writable"
+            )
         self._store.end_activation()
         return UpgradeResult(
             status="reconciled",
@@ -500,6 +525,62 @@ class UpgradeService:
             converged=True,
             stage=ActivationStage.HEALTH_VERIFIED.value,
             detail=detail,
+        )
+
+    def _reconcile_stranded_transition(self) -> UpgradeResult | None:
+        """Terminalize a ledger transition a crash left without a journal (F-009).
+
+        ``_begin_transition`` writes the PREPARED record BEFORE the journal, so a
+        crash between the two leaves a non-terminal transition and no journal: the
+        pointer never moved and no effect ran, so the transition is provably an
+        aborted attempt. It is terminalized as a typed failure -- the ledger is the
+        recovery authority, so a stranded PREPARED record is recovered here instead
+        of being invisible. A transition past PREPARED with no journal is a journal
+        loss (effects did run), which fails closed rather than guessing the pointer
+        state. Returns ``None`` when the ledger has no stranded transition.
+        """
+        if self._transitions is None:
+            return None
+        from ...domain.runtime_transition import RuntimeTransitionStatus
+
+        active = self._transitions.reconcile_active()
+        if not active:
+            return None
+        for envelope in active:
+            if envelope.value.status is not RuntimeTransitionStatus.PREPARED:
+                raise ConfigError(
+                    "ACTIVATION_RECONCILIATION_REQUIRED: transition "
+                    f"{envelope.value.transition_id} is {envelope.value.status.value} "
+                    "but no activation journal exists; effects ran, so the durable "
+                    "state cannot be reconstructed without the journal -- refuse to "
+                    "guess the pointer state"
+                )
+        terminalized = []
+        for envelope in active:
+            self._transitions.mark_outcome(
+                envelope.value,
+                outcome=RuntimeTransitionStatus.ACTIVATION_FAILED,
+                expected_revision=envelope.revision,
+                error_code="ACTIVATION_ABANDONED_PRE_JOURNAL",
+                error_message=(
+                    "the activation attempt crashed between the ledger record and "
+                    "the activation journal; no effect ran, so it is terminalized "
+                    "as an abandoned attempt"
+                ),
+            )
+            terminalized.append(envelope.value.transition_id)
+        current = self._store.current_sha()
+        return UpgradeResult(
+            status="reconciled",
+            candidate_sha=current or "",
+            build_fingerprint="",
+            tool_surface_hash="",
+            active_sha=current,
+            detail=(
+                "Terminalized abandoned pre-journal transition(s) "
+                f"{', '.join(terminalized)}; no activation effect had run, so "
+                "nothing to roll back."
+            ),
         )
 
     def _watch_or_rollback(
@@ -591,8 +672,19 @@ class UpgradeService:
         # terminal outcome, so without this a crash between the swap and the receipt
         # would leave `current` moved with no record that an activation ever started.
         journal_receipt_id = self._store.allocate_receipt_id(date_stamp=self._date_stamp())
+        # F-009: record the PREPARED transition BEFORE the journal. If the ledger
+        # create fails, nothing was journaled, so no dead journal is left behind.
+        transition_id = self._begin_transition(
+            kind="activate",
+            from_sha=previous_sha,
+            to_sha=commit_sha,
+            correlation_id=journal_receipt_id,
+        )
         self._store.begin_activation(
-            receipt_id=journal_receipt_id, from_sha=previous_sha, to_sha=commit_sha
+            receipt_id=journal_receipt_id,
+            from_sha=previous_sha,
+            to_sha=commit_sha,
+            transition_id=transition_id,
         )
 
         # Both shims must exist BEFORE the first restart -- on a fresh release root there
@@ -603,15 +695,18 @@ class UpgradeService:
         self._store.swap_current(commit_sha)
         stage = ActivationStage.SYMLINK_SWITCHED
         self._store.record_activation_stage(stage.value)
+        self._mark_effect(transition_id, status="staged")
 
         restart = self._restarter.restart(departing_release=previous_sha)
         if restart.ok:
             stage = ActivationStage.RUNTIME_RESTARTED
             self._store.record_activation_stage(stage.value)
+            self._mark_effect(transition_id, status="activated")
         converged, observed_sha, verify_detail = self._verify_serving(commit_sha)
         if converged:
             stage = ActivationStage.HEALTH_VERIFIED
             self._store.record_activation_stage(stage.value)
+            self._mark_effect(transition_id, status="health_checked")
 
         if not (restart.ok and converged):
             return self._fail_and_rollback(
@@ -621,6 +716,7 @@ class UpgradeService:
                 rediscovery_required=rediscovery_required,
                 stage=stage,
                 observed_sha=observed_sha,
+                transition_id=transition_id,
                 detail=(
                     f"Activation failed: {restart.detail if not restart.ok else verify_detail}"
                 ),
@@ -648,6 +744,7 @@ class UpgradeService:
                     rediscovery_required=rediscovery_required,
                     stage=stage,
                     observed_sha=observed_sha,
+                    transition_id=transition_id,
                     detail=(
                         "Activation failed: the worker reclamation evidence could not "
                         f"be persisted ({exc})"
@@ -673,7 +770,13 @@ class UpgradeService:
         # the runtime is already live and verified, so an auxiliary failure must never be
         # able to erase the fact that the activation happened.
         receipt = self._write_receipt(receipt)
-        self._store.end_activation()
+        # F-009: terminalize the transition before clearing the journal, and only
+        # clear when BOTH the receipt and the terminal transition exist. A failed
+        # terminal-save leaves the journal in place so reconciliation completes the
+        # tail -- a durable success is never reported as a command failure.
+        outcome_ok = self._mark_outcome(transition_id, outcome="completed")
+        if outcome_ok:
+            self._store.end_activation()
         path_status, path_detail = self._install_path_launcher_best_effort()
         pruned, retained_by_process = self._prune_without_evicting_live_code(keep_releases)
         return UpgradeResult(
@@ -789,6 +892,7 @@ class UpgradeService:
         rediscovery_required: bool,
         stage: ActivationStage,
         observed_sha: str | None,
+        transition_id: str | None,
         detail: str,
     ) -> UpgradeResult:
         """Record a FAILED activation and restore `previous`, linking both receipts."""
@@ -808,6 +912,15 @@ class UpgradeService:
             converged=False,
         )
         failed_receipt = self._write_receipt(failed_receipt)
+        # F-009: terminalize the activation transition as a terminal failure before
+        # clearing the journal, so a crash between receipt and terminalize leaves the
+        # journal for reconciliation rather than a bare FAILED receipt.
+        self._mark_outcome(
+            transition_id,
+            outcome="activation_failed",
+            error_code="ACTIVATION_FAILED",
+            error_message=detail,
+        )
         self._store.end_activation()
         if previous_sha is None:
             # Nothing to restore: there was no prior release. Leave `current` at the
@@ -1021,8 +1134,26 @@ class UpgradeService:
         # the trace and must not be overwritten.
         if self._store.read_in_flight_activation() is None:
             journal_receipt_id = self._store.allocate_receipt_id(date_stamp=self._date_stamp())
+            # F-009: record the PREPARED rollback transition before the journal.
+            rollback_transition_id = self._begin_transition(
+                kind="rollback",
+                from_sha=current,
+                to_sha=target,
+                correlation_id=journal_receipt_id,
+            )
             self._store.begin_activation(
-                receipt_id=journal_receipt_id, from_sha=current, to_sha=target
+                receipt_id=journal_receipt_id,
+                from_sha=current,
+                to_sha=target,
+                transition_id=rollback_transition_id,
+            )
+        else:
+            # A journal is already in flight (repair-rollback): reuse its transition
+            # cursor so the durable tail stays one record.
+            in_flight = self._store.read_in_flight_activation()
+            raw_transition = in_flight.get("transition_id") if isinstance(in_flight, dict) else None
+            rollback_transition_id = (
+                str(raw_transition) if isinstance(raw_transition, str) else None
             )
 
         self._store.swap_current(target)
@@ -1081,7 +1212,17 @@ class UpgradeService:
             worker_reclamation=worker_reclamation,
         )
         receipt = self._write_receipt(receipt)
-        self._store.end_activation()
+        if succeeded:
+            outcome_ok = self._mark_outcome(rollback_transition_id, outcome="rolled_back")
+        else:
+            outcome_ok = self._mark_outcome(
+                rollback_transition_id,
+                outcome="health_failed",
+                error_code="ROLLBACK_FAILED",
+                error_message=detail,
+            )
+        if outcome_ok:
+            self._store.end_activation()
         return UpgradeResult(
             status="rolled_back" if succeeded else "rollback_failed",
             candidate_sha=target,
@@ -1116,6 +1257,93 @@ class UpgradeService:
             f"RECEIPT_ID_EXHAUSTED: could not allocate a free receipt id after "
             f"{_RECEIPT_ID_ATTEMPTS} attempts"
         )
+
+    def _begin_transition(
+        self,
+        *,
+        kind: str,
+        from_sha: str | None,
+        to_sha: str | None,
+        correlation_id: str,
+    ) -> str | None:
+        """Record the PREPARED transition before any journal or effect (F-009).
+
+        Returns the transition id, or ``None`` when no coordinator is wired (the
+        legacy journal-only path). A ledger-create failure raises BEFORE the
+        journal is written, so no dead journal can strand later activations.
+        """
+        if self._transitions is None:
+            return None
+        envelope = self._transitions.record_attempt(
+            kind=kind,
+            from_sha=from_sha,
+            to_sha=to_sha,
+            correlation_id=correlation_id,
+        )
+        return envelope.record_id
+
+    def _mark_effect(self, transition_id: str | None, *, status: str) -> None:
+        """Advance the transition after a real effect boundary; never fabricates.
+
+        A ledger write failure here is NOT swallowed: the effect already happened,
+        so a ledger that stays on the previous phase would diverge from reality
+        and recovery would act on a lie. The caller surfaces it as a typed failure
+        (the journal stays, so reconciliation completes the tail) instead of
+        pretending the activation advanced (F-009).
+        """
+        if transition_id is None or self._transitions is None:
+            return
+        envelope = self._transitions.read(transition_id)
+        if envelope is None:
+            raise ConfigError(
+                "RUNTIME_TRANSITION_MISSING: the journal names transition "
+                f"{transition_id!r} but the ledger has no such record; refusing to "
+                "advance a transition that does not exist"
+            )
+        from ...domain.runtime_transition import RuntimeTransitionStatus
+
+        self._transitions.mark_effect(
+            envelope.value,
+            status=RuntimeTransitionStatus(status),
+            expected_revision=envelope.revision,
+        )
+
+    def _mark_outcome(
+        self,
+        transition_id: str | None,
+        *,
+        outcome: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        """Terminalize the transition; returns False on a post-success ledger failure.
+
+        The journal is cleared only when the receipt AND the terminal transition
+        both exist. A terminal-save failure therefore leaves the journal in place
+        (reconciliation completes the tail) instead of turning a durable success
+        into a command failure. A transition the journal names but the ledger
+        cannot find is an integrity violation, never a success: the receipt alone
+        does not complete the durable tail, so the journal must stay for
+        investigation (F-009).
+        """
+        if transition_id is None or self._transitions is None:
+            return True
+        try:
+            envelope = self._transitions.read(transition_id)
+            if envelope is None:
+                return False
+            from ...domain.runtime_transition import RuntimeTransitionStatus
+
+            self._transitions.mark_outcome(
+                envelope.value,
+                outcome=RuntimeTransitionStatus(outcome),
+                expected_revision=envelope.revision,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            return True
+        except Exception:
+            return False
 
     def _date_stamp(self) -> str:
         return self._clock.now_iso()[:10].replace("-", "")

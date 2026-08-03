@@ -914,10 +914,13 @@ def test_terminate_marks_reclaimed_only_after_confirmed_death(tmp_path) -> None:
 
 
 def _lease_envelope(lease, *, revision: int = 1):
-    from repoforge.domain.durable_state import Revision, StateEnvelope
+    from repoforge.domain.durable_state import Revision, SchemaVersion, StateEnvelope
 
     return StateEnvelope(
-        value=lease, revision=Revision(revision), updated_at="2026-07-30T00:00:00+00:00"
+        record_id=lease.lease_id,
+        schema_version=SchemaVersion(1),
+        value=lease,
+        revision=Revision(revision),
     )
 
 
@@ -977,6 +980,45 @@ def test_startup_blocks_on_registered_lease_without_pid() -> None:
         owner_identity_reader=_Owner(set()),
         command_line_reader=_CommandLines({}),
         identity_reader=_Tokens({}),
+        leases=_lease_store([lease]),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_incomplete == 1
+    assert report.blocker_code == "PROCESS_LEASE_INCOMPLETE"
+
+
+def test_read_only_preflight_blocks_on_a_registered_intent_that_can_claim_later() -> None:
+    """P1-3 admission race: a REGISTERED/READY intent is a durable fence member.
+
+    The re-review repro: the intent exists (REGISTERED) before the final fence;
+    the final preflight sees it as a live concern; a child that claims READY after
+    the incumbent is stopped must never be possible. The fence member blocks the
+    stop -- REGISTERED counts as incomplete even when it carries a pid.
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.REGISTERED,
+        process_identity=None,
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+    )
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
         leases=_lease_store([lease]),
         now_iso=lambda: "2026-07-30T00:00:00+00:00",
     )
@@ -1073,6 +1115,65 @@ def test_process_lease_terminalized_and_archived_with_binding() -> None:
     assert ProcessLeaseStatus.TERMINATED in statuses
 
 
+def test_single_authority_reclaim_terminalizes_the_lease_without_a_binding() -> None:
+    """A binding-backed reclaim must terminalize the authoritative lease (P0-1).
+
+    The re-review found the split-brain: a worker was reclaimed and its binding
+    archived while its ProcessLease stayed RUNNING -- the lease then blocked the
+    next release forever. The authoritative lease must advance to TERMINATED with
+    the binding, so the two can never diverge.
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        pgid=4242,
+        process_start_token="worker-start-token",
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    saved_statuses: list[object] = []
+
+    class _LeaseStore:
+        def list_page(self, *, role=None, max_records=2_000):
+            from repoforge.ports.process_lease_store import ProcessLeasePage
+
+            del role, max_records
+            return ProcessLeasePage(records=(lease,), scan_complete=True, unreadable_ids=())
+
+        def read(self, lease_id):
+            if lease_id == lease.lease_id:
+                return _lease_envelope(lease, revision=1)
+            return None
+
+        def save(self, candidate, *, expected_revision):
+            saved_statuses.append(candidate.status)
+            return _lease_envelope(candidate, revision=expected_revision.value + 1)
+
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=_LeaseStore(),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 1
+    assert ProcessLeaseStatus.TERMINATED in saved_statuses
+
+
 def test_same_worker_id_same_state_changed_pid_changes_registry_digest() -> None:
     """Hotfix 3: digest must invalidate when pid/start_token of a live binding changes."""
     bindings = _Bindings(_binding())
@@ -1101,3 +1202,877 @@ def test_same_worker_id_same_state_changed_pid_changes_registry_digest() -> None
 
     assert base
     assert base != changed
+
+
+# ---------------------------------------------------------------------------
+# Re-review: single-authority lifecycle (P0-1) and bidirectional containment.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLeaseStore:
+    """Lease store that records every save and can fail on demand (F-010 tests)."""
+
+    def __init__(self, *leases, failing: bool = False) -> None:
+        from repoforge.domain.process_lease import ProcessLease
+
+        self._records: dict[str, object] = {
+            lease.lease_id: _lease_envelope(lease) for lease in leases
+        }
+        self.saved: list[ProcessLease] = []
+        self.archived: list[str] = []
+        self.failing = failing
+
+    def list_page(self, *, role=None, max_records=2_000):
+        from repoforge.ports.process_lease_store import ProcessLeasePage
+
+        del max_records
+        values = [env.value for env in self._records.values()]
+        if role is not None:
+            values = [lease for lease in values if lease.role is role]
+        return ProcessLeasePage(records=tuple(values), scan_complete=True, unreadable_ids=())
+
+    def read(self, lease_id):
+        return self._records.get(lease_id)
+
+    def save(self, lease, *, expected_revision):
+        if self.failing:
+            raise OSError("disk full")
+        self.saved.append(lease)
+        envelope = _lease_envelope(lease, revision=expected_revision.value + 1)
+        self._records[lease.lease_id] = envelope
+        return envelope
+
+    def archive_terminal(self, lease_id, *, expected_revision):
+        del expected_revision
+        self.archived.append(lease_id)
+        return True
+
+
+def test_survived_kill_keeps_process_lease_killed_and_active() -> None:
+    """A process proven alive after SIGKILL is never recorded as TERMINATED (P0)."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease)
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, False, True, "survived SIGKILL")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.survived_kill == 1
+    statuses = [candidate.status for candidate in store.saved]
+    assert ProcessLeaseStatus.KILLED in statuses
+    assert ProcessLeaseStatus.TERMINATED not in statuses
+    assert store.archived == []
+    assert bindings.get(_WORKER).state == "survived_kill"
+
+
+def test_refused_unproven_keeps_process_lease_unproven_and_active() -> None:
+    """An unprovable worker is recorded as UNPROVEN, never as TERMINATED (P0)."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease)
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.refused_unproven == 1
+    statuses = [candidate.status for candidate in store.saved]
+    assert ProcessLeaseStatus.UNPROVEN in statuses
+    assert ProcessLeaseStatus.TERMINATED not in statuses
+    assert store.archived == []
+    assert bindings.get(_WORKER).state == "refused_unproven"
+
+
+def test_later_proof_of_death_terminalizes_killed_lease() -> None:
+    """A KILLED lease becomes TERMINATED only on a later proof of death."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.KILLED,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease)
+    bindings = _Bindings(_binding(state="survived_kill"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({}),
+        identity_reader=_Tokens({}),
+        process_group_gone=lambda pgid: True,
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.already_gone == 1
+    statuses = [candidate.status for candidate in store.saved]
+    assert ProcessLeaseStatus.TERMINATED in statuses
+    assert store.archived == [_WORKER]
+
+
+def test_active_binding_without_active_process_lease_is_divergence() -> None:
+    """A running binding with no lease at all diverges from the registry."""
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=_lease_store([]),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_binding_divergence == 1
+    assert report.blocker_code == "PROCESS_LEASE_BINDING_DIVERGENCE"
+
+
+def test_active_binding_with_terminal_process_lease_is_divergence() -> None:
+    """A running binding whose lease is already terminal is a split-brain."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.TERMINATED,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=_lease_store([lease]),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_binding_divergence == 1
+    assert report.blocker_code == "PROCESS_LEASE_BINDING_DIVERGENCE"
+
+
+def test_process_identity_mismatch_is_divergence() -> None:
+    """A lease and binding naming different start tokens diverge."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="lease-identity",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="lease-token-a",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    bindings = _Bindings(_binding(state="running", token="binding-token-b"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "binding-token-b"}),
+        leases=_lease_store([lease]),
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_binding_divergence == 1
+    assert report.blocker_code == "PROCESS_LEASE_BINDING_DIVERGENCE"
+
+
+def test_persistence_failure_is_reported_not_suppressed() -> None:
+    """A reaped worker whose lease write fails is reported, never claimed reclaimed."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease, failing=True)
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 0
+    assert report.persistence_failures == 1
+    assert report.persistence_failure_ids == (_WORKER,)
+    assert report.blocker_code == "PROCESS_LEASE_PERSISTENCE_FAILURE"
+
+
+def _real_spawner(tmp_path: Path, *, shadow: object | None = None):
+    """A real worker wired to the real registrar + JSON lease registry (F-010)."""
+
+    from conftest import create_forge_environment
+
+    from repoforge.adapters.persistence import JsonExecutionWorkerBindingStore
+    from repoforge.adapters.persistence.json_process_lease_adapter import (
+        JsonProcessLeaseAdapter,
+    )
+    from repoforge.adapters.runtime.execution_worker import SubprocessExecutionWorker
+    from repoforge.application.runtime.worker_lifecycle import WorkerLifecycleStore
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.bootstrap import build_configuration_store
+    from repoforge.testing import FixedClock, InMemoryLockManager, SequenceIdGenerator
+
+    env = create_forge_environment(tmp_path)
+    home = tmp_path / "home"
+    build_configuration_store(
+        env.config_path, state_root=home / ".local/state/repoforge"
+    ).import_legacy(
+        env.config_path.read_text(encoding="utf-8"),
+        env.config_path.read_text(encoding="utf-8"),
+        created_at="2026-07-29T00:00:00+00:00",
+    )
+    root = tmp_path / "state"
+    bindings = JsonExecutionWorkerBindingStore(root, InMemoryLockManager())
+    leases = JsonProcessLeaseAdapter(root, InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        shadow=shadow,
+    )
+    lifecycle = WorkerLifecycleStore(
+        bindings=bindings,
+        leases=leases,
+        shadow=shadow,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+    spawner = SubprocessExecutionWorker(
+        env.config_path,
+        bindings=bindings,
+        registrar=registrar,
+        lifecycle=lifecycle,
+        state_root=root,
+    )
+    return env, home, spawner, bindings, leases
+
+
+def _wait_alive(spawner, child) -> None:
+    import time
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not spawner.is_alive(child):
+        time.sleep(0.1)
+    assert spawner.is_alive(child), "the real execution worker did not start"
+
+
+def test_normal_terminate_terminalizes_and_archives_process_lease(tmp_path) -> None:
+    """Normal termination advances the canonical ProcessLease to TERMINATED (P0)."""
+    import os
+
+    from repoforge.domain.process_lease import ProcessLeaseStatus
+
+    _env, home, spawner, bindings, leases = _real_spawner(tmp_path)
+    child = spawner.start(
+        1,
+        env=dict(os.environ, HOME=str(home)),
+        log_path=tmp_path / "worker.log",
+        correlation_id="c" * 24,
+    )
+    try:
+        _wait_alive(spawner, child)
+
+        spawner.terminate(child, grace_seconds=3)
+
+        archived = bindings.list_archive()
+        worker_id = next((item.worker_id for item in archived if item.pid == child.pid), "")
+        assert worker_id
+        stored = leases.read(worker_id)
+        assert stored is not None
+        assert stored.value.status is ProcessLeaseStatus.TERMINATED
+        active = leases.list_active_page()
+        assert all(lease.lease_id != worker_id for lease in active.records)
+    finally:
+        spawner.terminate(child, grace_seconds=1)
+
+
+def test_normal_terminate_updates_shadow(tmp_path) -> None:
+    """Normal termination leaves parity in sync: the shadow row follows the JSON.
+
+    The SQLite shadow mirrors the canonical lease writes; when the terminal lease
+    is archived out of the JSON active store, the shadow row is removed with it,
+    so ``compare_lease_parity`` stays in sync after every worker lifetime instead
+    of reporting a permanent ``only_in_shadow`` drift (review F-010).
+    """
+    import os
+
+    from repoforge.adapters.persistence.parity import compare_lease_parity
+    from repoforge.adapters.persistence.sqlite_lease_store import SqliteLeaseStore
+
+    shadow = SqliteLeaseStore(tmp_path / "state" / "shadow.db")
+    _env, home, spawner, bindings, leases = _real_spawner(tmp_path, shadow=shadow)
+    child = spawner.start(
+        1,
+        env=dict(os.environ, HOME=str(home)),
+        log_path=tmp_path / "worker.log",
+        correlation_id="c" * 24,
+    )
+    try:
+        _wait_alive(spawner, child)
+
+        spawner.terminate(child, grace_seconds=3)
+
+        archived = bindings.list_archive()
+        worker_id = next((item.worker_id for item in archived if item.pid == child.pid), "")
+        assert worker_id
+        # The shadow row is removed with the JSON archive, not left as a stale
+        # TERMINATED record that makes parity drift forever.
+        assert shadow.list_all() == [], "the shadow row must be removed with the archive"
+        report = compare_lease_parity(leases, shadow)
+        assert report.in_sync is True, report.as_dict()
+    finally:
+        spawner.terminate(child, grace_seconds=1)
+
+
+def test_binding_less_active_lease_is_reclaimed_from_the_lease_alone() -> None:
+    """P0-1: a provable RUNNING lease with no binding is reclaimed, not divergence.
+
+    The canonical ProcessLease is the safety authority; the binding is a derived
+    projection a crash or store failure can lose. A RUNNING lease whose binding is
+    gone is still a real worker holding locks, so the reconciler proves it from the
+    lease (dead owner, exact entry point, matching start token) and reaps it --
+    otherwise a lost binding strands the orphan forever, recreating the 2026-08-01
+    deadlock.
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-bbbbbbbbbbbb",
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        pgid=4242,
+        process_start_token="worker-start-token",
+        owner_pid=4241,
+        owner_process_identity="a" * 64,
+        release_sha="0123abc",
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease)
+    bindings = _Bindings()  # no binding projection at all
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 1
+    assert report.process_lease_binding_divergence == 0
+    statuses = [candidate.status for candidate in store.saved]
+    assert ProcessLeaseStatus.TERMINATED in statuses
+    assert store.archived == ["worker-bbbbbbbbbbbb"]
+
+
+def test_binding_less_active_lease_still_blocks_when_unprovable() -> None:
+    """P0-1: an unprovable binding-less lease stays a divergence (fail closed)."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-bbbbbbbbbbbb",
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=9999,
+        pgid=9999,
+        process_start_token="worker-start-token",
+        owner_pid=4241,
+        owner_process_identity="a" * 64,
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease)
+    bindings = _Bindings()
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({}),  # entry point cannot be proven
+        identity_reader=_Tokens({9999: None}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.refused_unproven == 1
+    assert report.possibly_alive_unproven == 1
+    assert report.process_lease_binding_divergence == 1
+    # The more specific blocker wins: an unprovable possibly-alive worker is a
+    # stronger reason to refuse than the divergence itself.
+    assert report.blocker_code == "STALE_EXECUTION_WORKER_IDENTITY_UNPROVEN"
+
+
+def test_binding_less_lease_of_a_live_owner_is_left_alone() -> None:
+    """P0-1: a binding-less lease whose owner supervisor is alive is never touched."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-bbbbbbbbbbbb",
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        pgid=4242,
+        process_start_token="worker-start-token",
+        owner_pid=4241,
+        owner_process_identity="a" * 64,
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease)
+    bindings = _Bindings()
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner_identity_reader=_Owner({4241}),  # owner is alive (returns _SHA)
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 0
+    assert report.refused_unproven == 0
+    assert store.saved == [], "a lease with a live owner must never be terminalized"
+
+
+# ---------------------------------------------------------------------------
+# Re-review: lifecycle write ordering, containment truthfulness, maintenance
+# reporting (F-010).
+# ---------------------------------------------------------------------------
+
+
+def test_lease_failure_keeps_recovery_projection_intact() -> None:
+    """A lease write failure must leave the binding projection untouched (P0).
+
+    The canonical lease is persisted FIRST; the binding is only terminalized when
+    the canonical terminal checkpoint landed. A lease CAS failure therefore never
+    deletes/archives the recovery projection the next pass re-applies through --
+    the binding must stay active so the worker is still discoverable and the
+    outcome can be re-applied (review F-010).
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease, failing=True)
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 0
+    assert report.persistence_failures == 1
+    assert report.persistence_failure_ids == (_WORKER,)
+    # The recovery projection survives the lease failure: still active, still
+    # terminalizable by the next pass once the store heals.
+    assert bindings.get(_WORKER).state == "running"
+
+
+def test_missing_canonical_lease_is_a_persistence_failure() -> None:
+    """A reaped worker whose canonical lease is MISSING is never a success (P0).
+
+    In production the canonical ProcessLease is authoritative; a binding whose
+    lease does not exist cannot be terminalized as ``reclaimed`` -- that would be
+    a false success the registry never recorded. It is reported as
+    PROCESS_LEASE_MISSING and the binding stays active for recovery.
+    """
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=_RecordingLeaseStore(),  # wired, but the lease does not exist
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 0
+    assert report.persistence_failures == 1
+    assert report.persistence_failure_ids == (_WORKER,)
+    assert report.detail, "the detail must explain the missing canonical lease"
+    assert bindings.get(_WORKER).state == "running", "the projection stays for recovery"
+
+
+def test_unwired_lease_store_is_not_success() -> None:
+    """A lifecycle with no canonical lease store never reports persisted (P0).
+
+    The strict (non-binding-only) lifecycle is what production wires; without a
+    canonical lease store it must fail closed -- ``persisted=False`` -- instead of
+    reporting a terminal outcome the registry never recorded. The binding-only
+    opt-out is an explicit flag only embedders without any lease authority set.
+    """
+    from repoforge.application.runtime.worker_lifecycle import WorkerLifecycleStore
+
+    bindings = _Bindings(_binding(state="running"))
+    lifecycle = WorkerLifecycleStore(
+        bindings=bindings,
+        leases=None,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    result = lifecycle.apply_outcome(_WORKER, "reclaimed")
+
+    assert result.persisted is False
+    assert "PROCESS_LEASE_STORE_UNWIRED" in result.detail
+    assert bindings.get(_WORKER).state == "running", "no projection was touched"
+
+
+def test_terminal_binding_left_by_crash_is_debt_not_divergence() -> None:
+    """A terminal binding with no lease is maintenance debt, not a divergence.
+
+    A binding terminalized by a crash before its archive describes no process
+    that may hold locks, so it must never block a read-only preflight as a
+    live-process divergence (review F-010).
+    """
+    bindings = _Bindings(_binding(state="reclaimed"))
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+    reconciler._leases = _lease_store([])
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_binding_divergence == 0
+    assert report.terminal_binding_debt == 1
+    assert report.blocker_code is None, "archive debt must not block a preflight"
+
+
+def test_running_lease_missing_pid_is_incomplete() -> None:
+    """A RUNNING lease without a pid cannot prove its process: fail closed."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=None,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+    reconciler._leases = _lease_store([lease])
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_incomplete == 1
+    assert report.process_lease_binding_divergence == 0
+
+
+def test_running_lease_missing_start_token_is_incomplete() -> None:
+    """A RUNNING lease without a start token cannot prove PID reuse safety."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token=None,
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    bindings = _Bindings(_binding(state="running"))
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+    reconciler._leases = _lease_store([lease])
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_incomplete == 1
+    assert report.process_lease_binding_divergence == 0
+
+
+def test_refused_binding_with_killed_lease_is_divergent() -> None:
+    """refused_unproven <-> KILLED claims two histories for one worker."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.KILLED,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    bindings = _Bindings(_binding(state="refused_unproven"))
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+    reconciler._leases = _lease_store([lease])
+
+    report = reconciler.reconcile(read_only=True)
+
+    assert report.process_lease_binding_divergence == 1
+
+
+def test_survived_kill_binding_with_unproven_lease_is_divergent() -> None:
+    """survived_kill <-> UNPROVEN claims two histories for one worker."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.UNPROVEN,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        started_at=None,
+        heartbeat_at=None,
+        process_start_token="worker-start-token",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    bindings = _Bindings(_binding(state="survived_kill"))
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner=_Owner(set()),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+    reconciler._leases = _lease_store([lease])
+
+    report = reconciler.reconcile(read_only=True)
+
+    # The matrix divergence is reported; the blocker code is the higher-priority
+    # survived-kill gate (a possibly-alive worker is a stronger reason to refuse).
+    assert report.process_lease_binding_divergence == 1
+    assert report.blocker_code == "STALE_EXECUTION_WORKER_RECLAMATION_FAILED"
+
+
+def test_ready_lease_without_binding_is_reclaimed_from_the_lease_alone() -> None:
+    """A child that crashed mid-claim (READY-with-pid) is reclaimed, not stranded.
+
+    The canonical lease carries pid, pgid, start token, and owner identity, so a
+    READY lease whose binding was never written is proven and reaped from the
+    lease alone once its dead owner no longer owns it (review F-001 P0: recovery
+    never depends on the projection).
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id=_WORKER,
+        status=ProcessLeaseStatus.READY,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=4242,
+        pgid=4242,
+        process_start_token="worker-start-token",
+        owner_pid=4241,
+        owner_process_identity="a" * 64,
+        release_sha=_RELEASE,
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+    store = _RecordingLeaseStore(lease)
+    bindings = _Bindings()  # the claim crashed before writing the binding
+    reconciler = ExecutionWorkerReconciler(
+        bindings=bindings,
+        reaper=_Reaper([ReapOutcome(True, True, False, "reaped via SIGTERM")]),
+        owner_identity_reader=_Owner(set()),
+        command_line_reader=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        identity_reader=_Tokens({4242: "worker-start-token"}),
+        leases=store,
+        now_iso=lambda: "2026-07-30T00:00:00+00:00",
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.reclaimed == 1
+    assert report.process_lease_incomplete == 0, "the mid-claim crash is recovered"
+    assert report.process_lease_binding_divergence == 0
+    statuses = [candidate.status for candidate in store.saved]
+    assert ProcessLeaseStatus.TERMINATED in statuses
+    assert store.archived == [_WORKER]
+
+
+class _FailingBindings(_Bindings):
+    def collect_terminal(self, *, max_records: int = 5_000) -> int:
+        del max_records
+        raise OSError("disk full")
+
+
+def test_maintenance_failures_are_reported_not_suppressed() -> None:
+    """A terminal-collection failure is evidence, never a silent no-op."""
+    bindings = _FailingBindings(_binding())
+    reconciler = _reconciler(
+        bindings=bindings,
+        reaper=_Reaper([]),
+        owner=_Owner({4241}),
+        command_lines=_CommandLines({4242: _EXECUTION_WORKER_ARGV}),
+        tokens=_Tokens({4242: "worker-start-token"}),
+    )
+
+    report = reconciler.reconcile()
+
+    assert report.maintenance_failures == 1
+    assert report.maintenance_failure_ids == ("binding-collect",)
+    assert "maintenance failures=1" in report.detail

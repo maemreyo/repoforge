@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
+from ...application.runtime.worker_lifecycle import WorkerLifecycleStore
 from ...domain.durable_state import Revision
 from ...domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from ...domain.execution_worker import ExecutionWorkerBinding
@@ -35,6 +36,17 @@ _REGISTRATION_REAP_SECONDS = 5.0
 #: Env var carrying the pre-spawn lease id to the worker, so a later child-side
 #: handshake can claim the same lease (F-001 protocol).
 LEASE_ID_ENV = "REPOFORGE_EXECUTION_WORKER_LEASE_ID"
+#: Env var carrying the supervisor pid to the worker; the child-side claim acts
+#: only when this process is provably dead (F-001 P0).
+SUPERVISOR_PID_ENV = "REPOFORGE_SUPERVISOR_PID"
+#: Env var carrying the supervisor's process identity to the worker, so the
+#: child's binding projection still names the (dead) owner a reconciler can
+#: recognize.
+SUPERVISOR_IDENTITY_ENV = "REPOFORGE_SUPERVISOR_PROCESS_IDENTITY"
+#: Env var carrying the runtime state root to the worker, so the child-side
+#: claim reads and writes the SAME lease registry the parent's stores use --
+#: never a registry re-derived from config defaults (F-001 P0).
+STATE_ROOT_ENV = "REPOFORGE_RUNTIME_STATE_ROOT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +66,8 @@ class SubprocessExecutionWorker:
         bindings: ExecutionWorkerBindingStore,
         registrar: WorkerRegistrar,
         reaper: ProcessReaper | None = None,
+        lifecycle: WorkerLifecycleStore | None = None,
+        state_root: Path | None = None,
     ) -> None:
         self._config_path = config_path.expanduser().resolve()
         self._children: dict[int, subprocess.Popen[bytes]] = {}
@@ -61,6 +75,21 @@ class SubprocessExecutionWorker:
         self._bindings = bindings
         self._registrar = registrar
         self._reaper = reaper if reaper is not None else OsProcessReaper()
+        self._lifecycle = (
+            lifecycle
+            if lifecycle is not None
+            else WorkerLifecycleStore(
+                bindings=bindings,
+                leases=None,
+                shadow=None,
+                now_iso=None,
+                # No lease authority was injected, so this embedder persists only the
+                # binding projection (binding-only opt-out). Production always wires a
+                # lease store via bootstrap, so there the lifecycle is strict (F-010).
+                binding_only=True,
+            )
+        )
+        self._state_root = state_root.expanduser().resolve() if state_root is not None else None
 
     def start(
         self,
@@ -92,6 +121,12 @@ class SubprocessExecutionWorker:
         ]
         worker_env = dict(env)
         worker_env[LEASE_ID_ENV] = lease.lease_id
+        supervisor_identity = process_identity(os.getpid())
+        worker_env[SUPERVISOR_PID_ENV] = str(os.getpid())
+        if supervisor_identity is not None:
+            worker_env[SUPERVISOR_IDENTITY_ENV] = supervisor_identity
+        if self._state_root is not None:
+            worker_env[STATE_ROOT_ENV] = str(self._state_root)
         process: subprocess.Popen[bytes] | None = None
         try:
             with log_path.open("ab") as log:
@@ -104,9 +139,16 @@ class SubprocessExecutionWorker:
                     start_new_session=True,
                 )
             # Persist the pid the instant Popen returns: the process now has a lease AND
-            # a pid, so a crash here leaves a record a later supervisor can probe.
+            # a pid, so a crash here leaves a record a later supervisor can probe. The
+            # owner fields land here too (the supervisor already knows its own pid and
+            # identity), so a parent that dies before complete_registration still leaves
+            # a lease self-sufficient for lease-only recovery (F-001 P0).
             lease, revision = self._registrar.record_pid(
-                lease, pid=process.pid, expected_revision=revision
+                lease,
+                pid=process.pid,
+                expected_revision=revision,
+                owner_pid=os.getpid(),
+                owner_process_identity=supervisor_identity,
             )
             identity = self._establish_stable_identity(process)
             if identity is None:
@@ -170,7 +212,7 @@ class SubprocessExecutionWorker:
         process = self._children.get(child.pid)
         if process is None or process_identity(child.pid) != child.process_identity:
             self._children.pop(child.pid, None)
-            self._mark_state(child.pid, "already_gone")
+            self._apply_lifecycle(child.pid, "already_gone")
             return
         identity = read_identity(child.pid)
         start_token = identity.start_token if identity is not None else None
@@ -187,12 +229,12 @@ class SubprocessExecutionWorker:
         )
         self._children.pop(child.pid, None)
         if outcome.reaped:
-            self._mark_state(child.pid, "reclaimed" if outcome.attempted else "already_gone")
+            self._apply_lifecycle(child.pid, "reclaimed" if outcome.attempted else "already_gone")
         elif outcome.still_alive:
-            self._mark_state(child.pid, "survived_kill")
+            self._apply_lifecycle(child.pid, "survived_kill")
         else:
             # PID reuse or unproven containment without a live claim: refuse reclaimed.
-            self._mark_state(child.pid, "refused_unproven")
+            self._apply_lifecycle(child.pid, "refused_unproven")
 
     def _establish_stable_identity(self, process: subprocess.Popen[bytes]) -> str | None:
         """Wait for the worker's process identity to settle, then record it.
@@ -324,11 +366,16 @@ class SubprocessExecutionWorker:
             "the process table and reclaim it manually before starting a replacement."
         )
 
-    def _mark_state(self, pid: int, state: str) -> None:
-        if self._bindings is None:
-            return
+    def _apply_lifecycle(self, pid: int, state: str) -> None:
+        """Persist one termination outcome through the shared lifecycle service.
+
+        Normal termination must update the canonical ProcessLease and the shadow
+        exactly like the reconciler does (single authority): a worker recorded as
+        ``reclaimed`` here while its lease stayed RUNNING was the reviewed
+        split-brain. A persistence failure propagates -- the caller must never
+        believe the registry recorded a termination it did not.
+        """
         worker_id = self._worker_ids.get(pid)
         if worker_id is None:
             return
-        with contextlib.suppress(Exception):
-            self._bindings.update_state(worker_id, state)
+        self._lifecycle.apply_outcome(worker_id, state)

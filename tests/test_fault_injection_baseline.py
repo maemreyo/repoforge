@@ -174,9 +174,17 @@ class _RecordingRegistrar:
         return self.lease, Revision(1)
 
     def record_pid(
-        self, lease, *, pid: int, expected_revision: Revision
+        self,
+        lease,
+        *,
+        pid: int,
+        expected_revision: Revision,
+        pgid: int | None = None,
+        process_start_token: str | None = None,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
     ) -> tuple[ProcessLease, Revision]:
-        del expected_revision
+        del expected_revision, pgid, process_start_token, owner_pid, owner_process_identity
         self._events.append("record_pid")
         return replace(lease, pid=pid, updated_at="2026-07-29T09:26:22+00:00"), Revision(2)
 

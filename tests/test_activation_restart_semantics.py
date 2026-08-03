@@ -510,3 +510,81 @@ def test_an_undrainable_incumbent_is_never_kickstarted_into_a_race(tmp_path: Pat
     assert outcome.ok is False
     assert "race" in outcome.detail
     assert kickstarter.calls == 0
+
+
+def test_restart_fails_closed_when_the_admission_lock_is_wedged(tmp_path: Path) -> None:
+    """P1-3: a wedged admission holder must not let the incumbent be stopped."""
+    from repoforge.ports.worker_registrar import WORKER_ADMISSION_LOCK
+    from repoforge.testing import InMemoryLockManager
+
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    shared_locks = InMemoryLockManager()
+    restarter = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        locks=shared_locks,
+        admission_timeout_seconds=0.05,
+    )
+
+    with shared_locks.lock(WORKER_ADMISSION_LOCK):
+        outcome = restarter.restart()
+
+    assert outcome.ok is False
+    assert "WORKER_ADMISSION_LOCK_TIMEOUT" in outcome.detail
+    assert launcher.starts == [], "the replacement must never start under a wedged fence"
+    assert store.read().pid == 1000, "the incumbent must never be stopped"
+
+
+class _ReopenFailingEpoch:
+    """AdmissionEpochStore whose reopen cannot be durably written."""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.open_calls = 0
+
+    def read(self) -> tuple[int, str]:
+        return 1, "open"
+
+    def open_next(self) -> int:
+        self.open_calls += 1
+        raise ConfigError("REOPEN_DISK_FAILURE: simulated")
+
+    def close(self) -> int:
+        self.close_calls += 1
+        return 1
+
+
+def test_restart_reports_reopen_failure_instead_of_silently_swallowing(
+    tmp_path: Path,
+) -> None:
+    """P1-3: a stuck CLOSING admission must surface, never report a clean restart.
+
+    The replacement is live by the time the reopen is attempted (the fence must
+    stay closed while the outgoing process drains, so no dying supervisor spawns
+    into the new epoch) -- but the restart must then be reported as FAILED, never
+    as a clean success, because a CLOSING admission refuses every future worker
+    spawn.
+    """
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    epochs = _ReopenFailingEpoch()
+
+    outcome = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        admission_epochs=epochs,
+    ).restart()
+
+    assert outcome.ok is False, "a stuck admission must never be reported as success"
+    assert "WORKER_ADMISSION_REOPEN_FAILED" in outcome.detail
+    assert "REOPEN_DISK_FAILURE" in outcome.detail
+    assert epochs.close_calls == 1
+    assert epochs.open_calls == 1
+    assert launcher.starts, "the replacement is live before the reopen is attempted"

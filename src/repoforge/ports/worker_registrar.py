@@ -7,6 +7,14 @@ from typing import Protocol
 from ..domain.durable_state import Revision
 from ..domain.process_lease import ProcessLease, ProcessLeaseRole
 
+#: The one worker-admission fence every spawn path and every restarter shares.
+#: Held across the ENTIRE spawn transaction (create_intent -> record_pid ->
+#: complete_registration), and held by a restarter across final observation ->
+#: stop -> reclaim, so no spawn can slip in between a preflight and an incumbent
+#: stop (P1-3). Bounded everywhere it is acquired: a wedged holder must surface a
+#: typed fail-closed outcome, never an unbounded wait.
+WORKER_ADMISSION_LOCK = "worker-admission"
+
 
 class WorkerRegistrar(Protocol):
     """The pre-spawn intent -> RUNNING lease lifecycle a worker spawn must follow.
@@ -32,6 +40,10 @@ class WorkerRegistrar(Protocol):
         *,
         pid: int,
         expected_revision: Revision,
+        pgid: int | None = None,
+        process_start_token: str | None = None,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
     ) -> tuple[ProcessLease, Revision]: ...
 
     def complete_registration(
@@ -40,6 +52,10 @@ class WorkerRegistrar(Protocol):
         *,
         process_identity: str,
         expected_revision: Revision,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
+        release_sha: str | None = None,
+        generation: int | None = None,
     ) -> tuple[ProcessLease, Revision]: ...
 
     def abort_intent(
@@ -50,3 +66,46 @@ class WorkerRegistrar(Protocol):
         error_message: str,
         expected_revision: Revision,
     ) -> None: ...
+
+    def claim_intent(
+        self,
+        lease_id: str,
+        *,
+        process_identity: str,
+        pid: int,
+        pgid: int | None = None,
+        process_start_token: str | None = None,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
+    ) -> tuple[ProcessLease, Revision]:
+        """Child-side claim of an abandoned REGISTERED intent (F-001 P0).
+
+        Only the worker itself calls this, and only when its supervisor is
+        provably dead: the parent crashed between ``create_intent`` and
+        ``record_pid``/``complete_registration``, leaving a pid-less lease. The
+        claim advances REGISTERED -> READY with the worker's own pid and
+        identity, CAS-bound to the current revision, so a parent that did finish
+        the handshake is never clobbered.
+
+        The claim deliberately stops at READY: the durable binding projection is
+        written BETWEEN ``claim_intent`` and ``complete_claim``, so a crash after
+        the claim leaves READY-with-pid, which a later reconciler can prove and
+        reclaim from the canonical lease alone. Recovery never depends on the
+        projection (F-001 P0).
+        """
+
+    def complete_claim(
+        self,
+        lease: ProcessLease,
+        *,
+        expected_revision: Revision,
+    ) -> tuple[ProcessLease, Revision]:
+        """Child-side READY -> RUNNING acknowledgement (F-001 P0).
+
+        Runs only AFTER the durable binding projection exists, mirroring the
+        parent flow (``record_pid`` -> binding -> ``complete_registration``). A
+        crash between ``claim_intent`` and ``complete_claim`` leaves a
+        READY-with-pid lease with (or without) a binding; the containment scan
+        treats a fence lease as an in-flight claim, never a split-brain.
+        """
+        ...

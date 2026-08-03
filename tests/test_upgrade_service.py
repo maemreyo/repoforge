@@ -21,6 +21,7 @@ _FINGERPRINT = "a" * 64
 _SURFACE = "b" * 64
 _SURFACE_NEW = "c" * 64
 _CLEAN_SHA = "0123abc"
+_NEXT_SHA = "0456def"
 
 
 class _Inspector:
@@ -212,6 +213,7 @@ def _service(
     head: str = _CLEAN_SHA,
     store: RuntimeReleaseStore | None = None,
     pinned_observed: str | None = None,
+    transitions=None,
 ) -> tuple[UpgradeService, RuntimeReleaseStore, _Restarter]:
     used_store = store or RuntimeReleaseStore(tmp_path / "release-root")
     used_restarter = restarter or _Restarter()
@@ -231,6 +233,7 @@ def _service(
         clock=_Clock(),
         converge_attempts=2,
         converge_interval_seconds=0,
+        transitions=transitions,
     )
     return service, used_store, used_restarter
 
@@ -1416,3 +1419,367 @@ def test_rollback_force_unverified_is_an_explicit_escape_hatch(tmp_path: Path) -
     # the pre-swap probe, never the health-verified truthfulness of the receipt.
     receipt = store.read_receipt(result.activation_receipt)
     assert receipt is not None and receipt.converged is True
+
+
+# ---------------------------------------------------------------------------
+# F-009: the effect-owning runtime-transition coordinator is wired in.
+# ---------------------------------------------------------------------------
+
+
+def _coordinator(tmp_path: Path) -> tuple[object, object]:
+    from repoforge.application.runtime.runtime_transition_coordinator import (
+        RuntimeTransitionCoordinator,
+    )
+    from repoforge.testing import SequenceIdGenerator
+    from repoforge.testing.fakes_ext import InMemoryRuntimeTransitionStore
+
+    store = InMemoryRuntimeTransitionStore()
+    coordinator = RuntimeTransitionCoordinator(
+        transitions=store,
+        ids=SequenceIdGenerator(),
+        clock=_Clock(),
+    )
+    return coordinator, store
+
+
+def test_activation_records_and_terminalizes_the_transition_with_the_receipt(
+    tmp_path: Path,
+) -> None:
+    """A wired coordinator terminalizes journal, receipt, and transition together."""
+    from repoforge.domain.runtime_transition import is_terminal
+
+    coordinator, store = _coordinator(tmp_path)
+    service, used_store, _ = _service(tmp_path, transitions=coordinator)
+
+    result = service.upgrade(tmp_path, activate=True)
+
+    assert result.status == "activated"
+    assert used_store.read_in_flight_activation() is None
+    page = store.list_all()
+    assert len(page.records) == 1
+    assert is_terminal(page.records[0].value.status)
+
+
+def test_reconcile_terminalizes_a_transition_left_staged_by_a_crash(tmp_path: Path) -> None:
+    """Crash after the pointer swap: reconciliation completes the durable tail."""
+    from repoforge.domain.runtime_transition import RuntimeTransitionStatus, is_terminal
+
+    coordinator, store = _coordinator(tmp_path)
+    service, used_store, _ = _service(tmp_path, transitions=coordinator)
+    service.upgrade(tmp_path, activate=True)  # install + activate a first release
+    # A second activation crashes after the swap: journal + transition stay staged.
+    second, _, _ = _service(tmp_path, head=_NEXT_SHA, store=used_store, transitions=coordinator)
+    second.upgrade(tmp_path, activate=False)  # install the next release, no swap
+    journal_receipt_id = used_store.allocate_receipt_id(date_stamp="20260725")
+    transition_id = service._begin_transition(
+        kind="activate",
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        correlation_id=journal_receipt_id,
+    )
+    used_store.begin_activation(
+        receipt_id=journal_receipt_id,
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        transition_id=transition_id,
+    )
+    used_store.swap_current(_NEXT_SHA)
+    used_store.record_activation_stage("symlink_switched")
+    service._mark_effect(transition_id, status="staged")
+
+    result = service.reconcile()
+
+    assert result.status == "reconciled"
+    assert used_store.read_in_flight_activation() is None
+    crashed = store.read(transition_id)
+    assert crashed is not None
+    assert is_terminal(crashed.value.status)
+    assert crashed.value.status is RuntimeTransitionStatus.COMPLETED
+
+
+def test_ledger_create_failure_leaves_no_dead_journal(tmp_path: Path) -> None:
+    """F-009: if the transition cannot be created, nothing is journaled."""
+    from repoforge.application.runtime.runtime_transition_coordinator import (
+        RuntimeTransitionCoordinator,
+    )
+    from repoforge.testing.fakes_ext import InMemoryRuntimeTransitionStore
+
+    class _FailingStore(InMemoryRuntimeTransitionStore):
+        def create(self, transition):
+            del transition
+            raise RuntimeError("ledger create failed")
+
+    from repoforge.testing import SequenceIdGenerator
+
+    coordinator = RuntimeTransitionCoordinator(
+        transitions=_FailingStore(),
+        ids=SequenceIdGenerator(),
+        clock=_Clock(),
+    )
+    service, used_store, _ = _service(tmp_path, transitions=coordinator)
+
+    with pytest.raises(RuntimeError, match="ledger create failed"):
+        service.upgrade(tmp_path, activate=True)
+
+    # F-009: the ledger create failed BEFORE the journal was written, so there is
+    # no dead journal to strand later activations and no pointer was moved.
+    assert used_store.read_in_flight_activation() is None
+    assert used_store.current_sha() is None
+
+
+def test_ledger_terminal_save_failure_does_not_turn_success_into_failure(
+    tmp_path: Path,
+) -> None:
+    """F-009: a terminal-save failure after durable success keeps the journal."""
+    from repoforge.application.runtime.runtime_transition_coordinator import (
+        RuntimeTransitionCoordinator,
+    )
+    from repoforge.testing.fakes_ext import InMemoryRuntimeTransitionStore
+
+    class _SaveFailingStore(InMemoryRuntimeTransitionStore):
+        def save(self, transition, *, expected_revision):
+            if transition.status.value == "completed":
+                raise RuntimeError("ledger terminal save failed")
+            return super().save(transition, expected_revision=expected_revision)
+
+    from repoforge.testing import SequenceIdGenerator
+
+    coordinator = RuntimeTransitionCoordinator(
+        transitions=_SaveFailingStore(),
+        ids=SequenceIdGenerator(),
+        clock=_Clock(),
+    )
+    service, used_store, _ = _service(tmp_path, transitions=coordinator)
+
+    result = service.upgrade(tmp_path, activate=True)
+
+    # The activation is durable success: the receipt exists. The journal stays so
+    # reconciliation can complete the terminal transition -- never a command failure.
+    assert result.status == "activated"
+    assert result.activation_receipt is not None
+    assert used_store.read_receipt(result.activation_receipt) is not None
+    assert used_store.read_in_flight_activation() is not None
+
+
+def test_a_missing_transition_keeps_the_journal_and_blocks_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """F-009: a journal that names a transition the ledger lost must not clear."""
+    from repoforge.application.runtime.runtime_transition_coordinator import (
+        RuntimeTransitionCoordinator,
+    )
+    from repoforge.testing.fakes_ext import InMemoryRuntimeTransitionStore
+
+    class _ForgettingStore(InMemoryRuntimeTransitionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.forget = False
+
+        def read(self, transition_id):
+            if self.forget:
+                return None
+            return super().read(transition_id)
+
+    from repoforge.testing import SequenceIdGenerator
+
+    store = _ForgettingStore()
+    coordinator = RuntimeTransitionCoordinator(
+        transitions=store,
+        ids=SequenceIdGenerator(),
+        clock=_Clock(),
+    )
+    service, used_store, _ = _service(tmp_path, transitions=coordinator)
+    service.upgrade(tmp_path, activate=True)  # install + activate a first release
+    second, _, _ = _service(tmp_path, head=_NEXT_SHA, store=used_store, transitions=coordinator)
+    second.upgrade(tmp_path, activate=False)  # install the next release, no swap
+
+    # A crash left the journal naming a transition that no longer exists.
+    journal_receipt_id = used_store.allocate_receipt_id(date_stamp="20260725")
+    transition_id = service._begin_transition(
+        kind="activate",
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        correlation_id=journal_receipt_id,
+    )
+    assert transition_id is not None
+    used_store.begin_activation(
+        receipt_id=journal_receipt_id,
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        transition_id=transition_id,
+    )
+    used_store.swap_current(_NEXT_SHA)
+    store.forget = True
+
+    # _mark_outcome must NOT treat the missing transition as success: the receipt
+    # alone does not complete the durable tail, so the journal stays.
+    assert service._mark_outcome(transition_id, outcome="completed") is False
+    assert used_store.read_in_flight_activation() is not None
+
+
+def test_effect_marking_failure_is_not_swallowed(tmp_path: Path) -> None:
+    """F-009: a ledger write failure after a real effect must surface, not no-op."""
+    from repoforge.application.runtime.runtime_transition_coordinator import (
+        RuntimeTransitionCoordinator,
+    )
+    from repoforge.testing.fakes_ext import InMemoryRuntimeTransitionStore
+
+    class _EffectFailingStore(InMemoryRuntimeTransitionStore):
+        def save(self, transition, *, expected_revision):
+            if transition.status.value == "staged":
+                raise RuntimeError("ledger effect save failed")
+            return super().save(transition, expected_revision=expected_revision)
+
+    from repoforge.testing import SequenceIdGenerator
+
+    healthy_coordinator, _ = _coordinator(tmp_path)
+    service, used_store, _ = _service(tmp_path, transitions=healthy_coordinator)
+    service.upgrade(tmp_path, activate=True)  # install + activate a first release
+    second, _, _ = _service(
+        tmp_path, head=_NEXT_SHA, store=used_store, transitions=healthy_coordinator
+    )
+    second.upgrade(tmp_path, activate=False)  # install the next release, no swap
+
+    # The crash simulation uses a store that fails the staged effect write.
+    failing_coordinator = RuntimeTransitionCoordinator(
+        transitions=_EffectFailingStore(),
+        ids=SequenceIdGenerator(),
+        clock=_Clock(),
+    )
+    failing_service, _, _ = _service(tmp_path, transitions=failing_coordinator)
+    journal_receipt_id = used_store.allocate_receipt_id(date_stamp="20260725")
+    transition_id = failing_service._begin_transition(
+        kind="activate",
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        correlation_id=journal_receipt_id,
+    )
+    used_store.begin_activation(
+        receipt_id=journal_receipt_id,
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        transition_id=transition_id,
+    )
+    used_store.swap_current(_NEXT_SHA)
+    used_store.record_activation_stage("symlink_switched")
+
+    with pytest.raises(RuntimeError, match="ledger effect save failed"):
+        failing_service._mark_effect(transition_id, status="staged")
+
+
+def test_reconcile_fails_closed_when_the_terminal_transition_cannot_be_saved(
+    tmp_path: Path,
+) -> None:
+    """F-009: a receipt without a terminal transition is NOT a reconciled state."""
+    from repoforge.application.runtime.runtime_transition_coordinator import (
+        RuntimeTransitionCoordinator,
+    )
+    from repoforge.testing.fakes_ext import InMemoryRuntimeTransitionStore
+
+    class _OutcomeFailingStore(InMemoryRuntimeTransitionStore):
+        def save(self, transition, *, expected_revision):
+            if transition.status.value == "completed":
+                raise RuntimeError("ledger terminal save failed")
+            return super().save(transition, expected_revision=expected_revision)
+
+    from repoforge.testing import SequenceIdGenerator
+
+    healthy_coordinator, _ = _coordinator(tmp_path)
+    service, used_store, _ = _service(tmp_path, transitions=healthy_coordinator)
+    service.upgrade(tmp_path, activate=True)  # install + activate a first release
+    second, _, _ = _service(
+        tmp_path, head=_NEXT_SHA, store=used_store, transitions=healthy_coordinator
+    )
+    second.upgrade(tmp_path, activate=False)  # install the next release, no swap
+
+    # The crash simulation uses a store that fails the terminal "completed" save.
+    failing_coordinator = RuntimeTransitionCoordinator(
+        transitions=_OutcomeFailingStore(),
+        ids=SequenceIdGenerator(),
+        clock=_Clock(),
+    )
+    failing_service, _, _ = _service(tmp_path, transitions=failing_coordinator)
+    journal_receipt_id = used_store.allocate_receipt_id(date_stamp="20260725")
+    transition_id = failing_service._begin_transition(
+        kind="activate",
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        correlation_id=journal_receipt_id,
+    )
+    used_store.begin_activation(
+        receipt_id=journal_receipt_id,
+        from_sha=_CLEAN_SHA,
+        to_sha=_NEXT_SHA,
+        transition_id=transition_id,
+    )
+    used_store.swap_current(_NEXT_SHA)
+    used_store.record_activation_stage("symlink_switched")
+    failing_service._mark_effect(transition_id, status="staged")
+
+    with pytest.raises(ConfigError, match="ACTIVATION_RECONCILIATION_INCOMPLETE"):
+        failing_service.reconcile()
+    # The journal stays: reconciliation must be able to retry the tail.
+    assert used_store.read_in_flight_activation() is not None
+
+
+def test_reconcile_recovers_a_stranded_pre_journal_transition(tmp_path: Path) -> None:
+    """F-009: the ledger is the recovery authority -- a PREPARED transition with no
+    journal is an aborted attempt and is terminalized, not invisible."""
+    from repoforge.domain.runtime_transition import (
+        RuntimeTransitionStatus,
+        is_terminal_failure,
+    )
+
+    coordinator, store = _coordinator(tmp_path)
+    service, used_store, _ = _service(tmp_path, transitions=coordinator)
+
+    # Simulate a crash between _begin_transition and begin_activation: a PREPARED
+    # transition exists, no journal was ever written, no pointer moved.
+    journal_receipt_id = used_store.allocate_receipt_id(date_stamp="20260725")
+    transition_id = service._begin_transition(
+        kind="activate",
+        from_sha=None,
+        to_sha=_NEXT_SHA,
+        correlation_id=journal_receipt_id,
+    )
+    assert used_store.read_in_flight_activation() is None
+
+    result = service.reconcile()
+
+    assert result.status == "reconciled"
+    assert "pre-journal" in result.detail
+    assert used_store.current_sha() is None, "no pointer was ever moved"
+    recovered = store.read(transition_id)
+    assert recovered is not None
+    assert is_terminal_failure(recovered.value.status)
+    assert recovered.value.status is RuntimeTransitionStatus.ACTIVATION_FAILED
+    # A terminalized failure must never be listed active again: recovery would loop.
+    assert coordinator.reconcile_active() == ()
+
+
+def test_reconcile_fails_closed_when_a_past_prepared_transition_has_no_journal(
+    tmp_path: Path,
+) -> None:
+    """F-009: a transition past PREPARED with no journal is journal loss -- effects
+    ran, so the pointer state cannot be guessed."""
+    from repoforge.domain.runtime_transition import RuntimeTransitionStatus
+
+    coordinator, store = _coordinator(tmp_path)
+    service, used_store, _ = _service(tmp_path, transitions=coordinator)
+
+    journal_receipt_id = used_store.allocate_receipt_id(date_stamp="20260725")
+    transition_id = service._begin_transition(
+        kind="activate",
+        from_sha=None,
+        to_sha=_NEXT_SHA,
+        correlation_id=journal_receipt_id,
+    )
+    service._mark_effect(transition_id, status="staged")
+    assert used_store.read_in_flight_activation() is None
+
+    with pytest.raises(ConfigError, match="ACTIVATION_RECONCILIATION_REQUIRED"):
+        service.reconcile()
+    # The stranded transition is untouched: no guesswork about effects that ran.
+    stranded = store.read(transition_id)
+    assert stranded is not None
+    assert stranded.value.status is RuntimeTransitionStatus.STAGED

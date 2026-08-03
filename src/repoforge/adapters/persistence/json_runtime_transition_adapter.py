@@ -12,8 +12,11 @@ import re
 from pathlib import Path
 
 from ...domain.durable_state import Revision, SchemaVersion, StateCodec, StateEnvelope, StatePage
+from ...domain.errors import ConfigError
 from ...domain.runtime_transition import (
     RuntimeTransition,
+    is_terminal,
+    is_terminal_failure,
     runtime_transition_from_payload,
     runtime_transition_payload,
 )
@@ -92,3 +95,39 @@ class JsonRuntimeTransitionAdapter:
             scan_truncated=page.scan_truncated,
             unreadable_record_ids=page.unreadable_record_ids,
         )
+
+    def get_active_by_correlation(
+        self, correlation_id: str, *, max_records: int = 100
+    ) -> StateEnvelope[RuntimeTransition] | None:
+        """The single non-terminal transition for one correlation id.
+
+        Transition ids are random, so they carry no ordering information; the
+        "latest" cannot be derived by comparing ids or revisions across attempts.
+        The coordinator instead enforces a stronger invariant -- at most one
+        non-terminal transition per correlation -- and this lookup returns that
+        one. It fails closed (raises) when the invariant is violated or the scan
+        cannot prove it held, because answering with a guess would let
+        reconciliation terminalize the wrong attempt.
+        """
+        page = self._records.list_records(max_records=max_records)
+        if page.scan_truncated or page.unreadable_record_ids:
+            raise ConfigError(
+                "RUNTIME_TRANSITION_LOOKUP_INCOMPLETE: the transition scan was "
+                "truncated or contained unreadable records, so the active "
+                f"transition for correlation {correlation_id} cannot be proven"
+            )
+        active = [
+            item
+            for item in page.records
+            if item.value.correlation_id == correlation_id
+            and not is_terminal(item.value.status)
+            and not is_terminal_failure(item.value.status)
+        ]
+        if len(active) > 1:
+            raise ConfigError(
+                "RUNTIME_TRANSITION_INVARIANT_VIOLATED: more than one non-terminal "
+                f"transition exists for correlation {correlation_id} ("
+                + ", ".join(item.record_id for item in active)
+                + ")"
+            )
+        return active[0] if active else None

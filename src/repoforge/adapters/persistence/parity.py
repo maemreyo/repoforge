@@ -30,6 +30,8 @@ class ParityReport:
     revision_mismatch: tuple[str, ...]
     json_scan_complete: bool
     json_unreadable_ids: tuple[str, ...]
+    shadow_scan_complete: bool
+    shadow_unreadable_ids: tuple[str, ...]
 
     @property
     def in_sync(self) -> bool:
@@ -42,6 +44,8 @@ class ParityReport:
             )
             and self.json_scan_complete
             and not self.json_unreadable_ids
+            and self.shadow_scan_complete
+            and not self.shadow_unreadable_ids
         )
 
     def as_dict(self) -> dict[str, object]:
@@ -54,6 +58,8 @@ class ParityReport:
             "revision_mismatch": list(self.revision_mismatch),
             "json_scan_complete": self.json_scan_complete,
             "json_unreadable_ids": list(self.json_unreadable_ids),
+            "shadow_scan_complete": self.shadow_scan_complete,
+            "shadow_unreadable_ids": list(self.shadow_unreadable_ids),
             "in_sync": self.in_sync,
         }
 
@@ -83,6 +89,8 @@ def _lease_content_digest(lease: ProcessLease) -> str:
 def compare_lease_parity(
     leases: JsonProcessLeaseAdapter,
     shadow: SqliteLeaseStore,
+    *,
+    max_records: int = 2_000,
 ) -> ParityReport:
     """Compare authoritative JSON leases against shadow leases.
 
@@ -90,8 +98,13 @@ def compare_lease_parity(
     on both membership and logical content. A divergence means a write reached
     only one side, or a final transition failed on the shadow -- evidence for
     the operator that the mirror lagged behind.
+
+    Both sides are scanned with the same ``max_records`` bound, and ``in_sync``
+    fails closed unless *each* side reports a complete, readable scan: a shadow
+    row beyond the bound or a malformed shadow row is invisible to the diff, so
+    either must keep the report out of sync (F-008).
     """
-    page = leases.list_page()
+    page = leases.list_page(max_records=max_records)
     json_by_id: dict[str, tuple[ProcessLease, Revision]] = {}
     for lease in page.records:
         envelope = leases.read(lease.lease_id)
@@ -99,8 +112,9 @@ def compare_lease_parity(
             continue
         json_by_id[lease.lease_id] = (envelope.value, envelope.revision)
 
+    shadow_page = shadow.list_envelopes_page(max_records=max_records)
     shadow_by_id: dict[str, tuple[ProcessLease, Revision]] = {
-        lease.lease_id: (lease, revision) for lease, revision in shadow.list_all()
+        lease.lease_id: (lease, revision) for lease, revision in shadow_page.records
     }
 
     json_ids = set(json_by_id)
@@ -126,6 +140,8 @@ def compare_lease_parity(
         revision_mismatch=tuple(revision_mismatch),
         json_scan_complete=page.scan_complete,
         json_unreadable_ids=page.unreadable_ids,
+        shadow_scan_complete=shadow_page.scan_complete,
+        shadow_unreadable_ids=shadow_page.unreadable_ids,
     )
 
 
@@ -145,14 +161,31 @@ def import_active_bindings(
     """
     from ...domain.process_lease import ProcessLeaseStatus
 
+    #: Imported leases must keep the SAME durable reality as the binding they
+    #: came from, or the containment matrix (F-010) reads every import as a
+    #: split-brain: a refused_unproven binding with a RUNNING lease diverges, as
+    #: does a survived_kill binding with a RUNNING lease.
+    _STATUS_BY_BINDING_STATE = {
+        "running": ProcessLeaseStatus.RUNNING,
+        "legacy_unproven": ProcessLeaseStatus.RUNNING,
+        "refused_unproven": ProcessLeaseStatus.UNPROVEN,
+        "survived_kill": ProcessLeaseStatus.KILLED,
+    }
+
     imported = 0
     for binding in _active_bindings(bindings):
         lease = ProcessLease(
             lease_id=binding.worker_id,
             role=ProcessLeaseRole.EXECUTION_DAEMON,
-            status=ProcessLeaseStatus.RUNNING,
+            status=_STATUS_BY_BINDING_STATE[binding.state],
             process_identity=binding.process_start_token,
             pid=binding.pid,
+            pgid=binding.pgid,
+            process_start_token=binding.process_start_token,
+            owner_pid=binding.supervisor_pid,
+            owner_process_identity=binding.supervisor_process_identity,
+            release_sha=binding.release_sha,
+            generation=binding.generation,
             started_at=binding.started_at,
             heartbeat_at=binding.started_at,
             correlation_id=binding.correlation_id,
