@@ -35,6 +35,24 @@ class WorkspaceRemover:
 
         def op() -> WorkspaceRemoveResult:
             with self.ctx.locks.lock(c.workspace_id):
+                # An attached-shared workspace never had a RepoForge-created worktree to
+                # begin with -- it operates directly on a checkout the operator already
+                # owns. Removal can forget the registry entry, but it must never call
+                # into git against a checkout it did not create, so this refusal runs
+                # before every other check and before the effect boundary opens.
+                if not record.kind.owns_worktree_lifecycle:
+                    raise WorkspaceError(
+                        "ATTACHED_WORKSPACE_NOT_REMOVABLE: this workspace's checkout is "
+                        "externally owned; RepoForge does not manage its filesystem "
+                        "lifecycle and will not remove it",
+                        safe_next_action=(
+                            "If you want RepoForge to stop tracking this checkout, that is "
+                            "a detach operation, not workspace_remove."
+                        ),
+                        unchanged_state=(
+                            "The checkout, its branch, and the workspace registry were not modified.",
+                        ),
+                    )
                 try:
                     self.ctx.git.ensure_clean(path, context="workspace removal")
                 except WorkspaceError as exc:
@@ -69,7 +87,7 @@ class WorkspaceRemover:
                 # This refusal deliberately runs BEFORE `boundary.begin()`: the boundary
                 # means "an effect may have happened", so opening it and then raising would
                 # write a receipt claiming a started effect for a call that touched nothing.
-                delete_branch = c.delete_local_branch and not record.metadata.get("adopted_branch")
+                delete_branch = c.delete_local_branch and record.kind.owns_branch_lifecycle
                 if c.delete_local_branch and not delete_branch:
                     raise WorkspaceError(
                         f"ADOPTED_BRANCH_NOT_DELETABLE: {record.branch!r} was adopted, not "

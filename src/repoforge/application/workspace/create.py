@@ -7,7 +7,7 @@ from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
 from ...domain.policy import slugify, validate_adopted_branch, validate_branch
-from ...domain.workspace import WorkspaceRecord, normalize_issue_ids
+from ...domain.workspace import WorkspaceKind, WorkspaceRecord, normalize_issue_ids
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
 from ..idempotency import IdempotencyEffectBoundary
@@ -141,7 +141,7 @@ class WorkspaceCreator:
                 self.ctx.git.head_sha(destination),
                 next_step,
                 tuple(existing.metadata.get("issue_ids", ())),
-                adopted_branch=bool(existing.metadata.get("adopted_branch")),
+                adopted_branch=existing.kind is WorkspaceKind.ADOPTED_WORKTREE,
                 warnings=warnings,
             )
 
@@ -185,10 +185,6 @@ class WorkspaceCreator:
                     "commit_identity_config_digest": commit_config.digest,
                     "commit_identity_config_snapshot": commit_config.safe_payload(),
                 }
-                if adopt:
-                    # Durable, because removal has to know: deleting an adopted branch
-                    # would destroy work this workspace did not create.
-                    metadata["adopted_branch"] = True
                 if issue_ids:
                     metadata["issue_ids"] = list(issue_ids)
                 if key_hash:
@@ -202,6 +198,9 @@ class WorkspaceCreator:
                     repo.remote,
                     self.ctx.clock.now_iso(),
                     metadata=metadata,
+                    kind=WorkspaceKind.ADOPTED_WORKTREE
+                    if adopt
+                    else WorkspaceKind.MANAGED_WORKTREE,
                 )
                 self.ctx.store.save(record)
             except Exception as exc:

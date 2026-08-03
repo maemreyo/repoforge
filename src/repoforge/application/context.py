@@ -396,15 +396,16 @@ class ApplicationContext:
                     "isolated workspace for the other branch."
                 ),
             )
-        # Every workspace tool passes through here, so this is where an adopted branch is
-        # either honoured or silently unusable: the ai/* prefix rule would refuse the very
-        # branch the operator asked for on EVERY subsequent call, not just at creation.
-        # The rest of the validation -- protected branches, ref safety -- still applies,
-        # and the registry (not the request) decides which branches count as adopted.
-        if record.metadata.get("adopted_branch"):
-            validate_adopted_branch(branch, repo)
-        else:
+        # Every workspace tool passes through here, so this is where an adopted or
+        # attached branch is either honoured or silently unusable: the ai/* prefix rule
+        # would refuse the very branch the operator asked for on EVERY subsequent call,
+        # not just at creation. The rest of the validation -- protected branches, ref
+        # safety -- still applies, and the registry (not the request) decides which
+        # branches count as operator-named.
+        if record.kind.naming_convention_enforced:
             validate_branch(branch, repo)
+        else:
+            validate_adopted_branch(branch, repo)
         return (record, repo, path)
 
     def record_metric(
