@@ -533,8 +533,12 @@ class InMemoryWorkerRegistrar:
         *,
         pid: int,
         expected_revision: Revision,
+        pgid: int | None = None,
+        process_start_token: str | None = None,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
     ) -> tuple[ProcessLease, Revision]:
-        del expected_revision
+        del expected_revision, pgid, process_start_token, owner_pid, owner_process_identity
         return replace(lease, pid=pid), Revision(2)
 
     def complete_registration(
@@ -543,8 +547,14 @@ class InMemoryWorkerRegistrar:
         *,
         process_identity: str,
         expected_revision: Revision,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
+        release_sha: str | None = None,
+        generation: int | None = None,
+        process_start_token: str | None = None,
     ) -> tuple[ProcessLease, Revision]:
-        del expected_revision
+        del expected_revision, owner_pid, owner_process_identity, release_sha
+        del generation, process_start_token
         self.completed.append(lease.lease_id)
         return (
             replace(
@@ -564,6 +574,41 @@ class InMemoryWorkerRegistrar:
         expected_revision: Revision,
     ) -> None:
         del lease, error_code, error_message, expected_revision
+
+    def claim_intent(
+        self,
+        lease_id: str,
+        *,
+        process_identity: str,
+        pid: int,
+        pgid: int | None = None,
+        process_start_token: str | None = None,
+        owner_pid: int | None = None,
+        owner_process_identity: str | None = None,
+    ) -> tuple[ProcessLease, Revision]:
+        del lease_id, pgid, process_start_token, owner_pid, owner_process_identity
+        return (
+            replace(
+                self.lease,
+                status=ProcessLeaseStatus.READY,
+                pid=pid,
+                process_identity=process_identity,
+            ),
+            Revision(3),
+        )
+
+    def complete_claim(
+        self,
+        lease: ProcessLease,
+        *,
+        expected_revision: Revision,
+    ) -> tuple[ProcessLease, Revision]:
+        del expected_revision
+        self.completed.append(lease.lease_id)
+        return (
+            replace(lease, status=ProcessLeaseStatus.RUNNING),
+            Revision(4),
+        )
 
 
 class NullCommitIdentityGateway:

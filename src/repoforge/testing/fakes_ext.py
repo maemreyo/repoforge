@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from ..domain.durable_state import Revision, SchemaVersion, StateEnvelope, StatePage
-from ..domain.process_lease import ProcessLease
+from ..domain.process_lease import ACTIVE_LEASE_STATUSES, ProcessLease, ProcessLeaseStatus
 from ..domain.runtime_transition import RuntimeTransition
-from ..ports.process_lease_store import ProcessLeaseStore  # noqa: F401
+from ..ports.process_lease_store import ProcessLeasePage, ProcessLeaseStore  # noqa: F401
 from ..ports.runtime_transition_store import RuntimeTransitionStore  # noqa: F401
 
 __all__ = [
@@ -21,6 +21,7 @@ class InMemoryProcessLeaseStore:
 
     def __init__(self) -> None:
         self._records: dict[str, tuple[ProcessLease, Revision]] = {}
+        self._archived: dict[str, tuple[ProcessLease, Revision]] = {}
         self._next_revision: int = 1
 
     def _next(self) -> Revision:
@@ -73,6 +74,59 @@ class InMemoryProcessLeaseStore:
         return StatePage(
             records=tuple(self._envelope(*item) for item in page),
             scan_truncated=len(all_records) > max_records,
+        )
+
+    def list_page(
+        self,
+        *,
+        role: object | None = None,
+        max_records: int = 2_000,
+    ) -> ProcessLeasePage:
+        from ..domain.process_lease import ProcessLeaseRole
+
+        records = tuple(
+            lease
+            for lease, _revision in self._records.values()
+            if role is None or lease.role is role or lease.role is ProcessLeaseRole(role)
+        )
+        return self._page(records, max_records=max_records)
+
+    def list_active_page(
+        self,
+        *,
+        role: object | None = None,
+        max_records: int = 2_000,
+    ) -> ProcessLeasePage:
+        from ..domain.process_lease import ProcessLeaseRole
+
+        records = tuple(
+            lease
+            for lease, _revision in self._records.values()
+            if lease.status in ACTIVE_LEASE_STATUSES
+            and (role is None or lease.role is role or lease.role is ProcessLeaseRole(role))
+        )
+        return self._page(records, max_records=max_records)
+
+    def collect_terminal(self, *, max_records: int = 5_000) -> int:
+        terminal = [
+            lease_id
+            for lease_id, (lease, _revision) in self._records.items()
+            if lease.status in {ProcessLeaseStatus.TERMINATED, ProcessLeaseStatus.ARCHIVED}
+        ]
+        removed = 0
+        for lease_id in terminal[:max_records]:
+            lease, revision = self._records.pop(lease_id)
+            self._archived[lease_id] = (lease, revision)
+            removed += 1
+        return removed
+
+    @staticmethod
+    def _page(records: tuple[ProcessLease, ...], *, max_records: int) -> ProcessLeasePage:
+        ordered = tuple(sorted(records, key=lambda lease: lease.lease_id))
+        return ProcessLeasePage(
+            records=ordered[:max_records],
+            scan_complete=len(ordered) <= max_records,
+            unreadable_ids=(),
         )
 
     def delete(self, lease_id: str, *, expected_revision: Revision) -> bool:
@@ -162,3 +216,27 @@ class InMemoryRuntimeTransitionStore:
             records=tuple(self._envelope(*item) for item in page),
             scan_truncated=len(sorted_matching) > max_records,
         )
+
+    def get_active_by_correlation(
+        self, correlation_id: str, *, max_records: int = 100
+    ) -> StateEnvelope[RuntimeTransition] | None:
+        from ..domain.errors import ConfigError
+        from ..domain.runtime_transition import is_terminal, is_terminal_failure
+
+        matching = [
+            self._envelope(txn, rev)
+            for txn, rev in self._records.values()
+            if txn.correlation_id == correlation_id
+            and not is_terminal(txn.status)
+            and not is_terminal_failure(txn.status)
+        ]
+        matching.sort(key=lambda item: item.record_id)
+        if len(matching) > 1:
+            raise ConfigError(
+                "RUNTIME_TRANSITION_INVARIANT_VIOLATED: more than one non-terminal "
+                f"transition for correlation {correlation_id} ("
+                + ", ".join(item.record_id for item in matching[:8])
+                + ")"
+            )
+        page = matching[:max_records]
+        return page[0] if page else None

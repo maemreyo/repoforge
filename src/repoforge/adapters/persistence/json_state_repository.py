@@ -241,6 +241,19 @@ class JsonStateRepository(Generic[T]):
             self._write(path, self._encode(envelope))
         return envelope
 
+    def list_record_ids(self, *, max_records: int, offset: int = 0) -> tuple[tuple[str, ...], bool]:
+        """Raw record ids in the collection, without decoding.
+
+        Lets a caller (e.g. the process-lease adapter's active scan) enumerate the
+        collection once and filter by record content, while keeping the decode
+        sweep bounded by ``max_records``. ``offset`` pages the enumeration so a
+        caller can skip records it does not care about (e.g. terminal history)
+        without counting them against its completeness signal.
+        """
+        if not isinstance(max_records, int) or isinstance(max_records, bool) or max_records <= 0:
+            raise self._error("max_records must be a positive integer", ErrorCode.STATE_INVALID)
+        return self._files.list_ids(pattern="*.json", max_records=max_records, offset=offset)
+
     def list_records(self, *, max_records: int) -> StatePage[T]:
         if (
             not isinstance(max_records, int)

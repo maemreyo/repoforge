@@ -1057,6 +1057,13 @@ def _process_lease(tmp_path: Path) -> tuple[object, object]:
         status=ProcessLeaseStatus.UNPROVEN,
         process_identity=_SHA,
         pid=4321,
+        pgid=4321,
+        process_start_token="worker-start-token",
+        owner_pid=4320,
+        owner_process_identity=_SHA,
+        release_sha="0123abc",
+        generation=12,
+        admission_epoch=7,
         started_at="2026-07-29T09:26:21+00:00",
         heartbeat_at="2026-07-29T09:30:00+00:00",
         correlation_id="e" * 24,
@@ -1092,6 +1099,9 @@ def _runtime_transition(tmp_path: Path) -> tuple[object, object]:
         error_code="HEALTH_FAILED",
         error_message="Runtime did not report the target generation in time",
         previous_transition_id="tran-" + "b" * 24,
+        kind="rollback",
+        from_sha="a" * 64,
+        to_sha="b" * 64,
     )
     store.create(written)
     return written, _value(store.read(written.transition_id))

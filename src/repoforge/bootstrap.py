@@ -201,6 +201,7 @@ from .application.runtime.activation import GenerationActivator
 from .application.runtime.activation_journal import RuntimeActivationJournal
 from .application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
 from .application.runtime.supervisor import RuntimeSupervisor
+from .application.runtime.worker_lifecycle import WorkerLifecycleStore
 from .application.runtime.worker_registrar import WorkerRegistrar
 from .application.tasks import TaskCapsuleService
 from .application.workflow import (
@@ -304,6 +305,7 @@ from .ports import (
     WorkspacePublicationService,
     WorkspaceStore,
 )
+from .ports.admission_epoch import AdmissionEpochStore
 from .ports.auth_discovery import NamedAccountDiscovery, SshAliasDiscovery
 from .ports.auth_inspection import RepositoryObservationTarget
 from .ports.external_mutation_ledger import ExternalMutationLedger
@@ -313,6 +315,7 @@ from .ports.filesystem_transaction import (
 from .ports.issue_graph_proposal_store import IssueGraphProposalStore
 from .ports.issue_graph_publication_store import IssueGraphPublicationStore
 from .ports.issue_mutation import IssueMutationGateway
+from .ports.runtime_transition_coordinator import RuntimeTransitionCoordinator
 
 
 @dataclass(frozen=True, slots=True)
@@ -1178,12 +1181,22 @@ def build_lease_shadow_store(state_root: Path) -> SqliteLeaseStore:
     return SqliteLeaseStore(state_root / "runtime-leases-shadow.db")
 
 
+def build_admission_epoch_store(state_root: Path) -> AdmissionEpochStore:
+    """The durable worker-admission epoch shared by registrar and restarter (P1-3)."""
+    from .adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+
+    return JsonAdmissionEpochStore(state_root)
+
+
 def build_worker_registrar(state_root: Path) -> WorkerRegistrar:
     """The pre-spawn worker registrar: authoritative JSON lease + shadow mirror.
 
     The JSON ProcessLease store is authoritative for the intent -> running lease
-    lifecycle (F-001); the SQLite shadow mirrors it for parity checking.
+    lifecycle (F-001); the SQLite shadow mirrors it for parity checking. The
+    durable admission epoch (P1-3) is shared with the restarter so a spawn cannot
+    begin once the restarter has fenced admission.
     """
+    from .adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
     from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
 
     return WorkerRegistrar(
@@ -1191,11 +1204,37 @@ def build_worker_registrar(state_root: Path) -> WorkerRegistrar:
         ids=id_generator(),
         clock=system_clock(),
         shadow=build_lease_shadow_store(state_root),
+        epochs=JsonAdmissionEpochStore(state_root),
+        # P1-3: the same lock manager the restarter receives, so the registrar's
+        # OPEN check + intent create and the restarter's fence -> stop are
+        # mutually exclusive across processes.
+        locks=build_lock_manager(state_root),
+    )
+
+
+def build_worker_lifecycle_store(state_root: Path) -> WorkerLifecycleStore:
+    """The shared worker-lifecycle outcome store (single authority, F-010).
+
+    Normal termination and startup reconciliation both apply reaping outcomes
+    through this one service so the canonical ProcessLease, the binding
+    projection, and the SQLite shadow can never diverge.
+    """
+    from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
+    from .application.runtime.worker_lifecycle import WorkerLifecycleStore
+
+    bindings = build_execution_worker_binding_store(state_root)
+    leases = JsonProcessLeaseAdapter(state_root, build_lock_manager(state_root))
+    return WorkerLifecycleStore(
+        bindings=bindings,
+        leases=leases,
+        shadow=build_lease_shadow_store(state_root),
+        now_iso=system_clock().now_iso,
     )
 
 
 def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconciler:
     """Reclaim orphaned execution workers of departed releases before a new start."""
+    from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
     from .adapters.runtime.state_store import process_identity
     from .adapters.subprocess.os_process_reaper import OsProcessReaper
     from .adapters.subprocess.process_tree import (
@@ -1204,19 +1243,31 @@ def build_execution_worker_reconciler(state_root: Path) -> ExecutionWorkerReconc
         read_identity,
     )
     from .application.runtime.execution_worker_reconciler import ExecutionWorkerReconciler
+    from .application.runtime.worker_lifecycle import WorkerLifecycleStore
 
+    bindings = build_execution_worker_binding_store(state_root)
+    leases = JsonProcessLeaseAdapter(state_root, build_lock_manager(state_root))
     return ExecutionWorkerReconciler(
-        bindings=build_execution_worker_binding_store(state_root),
+        bindings=bindings,
         reaper=OsProcessReaper(),
         owner_identity_reader=process_identity,
         command_line_reader=read_command_line,
         identity_reader=read_identity,
         process_group_gone=lambda pgid: group_has_live_member(pgid) is False,
+        leases=leases,
+        now_iso=system_clock().now_iso,
+        lifecycle=WorkerLifecycleStore(
+            bindings=bindings,
+            leases=leases,
+            shadow=build_lease_shadow_store(state_root),
+            now_iso=system_clock().now_iso,
+        ),
     )
 
 
 def build_execution_worker_report_section(state_root: Path) -> dict[str, object]:
     """Execution-worker evidence for `rf doctor` / `rf runtime ls`, read-only."""
+    from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
     from .adapters.runtime.state_store import process_identity
     from .adapters.subprocess.process_tree import (
         group_has_live_member,
@@ -1232,6 +1283,7 @@ def build_execution_worker_report_section(state_root: Path) -> dict[str, object]
         command_line_reader=read_command_line,
         identity_reader=read_identity,
         process_group_gone=lambda pgid: group_has_live_member(pgid) is False,
+        leases=JsonProcessLeaseAdapter(state_root, build_lock_manager(state_root)),
     ).as_dict()
 
 
@@ -1285,6 +1337,13 @@ def build_upgrade_service(
             # The supervisor records worker bindings under the config state root (the
             # same root the runtime record lives in); the restarter must read THAT store.
             worker_reconciler=build_execution_worker_reconciler(runtime_record_path.parent),
+            # P1-3: the same durable admission epoch the registrar consults, so the
+            # restarter's fence is visible to every spawn path.
+            admission_epochs=build_admission_epoch_store(runtime_record_path.parent),
+            # P1-3: the SAME lock manager the registrar receives (same state root),
+            # so the restarter's fence -> final observation -> stop -> reopen window
+            # and the registrar's OPEN check + intent create are mutually exclusive.
+            locks=build_lock_manager(runtime_record_path.parent),
         ),
         observer=RuntimeRecordReleaseObserver(
             runtime=runtime_store, releases_root=store.root / "releases"
@@ -1293,6 +1352,9 @@ def build_upgrade_service(
         health_probe=SupervisorHealthProbe(control_client, correlation_id=correlation_id),
         sleeper=sleeper,
         locks=build_lock_manager(store.root / "runtime"),
+        # F-009: the effect-owning runtime-transition coordinator, so the activation
+        # ledger is the recovery authority wired into every upgrade path.
+        transitions=build_runtime_transition_coordinator(store.root / "runtime"),
         # Retention decides from pointers and recency, which says nothing about what is
         # running, so prune consults the process table before deleting a release tree.
         release_processes=(
@@ -1300,6 +1362,22 @@ def build_upgrade_service(
             if inspect_release_processes
             else None
         ),
+    )
+
+
+def build_runtime_transition_coordinator(state_root: Path) -> RuntimeTransitionCoordinator:
+    """The effect-owning runtime-transition coordinator (F-009)."""
+    from .adapters.persistence.json_runtime_transition_adapter import (
+        JsonRuntimeTransitionAdapter,
+    )
+    from .application.runtime.runtime_transition_coordinator import (
+        RuntimeTransitionCoordinator as _Coordinator,
+    )
+
+    return _Coordinator(
+        transitions=JsonRuntimeTransitionAdapter(state_root, build_lock_manager(state_root)),
+        ids=id_generator(),
+        clock=system_clock(),
     )
 
 
@@ -1999,6 +2077,56 @@ def _agent_secret_from_file() -> dict[str, str]:
     return {AGENT_SECRET_KEY: secret}
 
 
+def _claim_child_lease_if_spawned(configs: ConfigurationStore, generation: int) -> int | None:
+    """Child-side handshake for a worker spawned with a pre-spawn lease (F-001).
+
+    Returns an exit code when the worker must not start working (superseded or
+    lease conflict), None to continue. Runs only when the parent passed the
+    lease id via env; a directly-launched worker has no lease to claim.
+    """
+    from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
+    from .adapters.runtime.execution_worker import (
+        LEASE_ID_ENV,
+        STATE_ROOT_ENV,
+        SUPERVISOR_IDENTITY_ENV,
+        SUPERVISOR_PID_ENV,
+    )
+    from .adapters.runtime.state_store import process_identity
+    from .adapters.subprocess.process_tree import read_identity
+    from .application.runtime.child_lease_claim import claim_child_lease
+
+    lease_id = os.environ.get(LEASE_ID_ENV, "")
+    if not lease_id:
+        return None
+    try:
+        supervisor_pid = int(os.environ.get(SUPERVISOR_PID_ENV, "0") or 0)
+    except ValueError:
+        supervisor_pid = 0
+    supervisor_identity = os.environ.get(SUPERVISOR_IDENTITY_ENV, "")
+    # The parent passes the exact state root it registered the lease under; fall
+    # back to the config-derived root only when no parent supplied one.
+    root = Path(os.environ.get(STATE_ROOT_ENV, "") or configs.root)
+    own_identity = process_identity(os.getpid())
+    proc_identity = read_identity(os.getpid())
+    claim = claim_child_lease(
+        leases=JsonProcessLeaseAdapter(root, build_lock_manager(root)),
+        registrar=build_worker_registrar(root),
+        bindings=build_execution_worker_binding_store(root),
+        lease_id=lease_id,
+        supervisor_pid=supervisor_pid,
+        supervisor_process_identity=supervisor_identity,
+        generation=generation,
+        release_sha=os.environ.get("REPOFORGE_RUNNING_RELEASE_SHA"),
+        identity=own_identity,
+        start_token=proc_identity.start_token if proc_identity is not None else None,
+        now=system_clock().now_iso(),
+        supervisor_identity_reader=process_identity,
+    )
+    if claim.exit_code is not None:
+        return claim.exit_code
+    return None
+
+
 def run_execution_worker(config_path: Path, *, generation: int) -> int:
     """Run the generation-bound durable execution loop in its own process."""
     import signal
@@ -2014,6 +2142,9 @@ def run_execution_worker(config_path: Path, *, generation: int) -> int:
         raise ConfigError("Execution worker generation must be positive")
     config_path = config_path.expanduser().resolve()
     configs = build_configuration_store(config_path)
+    claim_exit = _claim_child_lease_if_spawned(configs, generation)
+    if claim_exit is not None:
+        return claim_exit
     resolved_path = configs.resolved_path(generation)
     config = load_config(resolved_path)
     application = build_application(config, config_generation=generation)
@@ -2144,6 +2275,8 @@ def run_runtime_worker(
             config_path,
             bindings=build_execution_worker_binding_store(root),
             registrar=build_worker_registrar(root),
+            lifecycle=build_worker_lifecycle_store(root),
+            state_root=root,
         ),
         execution_worker_log_path=root / "execution-worker.log",
         preflight=validate_generated_contract_identity,

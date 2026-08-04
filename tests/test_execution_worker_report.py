@@ -113,6 +113,7 @@ def _report(
     command_lines: _CommandLines,
     tokens: _Tokens,
     group_gone=None,
+    leases=None,
 ) -> ExecutionWorkerReport:
     return build_execution_worker_report(
         bindings=bindings,
@@ -121,6 +122,7 @@ def _report(
         command_line_reader=command_lines,
         identity_reader=tokens,
         process_group_gone=group_gone,
+        leases=leases,
     )
 
 
@@ -351,4 +353,173 @@ def test_report_flags_unprovable_containment_as_unsafe(tmp_path) -> None:
 
     assert report.containment_unproven is True
     assert report.reclamation_safe is False
+
+
+def test_report_surfaces_a_binding_less_live_lease_concern(tmp_path) -> None:
+    """Doctor must see an authoritative lease the binding projection does not know.
+
+    A binding-less READY/RUNNING ProcessLease is a real worker: the authoritative
+    lease store knows it, the binding table does not. The report lists it as a
+    binding-less concern instead of silently hiding it (single-authority
+    observability).
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-0000000000aa",
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=7777,
+        pgid=7777,
+        process_start_token="worker-start-token",
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+
+    class _Leases:
+        def list_active_page(self, *, role=None, max_records=2_000):
+            from repoforge.ports.process_lease_store import ProcessLeasePage
+
+            del role, max_records
+            return ProcessLeasePage(records=(lease,), scan_complete=True, unreadable_ids=())
+
+    report = _report(
+        bindings=_Bindings(),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+        leases=_Leases(),
+    )
+
+    assert report.binding_less_lease_concerns == (lease.lease_id,)
+    assert report.lease_scan_complete is True
+
+
+def test_report_folds_binding_less_lease_concerns_into_the_verdict(tmp_path) -> None:
+    """A report that names a binding-less live lease must not also say 'safe'.
+
+    The re-review found the verdict was computed before the lease concerns were
+    collected, so a report could simultaneously claim ``reclamation_safe`` while
+    listing a binding-less RUNNING lease -- an orphan the projection cannot see.
+    The verdict folds the lease signals in: any binding-less concern is unsafe.
+    """
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-0000000000aa",
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=7777,
+        pgid=7777,
+        process_start_token="worker-start-token",
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+
+    class _Leases:
+        def list_active_page(self, *, role=None, max_records=2_000):
+            from repoforge.ports.process_lease_store import ProcessLeasePage
+
+            del role, max_records
+            return ProcessLeasePage(records=(lease,), scan_complete=True, unreadable_ids=())
+
+    report = _report(
+        bindings=_Bindings(),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+        leases=_Leases(),
+    )
+
+    assert report.reclamation_safe is False
+    assert report.binding_less_lease_concerns == (lease.lease_id,)
+
+
+def test_report_folds_an_incomplete_lease_scan_into_the_verdict(tmp_path) -> None:
+    """A truncated lease scan can hide an orphan, so it must make the verdict unsafe."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-0000000000aa",
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=7777,
+        pgid=7777,
+        process_start_token="worker-start-token",
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+
+    class _Leases:
+        def list_active_page(self, *, role=None, max_records=2_000):
+            from repoforge.ports.process_lease_store import ProcessLeasePage
+
+            del role, max_records
+            return ProcessLeasePage(records=(lease,), scan_complete=False, unreadable_ids=())
+
+    report = _report(
+        bindings=_Bindings(),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+        leases=_Leases(),
+    )
+
+    assert report.lease_scan_complete is False
+    assert report.reclamation_safe is False
+
+
+def test_report_folds_unreadable_lease_records_into_the_verdict(tmp_path) -> None:
+    """An unreadable lease record can hide an orphan, so the verdict is unsafe."""
+    from repoforge.domain.process_lease import ProcessLease, ProcessLeaseRole, ProcessLeaseStatus
+
+    lease = ProcessLease(
+        lease_id="worker-0000000000aa",
+        status=ProcessLeaseStatus.RUNNING,
+        role=ProcessLeaseRole.EXECUTION_DAEMON,
+        process_identity="worker-start-token",
+        pid=7777,
+        pgid=7777,
+        process_start_token="worker-start-token",
+        started_at="2026-07-30T00:00:00+00:00",
+        heartbeat_at="2026-07-30T00:00:00+00:00",
+        correlation_id="c" * 24,
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+    )
+
+    class _Leases:
+        def list_active_page(self, *, role=None, max_records=2_000):
+            from repoforge.ports.process_lease_store import ProcessLeasePage
+
+            del role, max_records
+            return ProcessLeasePage(
+                records=(lease,), scan_complete=True, unreadable_ids=("worker-ffffffffffff",)
+            )
+
+    report = _report(
+        bindings=_Bindings(),
+        lock_root=tmp_path / "locks",
+        owner=_Owner(set()),
+        command_lines=_CommandLines({}),
+        tokens=_Tokens({}),
+        leases=_Leases(),
+    )
+
+    assert report.lease_unreadable_ids == ("worker-ffffffffffff",)
     assert report.reclamation_safe is False

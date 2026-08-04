@@ -44,6 +44,9 @@ _INHERITED = (
     "REPOFORGE_TUNNEL_PROFILE",
     "REPOFORGE_CONFIG",
     "REPOFORGE_RELEASE_ROOT",
+    # F-012: the handoff restarter's single-use replacement permit must survive the
+    # shim hop, or the supervisor's first worker spawn is refused while CLOSING.
+    "REPOFORGE_ADMISSION_PERMIT",
     # Under launchd there is no CONTROL_PLANE_API_KEY in the environment at all -- only
     # the path to the durable credential file. Dropping it here would leave a supervisor
     # restarted through this launcher with no credential and no way to obtain one.

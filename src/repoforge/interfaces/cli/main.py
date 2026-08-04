@@ -695,6 +695,14 @@ def _runtime_environment(args: argparse.Namespace) -> dict[str, str]:
         environment["REPOFORGE_TUNNEL_ID"] = str(tunnel_id)
     if profile:
         environment["REPOFORGE_TUNNEL_PROFILE"] = str(profile)
+    # F-012: a handoff restarter launches this supervisor through the stable shim and
+    # passes the single-use replacement permit via env. Without forwarding it here the
+    # supervisor's first worker spawn would be refused while admission is CLOSING --
+    # the live-activation deadlock -- so the permit survives the shim -> worker hop.
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    if ADMISSION_PERMIT_ENV in os.environ:
+        environment[ADMISSION_PERMIT_ENV] = os.environ[ADMISSION_PERMIT_ENV]
     return environment
 
 

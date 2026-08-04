@@ -25,3 +25,8 @@ config.toml
 # here is invisible to it and cannot reach a commit or a diff. A script meant to be
 # reviewed belongs in the tree instead.
 .rf-scratch/
+
+# Local review/plan scratch and review artifacts; never part of a commit.
+.omo/
+runtime-control-plane-crash-safety.patch
+runtime-review-crash-safety.patch

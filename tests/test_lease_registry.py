@@ -190,6 +190,97 @@ def test_list_page_names_unreadable_records(tmp_path: Path) -> None:
     assert page.unreadable_ids == (_WORKER,)
 
 
+def test_active_scan_completeness_ignores_terminal_history(tmp_path: Path) -> None:
+    """2,001 terminal leases must never make the active scan fail closed.
+
+    The re-review found a permanent fail-closed: read-only preflight blocks before
+    the mutating prune pass can run, so terminal history accumulating past the scan
+    bound blocks every later start forever. Active-scan completeness is computed
+    over active leases only.
+    """
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    for index in range(1, 2002):
+        from dataclasses import replace
+
+        leases.create(
+            replace(
+                _lease(worker_id=f"worker-{index:012x}"),
+                status=ProcessLeaseStatus.TERMINATED,
+            )
+        )
+    active = _lease(worker_id="worker-ffffffffffaa")  # one genuinely live lease
+    leases.create(active)
+
+    page = leases.list_active_page()
+
+    assert [lease.lease_id for lease in page.records] == [active.lease_id]
+    assert page.scan_complete is True
+    assert page.unreadable_ids == ()
+
+
+def test_active_scan_pages_past_deep_terminal_history(monkeypatch, tmp_path: Path) -> None:
+    """The active scan pages: terminal history deeper than one page cannot falsify
+    completeness, and an active lease after it is still found (F-008)."""
+
+    # Force a small page so the test proves paging without creating 100k files:
+    # a terminal backlog deeper than one scan page must be skipped, not counted.
+    monkeypatch.setattr(
+        "repoforge.adapters.persistence.json_process_lease_adapter._SCAN_PAGE_SIZE", 25
+    )
+
+    from dataclasses import replace
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    for index in range(1, 201):
+        leases.create(
+            replace(
+                _lease(worker_id=f"worker-{index:012x}"),
+                status=ProcessLeaseStatus.TERMINATED,
+            )
+        )
+    active = _lease(worker_id="worker-ffffffffffaa")  # active lease after the backlog
+    leases.create(active)
+
+    page = leases.list_active_page()
+
+    assert [lease.lease_id for lease in page.records] == [active.lease_id]
+    assert page.scan_complete is True, "deep terminal history must not fail the scan closed"
+    assert page.unreadable_ids == ()
+
+
+def test_active_scan_stays_incomplete_when_the_active_set_outgrows_the_page(
+    tmp_path: Path,
+) -> None:
+    """A genuinely truncated ACTIVE set (more active than max_records) still fails
+    closed: only terminal history is exempt from the completeness signal (F-008)."""
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    for index in range(1, 6):
+        leases.create(_lease(worker_id=f"worker-{index:012x}"))
+
+    page = leases.list_active_page(max_records=3)
+
+    assert len(page.records) == 3
+    assert page.scan_complete is False, "an active set bigger than max_records is truncated"
+
+
+def test_collect_terminal_archives_terminal_leases_out_of_the_active_scan(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    leases.create(replace(_lease(), status=ProcessLeaseStatus.TERMINATED))
+    live = _lease(worker_id="worker-0000000000bb")
+    leases.create(live)
+
+    moved = leases.collect_terminal()
+
+    assert moved == 1
+    page = leases.list_active_page()
+    assert [lease.lease_id for lease in page.records] == [live.lease_id]
+    assert page.scan_complete is True
+
+
 # ---------------------------------------------------------------------------
 # Parity: JSON authoritative vs SQLite shadow.
 # ---------------------------------------------------------------------------
@@ -245,6 +336,89 @@ def test_parity_surfaces_json_scan_truncation(tmp_path: Path) -> None:
 
     # The comparison is honest about the authoritative side being truncated.
     assert report.json_scan_complete is True  # 2 records is under the scan bound
+
+
+def test_parity_detects_same_id_different_status(tmp_path: Path) -> None:
+    """Same lease id on both sides but different status is not in_sync."""
+    from dataclasses import replace
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    envelope = leases.create(_lease())
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    # Shadow lags: still shows TERMINATING while JSON advanced to RUNNING.
+    shadow.write_shadow(
+        replace(envelope.value, status=ProcessLeaseStatus.TERMINATING),
+        envelope.revision,
+    )
+
+    report = compare_lease_parity(leases, shadow)
+
+    assert report.in_sync is False
+    assert report.content_mismatch == (_WORKER,)
+    assert report.only_in_json == ()
+    assert report.only_in_shadow == ()
+
+
+def test_parity_detects_same_id_different_revision(tmp_path: Path) -> None:
+    """Same logical content but different revision is not in_sync."""
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    envelope = leases.create(_lease())
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    # Shadow has the same payload but a stale revision number.
+    shadow.write_shadow(envelope.value, Revision(envelope.revision.value + 5))
+
+    report = compare_lease_parity(leases, shadow)
+
+    assert report.in_sync is False
+    assert report.revision_mismatch == (_WORKER,)
+    assert report.content_mismatch == ()
+
+
+def test_parity_fails_closed_on_shadow_truncation(tmp_path: Path) -> None:
+    """A shadow row hidden behind the scan bound must fail parity, never pass.
+
+    The false positive the review found: the visible ID sets agree while the
+    shadow holds an extra record past ``max_records``, so ``in_sync`` must fail
+    closed on the shadow's own ``scan_complete`` instead of trusting the page.
+    """
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    for index in range(1, 4):
+        worker_id = f"worker-{index:012x}"
+        leases.create(_lease(worker_id=worker_id))
+        shadow.write_shadow(_lease(worker_id=worker_id), Revision(1))
+    # The shadow holds one more lease than the parity scan bound can see.
+    shadow.write_shadow(_lease(worker_id="worker-000000000004"), Revision(1))
+
+    report = compare_lease_parity(leases, shadow, max_records=3)
+
+    # Visible ID sets match, yet the shadow scan is incomplete: fail closed.
+    assert report.only_in_json == ()
+    assert report.only_in_shadow == ()
+    assert report.json_scan_complete is True
+    assert report.shadow_scan_complete is False
+    assert report.in_sync is False
+
+
+def test_parity_fails_closed_on_shadow_unreadable_record(tmp_path: Path) -> None:
+    """A malformed shadow row must fail parity, never be silently dropped."""
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    leases.create(_lease())
+    shadow.write_shadow(_lease(), Revision(1))
+    # Corrupt the shadow row so it cannot be decoded into a ProcessLease.
+    conn = sqlite3.connect(str(tmp_path / "shadow.db"))
+    conn.execute(
+        "UPDATE process_leases SET status = 'garbage' WHERE lease_id = ?",
+        (_WORKER,),
+    )
+    conn.commit()
+    conn.close()
+
+    report = compare_lease_parity(leases, shadow)
+
+    assert report.in_sync is False
+    assert report.shadow_unreadable_ids == (_WORKER,)
 
 
 def test_import_active_bindings_mirrors_only_active_records(tmp_path: Path) -> None:
@@ -513,18 +687,34 @@ def test_record_pid_failure_reaps_the_spawned_worker(
 
     The process is alive the instant Popen returns; if the pid cannot be persisted
     the lease stays REGISTERED without a pid and the process must not be left
-    running untraceable. The adapter TERMs and KILLs it and raises the typed
-    registration error so the supervisor fails closed.
+    running untraceable. The adapter reaps via the group-aware reaper and raises
+    the typed registration error so the supervisor fails closed.
     """
     import repoforge.adapters.runtime.execution_worker as worker_module
     from repoforge.application.runtime.worker_registrar import WorkerRegistrar
     from repoforge.domain.errors import ExecutionWorkerRegistrationError
+    from repoforge.ports.process_reaper import ReapOutcome
     from repoforge.testing import FixedClock, SequenceIdGenerator
 
     class _FailingPidLeases(JsonProcessLeaseAdapter):
         def save(self, lease, *, expected_revision):
             del lease, expected_revision
             raise OSError("durable pid write failed")
+
+    class _ReapingReaper:
+        def __init__(self) -> None:
+            self.reaped_pids: list[int] = []
+
+        def reap(self, binding: object) -> ReapOutcome:
+            pid = getattr(binding, "child_pid", 0)
+            self.reaped_pids.append(int(pid))
+            return ReapOutcome(
+                attempted=True, reaped=True, still_alive=False, detail="reaped via SIGKILL"
+            )
+
+        def read_start_token(self, pid: int) -> str | None:
+            del pid
+            return None
 
     leases = _FailingPidLeases(tmp_path / "leases", InMemoryLockManager())
     registrar = WorkerRegistrar(
@@ -533,17 +723,15 @@ def test_record_pid_failure_reaps_the_spawned_worker(
         clock=FixedClock("2026-07-30T00:00:00+00:00"),
     )
     bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
-    reaped: list[int] = []
+    reaper = _ReapingReaper()
     monkeypatch.setattr(worker_module.subprocess, "Popen", lambda *a, **k: _fake_popen(4242))
-    monkeypatch.setattr(
-        worker_module,
-        "process_identity",
-        lambda pid: None if pid in reaped else _SHA,
-    )
+    monkeypatch.setattr(worker_module, "process_identity", lambda pid: _SHA)
     monkeypatch.setattr(worker_module.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(worker_module.os, "killpg", lambda pid, sig: reaped.append(pid))
     worker = worker_module.SubprocessExecutionWorker(
-        Path("/tmp/config.toml"), bindings=bindings, registrar=registrar
+        Path("/tmp/config.toml"),
+        bindings=bindings,
+        registrar=registrar,
+        reaper=reaper,
     )
 
     with pytest.raises(ExecutionWorkerRegistrationError, match="REGISTRATION_FAILED"):
@@ -554,6 +742,684 @@ def test_record_pid_failure_reaps_the_spawned_worker(
             correlation_id="c" * 24,
         )
 
-    assert reaped == [4242]
-    # The spawned worker was never handed to the parent or bound.
+    assert reaper.reaped_pids == [4242]
     assert len(bindings.list_all()) == 0
+
+
+# ---------------------------------------------------------------------------
+# Admission epoch (P1-3): the registrar refuses spawns while admission is fenced.
+# ---------------------------------------------------------------------------
+
+
+def test_admission_epoch_round_trips_through_the_json_store(tmp_path: Path) -> None:
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.ports.admission_epoch import ADMISSION_OPEN
+
+    store = JsonAdmissionEpochStore(tmp_path / "state")
+
+    epoch, state = store.read()
+    assert epoch == 1
+    assert state == ADMISSION_OPEN
+    store.close()
+    epoch, state = store.read()
+    assert state != ADMISSION_OPEN
+    reopened = store.open_next()
+    assert reopened == epoch + 1
+    assert store.read() == (reopened, ADMISSION_OPEN)
+
+
+def test_registrar_refuses_a_new_spawn_while_admission_is_closed(tmp_path: Path) -> None:
+    """P1-3: once a restarter has fenced admission, no new intent may be created."""
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.domain.errors import ConfigError
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    epochs = JsonAdmissionEpochStore(tmp_path / "state")
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epochs,
+    )
+    epochs.close()
+
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+
+    assert len(leases.list_all().records) == 0
+
+
+def test_registrar_stamps_the_open_epoch_onto_a_new_intent(tmp_path: Path) -> None:
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    epochs = JsonAdmissionEpochStore(tmp_path / "state")
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epochs,
+    )
+
+    lease, _revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+
+    assert lease.admission_epoch == 1
+
+
+def test_create_intent_holds_the_admission_lock_across_read_and_create(
+    tmp_path: Path,
+) -> None:
+    """P1-3: the OPEN check and the intent create are one atomic, locked section.
+
+    A restarter fencing the epoch in another process must never interleave
+    between the registrar's OPEN read and its lease write: either the intent
+    lands before the fence (a fence member the restarter waits on) or the read
+    observes CLOSING and the spawn is refused -- never a REGISTERED intent
+    created from a stale OPEN read after the fence.
+    """
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.ports.worker_registrar import WORKER_ADMISSION_LOCK
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    epochs = JsonAdmissionEpochStore(tmp_path / "state")
+    shared_locks = InMemoryLockManager()
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epochs,
+        locks=shared_locks,
+        admission_timeout_seconds=2.0,
+    )
+
+    created: list[ProcessLease] = []
+
+    def spawn() -> None:
+        lease, _ = registrar.create_intent(
+            role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+        )
+        created.append(lease)
+
+    with shared_locks.lock(WORKER_ADMISSION_LOCK):
+        # The restarter holds the fence; a spawn must not complete underneath it.
+        import threading
+
+        thread = threading.Thread(target=spawn)
+        thread.start()
+        thread.join(timeout=0.2)
+        assert created == [], "a spawn completed while the admission fence was held"
+    thread.join(timeout=2.0)
+    assert len(created) == 1, "the spawn must proceed once the fence is released"
+    assert created[0].admission_epoch == 1
+
+
+def test_create_intent_fails_closed_when_the_admission_lock_times_out(
+    tmp_path: Path,
+) -> None:
+    """P1-3: a wedged admission holder surfaces a typed LOCK_TIMEOUT, never a block."""
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.domain.errors import ConfigError
+    from repoforge.ports.worker_registrar import WORKER_ADMISSION_LOCK
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    epochs = JsonAdmissionEpochStore(tmp_path / "state")
+    shared_locks = InMemoryLockManager()
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epochs,
+        locks=shared_locks,
+        admission_timeout_seconds=0.05,
+    )
+
+    with shared_locks.lock(WORKER_ADMISSION_LOCK), pytest.raises(ConfigError, match="LOCK_TIMEOUT"):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+
+    assert len(leases.list_all().records) == 0, "no intent may be created on a timeout"
+
+
+def test_terminal_process_leases_are_archived_and_removed(tmp_path: Path) -> None:
+    """A TERMINATED lease is archived durably and removed from the active scan."""
+    from dataclasses import replace
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    envelope = leases.create(_lease())
+    terminal = leases.save(
+        replace(_lease(), status=ProcessLeaseStatus.TERMINATED),
+        expected_revision=envelope.revision,
+    )
+
+    assert leases.archive_terminal(_WORKER, expected_revision=terminal.revision) is True
+
+    active = leases.list_active_page()
+    assert [lease.lease_id for lease in active.records] == []
+    stored = leases.read(_WORKER)
+    assert stored is not None and stored.value.status is ProcessLeaseStatus.TERMINATED
+    assert leases.collect_terminal() == 0
+
+
+def test_archive_terminal_refuses_a_live_lease(tmp_path: Path) -> None:
+    """archive_terminal must never move a live (non-terminal) lease."""
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    envelope = leases.create(_lease())
+
+    assert leases.archive_terminal(_WORKER, expected_revision=envelope.revision) is False
+
+    assert leases.list_active_page().records
+    assert leases.read(_WORKER) is not None
+
+
+def test_parent_killed_after_popen_before_record_pid(tmp_path: Path) -> None:
+    """A worker whose parent died before record_pid claims the pid-less lease (P0)."""
+    import os
+
+    from repoforge.application.runtime.child_lease_claim import (
+        claim_child_lease,
+    )
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    shadow = SqliteLeaseStore(tmp_path / "shadow.db")
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        shadow=shadow,
+    )
+    # The parent wrote the REGISTERED intent, then died before record_pid.
+    lease, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+    assert lease.pid is None
+
+    claim = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id=lease.lease_id,
+        supervisor_pid=999_999_999,
+        supervisor_process_identity="0" * 64,
+        generation=12,
+        release_sha="0123abc",
+        identity="d" * 64,
+        start_token="child-start-token",
+        now="2026-07-30T00:00:00+00:00",
+    )
+
+    assert claim.claimed is True
+    stored = leases.read(lease.lease_id)
+    assert stored is not None
+    assert stored.value.status is ProcessLeaseStatus.RUNNING
+    assert stored.value.pid == os.getpid()
+    binding = bindings.get(lease.lease_id)
+    assert binding is not None and binding.state == "running"
+    assert any(item[0].lease_id == lease.lease_id for item in shadow.list_all())
+
+
+def test_child_claim_acks_while_supervisor_alive_and_self_terminates_on_terminal(
+    tmp_path: Path,
+) -> None:
+    """The claim never races a live parent and self-terminates a superseded worker."""
+    import os
+
+    from repoforge.application.runtime.child_lease_claim import (
+        EXIT_SUPERSEDED,
+        claim_child_lease,
+    )
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+    )
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+
+    ack = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id=lease.lease_id,
+        supervisor_pid=os.getpid(),
+        supervisor_process_identity="0" * 64,
+        generation=12,
+        release_sha=None,
+        identity="d" * 64,
+        start_token="child-start-token",
+        now="2026-07-30T00:00:00+00:00",
+    )
+
+    assert ack.acked is True
+    assert ack.exit_code is None
+    assert leases.read(lease.lease_id).value.pid is None
+
+    registrar.abort_intent(
+        lease,
+        error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
+        error_message="superseded",
+        expected_revision=revision,
+    )
+    superseded = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id=lease.lease_id,
+        supervisor_pid=999_999_999,
+        supervisor_process_identity="0" * 64,
+        generation=12,
+        release_sha=None,
+        identity="d" * 64,
+        start_token="child-start-token",
+        now="2026-07-30T00:00:00+00:00",
+    )
+
+    assert superseded.claimed is False
+    assert superseded.exit_code == EXIT_SUPERSEDED
+
+
+# ---------------------------------------------------------------------------
+# Re-review: child-side claim is fail-closed and crash-window safe (F-001 P0).
+# ---------------------------------------------------------------------------
+
+
+def test_reused_supervisor_pid_with_wrong_identity_is_treated_as_dead(
+    tmp_path: Path,
+) -> None:
+    """A reused supervisor pid whose identity no longer matches is a DEAD owner.
+
+    ``os.kill(pid, 0)`` alone cannot tell a live supervisor from an unrelated
+    process that reused its pid. When a supervisor identity was recorded, the pid
+    is only treated as alive when its CURRENT identity still matches -- anything
+    else is dead, or the worker would skip the claim and run as an invisible
+    orphan (review F-001 P0).
+    """
+    import os
+
+    from repoforge.application.runtime.child_lease_claim import claim_child_lease
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+    )
+    lease, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+
+    claim = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id=lease.lease_id,
+        supervisor_pid=os.getpid(),  # the pid EXISTS...
+        supervisor_process_identity="0" * 64,  # ...but it is not the recorded owner
+        generation=12,
+        release_sha=None,
+        identity="d" * 64,
+        start_token="child-start-token",
+        now="2026-07-30T00:00:00+00:00",
+        supervisor_identity_reader=lambda pid: "f" * 64,  # a different process now
+    )
+
+    assert claim.claimed is True, "a reused pid is a dead owner, not a live one"
+    stored = leases.read(lease.lease_id)
+    assert stored is not None and stored.value.status is ProcessLeaseStatus.RUNNING
+
+
+def test_dead_supervisor_and_missing_lease_self_terminates(tmp_path: Path) -> None:
+    """A dead supervisor with NO lease must self-terminate, never run invisible.
+
+    "The parent owns the lifecycle" stops being true the moment the parent is
+    provably dead and no lease exists: no reconciler can ever discover this
+    process through a record that does not exist, so running on creates an
+    invisible orphan (review F-001 P0).
+    """
+
+    from repoforge.application.runtime.child_lease_claim import (
+        EXIT_ORPHANED,
+        claim_child_lease,
+    )
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+    )
+
+    claim = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id="worker-000000000000000000000000",
+        supervisor_pid=999_999_999,
+        supervisor_process_identity="0" * 64,
+        generation=12,
+        release_sha=None,
+        identity="d" * 64,
+        start_token="child-start-token",
+        now="2026-07-30T00:00:00+00:00",
+    )
+
+    assert claim.claimed is False
+    assert claim.acked is False
+    assert claim.exit_code == EXIT_ORPHANED
+    assert bindings.list_all() == ()
+
+
+def test_unprovable_child_identity_self_terminates(tmp_path: Path) -> None:
+    """An identity the worker cannot prove records the pid, then self-terminates.
+
+    Continuing to run with no PID-reuse proof and no binding makes the worker an
+    un-reclaimable permanent blocker; the safe resolution is to record the
+    diagnostic pid and exit (review F-001 P0).
+    """
+    import os
+
+    from repoforge.application.runtime.child_lease_claim import (
+        EXIT_IDENTITY_UNPROVABLE,
+        claim_child_lease,
+    )
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+    )
+    lease, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+
+    claim = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id=lease.lease_id,
+        supervisor_pid=999_999_999,
+        supervisor_process_identity="0" * 64,
+        generation=12,
+        release_sha=None,
+        identity=None,  # the worker cannot prove itself
+        start_token=None,
+        now="2026-07-30T00:00:00+00:00",
+    )
+
+    assert claim.exit_code == EXIT_IDENTITY_UNPROVABLE
+    # The diagnostic pid is recorded so the lease stays discoverable...
+    stored = leases.read(lease.lease_id)
+    assert stored is not None and stored.value.pid == os.getpid()
+    # ...but no binding is written and the worker must not start working.
+    assert bindings.list_all() == ()
+
+
+def test_child_claim_stops_at_ready_until_the_binding_is_written(
+    tmp_path: Path,
+) -> None:
+    """The claim advances REGISTERED -> READY only; RUNNING waits for the binding.
+
+    A crash between the claim and the binding write must leave READY-with-pid --
+    recoverable from the canonical lease -- never a RUNNING lease with no
+    projection the recovery path cannot reconstruct (review F-001 P0).
+    """
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+    )
+    lease, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+
+    claimed, claimed_revision = registrar.claim_intent(
+        lease.lease_id,
+        process_identity="d" * 64,
+        pid=4242,
+        pgid=4242,
+        process_start_token="child-start-token",
+    )
+
+    assert claimed.status is ProcessLeaseStatus.READY, "claim stops at READY"
+    assert claimed.pid == 4242
+    assert claimed.lease_id == lease.lease_id
+
+    running, _ = registrar.complete_claim(claimed, expected_revision=claimed_revision)
+    assert running.status is ProcessLeaseStatus.RUNNING
+    stored = leases.read(lease.lease_id)
+    assert stored is not None and stored.value.status is ProcessLeaseStatus.RUNNING
+
+
+def test_running_lease_ack_requires_matching_start_token(tmp_path: Path) -> None:
+    """A RUNNING lease is acked only when its start token matches this worker.
+
+    A different token means the lease was reused by another process; acking would
+    run a duplicate, so the worker self-terminates with the lease-conflict exit
+    (review F-001 P0).
+    """
+    import os
+    from dataclasses import replace
+
+    from repoforge.application.runtime.child_lease_claim import (
+        EXIT_LEASE_CONFLICT,
+        claim_child_lease,
+    )
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    bindings = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+    )
+    lease, revision = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+    with_pid, pid_revision = registrar.record_pid(
+        lease, pid=os.getpid(), expected_revision=revision
+    )
+    registrar.complete_registration(
+        with_pid,
+        process_identity="d" * 64,
+        expected_revision=pid_revision,
+        owner_pid=os.getpid(),
+        owner_process_identity="0" * 64,
+    )
+    running = leases.read(lease.lease_id)
+    assert running is not None and running.value.status is ProcessLeaseStatus.RUNNING
+    leases.save(
+        replace(running.value, process_start_token="lease-token-a"),
+        expected_revision=running.revision,
+    )
+
+    conflict = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id=lease.lease_id,
+        supervisor_pid=999_999_999,
+        supervisor_process_identity="0" * 64,
+        generation=12,
+        release_sha=None,
+        identity="d" * 64,
+        start_token="child-token-b",  # not the lease's token
+        now="2026-07-30T00:00:00+00:00",
+    )
+
+    assert conflict.exit_code == EXIT_LEASE_CONFLICT
+    assert conflict.acked is False
+
+    # A matching token is acknowledged: the worker is already registered.
+    ack = claim_child_lease(
+        leases=leases,
+        registrar=registrar,
+        bindings=bindings,
+        lease_id=lease.lease_id,
+        supervisor_pid=999_999_999,
+        supervisor_process_identity="0" * 64,
+        generation=12,
+        release_sha=None,
+        identity="d" * 64,
+        start_token="lease-token-a",
+        now="2026-07-30T00:00:00+00:00",
+    )
+    assert ack.acked is True
+    assert ack.exit_code is None
+
+
+# ---------------------------------------------------------------------------
+# Re-review F-012: replacement-scoped admission permit (TDD — RED first).
+# ---------------------------------------------------------------------------
+
+
+def _permit_registrar(tmp_path: Path, *, locks=None, epochs=None):
+    """A registrar wired to a JSON admission epoch store and a shared lock manager."""
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+    from repoforge.application.runtime.worker_registrar import WorkerRegistrar
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    leases = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    shared_locks = locks if locks is not None else InMemoryLockManager()
+    epoch_store = epochs if epochs is not None else JsonAdmissionEpochStore(tmp_path / "state")
+    registrar = WorkerRegistrar(
+        leases=leases,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epoch_store,
+        locks=shared_locks,
+    )
+    return registrar, leases, epoch_store
+
+
+def test_replacement_can_claim_single_use_permit_while_admission_is_closing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-012: the replacement spawn may proceed while admission is CLOSING.
+
+    The restarter closes admission, issues a single-use permit bound to the
+    replacement's release, and launches it; the replacement's ``create_intent``
+    claims that permit atomically instead of being refused. A lease must be
+    created under the CLOSING epoch.
+    """
+    from repoforge.domain.process_lease import ProcessLeaseStatus
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    token = epochs.issue_permit(target="deadbeef")
+    monkeypatch.setenv(ADMISSION_PERMIT_ENV, token)
+    monkeypatch.setenv("REPOFORGE_RUNNING_RELEASE_SHA", "deadbeef")
+
+    lease, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+
+    assert lease.admission_epoch == 1, "the lease is stamped with the CLOSING epoch"
+    stored = leases.read(lease.lease_id)
+    assert stored is not None and stored.value.status is ProcessLeaseStatus.REGISTERED
+
+
+def test_unrelated_spawn_remains_refused_during_replacement_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-012: an unrelated spawn without a valid permit is still refused."""
+    from repoforge.domain.errors import ConfigError
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    epochs.issue_permit(target="deadbeef")
+    monkeypatch.delenv("REPOFORGE_ADMISSION_PERMIT", raising=False)
+
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    assert len(leases.list_all().records) == 0, "no lease may be created without a permit"
+
+
+def test_replacement_permit_is_single_use(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F-012: a permit consumed by one spawn cannot spawn a second worker."""
+    from repoforge.domain.errors import ConfigError
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    token = epochs.issue_permit(target="deadbeef")
+    monkeypatch.setenv(ADMISSION_PERMIT_ENV, token)
+    monkeypatch.setenv("REPOFORGE_RUNNING_RELEASE_SHA", "deadbeef")
+
+    first, _ = registrar.create_intent(
+        role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+    )
+    assert first.admission_epoch == 1
+
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+    assert len(leases.list_all().records) == 1, "only one lease may claim the permit"
+
+
+def test_stale_or_wrong_target_permit_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-012: wrong token, wrong target, or a stale epoch permit are all refused."""
+    from repoforge.domain.errors import ConfigError
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    registrar, leases, epochs = _permit_registrar(tmp_path)
+    epochs.close()
+    token = epochs.issue_permit(target="deadbeef")
+
+    def attempt(*, env_token: str, sha: str):
+        monkeypatch.setenv(ADMISSION_PERMIT_ENV, env_token)
+        monkeypatch.setenv("REPOFORGE_RUNNING_RELEASE_SHA", sha)
+        return registrar.create_intent(
+            role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+        )
+
+    # Wrong token.
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        attempt(env_token="bogus-token", sha="deadbeef")
+    # Wrong target release.
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        attempt(env_token=token, sha="another-release")
+    assert len(leases.list_all().records) == 0, "no lease may be created with a bad permit"
+
+    # A permit from a previous (reopened) epoch is stale: reopen then close a new
+    # handoff and try to reuse the old token.
+    epochs.open_next()
+    epochs.close()
+    epochs.issue_permit(target="fresh-release")
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        attempt(env_token=token, sha="deadbeef")
+    assert len(leases.list_all().records) == 0

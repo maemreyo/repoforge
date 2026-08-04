@@ -632,18 +632,35 @@ class RuntimeReleaseStore:
     def journal_path(self) -> Path:
         return self._root / "runtime" / "activation-in-flight.json"
 
-    def begin_activation(self, *, receipt_id: str, from_sha: str | None, to_sha: str) -> None:
+    def begin_activation(
+        self,
+        *,
+        receipt_id: str,
+        from_sha: str | None,
+        to_sha: str,
+        transition_id: str | None = None,
+    ) -> None:
         """Record an activation attempt BEFORE any side effect, so a crash is detectable.
 
         Receipts are immutable and only written at a terminal outcome, so a process that
         dies between the symlink swap and the receipt would leave `current` moved with no
         evidence that an activation was ever in progress. This journal closes that gap:
         it is written first and cleared only when a terminal receipt exists.
+
+        ``transition_id`` links the journal to its runtime-transition ledger record
+        (F-009 recovery cursor): reconciliation reads the journal, then completes the
+        missing durable tail -- terminal transition and receipt -- together.
         """
         path = self.journal_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
-            {"receipt_id": receipt_id, "from_sha": from_sha, "to_sha": to_sha, "stage": "prepared"},
+            {
+                "receipt_id": receipt_id,
+                "from_sha": from_sha,
+                "to_sha": to_sha,
+                "stage": "prepared",
+                "transition_id": transition_id,
+            },
             sort_keys=True,
             indent=2,
         )

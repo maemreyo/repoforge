@@ -180,9 +180,14 @@ class AtomicJsonFileStore:
                 retryable=True,
             ) from exc
 
-    def list_ids(self, *, pattern: str, max_records: int) -> tuple[tuple[str, ...], bool]:
+    def list_ids(
+        self, *, pattern: str, max_records: int, offset: int = 0
+    ) -> tuple[tuple[str, ...], bool]:
         paths = sorted(self.root.glob(pattern))
-        return tuple(path.stem for path in paths[:max_records]), len(paths) > max_records
+        return (
+            tuple(path.stem for path in paths[offset : offset + max_records]),
+            offset + max_records < len(paths),
+        )
 
 
 __all__ = ["AtomicJsonFileStore", "_state_error"]

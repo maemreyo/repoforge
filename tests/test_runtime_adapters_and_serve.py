@@ -395,8 +395,30 @@ def test_execution_worker_adapter_terminates_a_worker_it_cannot_register(
             del max_records
             return 0
 
+    from repoforge.ports.process_reaper import ReapOutcome
+
+    class FakeReaper:
+        """Signal the unregistered worker group; never probes the real process table.
+
+        The real OsProcessReaper probes identity via `ps`; the test's Popen double
+        must not be allowed to leak into that probe, so the reap is faked here and
+        the assertions cover the durable-signal contract instead.
+        """
+
+        def reap(self, target):
+            killed.append((target.child_pgid, signal.SIGTERM))
+            return ReapOutcome(
+                attempted=True,
+                reaped=True,
+                still_alive=False,
+                detail="faked reaper signalled the unregistered worker group",
+            )
+
     worker = SubprocessExecutionWorker(
-        tmp_path / "config.toml", bindings=FailingBindings(), registrar=InMemoryWorkerRegistrar()
+        tmp_path / "config.toml",
+        bindings=FailingBindings(),
+        registrar=InMemoryWorkerRegistrar(),
+        reaper=FakeReaper(),
     )
 
     with pytest.raises(

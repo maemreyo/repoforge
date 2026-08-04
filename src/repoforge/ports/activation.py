@@ -164,7 +164,20 @@ class RuntimeRestarter(Protocol):
         """Read-only handoff preflight: ``(ok, detail, evidence)`` with no side effects."""
         ...
 
-    def restart(self, *, departing_release: str | None = None) -> RestartOutcome: ...
+    def restart(
+        self,
+        *,
+        departing_release: str | None = None,
+        target_release: str | None = None,
+    ) -> RestartOutcome:
+        """Replace the live runtime so it adopts whatever ``current`` points at.
+
+        ``target_release`` is the release the replacement will serve; the restarter
+        binds the replacement-scoped admission permit (F-012) to it so the permit
+        for one release can never admit a spawn for another. ``None`` means the
+        permit stays epoch-bound only (a same-release restart).
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +314,14 @@ class ReleaseStore(Protocol):
     def retention_candidates(self, *, keep: int) -> list[str]: ...
     def prune(self, *, keep: int, protect: frozenset[str] = frozenset()) -> list[str]: ...
     def journal_path(self) -> Path: ...
-    def begin_activation(self, *, receipt_id: str, from_sha: str | None, to_sha: str) -> None: ...
+    def begin_activation(
+        self,
+        *,
+        receipt_id: str,
+        from_sha: str | None,
+        to_sha: str,
+        transition_id: str | None = None,
+    ) -> None: ...
     def record_activation_stage(self, stage: str) -> None: ...
     def read_in_flight_activation(self) -> dict[str, object] | None: ...
     def end_activation(self) -> None: ...
@@ -325,9 +345,82 @@ class SupervisorKickstarter(Protocol):
 
     When the supervisor is registered with launchd, restarting it by spawning our own
     detached process would move it *out* of launchd's control (a clean SHUTDOWN exit is
-    not relaunched under ``SuccessfulExit: False``). Kickstarting the registered job
+    not relaunched under ``SuccessfulExit: False``). Replacing the registered job
     instead keeps the OS as the owner across upgrades.
+
+    The restarter selects this path when the OS-managed definition is REGISTERED (on
+    disk), NOT merely when the job is currently LOADED: after a failed candidate
+    bootstrap the job is unloaded but still registered, so a rollback must stay
+    OS-managed and recover the unloaded job -- never fall back to a manually spawned
+    supervisor that launchd would stop owning.
+
+    The OS manager owns the replacement's environment, so the restarter's single-use
+    replacement permit cannot be carried in the caller's process environment. The
+    replacement-scoped permit is transported through the job definition itself, in two
+    strictly separated boundaries:
+
+    * ``stage_replacement_env`` (under the admission lock) writes the permit into the
+      on-disk job definition with NO launchctl side effect; and
+    * ``bootstrap_replacement`` (outside the admission lock) unloads the loaded
+      definition -- or skips the unload when the job is already unloaded -- and
+      bootstraps the staged one, which, with ``RunAtLoad``, IS the replacement's
+      single launch. The restarter never follows it with ``kickstart``: a second
+      launch would race the first for the single-use permit (F-012 OS-managed path).
+
+    ``scrub_replacement_env`` removes the permit afterwards without disturbing the
+    running job.
     """
 
-    def available(self) -> bool: ...
-    def kickstart(self) -> RestartOutcome: ...
+    def registered(self) -> bool:
+        """True when the OS-managed job definition is still registered (on disk).
+
+        The restarter chooses the OS-managed path on this alone. After a failed
+        candidate bootstrap the job is UNLOADED but still registered, so recovery
+        (the outer rollback protocol) must keep the OS as the owner and bootstrap
+        the restored definition rather than falling back to the manual launcher.
+        """
+
+    def loaded(self) -> bool:
+        """True when the OS manager currently has the job loaded and running.
+
+        The loaded state is distinct from ``registered``: a rollback following a
+        failed candidate bootstrap starts from an already-unloaded-but-registered
+        job, and ``bootstrap_replacement`` must handle it by skipping the bootout.
+        """
+
+    def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
+        """Stage ``env`` into the on-disk job definition. NO launchctl side effects.
+
+        Only the given keys are touched in the job's environment; every other key,
+        the file mode and the ownership are preserved, and the write is atomic. This
+        must run under the admission lock: it changes no launchd state, so the loaded
+        job is untouched until ``bootstrap_replacement`` unloads it. Returns
+        ``(ok, detail)``; the caller must fail closed on ``ok=False`` instead of ever
+        launching a replacement that cannot pass the admission fence.
+        """
+
+    def bootstrap_replacement(self) -> RestartOutcome:
+        """Load the STAGED job definition, outside any lock.
+
+        Idempotent with respect to the loaded state -- the job state is PROBED, never
+        inferred from a command's exit code: a LOADED job is booted out and the unload
+        verified, an already-UNLOADED job (a rollback following a failed candidate
+        bootstrap) skips the bootout, and an undeterminable state fails closed.
+        Because the job has ``RunAtLoad``, the bootstrap is the replacement's single
+        launch -- the caller must NOT follow it with ``kickstart``, which would kill
+        the just-started replacement and relaunch it against an already-consumed
+        single-use permit. On failure the detail must state whether the job is
+        ``loaded``, ``unloaded``, or ``unknown``, and a failed ``bootstrap`` must
+        never re-launch the previous definition by itself: recovery belongs to the
+        outer rollback protocol with a fresh permit (F-012 OS-managed path).
+        """
+
+    def scrub_replacement_env(self, keys: tuple[str, ...]) -> tuple[bool, str]:
+        """Remove ``keys`` from the job definition WITHOUT reloading the running job.
+
+        The running replacement keeps its process environment (harmless once the
+        permit is consumed and the epoch is open); only the on-disk definition is
+        cleaned, so a future launch no longer carries the permit. Returns
+        ``(ok, detail)``; a failed scrub is reported, never silently swallowed, and
+        it cannot unstart the already-running replacement.
+        """
