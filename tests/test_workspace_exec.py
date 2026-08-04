@@ -447,6 +447,18 @@ def test_contract_script_requires_shell() -> None:
         WorkspaceExecInput(workspace_id="ws-1", argv=("git", "status"), shell="sh")
 
 
+def test_contract_argv_sequence_rejects_stdin_text() -> None:
+    """Review finding: stdin_text was accepted alongside argv_sequence, persisted into
+    the durable work request, but silently dropped -- execute_sequence hardcodes
+    stdin_text=None per element. Rejected at the contract instead of dropped."""
+    with pytest.raises(ValueError, match="not supported with argv_sequence"):
+        WorkspaceExecInput(
+            workspace_id="ws-1",
+            argv_sequence=(("ruff", "check"),),
+            stdin_text="some input",
+        )
+
+
 def test_script_form_disabled_by_default(tmp_path: Path) -> None:
     """adhoc_shell_runners defaults to empty even under execution_mode='relaxed' with a
     populated adhoc_runners -- enabling the script form is a separate, explicit decision."""
@@ -665,3 +677,23 @@ def test_argv_sequence_reports_per_element_evidence_independently(tmp_path: Path
     assert "second" not in result["commands"][0]["output_excerpt"]
     assert result["commands"][1]["argv"] == ["python3", "-c", "print('second')"]
     assert "second" in result["commands"][1]["output_excerpt"]
+
+
+def test_argv_sequence_reports_execution_evidence(tmp_path: Path) -> None:
+    """Review finding (F-007): the sequence result never set execution_evidence, unlike
+    the single-command path -- a caller had no way to see effective backend policy
+    (containment degradation, network/filesystem posture) for a sequence run."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "sequence execution evidence")[
+        "workspace_id"
+    ]
+
+    result = _exec_sequence(
+        env,
+        workspace_id,
+        (("python3", "--version"), ("python3", "-c", "print('two')")),
+    )
+
+    assert result["execution_evidence"]
+    assert result["execution_evidence"]["requested_filesystem"] == "workspace_write"
+    assert result["execution_evidence"]["effective_filesystem"] == "host_account_access"

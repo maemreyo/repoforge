@@ -103,6 +103,47 @@ class OperationWorkRequest:
     rerun_failed: bool = False
     stdin_text: str | None = None
 
+    def __post_init__(self) -> None:
+        """Durable state is the execution authority after crash/retry -- it must not
+        rely on every request having passed through the public Pydantic validator to be
+        well-formed (review finding F-005). Re-enforces the same semantic invariants
+        WorkspaceExecInput's own validator does, for the "adhoc" kind only.
+
+        Only rejects genuine ambiguity (more than one form populated): a corrupted or
+        malformed record with two forms set must never let the worker pick one by
+        precedence. Zero forms set (e.g. an empty argv with no script/sequence) is not
+        ambiguous -- there is nothing to pick between -- so that case is left to the
+        existing, more specific "nothing to run" refusal deeper in the execution path,
+        exactly as before this check was added.
+        """
+        if self.kind != "adhoc":
+            return
+        forms_set = sum(
+            1
+            for populated in (
+                bool(self.argv),
+                self.script is not None,
+                self.argv_sequence is not None,
+            )
+            if populated
+        )
+        if forms_set > 1:
+            raise RepoForgeError(
+                "EXEC_FORM_CONFLICT: an adhoc operation work request must have at most "
+                "one of argv, script, or argv_sequence populated",
+                code=ErrorCode.OPERATION_INVALID,
+            )
+        if (self.script is None) != (self.shell is None):
+            raise RepoForgeError(
+                "EXEC_FORM_CONFLICT: shell is required with script, and only valid with script",
+                code=ErrorCode.OPERATION_INVALID,
+            )
+        if self.argv_sequence is not None and self.stdin_text is not None:
+            raise RepoForgeError(
+                "EXEC_FORM_CONFLICT: stdin_text is not supported with argv_sequence",
+                code=ErrorCode.OPERATION_INVALID,
+            )
+
     @classmethod
     def profile(
         cls,

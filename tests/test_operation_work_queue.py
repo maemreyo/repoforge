@@ -481,6 +481,103 @@ def test_adhoc_work_queued_before_script_and_sequence_existed_still_decodes() ->
     assert work_item_from_payload(legacy) == item
 
 
+def test_adhoc_request_rejects_more_than_one_populated_form() -> None:
+    """Review finding F-005: durable state is the execution authority after crash/
+    retry, so it must not rely on every request having passed through the public
+    Pydantic validator to be well-formed. A malformed or corrupted record with two
+    forms populated must be rejected at construction, not silently resolved by worker
+    dispatch precedence (argv_sequence, then script, then argv)."""
+    import pytest
+
+    from repoforge.domain.errors import ErrorCode, RepoForgeError
+    from repoforge.domain.operation_work import OperationWorkRequest
+
+    with pytest.raises(RepoForgeError) as excinfo:
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("git", "status"),
+            script="echo hi",
+            shell="sh",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+    assert excinfo.value.code is ErrorCode.OPERATION_INVALID
+
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("git", "status"),
+            argv_sequence=(("git", "status"),),
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+
+    # Zero forms populated is NOT ambiguity -- nothing to pick between -- so it is left
+    # to the existing, more specific "nothing to run" refusal deeper in execution.
+    OperationWorkRequest.adhoc(
+        workspace_id="workspace-1",
+        working_directory=None,
+        mutability="read_only",
+        expected_head_sha="b" * 40,
+        expected_fingerprint="c" * 64,
+        config_generation=12,
+    )
+
+
+def test_adhoc_request_rejects_script_without_shell_or_shell_without_script() -> None:
+    import pytest
+
+    from repoforge.domain.errors import RepoForgeError
+    from repoforge.domain.operation_work import OperationWorkRequest
+
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            script="echo hi",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("git", "status"),
+            shell="sh",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+
+
+def test_adhoc_request_rejects_stdin_text_with_argv_sequence() -> None:
+    import pytest
+
+    from repoforge.domain.errors import RepoForgeError
+    from repoforge.domain.operation_work import OperationWorkRequest
+
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv_sequence=(("git", "status"),),
+            stdin_text="hi",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+
+
 def test_adhoc_work_queued_before_stdin_existed_still_decodes() -> None:
     """An activation must not strand work the previous release already queued.
 

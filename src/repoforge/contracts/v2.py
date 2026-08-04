@@ -645,14 +645,21 @@ class ExecutionPolicyDeclaration(StrictModel):
     on an operator; narrowing applies through the same pipeline as a restriction.
 
     A runner is a bare executable basename resolved through the constrained runtime
-    PATH -- never a path, never a shell string. Note that adding a shell (`bash`, `sh`)
-    is permitted and is the direct way to obtain pipes and globbing, but RepoForge
-    content-inspects `git` argv only: under a shell the git guards do not see what the
-    shell runs, which `workspace_verify` reports as `content_inspected = false`.
+    PATH -- never a path, never a shell string. `adhoc_runners` never grants shell
+    syntax on its own, but an operator could still separately allowlist `bash`/`sh`
+    there; RepoForge content-inspects `git` argv only, so under any shell runner the
+    git guards do not see what the shell runs (`workspace_verify`/`workspace_exec`
+    report `content_inspected = false`). `adhoc_shell_runners` is the reviewed,
+    narrower path for the same capability: a separate, empty-by-default allowlist of
+    interpreters `workspace_exec`'s `script` form may use, kept distinct from
+    `adhoc_runners` precisely so enabling it is its own explicit, auditable decision.
     """
 
     execution_mode: Literal["strict", "relaxed"] | None = None
     adhoc_runners: tuple[_AdhocRunnerName, ...] | None = Field(
+        default=None, max_length=_MAX_ADHOC_RUNNERS
+    )
+    adhoc_shell_runners: tuple[_AdhocRunnerName, ...] | None = Field(
         default=None, max_length=_MAX_ADHOC_RUNNERS
     )
     adhoc_timeout_seconds: int | None = Field(default=None, ge=1, le=_MAX_ADHOC_TIMEOUT_SECONDS)
@@ -1777,6 +1784,12 @@ class WorkspaceExecInput(StrictModel):
             raise ValueError("Exactly one of argv, argv_sequence, or script must be provided")
         if (self.script is None) != (self.shell is None):
             raise ValueError("shell is required with script, and only valid with script")
+        if self.argv_sequence is not None and self.stdin_text is not None:
+            raise ValueError(
+                "stdin_text is not supported with argv_sequence -- each element runs "
+                "with no input; use a single argv or script call, or write the input "
+                "to a workspace file the sequence's commands can read"
+            )
         if self.mutability == "workspace" and (
             self.expected_head_sha is None or self.expected_fingerprint is None
         ):

@@ -196,6 +196,10 @@ class WorkspaceRunAdhocSequenceResult:
     verification_invalidated: bool
     gate_guidance: str
     next_safe_actions: list[dict[str, object]]
+    # Defaulted so a sequence result already stored by the prior release (before this
+    # field existed) still reconstructs via **stored across a deploy, same reasoning as
+    # WorkspaceRunAdhocResult's own output_artifact_reference/status fields.
+    execution_evidence: dict[str, object] = field(default_factory=dict)
 
 
 _GATE_GUIDANCE = (
@@ -732,7 +736,31 @@ class WorkspaceAdhocRunner:
                 commands: list[dict[str, object]] = []
                 stopped_early = False
                 command_error: CommandError | None = None
+                sequence_execution_evidence: dict[str, object] = {}
+                # One total budget for the whole sequence, not `adhoc_timeout_seconds`
+                # per element: without this, an N-element sequence could hold the
+                # workspace lock for up to N times the repository's single-command
+                # budget (review finding F-007).
+                sequence_deadline = time.monotonic() + locked_repo.adhoc_timeout_seconds
                 for index, argv in enumerate(validated):
+                    remaining = sequence_deadline - time.monotonic()
+                    if remaining <= 0:
+                        stopped_early = True
+                        audit_details["failed_element_index"] = index
+                        audit_details["stop_reason"] = "sequence_budget_exhausted"
+                        command_error = CommandError(
+                            "SEQUENCE_BUDGET_EXHAUSTED: this sequence's total time "
+                            f"budget ({locked_repo.adhoc_timeout_seconds}s) was exhausted "
+                            f"before element {index + 1}/{len(validated)} could start",
+                            code=ErrorCode.COMMAND_TIMEOUT,
+                            retryable=False,
+                            safe_next_action=(
+                                "Split this into fewer commands per call, or ask the "
+                                "repository owner to raise adhoc_timeout_seconds."
+                            ),
+                        )
+                        break
+                    element_timeout = max(1, min(locked_repo.adhoc_timeout_seconds, int(remaining)))
                     started = time.monotonic()
                     execution_request = adhoc_execution_request(
                         workspace_id=c.workspace_id,
@@ -740,7 +768,7 @@ class WorkspaceAdhocRunner:
                         command_cwd=command_cwd,
                         argv=argv,
                         working_directory_policy=c.working_directory or ".",
-                        timeout_seconds=locked_repo.adhoc_timeout_seconds,
+                        timeout_seconds=element_timeout,
                         output_limit=self.ctx.config.server.max_tool_output_chars,
                         cancel_token=c.cancellation_token,
                         stdin_text=None,
@@ -753,6 +781,15 @@ class WorkspaceAdhocRunner:
                             self.ctx.execution.prepare(execution_request) as session,
                         ):
                             result = session.execute(argv).result
+                            inspection = session.inspect()
+                            sequence_execution_evidence = to_data(
+                                build_execution_evidence(
+                                    execution_request.requested_policy,
+                                    inspection.identity,
+                                    inspection.effective_policy,
+                                    inspection.warnings,
+                                )
+                            )
                     except CommandError as exc:
                         command_error = exc
                         audit_details["failed_element_index"] = index
@@ -848,6 +885,7 @@ class WorkspaceAdhocRunner:
                     verification_invalidated=verification_invalidated,
                     gate_guidance=_GATE_GUIDANCE,
                     next_safe_actions=next_actions,
+                    execution_evidence=sequence_execution_evidence,
                 )
 
         return self.ctx.audited(_KIND, audit_details, run_body)

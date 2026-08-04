@@ -226,6 +226,7 @@ class WorkspaceExecutor:
                 satisfies_commit_gate=False,
                 head_sha=delegated.head_sha,
                 workspace_fingerprint=delegated.fingerprint_after,
+                execution_evidence=delegated.execution_evidence,
                 adhoc_evidence=_adhoc_sequence_evidence(delegated),
             )
         raw = {
