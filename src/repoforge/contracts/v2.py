@@ -754,11 +754,29 @@ class WorkspaceCreateInput(AuthSelectionInput):
         description=(
             "Attach to a worktree this repository's own git already tracks with this "
             "branch checked out -- typically the operator's primary checkout -- instead of "
-            "creating or adopting anything. Mutually exclusive with `base` and "
-            "`adopt_branch`. Creates no branch, worktree, or file. Reattaching the same "
-            "checkout returns the same workspace_id. Fails with actionable evidence if the "
-            "branch is not checked out anywhere, is checked out in more than one worktree, "
-            "the checkout is missing on disk, or the branch is protected."
+            "creating or adopting anything. Mutually exclusive with `base`, "
+            "`adopt_branch`, and `attach_checkout_alias`. Creates no branch, worktree, or "
+            "file. Reattaching the same checkout returns the same workspace_id. Fails with "
+            "actionable evidence if the branch is not checked out anywhere, is checked out "
+            "in more than one worktree, the checkout is missing on disk, or the branch is "
+            "protected."
+        ),
+    )
+    attach_checkout_alias: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+        description=(
+            "Attach to a checkout the operator has explicitly registered under this alias "
+            "(never a path -- only the operator, through repository configuration, can "
+            "make a path selectable at all). Use this for a checkout outside "
+            "workspace_root that isn't a worktree of this repository's own primary "
+            "checkout, e.g. a separate clone. Mutually exclusive with `base`, "
+            "`adopt_branch`, and `attach_branch`. Creates no branch, worktree, or file. "
+            "Fails with actionable evidence if the alias is not registered, the checkout "
+            "is missing, it is not the same repository, it is in detached HEAD state, or "
+            "its branch is protected."
         ),
     )
 

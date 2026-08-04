@@ -1017,6 +1017,7 @@ class CodingService:
         issue_ids: tuple[str, ...] = (),
         adopt_branch: str | None = None,
         attach_branch: str | None = None,
+        attach_checkout_alias: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._create.execute(
@@ -1028,6 +1029,7 @@ class CodingService:
                     issue_ids,
                     adopt_branch,
                     attach_branch,
+                    attach_checkout_alias,
                 )
             )
         )
@@ -1041,6 +1043,7 @@ class CodingService:
         issue_ids: tuple[str, ...] = (),
         adopt_branch: str | None = None,
         attach_branch: str | None = None,
+        attach_checkout_alias: str | None = None,
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
@@ -1055,6 +1058,7 @@ class CodingService:
                     issue_ids,
                     adopt_branch,
                     attach_branch,
+                    attach_checkout_alias,
                     selector,
                 )
             )

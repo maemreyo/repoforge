@@ -8,7 +8,7 @@ import shlex
 from pathlib import Path, PurePosixPath
 
 from ..config import RepositoryConfig
-from .errors import SecurityError
+from .errors import SecurityError, WorkspaceError
 
 _SLUG_RE = re.compile("[^a-z0-9]+")
 _SAFE_BRANCH_RE = re.compile("^[A-Za-z0-9._/-]+$")
@@ -138,3 +138,29 @@ def validate_patch(patch: str, repo: RepositoryConfig, *, max_chars: int) -> tup
     for path in paths:
         assert_path_allowed(path, repo)
     return paths
+
+
+def resolve_trusted_checkout(repo: RepositoryConfig, alias: str) -> Path:
+    """Look up an operator-registered external checkout alias (#373).
+
+    Never accepts a path from the caller -- only an alias the operator already put in
+    static config. This is a lookup only: it does not itself prove the path is safe right
+    now. The caller must re-resolve the returned path fresh (following any symlink) and
+    validate repository identity and workspace_root containment against that live
+    resolution on every call -- a stored snapshot cannot see a substitution introduced
+    since the configuration was loaded, but a live identity check catches whatever the
+    path currently, actually points to regardless of how it got there.
+    """
+    registered = repo.trusted_external_checkouts.get(alias)
+    if registered is None:
+        raise WorkspaceError(
+            f"ATTACH_ALIAS_NOT_REGISTERED: {alias!r} is not a registered trusted checkout "
+            f"for {repo.repo_id!r}",
+            safe_next_action=(
+                "Ask the operator to register this checkout in "
+                "trusted_external_checkouts, or use attach_branch if it is a worktree of "
+                "the repository's own primary checkout."
+            ),
+            unchanged_state=("No branch, worktree, or file was created.",),
+        )
+    return registered

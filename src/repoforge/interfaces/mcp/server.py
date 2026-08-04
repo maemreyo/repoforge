@@ -257,10 +257,13 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "alone. Call it only when you intend that. Pass attach_branch instead when the "
         "instruction means the operator's own existing checkout -- 'work on what I have open' -- "
         "not a new one: it creates nothing and reuses the checkout git already tracks for that "
-        "branch. To see what already exists, or to check that this surface is reachable, use "
-        "workspace_list or workspace_status -- neither creates anything. Pass idempotency_key "
-        "when resuming a fresh/adopted create, so a retry rejoins the same workspace instead of "
-        "cutting a second one; attach_branch is already idempotent on its own."
+        "branch. Pass attach_checkout_alias instead for a checkout the operator registered that "
+        "isn't a worktree of the repository's own primary checkout -- never a raw path, only an "
+        "alias the operator already set up. To see what already exists, or to check that this "
+        "surface is reachable, use workspace_list or workspace_status -- neither creates "
+        "anything. Pass idempotency_key when resuming a fresh/adopted create, so a retry rejoins "
+        "the same workspace instead of cutting a second one; both attach_branch and "
+        "attach_checkout_alias are already idempotent on their own."
     ),
     "workspace_remove": "Remove a clean local worktree without touching remote data.",
     "workspace_list": "List bounded workspace lifecycle and cleanup evidence.",

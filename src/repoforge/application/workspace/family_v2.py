@@ -29,6 +29,7 @@ class WorkspaceCreateV2Command:
     issue_ids: tuple[str, ...] = ()
     adopt_branch: str | None = None
     attach_branch: str | None = None
+    attach_checkout_alias: str | None = None
     selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
@@ -65,6 +66,7 @@ class WorkspaceCreatorV2:
                 command.issue_ids,
                 command.adopt_branch,
                 command.attach_branch,
+                command.attach_checkout_alias,
                 command.selector,
             )
         )

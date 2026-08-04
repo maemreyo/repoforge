@@ -119,8 +119,11 @@ test_files = [
   "tests/test_workspace_edit.py",
   "tests/test_workspace_hygiene.py",
   "tests/test_workspace_adopt_branch.py",
+  "tests/test_workspace_attach.py",
+  "tests/test_workspace_kind.py",
   "tests/test_workspace_mutate.py",
   "tests/test_workspace_refresh.py",
+  "tests/test_workspace_trusted_checkout.py",
 ]
 
 [groups.operations]
@@ -727,12 +730,15 @@ test_files = [
   "tests/test_workspace_adhoc.py",
   "tests/test_workspace_adopt_branch.py",
   "tests/test_workspace_assessment.py",
+  "tests/test_workspace_attach.py",
   "tests/test_workspace_diagnostics.py",
   "tests/test_workspace_diff_budget.py",
   "tests/test_workspace_edit.py",
   "tests/test_workspace_hygiene.py",
   "tests/test_workspace_issue_links.py",
+  "tests/test_workspace_kind.py",
   "tests/test_workspace_mutate.py",
   "tests/test_workspace_refresh.py",
   "tests/test_workspace_stale_cleanup.py",
+  "tests/test_workspace_trusted_checkout.py",
 ]

@@ -1869,6 +1869,22 @@ class GitCliRepository:
         flush()
         return tuple(entries)
 
+    def root_commit(self, path: Path) -> str:
+        """The repository's first commit -- a stable identity check (#373): two working
+        trees of genuinely the same repository share a root commit; unrelated
+        repositories, even ones an operator points a trusted-checkout alias at by
+        mistake, do not."""
+        result = self._executor.run(
+            ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=path, output_limit=4_096
+        )
+        roots = [line for line in result.stdout.splitlines() if line]
+        if len(roots) != 1:
+            raise RepoForgeError(
+                f"Cannot establish a single repository root commit at {path}",
+                code=ErrorCode.WORKTREE_REGISTRATION_STALE,
+            )
+        return roots[0]
+
     def local_branch_exists(self, repo: RepositoryConfig, branch: str) -> bool:
         result = self._executor.run(
             ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],

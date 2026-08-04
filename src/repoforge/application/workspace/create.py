@@ -8,7 +8,12 @@ from typing import Any, cast
 from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
-from ...domain.policy import slugify, validate_adopted_branch, validate_branch
+from ...domain.policy import (
+    resolve_trusted_checkout,
+    slugify,
+    validate_adopted_branch,
+    validate_branch,
+)
 from ...domain.workspace import WorkspaceKind, WorkspaceRecord, normalize_issue_ids
 from ..context import ApplicationContext, repository_policy_snapshot
 from ..dto import to_data
@@ -29,9 +34,14 @@ class WorkspaceCreateCommand:
     adopt_branch: str | None = None
     # "Work on the checkout the operator already has open": attach to a worktree git
     # already tracks for this repository, without creating a branch, worktree, or file.
-    # Mutually exclusive with both `base` and `adopt_branch` -- there is nothing to check
-    # out when the operator's own checkout is the point.
+    # Mutually exclusive with `base`, `adopt_branch`, and `attach_checkout_alias` -- there
+    # is nothing to check out when the operator's own checkout is the point.
     attach_branch: str | None = None
+    # "Work on a checkout the operator registered but that git doesn't link to this
+    # repository's own worktree list" (#373) -- e.g. a separate clone outside
+    # workspace_root. An alias into the operator-authored `trusted_external_checkouts`
+    # registry, never a path: the model can never select an arbitrary host path.
+    attach_checkout_alias: str | None = None
     selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
@@ -50,7 +60,9 @@ class WorkspaceCreateResult:
     stale_workspaces: dict[str, Any] | None = None
     adopted_branch: bool = False
     # Distinct from adopted_branch: an attached workspace has no worktree RepoForge
-    # created either, on top of not owning the branch.
+    # created either, on top of not owning the branch. True for both attach_branch and
+    # attach_checkout_alias -- the caller only needs to know it is attached, not by which
+    # discovery path.
     attached: bool = False
     # Non-blocking, and deliberately part of the result rather than a log line: adopting a
     # branch (or attaching to one) trades away isolation, and the caller acting on it must
@@ -58,14 +70,15 @@ class WorkspaceCreateResult:
     warnings: tuple[str, ...] = ()
 
 
-def _attach_workspace_id(repo_id: str, branch: str) -> str:
-    """Deterministic from (repo_id, branch) alone -- never from task_slug, an idempotency
-    key, or the resolved checkout path. The path is looked up fresh on every call and can
-    legitimately change (the operator moved or recreated the worktree); keying on it would
-    make a moved checkout register as a second workspace instead of self-healing the
-    existing one (#372's idempotent-reattach AC covers both "same checkout" and "moved")."""
-    digest = hashlib.sha256(f"{repo_id}:{branch}".encode()).hexdigest()
-    return f"attached-{slugify(branch)[:24]}-{digest[:10]}"
+def _attach_workspace_id(repo_id: str, discriminator: str, token: str) -> str:
+    """Deterministic from (repo_id, discriminator, token) alone -- never from task_slug, an
+    idempotency key, or the resolved checkout path. The path is looked up fresh on every
+    call and can legitimately change (the operator moved or recreated the checkout); keying
+    on it would make a moved checkout register as a second workspace instead of self-
+    healing the existing one. `discriminator` ("branch" vs. "alias") keeps a branch name and
+    an alias that happen to share a string from colliding on the same workspace_id."""
+    digest = hashlib.sha256(f"{repo_id}:{discriminator}:{token}".encode()).hexdigest()
+    return f"attached-{slugify(token)[:24]}-{digest[:10]}"
 
 
 class WorkspaceCreator:
@@ -117,26 +130,101 @@ class WorkspaceCreator:
             )
         return resolved.resolve(), entry.head_sha or self.ctx.git.head_sha(resolved)
 
+    def _resolve_attach_alias_target(self, repo: Any, alias: str) -> tuple[Path, str, str]:
+        """Resolve an operator-registered checkout alias (#373) to (path, head_sha,
+        branch). Unlike `_resolve_attach_target`, this checkout is not necessarily one git
+        already links to `repo.path`'s own worktree list, so repository identity is
+        verified independently via a shared root commit before anything else about it is
+        trusted.
+
+        The registered path is re-resolved fresh here, following any symlink as it exists
+        right now -- not a load-time snapshot. Combined with the identity and containment
+        checks below, which run against that live resolution, this is what actually defends
+        against a symlink substituted in after the configuration was loaded: whatever the
+        alias currently, actually points to must independently prove it is the same
+        repository and stays outside workspace_root, regardless of how it got there.
+        """
+        registered = resolve_trusted_checkout(repo, alias)
+        resolved = registered.resolve()
+        workspace_root = self.ctx.config.server.workspace_root.resolve()
+        try:
+            resolved.relative_to(workspace_root)
+        except ValueError:
+            pass
+        else:
+            raise SecurityError(
+                f"TRUSTED_CHECKOUT_ESCAPES_TO_WORKSPACE_ROOT: alias {alias!r} currently "
+                f"resolves inside workspace_root ({resolved}); a symlink may have been "
+                "substituted since the configuration was loaded"
+            )
+        if not resolved.is_dir() or not (resolved / ".git").exists():
+            raise WorkspaceError(
+                f"ATTACH_CHECKOUT_MISSING: the registered checkout for {alias!r} does not "
+                f"exist or is not a Git working tree at {resolved}",
+                safe_next_action=(
+                    "Recreate the checkout at its registered path, or ask the operator to "
+                    "update trusted_external_checkouts."
+                ),
+                unchanged_state=("No branch, worktree, or file was created.",),
+            )
+        expected_root = self.ctx.git.root_commit(repo.path)
+        observed_root = self.ctx.git.root_commit(resolved)
+        if observed_root != expected_root:
+            raise WorkspaceError(
+                f"ATTACH_REPOSITORY_MISMATCH: the checkout registered as {alias!r} is not "
+                f"the same repository as {repo.repo_id!r}",
+                details={
+                    "expected_root_commit": expected_root,
+                    "observed_root_commit": observed_root,
+                },
+                unchanged_state=("No branch, worktree, or file was created.",),
+            )
+        branch = self.ctx.git.current_branch(resolved)
+        if not branch:
+            raise WorkspaceError(
+                f"ATTACH_CHECKOUT_DETACHED: the registered checkout {alias!r} is in "
+                "detached HEAD state, not on any branch",
+                safe_next_action="Check out a branch in that checkout, then retry.",
+                unchanged_state=("No branch, worktree, or file was created.",),
+            )
+        validate_adopted_branch(branch, repo)
+        return resolved, self.ctx.git.head_sha(resolved), branch
+
     def execute(self, c: WorkspaceCreateCommand) -> WorkspaceCreateResult:
         repo = self.ctx.repo(c.repo_id)
         issue_ids = normalize_issue_ids(c.issue_ids)
         adopt = c.adopt_branch.strip() if c.adopt_branch else None
         attach = c.attach_branch.strip() if c.attach_branch else None
-        if sum(1 for value in (adopt, attach, c.base) if value) > 1:
+        attach_alias = c.attach_checkout_alias.strip() if c.attach_checkout_alias else None
+        if sum(1 for value in (adopt, attach, attach_alias, c.base) if value) > 1:
             raise WorkspaceError(
-                "ADOPT_BASE_CONFLICT: adopt_branch, attach_branch, and base each describe a "
-                "different way to get a workspace; pass exactly one."
+                "ADOPT_BASE_CONFLICT: adopt_branch, attach_branch, attach_checkout_alias, "
+                "and base each describe a different way to get a workspace; pass exactly one."
             )
+        is_attach = bool(attach or attach_alias)
         slug = slugify(c.task_slug)
         key_hash = hash_idempotency_key(c.idempotency_key) if c.idempotency_key else None
         warnings: tuple[str, ...] = ()
         attach_head_sha: str | None = None
 
-        if attach:
+        if attach_alias:
+            destination, attach_head_sha, branch = self._resolve_attach_alias_target(
+                repo, attach_alias
+            )
+            base = branch
+            workspace_id = _attach_workspace_id(repo.repo_id, "alias", attach_alias)
+            warnings = (
+                f"ATTACHED_SHARED: this workspace operates directly on the operator-"
+                f"registered checkout {attach_alias!r} at {destination}, currently on "
+                f"{branch!r}. RepoForge created neither the worktree nor the branch and "
+                "will not remove either; the checkout can change, move, or disappear "
+                "outside of anything this workspace does.",
+            )
+        elif attach:
             destination, attach_head_sha = self._resolve_attach_target(repo, attach)
             branch = attach
             base = attach
-            workspace_id = _attach_workspace_id(repo.repo_id, attach)
+            workspace_id = _attach_workspace_id(repo.repo_id, "branch", attach)
             warnings = (
                 f"ATTACHED_SHARED: this workspace operates directly on the operator's own "
                 f"checkout of {attach!r} at {destination}. RepoForge created neither the "
@@ -188,7 +276,7 @@ class WorkspaceCreator:
         boundary = IdempotencyEffectBoundary()
 
         def reconcile() -> WorkspaceCreateResult | None:
-            if attach:
+            if is_attach:
                 try:
                     existing = self.ctx.store.load(workspace_id)
                 except Exception:
@@ -202,10 +290,11 @@ class WorkspaceCreator:
                         "different state"
                     )
                 if existing.branch != branch or existing.path != str(destination):
-                    # Self-heal, not a conflict: the operator's checkout moved or was
-                    # recreated at a new path (#372's "moved" case) while the branch
-                    # identity -- and therefore workspace_id -- is unchanged. "Shared means
-                    # shared": this is an observation to reconcile, not a pre-refusal.
+                    # Self-heal, not a conflict: the operator's checkout moved, was
+                    # recreated at a new path, or switched branches, while the attach
+                    # identity (alias or discovered branch) -- and therefore workspace_id --
+                    # is unchanged. "Shared means shared": this is an observation to
+                    # reconcile, not a pre-refusal.
                     existing.branch = branch
                     existing.base = base
                     existing.path = str(destination)
@@ -263,7 +352,7 @@ class WorkspaceCreator:
             recovered = reconcile()
             if recovered is not None:
                 return recovered
-            if not attach and destination.exists():
+            if not is_attach and destination.exists():
                 raise WorkspaceError(
                     f"Workspace destination already exists: {destination}",
                     safe_next_action="Inspect and remove the orphaned deterministic worktree before retrying.",
@@ -275,7 +364,7 @@ class WorkspaceCreator:
             # (#234), and which worktree call runs depends on adoption (#281). Attach
             # creates nothing, so no worktree call runs at all.
             boundary.begin()
-            if attach:
+            if is_attach:
                 assert attach_head_sha is not None
                 head = attach_head_sha
             else:
@@ -310,7 +399,7 @@ class WorkspaceCreator:
                     metadata["workspace_create_idempotency"] = key_hash
                 kind = (
                     WorkspaceKind.ATTACHED_SHARED
-                    if attach
+                    if is_attach
                     else WorkspaceKind.ADOPTED_WORKTREE
                     if adopt
                     else WorkspaceKind.MANAGED_WORKTREE
@@ -328,7 +417,7 @@ class WorkspaceCreator:
                 )
                 self.ctx.store.save(record)
             except Exception as exc:
-                if not attach:
+                if not is_attach:
                     try:
                         self.ctx.git.remove_worktree(repo, destination, branch, not bool(adopt))
                     except Exception as cleanup_exc:
@@ -348,7 +437,7 @@ class WorkspaceCreator:
                 next_step,
                 issue_ids,
                 adopted_branch=bool(adopt),
-                attached=bool(attach),
+                attached=is_attach,
                 warnings=warnings,
             )
 
@@ -359,6 +448,7 @@ class WorkspaceCreator:
             "issue_ids": list(issue_ids),
             "adopt_branch": adopt,
             "attach_branch": attach,
+            "attach_checkout_alias": attach_alias,
             "selector": c.selector.payload(),
         }
         result = cast(

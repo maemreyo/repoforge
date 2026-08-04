@@ -133,6 +133,7 @@ _POLICY_PRESETS: dict[str, dict[str, bool | int]] = {
 }
 _SAFE_BRANCH_COMPONENT = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SAFE_REPO_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+_SAFE_CHECKOUT_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SAFE_ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 EnumValue = TypeVar("EnumValue", bound=Enum)
@@ -229,6 +230,11 @@ class RepositoryConfig:
     generated_paths: tuple[GeneratedPathRule, ...] = ()
     issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
     commit_identity: CommitIdentityPolicy | None = None
+    #: Operator-registered alias -> canonical (already realpath-resolved at load time)
+    #: checkout path, outside workspace_root. The model never supplies a path -- only an
+    #: alias from this durable, operator-authored registry (#373). Re-resolving the stored
+    #: value at attach time and comparing catches a symlink substituted in after load.
+    trusted_external_checkouts: dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1031,6 +1037,55 @@ def _load_commit_identity(value: object, repo_id: str) -> CommitIdentityPolicy |
         raise ConfigError(f"{context} is invalid: {exc}") from exc
 
 
+def _load_trusted_external_checkouts(
+    raw: Any, repo_id: str, *, base_dir: Path, workspace_root: Path
+) -> dict[str, Path]:
+    """Operator-authored alias -> path registry (#373).
+
+    Existence and Git-repository identity are validated live at attach time, not here --
+    the whole point is that the checkout can be created, moved, or temporarily absent
+    between config reloads. This validates only what a static config can honestly assert:
+    a safe alias, a well-formed path, and that it does not overlap workspace_root (which
+    managed/adopted workspaces already cover).
+
+    Deliberately stores the expanded-but-not-symlink-resolved path, not `_expand_path`'s
+    fully resolved form: resolving here would bake in whatever a symlink happened to point
+    to at config-load time, and every later attach would silently keep trusting that
+    load-time snapshot even after the symlink target changed. The application layer
+    resolves this path fresh on every attach call instead.
+    """
+    if raw is None:
+        return {}
+    table = _expect_mapping(raw, f"repositories.{repo_id}.trusted_external_checkouts")
+    checkouts: dict[str, Path] = {}
+    for alias, value in table.items():
+        if not _SAFE_CHECKOUT_ALIAS.fullmatch(alias):
+            raise ConfigError(
+                f"repositories.{repo_id}.trusted_external_checkouts has an unsafe alias: {alias!r}"
+            )
+        if not isinstance(value, str) or not value:
+            raise ConfigError(
+                f"repositories.{repo_id}.trusted_external_checkouts.{alias} must be a "
+                "non-empty path string"
+            )
+        expanded = os.path.expandvars(os.path.expanduser(value))
+        unresolved = Path(expanded)
+        if not unresolved.is_absolute():
+            unresolved = base_dir / unresolved
+        live_check = unresolved.resolve()
+        try:
+            live_check.relative_to(workspace_root)
+        except ValueError:
+            pass
+        else:
+            raise ConfigError(
+                f"repositories.{repo_id}.trusted_external_checkouts.{alias} resolves inside "
+                "workspace_root; managed and adopted workspaces already cover paths there"
+            )
+        checkouts[alias] = unresolved
+    return checkouts
+
+
 def _load_auth_profiles(raw: Any) -> dict[str, AuthProfileConfig]:
     table = _expect_mapping({} if raw is None else raw, "auth_profiles")
     result: dict[str, AuthProfileConfig] = {}
@@ -1416,6 +1471,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             3_600,
             f"repositories.{repo_id}.adhoc_timeout_seconds",
         )
+        trusted_external_checkouts = _load_trusted_external_checkouts(
+            repo_raw.get("trusted_external_checkouts"),
+            repo_id,
+            base_dir=base_dir,
+            workspace_root=server.workspace_root.resolve(),
+        )
         repositories[repo_id] = RepositoryConfig(
             repo_id=repo_id,
             path=_expand_path(str(repo_raw["path"]), base_dir=base_dir),
@@ -1490,7 +1551,19 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             generated_paths=generated_paths,
             issue_writes=issue_writes,
             commit_identity=commit_identity,
+            trusted_external_checkouts=trusted_external_checkouts,
         )
+    _checkout_owners: dict[Path, str] = {}
+    for repo_id, repo in repositories.items():
+        for alias, checkout_path in repo.trusted_external_checkouts.items():
+            owner = _checkout_owners.get(checkout_path)
+            if owner is not None and owner != repo_id:
+                raise ConfigError(
+                    f"trusted_external_checkouts path {checkout_path} is registered by both "
+                    f"{owner!r} and {repo_id!r} (alias {alias!r} on the latter); a checkout "
+                    "may belong to only one repository"
+                )
+            _checkout_owners[checkout_path] = repo_id
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(
         source_path=config_path,
