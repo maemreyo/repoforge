@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from dataclasses import replace
@@ -664,7 +665,15 @@ def test_supervisor_health_command_fails_when_child_is_not_healthy() -> None:
             del pid
             return "f" * 64
 
-    runtime = FakeRuntimeStore(_record(RuntimePhase.DEGRADED, 1))
+    # A fresh (non-stale) snapshot recording the child as unhealthy -- this test's own
+    # name asserts on "child is not healthy", not on an absent/stale observation, which
+    # is now its own distinct, correctly-labeled outcome (#448 Signature C).
+    record = replace(
+        _record(RuntimePhase.DEGRADED, 1),
+        health=(("tunnel_child", False, "managed child process exited"),),
+        health_observed_at="2026-07-13T00:00:00+00:00",
+    )
+    runtime = FakeRuntimeStore(record)
     supervisor = RuntimeSupervisor(
         store=runtime,
         configs=FakeConfigStore(_generation(1, CapabilityDeltaKind.EXPANSION)),
@@ -682,6 +691,251 @@ def test_supervisor_health_command_fails_when_child_is_not_healthy() -> None:
     response = supervisor._control_handler(ControlRequest(1, ControlCommand.HEALTH, "c"))
     assert not response.ok
     assert response.error_code == "RUNTIME_UNHEALTHY"
+
+
+def test_supervisor_health_command_reports_stale_when_never_observed() -> None:
+    """No health observation on record yet (e.g. watchdog hasn't run) must be reported
+    as an honest `stale`/`unknown` outcome, never silently conflated with a definite
+    'this was observed and is unhealthy' RUNTIME_UNHEALTHY (#448 Signature C)."""
+    from contextlib import nullcontext
+
+    from repoforge.application.runtime.supervisor import RuntimeSupervisor
+
+    class Locks:
+        def lock(self, name: str, *, timeout_seconds=None, metadata=None):
+            del name, timeout_seconds, metadata
+            return nullcontext()
+
+    class Server:
+        def start(self, handler):
+            del handler
+
+        def close(self):
+            pass
+
+        def is_serving(self) -> bool:
+            return True
+
+        def serving_diagnostic(self) -> str:
+            return "fake control server"
+
+    class Never:
+        def request(self, request, *, timeout_seconds=10.0):
+            del request, timeout_seconds
+            raise AssertionError
+
+    class Tunnel:
+        def is_alive(self, child):
+            del child
+            return False
+
+    class Processes:
+        def identity(self, pid: int) -> str | None:
+            del pid
+            return "f" * 64
+
+    runtime = FakeRuntimeStore(_record(RuntimePhase.DEGRADED, 1))
+    supervisor = RuntimeSupervisor(
+        store=runtime,
+        configs=FakeConfigStore(_generation(1, CapabilityDeltaKind.EXPANSION)),
+        locks=Locks(),
+        control=Server(),
+        mcp_control=Never(),
+        tunnel=Tunnel(),  # type: ignore[arg-type]
+        profile_store=MemoryTunnelProfileStore(),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        ids=SequenceIdGenerator(("id",)),
+        processes=Processes(),
+        mcp_runtime_path=Path("/missing"),
+        log_path=Path("/missing"),
+    )
+    response = supervisor._control_handler(ControlRequest(1, ControlCommand.HEALTH, "c"))
+    assert not response.ok
+    assert response.error_code == "HEALTH_SNAPSHOT_STALE"
+    payload = dict(response.payload)
+    assert payload["health_freshness"] == "unknown"
+    assert payload["health_age_seconds"] is None
+
+
+def test_supervisor_health_command_reports_stale_past_the_freshness_threshold() -> None:
+    """A health snapshot older than `health_snapshot_stale_after_seconds` must be
+    reported `stale`, never `healthy`, even if the last recorded checks were all
+    passing (#448 Signature C)."""
+    from contextlib import nullcontext
+
+    from repoforge.application.runtime.supervisor import RuntimeSupervisor
+    from repoforge.domain.runtime import ChildProcess
+
+    class Locks:
+        def lock(self, name: str, *, timeout_seconds=None, metadata=None):
+            del name, timeout_seconds, metadata
+            return nullcontext()
+
+    class Server:
+        def start(self, handler):
+            del handler
+
+        def close(self):
+            pass
+
+        def is_serving(self) -> bool:
+            return True
+
+        def serving_diagnostic(self) -> str:
+            return "fake control server"
+
+    class Never:
+        def request(self, request, *, timeout_seconds=10.0):
+            del request, timeout_seconds
+            raise AssertionError
+
+    class Tunnel:
+        def is_alive(self, child):
+            del child
+            return True
+
+    identity = "f" * 64
+
+    class Processes:
+        def identity(self, pid: int) -> str | None:
+            del pid
+            return identity
+
+    record = replace(
+        _record(RuntimePhase.HEALTHY, 1),
+        health=(("tunnel_child", True, "managed child process is alive"),),
+        # Far in the past relative to the clock below -- older than any reasonable
+        # `health_snapshot_stale_after_seconds`.
+        health_observed_at="2020-01-01T00:00:00+00:00",
+    )
+    runtime = FakeRuntimeStore(record)
+    supervisor = RuntimeSupervisor(
+        store=runtime,
+        configs=FakeConfigStore(_generation(1, CapabilityDeltaKind.EXPANSION)),
+        locks=Locks(),
+        control=Server(),
+        mcp_control=Never(),
+        tunnel=Tunnel(),  # type: ignore[arg-type]
+        profile_store=MemoryTunnelProfileStore(),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        ids=SequenceIdGenerator(("id",)),
+        processes=Processes(),  # type: ignore[arg-type]
+        mcp_runtime_path=Path("/missing"),
+        log_path=Path("/missing"),
+        health_snapshot_stale_after_seconds=30.0,
+    )
+    supervisor._child = ChildProcess(100, identity, "2026-07-13T00:00:00+00:00")
+
+    response = supervisor._control_handler(ControlRequest(1, ControlCommand.HEALTH, "c"))
+
+    assert not response.ok
+    assert response.error_code == "HEALTH_SNAPSHOT_STALE"
+    payload = dict(response.payload)
+    assert payload["health_freshness"] == "stale"
+    assert payload["health_age_seconds"] > 30.0
+
+
+def test_health_command_reads_the_watchdogs_last_snapshot_without_a_new_probe(
+    tmp_path: Path,
+) -> None:
+    """External HEALTH must answer from the watchdog's last observation, never launch
+    its own nested MCP round-trip (#448 Signature C): the control socket is a single
+    dedicated accept thread, so a request-triggered probe can block every other caller
+    behind it and manufacture a timeout that has nothing to do with real service health."""
+    from contextlib import nullcontext
+
+    from repoforge.application.runtime.supervisor import RuntimeSupervisor
+    from repoforge.domain.runtime import ChildProcess
+
+    class Locks:
+        def lock(self, name: str, *, timeout_seconds=None, metadata=None):
+            del name, timeout_seconds, metadata
+            return nullcontext()
+
+    class Server:
+        def start(self, handler):
+            del handler
+
+        def close(self):
+            pass
+
+        def is_serving(self) -> bool:
+            return True
+
+        def serving_diagnostic(self) -> str:
+            return "fake control server"
+
+    class CountingProbe:
+        """Records every call instead of raising: `_observe_health` catches and
+        redacts any exception from this call into a health-check detail string,
+        so a raising stub would be silently absorbed rather than failing loudly."""
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def request(self, request, *, timeout_seconds=10.0):
+            del request, timeout_seconds
+            self.call_count += 1
+            raise AssertionError("external HEALTH must not launch a new nested MCP probe")
+
+    class Tunnel:
+        def is_alive(self, child):
+            del child
+            return True
+
+    identity = "f" * 64
+
+    class Processes:
+        def identity(self, pid: int) -> str | None:
+            del pid
+            return identity
+
+    mcp_runtime_path = tmp_path / "mcp-runtime.json"
+    mcp_runtime_path.write_text(
+        json.dumps({"pid": 100, "process_identity": identity, "active_generation": 1}),
+        encoding="utf-8",
+    )
+
+    record = replace(
+        _record(RuntimePhase.HEALTHY, 1),
+        health=(
+            ("tunnel_child", True, "managed child process is alive"),
+            ("tunnel_admin", True, "ok"),
+            ("control_plane_response", True, "ok"),
+            ("control_plane", True, "ok"),
+            ("mcp_generation", True, "ok"),
+            ("repository_self_check", True, "repo_list completed through MCP control"),
+        ),
+        health_observed_at="2026-07-13T00:00:00+00:00",
+    )
+    runtime = FakeRuntimeStore(record)
+    probe = CountingProbe()
+    supervisor = RuntimeSupervisor(
+        store=runtime,
+        configs=FakeConfigStore(_generation(1, CapabilityDeltaKind.EXPANSION)),
+        locks=Locks(),
+        control=Server(),
+        mcp_control=probe,
+        tunnel=Tunnel(),  # type: ignore[arg-type]
+        profile_store=MemoryTunnelProfileStore(),
+        clock=FixedClock("2026-07-13T00:00:00+00:00"),
+        ids=SequenceIdGenerator(("id",)),
+        processes=Processes(),  # type: ignore[arg-type]
+        mcp_runtime_path=mcp_runtime_path,
+        log_path=tmp_path / "runtime.log",
+    )
+    supervisor._child = ChildProcess(100, identity, "2026-07-13T00:00:00+00:00")
+
+    response = supervisor._control_handler(ControlRequest(1, ControlCommand.HEALTH, "c"))
+
+    assert probe.call_count == 0, (
+        "external HEALTH triggered a fresh nested MCP probe instead of reading the "
+        "watchdog's last snapshot"
+    )
+    assert response.ok
+    payload = dict(response.payload)
+    assert payload["health"] == list(record.health)
+    assert payload["health_observed_at"] == record.health_observed_at
 
 
 def test_incompatible_generation_uses_supervisor_restart_without_hot_reload() -> None:

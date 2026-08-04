@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from repoforge import __version__
@@ -80,6 +81,13 @@ class RuntimeSupervisor:
         health_failure_threshold: int = 3,
         stable_health_reset_seconds: float = 60.0,
         single_instance_wait_seconds: float = 45.0,
+        # Generously above the watchdog's own cadence (`watchdog_interval_seconds`) plus
+        # its bounded nested-probe timeouts, so a live watchdog always keeps the snapshot
+        # this age is measured against fresh. Anything older means the watchdog loop
+        # itself has stopped producing observations -- named and documented per #448
+        # Signature C, which found the previous per-request probe timeout as a bare,
+        # undocumented `2.0` literal duplicated in two unrelated files.
+        health_snapshot_stale_after_seconds: float = 30.0,
         preflight: Callable[[], None] | None = None,
         worker_reconciler: ExecutionWorkerReconciler | None = None,
     ) -> None:
@@ -106,6 +114,7 @@ class RuntimeSupervisor:
             or health_failure_threshold <= 0
             or stable_health_reset_seconds <= 0
             or single_instance_wait_seconds < 0
+            or health_snapshot_stale_after_seconds <= 0
         ):
             raise ValueError("Runtime health and restart bounds must be positive")
         self._health_timeout = health_timeout_seconds
@@ -114,6 +123,7 @@ class RuntimeSupervisor:
         self._watchdog_interval = watchdog_interval_seconds
         self._health_failure_threshold = health_failure_threshold
         self._stable_health_reset = stable_health_reset_seconds
+        self._health_snapshot_stale_after = health_snapshot_stale_after_seconds
         self._preflight = preflight
         self._worker_reconciler = worker_reconciler
         self._stop = threading.Event()
@@ -390,6 +400,22 @@ class RuntimeSupervisor:
         legacy = tuple(check.legacy() for check in checks)
         return all(check.ok for check in checks), legacy
 
+    def _snapshot_age_seconds(self, observed_at: str | None) -> float | None:
+        """Age of a durable health observation, or ``None`` if it was never observed.
+
+        Deliberately parses two ISO-8601 timestamps rather than tracking a
+        monotonic clock alongside the record: the record is durable across
+        process restarts and a monotonic clock is not (#448 Signature C).
+        """
+        if not observed_at:
+            return None
+        try:
+            observed = datetime.fromisoformat(observed_at)
+            now = datetime.fromisoformat(self._clock.now_iso())
+        except ValueError:
+            return None
+        return max(0.0, (now - observed).total_seconds())
+
     def _control_handler(self, request: ControlRequest) -> ControlResponse:
         record = self._store.read()
         child_alive = bool(self._child and self._tunnel.is_alive(self._child))
@@ -421,20 +447,52 @@ class RuntimeSupervisor:
                 None if record is not None else "RUNTIME_NOT_STARTED",
             )
         if request.command is ControlCommand.HEALTH:
-            healthy = False
-            if record and self._child and record.active_generation is not None and child_alive:
-                healthy, observed = self._observe_health(record.active_generation, self._child)
-                payload["health"] = list(observed)
-                payload["health_observed_at"] = self._clock.now_iso()
-            healthy = bool(healthy and record and record.phase is RuntimePhase.HEALTHY)
+            # Snapshot read only (#448 Signature C): this control socket serves one
+            # connection at a time on a single dedicated thread (`UnixRuntimeControlServer`).
+            # A request that triggered its own fresh, nested MCP round-trip here used to
+            # block that thread for the probe's full duration, so a second caller could
+            # queue behind it in the kernel backlog and time out for no reason connected to
+            # real service health. The watchdog loop is the sole producer of health
+            # observations; this branch only ever reads what it already wrote.
+            age_seconds = self._snapshot_age_seconds(record.health_observed_at if record else None)
+            stale = age_seconds is None or age_seconds > self._health_snapshot_stale_after
+            payload["health_age_seconds"] = age_seconds
+            payload["health_freshness"] = (
+                "unknown" if age_seconds is None else ("stale" if stale else "fresh")
+            )
+            snapshot_healthy = bool(record and all(ok for _name, ok, _detail in record.health))
+            healthy = bool(
+                record
+                and record.phase is RuntimePhase.HEALTHY
+                and child_alive
+                and snapshot_healthy
+                and not stale
+            )
+            status: str
+            error_code: str | None
+            message: str | None
+            if stale:
+                status, error_code, message = (
+                    "unknown",
+                    "HEALTH_SNAPSHOT_STALE",
+                    (
+                        "No fresh health observation from the watchdog "
+                        f"(age={age_seconds!r}s, stale-after={self._health_snapshot_stale_after}s); "
+                        "the watchdog loop may have stopped producing observations."
+                    ),
+                )
+            else:
+                status = "healthy" if healthy else "unhealthy"
+                error_code = None if healthy else "RUNTIME_UNHEALTHY"
+                message = None if healthy else "Supervisor or managed child is not healthy"
             return ControlResponse(
                 1,
                 healthy,
                 request.correlation_id,
-                "healthy" if healthy else "unhealthy",
+                status,
                 tuple(sorted(payload.items())),
-                None if healthy else "RUNTIME_UNHEALTHY",
-                None if healthy else "Supervisor or managed child is not healthy",
+                error_code,
+                message,
             )
         if request.command is ControlCommand.SHUTDOWN:
             self._stop.set()

@@ -1423,6 +1423,8 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
     persisted_state = record.phase.value if record else "stopped"
     observed_state = persisted_state
     observed_health: list[object] = list(record.health) if record else []
+    health_age_seconds: float | None = None
+    health_freshness: str | None = None
     probe: dict[str, object] = {
         "attempted": False,
         "ok": record is None or record.phase is RuntimePhase.STOPPED,
@@ -1441,8 +1443,18 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
             raw_health = response_payload.get("health")
             if isinstance(raw_health, (list, tuple)):
                 observed_health = list(raw_health)
+            raw_age = response_payload.get("health_age_seconds")
+            health_age_seconds = raw_age if isinstance(raw_age, (int, float)) else None
+            raw_freshness = response_payload.get("health_freshness")
+            health_freshness = raw_freshness if isinstance(raw_freshness, str) else None
             observed_state = (
-                "healthy" if response.ok and response.status == "healthy" else "unhealthy"
+                "healthy"
+                if response.ok and response.status == "healthy"
+                # `status == "unknown"` is the control socket's own honest answer for a
+                # missing or stale health snapshot (#448 Signature C) -- surfaced as
+                # "stale" here rather than collapsed into "unhealthy", which would claim
+                # a definite bad observation that was never actually made.
+                else ("stale" if response.status == "unknown" else "unhealthy")
             )
             probe = {
                 "attempted": True,
@@ -1501,6 +1513,8 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
         "active_generation": record.active_generation if record else None,
         "health": observed_health,
         "health_observed_at": record.health_observed_at if record else None,
+        "health_age_seconds": health_age_seconds,
+        "health_freshness": health_freshness,
         "consecutive_health_failures": record.consecutive_health_failures if record else 0,
         "tunnel_profile": record.tunnel_profile if record else None,
         "tunnel_profile_fingerprint": record.tunnel_profile_fingerprint if record else None,
