@@ -11,6 +11,7 @@ import struct
 import tempfile
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,10 @@ from ...domain.runtime import (
 _MAX_MESSAGE = 64 * 1024
 _PROTOCOL = RUNTIME_CONTROL_PROTOCOL_VERSION
 _MAX_SOCKET_PATH_BYTES = 100
+# Matches the listener's own `listen(8)` backlog (#448 Slice 1): admission is bounded to
+# roughly what the kernel would queue anyway, so a caller that would have waited in the
+# backlog instead gets an immediate, typed, retryable answer.
+_DEFAULT_MAX_CONCURRENT_REQUESTS = 8
 # One exchange is a local request/response over a Unix socket: a peer that cannot finish
 # in this long is not one this loop may wait on, because waiting means serving nobody.
 _CLIENT_TIMEOUT_SECONDS = 5.0
@@ -129,13 +134,25 @@ def _decode_request(data: bytes) -> ControlRequest:
 
 
 class UnixRuntimeControlServer:
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_concurrent_requests: int = _DEFAULT_MAX_CONCURRENT_REQUESTS,
+    ):
+        if max_concurrent_requests <= 0:
+            raise ConfigError("max_concurrent_requests must be positive")
         self.path = path.expanduser().absolute()
         self._bound_path = resolve_unix_socket_path(self.path)
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._client_failures = 0
+        self._max_concurrent_requests = max_concurrent_requests
+        self._admission = threading.Semaphore(max_concurrent_requests)
+        self._executor: ThreadPoolExecutor | None = None
+        self._in_flight_lock = threading.Lock()
+        self._in_flight = 0
         self._stopped_reason: str | None = None
 
     @property
@@ -180,6 +197,10 @@ class UnixRuntimeControlServer:
         listener.listen(8)
         listener.settimeout(0.25)
         self._socket = listener
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._max_concurrent_requests,
+            thread_name_prefix="repoforge-control-worker",
+        )
 
         def deny(connection: socket.socket) -> None:
             connection.sendall(
@@ -225,6 +246,63 @@ class UnixRuntimeControlServer:
                 )
             connection.sendall(_encode(response))
 
+        def handle(connection: socket.socket) -> None:
+            """Run one exchange on a bounded worker thread, never on the accept loop.
+
+            #448 Signature C: a handler here used to run inline on the single accept
+            thread, so one expensive or slow request blocked every other caller behind
+            it in the kernel backlog. This now runs on one of `_max_concurrent_requests`
+            bounded worker threads, admitted only once a semaphore slot was acquired;
+            the slot is always released here, whether the exchange succeeded, raised, or
+            the peer disconnected mid-read.
+            """
+            try:
+                with connection:
+                    exchange(connection)
+            except Exception:
+                self._client_failures += 1
+            finally:
+                self._admission.release()
+                with self._in_flight_lock:
+                    self._in_flight -= 1
+
+        def reject_overloaded(connection: socket.socket) -> None:
+            """Answer immediately when at capacity, rather than queueing the peer.
+
+            This runs directly on the accept thread: it is bounded (a settimeout,
+            one send, one close) and never runs the real handler, so it cannot itself
+            become the thing that blocks the accept loop.
+            """
+            try:
+                connection.settimeout(_CLIENT_TIMEOUT_SECONDS)
+                with self._in_flight_lock:
+                    in_flight = self._in_flight
+                connection.sendall(
+                    _encode(
+                        ControlResponse(
+                            _PROTOCOL,
+                            False,
+                            "unknown",
+                            "overloaded",
+                            payload=(
+                                ("capacity", self._max_concurrent_requests),
+                                ("in_flight", in_flight),
+                                ("retryable", True),
+                            ),
+                            error_code="RUNTIME_CONTROL_OVERLOADED",
+                            message=(
+                                f"control socket at capacity "
+                                f"({self._max_concurrent_requests} requests in flight); "
+                                "retry shortly"
+                            ),
+                        )
+                    )
+                )
+            except OSError:
+                pass
+            finally:
+                connection.close()
+
         def serve() -> None:
             while not self._stop.is_set():
                 try:
@@ -242,11 +320,22 @@ class UnixRuntimeControlServer:
                 # while the process kept running and the watchdog kept recording `healthy`
                 # -- so the control plane was gone with every durable fact still claiming
                 # otherwise. A dropped connection costs that one exchange, nothing more.
+                if not self._admission.acquire(blocking=False):
+                    reject_overloaded(connection)
+                    continue
+                with self._in_flight_lock:
+                    self._in_flight += 1
+                assert self._executor is not None
                 try:
-                    with connection:
-                        exchange(connection)
-                except Exception:
-                    self._client_failures += 1
+                    self._executor.submit(handle, connection)
+                except RuntimeError:
+                    # Executor is shutting down (close() raced this accept): the slot
+                    # was never handed to a worker, so release it and close the
+                    # connection ourselves rather than leaking either.
+                    self._admission.release()
+                    with self._in_flight_lock:
+                        self._in_flight -= 1
+                    connection.close()
 
         self._thread = threading.Thread(target=serve, name="repoforge-runtime-control", daemon=True)
         self._thread.start()
@@ -257,9 +346,16 @@ class UnixRuntimeControlServer:
             self._socket.close()
         if self._thread is not None:
             self._thread.join(timeout=2)
+        # Bounded, not abandoned: every in-flight handler is itself bounded by
+        # `_CLIENT_TIMEOUT_SECONDS`, so waiting for the pool to drain here cannot hang
+        # indefinitely, and it is what actually proves no worker thread leaks past
+        # `close()` (#448 Slice 1) rather than merely stopping new admission.
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
         self.bound_path.unlink(missing_ok=True)
         self._socket = None
         self._thread = None
+        self._executor = None
 
 
 class UnixRuntimeControlClient:
