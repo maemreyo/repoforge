@@ -345,9 +345,57 @@ class SupervisorKickstarter(Protocol):
 
     When the supervisor is registered with launchd, restarting it by spawning our own
     detached process would move it *out* of launchd's control (a clean SHUTDOWN exit is
-    not relaunched under ``SuccessfulExit: False``). Kickstarting the registered job
+    not relaunched under ``SuccessfulExit: False``). Replacing the registered job
     instead keeps the OS as the owner across upgrades.
+
+    The OS manager owns the replacement's environment, so the restarter's single-use
+    replacement permit cannot be carried in the caller's process environment. The
+    replacement-scoped permit is transported through the job definition itself, in two
+    strictly separated boundaries:
+
+    * ``stage_replacement_env`` (under the admission lock) writes the permit into the
+      on-disk job definition with NO launchctl side effect; and
+    * ``bootstrap_replacement`` (outside the admission lock) unloads the loaded
+      definition and bootstraps the staged one -- which, with ``RunAtLoad``, IS the
+      replacement's single launch. The restarter never follows it with ``kickstart``:
+      a second launch would race the first for the single-use permit (F-012
+      OS-managed path).
+
+    ``scrub_replacement_env`` removes the permit afterwards without disturbing the
+    running job.
     """
 
     def available(self) -> bool: ...
-    def kickstart(self) -> RestartOutcome: ...
+
+    def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
+        """Stage ``env`` into the on-disk job definition. NO launchctl side effects.
+
+        Only the given keys are touched in the job's environment; every other key,
+        the file mode and the ownership are preserved, and the write is atomic. This
+        must run under the admission lock: it changes no launchd state, so the loaded
+        job is untouched until ``bootstrap_replacement`` unloads it. Returns
+        ``(ok, detail)``; the caller must fail closed on ``ok=False`` instead of ever
+        launching a replacement that cannot pass the admission fence.
+        """
+
+    def bootstrap_replacement(self) -> RestartOutcome:
+        """Unload the loaded definition and bootstrap the STAGED one, outside any lock.
+
+        Because the job has ``RunAtLoad``, the bootstrap is the replacement's single
+        launch -- the caller must NOT follow it with ``kickstart``, which would kill
+        the just-started replacement and relaunch it against an already-consumed
+        single-use permit. On failure the detail must state whether the job is
+        ``loaded``, ``unloaded``, or ``unknown``, and a failed ``bootstrap`` must
+        never re-launch the previous definition by itself: recovery belongs to the
+        outer rollback protocol with a fresh permit (F-012 OS-managed path).
+        """
+
+    def scrub_replacement_env(self, keys: tuple[str, ...]) -> tuple[bool, str]:
+        """Remove ``keys`` from the job definition WITHOUT reloading the running job.
+
+        The running replacement keeps its process environment (harmless once the
+        permit is consumed and the epoch is open); only the on-disk definition is
+        cleaned, so a future launch no longer carries the permit. Returns
+        ``(ok, detail)``; a failed scrub is reported, never silently swallowed, and
+        it cannot unstart the already-running replacement.
+        """

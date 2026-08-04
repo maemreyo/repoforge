@@ -15,22 +15,30 @@ import pytest
 
 from repoforge.adapters.activation.build import RuntimeRecordReleaseObserver, SupervisorRestarter
 from repoforge.adapters.activation.launcher import ReleaseAwareRuntimeLauncher
+from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+from repoforge.adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
 from repoforge.adapters.runtime import JsonRuntimeStore
 from repoforge.adapters.runtime.state_store import process_identity
 from repoforge.application.runtime.execution_worker_reconciler import (
     ExecutionWorkerReclamationReport,
 )
+from repoforge.application.runtime.worker_registrar import WorkerRegistrar
 from repoforge.domain.errors import ConfigError
+from repoforge.domain.process_lease import ProcessLeaseRole
 from repoforge.domain.runtime import (
     ControlResponse,
     RuntimePhase,
     RuntimeRecord,
 )
 from repoforge.ports.activation import RestartOutcome
+from repoforge.ports.admission_epoch import ADMISSION_OPEN, ADMISSION_PERMIT_ENV
+from repoforge.testing import FixedClock, InMemoryLockManager, SequenceIdGenerator
 
 _IDENTITY_OLD = "a" * 64
 _IDENTITY_NEW = "b" * 64
 _SURFACE = "c" * 64
+_TARGET_SHA = "d" * 64
+_RUNNING_SHA_ENV = "REPOFORGE_RUNNING_RELEASE_SHA"
 
 
 def _record(
@@ -261,35 +269,390 @@ def test_restart_rejects_a_record_that_is_still_the_old_process(tmp_path: Path) 
     assert outcome.ok is False
 
 
-def test_kickstart_is_preferred_so_launchd_keeps_owning_the_supervisor(
-    tmp_path: Path,
+def test_bootstrap_replaces_the_loaded_job_so_launchd_keeps_owning_the_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review finding 4: never hand-spawn when the OS manager owns the job."""
+    """Review finding 4: never hand-spawn when the OS manager owns the job.
+
+    The replacement boot now crosses the REAL `WorkerRegistrar.create_intent`
+    boundary on the `bootstrap_replacement` launch -- matching real launchd, where
+    ``RunAtLoad`` makes the bootstrap the replacement's SINGLE launch. The test
+    asserts the decisive handoff chain: admission lock released before the launch,
+    the permit read from the staged job env, exactly one supervisor launch, and
+    `kickstart` never called (a second launch would race the single-use permit).
+    """
     store = _Store()
     store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
     launcher = _RecordingLauncher(store)
+    locks = InMemoryLockManager()
+    registrar, _leases, epochs = _admission_wired_registrar(tmp_path, locks=locks)
+    kickstarter = _FakeOsLaunchd(
+        store, registrar=registrar, target_sha=_TARGET_SHA, monkeypatch=monkeypatch
+    )
 
-    class _Kickstarter:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def available(self) -> bool:
-            return True
-
-        def kickstart(self) -> RestartOutcome:
-            self.calls += 1
-            store.write(_record(phase=RuntimePhase.HEALTHY, pid=7777, identity=_IDENTITY_NEW))
-            return RestartOutcome(ok=True, detail="kickstarted")
-
-    kickstarter = _Kickstarter()
     outcome = _restarter(
-        store, _Control(store), launcher, tmp_path, kickstarter=kickstarter
-    ).restart()
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        kickstarter=kickstarter,
+        admission_epochs=epochs,
+        locks=locks,
+    ).restart(target_release=_TARGET_SHA)
 
-    assert outcome.ok is True
-    assert kickstarter.calls == 1
+    assert outcome.ok is True, outcome.detail
     # The manual launcher must NOT have been used.
     assert launcher.starts == []
+    # The replacement crossed the registrar while admission was CLOSING, exactly once.
+    assert kickstarter.bootstrap_calls == 1
+    assert kickstarter.boot_refused is False
+    assert kickstarter.second_spawn_refused is True, "the permit is single-use"
+    # The launch is the bootstrap alone: no second launch, no kickstart.
+    assert kickstarter.kickstart_calls == 0
+    # The permit was staged into the job definition and scrubbed after reopen.
+    assert kickstarter.staged_env is not None
+    assert kickstarter.staged_env[ADMISSION_PERMIT_ENV]
+    assert kickstarter.scrub_calls == [(ADMISSION_PERMIT_ENV,)]
+    assert epochs.read()[1] == ADMISSION_OPEN
+
+
+def _admission_wired_registrar(
+    tmp_path: Path, *, locks, epochs=None, admission_timeout_seconds: float = 5.0
+):
+    """A real registrar sharing the given admission lock manager and epoch store."""
+    lease_store = JsonProcessLeaseAdapter(tmp_path / "leases", InMemoryLockManager())
+    epoch_store = epochs if epochs is not None else JsonAdmissionEpochStore(tmp_path / "state")
+    registrar = WorkerRegistrar(
+        leases=lease_store,
+        ids=SequenceIdGenerator(("0",)),
+        clock=FixedClock("2026-07-30T00:00:00+00:00"),
+        epochs=epoch_store,
+        locks=locks,
+        admission_timeout_seconds=admission_timeout_seconds,
+    )
+    return registrar, lease_store, epoch_store
+
+
+class _FakeOsLaunchd:
+    """A launchd stand-in that boots the replacement through the REAL registrar.
+
+    Reproduces the supervisor's `run()` order: the execution worker is spawned via
+    `WorkerRegistrar.create_intent` FIRST, and the live HEALTHY record is written
+    only when that spawn succeeds -- a refused spawn never fakes a live record. The
+    boot is driven by `bootstrap_replacement()`, matching real launchd: with
+    ``RunAtLoad`` the bootstrap IS the launch. `kickstart` never boots anything and
+    only records its call, so a regression that relaunches the job (killing the
+    just-started replacement and racing the single-use permit) fails the test.
+    """
+
+    def __init__(
+        self,
+        store,
+        *,
+        registrar,
+        target_sha,
+        monkeypatch: pytest.MonkeyPatch,
+        fail_bootstrap: bool = False,
+        drop_permit: bool = False,
+        fail_stage: bool = False,
+    ) -> None:
+        self._store = store
+        self._registrar = registrar
+        self._target_sha = target_sha
+        self._mp = monkeypatch
+        self.fail_bootstrap = fail_bootstrap
+        self.drop_permit = drop_permit
+        self.fail_stage = fail_stage
+        self.staged_env: dict[str, str] | None = None
+        self.bootstrap_calls = 0
+        self.kickstart_calls = 0
+        self.scrub_calls: list[tuple[str, ...]] = []
+        self.boot_refused = False
+        self.second_spawn_refused: bool | None = None
+        self.new_pid = 7777
+
+    def available(self) -> bool:
+        return True
+
+    def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
+        self.staged_env = dict(env)
+        if self.fail_stage:
+            return False, "LAUNCHD_STAGE_FAILED: staged permit rejected"
+        return True, "staged"
+
+    # Round-1 restarter compatibility for the RED run: that flow staged via
+    # prepare_replacement and launched via kickstart, which never boots here.
+    def prepare_replacement(self, env: dict[str, str]) -> tuple[bool, str]:
+        return self.stage_replacement_env(env)
+
+    def scrub_replacement_env(self, keys: tuple[str, ...]) -> tuple[bool, str]:
+        self.scrub_calls.append(tuple(keys))
+        return True, "scrubbed"
+
+    def bootstrap_replacement(self) -> RestartOutcome:
+        self.bootstrap_calls += 1
+        if self.fail_bootstrap:
+            return RestartOutcome(ok=False, detail="launchctl bootstrap failed in test")
+        env = {} if self.drop_permit else dict(self.staged_env or {})
+        self._boot(env)
+        return RestartOutcome(ok=True, detail="bootstrapped (RunAtLoad launches)")
+
+    def kickstart(self) -> RestartOutcome:
+        self.kickstart_calls += 1
+        return RestartOutcome(ok=True, detail="kickstarted")
+
+    def _boot(self, env: dict[str, str]) -> None:
+        boot_env = dict(env)
+        boot_env.setdefault(_RUNNING_SHA_ENV, self._target_sha)
+        with self._mp.context() as ctx:
+            for key, value in boot_env.items():
+                ctx.setenv(key, value)
+            try:
+                self._registrar.create_intent(
+                    role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+                )
+            except ConfigError:
+                self.boot_refused = True
+                return
+            try:
+                self._registrar.create_intent(
+                    role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24
+                )
+                self.second_spawn_refused = False
+            except ConfigError:
+                self.second_spawn_refused = True
+        self._store.write(
+            _record(phase=RuntimePhase.HEALTHY, pid=self.new_pid, identity=_IDENTITY_NEW)
+        )
+
+
+def test_os_managed_boot_under_a_held_fence_lock_fails_with_lock_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 P0 guard: the launch must happen OUTSIDE the admission lock.
+
+    If a restarter ever bootstrapped (or kicked) the replacement while still holding
+    the fence lock, the replacement's first `create_intent` would hit LOCK_TIMEOUT
+    and fail closed. This encodes why the OS-managed launch belongs in Phase B.
+    """
+    from repoforge.ports.worker_registrar import WORKER_ADMISSION_LOCK
+
+    locks = InMemoryLockManager()
+    registrar, _leases, epochs = _admission_wired_registrar(
+        tmp_path, locks=locks, admission_timeout_seconds=0.2
+    )
+    epochs.close()
+    token = epochs.issue_permit(target=_TARGET_SHA)
+    monkeypatch.setenv(ADMISSION_PERMIT_ENV, token)
+    monkeypatch.setenv(_RUNNING_SHA_ENV, _TARGET_SHA)
+
+    with (
+        locks.lock(WORKER_ADMISSION_LOCK, timeout_seconds=5.0),
+        pytest.raises(ConfigError, match="LOCK_TIMEOUT"),
+    ):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
+
+
+def test_os_managed_replacement_without_a_transported_permit_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A boot that cannot carry the staged permit stays refused while CLOSING.
+
+    Even though the restarter staged the permit, a launchd that fails to deliver it
+    (the drop_permit case) leaves the replacement unable to pass the fence: the
+    worker spawn is refused, no live record is ever published, and the activation
+    fails closed instead of reporting a false success.
+    """
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    locks = InMemoryLockManager()
+    registrar, _leases, epochs = _admission_wired_registrar(tmp_path, locks=locks)
+    kickstarter = _FakeOsLaunchd(
+        store,
+        registrar=registrar,
+        target_sha=_TARGET_SHA,
+        monkeypatch=monkeypatch,
+        drop_permit=True,
+    )
+
+    outcome = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        kickstarter=kickstarter,
+        admission_epochs=epochs,
+        locks=locks,
+    ).restart(target_release=_TARGET_SHA)
+
+    assert outcome.ok is False
+    assert "live record" in outcome.detail
+    assert kickstarter.boot_refused is True
+    # The failed handoff reopened admission: nothing stays fenced forever.
+    assert epochs.read()[1] == ADMISSION_OPEN
+
+
+def test_os_managed_bootstrap_failure_surfaces_and_reopens_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed bootstrap is surfaced, admission reopens, and the permit is scrubbed."""
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    locks = InMemoryLockManager()
+    registrar, _leases, epochs = _admission_wired_registrar(tmp_path, locks=locks)
+    kickstarter = _FakeOsLaunchd(
+        store,
+        registrar=registrar,
+        target_sha=_TARGET_SHA,
+        monkeypatch=monkeypatch,
+        fail_bootstrap=True,
+    )
+
+    outcome = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        kickstarter=kickstarter,
+        admission_epochs=epochs,
+        locks=locks,
+    ).restart(target_release=_TARGET_SHA)
+
+    assert outcome.ok is False
+    assert "bootstrap failed in test" in outcome.detail
+    assert kickstarter.bootstrap_calls == 1
+    assert kickstarter.kickstart_calls == 0, "no second launch after a failed bootstrap"
+    assert kickstarter.scrub_calls == [(ADMISSION_PERMIT_ENV,)]
+    assert epochs.read()[1] == ADMISSION_OPEN
+
+
+def test_os_managed_stage_failure_refuses_to_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job that cannot carry the permit is never launched without it."""
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    locks = InMemoryLockManager()
+    registrar, _leases, epochs = _admission_wired_registrar(tmp_path, locks=locks)
+    kickstarter = _FakeOsLaunchd(
+        store,
+        registrar=registrar,
+        target_sha=_TARGET_SHA,
+        monkeypatch=monkeypatch,
+        fail_stage=True,
+    )
+
+    outcome = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        kickstarter=kickstarter,
+        admission_epochs=epochs,
+        locks=locks,
+    ).restart(target_release=_TARGET_SHA)
+
+    assert outcome.ok is False
+    assert "refusing to launch without it" in outcome.detail
+    assert kickstarter.bootstrap_calls == 0, "never launch without the staged permit"
+    assert kickstarter.kickstart_calls == 0
+    assert epochs.read()[1] == ADMISSION_OPEN
+
+
+def test_os_managed_success_scrubs_the_permit_and_launches_the_job_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a successful OS-managed handoff the permit is scrubbed, no second launch."""
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    locks = InMemoryLockManager()
+    registrar, _leases, epochs = _admission_wired_registrar(tmp_path, locks=locks)
+    kickstarter = _FakeOsLaunchd(
+        store, registrar=registrar, target_sha=_TARGET_SHA, monkeypatch=monkeypatch
+    )
+
+    outcome = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        kickstarter=kickstarter,
+        admission_epochs=epochs,
+        locks=locks,
+    ).restart(target_release=_TARGET_SHA)
+
+    assert outcome.ok is True, outcome.detail
+    assert kickstarter.bootstrap_calls == 1, "the job is launched exactly once"
+    assert kickstarter.kickstart_calls == 0, "the bootstrap IS the launch"
+    assert kickstarter.staged_env is not None
+    assert kickstarter.staged_env[ADMISSION_PERMIT_ENV]  # the token was staged
+    assert kickstarter.scrub_calls == [(ADMISSION_PERMIT_ENV,)]
+    assert epochs.read()[1] == ADMISSION_OPEN
+
+
+def test_os_managed_rollback_uses_a_fresh_permit_bound_to_the_old_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed candidate handoff is rolled back with a NEW permit, not the old token.
+
+    The rollback handoff issues a fresh permit bound to the old release; the failed
+    candidate's token is rotated out and can no longer pass a CLOSING fence -- the
+    same single-use/rotation property the unmanaged path already has (F-012).
+    """
+    from repoforge.domain.errors import ConfigError
+
+    store = _Store()
+    store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
+    launcher = _RecordingLauncher(store)
+    locks = InMemoryLockManager()
+    registrar, _leases, epochs = _admission_wired_registrar(tmp_path, locks=locks)
+
+    # Handoff 1 -- candidate bootstrap fails; its permit is staged, then invalidated.
+    fake = _FakeOsLaunchd(
+        store,
+        registrar=registrar,
+        target_sha=_TARGET_SHA,
+        monkeypatch=monkeypatch,
+        fail_bootstrap=True,
+    )
+    outcome1 = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        kickstarter=fake,
+        admission_epochs=epochs,
+        locks=locks,
+    ).restart(target_release=_TARGET_SHA)
+    assert outcome1.ok is False
+    candidate_token = fake.staged_env[ADMISSION_PERMIT_ENV]
+
+    # Handoff 2 -- rollback to the old release issues a FRESH permit.
+    fake.fail_bootstrap = False
+    outcome2 = _restarter(
+        store,
+        _Control(store),
+        launcher,
+        tmp_path,
+        kickstarter=fake,
+        admission_epochs=epochs,
+        locks=locks,
+    ).restart(target_release=_TARGET_SHA)
+    assert outcome2.ok is True, outcome2.detail
+    rollback_token = fake.staged_env[ADMISSION_PERMIT_ENV]
+    assert rollback_token != candidate_token, "the rollback must get a new permit"
+
+    # The candidate token cannot pass a CLOSING fence: rotate, then present it.
+    epochs.close()
+    epochs.issue_permit(target=_TARGET_SHA)
+    monkeypatch.setenv(ADMISSION_PERMIT_ENV, candidate_token)
+    monkeypatch.setenv(_RUNNING_SHA_ENV, _TARGET_SHA)
+    with pytest.raises(ConfigError, match="WORKER_ADMISSION_REFUSED"):
+        registrar.create_intent(role=ProcessLeaseRole.EXECUTION_DAEMON, correlation_id="c" * 24)
 
 
 # ------------------------------------------------- new-binary adoption (finding 1)
@@ -437,10 +800,10 @@ def test_a_relocatable_venv_symlink_is_never_used_to_infer_identity(tmp_path: Pa
 # ------------------------------- handoff: never two live supervisors (#304)
 
 
-def test_the_incumbent_is_drained_before_the_os_manager_is_kickstarted(
+def test_the_incumbent_is_drained_before_the_os_manager_is_bootstrapped(
     tmp_path: Path,
 ) -> None:
-    """`kickstart -k` only replaces the process launchd owns.
+    """Bootstrapping the staged job only replaces the process launchd owns.
 
     A supervisor started outside launchd -- a manual `rf start`, or a leftover from an
     earlier release -- survives it and keeps holding `runtime-single-instance`, so the
@@ -460,10 +823,13 @@ def test_the_incumbent_is_drained_before_the_os_manager_is_kickstarted(
         def available(self) -> bool:
             return True
 
-        def kickstart(self) -> RestartOutcome:
-            events.append("kickstart")
+        def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
+            return True, "staged"
+
+        def bootstrap_replacement(self) -> RestartOutcome:
+            events.append("bootstrap")
             store.write(_record(phase=RuntimePhase.HEALTHY, pid=7777, identity=_IDENTITY_NEW))
-            return RestartOutcome(ok=True, detail="kickstarted")
+            return RestartOutcome(ok=True, detail="bootstrapped")
 
     outcome = _restarter(
         store,
@@ -474,10 +840,10 @@ def test_the_incumbent_is_drained_before_the_os_manager_is_kickstarted(
     ).restart()
 
     assert outcome.ok is True, outcome.detail
-    assert events == ["shutdown", "kickstart"], "the incumbent must be gone before kickstart"
+    assert events == ["shutdown", "bootstrap"], "the incumbent must be gone before the launch"
 
 
-def test_an_undrainable_incumbent_is_never_kickstarted_into_a_race(tmp_path: Path) -> None:
+def test_an_undrainable_incumbent_is_never_bootstrapped_into_a_race(tmp_path: Path) -> None:
     """If the outgoing supervisor cannot be stopped, starting a second one is worse than
     reporting the failure: that is the state the single-instance lock exists to prevent."""
     store = _Store()
@@ -496,9 +862,12 @@ def test_an_undrainable_incumbent_is_never_kickstarted_into_a_race(tmp_path: Pat
         def available(self) -> bool:
             return True
 
-        def kickstart(self) -> RestartOutcome:
+        def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
+            return True, "staged"
+
+        def bootstrap_replacement(self) -> RestartOutcome:
             self.calls += 1
-            return RestartOutcome(ok=True, detail="kickstarted")
+            return RestartOutcome(ok=True, detail="bootstrapped")
 
     kickstarter = _Kickstarter()
     outcome = _restarter(

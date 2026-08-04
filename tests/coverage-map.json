@@ -1993,6 +1993,7 @@
     "tests/test_evidence_artifacts.py"
   ],
   "src/repoforge/adapters/persistence/json_admission_epoch.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_lease_registry.py"
   ],
   "src/repoforge/adapters/persistence/json_approval_store.py": [
@@ -3327,6 +3328,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/adapters/persistence/json_process_lease_adapter.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_cli_activation_wiring.py",
     "tests/test_cli_surface_coverage.py",
     "tests/test_durable_record_round_trip.py",
@@ -3499,6 +3501,7 @@
     "tests/test_json_adapter.py"
   ],
   "src/repoforge/adapters/persistence/json_state_file_store.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
@@ -3602,6 +3605,7 @@
     "tests/test_durable_state.py"
   ],
   "src/repoforge/adapters/persistence/json_state_repository.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_audit_cursor.py",
@@ -8301,6 +8305,7 @@
     "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/application/runtime/worker_registrar.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_execution_worker_reconciler.py",
     "tests/test_lease_registry.py"
   ],
@@ -13996,6 +14001,7 @@
     "tests/test_v2_shipping.py"
   ],
   "src/repoforge/domain/process_lease.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_durable_record_round_trip.py",
     "tests/test_execution_worker_reconciler.py",
     "tests/test_execution_worker_report.py",
@@ -14007,12 +14013,14 @@
     "tests/test_runtime_adapters_and_serve.py"
   ],
   "src/repoforge/domain/process_lease_payload.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_durable_record_round_trip.py",
     "tests/test_execution_worker_reconciler.py",
     "tests/test_json_adapter.py",
     "tests/test_lease_registry.py"
   ],
   "src/repoforge/domain/process_lease_role.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_durable_record_round_trip.py",
     "tests/test_execution_worker_reconciler.py",
     "tests/test_execution_worker_report.py",
@@ -14760,6 +14768,7 @@
     "tests/test_workspace_stale_cleanup.py"
   ],
   "src/repoforge/domain/versioning.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_adoption_nudges.py",
     "tests/test_agent_surface_friction.py",
     "tests/test_auth_cli.py",
@@ -14965,6 +14974,7 @@
     "tests/test_phase8_program_completion.py"
   ],
   "src/repoforge/interfaces/cli/main.py": [
+    "tests/test_activation_restart_semantics.py",
     "tests/test_audit_cursor.py",
     "tests/test_auth_cli.py",
     "tests/test_cli_activation_wiring.py",

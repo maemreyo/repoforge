@@ -352,9 +352,11 @@ class SupervisorRestarter:
       to be gone by identity instead.
     * When the supervisor is registered with launchd, spawning our own detached process
       would take it out of the OS manager's ownership. If a kickstarter is available we
-      restart the registered job instead -- but only after draining the incumbent by
-      identity, because the process holding the runtime lock is not always the one
-      launchd owns, and a kickstart that races it starts a second live supervisor.
+      replace the registered job instead -- after draining the incumbent by identity,
+      because the process holding the runtime lock is not always the one launchd owns,
+      and a replacement that races it starts a second live supervisor. The replacement
+      is launched exactly once, by bootstrapping the staged job definition (RunAtLoad),
+      never by kickstarting an already-bootstrapped job.
     """
 
     def __init__(
@@ -628,7 +630,23 @@ class SupervisorRestarter:
         worker while admission is still CLOSING -- the exact timing the live-activation
         gate deadlocked on (the spawn was refused and no live record was ever
         published). The lock is re-acquired only to reopen the next epoch.
+
+        Both launch paths follow this: the launcher carries the permit through the
+        replacement process environment, and the OS-managed path STAGES the permit
+        into the job definition on disk under the lock (no launchctl side effect),
+        then bootstraps that staged definition outside the lock -- which, with
+        ``RunAtLoad``, is the replacement's single launch. Neither may launch the
+        replacement while the fence lock is held, and the OS-managed path never
+        follows the bootstrap with a second launch (a ``kickstart`` would race the
+        just-started replacement for the single-use permit).
         """
+        kickstarter = (
+            self._kickstarter
+            if self._kickstarter is not None and self._kickstarter.available()
+            else None
+        )
+        os_managed = kickstarter is not None
+        permit_token: str | None = None
         with self._admission_lock():
             fence_ok, fence_detail = self._admission_fence()
             if not fence_ok:
@@ -666,67 +684,23 @@ class SupervisorRestarter:
                     reclamation=verify_evidence,
                 )
 
-            # Prefer the OS process manager so an upgrade never orphans the supervisor
-            # from launchd. `kickstart -k` stops and restarts the registered job in one
-            # step. The OS manager owns the replacement's environment, so the permit
-            # cannot be transported on this path; it keeps the pre-fence behavior.
-            if self._kickstarter is not None and self._kickstarter.available():
-                # Drain the incumbent FIRST, by identity. `kickstart -k` only replaces
-                # the process launchd itself owns, so a supervisor started outside
-                # launchd -- a manual `rf start`, or a leftover from an earlier release
-                # -- survives it and keeps holding `runtime-single-instance`. The
-                # incoming process then dies on that lock and an otherwise fine
-                # activation is reported as a failure. Observed on a real activation:
-                # two supervisors alive at once, one per release.
-                stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
-                if not stopped:
-                    self._reopen_admission()
-                    return RestartOutcome(
-                        ok=False,
-                        detail=(
-                            "could not stop the outgoing supervisor, so an OS-managed "
-                            f"replacement would race it for the runtime lock: {stop_detail}"
-                        ),
-                    )
-                reclaim_ok, reclaim_detail, reclamation = self._reclaim_departing(departing_release)
-                if not reclaim_ok:
-                    self._reopen_admission()
-                    return RestartOutcome(
-                        ok=False,
-                        detail=reclaim_detail,
-                        reclamation=reclamation,
-                    )
-                outcome = self._kickstarter.kickstart()
-                if not outcome.ok:
-                    self._reopen_admission()
-                    return outcome
-                # A STOPPED record from the old process is still on disk, so "a record
-                # exists" proves nothing: require a live record that is not the old
-                # process.
-                if not self._await(
-                    lambda: self._live_record(exclude_pid=old_pid) is not None,
-                    self._start_timeout,
-                ):
-                    self._reopen_admission()
-                    return RestartOutcome(
-                        ok=False,
-                        detail="OS-managed supervisor did not publish a live record after kickstart",
-                    )
-                record = self._live_record(exclude_pid=old_pid)
-                self._reopen_admission()
-                return RestartOutcome(
-                    ok=True,
-                    detail="restarted via the OS process manager",
-                    pid=record.pid if record else None,
-                    reclamation=reclamation,
-                )
-
-            # Launcher path Phase A -- drain the incumbent, reclaim on fresh evidence,
-            # then issue the replacement permit, all under the admission lock.
+            # Drain and reclaim FIRST, by identity, on BOTH paths: `kickstart -k` only
+            # replaces the process launchd itself owns, so a supervisor started outside
+            # launchd -- a manual `rf start`, or a leftover from an earlier release --
+            # survives it and keeps holding `runtime-single-instance`. The incoming
+            # process then dies on that lock and an otherwise fine activation is
+            # reported as a failure. Observed on a real activation: two supervisors
+            # alive at once, one per release.
             stopped, stop_detail = self._stop(old_pid=old_pid, old_identity=old_identity)
             if not stopped:
                 self._reopen_admission()
-                return RestartOutcome(ok=False, detail=f"could not stop the runtime: {stop_detail}")
+                return RestartOutcome(
+                    ok=False,
+                    detail=(
+                        "could not stop the outgoing supervisor, so a replacement "
+                        f"would race it for the runtime lock: {stop_detail}"
+                    ),
+                )
             reclaim_ok, reclaim_detail, reclamation = self._reclaim_departing(departing_release)
             if not reclaim_ok:
                 self._reopen_admission()
@@ -735,10 +709,90 @@ class SupervisorRestarter:
                     detail=reclaim_detail,
                     reclamation=reclamation,
                 )
-            permit_token = self._issue_admission_permit(target_release)
+
+            if os_managed:
+                assert kickstarter is not None
+                # The OS manager owns the replacement environment, so the permit cannot
+                # ride in the caller's process env. STAGE it into the on-disk job
+                # definition NOW, under the fence: this write has no launchctl side
+                # effect, so the loaded job is untouched and nothing can boot while the
+                # lock is held. A job that cannot carry the permit must fail closed --
+                # booting it without the token would leave the replacement unable to
+                # pass the fence and the activation would die on a refused worker
+                # spawn (F-012 P0).
+                permit_token = self._issue_admission_permit(target_release)
+                if permit_token is not None:
+                    staged_ok, staged_detail = kickstarter.stage_replacement_env(
+                        {ADMISSION_PERMIT_ENV: permit_token}
+                    )
+                    if not staged_ok:
+                        self._reopen_admission()
+                        return RestartOutcome(
+                            ok=False,
+                            detail=(
+                                "could not stage the replacement permit into the "
+                                "OS-managed job; refusing to launch without it "
+                                f"({staged_detail})"
+                            ),
+                        )
+            else:
+                permit_token = self._issue_admission_permit(target_release)
 
         # Phase B -- launch the replacement OUTSIDE the admission lock so its first
         # worker spawn can acquire the lock and claim the permit while CLOSING (F-012).
+        # For the OS-managed path the bootstrap IS the launch (RunAtLoad); it is never
+        # followed by kickstart, which would kill the just-started replacement and
+        # relaunch it against the already-consumed single-use permit.
+        if os_managed:
+            assert kickstarter is not None
+            try:
+                outcome = kickstarter.bootstrap_replacement()
+            except ConfigError as exc:
+                scrub_detail = self._scrub_replacement_permit(permit_token)
+                with self._admission_lock():
+                    self._reopen_admission()
+                return RestartOutcome(
+                    ok=False,
+                    detail=f"bootstrap failed: {exc}; {scrub_detail}".strip(" ;"),
+                )
+            if not outcome.ok:
+                scrub_detail = self._scrub_replacement_permit(permit_token)
+                with self._admission_lock():
+                    self._reopen_admission()
+                return RestartOutcome(
+                    ok=False,
+                    detail=f"{outcome.detail}; {scrub_detail}".strip(" ;"),
+                )
+            # A STOPPED record from the old process is still on disk, so "a record
+            # exists" proves nothing: require a live record that is not the old process.
+            if not self._await(
+                lambda: self._live_record(exclude_pid=old_pid) is not None,
+                self._start_timeout,
+            ):
+                scrub_detail = self._scrub_replacement_permit(permit_token)
+                with self._admission_lock():
+                    self._reopen_admission()
+                return RestartOutcome(
+                    ok=False,
+                    detail=(
+                        "OS-managed supervisor did not publish a live record after "
+                        f"bootstrap; {scrub_detail}".strip(" ;")
+                    ),
+                )
+            record = self._live_record(exclude_pid=old_pid)
+            with self._admission_lock():
+                self._reopen_admission()
+            scrub_detail = self._scrub_replacement_permit(permit_token)
+            detail = "restarted via the OS process manager"
+            if scrub_detail:
+                detail = f"{detail}; {scrub_detail}"
+            return RestartOutcome(
+                ok=True,
+                detail=detail,
+                pid=record.pid if record else None,
+                reclamation=reclamation,
+            )
+
         try:
             pid = self._launcher.start(
                 self._config_path, foreground=False, extra_env=self._replacement_env(permit_token)
@@ -767,6 +821,19 @@ class SupervisorRestarter:
             pid=record.pid if record else pid,
             reclamation=reclamation,
         )
+
+    def _scrub_replacement_permit(self, permit_token: str | None) -> str:
+        """Best-effort removal of the permit from the OS job definition (no reload).
+
+        Runs after the handoff resolves -- success or failure -- so the on-disk job
+        definition stops carrying a token that was already consumed or invalidated by
+        the reopen. A scrub failure is reported in the returned detail, never silently
+        swallowed, but it cannot unstart the running replacement.
+        """
+        if permit_token is None or self._kickstarter is None:
+            return ""
+        ok, detail = self._kickstarter.scrub_replacement_env((ADMISSION_PERMIT_ENV,))
+        return detail if not ok else ""
 
     def _issue_admission_permit(self, target_release: str | None) -> str | None:
         """Issue the replacement-scoped single-use permit for this handoff (F-012).
