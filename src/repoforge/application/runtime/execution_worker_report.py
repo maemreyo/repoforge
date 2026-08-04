@@ -17,17 +17,15 @@ from ...domain.execution_worker import (
     is_execution_worker_entry_point,
 )
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
-from .execution_worker_reconciler import (
+from ...ports.process_lease_store import ProcessLeaseStore
+from .execution_worker_concerns import (
+    ACTIVE_BINDING_STATES,
+    ACTIVE_LEASE_STATUSES,
     CommandLineReader,
     OwnerIdentityReader,
     ProcessGroupGoneReader,
     ProcessIdentityReader,
 )
-
-#: States that describe a live (or possibly live) worker, as opposed to terminal
-#: history. `refused_unproven`, `survived_kill`, and `legacy_unproven` are active
-#: concerns: the process may still be running and holding locks.
-_ACTIVE_STATES = frozenset({"running", "legacy_unproven", "refused_unproven", "survived_kill"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +41,13 @@ class ExecutionWorkerReport:
     orphaned_group_without_leader: tuple[str, ...]
     containment_unproven: bool
     detail: str
+    #: Binding-less live ProcessLease concerns (READY/RUNNING/UNPROVEN/TERMINATING
+    #: ...) with no matching binding projection. These are authoritative lease
+    #: concerns the doctor must surface even though the binding projection does not
+    #: know them (single-authority observability).
+    binding_less_lease_concerns: tuple[str, ...] = ()
+    lease_scan_complete: bool = True
+    lease_unreadable_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         sample = self.unreadable_record_ids[:8]
@@ -59,6 +64,11 @@ class ExecutionWorkerReport:
             "unreadable_record_ids_truncated": len(self.unreadable_record_ids) > 8,
             "orphaned_group_without_leader": list(self.orphaned_group_without_leader),
             "containment_unproven": self.containment_unproven,
+            "binding_less_lease_concerns": list(self.binding_less_lease_concerns),
+            "lease_scan_complete": self.lease_scan_complete,
+            "lease_unreadable_count": len(self.lease_unreadable_ids),
+            "lease_unreadable_ids_sample": list(self.lease_unreadable_ids[:8]),
+            "lease_unreadable_ids_truncated": len(self.lease_unreadable_ids) > 8,
             "detail": self.detail,
         }
 
@@ -94,6 +104,7 @@ def build_execution_worker_report(
     command_line_reader: CommandLineReader,
     identity_reader: ProcessIdentityReader,
     process_group_gone: ProcessGroupGoneReader | None = None,
+    leases: ProcessLeaseStore | None = None,
 ) -> ExecutionWorkerReport:
     """Enumerate stale execution workers and the lock evidence against them.
 
@@ -105,6 +116,11 @@ def build_execution_worker_report(
     may still hold locks, and an unavailable group probe is unprovable containment --
     both make reclamation unsafe (#424). A tokenless binding is likewise always unsafe
     (PID-reuse safety cannot be proven without the start token).
+
+    When a ProcessLease store is wired (production), the report also surfaces
+    binding-less live lease concerns: an authoritative READY/RUNNING lease with no
+    matching binding projection is a real worker the doctor must show even though
+    the binding table does not know it (single-authority observability).
     """
 
     page = bindings.list_page()
@@ -114,7 +130,7 @@ def build_execution_worker_report(
     orphaned_group: list[str] = []
     containment_unproven = False
     for binding in page.records:
-        if binding.state not in _ACTIVE_STATES:
+        if binding.state not in ACTIVE_BINDING_STATES:
             continue
         if binding.supervisor_process_identity is None:
             owner_states[binding.worker_id] = "unknown"
@@ -157,7 +173,24 @@ def build_execution_worker_report(
 
     locks_held = {binding.worker_id: lock_owners.get(binding.pid, []) for binding in stale}
     unsafe = unprovable > 0 or bool(orphaned_group) or containment_unproven
-    reclamation_safe = not unsafe and page.scan_complete and not page.unreadable_ids
+
+    binding_less_concerns, lease_scan_complete, lease_unreadable = _binding_less_lease_concerns(
+        leases, page.records
+    )
+    # The verdict must be truthful about the whole evidence set: a binding-less
+    # live lease is an orphan the projection cannot see, and an incomplete or
+    # unreadable lease scan can hide one -- so any of those folds into
+    # `reclamation_safe`. A report that says "safe" while naming binding-less
+    # concerns or an incomplete lease scan would be a contradiction.
+    reclamation_safe = (
+        not unsafe
+        and page.scan_complete
+        and not page.unreadable_ids
+        and not binding_less_concerns
+        and lease_scan_complete
+        and not lease_unreadable
+    )
+
     return ExecutionWorkerReport(
         stale_execution_worker_count=len(stale),
         workers_by_release=workers_by_release,
@@ -169,10 +202,37 @@ def build_execution_worker_report(
         unreadable_record_ids=page.unreadable_ids,
         orphaned_group_without_leader=tuple(orphaned_group),
         containment_unproven=containment_unproven,
+        binding_less_lease_concerns=binding_less_concerns,
+        lease_scan_complete=lease_scan_complete,
+        lease_unreadable_ids=lease_unreadable,
         detail=(
             f"{len(stale)} stale execution worker(s); reclamation safe: "
             f"{reclamation_safe} (scan complete: {page.scan_complete}, unreadable "
             f"records: {len(page.unreadable_ids)}, orphaned groups without a leader: "
-            f"{len(orphaned_group)}, containment unproven: {containment_unproven})"
+            f"{len(orphaned_group)}, containment unproven: {containment_unproven}); "
+            f"binding-less lease concerns: {len(binding_less_concerns)}"
         ),
     )
+
+
+def _binding_less_lease_concerns(
+    leases: ProcessLeaseStore | None,
+    bindings: tuple[ExecutionWorkerBinding, ...],
+) -> tuple[tuple[str, ...], bool, tuple[str, ...]]:
+    """Live authoritative leases with no matching active binding projection.
+
+    A lease in an active containment state whose id has no binding -- or whose
+    binding is terminal -- is a binding-less concern the doctor must show: the
+    authoritative lease store knows a worker the projection does not.
+    """
+    if leases is None:
+        return (), True, ()
+    scan = getattr(leases, "list_active_page", None)
+    page = scan(role=None) if scan is not None else leases.list_page(role=None)
+    binding_ids = {binding.worker_id for binding in bindings}
+    concerns = tuple(
+        lease.lease_id
+        for lease in page.records
+        if lease.status in ACTIVE_LEASE_STATUSES and lease.lease_id not in binding_ids
+    )
+    return concerns, page.scan_complete, page.unreadable_ids

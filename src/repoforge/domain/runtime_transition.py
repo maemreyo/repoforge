@@ -21,6 +21,9 @@ from .errors import ErrorCode, RepoForgeError
 
 _TRANSITION_ID = re.compile(r"^tran-[a-f0-9]{24}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+#: A git object id, full or abbreviated (release identity used across the upgrade
+#: pipeline, which works with short shas everywhere else).
+_SHA256 = re.compile(r"^[a-f0-9]{4,64}$")
 
 
 # --------------------------------------------------------------------------- status
@@ -64,9 +67,33 @@ _ALLOWED: dict[RuntimeTransitionStatus, frozenset[RuntimeTransitionStatus]] = {
 
 _TERMINAL = frozenset({_S.COMPLETED, _S.ROLLED_BACK})
 
+#: Failure statuses that a coordinator may persist as a terminal outcome. A
+#: failed transition is final: retrying an activation creates a NEW transition
+#: instead of mutating the failed one, so the failed record stays an honest
+#: terminal failure and recovery is always a fresh attempt.
+_TERMINAL_FAILURES = frozenset(
+    {
+        _S.CONFIG_FAILED,
+        _S.VALIDATION_FAILED,
+        _S.ACTIVATION_FAILED,
+        _S.HEALTH_FAILED,
+    }
+)
+
 
 def is_terminal(state: RuntimeTransitionStatus) -> bool:
     return state in _TERMINAL
+
+
+def is_terminal_failure(state: RuntimeTransitionStatus) -> bool:
+    """A persisted failure outcome that must never be silently resumed.
+
+    Distinct from the retryable statuses (CONFIG_FAILED -> PREPARED etc.) the
+    state machine allows for an in-memory retry: once the coordinator persists a
+    failure as the terminal outcome, that record is final and a retry is a new
+    transition.
+    """
+    return state in _TERMINAL_FAILURES
 
 
 # --------------------------------------------------------------------------- validators
@@ -82,6 +109,12 @@ def _positive_int(value: int, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{field} must be a positive integer")
     return value
+
+
+def _optional_positive_int(value: int | None, field: str) -> int | None:
+    if value is None:
+        return None
+    return _positive_int(value, field)
 
 
 def _non_empty_str(value: str, field: str) -> str:
@@ -121,7 +154,7 @@ def _iso(value: str, field: str) -> str:
 class RuntimeTransition:
     transition_id: str
     status: RuntimeTransitionStatus
-    target_generation: int
+    target_generation: int | None
     config_generation: int | None
     correlation_id: str
     started_at: str
@@ -130,12 +163,24 @@ class RuntimeTransition:
     error_code: str | None
     error_message: str | None
     previous_transition_id: str | None
+    #: Which lifecycle this record belongs to (F-009), so recovery knows what kind
+    #: of durable tail to complete. Optional so older payloads decode unchanged.
+    kind: str = "activate"
+    #: Release identity the effect moved between -- the real SHA, never a
+    #: placeholder generation number. Optional for payload compatibility.
+    from_sha: str | None = None
+    to_sha: str | None = None
 
     def __post_init__(self) -> None:
         _transition_id(self.transition_id)
-        _positive_int(self.target_generation, "target_generation")
+        _optional_positive_int(self.target_generation, "target_generation")
         if self.config_generation is not None:
             _positive_int(self.config_generation, "config_generation")
+        if self.target_generation is None and self.to_sha is None:
+            raise ValueError(
+                "runtime transition needs a target_generation or a to_sha "
+                "(a SHA-keyed lifecycle must name the target release)"
+            )
         _non_empty_str(self.correlation_id, "correlation_id")
         _iso(self.started_at, "started_at")
         _iso(self.updated_at, "updated_at")
@@ -146,6 +191,11 @@ class RuntimeTransition:
         _optional_str(self.error_message, "error_message")
         if self.previous_transition_id is not None:
             _transition_id(self.previous_transition_id)
+        _safe_id(self.kind, "kind")
+        if self.from_sha is not None and _SHA256.fullmatch(self.from_sha) is None:
+            raise ValueError("from_sha must be a 64-hex git object id")
+        if self.to_sha is not None and _SHA256.fullmatch(self.to_sha) is None:
+            raise ValueError("to_sha must be a 64-hex git object id")
 
     def _validate(self, target: RuntimeTransitionStatus) -> None:
         allowed = _ALLOWED.get(self.status)
@@ -251,81 +301,20 @@ class RuntimeTransition:
         return is_terminal(self.status)
 
 
-def runtime_transition_payload(transition: RuntimeTransition) -> dict[str, object]:
-    """Serialize a transition for durable storage; status becomes its string value."""
-    return {
-        "transition_id": transition.transition_id,
-        "status": transition.status.value,
-        "target_generation": transition.target_generation,
-        "config_generation": transition.config_generation,
-        "correlation_id": transition.correlation_id,
-        "started_at": transition.started_at,
-        "updated_at": transition.updated_at,
-        "completed_at": transition.completed_at,
-        "error_code": transition.error_code,
-        "error_message": transition.error_message,
-        "previous_transition_id": transition.previous_transition_id,
-    }
-
-
-def runtime_transition_from_payload(payload: dict[str, object]) -> RuntimeTransition:
-    """Decode a stored payload; an unknown status raises ValueError."""
-    required = {
-        "transition_id",
-        "status",
-        "target_generation",
-        "correlation_id",
-        "started_at",
-        "updated_at",
-    }
-    if not required.issubset(payload):
-        raise ValueError("runtime transition payload is missing required fields")
-    return RuntimeTransition(
-        transition_id=str(payload["transition_id"]),
-        status=RuntimeTransitionStatus(str(payload["status"])),
-        target_generation=_payload_int(payload["target_generation"], "target_generation"),
-        config_generation=_payload_optional_int(
-            payload.get("config_generation"), "config_generation"
-        ),
-        correlation_id=str(payload["correlation_id"]),
-        started_at=str(payload["started_at"]),
-        updated_at=str(payload["updated_at"]),
-        completed_at=_payload_optional_str(payload.get("completed_at")),
-        error_code=_payload_optional_str(payload.get("error_code")),
-        error_message=_payload_optional_str(payload.get("error_message")),
-        previous_transition_id=_payload_optional_str(payload.get("previous_transition_id")),
-    )
-
-
-def _payload_int(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{field} must be an integer")
-    return value
-
-
-def _payload_optional_int(value: object, field: str) -> int | None:
-    if value is None:
-        return None
-    return _payload_int(value, field)
-
-
-def _payload_optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    return str(value)
-
-
 # --------------------------------------------------------------------------- factory
 
 
 def new_runtime_transition(
     transition_id: str,
     *,
-    target_generation: int,
+    target_generation: int | None = None,
     correlation_id: str,
     started_at: str,
     config_generation: int | None = None,
     previous_transition_id: str | None = None,
+    kind: str = "activate",
+    from_sha: str | None = None,
+    to_sha: str | None = None,
 ) -> RuntimeTransition:
     """Create a new transition in PREPARED state."""
     return RuntimeTransition(
@@ -340,13 +329,26 @@ def new_runtime_transition(
         error_code=None,
         error_message=None,
         previous_transition_id=previous_transition_id,
+        kind=kind,
+        from_sha=from_sha,
+        to_sha=to_sha,
     )
 
+
+# The payload codec lives in the sibling ``runtime_transition_payload`` module so
+# this file stays under the 400-line policy; re-export it so the existing import
+# path ``from ...domain.runtime_transition import runtime_transition_payload``
+# keeps working unchanged.
+from .runtime_transition_payload import (  # noqa: E402
+    runtime_transition_from_payload,
+    runtime_transition_payload,
+)
 
 __all__ = [
     "RuntimeTransition",
     "RuntimeTransitionStatus",
     "is_terminal",
+    "is_terminal_failure",
     "new_runtime_transition",
     "runtime_transition_from_payload",
     "runtime_transition_payload",
