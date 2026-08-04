@@ -2132,6 +2132,11 @@ def run_execution_worker(config_path: Path, *, generation: int) -> int:
     import signal
     import threading
 
+    from .application.activation.handoff import (
+        GenerationHandoffReconciler,
+        OwnerIdentity,
+        reconcile_before_admit,
+    )
     from .application.operations.work_executor import VerificationWorkHandlers
     from .application.operations.work_loop import OperationWorkLoop
     from .application.workspace.run_adhoc import WorkspaceAdhocRunner
@@ -2148,6 +2153,20 @@ def run_execution_worker(config_path: Path, *, generation: int) -> int:
     resolved_path = configs.resolved_path(generation)
     config = load_config(resolved_path)
     application = build_application(config, config_generation=generation)
+    ctx = application.context
+    if ctx.worker_bindings is not None and ctx.reaper is not None:
+        server_pid = os.getpid()
+        admit = reconcile_before_admit(
+            reconciler=GenerationHandoffReconciler(bindings=ctx.worker_bindings, reaper=ctx.reaper),
+            current_owner=OwnerIdentity(
+                server_pid=server_pid,
+                server_start_token=ctx.reaper.read_start_token(server_pid),
+                generation=generation,
+            ),
+            audit=ctx.audit,
+        )
+        if admit.exit_code is not None:
+            return admit.exit_code
     handlers = VerificationWorkHandlers(
         WorkspaceProfileRunner(application.context),
         WorkspaceAdhocRunner(application.context),

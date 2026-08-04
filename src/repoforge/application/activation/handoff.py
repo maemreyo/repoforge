@@ -12,16 +12,33 @@ schema-v2 token) or, for pre-v2 bindings that predate the token, when its owning
 process identity (``server_pid`` + ``server_start_token``) matches the current process.
 Everything else is a prior generation's and is reconciled: its detached child is reaped
 (unless the operation kind is resumable across a handoff) and its binding released.
+
+#275 also drives this reconciler on the normal execution-worker admit path (not only the
+tunnel-seam swap): a generation-bound worker must reconcile before claiming durable work
+so two generations never both admit the same operation.
 """
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from ...domain.operation_worker import OperationWorkerBinding
 from ...ports.process_reaper import ProcessReaper
 from ...ports.worker_binding_store import WorkerBindingStore
+
+#: Exit code when admit-time handoff cannot transfer ownership (prior worker still live,
+#: scan incomplete, or unreadable binding). The worker must not start admitting work.
+EXIT_HANDOFF_CONFLICT = 7
+
+#: Audit action for generation handoff reconciliation (activation and admit paths).
+HANDOFF_AUDIT_ACTION = "generation_handoff_reconcile"
+
+
+class _AuditRecorder(Protocol):
+    def record(self, action: str, *, success: bool, details: dict[str, Any]) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,3 +178,39 @@ class GenerationHandoffReconciler:
             # identity; treat as not-owned so the binding is reconciled, not adopted.
             return False
         return binding.server_start_token == owner.server_start_token
+
+
+@dataclass(frozen=True, slots=True)
+class AdmitHandoffResult:
+    """Outcome of admit-time handoff: whether the worker may claim durable work."""
+
+    report: HandoffReport
+    exit_code: int | None
+
+
+def reconcile_before_admit(
+    *,
+    reconciler: GenerationHandoffReconciler,
+    current_owner: OwnerIdentity,
+    audit: _AuditRecorder | None = None,
+    is_resumable: Callable[[str], bool] | None = None,
+) -> AdmitHandoffResult:
+    """Reconcile prior-generation bindings before this generation admits work (#275).
+
+    Emits a handoff audit event (success or fail-closed). When ``report.ok`` is False the
+    worker must exit with ``EXIT_HANDOFF_CONFLICT`` rather than claim queue items that a
+    surviving prior-generation worker may still be executing.
+    """
+    report = reconciler.reconcile(current_owner=current_owner, is_resumable=is_resumable)
+    if audit is not None:
+        details: dict[str, Any] = {
+            **report.as_dict(),
+            "generation": current_owner.generation,
+            "server_pid": current_owner.server_pid,
+            "path": "admit",
+        }
+        with contextlib.suppress(Exception):
+            audit.record(HANDOFF_AUDIT_ACTION, success=report.ok, details=details)
+    if not report.ok:
+        return AdmitHandoffResult(report=report, exit_code=EXIT_HANDOFF_CONFLICT)
+    return AdmitHandoffResult(report=report, exit_code=None)

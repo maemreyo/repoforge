@@ -298,6 +298,7 @@ class WorkspaceProfileRunner:
                     child_start_token=child_token,
                     server_pid=server_pid,
                     server_start_token=server_token,
+                    owner_generation=getattr(self.ctx, "config_generation", 0) or None,
                     created_at=self.ctx.clock.now_iso(),
                 )
             )
