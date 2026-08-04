@@ -114,6 +114,11 @@ class RecoveryAction:
     profile_name: str | None = None
     plan_through: str | None = None
     relative_paths: tuple[str, ...] = ()
+    # Real current-content SHA-256 per `relative_paths` entry (workspace_mutate restore
+    # only); `None` for a path a caller must confirm is currently absent. Populated by
+    # `FailureIntelligenceService.build()`, which has filesystem access this pure
+    # domain/classification module does not.
+    path_hashes: tuple[ChangedPathHash, ...] = ()
     operation_id: str | None = None
     plan_id: str | None = None
     action: str | None = None
@@ -167,6 +172,17 @@ class RecoveryAction:
             "relative_paths",
             _safe_paths(self.relative_paths, "recovery action relative_paths"),
         )
+        object.__setattr__(
+            self,
+            "path_hashes",
+            _safe_path_hashes(
+                self.path_hashes,
+                "recovery action path_hashes",
+                allowed_paths=frozenset(self.relative_paths),
+            ),
+        )
+        if self.path_hashes and self.kind is not RecoveryActionKind.WORKSPACE_MUTATE:
+            _invalid("path_hashes is only valid for workspace_mutate recovery actions")
         verify_only = (self.mode, self.plan_action, self.diagnostic_id, self.profile_name)
         if self.kind is not RecoveryActionKind.WORKSPACE_VERIFY and (
             any(value is not None for value in verify_only) or self.plan_through is not None
@@ -275,9 +291,26 @@ class RecoveryAction:
                 "expected_fingerprint": self.expected_workspace_fingerprint,
             }
         if self.kind is RecoveryActionKind.WORKSPACE_MUTATE:
+            # `path_hashes` carries the real current-content hash for each path, computed
+            # by `FailureIntelligenceService.build()` (which has filesystem access this
+            # pure domain/classification module does not) at the moment the failure was
+            # observed. A path missing from `path_hashes` -- e.g. hashing failed, or this
+            # action was reconstructed from evidence predating this field -- falls back to
+            # null, which makes the suggested call safely refuse via an absence check
+            # (#374 review finding: restore previously had no proof-of-current-state check
+            # at all) rather than silently restoring over content nobody re-verified.
+            hashes = {item.path: item.sha256 for item in self.path_hashes}
             return {
                 "workspace_id": self.workspace_id,
-                "operations": [{"op": "restore", "paths": list(self.relative_paths)}],
+                "operations": [
+                    {
+                        "op": "restore",
+                        "entries": [
+                            {"path": path, "expected_sha256": hashes.get(path)}
+                            for path in self.relative_paths
+                        ],
+                    }
+                ],
                 "expected_head_sha": self.expected_head_sha,
                 "expected_workspace_fingerprint": self.expected_workspace_fingerprint,
             }
@@ -331,6 +364,21 @@ class FailureHistorySignal:
 
 
 @dataclass(frozen=True, slots=True)
+class ChangedPathHash:
+    """A path's real current-content SHA-256, or ``None`` if the path is currently
+    absent -- the same vocabulary `RestorePathExpectation.expected_sha256` uses, so
+    this can be forwarded directly into a restore recovery action's arguments."""
+
+    path: str
+    sha256: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", _safe_path(self.path, "changed path hash path"))
+        if self.sha256 is not None and _SHA64.fullmatch(self.sha256) is None:
+            _invalid("Changed path hash sha256 is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class FailureObservation:
     operation_id: str
     plan_id: str
@@ -349,6 +397,11 @@ class FailureObservation:
     changed_paths: tuple[str, ...]
     history: tuple[FailureHistorySignal, ...]
     compatibility_binding: str | None = None
+    # Real current-content SHA-256 per `changed_paths` entry (`None` for a path
+    # confirmed currently absent), computed by `FailureIntelligenceService.build()`.
+    # May be empty even when `changed_paths` is non-empty (hashing is best-effort);
+    # never contains a path outside `changed_paths`.
+    changed_path_hashes: tuple[ChangedPathHash, ...] = ()
 
     def __post_init__(self) -> None:
         if _SAFE_ID.fullmatch(self.workspace_id) is None:
@@ -377,6 +430,15 @@ class FailureObservation:
         if self.failure_domain is not None and _SAFE_ID.fullmatch(self.failure_domain) is None:
             _invalid("Failure observation failure_domain is invalid")
         object.__setattr__(self, "changed_paths", _safe_paths(self.changed_paths, "changed_paths"))
+        object.__setattr__(
+            self,
+            "changed_path_hashes",
+            _safe_path_hashes(
+                self.changed_path_hashes,
+                "changed_path_hashes",
+                allowed_paths=frozenset(self.changed_paths),
+            ),
+        )
         if not isinstance(self.history, tuple) or len(self.history) > 100:
             _invalid("Failure observation history must be a bounded tuple")
         if (
@@ -469,16 +531,32 @@ def _safe_text(value: str, field: str, limit: int) -> str:
     return normalized
 
 
+def _safe_path(value: str, field: str) -> str:
+    item = _safe_text(value, field, 512).replace("\\", "/")
+    if item.startswith("/") or any(part in {"", ".", ".."} for part in item.split("/")):
+        _invalid(f"{field} contains an unsafe path")
+    return item
+
+
 def _safe_paths(values: tuple[str, ...], field: str) -> tuple[str, ...]:
     if not isinstance(values, tuple) or len(values) > _MAX_SCOPE_ITEMS:
         _invalid(f"{field} must be a bounded tuple")
-    normalized: set[str] = set()
-    for value in values:
-        item = _safe_text(value, field, 512).replace("\\", "/")
-        if item.startswith("/") or any(part in {"", ".", ".."} for part in item.split("/")):
-            _invalid(f"{field} contains an unsafe path")
-        normalized.add(item)
-    return tuple(sorted(normalized))
+    return tuple(sorted({_safe_path(value, field) for value in values}))
+
+
+def _safe_path_hashes(
+    values: tuple[ChangedPathHash, ...], field: str, *, allowed_paths: frozenset[str]
+) -> tuple[ChangedPathHash, ...]:
+    if not isinstance(values, tuple) or len(values) > _MAX_SCOPE_ITEMS:
+        _invalid(f"{field} must be a bounded tuple")
+    if not all(isinstance(item, ChangedPathHash) for item in values):
+        _invalid(f"{field} entries must be ChangedPathHash values")
+    paths = [item.path for item in values]
+    if len(set(paths)) != len(paths):
+        _invalid(f"{field} contains duplicate paths")
+    if not set(paths) <= allowed_paths:
+        _invalid(f"{field} paths must be a subset of the associated changed/relative paths")
+    return tuple(sorted(values, key=lambda item: item.path))
 
 
 def _safe_strings(values: tuple[str, ...], field: str) -> tuple[str, ...]:
@@ -785,6 +863,7 @@ def _actions(
                 "The listed paths were reviewed and the operator intends to discard those exact changes.",
                 workspace_id=observation.workspace_id,
                 relative_paths=observation.changed_paths,
+                path_hashes=observation.changed_path_hashes,
                 expected_head_sha=observation.post_identity.head_sha,
                 expected_workspace_fingerprint=observation.post_identity.workspace_fingerprint,
             )
@@ -1026,6 +1105,7 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
         arguments = raw_arguments if isinstance(raw_arguments, dict) else raw
         raw_operations = arguments.get("operations", [])
         raw_paths = arguments.get("relative_paths", [])
+        raw_path_hashes: list[ChangedPathHash] = []
         if kind is RecoveryActionKind.WORKSPACE_MUTATE and isinstance(raw_operations, list):
             restore = next(
                 (
@@ -1036,7 +1116,25 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
                 None,
             )
             if isinstance(restore, dict):
-                raw_paths = restore.get("paths", [])
+                raw_entries = restore.get("entries", [])
+                if isinstance(raw_entries, list):
+                    valid_entries = [
+                        entry
+                        for entry in raw_entries
+                        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                    ]
+                    raw_paths = [entry["path"] for entry in valid_entries]
+                    raw_path_hashes = [
+                        ChangedPathHash(
+                            path=str(entry["path"]),
+                            sha256=(
+                                str(entry["expected_sha256"])
+                                if entry.get("expected_sha256") is not None
+                                else None
+                            ),
+                        )
+                        for entry in valid_entries
+                    ]
         if not isinstance(raw_paths, list):
             _invalid("Failure recovery action paths are invalid")
         actions.append(
@@ -1070,6 +1168,7 @@ def failure_evidence_from_payload(payload: dict[str, Any]) -> FailureEvidence:
                     else None
                 ),
                 relative_paths=tuple(str(item) for item in raw_paths),
+                path_hashes=tuple(raw_path_hashes),
                 operation_id=(
                     str(arguments["operation_id"])
                     if arguments.get("operation_id") is not None

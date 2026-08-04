@@ -1824,12 +1824,15 @@ class GitCliRepository:
 
         Bounded to what ``git worktree list --porcelain`` reports -- never a
         model-supplied host path (#372's discovery boundary).
+
+        ``check`` defaults to True here deliberately (review finding): this command does
+        not fail for a repository with zero worktrees -- it still exits 0 and reports just
+        the primary one. A non-zero exit is a genuine git failure (corrupt worktree
+        metadata, a permission error, a locked repository), not "no worktrees," and must
+        raise a typed CommandError with a bounded stderr excerpt instead of being reported
+        as an empty list indistinguishable from a real absence of matches.
         """
-        result = self._executor.run(
-            ["git", "worktree", "list", "--porcelain"], cwd=repo_path, check=False
-        )
-        if result.returncode != 0:
-            return ()
+        result = self._executor.run(["git", "worktree", "list", "--porcelain"], cwd=repo_path)
         entries: list[GitWorktreeEntry] = []
         current: dict[str, object] = {}
 

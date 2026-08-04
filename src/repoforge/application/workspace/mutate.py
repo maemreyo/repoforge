@@ -84,8 +84,16 @@ class ApplyPatchMutation:
 
 
 @dataclass(frozen=True, slots=True)
+class RestorePathExpectation:
+    path: str
+    # None means the caller expects this path to currently be absent from the working
+    # tree; any other value is compared against the working tree's actual current bytes.
+    expected_sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RestoreMutation:
-    paths: tuple[str, ...]
+    entries: tuple[RestorePathExpectation, ...]
 
 
 WorkspaceMutation: TypeAlias = (
@@ -446,12 +454,17 @@ class _MutationPlanner:
         )
 
     def _restore(self, operation: RestoreMutation) -> MutationDiagnostic:
-        if not operation.paths:
+        if not operation.entries:
             raise ValueError("restore paths must contain at least one path")
         changed = False
         restored: list[str] = []
-        for raw in operation.paths:
-            path, existing = self.load(raw)
+        for entry in operation.entries:
+            if entry.expected_sha256 is None:
+                path = self.require_absent(entry.path)
+                existing = None
+            else:
+                path, existing = self.require_existing(entry.path)
+                self.validate_sha(entry.expected_sha256, existing.sha256, path=path)
             try:
                 blob = self.ctx.git.read_snapshot_blob(
                     self.workspace,
@@ -1036,5 +1049,5 @@ class WorkspaceMutator:
         if isinstance(operation, ApplyPatchMutation):
             return None
         if isinstance(operation, RestoreMutation):
-            return ", ".join(operation.paths)
+            return ", ".join(entry.path for entry in operation.entries)
         return operation.path

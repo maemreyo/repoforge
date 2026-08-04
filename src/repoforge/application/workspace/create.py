@@ -9,6 +9,7 @@ from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, SecurityError, WorkspaceError
 from ...domain.operations import hash_idempotency_key
 from ...domain.policy import (
+    canonical_remote_identity,
     resolve_trusted_checkout,
     slugify,
     validate_adopted_branch,
@@ -179,6 +180,32 @@ class WorkspaceCreator:
                 },
                 unchanged_state=("No branch, worktree, or file was created.",),
             )
+        # A shared root commit alone proves common ancestry, not the same repository: a
+        # fork or an unrelated clone taken from the same history shares it too. Compare
+        # remote identity as well when both sides actually have `repo.remote` configured
+        # -- best-effort and local (no GitHub API call), so a checkout without that
+        # remote name configured is not penalized, but a checkout that DOES have one
+        # pointing elsewhere is refused rather than silently trusted on root-commit alone.
+        expected_remote_url = self.ctx.git.remote_url(repo.path, repo.remote)
+        observed_remote_url = self.ctx.git.remote_url(resolved, repo.remote)
+        if expected_remote_url.returncode == 0 and observed_remote_url.returncode == 0:
+            expected_identity = canonical_remote_identity(expected_remote_url.stdout)
+            observed_identity = canonical_remote_identity(observed_remote_url.stdout)
+            if (
+                expected_identity is not None
+                and observed_identity is not None
+                and expected_identity != observed_identity
+            ):
+                raise WorkspaceError(
+                    f"ATTACH_REPOSITORY_MISMATCH: the checkout registered as {alias!r} "
+                    f"shares root history with {repo.repo_id!r} but its {repo.remote!r} "
+                    "remote points elsewhere -- likely a fork or an unrelated clone",
+                    details={
+                        "expected_remote": expected_identity,
+                        "observed_remote": observed_identity,
+                    },
+                    unchanged_state=("No branch, worktree, or file was created.",),
+                )
         branch = self.ctx.git.current_branch(resolved)
         if not branch:
             raise WorkspaceError(
@@ -188,7 +215,37 @@ class WorkspaceCreator:
                 unchanged_state=("No branch, worktree, or file was created.",),
             )
         validate_adopted_branch(branch, repo)
+        conflicting = self._find_conflicting_alias_attachment(repo, alias, resolved)
+        if conflicting is not None:
+            raise WorkspaceError(
+                f"ATTACH_CHECKOUT_ALREADY_REGISTERED: {resolved} is already attached as "
+                f"workspace {conflicting!r} through a different alias; config-time "
+                "collision checks only catch this while every alias's target still "
+                "matches what config declared -- a symlink retargeted after the "
+                "configuration was loaded can still make two aliases converge on the "
+                "same live checkout. Re-attach using the alias that already governs it, "
+                "or remove that workspace first.",
+                details={"conflicting_workspace_id": conflicting},
+                unchanged_state=("No branch, worktree, or file was created.",),
+            )
         return resolved, self.ctx.git.head_sha(resolved), branch
+
+    def _find_conflicting_alias_attachment(
+        self, repo: Any, alias: str, resolved: Path
+    ) -> str | None:
+        """Two different aliases resolving to the identical live checkout must not each
+        mint their own workspace_id: `_attach_workspace_id` keys on the alias token, not
+        the path, so without this check they would get two independent workspace records
+        and two independent mutation locks over the same filesystem checkout."""
+        this_workspace_id = _attach_workspace_id(repo.repo_id, "alias", alias)
+        for record in self.ctx.store.list():
+            if record.repo_id != repo.repo_id or record.kind is not WorkspaceKind.ATTACHED_SHARED:
+                continue
+            if record.workspace_id == this_workspace_id:
+                continue
+            if Path(record.path).resolve() == resolved:
+                return record.workspace_id
+        return None
 
     def execute(self, c: WorkspaceCreateCommand) -> WorkspaceCreateResult:
         repo = self.ctx.repo(c.repo_id)
@@ -397,6 +454,14 @@ class WorkspaceCreator:
                     metadata["issue_ids"] = list(issue_ids)
                 if key_hash:
                     metadata["workspace_create_idempotency"] = key_hash
+                if attach_alias:
+                    # Persisted so ApplicationContext.workspace() can re-check, on every
+                    # subsequent call, that this alias still authorizes this checkout --
+                    # otherwise revoking a trusted_external_checkouts entry only blocks
+                    # NEW attach attempts, and a workspace already attached through it
+                    # keeps working forever (review finding: revocation must reach
+                    # already-attached workspaces, not just new ones).
+                    metadata["attach_checkout_alias"] = attach_alias
                 kind = (
                     WorkspaceKind.ATTACHED_SHARED
                     if is_attach

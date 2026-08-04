@@ -105,6 +105,7 @@ source_globs = [
   "src/repoforge/adapters/locking/**",
 ]
 test_files = [
+  "tests/test_branch_lifecycle_guards.py",
   "tests/test_commit_identity_governance.py",
   "tests/test_github_read_cache.py",
   "tests/test_journaled_filesystem_transaction.py",
@@ -671,6 +672,7 @@ test_files = [
   "tests/test_agent_surface_friction.py",
   "tests/test_audit_cursor.py",
   "tests/test_background_run_profile.py",
+  "tests/test_branch_lifecycle_guards.py",
   "tests/test_ci_failure_evidence.py",
   "tests/test_expensive_profile_guards.py",
   "tests/test_execution_worker_reconciler.py",

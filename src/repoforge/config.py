@@ -1553,17 +1553,26 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             commit_identity=commit_identity,
             trusted_external_checkouts=trusted_external_checkouts,
         )
-    _checkout_owners: dict[Path, str] = {}
+    # Keyed by the live-resolved path, not the literal config-declared one: a symlink and
+    # its target, or two differently-spelled paths to the same real checkout, must collide
+    # here even though the stored (unresolved) values differ. Keyed by (repo_id, alias),
+    # not just repo_id, so two aliases under the SAME repo pointing at the same checkout
+    # are rejected too -- each would otherwise mint its own workspace_id and its own
+    # mutation lock (`_attach_workspace_id` keys on the alias token) for the identical
+    # filesystem checkout, letting two operations run against it concurrently unlocked.
+    _checkout_owners: dict[Path, tuple[str, str]] = {}
     for repo_id, repo in repositories.items():
         for alias, checkout_path in repo.trusted_external_checkouts.items():
-            owner = _checkout_owners.get(checkout_path)
-            if owner is not None and owner != repo_id:
+            canonical = checkout_path.resolve()
+            owner = _checkout_owners.get(canonical)
+            if owner is not None:
+                owner_repo_id, owner_alias = owner
                 raise ConfigError(
                     f"trusted_external_checkouts path {checkout_path} is registered by both "
-                    f"{owner!r} and {repo_id!r} (alias {alias!r} on the latter); a checkout "
-                    "may belong to only one repository"
+                    f"{owner_repo_id!r} (alias {owner_alias!r}) and {repo_id!r} (alias "
+                    f"{alias!r}); a checkout may be attached through only one alias"
                 )
-            _checkout_owners[checkout_path] = repo_id
+            _checkout_owners[canonical] = (repo_id, alias)
     providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(
         source_path=config_path,

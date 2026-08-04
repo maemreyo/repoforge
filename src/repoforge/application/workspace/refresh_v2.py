@@ -24,7 +24,11 @@ from ...domain.filesystem_transaction import (
 )
 from ...domain.generated_paths import generated_path_rule_for, generated_paths_identity
 from ...domain.operations import request_fingerprint
-from ...domain.policy import assert_path_allowed, resolve_workspace_path, validate_branch
+from ...domain.policy import (
+    assert_path_allowed,
+    resolve_workspace_path,
+    validate_workspace_branch,
+)
 from ...domain.workspace import (
     WORKSPACE_REFRESH_RECEIPTS,
     VerificationReceipt,
@@ -508,7 +512,7 @@ class WorkspaceRefreshV2:
                 journal.recover_pending()
                 record = self.ctx.store.load(command.workspace_id)
                 repo = self.ctx.repository_for_workspace(record)
-                validate_branch(record.branch, repo)
+                validate_workspace_branch(record.kind, record.branch, repo)
                 if record.branch == record.base or record.branch in repo.protected_branches:
                     raise WorkspaceError("Protected or base branches cannot be refreshed")
                 head = self.ctx.git.head_sha(workspace)
@@ -751,7 +755,7 @@ class WorkspaceRefreshV2:
                     return replay
                 repo = self.ctx.repository_for_workspace(record)
                 workspace = Path(record.path)
-                validate_branch(record.branch, repo)
+                validate_workspace_branch(record.kind, record.branch, repo)
                 if record.branch == record.base or record.branch in repo.protected_branches:
                     raise self._recreate_refusal(("protected_or_base_branch",))
                 if not workspace.is_dir() or not self.ctx.git.is_worktree(workspace):
@@ -856,7 +860,7 @@ class WorkspaceRefreshV2:
                 code=ErrorCode.STALE_STATE,
                 retryable=False,
             )
-        validate_branch(branch, repo)
+        validate_workspace_branch(record.kind, branch, repo)
 
         if workspace.exists():
             if not self.ctx.git.is_worktree(workspace):

@@ -360,6 +360,14 @@ class WorkspaceSummary(StrictModel):
     dirty: bool | None = None
     lifecycle: str = Field(min_length=1, max_length=80)
     issue_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    kind: Literal["managed_worktree", "adopted_worktree", "attached_shared"] = Field(
+        description=(
+            "managed_worktree: RepoForge created both the branch and the worktree. "
+            "adopted_worktree: an existing branch, worktree created by RepoForge. "
+            "attached_shared: an operator-owned checkout RepoForge did not create; "
+            "concurrent drift is observed, not refused."
+        )
+    )
 
 
 class OperationState(str, Enum):

@@ -17,6 +17,8 @@ from conftest import ForgeEnvironment, git
 from repoforge.application.workspace.mutate import (
     CreateMutation,
     ReplaceTextMutation,
+    RestoreMutation,
+    RestorePathExpectation,
     TextReplacement,
 )
 from repoforge.domain.errors import WorkspaceError
@@ -144,4 +146,51 @@ def test_shared_mode_still_fails_closed_on_a_genuine_per_file_collision(
             ],
             expected_workspace_fingerprint="0" * 64,
             expected_head_sha="f" * 40,
+        )
+
+
+def test_shared_mode_restore_fails_closed_on_stale_inspection(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """RestoreMutation had no expected_sha256 guard at all (review finding): in shared
+    mode the whole-tree drift check is only an observation, so nothing else stopped a
+    stale restore from silently overwriting the operator's uncommitted edit with HEAD
+    content. Restore now requires the same proof-of-current-state every other
+    destructive mutation already required."""
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "shared restore stale")["workspace_id"]
+    path = Path(service.workspace_status(workspace_id)["path"])
+    hello = service.workspace_read_file(workspace_id, "hello.txt")
+    _make_shared(forge_env, workspace_id)
+
+    # Operator edits the tracked file, unstaged, after the agent's last inspection.
+    path.joinpath("hello.txt").write_text("operator's uncommitted edit\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceError, match="expected_sha256 mismatch"):
+        service.workspace_mutate(
+            workspace_id,
+            [RestoreMutation((RestorePathExpectation("hello.txt", hello["sha256"]),))],
+            expected_workspace_fingerprint="0" * 64,
+            expected_head_sha="f" * 40,
+        )
+
+    assert path.joinpath("hello.txt").read_text(encoding="utf-8") == "operator's uncommitted edit\n"
+
+
+def test_restore_absence_expectation_refuses_when_path_unexpectedly_exists(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """expected_sha256=None asserts the caller believes the path is currently absent
+    (e.g. restoring something they saw deleted); it must not be usable to blindly
+    overwrite a path that turns out to still exist."""
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "restore absence guard")["workspace_id"]
+    status = service.workspace_status(workspace_id)
+
+    with pytest.raises(WorkspaceError, match="already exists"):
+        service.workspace_mutate(
+            workspace_id,
+            [RestoreMutation((RestorePathExpectation("hello.txt", None),))],
+            expected_workspace_fingerprint=status["workspace_fingerprint"],
+            expected_head_sha=status["head_sha"],
         )

@@ -361,7 +361,11 @@ capability negotiation validated through #404 before the old surface is removed.
 2. **Publication-override wiring** (§5, outcome 2; §6 point 6) — #395's mechanism to design.
 3. **`--force-with-lease` target policy** (§6) — whether the exact-form allowance stays a normal guarded
    push, becomes an operator-only history-rewrite authority, or is blocked from generic shell entirely.
-   Gated on #375/#385/#407.
+   #375 confirmed the narrower, already-true fact this depends on: `classify_adhoc_command` takes no
+   workspace-kind parameter, so today's exact-form allowance is uniform across managed, adopted, and
+   attached workspaces alike -- there is no kind that gets a different answer. That is not the same
+   question as this item, which is about a *future* authority (an operator-only override, or a
+   `trusted_host`-scoped one) that doesn't exist yet. Still gated on #385/#407.
 4. **Sandboxed network default posture** — default-deny vs. profile-based (§4 mode matrix). Gated on
    #384/#405.
 5. **Ambient credentials under `sandboxed_turbo`** — denied outright vs. brokered per profile (§4).

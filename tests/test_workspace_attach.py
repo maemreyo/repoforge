@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from conftest import ForgeEnvironment, git
 
-from repoforge.domain.errors import SecurityError, WorkspaceError
+from repoforge.domain.errors import CommandError, SecurityError, WorkspaceError
 from repoforge.domain.workspace import WorkspaceKind
 
 
@@ -111,6 +111,22 @@ def test_attach_unknown_branch_fails_with_evidence(forge_env: ForgeEnvironment) 
     with pytest.raises(WorkspaceError, match="ATTACH_BRANCH_NOT_FOUND"):
         forge_env.service.workspace_create(
             "demo", "attach nothing", attach_branch="does-not-exist-anywhere"
+        )
+
+
+def test_attach_surfaces_a_real_git_worktree_list_failure_instead_of_not_found(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Review finding: list_worktrees used to treat ANY non-zero `git worktree list
+    --porcelain` exit as "zero worktrees" (`check=False`, then `return ()` on failure),
+    indistinguishable from a genuinely empty result -- masking real git failures
+    (corruption, permissions) behind a misleading ATTACH_BRANCH_NOT_FOUND. Removing
+    `.git/HEAD` is a reliable, deterministic way to make that exact command fail."""
+    (forge_env.source / ".git" / "HEAD").unlink()
+
+    with pytest.raises(CommandError):
+        forge_env.service.workspace_create(
+            "demo", "attach during corruption", attach_branch="does-not-matter"
         )
 
 

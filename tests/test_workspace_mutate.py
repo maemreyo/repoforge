@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment
+from test_workspace_shared_consistency import _make_shared
 
 import repoforge.application.workspace.mutate_enhanced as mutate_enhanced_module
 from repoforge.adapters.filesystem.receipt_transaction import JournaledFileTransaction
@@ -19,6 +20,7 @@ from repoforge.application.workspace.mutate import (
     MoveMutation,
     ReplaceTextMutation,
     RestoreMutation,
+    RestorePathExpectation,
     TextReplacement,
     WriteMutation,
 )
@@ -212,9 +214,10 @@ def test_patch_and_restore_are_planned_into_the_same_transaction_model(
     assert patched["changed"] is True
     assert "Journaled patch." in (root / "README.md").read_text(encoding="utf-8")
 
+    current_sha256 = hashlib.sha256((root / "README.md").read_bytes()).hexdigest()
     restored = service.workspace_mutate(
         workspace_id,
-        [RestoreMutation(paths=("README.md",))],
+        [RestoreMutation((RestorePathExpectation("README.md", current_sha256),))],
         expected_workspace_fingerprint=patched["workspace_fingerprint"],
     )
     assert restored["changed"] is True
@@ -364,6 +367,64 @@ def test_keyed_mutate_replays_same_transaction_and_rejects_conflicting_request(
         )
     assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     assert not (root / "other.txt").exists()
+
+
+def test_keyed_mutate_rejects_replay_with_a_different_expected_head_sha(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Review finding: expected_head_sha was absent from both outcome_request and the
+    idempotency request_fingerprint, so the same key replayed with a genuinely different
+    precondition returned the stale cached outcome instead of an IDEMPOTENCY_CONFLICT."""
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 keyed head binding")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+
+    first = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="keyed-head.txt", content="created once\n")],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        expected_head_sha=before["head_sha"],
+        idempotency_key="workspace-mutate-head-key-0001",
+    )
+    assert first["changed"] is True
+
+    with pytest.raises(ConfigError) as conflict:
+        service.workspace_mutate(
+            workspace_id,
+            [CreateMutation(path="keyed-head.txt", content="created once\n")],
+            expected_workspace_fingerprint=before["workspace_fingerprint"],
+            expected_head_sha="f" * 40,  # deliberately different from the first call
+            idempotency_key="workspace-mutate-head-key-0001",
+        )
+    assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+
+def test_keyed_mutate_rejects_replay_with_a_different_expected_head_sha_in_shared_mode(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "v2 keyed head binding shared")["workspace_id"]
+    before = service.workspace_status(workspace_id)
+    _make_shared(forge_env, workspace_id)
+
+    first = service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="keyed-head-shared.txt", content="created once\n")],
+        expected_workspace_fingerprint=before["workspace_fingerprint"],
+        expected_head_sha=before["head_sha"],
+        idempotency_key="workspace-mutate-head-key-shared-0001",
+    )
+    assert first["changed"] is True
+
+    with pytest.raises(ConfigError) as conflict:
+        service.workspace_mutate(
+            workspace_id,
+            [CreateMutation(path="keyed-head-shared.txt", content="created once\n")],
+            expected_workspace_fingerprint=before["workspace_fingerprint"],
+            expected_head_sha="f" * 40,
+            idempotency_key="workspace-mutate-head-key-shared-0001",
+        )
+    assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
 
 def test_cross_process_keyed_mutate_executes_transaction_once(

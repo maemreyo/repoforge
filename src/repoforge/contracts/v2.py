@@ -986,6 +986,14 @@ class WorkspaceStatusOutput(ToolResponse):
     sections: tuple[StatusSectionEvidence, ...] = Field(default=(), max_length=3)
     fingerprint_source: Literal["cache", "scan"]
     truncated: bool = False
+    kind: Literal["managed_worktree", "adopted_worktree", "attached_shared"] = Field(
+        description=(
+            "managed_worktree: RepoForge created both the branch and the worktree. "
+            "adopted_worktree: an existing branch, worktree created by RepoForge. "
+            "attached_shared: an operator-owned checkout RepoForge did not create; "
+            "concurrent drift is observed, not refused."
+        )
+    )
     read_consistency: StatusReadConsistency = StatusReadConsistency.LOCKED
 
 
@@ -1165,9 +1173,19 @@ class ApplyPatchOperation(StrictModel):
     patch: LongText
 
 
+class RestorePathExpectation(StrictModel):
+    path: RelativePath
+    # None asserts the caller expects this path to currently be absent from the working
+    # tree; any other value must match the working tree's actual current content hash --
+    # restore is a full-content overwrite from HEAD, so this is the same proof-of-current-
+    # state guard every other destructive mutation (write/delete/move/replace_text)
+    # already requires.
+    expected_sha256: Sha256 | None = None
+
+
 class RestoreOperation(StrictModel):
     op: Literal["restore"]
-    paths: tuple[RelativePath, ...] = Field(min_length=1, max_length=100)
+    entries: tuple[RestorePathExpectation, ...] = Field(min_length=1, max_length=100)
 
 
 MutationOperation = Annotated[

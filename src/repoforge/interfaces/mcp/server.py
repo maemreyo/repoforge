@@ -42,6 +42,7 @@ from ...application.workspace.mutate import (
     MoveMutation,
     ReplaceTextMutation,
     RestoreMutation,
+    RestorePathExpectation,
     TextReplacement,
     WorkspaceMutation,
     WriteMutation,
@@ -644,7 +645,17 @@ def _mutation_operations(raw: list[dict[str, Any]]) -> list[WorkspaceMutation]:
         elif op == "apply_patch":
             operations.append(ApplyPatchMutation(item["patch"]))
         elif op == "restore":
-            operations.append(RestoreMutation(tuple(item["paths"])))
+            operations.append(
+                RestoreMutation(
+                    tuple(
+                        RestorePathExpectation(
+                            path=entry["path"],
+                            expected_sha256=entry.get("expected_sha256"),
+                        )
+                        for entry in item["entries"]
+                    )
+                )
+            )
         else:  # pragma: no cover - discriminated Pydantic input prevents this
             raise ValueError(f"Unsupported mutation operation: {op}")
     return operations
