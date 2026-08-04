@@ -639,10 +639,16 @@ class SupervisorRestarter:
         replacement while the fence lock is held, and the OS-managed path never
         follows the bootstrap with a second launch (a ``kickstart`` would race the
         just-started replacement for the single-use permit).
+
+        The OS-managed path is selected on REGISTERED, not loaded: after a failed
+        candidate bootstrap the job is unloaded but still registered, and the outer
+        rollback must keep the OS as the owner -- ``bootstrap_replacement`` skips the
+        bootout of the already-unloaded job instead of the handoff falling back to
+        the manual launcher.
         """
         kickstarter = (
             self._kickstarter
-            if self._kickstarter is not None and self._kickstarter.available()
+            if self._kickstarter is not None and self._kickstarter.registered()
             else None
         )
         os_managed = kickstarter is not None

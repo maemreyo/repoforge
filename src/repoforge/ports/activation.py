@@ -348,6 +348,12 @@ class SupervisorKickstarter(Protocol):
     not relaunched under ``SuccessfulExit: False``). Replacing the registered job
     instead keeps the OS as the owner across upgrades.
 
+    The restarter selects this path when the OS-managed definition is REGISTERED (on
+    disk), NOT merely when the job is currently LOADED: after a failed candidate
+    bootstrap the job is unloaded but still registered, so a rollback must stay
+    OS-managed and recover the unloaded job -- never fall back to a manually spawned
+    supervisor that launchd would stop owning.
+
     The OS manager owns the replacement's environment, so the restarter's single-use
     replacement permit cannot be carried in the caller's process environment. The
     replacement-scoped permit is transported through the job definition itself, in two
@@ -356,16 +362,31 @@ class SupervisorKickstarter(Protocol):
     * ``stage_replacement_env`` (under the admission lock) writes the permit into the
       on-disk job definition with NO launchctl side effect; and
     * ``bootstrap_replacement`` (outside the admission lock) unloads the loaded
-      definition and bootstraps the staged one -- which, with ``RunAtLoad``, IS the
-      replacement's single launch. The restarter never follows it with ``kickstart``:
-      a second launch would race the first for the single-use permit (F-012
-      OS-managed path).
+      definition -- or skips the unload when the job is already unloaded -- and
+      bootstraps the staged one, which, with ``RunAtLoad``, IS the replacement's
+      single launch. The restarter never follows it with ``kickstart``: a second
+      launch would race the first for the single-use permit (F-012 OS-managed path).
 
     ``scrub_replacement_env`` removes the permit afterwards without disturbing the
     running job.
     """
 
-    def available(self) -> bool: ...
+    def registered(self) -> bool:
+        """True when the OS-managed job definition is still registered (on disk).
+
+        The restarter chooses the OS-managed path on this alone. After a failed
+        candidate bootstrap the job is UNLOADED but still registered, so recovery
+        (the outer rollback protocol) must keep the OS as the owner and bootstrap
+        the restored definition rather than falling back to the manual launcher.
+        """
+
+    def loaded(self) -> bool:
+        """True when the OS manager currently has the job loaded and running.
+
+        The loaded state is distinct from ``registered``: a rollback following a
+        failed candidate bootstrap starts from an already-unloaded-but-registered
+        job, and ``bootstrap_replacement`` must handle it by skipping the bootout.
+        """
 
     def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
         """Stage ``env`` into the on-disk job definition. NO launchctl side effects.
@@ -379,8 +400,12 @@ class SupervisorKickstarter(Protocol):
         """
 
     def bootstrap_replacement(self) -> RestartOutcome:
-        """Unload the loaded definition and bootstrap the STAGED one, outside any lock.
+        """Load the STAGED job definition, outside any lock.
 
+        Idempotent with respect to the loaded state -- the job state is PROBED, never
+        inferred from a command's exit code: a LOADED job is booted out and the unload
+        verified, an already-UNLOADED job (a rollback following a failed candidate
+        bootstrap) skips the bootout, and an undeterminable state fails closed.
         Because the job has ``RunAtLoad``, the bootstrap is the replacement's single
         launch -- the caller must NOT follow it with ``kickstart``, which would kill
         the just-started replacement and relaunch it against an already-consumed

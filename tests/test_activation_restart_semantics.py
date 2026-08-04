@@ -38,6 +38,7 @@ _IDENTITY_OLD = "a" * 64
 _IDENTITY_NEW = "b" * 64
 _SURFACE = "c" * 64
 _TARGET_SHA = "d" * 64
+_PREVIOUS_SHA = "e" * 64
 _RUNNING_SHA_ENV = "REPOFORGE_RUNNING_RELEASE_SHA"
 
 
@@ -334,15 +335,17 @@ def _admission_wired_registrar(
 
 
 class _FakeOsLaunchd:
-    """A launchd stand-in that boots the replacement through the REAL registrar.
+    """A stateful launchd stand-in that boots the replacement through the REAL registrar.
 
-    Reproduces the supervisor's `run()` order: the execution worker is spawned via
-    `WorkerRegistrar.create_intent` FIRST, and the live HEALTHY record is written
-    only when that spawn succeeds -- a refused spawn never fakes a live record. The
-    boot is driven by `bootstrap_replacement()`, matching real launchd: with
-    ``RunAtLoad`` the bootstrap IS the launch. `kickstart` never boots anything and
-    only records its call, so a regression that relaunches the job (killing the
-    just-started replacement and racing the single-use permit) fails the test.
+    Models the two states the OS-managed contract distinguishes: ``registered`` (the
+    job definition is registered on disk; never changes here) and ``loaded`` (launchd
+    currently has the job loaded). ``bootstrap_replacement`` mirrors the production
+    state machine: a LOADED job is booted out first (``bootout_calls``), an
+    already-UNLOADED job (a rollback after a failed candidate bootstrap) skips the
+    bootout, and a successful bootstrap reloads the job. ``available()`` reproduces
+    the PREVIOUS contract (loaded-only) so the RED run -- the rollback falling back
+    to the manual launcher because the job is UNLOADED -- fails exactly as the review
+    predicted; the new selector keys on ``registered()`` instead.
     """
 
     def __init__(
@@ -358,21 +361,31 @@ class _FakeOsLaunchd:
     ) -> None:
         self._store = store
         self._registrar = registrar
-        self._target_sha = target_sha
+        self.target_sha = target_sha
         self._mp = monkeypatch
         self.fail_bootstrap = fail_bootstrap
         self.drop_permit = drop_permit
         self.fail_stage = fail_stage
+        self._registered = True
+        self._loaded = True
         self.staged_env: dict[str, str] | None = None
         self.bootstrap_calls = 0
+        self.bootout_calls = 0
         self.kickstart_calls = 0
         self.scrub_calls: list[tuple[str, ...]] = []
         self.boot_refused = False
         self.second_spawn_refused: bool | None = None
         self.new_pid = 7777
 
+    def registered(self) -> bool:
+        return self._registered
+
+    def loaded(self) -> bool:
+        return self._loaded
+
+    # Reproduces the pre-fix selector contract (loaded-only) for the RED run.
     def available(self) -> bool:
-        return True
+        return self._loaded
 
     def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
         self.staged_env = dict(env)
@@ -391,10 +404,14 @@ class _FakeOsLaunchd:
 
     def bootstrap_replacement(self) -> RestartOutcome:
         self.bootstrap_calls += 1
+        if self._loaded:
+            self.bootout_calls += 1
+            self._loaded = False
         if self.fail_bootstrap:
             return RestartOutcome(ok=False, detail="launchctl bootstrap failed in test")
         env = {} if self.drop_permit else dict(self.staged_env or {})
         self._boot(env)
+        self._loaded = True
         return RestartOutcome(ok=True, detail="bootstrapped (RunAtLoad launches)")
 
     def kickstart(self) -> RestartOutcome:
@@ -403,7 +420,7 @@ class _FakeOsLaunchd:
 
     def _boot(self, env: dict[str, str]) -> None:
         boot_env = dict(env)
-        boot_env.setdefault(_RUNNING_SHA_ENV, self._target_sha)
+        boot_env.setdefault(_RUNNING_SHA_ENV, self.target_sha)
         with self._mp.context() as ctx:
             for key, value in boot_env.items():
                 ctx.setenv(key, value)
@@ -594,14 +611,28 @@ def test_os_managed_success_scrubs_the_permit_and_launches_the_job_exactly_once(
     assert epochs.read()[1] == ADMISSION_OPEN
 
 
-def test_os_managed_rollback_uses_a_fresh_permit_bound_to_the_old_release(
+class _RecordingPermitEpochs(JsonAdmissionEpochStore):
+    """Admission epoch store that records the permit target issued per handoff."""
+
+    def __init__(self, state_root: Path) -> None:
+        super().__init__(state_root)
+        self.issued_targets: list[str | None] = []
+
+    def issue_permit(self, *, target: str | None) -> str:
+        self.issued_targets.append(target)
+        return super().issue_permit(target=target)
+
+
+def test_os_managed_rollback_keeps_the_still_registered_job_os_managed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed candidate handoff is rolled back with a NEW permit, not the old token.
+    """P0: after a candidate bootstrap failure the job is UNLOADED but still REGISTERED.
 
-    The rollback handoff issues a fresh permit bound to the old release; the failed
-    candidate's token is rotated out and can no longer pass a CLOSING fence -- the
-    same single-use/rotation property the unmanaged path already has (F-012).
+    The rollback must stay OS-managed: the restarter selects the OS path because the
+    definition is still registered, issues a fresh permit bound to the old release,
+    and the bootstrap skips the bootout of the already-unloaded job -- the manual
+    launcher is never used, so launchd keeps owning the supervisor across the failure
+    and the recovery.
     """
     from repoforge.domain.errors import ConfigError
 
@@ -609,9 +640,10 @@ def test_os_managed_rollback_uses_a_fresh_permit_bound_to_the_old_release(
     store.write(_record(phase=RuntimePhase.HEALTHY, pid=1000, identity=_IDENTITY_OLD))
     launcher = _RecordingLauncher(store)
     locks = InMemoryLockManager()
-    registrar, _leases, epochs = _admission_wired_registrar(tmp_path, locks=locks)
+    epochs = _RecordingPermitEpochs(tmp_path / "state")
+    registrar, _leases, _ = _admission_wired_registrar(tmp_path, locks=locks, epochs=epochs)
 
-    # Handoff 1 -- candidate bootstrap fails; its permit is staged, then invalidated.
+    # Handoff 1 -- candidate bootstrap fails: the job goes UNLOADED but stays registered.
     fake = _FakeOsLaunchd(
         store,
         registrar=registrar,
@@ -630,9 +662,16 @@ def test_os_managed_rollback_uses_a_fresh_permit_bound_to_the_old_release(
     ).restart(target_release=_TARGET_SHA)
     assert outcome1.ok is False
     candidate_token = fake.staged_env[ADMISSION_PERMIT_ENV]
+    assert fake.registered() is True and fake.loaded() is False, (
+        "a failed bootstrap leaves the job UNLOADED but the definition registered"
+    )
+    assert fake.bootout_calls == 1
 
-    # Handoff 2 -- rollback to the old release issues a FRESH permit.
+    # Handoff 2 -- rollback to the PREVIOUS release: still OS-managed (registered),
+    # the bootout is skipped (already unloaded), and a FRESH permit bound to the old
+    # release is staged and bootstrapped. The manual launcher must never be used.
     fake.fail_bootstrap = False
+    fake.target_sha = _PREVIOUS_SHA  # the recovered supervisor serves the old release
     outcome2 = _restarter(
         store,
         _Control(store),
@@ -641,10 +680,17 @@ def test_os_managed_rollback_uses_a_fresh_permit_bound_to_the_old_release(
         kickstarter=fake,
         admission_epochs=epochs,
         locks=locks,
-    ).restart(target_release=_TARGET_SHA)
+    ).restart(target_release=_PREVIOUS_SHA)
     assert outcome2.ok is True, outcome2.detail
     rollback_token = fake.staged_env[ADMISSION_PERMIT_ENV]
     assert rollback_token != candidate_token, "the rollback must get a new permit"
+    assert epochs.issued_targets == [_TARGET_SHA, _PREVIOUS_SHA], (
+        "the rollback permit is bound to the old release, not the failed candidate"
+    )
+    assert fake.bootstrap_calls == 2
+    assert fake.bootout_calls == 1, "the rollback skips the bootout of the unloaded job"
+    assert fake.registered() is True and fake.loaded() is True
+    assert launcher.starts == [], "the rollback must never fall back to the manual launcher"
 
     # The candidate token cannot pass a CLOSING fence: rotate, then present it.
     epochs.close()
@@ -820,7 +866,13 @@ def test_the_incumbent_is_drained_before_the_os_manager_is_bootstrapped(
             return super().request(request, timeout_seconds=timeout_seconds)
 
     class _Kickstarter:
-        def available(self) -> bool:
+        def registered(self) -> bool:
+            return True
+
+        def loaded(self) -> bool:
+            return True
+
+        def available(self) -> bool:  # legacy selector contract, RED-run only
             return True
 
         def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:
@@ -859,7 +911,13 @@ def test_an_undrainable_incumbent_is_never_bootstrapped_into_a_race(tmp_path: Pa
         def __init__(self) -> None:
             self.calls = 0
 
-        def available(self) -> bool:
+        def registered(self) -> bool:
+            return True
+
+        def loaded(self) -> bool:
+            return True
+
+        def available(self) -> bool:  # legacy selector contract, RED-run only
             return True
 
         def stage_replacement_env(self, env: dict[str, str]) -> tuple[bool, str]:

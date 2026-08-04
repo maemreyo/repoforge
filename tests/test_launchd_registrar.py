@@ -151,11 +151,23 @@ def test_stage_replacement_env_fails_closed_when_there_is_no_plist(tmp_path: Pat
 
 
 def test_bootstrap_replacement_success_does_not_kickstart(tmp_path: Path) -> None:
-    """The bootstrap is the launch: bootout + bootstrap, and never a kickstart."""
+    """The bootstrap is the launch: probe, bootout, verify, bootstrap -- never kickstart."""
     calls: list[list[str]] = []
+    state = {"loaded": True}
 
     def runner(argv: list[str]) -> tuple[int, str]:
         calls.append(argv)
+        if argv[1] == "print":
+            # The domain probe always answers; the service probe reflects the job state.
+            if argv[2] == "gui/501":
+                return 0, ""
+            return (0, "") if state["loaded"] else (1, "Could not find service")
+        if argv[1] == "bootout":
+            state["loaded"] = False
+            return 0, ""
+        if argv[1] == "bootstrap":
+            state["loaded"] = True
+            return 0, ""
         return 0, ""
 
     agents_dir = tmp_path / "LaunchAgents"
@@ -168,11 +180,14 @@ def test_bootstrap_replacement_success_does_not_kickstart(tmp_path: Path) -> Non
 
     assert outcome.ok is True, outcome.detail
     assert "RunAtLoad launched the replacement" in outcome.detail
-    # install: bootout+bootstrap; replacement: bootout+bootstrap. No kickstart ever.
+    # install: bootout+bootstrap; replacement: probe, bootout, verify, bootstrap.
     assert [argv[1] for argv in calls] == [
         "bootout",
         "bootstrap",
+        "print",
         "bootout",
+        "print",
+        "print",
         "bootstrap",
     ]
     assert "kickstart" not in [argv[1] for argv in calls]
@@ -181,16 +196,27 @@ def test_bootstrap_replacement_success_does_not_kickstart(tmp_path: Path) -> Non
 def test_bootstrap_replacement_bootout_failure_restores_disk_and_does_not_bootstrap(
     tmp_path: Path,
 ) -> None:
-    """A bootout failure keeps the job LOADED: no bootstrap, disk restored to match."""
+    """A bootout failure with the job still LOADED: no bootstrap, disk restored to match."""
     from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
 
     calls: list[list[str]] = []
+    state = {"loaded": True, "bootouts": 0}
 
     def runner(argv: list[str]) -> tuple[int, str]:
         calls.append(argv)
-        # install() bootout/bootstrap succeed; the replacement bootout (index 2) fails.
-        if len(calls) == 3:
-            return 1, "bootout refused"
+        if argv[1] == "print":
+            if argv[2] == "gui/501":
+                return 0, ""
+            return (0, "") if state["loaded"] else (1, "Could not find service")
+        if argv[1] == "bootout":
+            state["bootouts"] += 1
+            if state["bootouts"] == 2:  # the replacement bootout fails; the job stays loaded
+                return 1, "bootout refused"
+            state["loaded"] = False
+            return 0, ""
+        if argv[1] == "bootstrap":
+            state["loaded"] = True
+            return 0, ""
         return 0, ""
 
     agents_dir = tmp_path / "LaunchAgents"
@@ -205,10 +231,16 @@ def test_bootstrap_replacement_bootout_failure_restores_disk_and_does_not_bootst
 
     assert outcome.ok is False
     assert "LAUNCHD_BOOTOUT_FAILED" in outcome.detail
-    assert "LOADED" in outcome.detail, "the job was never unloaded"
+    assert "LOADED" in outcome.detail, "the re-probe shows the job is still loaded"
     assert "restored on disk" in outcome.detail
-    # No bootstrap after the failed bootout.
-    assert len(calls) == 3
+    # probe + failed bootout + re-probe: no bootstrap after the failed bootout.
+    assert [argv[1] for argv in calls] == [
+        "bootout",
+        "bootstrap",
+        "print",
+        "bootout",
+        "print",
+    ]
     # The on-disk definition is back to the original (permit absent).
     assert ADMISSION_PERMIT_ENV not in _env_of(registrar.plist_path)
 
@@ -225,12 +257,23 @@ def test_bootstrap_replacement_bootstrap_failure_restores_disk_without_rebootstr
     from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
 
     calls: list[list[str]] = []
+    state = {"loaded": True, "bootstraps": 0}
 
     def runner(argv: list[str]) -> tuple[int, str]:
         calls.append(argv)
-        # install() bootout+bootstrap succeed; the replacement bootstrap (index 3) fails.
-        if len(calls) == 4:
-            return 7, "bad plist"
+        if argv[1] == "print":
+            if argv[2] == "gui/501":
+                return 0, ""
+            return (0, "") if state["loaded"] else (1, "Could not find service")
+        if argv[1] == "bootout":
+            state["loaded"] = False
+            return 0, ""
+        if argv[1] == "bootstrap":
+            state["bootstraps"] += 1
+            if state["bootstraps"] == 2:  # the replacement bootstrap fails
+                return 7, "bad plist"
+            state["loaded"] = True
+            return 0, ""
         return 0, ""
 
     agents_dir = tmp_path / "LaunchAgents"
@@ -247,10 +290,189 @@ def test_bootstrap_replacement_bootstrap_failure_restores_disk_without_rebootstr
     assert "LAUNCHD_BOOTSTRAP_FAILED" in outcome.detail
     assert "UNLOADED" in outcome.detail, "the old definition was already booted out"
     assert "restored on disk" in outcome.detail
-    # The restore is disk-only: no second bootstrap call after the failed one.
-    assert len(calls) == 4
+    # probe, bootout, verify, then the ONE failed bootstrap: no re-bootstrap.
+    assert [argv[1] for argv in calls] == [
+        "bootout",
+        "bootstrap",
+        "print",
+        "bootout",
+        "print",
+        "print",
+        "bootstrap",
+    ]
     # The on-disk definition no longer carries the staged permit.
     assert ADMISSION_PERMIT_ENV not in _env_of(registrar.plist_path)
+
+
+def test_bootstrap_replacement_skips_bootout_when_the_job_is_already_unloaded(
+    tmp_path: Path,
+) -> None:
+    """P0: a rollback after a failed candidate bootstrap starts UNLOADED but registered.
+
+    Booting the already-gone job out again would fail with "service not found" even
+    though the precondition is met; the bootstrap must skip the bootout and go
+    straight to bootstrapping the staged definition.
+    """
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    calls: list[list[str]] = []
+    state = {"loaded": True}
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        calls.append(argv)
+        if argv[1] == "print":
+            if argv[2] == "gui/501":
+                return 0, ""
+            return (0, "") if state["loaded"] else (1, "Could not find service")
+        if argv[1] == "bootout":
+            state["loaded"] = False
+            return 0, ""
+        if argv[1] == "bootstrap":
+            state["loaded"] = True
+            return 0, ""
+        return 0, ""
+
+    agents_dir = tmp_path / "LaunchAgents"
+    registrar = LaunchdRegistrar(
+        spec=_spec(tmp_path), agents_dir=agents_dir, uid=501, runner=runner
+    )
+    registrar.install()
+    staged_ok, _ = registrar.stage_replacement_env({ADMISSION_PERMIT_ENV: "tok"})
+    assert staged_ok
+    state["loaded"] = False  # the previous handoff's failed bootstrap left it unloaded
+
+    outcome = registrar.bootstrap_replacement()
+
+    assert outcome.ok is True, outcome.detail
+    assert "RunAtLoad launched the replacement" in outcome.detail
+    # install: bootout+bootstrap; replacement: probe + bootstrap, NO bootout.
+    assert [argv[1] for argv in calls] == [
+        "bootout",
+        "bootstrap",
+        "print",
+        "print",
+        "bootstrap",
+    ]
+
+
+def test_bootstrap_replacement_proceeds_when_bootout_fails_but_the_job_is_unloaded(
+    tmp_path: Path,
+) -> None:
+    """P0: the job state is probed, never inferred from the bootout exit code alone.
+
+    A bootout that exits nonzero while a re-probe shows the job UNLOADED (it exited
+    or was removed during the attempt) still proceeds to bootstrap the staged
+    definition.
+    """
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    calls: list[list[str]] = []
+    state = {"loaded": True, "bootouts": 0}
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        calls.append(argv)
+        if argv[1] == "print":
+            if argv[2] == "gui/501":
+                return 0, ""
+            return (0, "") if state["loaded"] else (1, "Could not find service")
+        if argv[1] == "bootout":
+            state["bootouts"] += 1
+            if state["bootouts"] == 2:
+                state["loaded"] = False
+                return 1, "Bootstrap failed: 5: Input/output error"
+            state["loaded"] = False
+            return 0, ""
+        if argv[1] == "bootstrap":
+            state["loaded"] = True
+            return 0, ""
+        return 0, ""
+
+    agents_dir = tmp_path / "LaunchAgents"
+    registrar = LaunchdRegistrar(
+        spec=_spec(tmp_path), agents_dir=agents_dir, uid=501, runner=runner
+    )
+    registrar.install()
+    staged_ok, _ = registrar.stage_replacement_env({ADMISSION_PERMIT_ENV: "tok"})
+    assert staged_ok
+
+    outcome = registrar.bootstrap_replacement()
+
+    assert outcome.ok is True, outcome.detail
+    assert "RunAtLoad launched the replacement" in outcome.detail
+    # The failed bootout is followed by a re-probe (unloaded) and then the bootstrap.
+    assert [argv[1] for argv in calls] == [
+        "bootout",
+        "bootstrap",
+        "print",
+        "bootout",
+        "print",
+        "print",
+        "bootstrap",
+    ]
+
+
+def test_bootstrap_replacement_fails_closed_when_the_job_state_is_unknown(
+    tmp_path: Path,
+) -> None:
+    """The job state is probed, never guessed: an unreachable domain fails closed."""
+    from repoforge.ports.admission_epoch import ADMISSION_PERMIT_ENV
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        calls.append(argv)
+        if argv[1] == "print":
+            return 1, "Bootstrap failed: 5: Input/output error"
+        return 0, ""
+
+    agents_dir = tmp_path / "LaunchAgents"
+    registrar = LaunchdRegistrar(
+        spec=_spec(tmp_path), agents_dir=agents_dir, uid=501, runner=runner
+    )
+    registrar.install()
+    staged_ok, _ = registrar.stage_replacement_env({ADMISSION_PERMIT_ENV: "tok"})
+    assert staged_ok
+
+    outcome = registrar.bootstrap_replacement()
+
+    assert outcome.ok is False
+    assert "LAUNCHD_STATE_UNKNOWN" in outcome.detail
+    # probe + domain probe, then fail closed: no bootout, no bootstrap.
+    assert [argv[1] for argv in calls] == ["bootout", "bootstrap", "print", "print"]
+
+
+def test_registered_reports_the_disk_definition_even_when_the_job_is_unloaded(
+    tmp_path: Path,
+) -> None:
+    """P0: the OS-managed selector keys on REGISTERED (on disk), not on loaded."""
+    calls: list[list[str]] = []
+    state = {"loaded": True}
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        calls.append(argv)
+        if argv[1] == "print":
+            if argv[2] == "gui/501":
+                return 0, ""
+            return (0, "") if state["loaded"] else (1, "Could not find service")
+        if argv[1] == "bootout":
+            state["loaded"] = False
+            return 0, ""
+        if argv[1] == "bootstrap":
+            state["loaded"] = True
+            return 0, ""
+        return 0, ""
+
+    agents_dir = tmp_path / "LaunchAgents"
+    registrar = LaunchdRegistrar(
+        spec=_spec(tmp_path), agents_dir=agents_dir, uid=501, runner=runner
+    )
+    registrar.install()
+    assert registrar.registered() is True
+    assert registrar.loaded() is True
+
+    state["loaded"] = False  # e.g. a failed candidate bootstrap left the job unloaded
+    assert registrar.registered() is True, "the definition is still registered on disk"
+    assert registrar.loaded() is False
 
 
 def test_scrub_replacement_env_removes_only_the_given_keys_without_reloading(

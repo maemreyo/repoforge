@@ -128,8 +128,18 @@ class LaunchdRegistrar:
             unit_path=str(self._plist_path),
         )
 
-    def available(self) -> bool:
-        """True when this supervisor is a registered, loaded launchd job."""
+    def registered(self) -> bool:
+        """True when the job definition is still registered (on disk).
+
+        The restarter selects the OS-managed path on this alone. A failed candidate
+        bootstrap leaves the job UNLOADED but the definition registered, so a rollback
+        must remain OS-managed and bootstrap the restored definition instead of
+        falling back to the manual launcher.
+        """
+        return self.status().registered
+
+    def loaded(self) -> bool:
+        """True when launchd currently has the job loaded and running."""
         return self.status().loaded
 
     def kickstart(self) -> RestartOutcome:
@@ -180,12 +190,19 @@ class LaunchdRegistrar:
     def bootstrap_replacement(self) -> RestartOutcome:
         """Unload the loaded definition and bootstrap the STAGED plist.
 
+        Idempotent with respect to the loaded state -- the job state is PROBED, never
+        inferred from a command's exit code:
+
+        * a LOADED job is booted out and the unload verified;
+        * an already-UNLOADED job (a rollback following a failed candidate bootstrap)
+          skips the bootout, which would otherwise fail with "service not found";
+        * an undeterminable state fails closed instead of acting blindly.
+
         With ``RunAtLoad: True`` the bootstrap IS the replacement's single launch, so
-        the caller must never follow this with ``kickstart``: a second launch would
-        kill the just-started replacement and relaunch it against an already-consumed
-        single-use permit. Every failure detail states the job state explicitly and
-        never re-launches the previous definition on its own -- recovery belongs to
-        the outer rollback protocol, which stages a fresh permit first.
+        the caller must never follow this with ``kickstart``. Every failure detail
+        states the job state explicitly and never re-launches the previous definition
+        on its own -- recovery belongs to the outer rollback protocol, which stages a
+        fresh permit first.
         """
         if not self._plist_path.is_file():
             return RestartOutcome(
@@ -197,23 +214,58 @@ class LaunchdRegistrar:
             return RestartOutcome(ok=False, detail=f"LAUNCHD_PLIST_UNREADABLE: {exc}")
         fmt = self._plist_format(previous)
 
-        code, detail = self._run(["launchctl", "bootout", self._domain(), str(self._plist_path)])
-        if code != 0:
-            # The job was never unloaded, so launchd still runs the previous definition
-            # (which never carried the staged permit). Restore the on-disk bytes to
-            # match what is loaded; do NOT re-bootstrap, which would double-load it.
-            restore = self._restore_plist(previous, fmt)
+        state = self._probe_job_state()
+        if state == "loaded":
+            code, detail = self._run(
+                ["launchctl", "bootout", self._domain(), str(self._plist_path)]
+            )
+            if code != 0:
+                # Never infer the job state from the bootout exit code alone: re-probe.
+                re_state = self._probe_job_state()
+                if re_state != "unloaded":
+                    restore = self._restore_plist(previous, fmt)
+                    return RestartOutcome(
+                        ok=False,
+                        detail=(
+                            f"LAUNCHD_BOOTOUT_FAILED: launchctl exited {code}: "
+                            f"{detail or 'no output'}; job state: {re_state.upper()} "
+                            f"(re-probed); previous job definition restored on disk: {restore}"
+                        ),
+                    )
+                # The job was already gone (it exited or was removed during the
+                # attempt): the unload precondition is met, so continue.
+            else:
+                # Bootout succeeded; verify the job is really unloaded before loading
+                # the staged definition on top of it.
+                verify = self._probe_job_state()
+                if verify != "unloaded":
+                    restore = self._restore_plist(previous, fmt)
+                    return RestartOutcome(
+                        ok=False,
+                        detail=(
+                            f"LAUNCHD_BOOTOUT_VERIFY_FAILED: after bootout the job state is "
+                            f"{verify.upper()}, not UNLOADED; previous job definition "
+                            f"restored on disk: {restore}"
+                        ),
+                    )
+        elif state == "unloaded":
+            # Already unloaded -- e.g. the previous handoff's bootstrap failed and the
+            # outer rollback is now recovering. Booting it out again would fail with
+            # "service not found", so skip the bootout entirely.
+            pass
+        else:
             return RestartOutcome(
                 ok=False,
                 detail=(
-                    f"LAUNCHD_BOOTOUT_FAILED: launchctl exited {code}: {detail or 'no output'}; "
-                    f"job state: LOADED (previous definition still loaded); "
-                    f"previous job definition restored on disk: {restore}"
+                    "LAUNCHD_STATE_UNKNOWN: the job state could not be determined "
+                    "(the launchd domain is unreachable); refusing to bootstrap "
+                    "blindly"
                 ),
             )
+
         code, detail = self._run(["launchctl", "bootstrap", self._domain(), str(self._plist_path)])
         if code != 0:
-            # The old definition is gone (bootout succeeded) and launchd rejected the
+            # The old definition is gone (or was already gone) and launchd rejected the
             # staged one. Restore the on-disk bytes ONLY: re-bootstrapping the old
             # definition here would launch a supervisor that cannot pass the CLOSING
             # worker-admission fence (it has no valid replacement permit) -- recovery
@@ -230,6 +282,22 @@ class LaunchdRegistrar:
             ok=True,
             detail="staged job definition bootstrapped; RunAtLoad launched the replacement",
         )
+
+    def _probe_job_state(self) -> str:
+        """Probe launchd for the job state: ``"loaded"``, ``"unloaded"``, or ``"unknown"``.
+
+        The state is never inferred from a single command's exit code: a failed
+        ``launchctl print`` of the service means the job is not loaded, and a separate
+        probe of the domain disambiguates an unloaded-but-registered job from a
+        domain that cannot be reached at all.
+        """
+        code, _ = self._run(["launchctl", "print", f"{self._domain()}/{self._spec.label}"])
+        if code == 0:
+            return "loaded"
+        domain_code, _ = self._run(["launchctl", "print", self._domain()])
+        if domain_code == 0:
+            return "unloaded"
+        return "unknown"
 
     def scrub_replacement_env(self, keys: tuple[str, ...]) -> tuple[bool, str]:
         """Remove ``keys`` from the plist on disk WITHOUT reloading the running job.
