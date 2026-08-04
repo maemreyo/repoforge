@@ -123,6 +123,7 @@ test_files = [
   "tests/test_workspace_kind.py",
   "tests/test_workspace_mutate.py",
   "tests/test_workspace_refresh.py",
+  "tests/test_workspace_shared_consistency.py",
   "tests/test_workspace_trusted_checkout.py",
 ]
 
@@ -739,6 +740,7 @@ test_files = [
   "tests/test_workspace_kind.py",
   "tests/test_workspace_mutate.py",
   "tests/test_workspace_refresh.py",
+  "tests/test_workspace_shared_consistency.py",
   "tests/test_workspace_stale_cleanup.py",
   "tests/test_workspace_trusted_checkout.py",
 ]

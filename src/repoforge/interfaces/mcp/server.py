@@ -1005,18 +1005,11 @@ class ForgeV2FastMCP(FastMCP[None]):
         if tool_name in _ADMIN_METHODS:
             return self._admin_boundary.call(_ADMIN_METHODS[tool_name], **kwargs)
         method = _SERVICE_METHODS[tool_name]
-        if tool_name == "workspace_mutate":
-            expected_head_sha = kwargs.pop("expected_head_sha")
-            status = self._service_boundary.call(
-                "workspace_status_v2",
-                workspace_id=kwargs["workspace_id"],
-                sections=("local",),
-                byte_budget=60_000,
-            )
-            if status.get("head_sha") != expected_head_sha:
-                raise WorkspaceError(
-                    "STALE_WORKSPACE_HEAD: expected_head_sha does not match current HEAD"
-                )
+        # expected_head_sha for workspace_mutate used to be checked here via a side-channel
+        # status call, unconditionally. It is now checked in the application layer
+        # (WorkspaceMutator.execute), where the workspace's kind is already resolved and the
+        # check can be consistency-mode-aware (#374): exact for managed/adopted workspaces,
+        # an observation instead of a refusal for attached_shared ones.
         result = self._service_boundary.call(method, **kwargs)
         if tool_name == "repo_list":
             selection = result.get("selection")

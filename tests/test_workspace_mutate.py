@@ -694,6 +694,7 @@ def test_keyed_mutate_replays_freshness_and_reads_v2_and_v1_receipts(
     payload = json.loads(receipt.read_text(encoding="utf-8"))
     payload["schema_version"] = 2
     payload["result"].pop("freshness_preflight")
+    payload["result"].pop("concurrent_observation")
     receipt.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 
     v2 = service.workspace_mutate(
@@ -704,6 +705,7 @@ def test_keyed_mutate_replays_freshness_and_reads_v2_and_v1_receipts(
     )
     assert v2["syntax_diagnostics"] == first["syntax_diagnostics"]
     assert v2["freshness_preflight"] is None
+    assert v2["concurrent_observation"] is None
 
     payload["schema_version"] = 1
     payload["result"].pop("syntax_diagnostics")

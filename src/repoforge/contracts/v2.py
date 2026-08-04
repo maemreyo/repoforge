@@ -1287,6 +1287,20 @@ class WorkspaceFreshnessPreflightEvidence(StrictModel):
     remote_error_code: str | None = Field(default=None, max_length=160)
 
 
+class WorkspaceConcurrentObservationEvidence(StrictModel):
+    """Present only for an attached_shared workspace (#374) whose HEAD or fingerprint no
+    longer matched what the caller expected. The mutation still proceeded -- each
+    operation's own expected_sha256 is the guard against a genuine collision with the
+    specific file it targets; this is a report of what else changed, not a refusal."""
+
+    expected_head_sha: GitObjectId | None
+    observed_head_sha: GitObjectId
+    expected_workspace_fingerprint: Sha256
+    observed_workspace_fingerprint: Sha256
+    dirty_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    untracked_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+
+
 class WorkspaceMutateOutput(ToolResponse):
     outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
@@ -1304,6 +1318,7 @@ class WorkspaceMutateOutput(ToolResponse):
     syntax_diagnostics: SyntaxDiagnosticsEvidence
     transaction_id: Identifier | None = None
     freshness_preflight: WorkspaceFreshnessPreflightEvidence | None = None
+    concurrent_observation: WorkspaceConcurrentObservationEvidence | None = None
 
 
 class VerifyMode(str, Enum):

@@ -31,6 +31,7 @@ from ...domain.syntax_diagnostics import (
     SyntaxDiagnosticState,
     SyntaxSeverity,
 )
+from ...domain.workspace import ConsistencyMode
 from ...ports.filesystem_transaction import FileTransaction
 from ..context import ApplicationContext
 from ..dto import to_data
@@ -45,7 +46,7 @@ from .base_status import collect_workspace_base_status, freshness_preflight_payl
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_OPERATIONS = 100
 _MAX_REPLACEMENTS = 20
-_RECEIPT_SCHEMA_VERSION = 3
+_RECEIPT_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,12 @@ class WorkspaceMutateCommand:
     workspace_id: str
     operations: tuple[WorkspaceMutation, ...]
     expected_workspace_fingerprint: str
+    # Optional, not required, even though the MCP contract requires it: this keeps every
+    # existing direct-service caller (tests, internal callers) working unchanged, since
+    # none of them went through the MCP dispatch layer that used to check this. Real MCP
+    # calls always supply it; execute() below is where it is actually checked now,
+    # kind-aware (#374), instead of as a side-channel precondition in the MCP dispatcher.
+    expected_head_sha: str | None = None
     dry_run: bool = False
     idempotency_key: str | None = None
 
@@ -151,6 +158,11 @@ class WorkspaceMutateResult:
     syntax_diagnostics: SyntaxDiagnostics
     transaction_id: str | None
     freshness_preflight: dict[str, object] | None = None
+    # Populated only in shared consistency mode (#374) when the workspace's HEAD or
+    # fingerprint no longer matches what the caller expected: reports the drift as an
+    # observation instead of refusing the call outright. None whenever nothing drifted, and
+    # always None in exact mode -- there, drift is a refusal (WorkspaceError), not a field.
+    concurrent_observation: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,11 +580,45 @@ class WorkspaceMutator:
                     self.ctx.git,
                     workspace,
                 )
-                if before_lookup.fingerprint != command.expected_workspace_fingerprint:
-                    raise WorkspaceError(
-                        "Workspace changed since it was inspected; refresh status before mutating"
-                    )
                 head_sha = self.ctx.git.head_sha(workspace)
+                fingerprint_drifted = (
+                    before_lookup.fingerprint != command.expected_workspace_fingerprint
+                )
+                head_drifted = (
+                    command.expected_head_sha is not None and command.expected_head_sha != head_sha
+                )
+                concurrent_observation: dict[str, object] | None = None
+                if record.kind.consistency_mode is ConsistencyMode.SHARED:
+                    # Exact-state preconditions become an observation, not a refusal: the
+                    # whole point of a shared-consistency workspace is that the operator's
+                    # editor (or anything else) may be touching these files right now.
+                    # Each mutation's own expected_sha256 still fails closed on a genuine
+                    # collision with the SPECIFIC file it targets (#374 AC: "overlapping
+                    # destructive edits still produce explicit conflict evidence") -- this
+                    # only relaxes the whole-tree gate that would otherwise refuse the call
+                    # for drift in files nobody asked to touch.
+                    if fingerprint_drifted or head_drifted:
+                        concurrent_observation = {
+                            "expected_head_sha": command.expected_head_sha,
+                            "observed_head_sha": head_sha,
+                            "expected_workspace_fingerprint": command.expected_workspace_fingerprint,
+                            "observed_workspace_fingerprint": before_lookup.fingerprint,
+                            "dirty_paths": sorted(self.ctx.git.changed_paths(workspace, repo)),
+                            "untracked_paths": sorted(
+                                self.ctx.git.untracked_paths(workspace, repo)
+                            ),
+                        }
+                else:
+                    if head_drifted:
+                        raise WorkspaceError(
+                            "STALE_WORKSPACE_HEAD: expected_head_sha does not match current HEAD",
+                            code=ErrorCode.STALE_STATE,
+                            retryable=True,
+                        )
+                    if fingerprint_drifted:
+                        raise WorkspaceError(
+                            "Workspace changed since it was inspected; refresh status before mutating"
+                        )
                 freshness_preflight = freshness_preflight_payload(
                     collect_workspace_base_status(
                         self.ctx,
@@ -674,6 +720,7 @@ class WorkspaceMutator:
                         syntax_diagnostics,
                         None,
                         freshness_preflight,
+                        concurrent_observation,
                     )
                     self._persist_receipt_only(
                         engine,
@@ -700,6 +747,7 @@ class WorkspaceMutator:
                         syntax_diagnostics,
                         None,
                         freshness_preflight,
+                        concurrent_observation,
                     )
                     self._persist_receipt_only(
                         engine,
@@ -746,6 +794,7 @@ class WorkspaceMutator:
                         syntax_diagnostics,
                         transaction_id,
                         freshness_preflight,
+                        concurrent_observation,
                     )
                     return (
                         receipt_name,
@@ -797,6 +846,7 @@ class WorkspaceMutator:
                         syntax_diagnostics,
                         receipt.transaction_id,
                         freshness_preflight,
+                        concurrent_observation,
                     )
                 record.last_verification = None
                 self.ctx.store.save(record)
@@ -892,7 +942,7 @@ class WorkspaceMutator:
         }:
             raise WorkspaceMutator._corrupt_receipt("receipt fields do not match schema version 1")
         schema_version = raw.get("schema_version")
-        if schema_version not in (1, 2, _RECEIPT_SCHEMA_VERSION):
+        if schema_version not in (1, 2, 3, _RECEIPT_SCHEMA_VERSION):
             raise WorkspaceMutator._corrupt_receipt("receipt schema version is unsupported")
         if raw.get("action") != "workspace_mutate" or raw.get("key_hash") != key_hash:
             raise WorkspaceMutator._corrupt_receipt("receipt identity does not match its key")
@@ -925,6 +975,8 @@ class WorkspaceMutator:
             expected_fields.add("syntax_diagnostics")
         if schema_version >= 3:
             expected_fields.add("freshness_preflight")
+        if schema_version >= 4:
+            expected_fields.add("concurrent_observation")
         if not isinstance(result, dict) or set(result) != expected_fields:
             raise WorkspaceMutator._corrupt_receipt("receipt result fields are invalid")
         if result.get("workspace_id") != workspace_id:
@@ -1042,6 +1094,12 @@ class WorkspaceMutator:
                 freshness_preflight=(
                     dict(result["freshness_preflight"])
                     if schema_version >= 3 and isinstance(result.get("freshness_preflight"), dict)
+                    else None
+                ),
+                concurrent_observation=(
+                    dict(result["concurrent_observation"])
+                    if schema_version >= 4
+                    and isinstance(result.get("concurrent_observation"), dict)
                     else None
                 ),
             )

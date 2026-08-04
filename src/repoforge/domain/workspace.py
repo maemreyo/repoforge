@@ -96,6 +96,39 @@ class WorkspaceKind(str, Enum):
         """Whether the branch must match the repository's ai/* prefix and base allowlist."""
         return self is WorkspaceKind.MANAGED_WORKTREE
 
+    @property
+    def consistency_mode(self) -> ConsistencyMode:
+        """Whether exact-state preconditions gate mutation, or become observations (#374).
+
+        managed_worktree and adopted_worktree stay EXACT: RepoForge is the only actor
+        expected to touch that specific worktree directory, so a fingerprint or HEAD
+        mismatch really does mean "something is wrong, stop." attached_shared is SHARED
+        by definition -- the whole point of attaching is that the operator's own editor,
+        or anything else, may be touching the same files at the same time, so a mismatch
+        there is an expected observation, not evidence of a problem.
+
+        OPTIMISTIC exists as a domain concept for a future kind or explicit override; no
+        current WorkspaceKind defaults to it.
+        """
+        if self is WorkspaceKind.ATTACHED_SHARED:
+            return ConsistencyMode.SHARED
+        return ConsistencyMode.EXACT
+
+
+class ConsistencyMode(str, Enum):
+    #: Exact-state preconditions (HEAD, workspace fingerprint) must match or the call is
+    #: refused outright. Unchanged behavior for managed and adopted workspaces (#374 AC).
+    EXACT = "exact"
+    #: Reserved for a future kind or explicit override -- not yet the default for any
+    #: WorkspaceKind. Intended granularity: relax the whole-tree fingerprint but keep HEAD
+    #: exact, or vice versa, rather than SHARED's "both become observations."
+    OPTIMISTIC = "optimistic"
+    #: Exact-state preconditions become recorded observations rather than mandatory
+    #: preconditions: a mismatch is reported, not refused. Per-target guards (each
+    #: mutation operation's own expected_sha256) are untouched by this and still fail
+    #: closed on a genuine collision -- this only relaxes the whole-tree gate.
+    SHARED = "shared"
+
 
 @dataclass
 class WorkspaceRecord:

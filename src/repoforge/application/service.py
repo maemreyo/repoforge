@@ -1296,6 +1296,7 @@ class CodingService:
         workspace_id: str,
         operations: list[WorkspaceMutation],
         expected_workspace_fingerprint: str,
+        expected_head_sha: str | None = None,
         dry_run: bool = False,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -1305,6 +1306,7 @@ class CodingService:
                     workspace_id,
                     tuple(operations),
                     expected_workspace_fingerprint,
+                    expected_head_sha,
                     dry_run,
                     idempotency_key,
                 )
