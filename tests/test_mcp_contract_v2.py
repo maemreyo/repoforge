@@ -66,7 +66,7 @@ async def test_forge_v2_identity_publishes_exact_authoritative_roster_and_schema
     assert server.name == FORGE_V2_IDENTITY == "forge_v2"
     tools = await server.list_tools()
     assert tuple(tool.name for tool in tools) == V2_TOOL_NAMES
-    assert len(tools) == 28
+    assert len(tools) == 29
     diff_tool = next(tool for tool in tools if tool.name == "workspace_diff")
     include_hunks_schema = diff_tool.inputSchema["properties"]["include_hunks"]
     assert include_hunks_schema["type"] == "boolean"
@@ -190,7 +190,7 @@ async def test_protocol_error_is_one_redacted_typed_envelope(
     # The typed error envelope must be real structuredContent, not only
     # recoverable by parsing JSON out of the text block (#225 review), and it
     # must conform to the same {status, summary, error: ToolError} contract
-    # every one of the 28 tools' own output model inherits from ToolResponse
+    # every one of the 29 tools' own output model inherits from ToolResponse
     # -- not an ad-hoc shape a client cannot validate against any advertised
     # output schema.
     assert result.structuredContent == envelope
@@ -479,7 +479,7 @@ def test_contract_schema_digests_are_deterministic_and_separate_input_from_outpu
     assert first == second
     assert first.input_digest != first.output_digest
     assert len(first.input_digest) == len(first.output_digest) == 64
-    assert first.tool_count == 28
+    assert first.tool_count == 29
 
 
 def test_server_build_sha_fingerprints_package_bytes_and_ignores_bytecode(tmp_path: Path) -> None:
@@ -538,7 +538,7 @@ async def test_discovery_and_success_response_expose_the_same_runtime_identity(
     )
 
     tools = await server.list_tools()
-    assert len(tools) == 28
+    assert len(tools) == 29
     direct_discovery = [
         tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in tools
     ]
@@ -581,7 +581,7 @@ async def test_stale_discovery_identity_is_rejected_before_mutation_handler() ->
     )
     async with create_connected_server_and_client_session(server) as session:
         discovered = await session.list_tools()
-        assert len(discovered.tools) == 28
+        assert len(discovered.tools) == 29
         current[0] = _contract_identity(input_contract_digest="f" * 64)
         result = await session.call_tool(
             "workspace_create",
@@ -610,7 +610,7 @@ async def test_repo_selection_is_pinned_and_reused_within_one_session(
 
     async with create_connected_server_and_client_session(server) as session:
         discovered = await session.list_tools()
-        assert len(discovered.tools) == 28
+        assert len(discovered.tools) == 29
 
         selected = await session.call_tool("repo_list", {"requested_repo": "demo"})
         assert selected.isError is False

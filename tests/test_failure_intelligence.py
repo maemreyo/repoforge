@@ -593,7 +593,7 @@ def test_failed_plan_stage_persists_one_reusable_evidence_id_for_all_consumers(
 async def test_failure_evidence_read_is_exposed_through_actual_mcp_session(
     forge_env: ForgeEnvironment,
 ) -> None:
-    """The static 28-tool Forge v2 surface has no standalone `failure_evidence_read`
+    """The static 29-tool Forge v2 surface has no standalone `failure_evidence_read`
     tool (#180); failure evidence is reachable only through `operation(action=
     "failure_evidence")` on the durable-operation composite."""
     service, runner = _failing_service(forge_env)

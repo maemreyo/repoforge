@@ -1,5 +1,5 @@
 """Coverage for deterministic repository selection on the v2 `repo_list` composite (#150,
-ported onto the static 28-tool Forge v2 surface as part of epic #180 integration)."""
+ported onto the static 29-tool Forge v2 surface as part of epic #180 integration)."""
 
 from __future__ import annotations
 

@@ -76,7 +76,7 @@ def test_workspace_verify_is_a_first_class_v2_contract() -> None:
 
 
 def test_mcp_tool_surface_is_static_reviewed_and_unique() -> None:
-    assert len(V2_TOOL_NAMES) == 28
+    assert len(V2_TOOL_NAMES) == 29
     assert len(V2_TOOL_NAMES) == len(set(V2_TOOL_NAMES))
     assert tuple(V2_TOOL_SPECS) == V2_TOOL_NAMES
     assert {

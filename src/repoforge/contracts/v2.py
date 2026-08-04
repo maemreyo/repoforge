@@ -1,4 +1,4 @@
-"""Strict request and response models for the static 28-tool Forge v2 surface."""
+"""Strict request and response models for the static 29-tool Forge v2 surface."""
 
 from __future__ import annotations
 
@@ -1697,6 +1697,75 @@ class WorkspaceVerifyOutput(ToolResponse):
     rerun_of_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
 
 
+class WorkspaceExecInput(StrictModel):
+    """First-class ad-hoc command execution (#376), superseding
+    `workspace_verify(mode="adhoc")` for the run-a-command intent -- see
+    docs/architecture/autonomy-policy-model.md §9. `workspace_verify` keeps
+    `mode="adhoc"` working during a deprecation window rather than losing it in the
+    same change; new callers should reach for this tool instead."""
+
+    workspace_id: Identifier
+    argv: tuple[_AdhocArgvItem, ...] = Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENTS)
+    working_directory: RelativePath | None = None
+    stdin_text: str | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_STDIN_LENGTH,
+        description=(
+            "Piped to the process's standard input. Never logged or echoed in audit "
+            "records -- only its length is recorded."
+        ),
+    )
+    expected_fingerprint: Sha256 | None = None
+    expected_head_sha: GitObjectId | None = None
+    mutability: Literal["read_only", "workspace"] = Field(
+        default="read_only",
+        description=(
+            "Declares intent, not a guarantee: a command classified read_only that "
+            "changes the tree anyway is reported as read_only_violation, not silently "
+            "accepted. mutability='workspace' requires expected_head_sha and "
+            "expected_fingerprint -- an exact-state lock, since a mutating run cannot be "
+            "replayed against a workspace someone else already changed."
+        ),
+    )
+    background: bool = False
+
+    @model_validator(mode="after")
+    def validate_exact_state_lock(self) -> WorkspaceExecInput:
+        if self.mutability == "workspace" and (
+            self.expected_head_sha is None or self.expected_fingerprint is None
+        ):
+            raise ValueError(
+                "mutability='workspace' requires expected_head_sha and expected_fingerprint"
+            )
+        return self
+
+
+class WorkspaceExecOutput(ToolResponse):
+    """Every command run through this tool is evidence-only: `satisfies_commit_gate`
+    is always False, and a mutating run invalidates any prior verification receipt on
+    this workspace -- generic shell evidence never becomes a typed commit/push/PR/
+    verification receipt merely because it exited successfully."""
+
+    workspace_id: Identifier
+    outcome: Literal["passed", "failed", "running"]
+    next_action: str | None = Field(
+        default=None,
+        max_length=1000,
+        description=(
+            "What to do when this response did not finish the work -- the exact "
+            "`operation` wait to issue for a background run. Null once outcome is "
+            "passed or failed."
+        ),
+    )
+    operation: OperationEvidence | None = None
+    commands: tuple[CommandEvidence, ...] = Field(default=(), max_length=1)
+    satisfies_commit_gate: bool = False
+    head_sha: GitObjectId
+    workspace_fingerprint: Sha256
+    execution_evidence: ExecutionEvidenceModel | None = None
+    adhoc_evidence: AdhocEvidence | None = None
+
+
 class ShippingChangeLimits(StrictModel):
     max_changed_files: int = Field(ge=1)
     max_diff_lines: int = Field(ge=1)
@@ -2529,6 +2598,7 @@ MODEL_PAIRS: tuple[tuple[str, type[StrictModel], type[ToolResponse]], ...] = (
     ("workspace_diff", WorkspaceDiffInput, WorkspaceDiffOutput),
     ("workspace_mutate", WorkspaceMutateInput, WorkspaceMutateOutput),
     ("workspace_verify", WorkspaceVerifyInput, WorkspaceVerifyOutput),
+    ("workspace_exec", WorkspaceExecInput, WorkspaceExecOutput),
     ("workspace_commit", WorkspaceCommitInput, WorkspaceCommitOutput),
     ("workspace_push", WorkspacePushInput, WorkspacePushOutput),
     ("workspace_pr", WorkspacePrInput, WorkspacePrOutput),

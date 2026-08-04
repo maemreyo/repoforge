@@ -30,7 +30,7 @@ def _load_script(name: str) -> ModuleType:
 def test_generated_artifact_writer_reports_digests_without_bodies(tmp_path: Path) -> None:
     artifacts = {
         "docs/contracts/release-contract-v2.json": '{"version":2}\n',
-        "docs/contracts/tool-schemas-v2.json": '{"tool_count":28}\n',
+        "docs/contracts/tool-schemas-v2.json": '{"tool_count":29}\n',
     }
 
     first = write_generated_artifacts(tmp_path, artifacts)
@@ -94,7 +94,7 @@ def test_release_generator_write_emits_bounded_digest_report(
     contract = tmp_path / "docs/contracts/release-contract-v2.json"
 
     async def release_contract() -> dict[str, object]:
-        return {"contract_version": 2, "mcp": {"tool_count": 28}}
+        return {"contract_version": 2, "mcp": {"tool_count": 29}}
 
     monkeypatch.setattr(generator, "ROOT", tmp_path)
     monkeypatch.setattr(generator, "CONTRACT_PATH", contract)
@@ -117,7 +117,7 @@ def test_schema_bundle_is_deterministic_and_complete() -> None:
 
     assert first == second
     assert first["contract_version"] == 2
-    assert first["tool_count"] == 28
+    assert first["tool_count"] == 29
     assert first["evolution"] == {
         "outputs_closed": True,
         "tolerant_reader_required": True,

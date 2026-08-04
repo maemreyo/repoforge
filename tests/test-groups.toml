@@ -13,7 +13,7 @@
 # sequential bottleneck; see the test-fast lane-split commit history).
 
 [groups.contracts]
-description = "MCP schemas, fixed 28-tool roster, serialization, egress, release contracts."
+description = "MCP schemas, fixed 29-tool roster, serialization, egress, release contracts."
 # parallel = true: a few of these drive real MCP sessions / git through
 # SubprocessCommandExecutor, but they are tmp_path-isolated, so xdist-safe.
 # Their earlier 60s-timeout flakiness under contention was a timeout-layer
@@ -301,6 +301,9 @@ description = "repo_policy, config_inspect, generation rendering, approval, sour
 parallel = true
 source_globs = [
   "README.md",
+  "AGENTS.md",
+  ".claude/CLAUDE.md",
+  "scripts/verify-wheel-install.sh",
   "config.example.toml",
   "docs/development/**",
   "docs/testing/**",
@@ -367,6 +370,7 @@ test_files = [
   "tests/test_source_integrity_policy.py",
   "tests/test_verification_detection.py",
   "tests/test_workspace_adhoc.py",
+  "tests/test_workspace_exec.py",
   "tests/test_workspace_risk.py",
 ]
 
@@ -477,8 +481,10 @@ source_globs = [
   "Makefile",
   ".github/workflows/**",
   "src/repoforge/application/diagnostics/**",
+  "src/repoforge/application/operations/durable_wait.py",
   "src/repoforge/application/workspace/diagnostic_parser.py",
   "src/repoforge/application/workspace/diagnostic_selector.py",
+  "src/repoforge/application/workspace/exec.py",
   "src/repoforge/application/workspace/format_changed.py",
   "src/repoforge/application/workspace/run_adhoc.py",
   "src/repoforge/application/workspace/run_diagnostic.py",
@@ -734,6 +740,7 @@ test_files = [
   "tests/test_workflow_recording.py",
   "tests/test_workspace_adhoc.py",
   "tests/test_workspace_adopt_branch.py",
+  "tests/test_workspace_exec.py",
   "tests/test_workspace_assessment.py",
   "tests/test_workspace_attach.py",
   "tests/test_workspace_diagnostics.py",

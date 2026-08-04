@@ -100,6 +100,7 @@ from .workspace.edit import (
     WorkspaceEditCommand,
     WorkspaceEditor,
 )
+from .workspace.exec import WorkspaceExecCommand, WorkspaceExecutor
 from .workspace.execute_plan import (
     WorkspaceExecutePlanCommand,
     WorkspacePlanExecutor,
@@ -470,6 +471,12 @@ class CodingService:
             snapshot=self._snapshot,
             profile=self._profile,
             diagnostic=self._diagnostic,
+            adhoc=self._adhoc,
+            admission=self._work_admission,
+            operations=self.operations,
+        )
+        self._exec = WorkspaceExecutor(
+            ctx,
             adhoc=self._adhoc,
             admission=self._work_admission,
             operations=self.operations,
@@ -1666,6 +1673,32 @@ class CodingService:
                 outcome="running",
                 head_sha=binding.head_sha if binding is not None else "",
                 workspace_fingerprint=binding.workspace_fingerprint if binding is not None else "",
+            )
+        )
+
+    def workspace_exec(
+        self,
+        workspace_id: str,
+        argv: tuple[str, ...],
+        working_directory: str | None = None,
+        stdin_text: str | None = None,
+        expected_fingerprint: str | None = None,
+        expected_head_sha: str | None = None,
+        mutability: str = "read_only",
+        background: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._exec.execute(
+                WorkspaceExecCommand(
+                    workspace_id=workspace_id,
+                    argv=argv,
+                    working_directory=working_directory,
+                    stdin_text=stdin_text,
+                    expected_fingerprint=expected_fingerprint,
+                    expected_head_sha=expected_head_sha,
+                    mutability=mutability,
+                    background=background,
+                )
             )
         )
 

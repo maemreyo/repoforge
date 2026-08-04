@@ -1,4 +1,4 @@
-"""Forge v2 MCP composition backed by the authoritative 28-tool registry."""
+"""Forge v2 MCP composition backed by the authoritative 29-tool registry."""
 
 from __future__ import annotations
 
@@ -139,12 +139,13 @@ Forge v2 connects ChatGPT to allowlisted local Git repositories through isolated
 Begin with repo_list, then use repo_task_context before creating or resuming a workspace. Exact or
 single-repository selection is pinned to the MCP session; reuse that context for later repo-scoped calls
 and do not poll repo_list again unless stale-selection recovery requires it or the user changes repos. The
-public surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
+public surface is the fixed 29-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
 composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
 profiles, and workspace_pr for draft-PR lifecycle operations. To run a command that no enrolled
-diagnostic covers, use workspace_verify mode=adhoc with an argv list -- never a shell string -- limited
-to the repository's adhoc_runners allowlist; when the runner you need is missing, propose it through
-repo_policy rather than working around it. Review workspace_diff after meaningful
+diagnostic covers, use workspace_exec with an argv list -- never a shell string -- limited to the
+repository's adhoc_runners allowlist; when the runner you need is missing, propose it through
+repo_policy rather than working around it (workspace_verify mode=adhoc still works during a
+deprecation window, but workspace_exec is the current answer to "run a command"). Review workspace_diff after meaningful
 changes. Run final verification immediately before workspace_commit. For desired GitHub issue graphs,
 use repo_issue mode=manage with plan/apply/status/reconcile; never substitute raw GitHub mutation.
 Resume a disconnected or new session from repo_task_context section ticket_workflow. After apply, use
@@ -224,6 +225,7 @@ _TOOL_TITLES: Mapping[str, str] = {
     "workspace_diff": "Read workspace diff",
     "workspace_mutate": "Apply exact-state workspace mutations",
     "workspace_verify": "Plan, verify, or run an allowlisted command",
+    "workspace_exec": "Run an allowlisted ad-hoc command",
     "workspace_commit": "Commit verified workspace",
     "workspace_push": "Push workspace branch",
     "workspace_pr": "Manage draft pull request",
@@ -283,10 +285,20 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "workspace_mutate": "Atomically plan or apply typed exact-state mutations under workspace policy and budgets.",
     "workspace_verify": (
         "Plan, route, or run reviewed diagnostics and profiles, and -- under relaxed execution mode -- "
-        "run an allowlisted command directly with mode=adhoc. Ad-hoc takes an argv list, never a shell "
-        "string, and its result is evidence only: it never satisfies the commit gate. The response's "
+        "run an allowlisted command directly with mode=adhoc, kept working during workspace_exec's "
+        "deprecation window. Prefer workspace_exec for new ad-hoc command calls. Ad-hoc takes an argv "
+        "list, never a shell string, and its result is evidence only: it never satisfies the commit "
+        "gate. The response's adhoc_evidence.content_inspected reports whether RepoForge inspected the "
+        "command at all, which it does for git argv only."
+    ),
+    "workspace_exec": (
+        "Under relaxed execution mode, run an allowlisted command directly -- the first-class answer "
+        "to 'run a command', superseding workspace_verify mode=adhoc. Takes an argv list, never a shell "
+        "string, and its result is evidence only: it never satisfies the commit gate. A mutating run "
+        "(mutability='workspace') requires expected_head_sha and expected_fingerprint as an exact-state "
+        "lock, and invalidates any prior verification receipt on the workspace. The response's "
         "adhoc_evidence.content_inspected reports whether RepoForge inspected the command at all, which "
-        "it does for git argv only."
+        "it does for git argv only -- every other runner, a shell included, runs uninspected."
     ),
     "workspace_commit": "Commit only the exact verified tree with optional exact-head and fingerprint locks.",
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
@@ -344,6 +356,11 @@ _LOCAL_DESTRUCTIVE_TOOLS = frozenset({"workspace_remove", "workspace_mutate"})
 # diagnostic, profile, adhoc) are (#225 round-3 review). MCP annotations are
 # per-tool, not per-mode, so the honest tool-wide hint is the default
 # LOCAL_MUTATE (idempotentHint=False).
+# workspace_exec is deliberately excluded too, for the same reason applied to a
+# simpler tool: it runs an arbitrary allowlisted command once per call, with no
+# read-only guarantee (a declared mutability='read_only' run can still trip
+# read_only_violation) and no guarantee that repeating the same argv is safe or
+# produces the same effect. The honest hint is the same default LOCAL_MUTATE.
 _LOCAL_IDEMPOTENT_TOOLS = frozenset({"workspace_format_changed", "operation"})
 
 
@@ -573,6 +590,7 @@ _SERVICE_METHODS: Mapping[str, str] = {
     "workspace_diff": "workspace_diff_v2",
     "workspace_mutate": "workspace_mutate",
     "workspace_verify": "workspace_verify",
+    "workspace_exec": "workspace_exec",
     "workspace_commit": "workspace_commit",
     "workspace_push": "workspace_push",
     "workspace_pr": "workspace_pr",

@@ -125,7 +125,7 @@ class ToolErrorDetails(StrictModel):
 
 
 class ToolError(StrictModel):
-    """One typed error shape shared by all 28 public tools."""
+    """One typed error shape shared by all 29 public tools."""
 
     code: ErrorCode
     message: ShortText

@@ -211,10 +211,10 @@ def test_foreground_profile_only_bounded_waits_on_durable_operation(
     monkeypatch,
 ) -> None:
     """A foreground request never executes the profile when no worker has claimed it."""
-    import repoforge.application.workspace.verify as verify_module
+    import repoforge.application.operations.durable_wait as durable_wait_module
 
-    monkeypatch.setattr(verify_module, "_FOREGROUND_WAIT_SECONDS", 0.01)
-    monkeypatch.setattr(verify_module, "_FOREGROUND_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(durable_wait_module, "FOREGROUND_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(durable_wait_module, "FOREGROUND_POLL_SECONDS", 0.001)
     env = create_forge_environment(tmp_path)
     config = load_config(env.config_path)
     legacy_background = ManualBackgroundTaskRunner()

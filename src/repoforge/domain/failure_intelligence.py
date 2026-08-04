@@ -67,7 +67,7 @@ class FailureReproducibility(str, Enum):
 class RecoveryActionKind(str, Enum):
     """The exact Forge v2 tool a recovery action names.
 
-    RepoForge exposes exactly 28 static tools (#180); several v1-era
+    RepoForge exposes exactly 29 static tools (#180); several v1-era
     operations (`workspace_run_diagnostic`, `workspace_run_profile`,
     `workspace_create_execution_plan`, `workspace_execute_plan`,
     `workspace_refresh_preview`, `workspace_restore_paths`,
