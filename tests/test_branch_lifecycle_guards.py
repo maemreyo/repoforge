@@ -212,9 +212,14 @@ def test_attached_shared_workspace_switch_to_protected_branch_still_refuses(
 ) -> None:
     """Self-heal reconciles the registry with reality, but it must not turn a protected
     branch into a workspace RepoForge will operate on: AC2's "no bypass path in any kind"
-    guarantee has to hold even for a state only reachable through self-heal itself. The
-    registry still records what the checkout is actually on (self-heal is honest about
-    drift), it just also refuses to proceed past that point."""
+    guarantee has to hold even for a state only reachable through self-heal itself.
+
+    The observed branch is validated BEFORE it is persisted (review finding F-003): a
+    denied branch must never be written into the registry as though it were the
+    workspace's authorized state, even transiently. The registry therefore keeps the last
+    branch that was actually authorized, not the protected one the switch was refused
+    on -- self-heal is honest about drift only up to the point it would record something
+    it is about to refuse."""
     _checked_out_branch(forge_env, "wip/attach-protected")
     created = forge_env.service.workspace_create(
         "demo", "attach then switch to main", attach_branch="wip/attach-protected"
@@ -228,8 +233,8 @@ def test_attached_shared_workspace_switch_to_protected_branch_still_refuses(
         forge_env.service.workspace_status(workspace_id)
 
     record = forge_env.service.state.load(workspace_id)
-    assert record.branch == "main"
-    assert record.base == "main"
+    assert record.branch == "wip/attach-protected"
+    assert record.base == "wip/attach-protected"
 
 
 # --- AC2: protected branches have no bypass path in any kind or execution mode ---

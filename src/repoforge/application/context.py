@@ -413,6 +413,15 @@ class ApplicationContext:
                 # same self-heal #373's reattach flow already applies to a moved checkout,
                 # rather than refusing every subsequent call until something "fixes" a
                 # registry entry that is not actually wrong -- it is just stale.
+                #
+                # Validated BEFORE persisting: a denied branch (e.g. protected) must never
+                # be written into the registry as though it were the workspace's
+                # authorized state, even transiently between this save and the refusal
+                # below (review finding F-003). If it is not denied, this call is
+                # redundant with the one after the if/else -- cheap, and it keeps the
+                # invariant "never persist an observation this function is about to
+                # refuse" true without threading extra state through the branch.
+                validate_workspace_branch(record.kind, branch, repo)
                 record.branch = branch
                 record.base = branch
                 self.store.save(record)
@@ -430,13 +439,14 @@ class ApplicationContext:
                         "isolated workspace for the other branch."
                     ),
                 )
-        # Every workspace tool passes through here, so this is where an adopted or
-        # attached branch is either honoured or silently unusable: the ai/* prefix rule
-        # would refuse the very branch the operator asked for on EVERY subsequent call,
-        # not just at creation. The rest of the validation -- protected branches, ref
-        # safety -- still applies, and the registry (not the request) decides which
-        # branches count as operator-named.
-        validate_workspace_branch(record.kind, branch, repo)
+        else:
+            # Every workspace tool passes through here, so this is where an adopted or
+            # attached branch is either honoured or silently unusable: the ai/* prefix
+            # rule would refuse the very branch the operator asked for on EVERY subsequent
+            # call, not just at creation. The rest of the validation -- protected
+            # branches, ref safety -- still applies, and the registry (not the request)
+            # decides which branches count as operator-named.
+            validate_workspace_branch(record.kind, branch, repo)
         return (record, repo, path)
 
     def record_metric(

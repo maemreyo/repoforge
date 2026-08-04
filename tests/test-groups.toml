@@ -97,6 +97,7 @@ source_globs = [
   "docs/architecture/autonomy-policy-model.md",
   "src/repoforge/ports/commit_identity.py",
   "src/repoforge/ports/command.py",
+  "src/repoforge/ports/git.py",
   "src/repoforge/testing/fakes.py",
   "src/repoforge/adapters/persistence/json_hygiene_cache.py",
   "src/repoforge/adapters/persistence/json_workspace_store.py",

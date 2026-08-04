@@ -75,21 +75,24 @@ def test_corrupt_kind_on_disk_fails_closed(forge_env: ForgeEnvironment) -> None:
         store.load(workspace_id)
 
 
-def test_attached_shared_workspace_removal_is_refused(forge_env: ForgeEnvironment) -> None:
-    """No attach flow exists yet (#372/#373), so this constructs the record directly --
-    the same shape a future attach flow will produce -- to prove the removal guard already
-    protects a kind whose creation path does not exist yet."""
+def test_attached_shared_workspace_removal_detaches_registry_only(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """Removing an attached-shared workspace must never touch its checkout, but it must
+    still be able to forget RepoForge's own registry entry -- that bookkeeping is the only
+    thing workspace_remove owns for this kind (review finding F-002)."""
     created = forge_env.service.workspace_create("demo", "future attach")
     workspace_id = created["workspace_id"]
     record = forge_env.service.state.load(workspace_id)
     record.kind = WorkspaceKind.ATTACHED_SHARED
     forge_env.service.state.save(record)
 
-    with pytest.raises(WorkspaceError, match="ATTACHED_WORKSPACE_NOT_REMOVABLE"):
-        forge_env.service.workspace_remove(workspace_id)
+    result = forge_env.service.workspace_remove(workspace_id)
 
-    # Refused means nothing happened: the checkout and the registry entry are untouched.
-    assert forge_env.service.state.load(workspace_id).kind is WorkspaceKind.ATTACHED_SHARED
+    assert result["removed"] is True
+    assert result["local_branch_deleted"] is False
+    with pytest.raises(WorkspaceError, match="Unknown workspace id"):
+        forge_env.service.state.load(workspace_id)
     from pathlib import Path
 
     assert Path(created["path"]).is_dir()

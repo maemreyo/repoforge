@@ -107,6 +107,32 @@ def test_reattach_self_heals_when_the_worktree_moved(forge_env: ForgeEnvironment
     assert record.path == str(moved)
 
 
+def test_attach_refuses_a_second_branch_that_now_resolves_to_an_already_attached_checkout(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """`_attach_workspace_id` keys attach_branch on the requested branch name, not the
+    checkout's path -- so if the checkout's branch changes (the operator switches it
+    directly, not through RepoForge) and something re-attaches using the NEW branch name,
+    that used to mint a second, independent workspace_id -- and a second, independent
+    mutation lock -- over the identical physical checkout (review finding F-001). This is
+    the branch-attach counterpart of the alias-retargeted-symlink collision test."""
+    _checkout_new_branch_in_primary(forge_env, "wip/attach-first")
+    first = forge_env.service.workspace_create(
+        "demo", "attach first branch", attach_branch="wip/attach-first"
+    )
+
+    git("checkout", "-q", "-b", "wip/attach-second", cwd=forge_env.source)
+
+    with pytest.raises(WorkspaceError, match="ATTACH_CHECKOUT_ALREADY_REGISTERED"):
+        forge_env.service.workspace_create(
+            "demo", "attach second branch", attach_branch="wip/attach-second"
+        )
+
+    assert forge_env.service.state.load(first["workspace_id"]).kind is (
+        WorkspaceKind.ATTACHED_SHARED
+    )
+
+
 def test_attach_unknown_branch_fails_with_evidence(forge_env: ForgeEnvironment) -> None:
     with pytest.raises(WorkspaceError, match="ATTACH_BRANCH_NOT_FOUND"):
         forge_env.service.workspace_create(
@@ -191,14 +217,39 @@ def test_attach_ignores_a_detached_worktree_with_the_same_name_hint(
     assert excinfo.value.details["detached_worktree_count"] == 1
 
 
-def test_removing_an_attached_workspace_is_refused(forge_env: ForgeEnvironment) -> None:
+def test_removing_an_attached_workspace_detaches_the_registry_entry_only(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """workspace_remove on an attached-shared workspace must never touch the operator's
+    checkout, but it must still be able to forget RepoForge's own registry bookkeeping --
+    there is no other public path to clear a stale attached-workspace record (review
+    finding F-002)."""
     _checkout_new_branch_in_primary(forge_env, "wip/attach-remove")
     created = forge_env.service.workspace_create(
         "demo", "attach then try remove", attach_branch="wip/attach-remove"
     )
 
-    with pytest.raises(WorkspaceError, match="ATTACHED_WORKSPACE_NOT_REMOVABLE"):
-        forge_env.service.workspace_remove(created["workspace_id"])
+    result = forge_env.service.workspace_remove(created["workspace_id"])
+
+    assert result["removed"] is True
+    assert result["local_branch_deleted"] is False
+    # The checkout and its branch are untouched -- only the registry entry is gone.
+    assert Path(created["path"]).is_dir()
+    assert git("rev-parse", "--verify", "wip/attach-remove", cwd=forge_env.source)
+    with pytest.raises(WorkspaceError, match="Unknown workspace id"):
+        forge_env.service.state.load(created["workspace_id"])
+
+
+def test_removing_an_attached_workspace_refuses_delete_local_branch(
+    forge_env: ForgeEnvironment,
+) -> None:
+    _checkout_new_branch_in_primary(forge_env, "wip/attach-remove-branch")
+    created = forge_env.service.workspace_create(
+        "demo", "attach then try delete branch", attach_branch="wip/attach-remove-branch"
+    )
+
+    with pytest.raises(WorkspaceError, match="ADOPTED_BRANCH_NOT_DELETABLE"):
+        forge_env.service.workspace_remove(created["workspace_id"], delete_local_branch=True)
 
     assert Path(created["path"]).is_dir()
     assert forge_env.service.state.load(created["workspace_id"]).kind is (

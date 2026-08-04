@@ -258,7 +258,7 @@ def test_attach_alias_symlink_escaping_to_workspace_root_fails_closed(tmp_path: 
         )
 
 
-def test_removing_an_alias_attached_workspace_is_refused(tmp_path: Path) -> None:
+def test_removing_an_alias_attached_workspace_detaches_registry_only(tmp_path: Path) -> None:
     external = _external_checkout(tmp_path, "external", "ops/attach-remove")
     env = create_forge_environment(
         tmp_path, trusted_external_checkouts={"ops-clone": str(external)}
@@ -267,10 +267,12 @@ def test_removing_an_alias_attached_workspace_is_refused(tmp_path: Path) -> None
         "demo", "attach then remove", attach_checkout_alias="ops-clone"
     )
 
-    with pytest.raises(WorkspaceError, match="ATTACHED_WORKSPACE_NOT_REMOVABLE"):
-        env.service.workspace_remove(created["workspace_id"])
+    result = env.service.workspace_remove(created["workspace_id"])
 
+    assert result["removed"] is True
     assert external.is_dir()
+    with pytest.raises(WorkspaceError, match="Unknown workspace id"):
+        env.service.state.load(created["workspace_id"])
 
 
 def test_revoking_an_alias_immediately_prevents_new_attach(tmp_path: Path) -> None:
@@ -335,6 +337,16 @@ def test_revoking_an_alias_cuts_off_an_already_attached_workspace(tmp_path: Path
 
     with pytest.raises(SecurityError, match="ATTACH_CHECKOUT_REVOKED"):
         env.service.workspace_status(workspace_id)
+
+    # Review finding F-002: revocation must not create a dead end. workspace_remove is
+    # the only public recovery action for a stale attached-workspace record, and it must
+    # still succeed -- as a registry-only detach that never touches the now-unauthorized
+    # checkout -- even though every other call on this workspace_id is now refused.
+    result = env.service.workspace_remove(workspace_id)
+    assert result["removed"] is True
+    assert external.is_dir()
+    with pytest.raises(WorkspaceError, match="Unknown workspace id"):
+        env.service.state.load(workspace_id)
 
 
 def test_attach_alias_and_branch_together_are_refused(tmp_path: Path) -> None:

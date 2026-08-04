@@ -194,3 +194,33 @@ def test_restore_absence_expectation_refuses_when_path_unexpectedly_exists(
             expected_workspace_fingerprint=status["workspace_fingerprint"],
             expected_head_sha=status["head_sha"],
         )
+
+
+def test_shared_mode_refuses_workspace_commit(forge_env: ForgeEnvironment) -> None:
+    """workspace_commit's commit identity gateway stages with `git add --all --` --
+    every tracked, untracked, staged, and unstaged change in the checkout, with no path
+    scoping. On an attached-shared checkout that is the operator's own, that could sweep
+    unrelated operator work into an agent commit (review finding F-004): blocked until a
+    scoped-index commit path exists."""
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "shared commit blocked")["workspace_id"]
+    status = service.workspace_status(workspace_id)
+    service.workspace_mutate(
+        workspace_id,
+        [CreateMutation(path="new.txt", content="new\n")],
+        expected_workspace_fingerprint=status["workspace_fingerprint"],
+        expected_head_sha=status["head_sha"],
+    )
+    _make_shared(forge_env, workspace_id)
+    path = Path(service.workspace_status(workspace_id)["path"])
+    # Simulate unrelated operator work already present in the same checkout.
+    path.joinpath("operator-untracked.txt").write_text("operator's own file\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceError, match="ATTACHED_WORKSPACE_COMMIT_BLOCKED"):
+        service.workspace_commit(workspace_id, "agent commit")
+
+    # Refused means nothing happened: no commit, nothing staged, operator file untouched.
+    assert git("status", "--porcelain", cwd=path).strip() != ""
+    assert path.joinpath("operator-untracked.txt").read_text(encoding="utf-8") == (
+        "operator's own file\n"
+    )

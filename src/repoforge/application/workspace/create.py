@@ -129,7 +129,25 @@ class WorkspaceCreator:
                 ),
                 unchanged_state=("No branch, worktree, or file was created.",),
             )
-        return resolved.resolve(), entry.head_sha or self.ctx.git.head_sha(resolved)
+        resolved = resolved.resolve()
+        # `_attach_workspace_id` keys on (repo_id, "branch", attach) -- the requested
+        # branch name, not the checkout's path. If the checkout's branch later changes and
+        # something re-attaches with the new branch name, that mints a DIFFERENT
+        # workspace_id over the identical physical checkout: two registry records, two
+        # independent mutation locks, one filesystem (review finding F-001). The alias
+        # path already guards this by resolved path; apply the same guard here.
+        conflicting = self._find_conflicting_attachment(repo, "branch", attach, resolved)
+        if conflicting is not None:
+            raise WorkspaceError(
+                f"ATTACH_CHECKOUT_ALREADY_REGISTERED: {resolved} is already attached as "
+                f"workspace {conflicting!r}; its branch changed since that attachment was "
+                "created. Re-attach using workspace_id "
+                f"{conflicting!r}'s own branch (it self-heals), or remove that workspace "
+                "first before attaching this checkout under a new identity.",
+                details={"conflicting_workspace_id": conflicting},
+                unchanged_state=("No branch, worktree, or file was created.",),
+            )
+        return resolved, entry.head_sha or self.ctx.git.head_sha(resolved)
 
     def _resolve_attach_alias_target(self, repo: Any, alias: str) -> tuple[Path, str, str]:
         """Resolve an operator-registered checkout alias (#373) to (path, head_sha,
@@ -215,7 +233,7 @@ class WorkspaceCreator:
                 unchanged_state=("No branch, worktree, or file was created.",),
             )
         validate_adopted_branch(branch, repo)
-        conflicting = self._find_conflicting_alias_attachment(repo, alias, resolved)
+        conflicting = self._find_conflicting_attachment(repo, "alias", alias, resolved)
         if conflicting is not None:
             raise WorkspaceError(
                 f"ATTACH_CHECKOUT_ALREADY_REGISTERED: {resolved} is already attached as "
@@ -230,14 +248,16 @@ class WorkspaceCreator:
             )
         return resolved, self.ctx.git.head_sha(resolved), branch
 
-    def _find_conflicting_alias_attachment(
-        self, repo: Any, alias: str, resolved: Path
+    def _find_conflicting_attachment(
+        self, repo: Any, discriminator: str, token: str, resolved: Path
     ) -> str | None:
-        """Two different aliases resolving to the identical live checkout must not each
-        mint their own workspace_id: `_attach_workspace_id` keys on the alias token, not
-        the path, so without this check they would get two independent workspace records
-        and two independent mutation locks over the same filesystem checkout."""
-        this_workspace_id = _attach_workspace_id(repo.repo_id, "alias", alias)
+        """Two different attach identities (two aliases, two branch names, or one of
+        each) resolving to the identical live checkout must not each mint their own
+        workspace_id: `_attach_workspace_id` keys on the discriminator/token, not the
+        path, so without this check they would get two independent workspace records and
+        two independent mutation locks over the same filesystem checkout. Used by both
+        the alias-attach and branch-attach discovery paths."""
+        this_workspace_id = _attach_workspace_id(repo.repo_id, discriminator, token)
         for record in self.ctx.store.list():
             if record.repo_id != repo.repo_id or record.kind is not WorkspaceKind.ATTACHED_SHARED:
                 continue
