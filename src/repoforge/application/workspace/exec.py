@@ -24,6 +24,7 @@ from .run_adhoc import (
     WorkspaceAdhocRunner,
     WorkspaceRunAdhocBackgroundResult,
     WorkspaceRunAdhocResult,
+    WorkspaceRunAdhocSequenceResult,
 )
 from .snapshot import WorkspaceSnapshotReader
 from .verify import _adhoc_evidence, _command_evidence
@@ -37,10 +38,35 @@ _WAIT_SAFE_NEXT_ACTION = (
 )
 
 
+def _adhoc_sequence_evidence(result: WorkspaceRunAdhocSequenceResult) -> dict[str, object]:
+    """Project a sequence's (#443) policy facts onto the same AdhocEvidence shape a
+    single command uses. `command_class` has no single value across a sequence's
+    (possibly mixed) elements, so it is always null here; `content_inspected` is true
+    only when every element was git and actually inspected -- see
+    WorkspaceRunAdhocSequenceResult.all_content_inspected."""
+    return {
+        "mutability": result.mutability,
+        "command_class": None,
+        "content_inspected": result.all_content_inspected,
+        "fingerprint_changed": result.fingerprint_changed,
+        "read_only_violation": result.read_only_violation,
+        "changed_paths": list(result.changed_paths),
+        "changed_paths_truncated": result.changed_paths_truncated,
+        "network_policy": result.network_policy,
+        "verification_invalidated": result.verification_invalidated,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceExecCommand:
     workspace_id: str
-    argv: tuple[str, ...]
+    argv: tuple[str, ...] | None = None
+    # Reviewed shell-script form (#377) and bounded fail-fast argv sequence (#443):
+    # mutually exclusive with argv and with each other -- the contract layer
+    # (WorkspaceExecInput) enforces exactly one of the three is set.
+    script: str | None = None
+    shell: str | None = None
+    argv_sequence: tuple[tuple[str, ...], ...] | None = None
     working_directory: str | None = None
     stdin_text: str | None = None
     expected_fingerprint: str | None = None
@@ -117,7 +143,10 @@ class WorkspaceExecutor:
         admitted = self._admission.admit(
             OperationWorkRequest.adhoc(
                 workspace_id=command.workspace_id,
-                argv=command.argv,
+                argv=command.argv or (),
+                script=command.script,
+                shell=command.shell,
+                argv_sequence=command.argv_sequence,
                 working_directory=command.working_directory,
                 mutability=command.mutability,
                 expected_head_sha=head_sha,
@@ -133,9 +162,17 @@ class WorkspaceExecutor:
             task, stored = durable_wait.wait_for_operation(
                 self.ctx, self._operations, admitted.operation_id
             )
-        delegated: WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult
+        delegated: (
+            WorkspaceRunAdhocResult
+            | WorkspaceRunAdhocSequenceResult
+            | WorkspaceRunAdhocBackgroundResult
+        )
         if task.state is OperationState.SUCCEEDED and stored is not None:
-            delegated = WorkspaceRunAdhocResult(**stored)
+            delegated = (
+                WorkspaceRunAdhocSequenceResult(**stored)
+                if command.argv_sequence is not None
+                else WorkspaceRunAdhocResult(**stored)
+            )
         else:
             delegated = WorkspaceRunAdhocBackgroundResult(
                 operation_id=admitted.operation_id,
@@ -152,7 +189,11 @@ class WorkspaceExecutor:
     @staticmethod
     def _project(
         command: WorkspaceExecCommand,
-        delegated: WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult,
+        delegated: (
+            WorkspaceRunAdhocResult
+            | WorkspaceRunAdhocSequenceResult
+            | WorkspaceRunAdhocBackgroundResult
+        ),
         *,
         head_sha: str,
         workspace_fingerprint: str,
@@ -173,12 +214,28 @@ class WorkspaceExecutor:
                 head_sha=head_sha,
                 workspace_fingerprint=workspace_fingerprint,
             )
+        if isinstance(delegated, WorkspaceRunAdhocSequenceResult):
+            last_returncode = delegated.commands[-1]["returncode"] if delegated.commands else 1
+            outcome = "passed" if last_returncode == 0 and not delegated.stopped_early else "failed"
+            return WorkspaceExecResult(
+                workspace_id=command.workspace_id,
+                outcome=outcome,
+                next_action=None,
+                operation=None,
+                commands=[_command_evidence(item) for item in delegated.commands],
+                satisfies_commit_gate=False,
+                head_sha=delegated.head_sha,
+                workspace_fingerprint=delegated.fingerprint_after,
+                adhoc_evidence=_adhoc_sequence_evidence(delegated),
+            )
         raw = {
             "argv": delegated.argv,
             "returncode": delegated.returncode,
             "duration_ms": delegated.duration_ms,
             "stdout": delegated.stdout,
             "stderr": delegated.stderr,
+            "output_artifact_reference": delegated.output_artifact_reference,
+            "output_artifact_status": delegated.output_artifact_status,
         }
         return WorkspaceExecResult(
             workspace_id=command.workspace_id,

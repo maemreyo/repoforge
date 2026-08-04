@@ -309,6 +309,23 @@ class CommandEvidence(StrictModel):
     returncode: int
     duration_ms: float = Field(ge=0)
     output_excerpt: str = Field(default="", max_length=12_000)
+    output_artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+        description=(
+            "Reference to the full, untruncated stdout+stderr when combined output "
+            "exceeded the inline excerpt bound, retrievable via runtime_logs_read "
+            "(source='failure_artifact'). The 'failure-output:' prefix predates this "
+            "field covering more than failures -- it is the same content-addressed "
+            "store, now persisted regardless of exit code whenever output is oversized."
+        ),
+    )
+    output_artifact_status: Literal[
+        "not_applicable",
+        "available",
+        "oversized",
+        "persistence_failed",
+    ] = "not_applicable"
 
 
 class EnforcementEvidenceModel(StrictModel):

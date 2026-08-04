@@ -690,6 +690,7 @@ def create_forge_environment(
     clock: Clock | None = None,
     execution_mode: str = "strict",
     adhoc_runners: tuple[str, ...] = (),
+    adhoc_shell_runners: tuple[str, ...] = (),
     allowed_mutation_ops: tuple[str, ...] = MUTATION_OPS,
     trusted_external_checkouts: dict[str, str] | None = None,
 ) -> ForgeEnvironment:
@@ -737,6 +738,7 @@ pr_reviewers = ["reviewer"]
 no_maintainer_edit = true
 execution_mode = "{execution_mode}"
 adhoc_runners = {json.dumps(list(adhoc_runners))}
+adhoc_shell_runners = {json.dumps(list(adhoc_shell_runners))}
 {trusted_checkouts_section}
 
 [repositories.demo.profiles.quick]

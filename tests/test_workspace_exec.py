@@ -1,5 +1,8 @@
 """Coverage for issue #376: `workspace_exec`, a first-class ad-hoc command tool
-superseding `workspace_verify(mode="adhoc")` for the run-a-command intent.
+superseding `workspace_verify(mode="adhoc")` for the run-a-command intent. Also covers
+#377 (reviewed shell-script execution, output-artifact references, non-interactive
+default) and #443 (bounded fail-fast argv sequences), both additive extensions of the
+same tool's contract.
 
 `workspace_exec` promotes the SAME underlying machinery `tests/test_workspace_adhoc.py`
 already covers in depth (`WorkspaceAdhocRunner`, `classify_adhoc_command`, config
@@ -47,6 +50,37 @@ def _exec(
 ) -> dict:
     with durable_worker(env.service):
         return env.service.workspace_exec(workspace_id, argv, **kwargs)
+
+
+def _relaxed_shell_env(
+    tmp_path: Path,
+    *,
+    shell_runners: tuple[str, ...] = ("sh",),
+    runners: tuple[str, ...] = ("python3",),
+) -> ForgeEnvironment:
+    return create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=runners,
+        adhoc_shell_runners=shell_runners,
+    )
+
+
+def _exec_script(
+    env: ForgeEnvironment, workspace_id: str, script: str, shell: str, **kwargs: object
+) -> dict:
+    with durable_worker(env.service):
+        return env.service.workspace_exec(workspace_id, script=script, shell=shell, **kwargs)
+
+
+def _exec_sequence(
+    env: ForgeEnvironment,
+    workspace_id: str,
+    argv_sequence: tuple[tuple[str, ...], ...],
+    **kwargs: object,
+) -> dict:
+    with durable_worker(env.service):
+        return env.service.workspace_exec(workspace_id, argv_sequence=argv_sequence, **kwargs)
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
@@ -367,3 +401,267 @@ def test_exec_audit_records_stdin_length_but_never_its_content(tmp_path: Path) -
     assert events, "the exec run must be audited under the shared adhoc-runner event"
     assert events[-1]["details"]["stdin_length"] == len(secret)
     assert secret not in json.dumps(events[-1])
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive default (#377 AC): a command with no stdin_text gets
+# immediate EOF, never a hang, whether or not it was even expecting input.
+# ---------------------------------------------------------------------------
+
+
+def test_exec_with_no_stdin_text_gets_immediate_eof_not_a_hang(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "no stdin_text")["workspace_id"]
+
+    result = _exec(
+        env,
+        workspace_id,
+        ("python3", "-c", "import sys; data = sys.stdin.read(); print(repr(data))"),
+    )
+
+    assert result["outcome"] == "passed"
+    assert result["commands"][0]["returncode"] == 0
+    assert "''" in result["commands"][0]["output_excerpt"]
+
+
+# ---------------------------------------------------------------------------
+# Reviewed shell-script execution (#377): mutually exclusive with argv and
+# argv_sequence, gated behind a separate, empty-by-default adhoc_shell_runners
+# allowlist, and never content-inspected for git forms.
+# ---------------------------------------------------------------------------
+
+
+def test_contract_requires_exactly_one_of_argv_script_or_argv_sequence() -> None:
+    with pytest.raises(ValueError, match="Exactly one of argv, argv_sequence, or script"):
+        WorkspaceExecInput(workspace_id="ws-1")
+    with pytest.raises(ValueError, match="Exactly one of argv, argv_sequence, or script"):
+        WorkspaceExecInput(
+            workspace_id="ws-1", argv=("git", "status"), script="echo hi", shell="sh"
+        )
+
+
+def test_contract_script_requires_shell() -> None:
+    with pytest.raises(ValueError, match="shell is required with script"):
+        WorkspaceExecInput(workspace_id="ws-1", script="echo hi")
+    with pytest.raises(ValueError, match="shell is required with script"):
+        WorkspaceExecInput(workspace_id="ws-1", argv=("git", "status"), shell="sh")
+
+
+def test_script_form_disabled_by_default(tmp_path: Path) -> None:
+    """adhoc_shell_runners defaults to empty even under execution_mode='relaxed' with a
+    populated adhoc_runners -- enabling the script form is a separate, explicit decision."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "script disabled")["workspace_id"]
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec_script(env, workspace_id, "echo hi", "sh")
+
+    assert exc.value.code is ErrorCode.ADHOC_RUNNER_NOT_ALLOWED
+    assert "adhoc_shell_runners" in str(exc.value)
+
+
+def test_script_form_refuses_an_unlisted_shell(tmp_path: Path) -> None:
+    env = _relaxed_shell_env(tmp_path, shell_runners=("sh",))
+    workspace_id = env.service.workspace_create("demo", "unlisted shell")["workspace_id"]
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec_script(env, workspace_id, "echo hi", "bash")
+
+    assert exc.value.code is ErrorCode.ADHOC_RUNNER_NOT_ALLOWED
+
+
+def test_script_form_runs_through_the_allowlisted_shell(tmp_path: Path) -> None:
+    env = _relaxed_shell_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "script happy path")["workspace_id"]
+
+    result = _exec_script(env, workspace_id, "echo hello from script", "sh")
+
+    assert result["outcome"] == "passed"
+    command = result["commands"][0]
+    assert command["returncode"] == 0
+    assert command["argv"] == ["sh", "-c", "echo hello from script"]
+    assert "hello from script" in command["output_excerpt"]
+
+
+def test_script_form_supports_pipes_and_globbing(tmp_path: Path) -> None:
+    """The whole point of the script form over argv: shell syntax argv structurally
+    cannot carry (pipes, redirects, globbing, command chaining)."""
+    env = _relaxed_shell_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "script pipes")["workspace_id"]
+
+    result = _exec_script(
+        env,
+        workspace_id,
+        "echo one two three | tr ' ' '\\n' | grep two && echo done",
+        "sh",
+    )
+
+    assert result["outcome"] == "passed"
+    excerpt = result["commands"][0]["output_excerpt"]
+    assert "two" in excerpt
+    assert "done" in excerpt
+
+
+def test_script_form_is_never_content_inspected(tmp_path: Path) -> None:
+    env = _relaxed_shell_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "script no inspection")["workspace_id"]
+
+    result = _exec_script(env, workspace_id, "echo hi", "sh")
+
+    assert result["adhoc_evidence"]["command_class"] is None
+    assert result["adhoc_evidence"]["content_inspected"] is False
+
+
+def test_script_form_is_not_blocked_by_git_content_inspection(tmp_path: Path) -> None:
+    """A form classify_adhoc_command would refuse via the argv path (git clean --force
+    is explicitly blocked, see domain/adhoc.py) is NOT structurally blocked when run
+    through a script body -- documented, expected behavior (review finding), not a new
+    gap: an operator who enables adhoc_shell_runners has already accepted this, the same
+    trust decision as allowlisting a shell interpreter in adhoc_runners would be."""
+    env = _relaxed_shell_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "script git clean force")["workspace_id"]
+
+    result = _exec_script(env, workspace_id, "git clean --force", "sh")
+
+    # Not ADHOC_COMMAND_FORBIDDEN: the script form has no visibility into what the shell
+    # actually ran, so it cannot raise the argv-only content-inspection error at all.
+    assert result["outcome"] in {"passed", "failed"}
+
+
+def test_script_body_over_bound_is_rejected() -> None:
+    from repoforge.domain.adhoc import MAX_ADHOC_SCRIPT_LENGTH
+
+    with pytest.raises(ValueError):
+        WorkspaceExecInput(
+            workspace_id="ws-1", script="x" * (MAX_ADHOC_SCRIPT_LENGTH + 1), shell="sh"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bounded fail-fast argv sequences (#443): additive to the single-argv form,
+# not a substitute for shell syntax -- every element still goes through the
+# same content inspection a single argv command would.
+# ---------------------------------------------------------------------------
+
+
+def test_argv_sequence_runs_every_element_in_order(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "sequence happy path")["workspace_id"]
+
+    result = _exec_sequence(
+        env,
+        workspace_id,
+        (("python3", "--version"), ("python3", "-c", "print('two')")),
+    )
+
+    assert result["outcome"] == "passed"
+    assert len(result["commands"]) == 2
+    assert all(command["returncode"] == 0 for command in result["commands"])
+    assert "two" in result["commands"][1]["output_excerpt"]
+
+
+def test_argv_sequence_stops_at_the_first_failure(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "sequence fail fast")["workspace_id"]
+
+    result = _exec_sequence(
+        env,
+        workspace_id,
+        (
+            ("python3", "-c", "import sys; sys.exit(3)"),
+            ("python3", "-c", "print('should not run')"),
+        ),
+    )
+
+    assert result["outcome"] == "failed"
+    # Fail-fast: only the failing element's result is present, not the second one.
+    assert len(result["commands"]) == 1
+    assert result["commands"][0]["returncode"] == 3
+
+
+def test_argv_sequence_mutating_element_requires_exact_state_lock(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "sequence needs lock")["workspace_id"]
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec_sequence(
+            env,
+            workspace_id,
+            (("git", "status"), ("git", "checkout", "-b", "ai/seq-branch")),
+        )
+
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
+    assert "mutability='workspace'" in str(exc.value)
+
+
+def test_argv_sequence_mutating_element_runs_with_correct_lock(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "sequence correct lock")["workspace_id"]
+    status = env.service.workspace_status(workspace_id)
+
+    result = _exec_sequence(
+        env,
+        workspace_id,
+        (("git", "status"), ("git", "checkout", "-b", "ai/seq-branch")),
+        mutability="workspace",
+        expected_head_sha=status["head_sha"],
+        expected_fingerprint=status["workspace_fingerprint"],
+    )
+
+    assert result["outcome"] == "passed"
+    assert len(result["commands"]) == 2
+
+
+def test_argv_sequence_validates_every_element_before_running_any(tmp_path: Path) -> None:
+    """A sequence either runs entirely reviewed or not at all: an invalid element 2 must
+    refuse before element 1 -- which would otherwise have run and mutated the tree --
+    ever starts."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "sequence validates upfront")[
+        "workspace_id"
+    ]
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec_sequence(
+            env,
+            workspace_id,
+            (
+                ("python3", "-c", "open('should-not-exist.txt', 'w').close()"),
+                ("node", "--version"),  # not in adhoc_runners
+            ),
+        )
+
+    assert exc.value.code is ErrorCode.ADHOC_RUNNER_NOT_ALLOWED
+    path = Path(env.service.workspace_status(workspace_id)["path"])
+    assert not (path / "should-not-exist.txt").exists()
+
+
+def test_argv_sequence_over_bound_is_rejected() -> None:
+    from repoforge.domain.adhoc import MAX_ADHOC_SEQUENCE_LENGTH
+
+    with pytest.raises(ValueError):
+        WorkspaceExecInput(
+            workspace_id="ws-1",
+            argv_sequence=tuple(
+                ("python3", "--version") for _ in range(MAX_ADHOC_SEQUENCE_LENGTH + 1)
+            ),
+        )
+
+
+def test_argv_sequence_reports_per_element_evidence_independently(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "sequence per-element evidence")[
+        "workspace_id"
+    ]
+
+    result = _exec_sequence(
+        env,
+        workspace_id,
+        (("python3", "-c", "print('first')"), ("python3", "-c", "print('second')")),
+    )
+
+    assert result["commands"][0]["argv"] == ["python3", "-c", "print('first')"]
+    assert "first" in result["commands"][0]["output_excerpt"]
+    assert "second" not in result["commands"][0]["output_excerpt"]
+    assert result["commands"][1]["argv"] == ["python3", "-c", "print('second')"]
+    assert "second" in result["commands"][1]["output_excerpt"]

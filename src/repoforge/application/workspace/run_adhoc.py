@@ -16,7 +16,7 @@ import hashlib
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,6 +26,9 @@ from ...domain.adhoc import (
     ExecutionMode,
     classify_adhoc_command,
     validate_adhoc_argv,
+    validate_adhoc_script,
+    validate_adhoc_sequence,
+    validate_adhoc_shell_runner,
     validate_adhoc_stdin,
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
@@ -48,12 +51,53 @@ _NETWORK_POLICY_LABEL = "advisory_local_only"
 _ARGV_RECURRENCE_THRESHOLD = 3
 _MAX_CHANGED_PATHS_REPORTED = 200
 _OPERATION_LEASE_GRACE_SECONDS = 60
+#: Same rationale and value as run_profile.py's own step heartbeat: a long-running
+#: command's operation record would otherwise go quiet for its whole duration, and a
+#: slow (but healthy) command becomes indistinguishable from a hung one until the
+#: repository's adhoc_timeout_seconds fires (#377 AC: "streaming works within connector
+#: timeouts"). Deliberately a periodic re-emit of the existing progress channel, not a
+#: rewrite of subprocess I/O -- the command itself still runs as one blocking call.
+_PROGRESS_HEARTBEAT_SECONDS = 30.0
+
+
+@contextlib.contextmanager
+def _command_progress_heartbeat(
+    progress: Callable[[str, int, int, str, str], None] | None,
+    *,
+    label: str,
+    interval_seconds: float = _PROGRESS_HEARTBEAT_SECONDS,
+) -> Iterator[None]:
+    """Re-emit "running" progress on a timer while the wrapped command executes."""
+    if progress is None:
+        yield
+        return
+    started = time.monotonic()
+    stop = threading.Event()
+
+    def tick() -> None:
+        while not stop.wait(interval_seconds):
+            elapsed = time.monotonic() - started
+            progress("running", 0, 1, "commands", f"running {label} (elapsed {elapsed:.0f}s)")
+
+    thread = threading.Thread(target=tick, name="adhoc-progress-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=interval_seconds)
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRunAdhocCommand:
     workspace_id: str
-    argv: tuple[str, ...]
+    argv: tuple[str, ...] | None = None
+    # Reviewed shell-script form (#377): mutually exclusive with argv. `shell` names the
+    # interpreter (validated against repo.adhoc_shell_runners); the actual argv run is
+    # (shell, "-c", script) -- never content-inspected, unlike a git argv (see
+    # validate_adhoc_shell_runner).
+    script: str | None = None
+    shell: str | None = None
     working_directory: str | None = None
     background: bool = False
     expected_fingerprint: str | None = None
@@ -93,6 +137,11 @@ class WorkspaceRunAdhocResult:
     enrollment_nudge: str | None
     next_safe_actions: list[dict[str, object]]
     execution_evidence: dict[str, object] = field(default_factory=dict)
+    # Defaulted (unlike most fields here) so a background result stored by an earlier
+    # release -- before this field existed -- still reconstructs via **stored across a
+    # deploy, instead of failing with a missing-argument error.
+    output_artifact_reference: str | None = None
+    output_artifact_status: str = "not_applicable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +149,53 @@ class WorkspaceRunAdhocBackgroundResult:
     operation_id: str
     phase: str
     safe_next_action: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRunAdhocSequenceCommand:
+    """Bounded fail-fast argv sequence (#443). Reachable only through workspace_exec's
+    durable-admission-queue path, not the older self-admitting workspace_run_adhoc
+    service method -- so there is no separate background field here: foreground vs.
+    background is entirely an operation-admission concern the durable queue already
+    handles (see WorkspaceExecutor), identical for a single command or a sequence."""
+
+    workspace_id: str
+    argv_sequence: tuple[tuple[str, ...], ...]
+    working_directory: str | None = None
+    expected_fingerprint: str | None = None
+    expected_head_sha: str | None = None
+    mutability: str = "read_only"
+    cancellation_token: CancellationToken | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRunAdhocSequenceResult:
+    workspace_id: str
+    #: One dict per element that ran, in order, shaped for `_command_evidence()`
+    #: (argv, returncode, duration_ms, stdout, stderr, output_artifact_reference,
+    #: output_artifact_status) -- the same shape `workspace_run_profile`'s multi-step
+    #: commands list already uses.
+    commands: list[dict[str, object]]
+    stopped_early: bool
+    fingerprint_before: str
+    fingerprint_after: str
+    fingerprint_changed: bool
+    changed_paths: list[str]
+    changed_paths_truncated: bool
+    head_sha: str
+    head_sha_before: str
+    mutability: str
+    read_only_violation: bool
+    #: True only when every element was a git command classify_adhoc_command actually
+    #: inspected -- the weakest link decides: one opaque (non-git) element makes the
+    #: overall "this sequence's content was inspected" claim false.
+    all_content_inspected: bool
+    network_policy: str
+    evidence_only: bool
+    satisfies_commit_gate: bool
+    verification_invalidated: bool
+    gate_guidance: str
+    next_safe_actions: list[dict[str, object]]
 
 
 _GATE_GUIDANCE = (
@@ -226,7 +322,10 @@ class WorkspaceAdhocRunner:
     ) -> WorkspaceRunAdhocResult:
         """Execute already-claimed ad-hoc work without recursive admission."""
         progress("running", 0, 1, "commands", "running reviewed ad-hoc command")
-        result = self.execute(replace(c, background=False, cancellation_token=cancellation_token))
+        result = self.execute(
+            replace(c, background=False, cancellation_token=cancellation_token),
+            progress=progress,
+        )
         if not isinstance(result, WorkspaceRunAdhocResult):
             raise RepoForgeError(
                 "Claimed ad-hoc execution returned a background operation",
@@ -235,8 +334,26 @@ class WorkspaceAdhocRunner:
         progress("running", 1, 1, "commands", "completed reviewed ad-hoc command")
         return result
 
+    def execute_sequence_claimed(
+        self,
+        c: WorkspaceRunAdhocSequenceCommand,
+        *,
+        cancellation_token: CancellationToken,
+        progress: Callable[[str, int, int, str, str], None],
+    ) -> WorkspaceRunAdhocSequenceResult:
+        """Execute already-claimed ad-hoc sequence work without recursive admission."""
+        progress("running", 0, 1, "commands", "running reviewed ad-hoc command sequence")
+        result = self.execute_sequence(
+            replace(c, cancellation_token=cancellation_token), progress=progress
+        )
+        progress("running", 1, 1, "commands", "completed reviewed ad-hoc command sequence")
+        return result
+
     def execute(
-        self, c: WorkspaceRunAdhocCommand
+        self,
+        c: WorkspaceRunAdhocCommand,
+        *,
+        progress: Callable[[str, int, int, str, str], None] | None = None,
     ) -> WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult:
         _, repo, path = self.ctx.workspace(c.workspace_id)
         if repo.execution_mode is not ExecutionMode.RELAXED:
@@ -246,12 +363,29 @@ class WorkspaceAdhocRunner:
                 f"Ad-hoc mutability must be 'read_only' or 'workspace'; got {c.mutability!r}",
                 ErrorCode.ADHOC_ARGV_INVALID,
             )
-        argv = validate_adhoc_argv(c.argv, repo.adhoc_runners)
+        argv: tuple[str, ...]
+        if c.script is not None:
+            shell = validate_adhoc_shell_runner(c.shell or "", repo.adhoc_shell_runners)
+            script = validate_adhoc_script(c.script)
+            argv = (shell, "-c", script)
+            # A script body is never content-inspected: classify_adhoc_command only
+            # inspects when argv[0] == "git" literally, so this is opaque exactly like
+            # every non-git argv runner already is -- not a new gap (see
+            # validate_adhoc_shell_runner).
+            command_class = None
+        else:
+            if c.argv is None:
+                raise _adhoc_error(
+                    "Ad-hoc command requires either argv or script",
+                    ErrorCode.ADHOC_ARGV_INVALID,
+                )
+            argv = validate_adhoc_argv(c.argv, repo.adhoc_runners)
+            # Content-inspect the exact argv: blocks irreversible/history-rewriting git
+            # forms (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers
+            # whether a git command is read-only or mutating. Non-git runners return None
+            # (opaque).
+            command_class = classify_adhoc_command(argv)
         stdin_text = validate_adhoc_stdin(c.stdin_text)
-        # Content-inspect the exact argv: blocks irreversible/history-rewriting git forms
-        # (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers whether a
-        # git command is read-only or mutating. Non-git runners return None (opaque).
-        command_class = classify_adhoc_command(argv)
         declared_mutating = c.mutability == "workspace"
         effective_mutating = declared_mutating or command_class is CommandClass.MUTATING
         if command_class is CommandClass.MUTATING and not declared_mutating:
@@ -365,7 +499,10 @@ class WorkspaceAdhocRunner:
                     stdin_text=stdin_text,
                 )
                 try:
-                    with self.ctx.execution.prepare(execution_request) as session:
+                    with (
+                        _command_progress_heartbeat(progress, label=argv[0]),
+                        self.ctx.execution.prepare(execution_request) as session,
+                    ):
                         result = session.execute(argv).result
                         inspection = session.inspect()
                         execution_evidence_data = to_data(
@@ -465,6 +602,8 @@ class WorkspaceAdhocRunner:
                     stderr=result.stderr,
                     stdout_truncated=result.stdout_truncated,
                     stderr_truncated=result.stderr_truncated,
+                    output_artifact_reference=result.output_artifact_reference,
+                    output_artifact_status=result.output_artifact_status,
                     duration_ms=duration_ms,
                     fingerprint_before=before_fingerprint,
                     fingerprint_after=after_fingerprint,
@@ -494,6 +633,224 @@ class WorkspaceAdhocRunner:
             )
 
         return self._start_background(c, run_body, audit_details)
+
+    def execute_sequence(
+        self,
+        c: WorkspaceRunAdhocSequenceCommand,
+        *,
+        progress: Callable[[str, int, int, str, str], None] | None = None,
+    ) -> WorkspaceRunAdhocSequenceResult:
+        """Bounded fail-fast argv sequence (#443): every element is validated up front
+        (fails closed before element 1 runs if any element is invalid), then elements run
+        in order under one held workspace lock, stopping at the first non-zero exit.
+        Fingerprint/HEAD preconditions and verification-invalidation bracket the whole
+        sequence, exactly like a single ad-hoc run's own bracketing -- not per element."""
+        _, repo, path = self.ctx.workspace(c.workspace_id)
+        if repo.execution_mode is not ExecutionMode.RELAXED:
+            raise _strict_mode_error(repo.repo_id)
+        if c.mutability not in {"read_only", "workspace"}:
+            raise _adhoc_error(
+                f"Ad-hoc mutability must be 'read_only' or 'workspace'; got {c.mutability!r}",
+                ErrorCode.ADHOC_ARGV_INVALID,
+            )
+        validated = validate_adhoc_sequence(c.argv_sequence, repo.adhoc_runners)
+        command_classes = [classify_adhoc_command(argv) for argv in validated]
+        declared_mutating = c.mutability == "workspace"
+        any_mutating_class = any(cls is CommandClass.MUTATING for cls in command_classes)
+        effective_mutating = declared_mutating or any_mutating_class
+        if any_mutating_class and not declared_mutating:
+            raise _adhoc_error(
+                "One or more commands in this sequence changes workspace or history "
+                "state; call with mutability='workspace' and both expected_head_sha and "
+                "expected_fingerprint so the run is bound to reviewed state",
+                ErrorCode.ADHOC_ARGV_INVALID,
+            )
+        if effective_mutating:
+            missing = [
+                name
+                for name, value in (
+                    ("expected_head_sha", c.expected_head_sha),
+                    ("expected_fingerprint", c.expected_fingerprint),
+                )
+                if value is None
+            ]
+            if missing:
+                raise _adhoc_error(
+                    "Mutating ad-hoc sequences require an exact-state lock; missing: "
+                    + ", ".join(missing),
+                    ErrorCode.ADHOC_ARGV_INVALID,
+                )
+        command_cwd = _resolve_working_directory(path, c.working_directory)
+
+        audit_details: dict[str, object] = {
+            "workspace_id": c.workspace_id,
+            "sequence_length": len(validated),
+            "network_policy": _NETWORK_POLICY_LABEL,
+            "expected_fingerprint": c.expected_fingerprint,
+            "expected_head_sha": c.expected_head_sha,
+            "mutability": c.mutability,
+        }
+
+        def run_body() -> WorkspaceRunAdhocSequenceResult:
+            with self.ctx.locks.lock(c.workspace_id):
+                fresh, locked_repo, locked_workspace = self.ctx.workspace(c.workspace_id)
+                before_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
+                before = read_fingerprint(
+                    self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, locked_workspace
+                )
+                before_fingerprint = before.fingerprint
+                head_before = self.ctx.git.head_sha(locked_workspace)
+                if (
+                    c.expected_fingerprint is not None
+                    and c.expected_fingerprint != before_fingerprint
+                ):
+                    raise WorkspaceError(
+                        "Workspace changed since the verification plan was reviewed"
+                    )
+                if c.expected_head_sha is not None and c.expected_head_sha != head_before:
+                    raise WorkspaceError(
+                        "STALE_STATE: workspace HEAD changed since the ad-hoc sequence was "
+                        "reviewed",
+                        code=ErrorCode.STALE_STATE,
+                        retryable=True,
+                        details={
+                            "expected_head_sha": c.expected_head_sha,
+                            "actual_head_sha": head_before,
+                        },
+                        unchanged_state=(
+                            "No command was started; the workspace and remote state were "
+                            "not modified.",
+                        ),
+                        safe_next_action=(
+                            "Read workspace_status for the current HEAD and fingerprint, "
+                            "then reissue the ad-hoc sequence bound to the reviewed values."
+                        ),
+                    )
+                audit_details["fingerprint_source"] = before.source
+                audit_details["head_sha_before"] = head_before
+
+                commands: list[dict[str, object]] = []
+                stopped_early = False
+                command_error: CommandError | None = None
+                for index, argv in enumerate(validated):
+                    started = time.monotonic()
+                    execution_request = adhoc_execution_request(
+                        workspace_id=c.workspace_id,
+                        workspace_root=locked_workspace,
+                        command_cwd=command_cwd,
+                        argv=argv,
+                        working_directory_policy=c.working_directory or ".",
+                        timeout_seconds=locked_repo.adhoc_timeout_seconds,
+                        output_limit=self.ctx.config.server.max_tool_output_chars,
+                        cancel_token=c.cancellation_token,
+                        stdin_text=None,
+                    )
+                    try:
+                        with (
+                            _command_progress_heartbeat(
+                                progress, label=f"{argv[0]} (element {index + 1}/{len(validated)})"
+                            ),
+                            self.ctx.execution.prepare(execution_request) as session,
+                        ):
+                            result = session.execute(argv).result
+                    except CommandError as exc:
+                        command_error = exc
+                        audit_details["failed_element_index"] = index
+                        audit_details["exit_code"] = exc.details.get("exit_code")
+                        break
+                    duration_ms = round((time.monotonic() - started) * 1000, 3)
+                    commands.append(
+                        {
+                            "argv": list(argv),
+                            "returncode": result.returncode,
+                            "duration_ms": duration_ms,
+                            "stdout": result.stdout,
+                            "stderr": result.stderr,
+                            "output_artifact_reference": result.output_artifact_reference,
+                            "output_artifact_status": result.output_artifact_status,
+                        }
+                    )
+                    if result.returncode != 0:
+                        stopped_early = index < len(validated) - 1
+                        break
+
+                after = prime_fingerprint(
+                    self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, locked_workspace
+                )
+                after_fingerprint = after.fingerprint
+                fingerprint_changed = after_fingerprint != before_fingerprint
+                audit_details["fingerprint_changed"] = fingerprint_changed
+                read_only_violation = not effective_mutating and fingerprint_changed
+                audit_details["read_only_violation"] = read_only_violation
+
+                verification_invalidated = False
+                if fingerprint_changed and fresh.last_verification is not None:
+                    fresh.last_verification = None
+                    self.ctx.store.save(fresh)
+                    verification_invalidated = True
+
+                try:
+                    after_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
+                    combined_paths = sorted(set(before_paths) | set(after_paths))
+                except SecurityError:
+                    combined_paths = sorted(before_paths)
+
+                if command_error is not None:
+                    raise command_error
+
+                next_actions: list[dict[str, object]] = []
+                if read_only_violation:
+                    next_actions.append(
+                        {
+                            "action": "workspace_status",
+                            "reason": (
+                                "A command sequence declared read-only changed the "
+                                "workspace tree; review the unexpected mutation and "
+                                "restore paths if it was unintended."
+                            ),
+                            "required": True,
+                        }
+                    )
+                elif fingerprint_changed:
+                    next_actions.append(
+                        {
+                            "action": "workspace_status",
+                            "reason": "The ad-hoc sequence changed the workspace fingerprint.",
+                            "required": True,
+                        }
+                    )
+                next_actions.append(
+                    {
+                        "action": "workspace_run_profile",
+                        "reason": _GATE_GUIDANCE,
+                        "required": True,
+                    }
+                )
+
+                changed_paths = combined_paths[:_MAX_CHANGED_PATHS_REPORTED]
+                return WorkspaceRunAdhocSequenceResult(
+                    workspace_id=c.workspace_id,
+                    commands=commands,
+                    stopped_early=stopped_early,
+                    fingerprint_before=before_fingerprint,
+                    fingerprint_after=after_fingerprint,
+                    fingerprint_changed=fingerprint_changed,
+                    changed_paths=changed_paths,
+                    changed_paths_truncated=len(combined_paths) > _MAX_CHANGED_PATHS_REPORTED,
+                    head_sha=self.ctx.git.head_sha(locked_workspace),
+                    head_sha_before=head_before,
+                    mutability=c.mutability,
+                    read_only_violation=read_only_violation,
+                    all_content_inspected=all(cls is not None for cls in command_classes),
+                    network_policy=_NETWORK_POLICY_LABEL,
+                    evidence_only=True,
+                    satisfies_commit_gate=False,
+                    verification_invalidated=verification_invalidated,
+                    gate_guidance=_GATE_GUIDANCE,
+                    next_safe_actions=next_actions,
+                )
+
+        return self.ctx.audited(_KIND, audit_details, run_body)
 
     # ------------------------------------------------------------------
     # Background execution via the existing durable-operations pipeline.

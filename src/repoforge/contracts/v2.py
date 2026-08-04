@@ -1498,7 +1498,15 @@ _Selector = _SelectorItem | _SelectorItems
 _MAX_ADHOC_ARGV_ELEMENTS = 32
 _MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
 _MAX_ADHOC_STDIN_LENGTH = 64_000
+# These must equal domain.adhoc's MAX_ADHOC_SCRIPT_LENGTH and MAX_ADHOC_SEQUENCE_LENGTH,
+# same reason as the pair above: the contracts package imports no domain module, so a
+# test pins these together instead.
+_MAX_ADHOC_SCRIPT_LENGTH = 64_000
+_MAX_ADHOC_SEQUENCE_LENGTH = 8
 _AdhocArgvItem = Annotated[str, Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENT_LENGTH)]
+_AdhocArgv = Annotated[
+    tuple[_AdhocArgvItem, ...], Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENTS)
+]
 
 
 class WorkspaceVerifyInput(StrictModel):
@@ -1705,7 +1713,40 @@ class WorkspaceExecInput(StrictModel):
     same change; new callers should reach for this tool instead."""
 
     workspace_id: Identifier
-    argv: tuple[_AdhocArgvItem, ...] = Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENTS)
+    argv: tuple[_AdhocArgvItem, ...] | None = Field(
+        default=None, min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENTS
+    )
+    argv_sequence: tuple[_AdhocArgv, ...] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_ADHOC_SEQUENCE_LENGTH,
+        description=(
+            "A bounded ordered list of argv commands run in one call with fail-fast "
+            "semantics (#443): execution stops at the first non-zero exit, and each "
+            "element's exit code and truncated output are reported independently. "
+            "Additive to the single-argv form, not a substitute for shell syntax -- "
+            "each element still goes through the same content inspection a single "
+            "argv command would. Mutually exclusive with argv and script."
+        ),
+    )
+    script: str | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_SCRIPT_LENGTH,
+        description=(
+            "A reviewed multiline shell-script body (#377), run through the interpreter "
+            "named in `shell`. Bounded like stdin_text, not like an argv element -- "
+            "newlines are the whole point. Unlike argv, script content is never "
+            "inspected for git forms: classify_adhoc_command only content-inspects "
+            "when argv[0] == 'git' literally, so this does not remove a safety "
+            "guarantee the argv form had either. Requires the repository to configure "
+            "a non-empty adhoc_shell_runners allowlist. Mutually exclusive with argv "
+            "and argv_sequence."
+        ),
+    )
+    shell: Identifier | None = Field(
+        default=None,
+        description="The interpreter to run `script` with (e.g. 'sh', 'bash'); required with script.",
+    )
     working_directory: RelativePath | None = None
     stdin_text: str | None = Field(
         default=None,
@@ -1730,7 +1771,12 @@ class WorkspaceExecInput(StrictModel):
     background: bool = False
 
     @model_validator(mode="after")
-    def validate_exact_state_lock(self) -> WorkspaceExecInput:
+    def validate_command_form(self) -> WorkspaceExecInput:
+        forms_set = sum(value is not None for value in (self.argv, self.argv_sequence, self.script))
+        if forms_set != 1:
+            raise ValueError("Exactly one of argv, argv_sequence, or script must be provided")
+        if (self.script is None) != (self.shell is None):
+            raise ValueError("shell is required with script, and only valid with script")
         if self.mutability == "workspace" and (
             self.expected_head_sha is None or self.expected_fingerprint is None
         ):
@@ -1758,7 +1804,15 @@ class WorkspaceExecOutput(ToolResponse):
         ),
     )
     operation: OperationEvidence | None = None
-    commands: tuple[CommandEvidence, ...] = Field(default=(), max_length=1)
+    commands: tuple[CommandEvidence, ...] = Field(
+        default=(),
+        max_length=_MAX_ADHOC_SEQUENCE_LENGTH,
+        description=(
+            "One entry for a single argv/script run; up to _MAX_ADHOC_SEQUENCE_LENGTH "
+            "entries, in order, for argv_sequence (#443) -- fail-fast means this may be "
+            "shorter than the requested sequence if an earlier element failed."
+        ),
+    )
     satisfies_commit_gate: bool = False
     head_sha: GitObjectId
     workspace_fingerprint: Sha256

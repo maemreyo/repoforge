@@ -50,7 +50,9 @@ _ADHOC_REQUEST_FIELDS = frozenset(
 #: Fields the encoder always writes but whose absence must still decode, so an item
 #: queued by an earlier release survives the activation that adds them. The decoder
 #: stays exact about unknown fields; it is only tolerant about these missing ones.
-_OPTIONAL_REQUEST_FIELDS: dict[str, frozenset[str]] = {"adhoc": frozenset({"stdin_text"})}
+_OPTIONAL_REQUEST_FIELDS: dict[str, frozenset[str]] = {
+    "adhoc": frozenset({"stdin_text", "script", "shell", "argv_sequence"})
+}
 _DIAGNOSTIC_REQUEST_FIELDS = frozenset(
     {
         "kind",
@@ -84,6 +86,11 @@ class OperationWorkRequest:
     config_generation: int
     profile_name: str | None = None
     argv: tuple[str, ...] = ()
+    # Reviewed shell-script form (#377): mutually exclusive with argv.
+    script: str | None = None
+    shell: str | None = None
+    # Bounded fail-fast argv sequence (#443): mutually exclusive with argv and script.
+    argv_sequence: tuple[tuple[str, ...], ...] | None = None
     working_directory: str | None = None
     mutability: str = "read_only"
     diagnostic_id: str | None = None
@@ -153,7 +160,10 @@ class OperationWorkRequest:
         cls,
         *,
         workspace_id: str,
-        argv: tuple[str, ...],
+        argv: tuple[str, ...] = (),
+        script: str | None = None,
+        shell: str | None = None,
+        argv_sequence: tuple[tuple[str, ...], ...] | None = None,
         working_directory: str | None,
         mutability: str,
         expected_head_sha: str,
@@ -165,6 +175,9 @@ class OperationWorkRequest:
             kind="adhoc",
             workspace_id=workspace_id,
             argv=argv,
+            script=script,
+            shell=shell,
+            argv_sequence=argv_sequence,
             working_directory=working_directory,
             mutability=mutability,
             stdin_text=stdin_text,
@@ -333,6 +346,13 @@ def work_item_payload(item: OperationWorkItem) -> dict[str, object]:
             "kind": "adhoc",
             "workspace_id": request.workspace_id,
             "argv": list(request.argv),
+            "script": request.script,
+            "shell": request.shell,
+            "argv_sequence": (
+                None
+                if request.argv_sequence is None
+                else [list(element) for element in request.argv_sequence]
+            ),
             "working_directory": request.working_directory,
             "mutability": request.mutability,
             "stdin_text": request.stdin_text,
@@ -434,9 +454,26 @@ def work_item_from_payload(payload: dict[str, object]) -> OperationWorkItem:
                 "operation work adhoc argv must be a JSON string array",
                 code=ErrorCode.OPERATION_INVALID,
             )
+        raw_argv_sequence = request_payload.get("argv_sequence")
+        argv_sequence: tuple[tuple[str, ...], ...] | None = None
+        if raw_argv_sequence is not None:
+            if not isinstance(raw_argv_sequence, list) or not all(
+                isinstance(element, list) and all(isinstance(item, str) for item in element)
+                for element in raw_argv_sequence
+            ):
+                raise RepoForgeError(
+                    "operation work adhoc argv_sequence must be a JSON array of string arrays",
+                    code=ErrorCode.OPERATION_INVALID,
+                )
+            argv_sequence = tuple(tuple(element) for element in raw_argv_sequence)
         request = OperationWorkRequest.adhoc(
             workspace_id=str(request_payload["workspace_id"]),
             argv=tuple(raw_argv),
+            script=(
+                None if request_payload.get("script") is None else str(request_payload["script"])
+            ),
+            shell=(None if request_payload.get("shell") is None else str(request_payload["shell"])),
+            argv_sequence=argv_sequence,
             working_directory=(
                 None
                 if request_payload["working_directory"] is None

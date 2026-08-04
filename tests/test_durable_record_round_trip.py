@@ -600,7 +600,17 @@ def _iteration_cache_entry(tmp_path: Path) -> tuple[object, object]:
 #: other two kinds own are inapplicable rather than missing.
 _WORK_REQUEST_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
     "profile": frozenset({"profile_name"}),
-    "adhoc": frozenset({"argv", "working_directory", "mutability", "stdin_text"}),
+    "adhoc": frozenset(
+        {
+            "argv",
+            "script",
+            "shell",
+            "argv_sequence",
+            "working_directory",
+            "mutability",
+            "stdin_text",
+        }
+    ),
     "diagnostic": frozenset(
         {
             "diagnostic_id",
@@ -635,6 +645,13 @@ def _operation_work_item(kind: str) -> Callable[[Path], tuple[object, object]]:
             "profile": {"profile_name": "verify"},
             "adhoc": {
                 "argv": ("pytest", "-q"),
+                # Not a valid combination in practice (argv/script/argv_sequence are
+                # mutually exclusive -- enforced by the application layer, not this
+                # plain dataclass), but the round trip only cares whether every field
+                # this codec persists survives, so all three are populated here.
+                "script": "echo hi",
+                "shell": "sh",
+                "argv_sequence": (("ruff", "check"), ("mypy", ".")),
                 "working_directory": "src",
                 "mutability": "workspace_write",
                 "stdin_text": "--- a/x\n+++ b/x\n",

@@ -388,6 +388,9 @@ def test_adhoc_work_request_round_trips_exact_argv_and_policy() -> None:
         "kind": "adhoc",
         "workspace_id": "workspace-1",
         "argv": ["python3", "-c", "print('durable')"],
+        "script": None,
+        "shell": None,
+        "argv_sequence": None,
         "working_directory": "src",
         "mutability": "read_only",
         "stdin_text": None,
@@ -396,6 +399,86 @@ def test_adhoc_work_request_round_trips_exact_argv_and_policy() -> None:
         "config_generation": 12,
     }
     assert work_item_from_payload(payload) == item
+
+
+def test_adhoc_work_request_round_trips_script_and_argv_sequence_forms() -> None:
+    """#377/#443: the script and argv_sequence forms persist and decode exactly, same as
+    the original argv form."""
+    from repoforge.domain.operation_work import (
+        OperationWorkRequest,
+        new_work_item,
+        work_item_from_payload,
+        work_item_payload,
+    )
+
+    script_item = new_work_item(
+        operation_id="op-" + "a" * 24,
+        request=OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            script="echo hi",
+            shell="sh",
+            working_directory="src",
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        ),
+        now="2026-07-27T00:00:00+00:00",
+    )
+    script_payload = work_item_payload(script_item)
+    assert script_payload["request"]["script"] == "echo hi"
+    assert script_payload["request"]["shell"] == "sh"
+    assert script_payload["request"]["argv"] == []
+    assert work_item_from_payload(script_payload) == script_item
+
+    sequence_item = new_work_item(
+        operation_id="op-" + "b" * 24,
+        request=OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv_sequence=(("ruff", "check"), ("mypy", ".")),
+            working_directory="src",
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        ),
+        now="2026-07-27T00:00:00+00:00",
+    )
+    sequence_payload = work_item_payload(sequence_item)
+    assert sequence_payload["request"]["argv_sequence"] == [["ruff", "check"], ["mypy", "."]]
+    assert work_item_from_payload(sequence_payload) == sequence_item
+
+
+def test_adhoc_work_queued_before_script_and_sequence_existed_still_decodes() -> None:
+    """Same backward-compatibility guarantee as stdin_text's own precedent below: an
+    in-flight item queued before #377/#443 added script/shell/argv_sequence must still
+    decode after the release that adds them takes over."""
+    from repoforge.domain.operation_work import (
+        OperationWorkRequest,
+        new_work_item,
+        work_item_from_payload,
+        work_item_payload,
+    )
+
+    item = new_work_item(
+        operation_id="op-" + "a" * 24,
+        request=OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("python3", "-c", "print('durable')"),
+            working_directory="src",
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        ),
+        now="2026-07-27T00:00:00+00:00",
+    )
+    legacy = work_item_payload(item)
+    del legacy["request"]["script"]  # type: ignore[union-attr]
+    del legacy["request"]["shell"]  # type: ignore[union-attr]
+    del legacy["request"]["argv_sequence"]  # type: ignore[union-attr]
+
+    assert work_item_from_payload(legacy) == item
 
 
 def test_adhoc_work_queued_before_stdin_existed_still_decodes() -> None:

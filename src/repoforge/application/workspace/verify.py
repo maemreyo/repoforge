@@ -304,11 +304,19 @@ def _command_evidence(raw: dict[str, object]) -> dict[str, object]:
     stdout = raw.get("stdout", "")
     stderr = raw.get("stderr", "")
     excerpt = "\n".join(item for item in (stdout, stderr) if isinstance(item, str) and item)
+    artifact_reference = raw.get("output_artifact_reference")
+    artifact_status = raw.get("output_artifact_status", "not_applicable")
     return {
         "argv": argv,
         "returncode": returncode,
         "duration_ms": float(duration),
         "output_excerpt": bound_command_excerpt(excerpt, 12_000),
+        "output_artifact_reference": (
+            artifact_reference if isinstance(artifact_reference, str) else None
+        ),
+        "output_artifact_status": (
+            artifact_status if isinstance(artifact_status, str) else "not_applicable"
+        ),
     }
 
 

@@ -145,7 +145,9 @@ profiles, and workspace_pr for draft-PR lifecycle operations. To run a command t
 diagnostic covers, use workspace_exec with an argv list -- never a shell string -- limited to the
 repository's adhoc_runners allowlist; when the runner you need is missing, propose it through
 repo_policy rather than working around it (workspace_verify mode=adhoc still works during a
-deprecation window, but workspace_exec is the current answer to "run a command"). Review workspace_diff after meaningful
+deprecation window, but workspace_exec is the current answer to "run a command"). For pipes,
+redirects, globbing, or chaining, or to run a bounded fail-fast sequence of commands in one call,
+see workspace_exec's script/shell and argv_sequence fields. Review workspace_diff after meaningful
 changes. Run final verification immediately before workspace_commit. For desired GitHub issue graphs,
 use repo_issue mode=manage with plan/apply/status/reconcile; never substitute raw GitHub mutation.
 Resume a disconnected or new session from repo_task_context section ticket_workflow. After apply, use
@@ -293,12 +295,21 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     ),
     "workspace_exec": (
         "Under relaxed execution mode, run an allowlisted command directly -- the first-class answer "
-        "to 'run a command', superseding workspace_verify mode=adhoc. Takes an argv list, never a shell "
-        "string, and its result is evidence only: it never satisfies the commit gate. A mutating run "
-        "(mutability='workspace') requires expected_head_sha and expected_fingerprint as an exact-state "
-        "lock, and invalidates any prior verification receipt on the workspace. The response's "
-        "adhoc_evidence.content_inspected reports whether RepoForge inspected the command at all, which "
-        "it does for git argv only -- every other runner, a shell included, runs uninspected."
+        "to 'run a command', superseding workspace_verify mode=adhoc. Its result is evidence only: it "
+        "never satisfies the commit gate. A mutating run (mutability='workspace') requires "
+        "expected_head_sha and expected_fingerprint as an exact-state lock, and invalidates any prior "
+        "verification receipt on the workspace. The response's adhoc_evidence.content_inspected reports "
+        "whether RepoForge inspected the command at all, which it does for git argv only -- every other "
+        "runner, a shell included, runs uninspected. Exactly one of three mutually exclusive forms: "
+        "argv (a list, never a shell string) for one command; script + shell for a reviewed multiline "
+        "shell-script body (pipes/redirects/globbing/chaining) run through an operator-allowlisted "
+        "interpreter (repositories.<id>.adhoc_shell_runners, empty by default) -- script content is "
+        "never inspected for git forms, the same trust level as allowlisting a shell interpreter in "
+        "adhoc_runners already is; or argv_sequence, a bounded ordered list of argv commands run with "
+        "fail-fast (stops at the first non-zero exit) in one call, each element independently evidenced. "
+        "Output larger than the inline excerpt gets a retrievable output_artifact_reference (read via "
+        "runtime_logs_read); a command with no stdin_text gets immediate EOF on stdin rather than "
+        "hanging, unless it was never expecting input at all."
     ),
     "workspace_commit": "Commit only the exact verified tree with optional exact-head and fingerprint locks.",
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",

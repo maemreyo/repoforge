@@ -36,6 +36,8 @@ from repoforge.domain.adhoc import (
     MAX_ADHOC_ARGV_ELEMENT_LENGTH,
     MAX_ADHOC_ARGV_ELEMENTS,
     MAX_ADHOC_RUNNERS,
+    MAX_ADHOC_SCRIPT_LENGTH,
+    MAX_ADHOC_SEQUENCE_LENGTH,
     MAX_ADHOC_STDIN_LENGTH,
     validate_adhoc_argv,
 )
@@ -116,6 +118,8 @@ class TestAdhocArgvContractMatchesEnforcement:
         stops the advertised bounds from drifting away from the enforced ones again."""
         assert v2_contracts._MAX_ADHOC_ARGV_ELEMENTS == MAX_ADHOC_ARGV_ELEMENTS
         assert v2_contracts._MAX_ADHOC_ARGV_ELEMENT_LENGTH == MAX_ADHOC_ARGV_ELEMENT_LENGTH
+        assert v2_contracts._MAX_ADHOC_SCRIPT_LENGTH == MAX_ADHOC_SCRIPT_LENGTH
+        assert v2_contracts._MAX_ADHOC_SEQUENCE_LENGTH == MAX_ADHOC_SEQUENCE_LENGTH
 
     def test_selector_bounds_stay_wide(self) -> None:
         """Only argv narrows: a selector is a test path, not a command argument."""

@@ -163,6 +163,8 @@ def apply_policy_patch(
         repo["execution_mode"] = patch.execution_mode
     if patch.adhoc_runners is not None:
         repo["adhoc_runners"] = list(patch.adhoc_runners)
+    if patch.adhoc_shell_runners is not None:
+        repo["adhoc_shell_runners"] = list(patch.adhoc_shell_runners)
     if patch.adhoc_timeout_seconds is not None:
         repo["adhoc_timeout_seconds"] = patch.adhoc_timeout_seconds
     profiles = repo.setdefault("profiles", {})

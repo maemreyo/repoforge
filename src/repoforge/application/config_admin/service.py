@@ -162,7 +162,12 @@ class ProfileDefinition:
     working_directory: str | None = None
 
 
-_EXECUTION_FIELDS = ("execution_mode", "adhoc_runners", "adhoc_timeout_seconds")
+_EXECUTION_FIELDS = (
+    "execution_mode",
+    "adhoc_runners",
+    "adhoc_shell_runners",
+    "adhoc_timeout_seconds",
+)
 
 
 def _canonical_execution(raw: dict[str, Any] | None, repo_id: str) -> dict[str, Any] | None:
@@ -193,6 +198,15 @@ def _canonical_execution(raw: dict[str, Any] | None, repo_id: str) -> dict[str, 
         # The same validator the config loader uses, so the surface cannot accept a
         # runner name that would be refused once the generation is resolved.
         canonical["adhoc_runners"] = list(validate_adhoc_runners(tuple(runners), repo_id))
+    shell_runners = raw.get("adhoc_shell_runners")
+    if shell_runners is not None:
+        if not isinstance(shell_runners, (list, tuple)) or not all(
+            isinstance(item, str) for item in shell_runners
+        ):
+            raise ConfigError("repo_policy execution.adhoc_shell_runners must be a list of strings")
+        canonical["adhoc_shell_runners"] = list(
+            validate_adhoc_runners(tuple(shell_runners), repo_id, field_name="adhoc_shell_runners")
+        )
     timeout = raw.get("adhoc_timeout_seconds")
     if timeout is not None:
         if (
@@ -1278,6 +1292,7 @@ class ConfigAdminService:
         remove_formatters: list[str] | None = None,
         execution_mode: str | None = None,
         adhoc_runners: list[str] | None = None,
+        adhoc_shell_runners: list[str] | None = None,
         adhoc_timeout_seconds: int | None = None,
         policy_overrides: dict[str, str] | None = None,
         remove_policy_overrides: list[str] | None = None,
@@ -1301,6 +1316,7 @@ class ConfigAdminService:
             remove_formatters=remove_formatters or [],
             execution_mode=execution_mode,
             adhoc_runners=adhoc_runners,
+            adhoc_shell_runners=adhoc_shell_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
         )
         try:
@@ -1622,6 +1638,7 @@ class ConfigAdminService:
         remove_formatters: list[str],
         execution_mode: str | None,
         adhoc_runners: list[str] | None,
+        adhoc_shell_runners: list[str] | None,
         adhoc_timeout_seconds: int | None,
     ) -> RepositoryPolicyPatch:
         try:
@@ -1637,6 +1654,9 @@ class ConfigAdminService:
                 formatters=tuple(sorted(set_formatters.items())),
                 execution_mode=execution_mode,
                 adhoc_runners=tuple(adhoc_runners) if adhoc_runners is not None else None,
+                adhoc_shell_runners=(
+                    tuple(adhoc_shell_runners) if adhoc_shell_runners is not None else None
+                ),
                 adhoc_timeout_seconds=adhoc_timeout_seconds,
                 remove_profiles=tuple(remove_profiles),
                 remove_diagnostics=tuple(remove_diagnostics),

@@ -1679,7 +1679,10 @@ class CodingService:
     def workspace_exec(
         self,
         workspace_id: str,
-        argv: tuple[str, ...],
+        argv: tuple[str, ...] | None = None,
+        script: str | None = None,
+        shell: str | None = None,
+        argv_sequence: tuple[tuple[str, ...], ...] | None = None,
         working_directory: str | None = None,
         stdin_text: str | None = None,
         expected_fingerprint: str | None = None,
@@ -1692,6 +1695,9 @@ class CodingService:
                 WorkspaceExecCommand(
                     workspace_id=workspace_id,
                     argv=argv,
+                    script=script,
+                    shell=shell,
+                    argv_sequence=argv_sequence,
                     working_directory=working_directory,
                     stdin_text=stdin_text,
                     expected_fingerprint=expected_fingerprint,

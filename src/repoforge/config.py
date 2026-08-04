@@ -226,6 +226,14 @@ class RepositoryConfig:
     execution_mode: ExecutionMode = ExecutionMode.STRICT
     adhoc_runners: tuple[str, ...] = ()
     adhoc_timeout_seconds: int = 300
+    #: Separate, narrower allowlist for the reviewed shell-script execution form (#377):
+    #: interpreters here (e.g. "sh", "bash") receive a multiline script body, not a single
+    #: parsed argv. Deliberately does not extend adhoc_runners: enabling this is the same
+    #: trust decision as allowlisting a shell interpreter in adhoc_runners already is --
+    #: classify_adhoc_command only content-inspects when argv[0] == "git" literally, so
+    #: script bodies were never structurally protected from reaching git either way. Empty
+    #: by default (feature disabled) regardless of adhoc_runners/execution_mode.
+    adhoc_shell_runners: tuple[str, ...] = ()
     ticket_graph: GitHubTicketGraphConfig | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
     issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
@@ -1464,6 +1472,14 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             raise ConfigError(
                 f"repositories.{repo_id}.execution_mode='relaxed' requires a non-empty adhoc_runners allowlist"
             )
+        adhoc_shell_runners = validate_adhoc_runners(
+            _tuple_of_strings(
+                repo_raw.get("adhoc_shell_runners"),
+                f"repositories.{repo_id}.adhoc_shell_runners",
+            ),
+            repo_id,
+            field_name="adhoc_shell_runners",
+        )
         adhoc_timeout_seconds = _bounded_int(
             repo_raw.get("adhoc_timeout_seconds"),
             300,
@@ -1546,6 +1562,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             resource_budget=resource_budget,
             execution_mode=execution_mode,
             adhoc_runners=adhoc_runners,
+            adhoc_shell_runners=adhoc_shell_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
             ticket_graph=ticket_graph,
             generated_paths=generated_paths,

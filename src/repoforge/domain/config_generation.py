@@ -648,6 +648,7 @@ _REPO_RECOGNIZED = {
     "resource_budget",
     "execution_mode",
     "adhoc_runners",
+    "adhoc_shell_runners",
     "adhoc_timeout_seconds",
     "trusted_external_checkouts",
 }
@@ -993,6 +994,15 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             additions=CapabilityDeltaKind.EXPANSION,
             removals=CapabilityDeltaKind.RESTRICTION,
             reason="ad-hoc executable allowlist changed",
+        )
+        _record_set_change(
+            changes,
+            prefix + ".adhoc_shell_runners",
+            _set(left.get("adhoc_shell_runners")),
+            _set(right.get("adhoc_shell_runners")),
+            additions=CapabilityDeltaKind.EXPANSION,
+            removals=CapabilityDeltaKind.RESTRICTION,
+            reason="ad-hoc shell-script interpreter allowlist changed",
         )
         _record_number(
             changes,

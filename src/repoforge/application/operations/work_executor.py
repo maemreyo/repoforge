@@ -11,6 +11,8 @@ from ..workspace.run_adhoc import (
     WorkspaceAdhocRunner,
     WorkspaceRunAdhocCommand,
     WorkspaceRunAdhocResult,
+    WorkspaceRunAdhocSequenceCommand,
+    WorkspaceRunAdhocSequenceResult,
 )
 from ..workspace.run_diagnostic import (
     WorkspaceDiagnosticRunner,
@@ -25,7 +27,10 @@ from ..workspace.run_profile import (
 
 WorkProgress = Callable[[str, int, int, str, str], None]
 VerificationWorkResult = (
-    WorkspaceRunProfileResult | WorkspaceRunAdhocResult | WorkspaceRunDiagnosticResult
+    WorkspaceRunProfileResult
+    | WorkspaceRunAdhocResult
+    | WorkspaceRunAdhocSequenceResult
+    | WorkspaceRunDiagnosticResult
 )
 
 
@@ -91,10 +96,25 @@ class VerificationWorkHandlers:
                 progress=progress,
             )
         if request.kind == "adhoc":
+            if request.argv_sequence is not None:
+                return self._adhoc_runner.execute_sequence_claimed(
+                    WorkspaceRunAdhocSequenceCommand(
+                        workspace_id=request.workspace_id,
+                        argv_sequence=request.argv_sequence,
+                        working_directory=request.working_directory,
+                        expected_fingerprint=request.expected_fingerprint,
+                        expected_head_sha=request.expected_head_sha,
+                        mutability=request.mutability,
+                    ),
+                    cancellation_token=cancellation_token,
+                    progress=progress,
+                )
             return self._adhoc_runner.execute_claimed(
                 WorkspaceRunAdhocCommand(
                     workspace_id=request.workspace_id,
                     argv=request.argv,
+                    script=request.script,
+                    shell=request.shell,
                     working_directory=request.working_directory,
                     expected_fingerprint=request.expected_fingerprint,
                     expected_head_sha=request.expected_head_sha,
