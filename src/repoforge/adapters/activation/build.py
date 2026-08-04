@@ -40,6 +40,7 @@ from ...ports.locking import LockManager
 from ...ports.runtime_control import RuntimeControlClient, RuntimeLauncher, RuntimeStore
 from ...ports.sleeper import Sleeper
 from ...ports.worker_registrar import WORKER_ADMISSION_LOCK
+from ..runtime.state_store import process_identity
 
 _VENV = "venv"
 
@@ -822,7 +823,16 @@ class SupervisorRestarter:
             if current is None:
                 return True
             if current.phase in {RuntimePhase.STOPPED, RuntimePhase.FAILED}:
-                return True
+                # A graceful shutdown writes STOPPED before the process exits. The
+                # runtime-single-instance flock is only released on process exit, so
+                # the replacement must not launch until the incumbent PROCESS is
+                # actually gone -- otherwise it opens the lock file (and lsof reports
+                # it as a holder) while the old process still holds the flock, and
+                # the handoff looks like a two-supervisor overlap (observed flaky in
+                # the live-activation sandbox).
+                return (
+                    process_identity(old_pid) is None or process_identity(old_pid) != old_identity
+                )
             # A different pid/identity means our target already exited and something
             # else owns the record.
             return current.pid != old_pid or current.process_identity != old_identity
