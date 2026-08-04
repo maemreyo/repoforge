@@ -28,6 +28,7 @@ source_globs = [
   "src/repoforge/domain/tool_contract.py",
   "src/repoforge/domain/versioning.py",
   "src/repoforge/application/workspace/family_v2.py",
+  "src/repoforge/contracts/generated_contract_identity.py",
   "docs/contracts/**",
 ]
 test_files = [
@@ -93,6 +94,7 @@ source_globs = [
   "src/repoforge/domain/patches.py",
   "src/repoforge/domain/workspace.py",
   "src/repoforge/domain/workspace_removal.py",
+  "docs/architecture/autonomy-policy-model.md",
   "src/repoforge/ports/commit_identity.py",
   "src/repoforge/ports/command.py",
   "src/repoforge/testing/fakes.py",

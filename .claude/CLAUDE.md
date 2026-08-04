@@ -8,3 +8,22 @@ In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the re
 
 If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
 <!-- CODEGRAPH_END -->
+
+## Testing — never default to the full suite
+
+For an ordinary change, run `make test` (equivalently `uv run python
+scripts/select_affected_tests.py --run`), never `./scripts/test-all.sh`. `make test` maps the
+current diff to its exact covering tests via `tests/coverage-map.json` /
+`tests/test-groups.toml` and runs only those, with real `-n 3` parallelism — the full suite is
+single-process and takes the better part of an hour, which is not a routine local gate.
+
+The selector fails closed: a changed path with no coverage/group mapping escalates to the full
+suite rather than silently under-testing. If that fires for a path that should have a narrow
+mapping, fix the mapping (add the path to the owning group's `source_globs` in
+`tests/test-groups.toml` — exact-listed, not just covered by a wildcard, for a
+`src/repoforge/**.py` module the coverage map cannot attribute, e.g. generated/data-only
+files) instead of accepting a full run as the new normal. See `AGENTS.md`'s "Golden commands"
+and "Testing expectations" sections for the full rationale.
+
+Run `./scripts/test-all.sh` only for a release candidate, to reproduce an order-dependent
+failure the selector's narrower run cannot, or when the user explicitly asks for a full run.
