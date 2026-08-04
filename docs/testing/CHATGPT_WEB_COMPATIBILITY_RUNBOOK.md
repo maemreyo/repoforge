@@ -20,11 +20,12 @@ just check the box. A blank or "assumed" result is not evidence.
 ## 0. Prerequisites
 
 - [ ] The running RepoForge instance is activated from a build that includes this PR's
-      commits (`5dbd3c2`, `c3f0ee3`, and the `main` merge). Confirm with:
+      commits (`5dbd3c2`, `c3f0ee3`, and the `main` merge). Confirm from a terminal with:
       ```bash
-      rf config inspect   # or: ask ChatGPT to call config_inspect
+      rf show-config
       ```
-      and check the reported `tool_surface_hash` / release-contract identity matches
+      or ask ChatGPT to call the `config_inspect` MCP tool. Either way, check the reported
+      `tool_surface_hash` / release-contract identity matches
       `docs/contracts/release-contract-v2.json` on this branch (29 tools).
 - [ ] At least one repository is enrolled with `execution_mode = "relaxed"` and a
       non-empty `adhoc_runners` (e.g. `["python3"]`), so the execution-form tests below
