@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from ...config import RepositoryConfig
 from ...domain.ci_evidence import sanitize_ci_text
@@ -25,6 +26,7 @@ class RepositoryCommitReadResult:
     requested_ref: str
     resolved_ref: str
     commit_sha: str
+    provenance: Literal["reviewed_base", "operator_local"]
     tree_sha: str
     parent_shas: tuple[str, ...]
     comparison_parent_sha: str | None
@@ -148,6 +150,7 @@ class RepositoryCommitReader:
             command.ref,
             snapshot.resolved_ref,
             snapshot.commit_sha,
+            snapshot.provenance,
             evidence.tree_sha,
             evidence.parent_shas,
             evidence.comparison_parent_sha,

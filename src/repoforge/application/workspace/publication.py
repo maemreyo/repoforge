@@ -111,7 +111,9 @@ def exact_workspace_tree_sha(
 ) -> str:
     """Read the exact tree identity for the already-reviewed workspace HEAD."""
 
-    snapshot = ResolvedRepositoryRef(resolved_ref=head_sha, commit_sha=head_sha)
+    snapshot = ResolvedRepositoryRef(
+        resolved_ref=head_sha, commit_sha=head_sha, provenance="reviewed_base"
+    )
     if ctx.git.head_sha(path) != head_sha:
         raise WorkspaceError(
             "Workspace HEAD changed while publication identity was being prepared",

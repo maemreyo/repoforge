@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, git
 
+from repoforge.adapters.git.cli import GitCliRepository
+from repoforge.application.read_batch import FileReadRequest
+from repoforge.application.retrieval import SearchMode
+from repoforge.config import RepositoryConfig, ServerConfig
 from repoforge.domain.errors import ErrorCode, RepoForgeError, SecurityError
+from repoforge.ports.command import CommandResult
 
 
 def test_repository_snapshot_reads_default_and_explicit_commit(
@@ -147,21 +153,161 @@ def test_repository_snapshot_rejects_invalid_refs(forge_env: ForgeEnvironment) -
     commit_sha = git("rev-parse", "main", cwd=forge_env.source)
     tree_sha = git("rev-parse", "main^{tree}", cwd=forge_env.source)
     external_commit = git("commit-tree", tree_sha, "-m", "detached", cwd=forge_env.source)
-    git("branch", "ai/private", cwd=forge_env.source)
 
     cases = [
         ("0" * len(commit_sha), ErrorCode.REPOSITORY_REF_NOT_FOUND),
         (external_commit, ErrorCode.REPOSITORY_REF_EXTERNAL),
-        (commit_sha[:12], ErrorCode.REPOSITORY_REF_AMBIGUOUS),
         ("origin/main", ErrorCode.REPOSITORY_REF_EXTERNAL),
         ("refs/remotes/origin/main", ErrorCode.REPOSITORY_REF_EXTERNAL),
-        ("ai/private", ErrorCode.REPOSITORY_REF_DISALLOWED),
         ("main~1", ErrorCode.REPOSITORY_REF_DISALLOWED),
     ]
     for ref, expected_code in cases:
         with pytest.raises(RepoForgeError) as exc_info:
             forge_env.service.repo_tree("demo", ref=ref)
         assert exc_info.value.code is expected_code
+
+
+class _FakeAmbiguousExecutor:
+    """Simulates a repository where a short hex prefix genuinely collides between
+    two distinct commits. Real SHA-1 collisions cannot be constructed deterministically
+    in a fast test, so the collision is faked at the command boundary instead; every
+    other resolution path (branch/tag/full-object-id lookups) is made to fail so
+    `resolve_snapshot_ref` falls through to the abbreviated-ref path being tested."""
+
+    def __init__(self, prefix: str, colliding_shas: tuple[str, str]) -> None:
+        self._prefix = prefix
+        self._colliding_shas = colliding_shas
+
+    def environment(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+        return dict(extra or {})
+
+    def run(self, argv: list[str], **kwargs: object) -> CommandResult:
+        cwd = str(kwargs.get("cwd", ""))
+        if argv[:3] == ["git", "rev-parse", f"--disambiguate={self._prefix}"]:
+            return CommandResult(tuple(argv), cwd, 0, "\n".join(self._colliding_shas), "")
+        if len(argv) >= 3 and argv[-1].removesuffix("^{commit}") in self._colliding_shas:
+            sha = argv[-1].removesuffix("^{commit}")
+            return CommandResult(tuple(argv), cwd, 0, sha, "")
+        return CommandResult(tuple(argv), cwd, 1, "", "not found")
+
+
+def test_repository_snapshot_still_rejects_a_truly_ambiguous_abbreviated_sha() -> None:
+    """A short hex prefix that resolves to more than one distinct commit must still
+    fail closed (#445): the fix is accepting an *unambiguous* abbreviation, not
+    accepting every abbreviation."""
+    prefix = "abcd"
+    colliding_shas = ("a" * 40, "b" * 40)
+    executor = _FakeAmbiguousExecutor(prefix, colliding_shas)
+    server = ServerConfig(workspace_root=Path("/tmp/ws"), state_root=Path("/tmp/state"))
+    repo = RepositoryConfig(repo_id="demo", path=Path("/tmp/repo"))
+    git_repo = GitCliRepository(executor, server)  # type: ignore[arg-type]
+
+    with pytest.raises(RepoForgeError) as exc_info:
+        git_repo.resolve_snapshot_ref(repo.path, repo, prefix)
+    assert exc_info.value.code is ErrorCode.REPOSITORY_REF_AMBIGUOUS
+
+
+def test_unmerged_local_branch_is_readable_by_name_with_operator_local_provenance(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """#445 AC: a local feature branch not in allowed_base_branches is readable by
+    name via repo_read/repo_tree/repo_search, diffable via repo_history compare,
+    every payload carries its provenance, and no workspace/worktree is created."""
+    service = forge_env.service
+    before_workspaces = len(service.workspace_list()["workspaces"])
+
+    git("checkout", "-b", "feature/local-work", cwd=forge_env.source)
+    (forge_env.source / "feature.txt").write_text("feature content\n", encoding="utf-8")
+    git("add", "feature.txt", cwd=forge_env.source)
+    git("commit", "-m", "unmerged local work", cwd=forge_env.source)
+    feature_sha = git("rev-parse", "feature/local-work", cwd=forge_env.source)
+    main_sha = git("rev-parse", "main", cwd=forge_env.source)
+    git("checkout", "main", cwd=forge_env.source)
+
+    tree = service.repo_tree_v2("demo", ref="feature/local-work")
+    assert tree["resolved_ref"] == "refs/heads/feature/local-work"
+    assert tree["commit_sha"] == feature_sha
+    assert tree["provenance"] == "operator_local"
+    assert "feature.txt" in [entry["path"] for entry in tree["entries"]]
+
+    # Same commit, addressed by full SHA instead of branch name -- exercises the
+    # ancestry-based _commit_is_operator_local classification path, not the
+    # unconditional branch-name-resolution path exercised above.
+    tree_by_sha = service.repo_tree_v2("demo", ref=feature_sha)
+    assert tree_by_sha["resolved_ref"] == feature_sha
+    assert tree_by_sha["commit_sha"] == feature_sha
+    assert tree_by_sha["provenance"] == "operator_local"
+
+    read = service.repo_read("demo", [FileReadRequest("feature.txt")], ref="feature/local-work")
+    assert read["commit_sha"] == feature_sha
+    assert read["provenance"] == "operator_local"
+    assert read["files"][0]["content"] == "1: feature content"
+
+    search = service.repo_search_v2(
+        "demo", "feature content", mode=SearchMode.LITERAL, ref="feature/local-work"
+    )
+    assert search["commit_sha"] == feature_sha
+    assert search["provenance"] == "operator_local"
+
+    history = service.repo_history_v2(
+        "demo", mode="compare", base_ref="main", head_ref="feature/local-work"
+    )
+    comparison = history["comparison"]
+    assert comparison["base_sha"] == main_sha
+    assert comparison["base_provenance"] == "reviewed_base"
+    assert comparison["head_sha"] == feature_sha
+    assert comparison["head_provenance"] == "operator_local"
+    assert any(item["path"] == "feature.txt" for item in comparison["files"])
+
+    commit = service.repo_history_v2("demo", mode="commit", ref="feature/local-work")["commit"]
+    assert commit["sha"] == feature_sha
+    assert commit["provenance"] == "operator_local"
+
+    assert len(service.workspace_list()["workspaces"]) == before_workspaces
+
+
+def test_repository_history_log_mode_reports_reviewed_base_provenance(
+    forge_env: ForgeEnvironment,
+) -> None:
+    history = forge_env.service.repo_history_v2("demo", mode="log", limit=5)
+    assert history["commits"]
+    assert all(commit["provenance"] == "reviewed_base" for commit in history["commits"])
+
+
+def test_repository_read_tree_search_report_reviewed_base_provenance_on_main(
+    forge_env: ForgeEnvironment,
+) -> None:
+    service = forge_env.service
+    assert service.repo_tree_v2("demo")["provenance"] == "reviewed_base"
+    assert (
+        service.repo_read("demo", [FileReadRequest("hello.txt")])["provenance"] == "reviewed_base"
+    )
+    assert (
+        service.repo_search_v2("demo", "Repository", mode=SearchMode.LITERAL)["provenance"]
+        == "reviewed_base"
+    )
+
+
+def test_repository_snapshot_accepts_an_unambiguous_abbreviated_sha(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """#445 AC: an abbreviated SHA that resolves to exactly one object is accepted,
+    not blanket-rejected."""
+    commit_sha = git("rev-parse", "main", cwd=forge_env.source)
+    tree = forge_env.service.repo_tree_v2("demo", ref=commit_sha[:12])
+    assert tree["commit_sha"] == commit_sha
+    assert tree["resolved_ref"] == commit_sha
+    assert tree["provenance"] == "reviewed_base"
+
+
+def test_repository_snapshot_v2_still_rejects_remote_refs(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """#445 AC: refs/remotes/* and <remote>/* remain rejected through the v2 surface too."""
+    for ref in ("origin/main", "refs/remotes/origin/main"):
+        with pytest.raises(RepoForgeError) as exc_info:
+            forge_env.service.repo_tree_v2("demo", ref=ref)
+        assert exc_info.value.code is ErrorCode.REPOSITORY_REF_EXTERNAL
 
 
 def test_repository_search_context_lines_returns_surrounding_lines(

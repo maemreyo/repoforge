@@ -33,6 +33,7 @@ from .common import (
     ProviderEvidence,
     ReadFileRequest,
     ReadFileResult,
+    RefProvenance,
     RelativePath,
     RepoId,
     RepositorySummary,
@@ -86,6 +87,7 @@ class RepoReadOutput(ToolResponse):
     repo_id: RepoId
     resolved_ref: GitRef
     commit_sha: GitObjectId
+    provenance: RefProvenance
     files: tuple[ReadFileResult, ...] = Field(default=(), max_length=20)
     truncated: bool = False
     next_cursor: Cursor | None = None
@@ -107,6 +109,7 @@ class RepoSearchOutput(ToolResponse):
     repo_id: RepoId
     resolved_ref: GitRef
     commit_sha: GitObjectId
+    provenance: RefProvenance
     mode: SearchMode
     matches: tuple[SearchMatch, ...] = Field(default=(), max_length=200)
     omitted_count: int = Field(default=0, ge=0)
@@ -142,6 +145,7 @@ class RepoTreeOutput(ToolResponse):
     repo_id: RepoId
     resolved_ref: GitRef
     commit_sha: GitObjectId
+    provenance: RefProvenance
     subtree: RelativePath | None = None
     entries: tuple[TreeEntry, ...] = Field(default=(), max_length=2000)
     omitted_count: int = Field(default=0, ge=0)
@@ -165,7 +169,9 @@ class FileChange(StrictModel):
 
 class HistoryComparison(StrictModel):
     base_sha: GitObjectId
+    base_provenance: RefProvenance
     head_sha: GitObjectId
+    head_provenance: RefProvenance
     merge_base_sha: GitObjectId
     ahead: int = Field(ge=0)
     behind: int = Field(ge=0)

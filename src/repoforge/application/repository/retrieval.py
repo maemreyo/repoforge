@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 from ...domain.errors import ErrorCode, RepoForgeError, SecurityError
 from ..context import ApplicationContext
@@ -40,6 +40,7 @@ class RepositorySearchV2Result:
     repo_id: str
     resolved_ref: str
     commit_sha: str
+    provenance: Literal["reviewed_base", "operator_local"]
     mode: str
     matches: tuple[StructuredSearchMatch, ...]
     truncated: bool
@@ -69,6 +70,7 @@ class RepositoryTreeV2Result:
     repo_id: str
     resolved_ref: str
     commit_sha: str
+    provenance: Literal["reviewed_base", "operator_local"]
     subtree: str | None
     entries: tuple[StructuredTreeEntry, ...]
     omitted_count: int
@@ -249,6 +251,7 @@ class RepositoryRetrieval:
                 repo_id=command.repo_id,
                 resolved_ref=snapshot.resolved_ref,
                 commit_sha=snapshot.commit_sha,
+                provenance=snapshot.provenance,
                 mode=command.mode.value,
                 matches=search_matches,
                 truncated=next_cursor is not None or source_truncated,
@@ -307,6 +310,7 @@ class RepositoryRetrieval:
                 command.repo_id,
                 snapshot.resolved_ref,
                 snapshot.commit_sha,
+                snapshot.provenance,
                 command.subtree,
                 tuple(page.items),  # type: ignore[arg-type]
                 page.omitted_count,

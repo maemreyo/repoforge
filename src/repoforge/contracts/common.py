@@ -28,6 +28,7 @@ RelativePath = Annotated[
 GitRef = Annotated[str, Field(min_length=1, max_length=512)]
 Sha256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 GitObjectId = Annotated[str, Field(pattern=r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")]
+RefProvenance = Literal["reviewed_base", "operator_local"]
 Cursor = Annotated[str, Field(min_length=1, max_length=2048)]
 ShortText = Annotated[str, Field(min_length=1, max_length=500)]
 LongText = Annotated[str, Field(min_length=1, max_length=120_000)]
@@ -285,6 +286,7 @@ class CommitSummary(StrictModel):
     subject: str = Field(min_length=1, max_length=500)
     author: str = Field(min_length=1, max_length=300)
     committed_at: str = Field(min_length=1, max_length=80)
+    provenance: RefProvenance
 
 
 class ChangeBudgetLimits(StrictModel):

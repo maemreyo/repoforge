@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from ...domain.errors import SecurityError
 from ..context import ApplicationContext
@@ -29,6 +30,7 @@ class RepositoryReadResult:
     repo_id: str
     resolved_ref: str
     commit_sha: str
+    provenance: Literal["reviewed_base", "operator_local"]
     files: tuple[ReadFileResult, ...]
     errors: tuple[ReadFileError, ...]
     requested: int
@@ -70,6 +72,7 @@ class RepositoryReader:
                 repo_id=command.repo_id,
                 resolved_ref=snapshot.resolved_ref,
                 commit_sha=snapshot.commit_sha,
+                provenance=snapshot.provenance,
                 files=batch.files,
                 errors=batch.errors,
                 requested=batch.requested,

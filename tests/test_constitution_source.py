@@ -222,7 +222,9 @@ class _SymlinkServingGit:
     """
 
     def resolve_snapshot_ref(self, path: Path, repo: object, ref: str | None) -> object:
-        return ResolvedRepositoryRef(resolved_ref="refs/heads/main", commit_sha="a" * 40)
+        return ResolvedRepositoryRef(
+            resolved_ref="refs/heads/main", commit_sha="a" * 40, provenance="reviewed_base"
+        )
 
     def list_snapshot_files(
         self, path: Path, repo: object, commit_sha: str, max_entries: int

@@ -22,6 +22,7 @@ class GitDiffSummary:
 class ResolvedRepositoryRef:
     resolved_ref: str
     commit_sha: str
+    provenance: Literal["reviewed_base", "operator_local"]
 
 
 @dataclass(frozen=True, slots=True)

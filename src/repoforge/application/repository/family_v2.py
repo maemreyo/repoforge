@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from ...config import RepositoryConfig
 from ...domain.auth_profile import AuthProfileSelector
@@ -44,6 +44,7 @@ class CompactCommit:
     subject: str
     author: str
     committed_at: str
+    provenance: Literal["reviewed_base", "operator_local"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +58,9 @@ class CompactFileChange:
 @dataclass(frozen=True, slots=True)
 class CompactComparison:
     base_sha: str
+    base_provenance: Literal["reviewed_base", "operator_local"]
     head_sha: str
+    head_provenance: Literal["reviewed_base", "operator_local"]
     merge_base_sha: str
     ahead: int
     behind: int
@@ -330,6 +333,9 @@ def _compact_recent(raw: dict[str, Any]) -> CompactCommit:
         subject=_text(raw, "subject", "title", "message")[:500] or "(no subject)",
         author=_text(raw, "author", "author_name")[:300] or "unknown",
         committed_at=_text(raw, "date", "committed_at", "timestamp")[:80] or "unknown",
+        # mode="log" always walks the repository's own default HEAD, never an
+        # arbitrary requested ref, so it is unconditionally reviewed_base.
+        provenance="reviewed_base",
     )
 
 
@@ -398,6 +404,7 @@ class RepositoryHistoryV2:
                 commit_raw.subject[:500] or "(no subject)",
                 commit_raw.author.name[:300] or "unknown",
                 commit_raw.author.date[:80] or commit_raw.committer.date[:80] or "unknown",
+                commit_raw.provenance,
             )
             return RepositoryHistoryV2Result(
                 "ok",
@@ -474,7 +481,9 @@ class RepositoryHistoryV2:
         )
         comparison = CompactComparison(
             raw_compare.base_sha,
+            raw_compare.base_provenance,
             raw_compare.head_sha,
+            raw_compare.head_provenance,
             raw_compare.merge_base_sha,
             raw_compare.ahead,
             raw_compare.behind,

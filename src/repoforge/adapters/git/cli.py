@@ -9,7 +9,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn, cast
+from typing import Any, Literal, NoReturn, cast
 
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
@@ -630,6 +630,81 @@ class GitCliRepository:
                 )
         return False
 
+    def _commit_is_operator_local(self, path: Path, commit_sha: str) -> bool:
+        """A commit reachable from some local branch -- the operator's own work,
+        as opposed to a ref only reachable via `refs/remotes/*` or not reachable
+        from any ref at all."""
+        result = self._executor.run(
+            ["git", "branch", "--contains", commit_sha],
+            cwd=path,
+            check=False,
+            output_limit=4096,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    def _classify_ref_provenance(
+        self,
+        path: Path,
+        repo: RepositoryConfig,
+        commit_sha: str,
+    ) -> Literal["reviewed_base", "operator_local"] | None:
+        if self._commit_is_reviewed(path, repo, commit_sha):
+            return "reviewed_base"
+        if self._commit_is_operator_local(path, commit_sha):
+            return "operator_local"
+        return None
+
+    def _disambiguate_commit(self, path: Path, prefix: str) -> str | None:
+        """Resolve an abbreviated object name to exactly one commit.
+
+        Returns ``None`` when no object matches the prefix. Raises
+        ``REPOSITORY_REF_AMBIGUOUS`` when the prefix matches more than one distinct
+        commit -- genuine ambiguity, not merely an abbreviated form.
+        """
+        result = self._executor.run(
+            ["git", "rev-parse", f"--disambiguate={prefix}"],
+            cwd=path,
+            check=False,
+            output_limit=4096,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        commit_shas: set[str] = set()
+        for candidate in result.stdout.split():
+            peeled = self._executor.run(
+                ["git", "rev-parse", "--verify", "--end-of-options", f"{candidate}^{{commit}}"],
+                cwd=path,
+                check=False,
+                output_limit=512,
+            )
+            if peeled.returncode == 0:
+                commit_shas.add(peeled.stdout.strip())
+        if len(commit_shas) > 1:
+            self._raise_ref_error(
+                f"Abbreviated repository ref is ambiguous: {prefix}",
+                ErrorCode.REPOSITORY_REF_AMBIGUOUS,
+            )
+        if len(commit_shas) == 1:
+            return next(iter(commit_shas))
+        return None
+
+    @staticmethod
+    def _branch_name(requested: str) -> str | None:
+        name = requested.removeprefix("refs/heads/")
+        if requested.startswith("refs/") and not requested.startswith("refs/heads/"):
+            return None
+        if (
+            not name
+            or len(name) > 200
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", name) is None
+            or ".." in name
+            or "@{" in name
+            or name.endswith((".", "/", ".lock"))
+            or any(part in {"", ".", ".."} or part.startswith(".") for part in name.split("/"))
+        ):
+            return None
+        return name
+
     def resolve_snapshot_ref(
         self, path: Path, repo: RepositoryConfig, ref: str | None
     ) -> ResolvedRepositoryRef:
@@ -658,7 +733,19 @@ class GitCliRepository:
                     f"Repository ref not found: {requested}",
                     ErrorCode.REPOSITORY_REF_NOT_FOUND,
                 )
-            return ResolvedRepositoryRef(resolved_ref, result.stdout.strip())
+            return ResolvedRepositoryRef(resolved_ref, result.stdout.strip(), "reviewed_base")
+
+        branch_name = self._branch_name(requested)
+        if branch_name is not None:
+            branch_ref = f"refs/heads/{branch_name}"
+            branch = self._executor.run(
+                ["git", "rev-parse", "--verify", "--end-of-options", f"{branch_ref}^{{commit}}"],
+                cwd=path,
+                check=False,
+                output_limit=512,
+            )
+            if branch.returncode == 0:
+                return ResolvedRepositoryRef(branch_ref, branch.stdout.strip(), "operator_local")
 
         tag_name = self._tag_name(requested)
         if tag_name is not None:
@@ -671,12 +758,13 @@ class GitCliRepository:
             )
             if tag.returncode == 0:
                 commit_sha = tag.stdout.strip()
-                if not self._commit_is_reviewed(path, repo, commit_sha):
+                provenance = self._classify_ref_provenance(path, repo, commit_sha)
+                if provenance is None:
                     self._raise_ref_error(
-                        f"Repository ref is outside reviewed base history: {requested}",
+                        f"Repository ref is outside reviewed or operator-local history: {requested}",
                         ErrorCode.REPOSITORY_REF_EXTERNAL,
                     )
-                return ResolvedRepositoryRef(tag_ref, commit_sha)
+                return ResolvedRepositoryRef(tag_ref, commit_sha, provenance)
             if requested.startswith("refs/tags/"):
                 self._raise_ref_error(
                     f"Repository ref not found: {requested}",
@@ -697,18 +785,30 @@ class GitCliRepository:
                     ErrorCode.REPOSITORY_REF_NOT_FOUND,
                 )
             commit_sha = result.stdout.strip()
-            if not self._commit_is_reviewed(path, repo, commit_sha):
+            provenance = self._classify_ref_provenance(path, repo, commit_sha)
+            if provenance is None:
                 self._raise_ref_error(
-                    f"Repository ref is outside reviewed base history: {requested}",
+                    f"Repository ref is outside reviewed or operator-local history: {requested}",
                     ErrorCode.REPOSITORY_REF_EXTERNAL,
                 )
-            return ResolvedRepositoryRef(commit_sha, commit_sha)
+            return ResolvedRepositoryRef(commit_sha, commit_sha, provenance)
 
         if re.fullmatch(r"[0-9a-fA-F]{4,63}", requested) is not None:
-            self._raise_ref_error(
-                f"Abbreviated repository ref is ambiguous: {requested}",
-                ErrorCode.REPOSITORY_REF_AMBIGUOUS,
-            )
+            disambiguated = self._disambiguate_commit(path, requested)
+            if disambiguated is None:
+                self._raise_ref_error(
+                    f"Repository ref not found: {requested}",
+                    ErrorCode.REPOSITORY_REF_NOT_FOUND,
+                )
+            commit_sha = disambiguated
+            provenance = self._classify_ref_provenance(path, repo, commit_sha)
+            if provenance is None:
+                self._raise_ref_error(
+                    f"Repository ref is outside reviewed or operator-local history: {requested}",
+                    ErrorCode.REPOSITORY_REF_EXTERNAL,
+                )
+            return ResolvedRepositoryRef(commit_sha, commit_sha, provenance)
+
         if requested.startswith(("refs/remotes/", f"{repo.remote}/")):
             self._raise_ref_error(
                 f"External repository ref is not allowed: {requested}",

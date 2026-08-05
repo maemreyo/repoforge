@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Literal
 
 from ...config import RepositoryConfig
 from ...domain.errors import ErrorCode, RepoForgeError, SecurityError
@@ -26,9 +27,11 @@ class RepositoryCompareResult:
     requested_base_ref: str
     base_resolved_ref: str
     base_sha: str
+    base_provenance: Literal["reviewed_base", "operator_local"]
     requested_head_ref: str
     head_resolved_ref: str
     head_sha: str
+    head_provenance: Literal["reviewed_base", "operator_local"]
     merge_base_sha: str
     ahead: int
     behind: int
@@ -125,9 +128,11 @@ class RepositoryComparer:
             command.base_ref,
             base.resolved_ref,
             base.commit_sha,
+            base.provenance,
             command.head_ref,
             head.resolved_ref,
             head.commit_sha,
+            head.provenance,
             evidence.merge_base_sha,
             evidence.ahead,
             evidence.behind,
