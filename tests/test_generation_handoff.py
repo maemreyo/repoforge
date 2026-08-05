@@ -270,3 +270,139 @@ def test_admit_path_fails_closed_when_prior_worker_survives() -> None:
     assert success is False
     assert details["ok"] is False
     assert details["path"] == "admit"
+
+
+# --------------------------------------------------------------------- #275
+# Same config_generation, different supervisor process: a release handoff where the
+# config did not change. Generation equality alone must never adopt another process's
+# binding; process identity is a mandatory part of ownership.
+
+
+def test_same_config_generation_dead_owner_is_reclaimed() -> None:
+    """#275: binding with matching config gen but a DEAD prior supervisor is reclaimed."""
+    from repoforge.application.activation.handoff import reconcile_before_admit
+
+    store = InMemoryWorkerBindingStore()
+    store.put(
+        _binding(_op("a1"), server_pid=200, server_start_token="srv-OLD", owner_generation=42)
+    )
+    reaper = RecordingProcessReaper(
+        outcome=ReapOutcome(
+            attempted=False, reaped=False, still_alive=False, detail="old supervisor gone"
+        )
+    )
+    reconciler = GenerationHandoffReconciler(bindings=store, reaper=reaper)
+
+    result = reconcile_before_admit(
+        reconciler=reconciler,
+        current_owner=OwnerIdentity(server_pid=100, server_start_token="srv-NEW", generation=42),
+    )
+
+    assert result.exit_code is None
+    assert result.report.ok is True
+    assert result.report.released == (_op("a1"),)
+    assert result.report.retained == ()
+    assert store.get(_op("a1")) is None
+
+
+def test_same_config_generation_live_owner_conflicts_and_fails_closed() -> None:
+    """#275: same config gen but the prior supervisor is STILL ALIVE -> conflict, exit 7."""
+    from repoforge.application.activation.handoff import (
+        EXIT_HANDOFF_CONFLICT,
+        reconcile_before_admit,
+    )
+
+    store = InMemoryWorkerBindingStore()
+    store.put(
+        _binding(_op("a1"), server_pid=200, server_start_token="srv-OLD", owner_generation=42)
+    )
+    reaper = RecordingProcessReaper(
+        outcome=ReapOutcome(
+            attempted=True, reaped=False, still_alive=True, detail="prior worker survived"
+        )
+    )
+    reconciler = GenerationHandoffReconciler(bindings=store, reaper=reaper)
+
+    result = reconcile_before_admit(
+        reconciler=reconciler,
+        current_owner=OwnerIdentity(server_pid=100, server_start_token="srv-NEW", generation=42),
+    )
+
+    assert result.exit_code == EXIT_HANDOFF_CONFLICT
+    assert result.report.ok is False
+    assert store.get(_op("a1")) is not None
+
+
+def test_same_config_generation_same_process_is_retained() -> None:
+    """#275: a binding truly owned by the incoming supervisor is retained."""
+    store = InMemoryWorkerBindingStore()
+    store.put(
+        _binding(_op("a1"), server_pid=100, server_start_token="srv-NEW", owner_generation=42)
+    )
+    reaper = RecordingProcessReaper()
+    reconciler = GenerationHandoffReconciler(bindings=store, reaper=reaper)
+
+    report = reconciler.reconcile(
+        current_owner=OwnerIdentity(server_pid=100, server_start_token="srv-NEW", generation=42)
+    )
+
+    assert report.retained == (_op("a1"),)
+    assert report.reaped == ()
+    assert report.released == ()
+    assert store.get(_op("a1")) is not None
+
+
+def test_legacy_binding_without_generation_still_uses_process_identity() -> None:
+    """#275: a legacy (owner_generation None) binding still fails safe by process identity."""
+    from repoforge.application.activation.handoff import reconcile_before_admit
+
+    store = InMemoryWorkerBindingStore()
+    store.put(_binding(_op("a1"), server_pid=200, server_start_token="srv-OLD"))
+    reaper = RecordingProcessReaper(
+        outcome=ReapOutcome(
+            attempted=True, reaped=False, still_alive=False, detail="prior worker gone"
+        )
+    )
+    reconciler = GenerationHandoffReconciler(bindings=store, reaper=reaper)
+
+    result = reconcile_before_admit(
+        reconciler=reconciler,
+        current_owner=OwnerIdentity(server_pid=100, server_start_token="srv-NEW", generation=42),
+    )
+
+    assert result.exit_code is None
+    assert result.report.retained == ()
+    assert store.get(_op("a1")) is None
+
+
+def test_admit_path_records_report_null_when_reconciler_throws() -> None:
+    """#275: a reconciler exception must not fabricate a report; admission fails closed."""
+    from repoforge.application.activation.handoff import (
+        EXIT_HANDOFF_CONFLICT,
+        HANDOFF_AUDIT_ACTION,
+        reconcile_before_admit,
+    )
+
+    class _ExplodingReconciler:
+        def reconcile(self, *, current_owner, is_resumable=None):
+            del current_owner, is_resumable
+            raise RuntimeError("binding store unavailable")
+
+    audit = _RecordingAudit()
+    result = reconcile_before_admit(
+        reconciler=_ExplodingReconciler(),  # type: ignore[arg-type]
+        current_owner=OwnerIdentity(server_pid=100, server_start_token="srv-NEW", generation=42),
+        audit=audit,
+    )
+
+    assert result.exit_code == EXIT_HANDOFF_CONFLICT
+    assert result.report is None
+    assert len(audit.events) == 1
+    action, success, details = audit.events[0]
+    assert action == HANDOFF_AUDIT_ACTION
+    assert success is False
+    assert details.get("ok") is False
+    assert details.get("report") is None
+    assert details.get("error_code") == "RuntimeError"
+    assert details.get("path") == "admit"
+    assert details.get("generation") == 42
