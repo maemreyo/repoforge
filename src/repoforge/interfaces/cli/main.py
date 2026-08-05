@@ -1943,9 +1943,13 @@ def _upgrade_command(args: argparse.Namespace) -> int:
     if getattr(args, "upgrade_command", None) == "reconcile":
         result = service.reconcile(repair=getattr(args, "repair", None))
         _json(result.as_dict())
-        # A reconciled or repaired activation is terminal; a repair rollback that did
-        # not converge raises rather than silently exiting 0.
-        return 0 if result.status in {"reconciled", "rolled_back", "nothing_to_reconcile"} else 1
+        # A reconciled or repaired activation is terminal; a repair rollback (or
+        # recover) that did not converge raises rather than silently exiting 0.
+        return (
+            0
+            if result.status in {"reconciled", "rolled_back", "recovered", "nothing_to_reconcile"}
+            else 1
+        )
     if getattr(args, "upgrade_command", None) == "rollback":
         receipt = args.receipt
         if receipt is not None:
@@ -2609,11 +2613,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     ).add_argument(
         "--repair",
-        choices=["rollback"],
+        choices=["rollback", "recover"],
         help=(
             "Repair a fail-closed activation by rolling `current` back to the previous "
-            "release after verifying the typed failure and that the target is usable. "
-            "Never the default."
+            "release after verifying the typed failure and that the target is usable "
+            "(rollback), or promote a candidate that received a terminal FAILED "
+            "activation receipt but is now independently re-verified as durably "
+            "serving -- writes a new, distinct ACTIVATED receipt linked to the FAILED "
+            "one, never edits the original (recover). Never the default."
         ),
     )
     dev_runtime = commands.add_parser("dev-runtime")

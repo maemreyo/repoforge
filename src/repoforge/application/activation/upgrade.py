@@ -82,9 +82,10 @@ class UpgradeResult:
     def as_dict(self) -> dict[str, Any]:
         rollback = (
             f"rf upgrade rollback {self.activation_receipt}"
-            # A reconciled activation ends with an ordinary activation receipt, so it is
-            # reversible in exactly the same way.
-            if self.activation_receipt and self.status in {"activated", "reconciled"}
+            # A reconciled or recovered activation ends with an ordinary, health-verified
+            # activation receipt, so it is reversible in exactly the same way.
+            if self.activation_receipt
+            and self.status in {"activated", "reconciled", "recovered", "already_recovered"}
             else None
         )
         return {
@@ -335,6 +336,16 @@ class UpgradeService:
                 stranded = self._reconcile_stranded_transition()
                 if stranded is not None:
                     return stranded
+                if repair == "recover":
+                    recovered = self._repair_recover_failed_but_serving()
+                    if recovered is not None:
+                        return recovered
+                    raise ConfigError(
+                        "ACTIVATION_NOT_RECOVERABLE: no FAILED activation matching the "
+                        "currently active release was found to recover; `rf version "
+                        "status` reports the actual receipt history and what is running "
+                        "now."
+                    )
                 current = self._store.current_sha()
                 return UpgradeResult(
                     status="nothing_to_reconcile",
@@ -419,6 +430,183 @@ class UpgradeService:
         self._verify_installed_contract(previous_manifest)
         rolled_back = self._rollback_locked(receipt_id=None, expected_current=to_sha)
         return replace(rolled_back, detail=f"Repair rollback: {rolled_back.detail}")
+
+    def _repair_recover_failed_but_serving(self) -> UpgradeResult | None:
+        """Promote a FAILED activation whose candidate is now genuinely, durably serving.
+
+        `_fail_and_rollback` always clears the journal before it returns (it must: the
+        journal describes an activation that IS terminal by that point), so by the time
+        anyone can observe a FAILED receipt, there is no in-flight journal left for the
+        ordinary reconcile path above to act on. If the rollback it attempted also
+        failed to converge -- or the runtime was fixed out-of-band afterward -- `current`
+        can be left pointing at a release that is genuinely healthy right now, with a
+        permanent FAILED receipt and no designed path back to a truthful terminal state
+        (#448 Slice 6; this is the exact shape of the `act-20260804-001` incident).
+
+        Never rewrites the FAILED receipt -- receipts are immutable by construction
+        (`ReleaseStore.write_receipt` refuses to overwrite an existing id). This writes
+        a new ACTIVATED receipt linked to the original via `cause_receipt_id`, so the
+        history stays honest about what actually happened.
+
+        Deliberately reuses `ActivationOutcome.ACTIVATED` rather than a new persisted
+        enum value (#448 Slice 6 review): `ActivationOutcome` is serialized verbatim
+        into append-only receipts, which an older, still-running binary parses with
+        `ActivationOutcome(outcome_raw)` after a rollback. A value that binary has
+        never heard of makes the receipt unreadable to it, which can poison
+        `ReceiptHistory.latest` (unknown) and block that binary's own
+        upgrade/reconcile/rollback -- the opposite of what a rollback-safety mechanism
+        may ever do. `cause_receipt_id` still links this receipt back to the FAILED one
+        it promotes; recovery is distinguished only at the result/CLI layer
+        (`UpgradeResult.status == "recovered"` / `"already_recovered"`), never in the
+        persisted receipt schema.
+
+        Health is independently re-verified here and now -- an `ObservedRuntime` read
+        plus a fresh, actively re-sampled hysteresis window (the same one `--watch`
+        uses, `_sample_window`), never a single cached/stale sample -- so a fluky
+        one-off healthy probe, or evidence that predates this exact call, can never
+        promote a candidate that only looks fine in a stale snapshot.
+
+        The installed manifest's fingerprint and tool-surface hash must also still match
+        what the FAILED receipt recorded (#448 Slice 6 review): serving healthy at
+        `current` proves the runtime is happy with whatever is on disk right now, not
+        that it is the same build the receipt describes -- the release directory could
+        have been replaced out-of-band in between. Without this, recovery could promote
+        a receipt for a build that no longer exists.
+
+        Returns `None` (not an exception) when nothing here is shaped like a FAILED
+        activation to recover, so `reconcile()` can give a precise, typed error naming
+        what was actually asked for.
+
+        A repeated call after a successful recovery must never write a second
+        recovery receipt: `latest` is by then the recovery's own ACTIVATED receipt (not
+        FAILED), so without this check the code below would report "nothing to
+        recover" for what is actually an already-recovered, still-current candidate --
+        confusing at best, and a duplicate-receipt risk for any caller that retries an
+        errored-out response (#448 Slice 6 review: "already_recovered" must be
+        idempotent). A recovery receipt is identified by `cause_receipt_id` being set:
+        no other ACTIVATED-outcome code path in this class ever sets it (an ordinary
+        activation or forward reconciliation never names a "cause"), so this is a safe,
+        exclusive signal -- never confused with a receipted rollback, which links its
+        own cause on a ROLLED_BACK/ROLLBACK_FAILED receipt, not ACTIVATED.
+        """
+        latest = self._store.receipt_history().latest
+        current = self._store.current_sha()
+        if (
+            latest is not None
+            and latest.outcome is ActivationOutcome.ACTIVATED
+            and latest.cause_receipt_id is not None
+            and current is not None
+            and latest.to_sha == current
+        ):
+            return UpgradeResult(
+                status="already_recovered",
+                candidate_sha=current,
+                build_fingerprint=latest.to_fingerprint,
+                tool_surface_hash=latest.tool_surface_hash,
+                previous_sha=latest.from_sha,
+                active_sha=current,
+                activation_receipt=latest.receipt_id,
+                observed_sha=latest.observed_sha,
+                converged=latest.converged,
+                stage=latest.stage.value,
+                detail=(
+                    f"{current} was already recovered by receipt {latest.receipt_id}; "
+                    "no new receipt was written."
+                ),
+            )
+        if (
+            latest is None
+            or latest.outcome is not ActivationOutcome.FAILED
+            or current is None
+            or latest.to_sha != current
+        ):
+            return None
+        if self._health_probe is None:
+            raise ConfigError(
+                "ACTIVATION_NOT_RECOVERABLE: no health probe is configured, so sustained "
+                "health cannot be independently re-verified before promoting a "
+                "previously-failed candidate"
+            )
+        observed = self._observer.observe()
+        if observed.running_release_sha != current or observed.phase != "healthy":
+            raise ConfigError(
+                "ACTIVATION_NOT_RECOVERABLE: the runtime is not currently observed "
+                f"healthy and serving {current} (phase={observed.phase}, "
+                f"running={observed.running_release_sha or 'unknown'}); recovery only "
+                "promotes a candidate that is genuinely serving right now, never a guess"
+            )
+        failure_detail = self._sample_window(
+            window_seconds=DEFAULT_HEALTH_WINDOW_SECONDS,
+            interval_seconds=DEFAULT_HEALTH_INTERVAL_SECONDS,
+        )
+        if failure_detail is not None:
+            raise ConfigError(
+                "ACTIVATION_NOT_RECOVERABLE: health degraded during independent "
+                f"re-verification ({failure_detail}); a single healthy sample is never "
+                "enough to promote a previously-failed candidate"
+            )
+        manifest = self._store.read_manifest(current)
+        if manifest is None:
+            raise ConfigError(
+                f"ACTIVATION_NOT_RECOVERABLE: no installed manifest was found for {current}; "
+                "recovery cannot verify what is actually installed matches the failed "
+                "receipt's record"
+            )
+        if manifest.build_fingerprint != latest.to_fingerprint:
+            raise ConfigError(
+                "ACTIVATION_NOT_RECOVERABLE: the installed manifest fingerprint "
+                f"({manifest.build_fingerprint}) no longer matches the failed receipt's "
+                f"recorded fingerprint ({latest.to_fingerprint}); the release directory has "
+                "drifted since that receipt was written, so recovery cannot prove it is "
+                "promoting the same build"
+            )
+        if manifest.tool_surface_hash != latest.tool_surface_hash:
+            raise ConfigError(
+                "ACTIVATION_NOT_RECOVERABLE: the installed manifest tool-surface hash "
+                f"({manifest.tool_surface_hash}) no longer matches the failed receipt's "
+                f"recorded tool-surface hash ({latest.tool_surface_hash}); recovery cannot "
+                "prove it is promoting the same connector tool surface the receipt describes"
+            )
+        recovered_receipt = self._write_receipt(
+            ActivationReceipt(
+                receipt_id=self._store.allocate_receipt_id(date_stamp=self._date_stamp()),
+                from_sha=latest.from_sha,
+                to_sha=current,
+                from_fingerprint=latest.from_fingerprint,
+                to_fingerprint=manifest.build_fingerprint,
+                tool_surface_hash=manifest.tool_surface_hash,
+                rediscovery_required=False,
+                # Reuses ACTIVATED rather than a new persisted outcome value -- see the
+                # rollback-compatibility note in this method's docstring (#448 Slice 6
+                # review). `cause_receipt_id` below is what actually marks this as a
+                # recovery.
+                outcome=ActivationOutcome.ACTIVATED,
+                activated_at=self._clock.now_iso(),
+                detail=(
+                    f"Recovered a previously failed-but-serving activation: {current} "
+                    f"was marked FAILED (receipt {latest.receipt_id}) but is now "
+                    "independently re-verified as durably serving. No receipt was "
+                    "edited; this is a new, distinct receipt."
+                ),
+                stage=ActivationStage.HEALTH_VERIFIED,
+                observed_sha=observed.running_release_sha,
+                converged=True,
+                cause_receipt_id=latest.receipt_id,
+            )
+        )
+        return UpgradeResult(
+            status="recovered",
+            candidate_sha=current,
+            build_fingerprint=recovered_receipt.to_fingerprint,
+            tool_surface_hash=recovered_receipt.tool_surface_hash,
+            previous_sha=latest.from_sha,
+            active_sha=current,
+            activation_receipt=recovered_receipt.receipt_id,
+            observed_sha=observed.running_release_sha,
+            converged=True,
+            stage=ActivationStage.HEALTH_VERIFIED.value,
+            detail=recovered_receipt.detail,
+        )
 
     def _require_no_unreconciled_activation(self, *, action: str) -> None:
         """Fail closed on an unterminalized activation -- unless it demonstrably won.

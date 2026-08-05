@@ -7,6 +7,7 @@ import pytest
 
 from repoforge.adapters.activation.release_store import RuntimeReleaseStore
 from repoforge.application.activation.upgrade import UpgradeService
+from repoforge.domain.activation import ReleaseManifest
 from repoforge.domain.errors import ConfigError
 from repoforge.ports.activation import (
     BuildArtifact,
@@ -1278,6 +1279,431 @@ def test_a_rollback_target_that_cannot_be_verified_is_reported_not_swallowed(
     assert "rf version status" in message
     assert [r.outcome.value for r in store.list_receipts()].count("failed") == 1
     assert store.read_in_flight_activation() is None
+
+
+def _stranded_failed_candidate(tmp_path: Path) -> tuple[RuntimeReleaseStore, str]:
+    """Build the exact incident shape (#448 Slice 6): a FAILED receipt whose rollback
+    was never even attempted (its target was unusable), so `current` is still the
+    candidate the receipt calls a failure -- the receipt id is returned for assertions.
+    """
+    import shutil
+
+    first, store, _ = _service(tmp_path, head="1111aaa")
+    first.upgrade(tmp_path, activate=True)
+    second, _, _ = _service(tmp_path, head="2222bbb", store=store, restarter=_Restarter(ok=False))
+    # Destroy the only rollback target after it became `previous`, exactly like
+    # `test_a_rollback_target_that_cannot_be_verified_is_reported_not_swallowed`: the
+    # unwind raises before it ever touches `current`.
+    shutil.rmtree(store.release_path("1111aaa"))
+
+    with pytest.raises(ConfigError, match="ACTIVATION_FAILED_ROLLBACK_FAILED"):
+        second.upgrade(tmp_path, activate=True)
+
+    assert store.current_sha() == "2222bbb"
+    assert store.read_in_flight_activation() is None
+    failed = [r for r in store.list_receipts() if r.outcome.value == "failed"]
+    assert len(failed) == 1
+    return store, failed[0].receipt_id
+
+
+def test_reconcile_repair_recover_promotes_a_failed_but_now_durably_serving_candidate(
+    tmp_path: Path,
+) -> None:
+    """The exact `act-20260804-001` incident shape: a terminal FAILED receipt, but the
+    candidate is now independently, durably re-verified as genuinely serving (#448
+    Slice 6). Recovery must write a NEW receipt -- never edit the original -- linked
+    to it via `cause_receipt_id`. The new receipt's outcome is ordinary ACTIVATED, not
+    a distinct persisted value: `ActivationOutcome` is serialized into append-only
+    receipts an older binary parses after a rollback, so a value that binary has never
+    heard of would make the receipt unreadable to it -- recovery is distinguished only
+    at the `UpgradeResult.status` / CLI layer, never in the persisted receipt schema.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+
+    recovering = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(store, phase="healthy"),
+        clock=_Clock(),
+        health_probe=_HealthProbe([HealthSample(healthy=True, detail="ok")]),
+        sleeper=_Sleeper(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+        health_failure_threshold=1,
+    )
+
+    result = recovering.reconcile(repair="recover")
+
+    assert result.status == "recovered"
+    assert result.active_sha == "2222bbb"
+    assert result.activation_receipt is not None
+    assert result.activation_receipt != failed_receipt_id
+    recovered = store.read_receipt(result.activation_receipt)
+    assert recovered is not None
+    assert recovered.outcome.value == "activated"
+    assert recovered.converged is True
+    assert recovered.stage.value == "health_verified"
+    assert recovered.cause_receipt_id == failed_receipt_id
+    # The original FAILED receipt is untouched -- recovery never rewrites history.
+    original = store.read_receipt(failed_receipt_id)
+    assert original is not None
+    assert original.outcome.value == "failed"
+    # `current` itself never moved: recovery is pure evidence, not a mutation of what
+    # is actually running.
+    assert store.current_sha() == "2222bbb"
+
+
+def test_reconcile_repair_recover_refuses_on_a_single_healthy_sample_alone(
+    tmp_path: Path,
+) -> None:
+    """A single healthy sample is not sustained evidence (#448 Slice 6): recovery must
+    actively re-verify a full hysteresis window, exactly like `--watch` does, not trust
+    one probe that could be a fluke or already-stale by the time it is read.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+
+    flaky = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(store, phase="healthy"),
+        clock=_Clock(),
+        health_probe=_HealthProbe(
+            [
+                HealthSample(healthy=True, detail="ok"),
+                HealthSample(healthy=False, detail="degraded again"),
+                HealthSample(healthy=False, detail="degraded again"),
+            ]
+        ),
+        sleeper=_Sleeper(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+        health_failure_threshold=2,
+    )
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE") as raised:
+        flaky.reconcile(repair="recover")
+
+    assert "degraded" in str(raised.value)
+    # Refused, so nothing new was written and the original receipt stands alone.
+    assert [r.outcome.value for r in store.list_receipts()].count("failed") == 1
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_refuses_when_no_health_probe_is_configured(
+    tmp_path: Path,
+) -> None:
+    """Recovery must never rely on `_verify_serving()`'s permissive default for a
+    missing health probe (#448 Slice 6 review): that default treats "no probe
+    configured" as success for legacy/test flows where nothing destructive is at
+    stake, but recovery turns a terminal FAILED receipt into a terminal success
+    receipt -- it must have positive, independently re-verified health proof, never a
+    shrug from a missing probe.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+
+    unprobed = UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(store, phase="healthy"),
+        clock=_Clock(),
+        health_probe=None,
+        sleeper=_Sleeper(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+        health_failure_threshold=1,
+    )
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE") as raised:
+        unprobed.reconcile(repair="recover")
+
+    assert "health probe" in str(raised.value)
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def _is_recovery_receipt(receipt) -> bool:
+    """A recovery receipt is an ordinary ACTIVATED receipt with `cause_receipt_id` set
+    (#448 Slice 6 review): recovery deliberately reuses `ActivationOutcome.ACTIVATED`
+    rather than a distinct persisted value, since `ActivationOutcome` is serialized
+    into append-only receipts an older binary must still be able to parse after a
+    rollback. No other code path in `UpgradeService` writes an ACTIVATED receipt with a
+    `cause_receipt_id`, so this is an exclusive, safe signal for tests to check "was a
+    recovery receipt written" without depending on a persisted-schema marker.
+    """
+    return receipt.outcome.value == "activated" and receipt.cause_receipt_id is not None
+
+
+def _recovering_service(
+    store: RuntimeReleaseStore,
+    *,
+    phase: str = "healthy",
+    pinned_observed: str | None = None,
+    samples: list[HealthSample] | None = None,
+) -> UpgradeService:
+    """A `recover`-ready service against an already-built `_stranded_failed_candidate`
+    store, matching the two original Slice 6 tests, factored out for the fuller
+    rejection matrix the #448 Slice 6 review required.
+    """
+    return UpgradeService(
+        store=store,
+        inspector=_Inspector(WorktreeState(head_sha="2222bbb", clean=True)),
+        builder=_Builder(),
+        installer=_Installer(),
+        smoke=_Smoke(),
+        restarter=_Restarter(),
+        observer=_Observer(store, pinned=pinned_observed, phase=phase),
+        clock=_Clock(),
+        health_probe=_HealthProbe(samples or [HealthSample(healthy=True, detail="ok")]),
+        sleeper=_Sleeper(),
+        converge_attempts=2,
+        converge_interval_seconds=0,
+        health_failure_threshold=1,
+    )
+
+
+def test_reconcile_repair_recover_rejects_when_the_installed_manifest_fingerprint_drifted(
+    tmp_path: Path,
+) -> None:
+    """The installed manifest must still match what the FAILED receipt recorded (#448
+    Slice 6 review): a healthy, serving runtime only proves the runtime is happy with
+    whatever is on disk right now, never that it is the exact build the receipt
+    describes -- the release directory could have been replaced out-of-band since.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+    original = store.read_manifest("2222bbb")
+    assert original is not None
+    store.write_manifest(replace(original, build_fingerprint="d" * 64))
+
+    recovering = _recovering_service(store)
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE") as raised:
+        recovering.reconcile(repair="recover")
+
+    assert "fingerprint" in str(raised.value)
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_rejects_when_the_installed_tool_surface_hash_drifted(
+    tmp_path: Path,
+) -> None:
+    """Same drift guard as the fingerprint check above, for the connector tool-surface
+    hash (#448 Slice 6 review): both identify what is actually installed, and either
+    one drifting from the FAILED receipt's record must block recovery.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+    original = store.read_manifest("2222bbb")
+    assert original is not None
+    store.write_manifest(replace(original, tool_surface_hash="d" * 64))
+
+    recovering = _recovering_service(store)
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE") as raised:
+        recovering.reconcile(repair="recover")
+
+    assert "tool-surface hash" in str(raised.value)
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_is_idempotent_on_a_repeated_call(tmp_path: Path) -> None:
+    """A second `recover` call after a successful one must never write a second
+    recovery receipt (#448 Slice 6 review): it returns the existing recovery
+    receipt's own info, distinctly labeled `already_recovered`, instead of either
+    erroring (the pre-fix behavior -- `latest` is no longer FAILED, so the old code
+    reported "nothing to recover") or silently duplicating the receipt.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+    recovering = _recovering_service(store)
+
+    first = recovering.reconcile(repair="recover")
+    assert first.status == "recovered"
+
+    second = recovering.reconcile(repair="recover")
+
+    assert second.status == "already_recovered"
+    assert second.activation_receipt == first.activation_receipt
+    assert second.active_sha == "2222bbb"
+    # Exactly one recovery receipt exists -- the repeat call wrote nothing new.
+    recovered_receipts = [r for r in store.list_receipts() if _is_recovery_receipt(r)]
+    assert len(recovered_receipts) == 1
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_does_not_mistake_a_stale_recovery_receipt_for_already_recovered(
+    tmp_path: Path,
+) -> None:
+    """The `already_recovered` idempotency check must be pinned to the CURRENT
+    candidate, not just "some ACTIVATED receipt with a `cause_receipt_id` exists"
+    (#448 Slice 6 review): a genuine prior recovery receipt whose `to_sha` no longer
+    matches `current` (here, simulating `current` having moved on out-of-band,
+    without writing any new receipt -- the same shape as the "current does not point
+    at the candidate" test above) must never be reported as already recovering
+    whatever `current` happens to be now.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+    recovering = _recovering_service(store)
+
+    first = recovering.reconcile(repair="recover")
+    assert first.status == "recovered"
+    stale_recovery_receipt_id = first.activation_receipt
+
+    # `current` moves to a different, unrelated release WITHOUT any new receipt --
+    # `latest` is still the recovery receipt above, but it now describes a candidate
+    # that is no longer live.
+    bystander = "3333ccc"
+    (store.release_path(bystander) / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+    store.write_manifest(
+        ReleaseManifest(
+            commit_sha=bystander,
+            package_version="2.2.0",
+            build_fingerprint=_FINGERPRINT,
+            tool_surface_hash=_SURFACE,
+            source_worktree=str(tmp_path),
+            built_at="2026-07-25T10:00:00+00:00",
+        )
+    )
+    store.swap_current(bystander)
+    assert store.current_sha() == bystander
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE"):
+        recovering.reconcile(repair="recover")
+
+    # Nothing new was written -- the stale recovery receipt and the original FAILED
+    # receipt are exactly what existed before this call.
+    recovered_receipts = [r for r in store.list_receipts() if _is_recovery_receipt(r)]
+    assert len(recovered_receipts) == 1
+    assert recovered_receipts[0].receipt_id == stale_recovery_receipt_id
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_rejects_when_current_does_not_point_at_the_candidate(
+    tmp_path: Path,
+) -> None:
+    """`current` must still be exactly the FAILED receipt's own target (#448 Slice 6):
+    if it has moved on (here, simulating an out-of-band symlink move that recorded no
+    receipt of its own), recovery must never promote a candidate the receipt does not
+    actually describe.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+    bystander = "3333ccc"
+    (store.release_path(bystander) / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+    store.write_manifest(
+        ReleaseManifest(
+            commit_sha=bystander,
+            package_version="2.2.0",
+            build_fingerprint=_FINGERPRINT,
+            tool_surface_hash=_SURFACE,
+            source_worktree=str(tmp_path),
+            built_at="2026-07-25T10:00:00+00:00",
+        )
+    )
+    store.swap_current(bystander)
+    assert store.current_sha() == bystander
+
+    recovering = _recovering_service(store, pinned_observed=bystander)
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE"):
+        recovering.reconcile(repair="recover")
+
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_rejects_when_the_runtime_serves_a_different_sha(
+    tmp_path: Path,
+) -> None:
+    """The live runtime must be observed serving exactly the candidate, not a guess
+    (#448 Slice 6): a stale or mismatched `running_release_sha` must block recovery
+    even though `current` itself still points at the candidate.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+
+    recovering = _recovering_service(store, pinned_observed="1111aaa")
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE") as raised:
+        recovering.reconcile(repair="recover")
+
+    assert "running=1111aaa" in str(raised.value)
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+@pytest.mark.parametrize("phase", ["fail_closed", "degraded", "stale", "unknown"])
+def test_reconcile_repair_recover_rejects_every_non_healthy_phase(
+    tmp_path: Path, phase: str
+) -> None:
+    """Recovery only promotes a candidate the runtime reports as `healthy` right now
+    (#448 Slice 6): every other observed phase the runtime can publish must block it,
+    not just the ones exercised by the original two tests.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+
+    recovering = _recovering_service(store, phase=phase)
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE") as raised:
+        recovering.reconcile(repair="recover")
+
+    assert f"phase={phase}" in str(raised.value)
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_rejects_when_a_later_receipt_supersedes_the_failed_one(
+    tmp_path: Path,
+) -> None:
+    """A later successful activation must permanently retire the FAILED receipt from
+    recovery eligibility (#448 Slice 6): once superseded, that receipt is history, not
+    something a stale `recover` request can still reach for.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+    third, _, _ = _service(tmp_path, head="3333ccc", store=store)
+    third.upgrade(tmp_path, activate=True)
+    assert store.current_sha() == "3333ccc"
+
+    recovering = _recovering_service(store, pinned_observed="3333ccc")
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE"):
+        recovering.reconcile(repair="recover")
+
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
+
+
+def test_reconcile_repair_recover_fails_closed_on_a_newer_unreadable_receipt(
+    tmp_path: Path,
+) -> None:
+    """`ReceiptHistory.latest` deliberately returns `None` when a newer receipt exists
+    but cannot be parsed, rather than falling back to an older FAILED receipt (#448
+    Slice 6 review): recovery must inherit that same fail-closed truthfulness, never
+    silently picking the stale-but-readable receipt underneath.
+    """
+    store, failed_receipt_id = _stranded_failed_candidate(tmp_path)
+    receipts_dir = store.root / "runtime" / "activation-receipts"
+    corrupt_path = receipts_dir / "act-20260805-999.json"
+    corrupt_path.write_text("{not valid json", encoding="utf-8")
+    assert store.receipt_history().latest is None
+
+    recovering = _recovering_service(store)
+
+    with pytest.raises(ConfigError, match="ACTIVATION_NOT_RECOVERABLE"):
+        recovering.reconcile(repair="recover")
+
+    assert not any(_is_recovery_receipt(r) for r in store.list_receipts())
+    assert store.read_receipt(failed_receipt_id) is not None
 
 
 def test_reconcile_repair_refuses_a_transient_failure_code(tmp_path: Path) -> None:

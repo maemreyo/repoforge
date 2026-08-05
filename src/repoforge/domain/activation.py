@@ -224,7 +224,10 @@ class ActivationReceipt:
         # truthful when the live runtime was observed serving the target and
         # health-verified. Legacy receipts predate these fields, so the invariant is
         # not applied retroactively to them (they carry LEGACY_UNKNOWN instead).
-        verified_outcomes = {ActivationOutcome.ACTIVATED, ActivationOutcome.ROLLED_BACK}
+        verified_outcomes = {
+            ActivationOutcome.ACTIVATED,
+            ActivationOutcome.ROLLED_BACK,
+        }
         if (
             self.outcome in verified_outcomes
             and self.stage is not ActivationStage.LEGACY_UNKNOWN
