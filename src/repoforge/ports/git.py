@@ -121,6 +121,22 @@ class GitMergeResult:
     conflict_paths: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class GitWorktreeEntry:
+    """One entry from `git worktree list --porcelain` against a repository's own git dir.
+
+    Bounded, structural evidence of checkouts git itself already tracks -- not an
+    arbitrary host path a model could supply (#372's discovery boundary).
+    """
+
+    path: str
+    head_sha: str | None
+    branch: str | None
+    detached: bool
+    locked: bool
+    prunable: bool
+
+
 class GitRepository(Protocol):
     @property
     def executor(self) -> CommandExecutor: ...
@@ -327,3 +343,7 @@ class GitRepository(Protocol):
     def remote_url(self, path: Path, remote: str) -> CommandResult: ...
 
     def verify_base(self, path: Path, remote: str, base: str) -> CommandResult: ...
+
+    def list_worktrees(self, repo_path: Path) -> tuple[GitWorktreeEntry, ...]: ...
+
+    def root_commit(self, path: Path) -> str: ...

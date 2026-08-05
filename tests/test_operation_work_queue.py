@@ -388,6 +388,9 @@ def test_adhoc_work_request_round_trips_exact_argv_and_policy() -> None:
         "kind": "adhoc",
         "workspace_id": "workspace-1",
         "argv": ["python3", "-c", "print('durable')"],
+        "script": None,
+        "shell": None,
+        "argv_sequence": None,
         "working_directory": "src",
         "mutability": "read_only",
         "stdin_text": None,
@@ -396,6 +399,183 @@ def test_adhoc_work_request_round_trips_exact_argv_and_policy() -> None:
         "config_generation": 12,
     }
     assert work_item_from_payload(payload) == item
+
+
+def test_adhoc_work_request_round_trips_script_and_argv_sequence_forms() -> None:
+    """#377/#443: the script and argv_sequence forms persist and decode exactly, same as
+    the original argv form."""
+    from repoforge.domain.operation_work import (
+        OperationWorkRequest,
+        new_work_item,
+        work_item_from_payload,
+        work_item_payload,
+    )
+
+    script_item = new_work_item(
+        operation_id="op-" + "a" * 24,
+        request=OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            script="echo hi",
+            shell="sh",
+            working_directory="src",
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        ),
+        now="2026-07-27T00:00:00+00:00",
+    )
+    script_payload = work_item_payload(script_item)
+    assert script_payload["request"]["script"] == "echo hi"
+    assert script_payload["request"]["shell"] == "sh"
+    assert script_payload["request"]["argv"] == []
+    assert work_item_from_payload(script_payload) == script_item
+
+    sequence_item = new_work_item(
+        operation_id="op-" + "b" * 24,
+        request=OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv_sequence=(("ruff", "check"), ("mypy", ".")),
+            working_directory="src",
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        ),
+        now="2026-07-27T00:00:00+00:00",
+    )
+    sequence_payload = work_item_payload(sequence_item)
+    assert sequence_payload["request"]["argv_sequence"] == [["ruff", "check"], ["mypy", "."]]
+    assert work_item_from_payload(sequence_payload) == sequence_item
+
+
+def test_adhoc_work_queued_before_script_and_sequence_existed_still_decodes() -> None:
+    """Same backward-compatibility guarantee as stdin_text's own precedent below: an
+    in-flight item queued before #377/#443 added script/shell/argv_sequence must still
+    decode after the release that adds them takes over."""
+    from repoforge.domain.operation_work import (
+        OperationWorkRequest,
+        new_work_item,
+        work_item_from_payload,
+        work_item_payload,
+    )
+
+    item = new_work_item(
+        operation_id="op-" + "a" * 24,
+        request=OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("python3", "-c", "print('durable')"),
+            working_directory="src",
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        ),
+        now="2026-07-27T00:00:00+00:00",
+    )
+    legacy = work_item_payload(item)
+    del legacy["request"]["script"]  # type: ignore[union-attr]
+    del legacy["request"]["shell"]  # type: ignore[union-attr]
+    del legacy["request"]["argv_sequence"]  # type: ignore[union-attr]
+
+    assert work_item_from_payload(legacy) == item
+
+
+def test_adhoc_request_rejects_more_than_one_populated_form() -> None:
+    """Review finding F-005: durable state is the execution authority after crash/
+    retry, so it must not rely on every request having passed through the public
+    Pydantic validator to be well-formed. A malformed or corrupted record with two
+    forms populated must be rejected at construction, not silently resolved by worker
+    dispatch precedence (argv_sequence, then script, then argv)."""
+    import pytest
+
+    from repoforge.domain.errors import ErrorCode, RepoForgeError
+    from repoforge.domain.operation_work import OperationWorkRequest
+
+    with pytest.raises(RepoForgeError) as excinfo:
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("git", "status"),
+            script="echo hi",
+            shell="sh",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+    assert excinfo.value.code is ErrorCode.OPERATION_INVALID
+
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("git", "status"),
+            argv_sequence=(("git", "status"),),
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+
+    # Zero forms populated is NOT ambiguity -- nothing to pick between -- so it is left
+    # to the existing, more specific "nothing to run" refusal deeper in execution.
+    OperationWorkRequest.adhoc(
+        workspace_id="workspace-1",
+        working_directory=None,
+        mutability="read_only",
+        expected_head_sha="b" * 40,
+        expected_fingerprint="c" * 64,
+        config_generation=12,
+    )
+
+
+def test_adhoc_request_rejects_script_without_shell_or_shell_without_script() -> None:
+    import pytest
+
+    from repoforge.domain.errors import RepoForgeError
+    from repoforge.domain.operation_work import OperationWorkRequest
+
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            script="echo hi",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv=("git", "status"),
+            shell="sh",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
+
+
+def test_adhoc_request_rejects_stdin_text_with_argv_sequence() -> None:
+    import pytest
+
+    from repoforge.domain.errors import RepoForgeError
+    from repoforge.domain.operation_work import OperationWorkRequest
+
+    with pytest.raises(RepoForgeError):
+        OperationWorkRequest.adhoc(
+            workspace_id="workspace-1",
+            argv_sequence=(("git", "status"),),
+            stdin_text="hi",
+            working_directory=None,
+            mutability="read_only",
+            expected_head_sha="b" * 40,
+            expected_fingerprint="c" * 64,
+            config_generation=12,
+        )
 
 
 def test_adhoc_work_queued_before_stdin_existed_still_decodes() -> None:

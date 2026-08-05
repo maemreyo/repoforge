@@ -7,6 +7,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from .errors import WorkspaceError
@@ -62,6 +63,73 @@ class VerificationReceipt:
     execution_evidence: dict[str, Any] = field(default_factory=dict)
 
 
+class WorkspaceKind(str, Enum):
+    """Who created the worktree, and who owns its branch and filesystem lifecycle.
+
+    A discriminator, not a bundle of independently-settable flags: lifecycle ownership,
+    naming-convention enforcement, and branch/worktree deletability are all *consequences*
+    of which kind a workspace is, so they are exposed as properties derived from the kind
+    rather than as separate persisted fields that could drift out of sync with it.
+    """
+
+    #: RepoForge cut a fresh branch and created the worktree. Owns both.
+    MANAGED_WORKTREE = "managed_worktree"
+    #: RepoForge created the worktree, but the branch already existed and belongs to the
+    #: operator. Owns the worktree, not the branch.
+    ADOPTED_WORKTREE = "adopted_worktree"
+    #: RepoForge did not create the worktree at all -- it operates on a checkout the
+    #: operator already has. Owns neither the branch nor the worktree/filesystem lifecycle.
+    ATTACHED_SHARED = "attached_shared"
+
+    @property
+    def owns_branch_lifecycle(self) -> bool:
+        """Whether removing this workspace may ever delete its branch."""
+        return self is WorkspaceKind.MANAGED_WORKTREE
+
+    @property
+    def owns_worktree_lifecycle(self) -> bool:
+        """Whether removing this workspace may touch the worktree/filesystem at all."""
+        return self is not WorkspaceKind.ATTACHED_SHARED
+
+    @property
+    def naming_convention_enforced(self) -> bool:
+        """Whether the branch must match the repository's ai/* prefix and base allowlist."""
+        return self is WorkspaceKind.MANAGED_WORKTREE
+
+    @property
+    def consistency_mode(self) -> ConsistencyMode:
+        """Whether exact-state preconditions gate mutation, or become observations (#374).
+
+        managed_worktree and adopted_worktree stay EXACT: RepoForge is the only actor
+        expected to touch that specific worktree directory, so a fingerprint or HEAD
+        mismatch really does mean "something is wrong, stop." attached_shared is SHARED
+        by definition -- the whole point of attaching is that the operator's own editor,
+        or anything else, may be touching the same files at the same time, so a mismatch
+        there is an expected observation, not evidence of a problem.
+
+        OPTIMISTIC exists as a domain concept for a future kind or explicit override; no
+        current WorkspaceKind defaults to it.
+        """
+        if self is WorkspaceKind.ATTACHED_SHARED:
+            return ConsistencyMode.SHARED
+        return ConsistencyMode.EXACT
+
+
+class ConsistencyMode(str, Enum):
+    #: Exact-state preconditions (HEAD, workspace fingerprint) must match or the call is
+    #: refused outright. Unchanged behavior for managed and adopted workspaces (#374 AC).
+    EXACT = "exact"
+    #: Reserved for a future kind or explicit override -- not yet the default for any
+    #: WorkspaceKind. Intended granularity: relax the whole-tree fingerprint but keep HEAD
+    #: exact, or vice versa, rather than SHARED's "both become observations."
+    OPTIMISTIC = "optimistic"
+    #: Exact-state preconditions become recorded observations rather than mandatory
+    #: preconditions: a mismatch is reported, not refused. Per-target guards (each
+    #: mutation operation's own expected_sha256) are untouched by this and still fail
+    #: closed on a genuine collision -- this only relaxes the whole-tree gate.
+    SHARED = "shared"
+
+
 @dataclass
 class WorkspaceRecord:
     workspace_id: str
@@ -73,6 +141,19 @@ class WorkspaceRecord:
     created_at: str
     last_verification: VerificationReceipt | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    kind: WorkspaceKind = WorkspaceKind.MANAGED_WORKTREE
+
+    def __post_init__(self) -> None:
+        # A record loaded from disk unpacks the raw JSON string directly into this field
+        # (see JsonWorkspaceStore.load); coerce and validate here so a registry entry
+        # predating this field, or one carrying a corrupt value, fails closed instead of
+        # silently comparing unequal to every WorkspaceKind member.
+        try:
+            self.kind = WorkspaceKind(self.kind)
+        except ValueError as exc:
+            raise WorkspaceError(
+                f"Workspace registry record has an invalid kind: {self.kind!r}"
+            ) from exc
 
 
 @dataclass(frozen=True, slots=True)

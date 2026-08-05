@@ -79,11 +79,22 @@ make build
 make check
 ```
 
-The complete local gate is:
+`make test` above is the default local gate for an ordinary change, not the full suite: it runs
+`scripts/select_affected_tests.py --run`, which reads the current diff against `main` (or an
+explicit `--base`/`--path`), maps changed files to their exact covering tests via
+`tests/coverage-map.json` and `tests/test-groups.toml`, and runs only those — fail-closed: any
+changed path with no coverage/group mapping escalates to the full suite rather than silently
+under-testing. Do not treat that escalation as routine; if it fires for a path that should
+have a narrow mapping, fix the mapping (register the path in the owning group's
+`source_globs`, exact-listed if it is a `src/repoforge/**.py` module the coverage map cannot
+attribute, e.g. a generated/data-only file) instead of accepting a full run as the new normal.
 
-```sh
-./scripts/test-all.sh
-```
+`./scripts/test-all.sh` runs the complete, unselective suite. Reserve it for: verifying a
+release candidate, diagnosing an order-dependent or cross-module failure the selector's
+narrower run cannot reproduce, or when the user explicitly asks for a full run. Do not run it
+by default for routine implementation changes — CI's own push-to-`main` gate already runs the
+full suite with coverage, so a routine PR-shaped change does not need a local full run to
+match what CI will authoritatively verify.
 
 Before a live Plugin session:
 
@@ -174,8 +185,12 @@ For ordinary implementation changes:
 
 ```sh
 uv run pytest tests/path/to/relevant_test.py
-./scripts/test-all.sh
+make test
 ```
+
+Run the full `./scripts/test-all.sh` only per the "Golden commands" guidance above (release
+candidates, reproducing an order-dependent failure, or an explicit request) — not as the
+routine second step here.
 
 For safety-policy, state, runner, Git, or write-tool changes, include:
 
@@ -325,7 +340,11 @@ Before presenting a RepoForge change as complete:
 
 - the requested behavior is implemented without broadening permissions unintentionally;
 - relevant positive, negative, failure-path, and stale-state tests exist;
-- `./scripts/test-all.sh` passes;
+- `make test` (the affected-test selector) passes without escalating to the full suite for an
+  unexplained reason — an escalation for a path that should have a narrow mapping means the
+  mapping needs fixing, not that a full run is now the baseline; `./scripts/test-all.sh` only
+  when the change is release-scoped or the selector's own escalation says the full suite is
+  required;
 - MCP tool count, schemas, annotations, and documentation agree;
 - golden prompts were rerun when metadata changed;
 - the Work Frontier config remains valid when relevant;

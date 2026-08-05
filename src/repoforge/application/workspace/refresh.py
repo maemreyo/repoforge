@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from ...domain.errors import ErrorCode, WorkspaceError
-from ...domain.policy import validate_branch
+from ...domain.policy import validate_workspace_branch
 from ...domain.workspace import (
     WorkspaceRefreshBinding,
     invalidate_workspace_refresh_receipts,
@@ -69,7 +69,7 @@ class WorkspaceRefresher:
             with self.ctx.locks.lock(command.workspace_id):
                 stored = self.ctx.store.load(command.workspace_id)
                 record = replace(stored, metadata=dict(stored.metadata))
-                validate_branch(record.branch, repo)
+                validate_workspace_branch(record.kind, record.branch, repo)
                 if record.branch == record.base or record.branch in repo.protected_branches:
                     raise WorkspaceError("Protected or base branches cannot be refreshed")
                 old_head, old_fingerprint = require_refresh_snapshot(

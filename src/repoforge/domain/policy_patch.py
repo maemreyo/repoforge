@@ -393,6 +393,7 @@ class RepositoryPolicyPatch:
     formatters: tuple[tuple[str, dict[str, Any]], ...] = ()
     execution_mode: str | None = None
     adhoc_runners: tuple[str, ...] | None = None
+    adhoc_shell_runners: tuple[str, ...] | None = None
     adhoc_timeout_seconds: int | None = None
     remove_profiles: tuple[str, ...] = ()
     remove_diagnostics: tuple[str, ...] = ()
@@ -407,6 +408,16 @@ class RepositoryPolicyPatch:
             except ConfigError as exc:
                 raise PolicyPatchError(str(exc)) from exc
             object.__setattr__(self, "adhoc_runners", runners)
+        if self.adhoc_shell_runners is not None:
+            try:
+                shell_runners = validate_adhoc_runners(
+                    tuple(self.adhoc_shell_runners),
+                    "policy_patch",
+                    field_name="adhoc_shell_runners",
+                )
+            except ConfigError as exc:
+                raise PolicyPatchError(str(exc)) from exc
+            object.__setattr__(self, "adhoc_shell_runners", shell_runners)
         if self.adhoc_timeout_seconds is not None and (
             not isinstance(self.adhoc_timeout_seconds, int)
             or isinstance(self.adhoc_timeout_seconds, bool)
@@ -475,6 +486,7 @@ class RepositoryPolicyPatch:
             or self.formatters
             or self.execution_mode is not None
             or self.adhoc_runners is not None
+            or self.adhoc_shell_runners is not None
             or self.adhoc_timeout_seconds is not None
             or self.remove_profiles
             or self.remove_diagnostics
@@ -516,6 +528,11 @@ class RepositoryPolicyPatch:
             adhoc_runners=(
                 other.adhoc_runners if other.adhoc_runners is not None else self.adhoc_runners
             ),
+            adhoc_shell_runners=(
+                other.adhoc_shell_runners
+                if other.adhoc_shell_runners is not None
+                else self.adhoc_shell_runners
+            ),
             adhoc_timeout_seconds=(
                 other.adhoc_timeout_seconds
                 if other.adhoc_timeout_seconds is not None
@@ -532,6 +549,8 @@ class RepositoryPolicyPatch:
             table["execution_mode"] = self.execution_mode
         if self.adhoc_runners is not None:
             table["adhoc_runners"] = list(self.adhoc_runners)
+        if self.adhoc_shell_runners is not None:
+            table["adhoc_shell_runners"] = list(self.adhoc_shell_runners)
         if self.adhoc_timeout_seconds is not None:
             table["adhoc_timeout_seconds"] = self.adhoc_timeout_seconds
         if self.remove_profiles:
@@ -562,6 +581,7 @@ class RepositoryPolicyPatch:
                 "formatters",
                 "execution_mode",
                 "adhoc_runners",
+                "adhoc_shell_runners",
                 "adhoc_timeout_seconds",
                 "remove_profiles",
                 "remove_diagnostics",
@@ -590,6 +610,11 @@ class RepositoryPolicyPatch:
             adhoc_runners=(
                 tuple(raw["adhoc_runners"])
                 if isinstance(raw.get("adhoc_runners"), (list, tuple))
+                else None
+            ),
+            adhoc_shell_runners=(
+                tuple(raw["adhoc_shell_runners"])
+                if isinstance(raw.get("adhoc_shell_runners"), (list, tuple))
                 else None
             ),
             adhoc_timeout_seconds=raw.get("adhoc_timeout_seconds"),

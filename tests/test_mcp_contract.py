@@ -30,7 +30,7 @@ async def test_release_contract_is_big_bang_v2_with_one_grace_tool() -> None:
     assert contract["contract_version"] == 2
     assert mcp["identity"] == "forge_v2"
     assert mcp["retired_identity"] == "forge_v1"
-    assert mcp["tool_count"] == 28
+    assert mcp["tool_count"] == 29
     assert mcp["tool_names"] == list(V2_TOOL_NAMES)
     assert set(mcp["tool_hashes"]) == set(V2_TOOL_NAMES)
     assert "tools" not in mcp
@@ -54,8 +54,8 @@ async def test_mcp_protocol_contract_and_annotations(
     tools = await server.list_tools()
 
     assert tuple(tool.name for tool in tools) == V2_TOOL_NAMES
-    assert len(tools) == 28
-    assert len({tool.name for tool in tools}) == 28
+    assert len(tools) == 29
+    assert len({tool.name for tool in tools}) == 29
     assert {"repo_status", "workspace_run_profile", "repo_policy_apply"}.isdisjoint(
         tool.name for tool in tools
     )

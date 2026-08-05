@@ -600,7 +600,17 @@ def _iteration_cache_entry(tmp_path: Path) -> tuple[object, object]:
 #: other two kinds own are inapplicable rather than missing.
 _WORK_REQUEST_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
     "profile": frozenset({"profile_name"}),
-    "adhoc": frozenset({"argv", "working_directory", "mutability", "stdin_text"}),
+    "adhoc": frozenset(
+        {
+            "argv",
+            "script",
+            "shell",
+            "argv_sequence",
+            "working_directory",
+            "mutability",
+            "stdin_text",
+        }
+    ),
     "diagnostic": frozenset(
         {
             "diagnostic_id",
@@ -616,10 +626,19 @@ _WORK_REQUEST_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
 }
 
 
+#: script/shell/argv_sequence are mutually exclusive with argv (enforced by
+#: OperationWorkRequest.__post_init__, review finding F-005), so the "adhoc" fixture
+#: below populates only argv and cannot also populate these three -- they are proven to
+#: round-trip instead by test_operation_work_queue.py's dedicated
+#: test_adhoc_work_request_round_trips_script_and_argv_sequence_forms.
+_ADHOC_MUTUALLY_EXCLUSIVE_FORMS = frozenset({"script", "shell", "argv_sequence"})
+
+
 def _work_request_inapplicable(kind: str) -> frozenset[str]:
     owned = _WORK_REQUEST_FIELDS_BY_KIND[kind]
     others = frozenset().union(*_WORK_REQUEST_FIELDS_BY_KIND.values()) - owned
-    return frozenset(f"OperationWorkRequest.{name}" for name in others)
+    exempt = _ADHOC_MUTUALLY_EXCLUSIVE_FORMS if kind == "adhoc" else frozenset()
+    return frozenset(f"OperationWorkRequest.{name}" for name in others | exempt)
 
 
 def _operation_work_item(kind: str) -> Callable[[Path], tuple[object, object]]:

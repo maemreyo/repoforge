@@ -95,6 +95,41 @@ def test_run_preserves_complete_failed_selectors_before_output_truncation(
     assert "tests/test_beta.py::TestCase::test_two[param]" in body
 
 
+def test_run_persists_output_artifact_for_oversized_successful_output(
+    tmp_path: Path,
+) -> None:
+    """Review finding (#377): output-artifact persistence used to be failure-only, so a
+    successful command's oversized output was truncated with no way to retrieve the
+    dropped middle. Generalized to persist whenever output is truncated, regardless of
+    exit code -- same store, same reference shape, as the pre-existing failure path."""
+    executor = _executor(tmp_path)
+    script = tmp_path / "large_success.py"
+    script.write_text("print('x' * 5000)\n", encoding="utf-8")
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, output_limit=100)
+
+    assert result.returncode == 0
+    assert result.stdout_truncated is True
+    assert result.output_artifact_status == "available"
+    assert result.output_artifact_reference is not None
+    prefix = "failure-output:"
+    assert result.output_artifact_reference.startswith(prefix)
+    digest = result.output_artifact_reference.removeprefix(prefix)
+    artifact = tmp_path / "s" / "failure-output-artifacts" / f"{digest}.blob"
+    assert "x" * 5000 in artifact.read_text(encoding="utf-8")
+
+
+def test_run_does_not_persist_artifact_when_output_fits_inline(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+
+    result = executor.run(["echo", "small"], cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout_truncated is False
+    assert result.output_artifact_reference is None
+    assert result.output_artifact_status == "not_applicable"
+
+
 def test_command_error_carries_complete_failed_selectors_and_artifact_reference(
     tmp_path: Path,
 ) -> None:

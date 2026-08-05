@@ -9,7 +9,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from ...config import ProfileConfig, RepositoryConfig, ServerConfig
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
@@ -27,6 +27,7 @@ from ...ports.git import (
     GitMergeResult,
     GitSearchLocation,
     GitSnapshotBlob,
+    GitWorktreeEntry,
     ResolvedRepositoryRef,
 )
 from .diff_summary import parse_diff_summary
@@ -1817,6 +1818,75 @@ class GitCliRepository:
         if delete_branch:
             self._executor.run(["git", "branch", "-D", branch], cwd=repo.path)
         return delete_branch
+
+    def list_worktrees(self, repo_path: Path) -> tuple[GitWorktreeEntry, ...]:
+        """Enumerate every worktree git already tracks for this repository's own git dir.
+
+        Bounded to what ``git worktree list --porcelain`` reports -- never a
+        model-supplied host path (#372's discovery boundary).
+
+        ``check`` defaults to True here deliberately (review finding): this command does
+        not fail for a repository with zero worktrees -- it still exits 0 and reports just
+        the primary one. A non-zero exit is a genuine git failure (corrupt worktree
+        metadata, a permission error, a locked repository), not "no worktrees," and must
+        raise a typed CommandError with a bounded stderr excerpt instead of being reported
+        as an empty list indistinguishable from a real absence of matches.
+        """
+        result = self._executor.run(["git", "worktree", "list", "--porcelain"], cwd=repo_path)
+        entries: list[GitWorktreeEntry] = []
+        current: dict[str, object] = {}
+
+        def flush() -> None:
+            if "path" in current:
+                entries.append(
+                    GitWorktreeEntry(
+                        path=str(current["path"]),
+                        head_sha=cast(str | None, current.get("head_sha")),
+                        branch=cast(str | None, current.get("branch")),
+                        detached=bool(current.get("detached", False)),
+                        locked=bool(current.get("locked", False)),
+                        prunable=bool(current.get("prunable", False)),
+                    )
+                )
+            current.clear()
+
+        for line in result.stdout.splitlines():
+            if not line:
+                flush()
+            elif line.startswith("worktree "):
+                flush()
+                current["path"] = line.removeprefix("worktree ")
+            elif line.startswith("HEAD "):
+                current["head_sha"] = line.removeprefix("HEAD ")
+            elif line.startswith("branch refs/heads/"):
+                current["branch"] = line.removeprefix("branch refs/heads/")
+            elif line.startswith("branch "):
+                # A branch ref outside refs/heads/ (unexpected but not our call to hide).
+                current["branch"] = line.removeprefix("branch ")
+            elif line == "detached":
+                current["detached"] = True
+            elif line == "locked" or line.startswith("locked "):
+                current["locked"] = True
+            elif line == "prunable" or line.startswith("prunable "):
+                current["prunable"] = True
+        flush()
+        return tuple(entries)
+
+    def root_commit(self, path: Path) -> str:
+        """The repository's first commit -- a stable identity check (#373): two working
+        trees of genuinely the same repository share a root commit; unrelated
+        repositories, even ones an operator points a trusted-checkout alias at by
+        mistake, do not."""
+        result = self._executor.run(
+            ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=path, output_limit=4_096
+        )
+        roots = [line for line in result.stdout.splitlines() if line]
+        if len(roots) != 1:
+            raise RepoForgeError(
+                f"Cannot establish a single repository root commit at {path}",
+                code=ErrorCode.WORKTREE_REGISTRATION_STALE,
+            )
+        return roots[0]
 
     def local_branch_exists(self, repo: RepositoryConfig, branch: str) -> bool:
         result = self._executor.run(

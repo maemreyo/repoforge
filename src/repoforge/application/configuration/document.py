@@ -163,6 +163,8 @@ def apply_policy_patch(
         repo["execution_mode"] = patch.execution_mode
     if patch.adhoc_runners is not None:
         repo["adhoc_runners"] = list(patch.adhoc_runners)
+    if patch.adhoc_shell_runners is not None:
+        repo["adhoc_shell_runners"] = list(patch.adhoc_shell_runners)
     if patch.adhoc_timeout_seconds is not None:
         repo["adhoc_timeout_seconds"] = patch.adhoc_timeout_seconds
     profiles = repo.setdefault("profiles", {})
@@ -425,6 +427,7 @@ def render_resolved(
                     "resource_budget",
                     "ticket_graph",
                     "risk",
+                    "trusted_external_checkouts",
                 }
             ):
                 value = raw[key]
@@ -451,6 +454,13 @@ def render_resolved(
                     value = risk[key]
                     if isinstance(value, (str, int, list)) and not isinstance(value, bool):
                         lines.append(f"{key} = {_toml(value)}")
+            trusted_external_checkouts = raw.get("trusted_external_checkouts")
+            if isinstance(trusted_external_checkouts, dict):
+                lines.extend(["", f"[repositories.{repo_id}.trusted_external_checkouts]"])
+                for alias in sorted(trusted_external_checkouts):
+                    value = trusted_external_checkouts[alias]
+                    if isinstance(value, str):
+                        lines.append(f"{alias} = {_toml(value)}")
             profiles = raw.get("profiles", {})
             if isinstance(profiles, dict):
                 for name in sorted(profiles):

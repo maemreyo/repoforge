@@ -100,6 +100,7 @@ from .workspace.edit import (
     WorkspaceEditCommand,
     WorkspaceEditor,
 )
+from .workspace.exec import WorkspaceExecCommand, WorkspaceExecutor
 from .workspace.execute_plan import (
     WorkspaceExecutePlanCommand,
     WorkspacePlanExecutor,
@@ -470,6 +471,12 @@ class CodingService:
             snapshot=self._snapshot,
             profile=self._profile,
             diagnostic=self._diagnostic,
+            adhoc=self._adhoc,
+            admission=self._work_admission,
+            operations=self.operations,
+        )
+        self._exec = WorkspaceExecutor(
+            ctx,
             adhoc=self._adhoc,
             admission=self._work_admission,
             operations=self.operations,
@@ -1016,11 +1023,20 @@ class CodingService:
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
         adopt_branch: str | None = None,
+        attach_branch: str | None = None,
+        attach_checkout_alias: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._create.execute(
                 WorkspaceCreateCommand(
-                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                    repo_id,
+                    task_slug,
+                    base,
+                    idempotency_key,
+                    issue_ids,
+                    adopt_branch,
+                    attach_branch,
+                    attach_checkout_alias,
                 )
             )
         )
@@ -1033,6 +1049,8 @@ class CodingService:
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
         adopt_branch: str | None = None,
+        attach_branch: str | None = None,
+        attach_checkout_alias: str | None = None,
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
@@ -1046,6 +1064,8 @@ class CodingService:
                     idempotency_key,
                     issue_ids,
                     adopt_branch,
+                    attach_branch,
+                    attach_checkout_alias,
                     selector,
                 )
             )
@@ -1283,6 +1303,7 @@ class CodingService:
         workspace_id: str,
         operations: list[WorkspaceMutation],
         expected_workspace_fingerprint: str,
+        expected_head_sha: str | None = None,
         dry_run: bool = False,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -1292,6 +1313,7 @@ class CodingService:
                     workspace_id,
                     tuple(operations),
                     expected_workspace_fingerprint,
+                    expected_head_sha,
                     dry_run,
                     idempotency_key,
                 )
@@ -1651,6 +1673,38 @@ class CodingService:
                 outcome="running",
                 head_sha=binding.head_sha if binding is not None else "",
                 workspace_fingerprint=binding.workspace_fingerprint if binding is not None else "",
+            )
+        )
+
+    def workspace_exec(
+        self,
+        workspace_id: str,
+        argv: tuple[str, ...] | None = None,
+        script: str | None = None,
+        shell: str | None = None,
+        argv_sequence: tuple[tuple[str, ...], ...] | None = None,
+        working_directory: str | None = None,
+        stdin_text: str | None = None,
+        expected_fingerprint: str | None = None,
+        expected_head_sha: str | None = None,
+        mutability: str = "read_only",
+        background: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._exec.execute(
+                WorkspaceExecCommand(
+                    workspace_id=workspace_id,
+                    argv=argv,
+                    script=script,
+                    shell=shell,
+                    argv_sequence=argv_sequence,
+                    working_directory=working_directory,
+                    stdin_text=stdin_text,
+                    expected_fingerprint=expected_fingerprint,
+                    expected_head_sha=expected_head_sha,
+                    mutability=mutability,
+                    background=background,
+                )
             )
         )
 

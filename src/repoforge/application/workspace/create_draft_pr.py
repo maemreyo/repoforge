@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import ErrorCode, WorkspaceError
-from ...domain.policy import validate_branch
+from ...domain.policy import validate_workspace_branch
 from ...domain.publishing import render_pr_body, validate_pr_create
 from ...ports.workspace_publication import WorkspaceDraftPrPublication
 from ..context import ApplicationContext
@@ -43,7 +43,7 @@ class DraftPullRequestCreator:
             fresh = self.ctx.store.load(c.workspace_id)
             self.ctx.git.changed_paths(path, repo)
             self.ctx.git.ensure_clean(path, context="creating a pull request")
-            validate_branch(fresh.branch, repo)
+            validate_workspace_branch(fresh.kind, fresh.branch, repo)
             if self.ctx.git.upstream_name(path) is None:
                 raise WorkspaceError("Branch has no upstream; call workspace_push first")
             head = self.ctx.git.head_sha(path)

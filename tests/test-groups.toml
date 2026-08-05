@@ -13,7 +13,7 @@
 # sequential bottleneck; see the test-fast lane-split commit history).
 
 [groups.contracts]
-description = "MCP schemas, fixed 28-tool roster, serialization, egress, release contracts."
+description = "MCP schemas, fixed 29-tool roster, serialization, egress, release contracts."
 # parallel = true: a few of these drive real MCP sessions / git through
 # SubprocessCommandExecutor, but they are tmp_path-isolated, so xdist-safe.
 # Their earlier 60s-timeout flakiness under contention was a timeout-layer
@@ -28,6 +28,7 @@ source_globs = [
   "src/repoforge/domain/tool_contract.py",
   "src/repoforge/domain/versioning.py",
   "src/repoforge/application/workspace/family_v2.py",
+  "src/repoforge/contracts/generated_contract_identity.py",
   "docs/contracts/**",
 ]
 test_files = [
@@ -93,8 +94,10 @@ source_globs = [
   "src/repoforge/domain/patches.py",
   "src/repoforge/domain/workspace.py",
   "src/repoforge/domain/workspace_removal.py",
+  "docs/architecture/autonomy-policy-model.md",
   "src/repoforge/ports/commit_identity.py",
   "src/repoforge/ports/command.py",
+  "src/repoforge/ports/git.py",
   "src/repoforge/testing/fakes.py",
   "src/repoforge/adapters/persistence/json_hygiene_cache.py",
   "src/repoforge/adapters/persistence/json_workspace_store.py",
@@ -105,6 +108,7 @@ source_globs = [
   "src/repoforge/adapters/locking/**",
 ]
 test_files = [
+  "tests/test_branch_lifecycle_guards.py",
   "tests/test_commit_identity_governance.py",
   "tests/test_github_read_cache.py",
   "tests/test_journaled_filesystem_transaction.py",
@@ -119,8 +123,12 @@ test_files = [
   "tests/test_workspace_edit.py",
   "tests/test_workspace_hygiene.py",
   "tests/test_workspace_adopt_branch.py",
+  "tests/test_workspace_attach.py",
+  "tests/test_workspace_kind.py",
   "tests/test_workspace_mutate.py",
   "tests/test_workspace_refresh.py",
+  "tests/test_workspace_shared_consistency.py",
+  "tests/test_workspace_trusted_checkout.py",
 ]
 
 [groups.operations]
@@ -308,6 +316,9 @@ description = "repo_policy, config_inspect, generation rendering, approval, sour
 parallel = true
 source_globs = [
   "README.md",
+  "AGENTS.md",
+  ".claude/CLAUDE.md",
+  "scripts/verify-wheel-install.sh",
   "config.example.toml",
   "docs/development/**",
   "docs/testing/**",
@@ -374,6 +385,7 @@ test_files = [
   "tests/test_source_integrity_policy.py",
   "tests/test_verification_detection.py",
   "tests/test_workspace_adhoc.py",
+  "tests/test_workspace_exec.py",
   "tests/test_workspace_risk.py",
 ]
 
@@ -484,8 +496,10 @@ source_globs = [
   "Makefile",
   ".github/workflows/**",
   "src/repoforge/application/diagnostics/**",
+  "src/repoforge/application/operations/durable_wait.py",
   "src/repoforge/application/workspace/diagnostic_parser.py",
   "src/repoforge/application/workspace/diagnostic_selector.py",
+  "src/repoforge/application/workspace/exec.py",
   "src/repoforge/application/workspace/format_changed.py",
   "src/repoforge/application/workspace/run_adhoc.py",
   "src/repoforge/application/workspace/run_diagnostic.py",
@@ -681,6 +695,7 @@ test_files = [
   "tests/test_agent_surface_friction.py",
   "tests/test_audit_cursor.py",
   "tests/test_background_run_profile.py",
+  "tests/test_branch_lifecycle_guards.py",
   "tests/test_ci_failure_evidence.py",
   "tests/test_expensive_profile_guards.py",
   "tests/test_execution_worker_reconciler.py",
@@ -740,13 +755,18 @@ test_files = [
   "tests/test_workflow_recording.py",
   "tests/test_workspace_adhoc.py",
   "tests/test_workspace_adopt_branch.py",
+  "tests/test_workspace_exec.py",
   "tests/test_workspace_assessment.py",
+  "tests/test_workspace_attach.py",
   "tests/test_workspace_diagnostics.py",
   "tests/test_workspace_diff_budget.py",
   "tests/test_workspace_edit.py",
   "tests/test_workspace_hygiene.py",
   "tests/test_workspace_issue_links.py",
+  "tests/test_workspace_kind.py",
   "tests/test_workspace_mutate.py",
   "tests/test_workspace_refresh.py",
+  "tests/test_workspace_shared_consistency.py",
   "tests/test_workspace_stale_cleanup.py",
+  "tests/test_workspace_trusted_checkout.py",
 ]

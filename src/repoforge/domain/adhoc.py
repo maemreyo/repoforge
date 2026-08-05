@@ -23,6 +23,12 @@ MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
 # than an argv element -- a patch fed to `git apply -` is routinely longer than 512
 # characters. It is still bounded: the text is persisted with the durable work request.
 MAX_ADHOC_STDIN_LENGTH = 64_000
+# A reviewed shell-script body (#377) is content like stdin, not an argv element -- same
+# bound, same rationale.
+MAX_ADHOC_SCRIPT_LENGTH = 64_000
+# Bounded ordered argv-command sequence (#443): each element is validated exactly like a
+# single ad-hoc argv; this only bounds how many can run in one call.
+MAX_ADHOC_SEQUENCE_LENGTH = 8
 
 
 class ExecutionMode(str, Enum):
@@ -229,14 +235,21 @@ def classify_adhoc_command(argv: tuple[str, ...]) -> CommandClass | None:
     return _assert_git_command_allowed(subcommand, rest)
 
 
-def validate_adhoc_runners(runners: tuple[str, ...], repo_id: str) -> tuple[str, ...]:
-    """Validate a repository's ``adhoc_runners`` allowlist at config-load time."""
+def validate_adhoc_runners(
+    runners: tuple[str, ...], repo_id: str, *, field_name: str = "adhoc_runners"
+) -> tuple[str, ...]:
+    """Validate a repository's runner allowlist at config-load time.
+
+    Shared by ``adhoc_runners`` (argv form) and ``adhoc_shell_runners`` (#377's
+    reviewed shell-script form) -- both are bare-basename allowlists with the same
+    shape and limits; ``field_name`` only changes which field an error names.
+    """
     if len(runners) > MAX_ADHOC_RUNNERS:
         raise ConfigError(
-            f"repositories.{repo_id}.adhoc_runners must not exceed {MAX_ADHOC_RUNNERS} entries"
+            f"repositories.{repo_id}.{field_name} must not exceed {MAX_ADHOC_RUNNERS} entries"
         )
     if len(set(runners)) != len(runners):
-        raise ConfigError(f"repositories.{repo_id}.adhoc_runners contains duplicates")
+        raise ConfigError(f"repositories.{repo_id}.{field_name} contains duplicates")
     for runner in runners:
         if (
             not isinstance(runner, str)
@@ -245,7 +258,7 @@ def validate_adhoc_runners(runners: tuple[str, ...], repo_id: str) -> tuple[str,
             or "\\" in runner
         ):
             raise ConfigError(
-                f"repositories.{repo_id}.adhoc_runners contains an invalid runner basename: {runner!r}"
+                f"repositories.{repo_id}.{field_name} contains an invalid runner basename: {runner!r}"
             )
     return runners
 
@@ -284,6 +297,117 @@ def validate_adhoc_stdin(text: str | None) -> str | None:
             ),
         )
     return text
+
+
+def validate_adhoc_shell_runner(shell: str, runners: tuple[str, ...]) -> str:
+    """Validate the requested interpreter for the reviewed shell-script form (#377).
+
+    Deliberately a separate allowlist from ``adhoc_runners``, empty by default: enabling
+    this is the same trust decision as allowlisting a shell interpreter in
+    ``adhoc_runners`` already is. ``classify_adhoc_command`` only content-inspects when
+    argv[0] == "git" literally, so a script body was never structurally protected from
+    reaching git either way -- this does not remove a safety guarantee that existed.
+    """
+    if not runners:
+        raise _adhoc_error(
+            "This repository has no adhoc_shell_runners configured; the reviewed "
+            "shell-script execution form is disabled",
+            ErrorCode.ADHOC_RUNNER_NOT_ALLOWED,
+            safe_next_action=(
+                "Ask the repository owner to set repositories.<repo_id>.adhoc_shell_runners "
+                "(e.g. ['sh', 'bash']), or use the argv form instead."
+            ),
+        )
+    if (
+        not isinstance(shell, str)
+        or _RUNNER_BASENAME.fullmatch(shell) is None
+        or "/" in shell
+        or "\\" in shell
+    ):
+        raise _adhoc_error(
+            f"Ad-hoc shell must be a bare executable name, not a path: {shell!r}",
+            ErrorCode.ADHOC_RUNNER_NOT_ALLOWED,
+            safe_next_action="Pass a bare interpreter basename (e.g. 'sh', 'bash') as shell.",
+        )
+    if shell not in runners:
+        raise _adhoc_error(
+            f"Ad-hoc shell {shell!r} is not in this repository's adhoc_shell_runners allowlist",
+            ErrorCode.ADHOC_RUNNER_NOT_ALLOWED,
+            safe_next_action=(
+                "Use one of the repository's configured adhoc_shell_runners, or ask the "
+                "repository owner to add this interpreter to "
+                "repositories.<repo_id>.adhoc_shell_runners."
+            ),
+        )
+    return shell
+
+
+def validate_adhoc_script(script: str) -> str:
+    """Validate one reviewed shell-script body (#377).
+
+    Bounded like stdin content, not like an argv element: newlines are the whole point.
+    Unlike argv, this is never content-inspected for git forms -- see
+    :func:`validate_adhoc_shell_runner`.
+    """
+    if not isinstance(script, str):
+        raise _adhoc_error(
+            f"Ad-hoc script must be a string, got {type(script).__name__}",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action="Pass script as text.",
+        )
+    if not script.strip():
+        raise _adhoc_error(
+            "Ad-hoc script is empty",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action="Provide a non-empty script body, or use the argv form instead.",
+        )
+    if len(script) > MAX_ADHOC_SCRIPT_LENGTH:
+        raise _adhoc_error(
+            f"Ad-hoc script is {len(script)} characters; the limit is {MAX_ADHOC_SCRIPT_LENGTH}",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action=(
+                "Write a script this large to a file in the workspace and run the "
+                f"interpreter against that path instead; script carries at most "
+                f"{MAX_ADHOC_SCRIPT_LENGTH} characters."
+            ),
+        )
+    if "\x00" in script:
+        raise _adhoc_error(
+            "Ad-hoc script contains a NUL byte",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action="Remove the NUL byte; a shell script cannot contain one.",
+        )
+    return script
+
+
+def validate_adhoc_sequence(
+    sequence: tuple[tuple[str, ...], ...], runners: tuple[str, ...]
+) -> tuple[tuple[str, ...], ...]:
+    """Validate a bounded ordered argv-command sequence (#443).
+
+    Every element is validated exactly like a single ad-hoc argv (same allowlist, same
+    per-element shape rules) -- this only adds the sequence-length bound. Validating all
+    elements up front, before any of them run, means a sequence either runs entirely
+    reviewed or not at all; it never starts on element 1 only to discover element 3 was
+    invalid.
+    """
+    if not isinstance(sequence, (list, tuple)) or not sequence:
+        raise _adhoc_error(
+            "Ad-hoc argv_sequence must be a non-empty list of argv commands",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action="Supply at least one argv command, or use the single-command argv form.",
+        )
+    if len(sequence) > MAX_ADHOC_SEQUENCE_LENGTH:
+        raise _adhoc_error(
+            f"Ad-hoc argv_sequence has {len(sequence)} commands; the limit is "
+            f"{MAX_ADHOC_SEQUENCE_LENGTH}",
+            ErrorCode.ADHOC_ARGV_INVALID,
+            safe_next_action=(
+                f"Split this into multiple workspace_exec calls; a sequence carries at most "
+                f"{MAX_ADHOC_SEQUENCE_LENGTH} commands."
+            ),
+        )
+    return tuple(validate_adhoc_argv(tuple(element), runners) for element in sequence)
 
 
 def _adhoc_error(message: str, code: ErrorCode, *, safe_next_action: str) -> RepoForgeError:
@@ -385,11 +509,16 @@ __all__ = [
     "MAX_ADHOC_ARGV_ELEMENTS",
     "MAX_ADHOC_ARGV_ELEMENT_LENGTH",
     "MAX_ADHOC_RUNNERS",
+    "MAX_ADHOC_SCRIPT_LENGTH",
+    "MAX_ADHOC_SEQUENCE_LENGTH",
     "MAX_ADHOC_STDIN_LENGTH",
     "CommandClass",
     "ExecutionMode",
     "classify_adhoc_command",
     "validate_adhoc_argv",
     "validate_adhoc_runners",
+    "validate_adhoc_script",
+    "validate_adhoc_sequence",
+    "validate_adhoc_shell_runner",
     "validate_adhoc_stdin",
 ]

@@ -6,9 +6,11 @@ import fnmatch
 import re
 import shlex
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from ..config import RepositoryConfig
-from .errors import SecurityError
+from .errors import SecurityError, WorkspaceError
+from .workspace import WorkspaceKind
 
 _SLUG_RE = re.compile("[^a-z0-9]+")
 _SAFE_BRANCH_RE = re.compile("^[A-Za-z0-9._/-]+$")
@@ -51,6 +53,22 @@ def validate_adopted_branch(branch: str, repo: RepositoryConfig) -> None:
         or ("//" in branch)
     ):
         raise SecurityError(f"Unsafe branch name: {branch!r}")
+
+
+def validate_workspace_branch(kind: WorkspaceKind, branch: str, repo: RepositoryConfig) -> None:
+    """Validate a branch for whichever kind of workspace it belongs to (#375).
+
+    The single dispatch every call site must use instead of choosing between
+    ``validate_branch``/``validate_adopted_branch`` itself: only ``managed_worktree``
+    enforces the ai/* naming convention (#371's ``naming_convention_enforced``).
+    ``adopted_worktree`` and ``attached_shared`` both validate as operator-named branches --
+    the protected-branch and unsafe-name checks stay in every case; only the convention
+    does not apply to a branch RepoForge did not name.
+    """
+    if kind.naming_convention_enforced:
+        validate_branch(branch, repo)
+    else:
+        validate_adopted_branch(branch, repo)
 
 
 def normalize_relative_path(value: str) -> str:
@@ -138,3 +156,59 @@ def validate_patch(patch: str, repo: RepositoryConfig, *, max_chars: int) -> tup
     for path in paths:
         assert_path_allowed(path, repo)
     return paths
+
+
+def resolve_trusted_checkout(repo: RepositoryConfig, alias: str) -> Path:
+    """Look up an operator-registered external checkout alias (#373).
+
+    Never accepts a path from the caller -- only an alias the operator already put in
+    static config. This is a lookup only: it does not itself prove the path is safe right
+    now. The caller must re-resolve the returned path fresh (following any symlink) and
+    validate repository identity and workspace_root containment against that live
+    resolution on every call -- a stored snapshot cannot see a substitution introduced
+    since the configuration was loaded, but a live identity check catches whatever the
+    path currently, actually points to regardless of how it got there.
+    """
+    registered = repo.trusted_external_checkouts.get(alias)
+    if registered is None:
+        raise WorkspaceError(
+            f"ATTACH_ALIAS_NOT_REGISTERED: {alias!r} is not a registered trusted checkout "
+            f"for {repo.repo_id!r}",
+            safe_next_action=(
+                "Ask the operator to register this checkout in "
+                "trusted_external_checkouts, or use attach_branch if it is a worktree of "
+                "the repository's own primary checkout."
+            ),
+            unchanged_state=("No branch, worktree, or file was created.",),
+        )
+    return registered
+
+
+_SCP_LIKE_REMOTE = re.compile(r"^(?:[\w.-]+@)?([\w.-]+):(.+)$")
+
+
+def canonical_remote_identity(url: str) -> str | None:
+    """Reduce a git remote URL to a host+path identity, independent of ssh vs https
+    transport, a trailing `.git`, or trailing slashes -- so `git@github.com:a/b.git` and
+    `https://github.com/a/b` compare equal. Returns None for blank input; this is a
+    best-effort local comparison (no DNS/GitHub-API resolution), used to catch a fork or
+    unrelated clone that happens to share root history with the enrolled repository but
+    points at a different remote (#373 review finding) -- distinct from and in addition
+    to the GitHub-API-backed identity check publication already applies at push time.
+    """
+    stripped = url.strip()
+    if not stripped:
+        return None
+    if "://" in stripped:
+        parsed = urlsplit(stripped)
+        host = parsed.hostname or ""
+        path = parsed.path
+    else:
+        scp = _SCP_LIKE_REMOTE.match(stripped)
+        if scp is None:
+            return None
+        host, path = scp.group(1), scp.group(2)
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    return f"{host.lower()}/{path.lower()}"

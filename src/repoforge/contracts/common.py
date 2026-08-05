@@ -125,7 +125,7 @@ class ToolErrorDetails(StrictModel):
 
 
 class ToolError(StrictModel):
-    """One typed error shape shared by all 28 public tools."""
+    """One typed error shape shared by all 29 public tools."""
 
     code: ErrorCode
     message: ShortText
@@ -309,6 +309,23 @@ class CommandEvidence(StrictModel):
     returncode: int
     duration_ms: float = Field(ge=0)
     output_excerpt: str = Field(default="", max_length=12_000)
+    output_artifact_reference: str | None = Field(
+        default=None,
+        pattern=r"^failure-output:[a-f0-9]{64}$",
+        description=(
+            "Reference to the full, untruncated stdout+stderr when combined output "
+            "exceeded the inline excerpt bound, retrievable via runtime_logs_read "
+            "(source='failure_artifact'). The 'failure-output:' prefix predates this "
+            "field covering more than failures -- it is the same content-addressed "
+            "store, now persisted regardless of exit code whenever output is oversized."
+        ),
+    )
+    output_artifact_status: Literal[
+        "not_applicable",
+        "available",
+        "oversized",
+        "persistence_failed",
+    ] = "not_applicable"
 
 
 class EnforcementEvidenceModel(StrictModel):
@@ -360,6 +377,14 @@ class WorkspaceSummary(StrictModel):
     dirty: bool | None = None
     lifecycle: str = Field(min_length=1, max_length=80)
     issue_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    kind: Literal["managed_worktree", "adopted_worktree", "attached_shared"] = Field(
+        description=(
+            "managed_worktree: RepoForge created both the branch and the worktree. "
+            "adopted_worktree: an existing branch, worktree created by RepoForge. "
+            "attached_shared: an operator-owned checkout RepoForge did not create; "
+            "concurrent drift is observed, not refused."
+        )
+    )
 
 
 class OperationState(str, Enum):
