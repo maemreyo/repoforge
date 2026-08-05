@@ -15282,6 +15282,9 @@
     "tests/test_nested_identity_adapter.py",
     "tests/test_nested_identity_coordinator.py"
   ],
+  "src/repoforge/ports/process_supervisor.py": [
+    "tests/test_release_selection.py"
+  ],
   "src/repoforge/ports/progress_reporter.py": [
     "tests/test_operation_progress_wait.py"
   ],

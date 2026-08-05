@@ -207,7 +207,7 @@ def scan_process_leases(
             continue
         if (
             binding.state == "running"
-            and lease.status is ProcessLeaseStatus.RUNNING
+            and lease.status == ProcessLeaseStatus.RUNNING
             and (lease.pid is None or lease.process_start_token is None)
         ):
             # A modern proven pair without the identity proof that makes the

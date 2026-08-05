@@ -464,9 +464,10 @@ class SupervisorRestarter:
             return (
                 False,
                 "PROCESS_LEASE_INCOMPLETE: "
-                f"{report.process_lease_incomplete} process lease(s) are REGISTERED "
-                "with no pid (pre-spawn crash window); refusing to start a replacement "
-                "on incomplete lease evidence",
+                f"{report.process_lease_incomplete} process lease(s) lack complete "
+                "identity evidence (REGISTERED/READY fence, or RUNNING without pid/"
+                "start token); refusing to start a replacement on incomplete lease "
+                "evidence",
                 evidence,
             )
         if report.process_lease_binding_divergence > 0:
