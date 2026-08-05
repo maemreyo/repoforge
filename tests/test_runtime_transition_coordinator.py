@@ -382,3 +382,43 @@ def test_reconcile_active_excludes_persisted_terminal_failures() -> None:
 
     assert [item.value.correlation_id for item in active] == ["d" * 24]
     assert coordinator.get_active_by_correlation("c" * 24) is None
+
+
+def test_reconcile_active_fails_closed_when_the_scan_is_truncated() -> None:
+    """A non-terminal transition may sit outside the bounded scan page."""
+    coordinator, _ = _coordinator()
+    for index in range(6):
+        coordinator.record_attempt(
+            correlation_id=f"{index:024d}",
+            kind="activate",
+            from_sha=_SHA,
+            to_sha=_OTHER_SHA,
+        )
+
+    with pytest.raises(ConfigError, match="RUNTIME_TRANSITION_SCAN_INCOMPLETE"):
+        coordinator.reconcile_active(max_records=5)
+
+
+def test_reconcile_active_fails_closed_on_unreadable_records() -> None:
+    """An unreadable record may be active, so recovery must fail closed."""
+    from repoforge.domain.durable_state import StatePage
+
+    class _UnreadableStore(InMemoryRuntimeTransitionStore):
+        def list_all(self, *, max_records: int = 2_000):
+            page = super().list_all(max_records=max_records)
+            return StatePage(
+                records=page.records,
+                scan_truncated=page.scan_truncated,
+                unreadable_record_ids=("tran-" + "f" * 24,),
+            )
+
+    coordinator, _ = _coordinator(_UnreadableStore())
+    coordinator.record_attempt(
+        correlation_id="c" * 24,
+        kind="activate",
+        from_sha=_SHA,
+        to_sha=_OTHER_SHA,
+    )
+
+    with pytest.raises(ConfigError, match="RUNTIME_TRANSITION_SCAN_INCOMPLETE"):
+        coordinator.reconcile_active()
