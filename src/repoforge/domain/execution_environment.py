@@ -343,6 +343,18 @@ class EnvironmentIdentity:
     enforcement_assessment: EnforcementAssessment = field(default_factory=EnforcementAssessment)
     backend_capability_hash: str = ""
     working_directory_policy_hash: str = ""
+    #: The constructed runtime PATH commands under this identity actually resolve
+    #: runners against (#380 AC2). Directory entries, never a secret -- unlike every
+    #: other environment-variable value here, this is not present in
+    #: approved_env_value_hashes' hash-only projection because it is meant to be read
+    #: directly, not merely detected as changed. Excluded from the dataclass repr
+    #: (repr=False): it must reach a caller only through the explicit, intentional
+    #: ExecutionEvidence/ExecutionEvidenceModel path, never leak incidentally through a
+    #: stray log line or exception message that happens to repr() this identity --
+    #: local filesystem layout (e.g. a username embedded in a path) is not the same
+    #: category of "secret" a hash already protects, but it is still not for ambient
+    #: logging.
+    effective_path: str = field(default="", repr=False)
     # Historical fields remain readable but are never enforcement evidence.
     network_policy: NetworkPolicy = NetworkPolicy.NONE
     filesystem_capability: FilesystemCapability = FilesystemCapability.READ
@@ -504,6 +516,14 @@ class ExecutionEvidence:
     degraded: bool
     enforcement: EnforcementEvidence
     warnings: tuple[str, ...]
+    #: The constructed runtime PATH a command actually resolves runners against (#380
+    #: AC2) -- directory entries, never a secret, so this is surfaced verbatim rather
+    #: than hashed like approved_env_value_hashes' other entries.
+    effective_path: str = ""
+    #: Tool versions discovered for this run's commands (#380 AC2) -- a copy of
+    #: identity.tools, projected here so a caller reads capability discovery from the
+    #: evidence it already receives instead of a separate identity call.
+    tool_versions: tuple[ToolVersion, ...] = ()
 
 
 def build_execution_evidence(
@@ -540,6 +560,8 @@ def build_execution_evidence(
             network_bytes=assessment.network_bytes.value,
         ),
         warnings=bounded_warnings,
+        effective_path=identity.effective_path,
+        tool_versions=identity.tools,
     )
 
 

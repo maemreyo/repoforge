@@ -36,6 +36,7 @@ from ...domain.adhoc import (
 )
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
+from ...domain.execution_profiles import available_execution_profiles
 from ...domain.operation_identity import bind_worker_identity
 from ...domain.operation_task import OperationRetryability, OperationState
 from ...domain.operation_worker import OperationWorkerBinding
@@ -250,6 +251,18 @@ def _adhoc_timeout_remedy(budget_seconds: int) -> str:
     )
 
 
+def _adhoc_missing_executable_remedy(executable: str, repo_id: str) -> str:
+    """Name the two reviewed ways to make an allowlisted-but-absent runner resolvable,
+    instead of leaving a raw OS-level "not found" with no actionable next step (#380)."""
+    return (
+        f"{executable!r} is allowlisted for repositories.{repo_id} but is not installed, "
+        "or is not on the constrained runtime PATH (repositories.<id>.execution_profiles, "
+        "server.path_prefixes). Install it where the runtime PATH resolves it, or ask the "
+        "repository owner to enroll a reviewed execution_profiles entry that provides it "
+        f"({', '.join(available_execution_profiles())})."
+    )
+
+
 def _strict_mode_error(repo_id: str) -> RepoForgeError:
     return RepoForgeError(
         f"Repository {repo_id!r} is enrolled in strict execution mode; the ad-hoc runner is disabled",
@@ -408,7 +421,7 @@ class WorkspaceAdhocRunner:
                     "Ad-hoc command requires either argv or script",
                     ErrorCode.ADHOC_ARGV_INVALID,
                 )
-            argv = validate_adhoc_argv(c.argv, repo.adhoc_runners)
+            argv = validate_adhoc_argv(c.argv, repo.effective_adhoc_runners())
             # Content-inspect the exact argv: blocks irreversible/history-rewriting git
             # forms (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers
             # the git command's effect (#382). Non-git runners return None (opaque).
@@ -474,6 +487,12 @@ class WorkspaceAdhocRunner:
                 # is what makes an agent invent a chunked workaround for a job that simply
                 # needed a bigger budget or a profile of its own.
                 exc.safe_next_action = _adhoc_timeout_remedy(repo.adhoc_timeout_seconds)
+            if exc.code is ErrorCode.NOT_FOUND and not exc.safe_next_action:
+                executable = exc.details.get("executable")
+                if isinstance(executable, str):
+                    exc.safe_next_action = _adhoc_missing_executable_remedy(
+                        executable, repo.repo_id
+                    )
 
         def run_body(
             cancel_token: CancellationToken | None,
@@ -692,7 +711,7 @@ class WorkspaceAdhocRunner:
                 f"Ad-hoc mutability must be 'read_only' or 'workspace'; got {c.mutability!r}",
                 ErrorCode.ADHOC_ARGV_INVALID,
             )
-        validated = validate_adhoc_sequence(c.argv_sequence, repo.adhoc_runners)
+        validated = validate_adhoc_sequence(c.argv_sequence, repo.effective_adhoc_runners())
         effect_classes = [classify_adhoc_effect(argv) for argv in validated]
         command_classes = [
             None if effect is None else effect_to_command_class(effect) for effect in effect_classes
@@ -840,6 +859,12 @@ class WorkspaceAdhocRunner:
                         command_error = exc
                         audit_details["failed_element_index"] = index
                         audit_details["exit_code"] = exc.details.get("exit_code")
+                        if exc.code is ErrorCode.NOT_FOUND and not exc.safe_next_action:
+                            executable = exc.details.get("executable")
+                            if isinstance(executable, str):
+                                exc.safe_next_action = _adhoc_missing_executable_remedy(
+                                    executable, repo.repo_id
+                                )
                         break
                     duration_ms = round((time.monotonic() - started) * 1000, 3)
                     commands.append(

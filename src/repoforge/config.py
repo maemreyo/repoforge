@@ -30,6 +30,10 @@ from .domain.diagnostics import (
     validate_diagnostic_profile,
 )
 from .domain.errors import ConfigError
+from .domain.execution_profiles import (
+    resolve_execution_profile_runners,
+    validate_execution_profiles,
+)
 from .domain.generated_paths import GeneratedPathRule, parse_generated_paths
 from .domain.git_transport_identity import (
     GitTransportAccess,
@@ -234,6 +238,11 @@ class RepositoryConfig:
     #: script bodies were never structurally protected from reaching git either way. Empty
     #: by default (feature disabled) regardless of adhoc_runners/execution_mode.
     adhoc_shell_runners: tuple[str, ...] = ()
+    #: Reviewed named toolchain profiles (#380) this repository is enrolled in -- e.g.
+    #: ("python", "node") -- unioned with adhoc_runners at admission time via
+    #: effective_adhoc_runners(). Lets an operator select a reviewed developer environment
+    #: without manually listing every individual command.
+    execution_profiles: tuple[str, ...] = ()
     ticket_graph: GitHubTicketGraphConfig | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
     issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
@@ -243,6 +252,18 @@ class RepositoryConfig:
     #: alias from this durable, operator-authored registry (#373). Re-resolving the stored
     #: value at attach time and comparing catches a symlink substituted in after load.
     trusted_external_checkouts: dict[str, Path] = field(default_factory=dict)
+
+    def effective_adhoc_runners(self) -> tuple[str, ...]:
+        """adhoc_runners unioned with every runner execution_profiles' enrolled profiles
+        contribute (#380) -- the allowlist admission actually checks against, so a
+        profile-contributed runner and an individually-listed one are equivalent."""
+        seen: dict[str, None] = {}
+        for runner in (
+            *self.adhoc_runners,
+            *resolve_execution_profile_runners(self.execution_profiles),
+        ):
+            seen[runner] = None
+        return tuple(seen)
 
 
 @dataclass(frozen=True)
@@ -1468,9 +1489,17 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             ),
             repo_id,
         )
-        if execution_mode is ExecutionMode.RELAXED and not adhoc_runners:
+        execution_profiles = validate_execution_profiles(
+            _tuple_of_strings(
+                repo_raw.get("execution_profiles"),
+                f"repositories.{repo_id}.execution_profiles",
+            ),
+            repo_id,
+        )
+        if execution_mode is ExecutionMode.RELAXED and not (adhoc_runners or execution_profiles):
             raise ConfigError(
-                f"repositories.{repo_id}.execution_mode='relaxed' requires a non-empty adhoc_runners allowlist"
+                f"repositories.{repo_id}.execution_mode='relaxed' requires a non-empty "
+                "adhoc_runners allowlist or at least one enrolled execution_profiles entry"
             )
         adhoc_shell_runners = validate_adhoc_runners(
             _tuple_of_strings(
@@ -1564,6 +1593,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             adhoc_runners=adhoc_runners,
             adhoc_shell_runners=adhoc_shell_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
+            execution_profiles=execution_profiles,
             ticket_graph=ticket_graph,
             generated_paths=generated_paths,
             issue_writes=issue_writes,

@@ -152,6 +152,32 @@ def test_execution_evidence_is_bounded_and_truthful() -> None:
     assert evidence.warnings == ("tool version unavailable",)
 
 
+def test_execution_evidence_carries_effective_path_and_tool_versions() -> None:
+    """#380 AC2: tool versions and effective PATH must be observable through the
+    evidence a caller already receives, not only inside the identity a caller does not
+    normally see."""
+    identity = dataclasses.replace(
+        complete_identity(),
+        effective_path="/usr/local/bin:/usr/bin:/bin",
+        tools=(ToolVersion("python", "3.13"), ToolVersion("git", "2.50")),
+    )
+
+    evidence = build_execution_evidence(requested_policy(), identity, effective_native_policy())
+
+    assert evidence.effective_path == "/usr/local/bin:/usr/bin:/bin"
+    assert evidence.tool_versions == (ToolVersion("python", "3.13"), ToolVersion("git", "2.50"))
+
+
+def test_effective_path_is_excluded_from_identity_repr() -> None:
+    """effective_path must reach a caller only through the explicit ExecutionEvidence
+    path (see test above), never leak incidentally through repr() the way
+    test_identity_contains_no_environment_bodies_or_paths already guards for the hashed
+    fields -- this is the same guarantee for the one field that is not hashed."""
+    identity = dataclasses.replace(complete_identity(), effective_path="/Users/operator/bin")
+
+    assert "/Users/operator/bin" not in repr(identity)
+
+
 def test_identity_hash_is_order_independent() -> None:
     first = EnvironmentIdentity(
         platform="linux",
@@ -195,6 +221,27 @@ def test_identity_changes_with_policy_and_environment() -> None:
     )
 
     assert first.identity_hash != second.identity_hash
+
+
+def test_identity_hash_distinguishes_adapter_kind() -> None:
+    """#380 AC4: host and sandbox environments must have distinct, testable identities.
+    No sandbox adapter exists yet (that is #384's scope), but the identity model itself
+    must already be sandbox-ready: two identities differing only in adapter_kind must
+    hash differently, so #384 can build a real DEV_CONTAINER/HERMETIC_CONTAINER adapter
+    on top of a type that already distinguishes it from NATIVE_REVIEWED."""
+    common = {
+        "platform": "linux",
+        "architecture": "arm64",
+        "python_version": "3.13",
+        "runtime_version": "python/3.13",
+        "tools": (ToolVersion("python", "3.13"),),
+        "working_directory_policy_hash": "b" * 64,
+    }
+    host = EnvironmentIdentity(adapter_kind=EnvironmentAdapterKind.NATIVE_REVIEWED, **common)
+    dev_container = EnvironmentIdentity(adapter_kind=EnvironmentAdapterKind.DEV_CONTAINER, **common)
+    hermetic = EnvironmentIdentity(adapter_kind=EnvironmentAdapterKind.HERMETIC_CONTAINER, **common)
+
+    assert len({host.identity_hash, dev_container.identity_hash, hermetic.identity_hash}) == 3
 
 
 def test_partial_tool_identity_is_not_cache_eligible() -> None:

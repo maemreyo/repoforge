@@ -19,6 +19,7 @@ from typing import Any
 
 from .adhoc import validate_adhoc_runners
 from .errors import ConfigError
+from .execution_profiles import validate_execution_profiles
 from .verification_steps import (
     HygieneBaselinePolicy,
     VerificationStep,
@@ -395,6 +396,7 @@ class RepositoryPolicyPatch:
     adhoc_runners: tuple[str, ...] | None = None
     adhoc_shell_runners: tuple[str, ...] | None = None
     adhoc_timeout_seconds: int | None = None
+    execution_profiles: tuple[str, ...] | None = None
     remove_profiles: tuple[str, ...] = ()
     remove_diagnostics: tuple[str, ...] = ()
     remove_formatters: tuple[str, ...] = ()
@@ -418,6 +420,14 @@ class RepositoryPolicyPatch:
             except ConfigError as exc:
                 raise PolicyPatchError(str(exc)) from exc
             object.__setattr__(self, "adhoc_shell_runners", shell_runners)
+        if self.execution_profiles is not None:
+            try:
+                profiles = validate_execution_profiles(
+                    tuple(self.execution_profiles), "policy_patch"
+                )
+            except ConfigError as exc:
+                raise PolicyPatchError(str(exc)) from exc
+            object.__setattr__(self, "execution_profiles", profiles)
         if self.adhoc_timeout_seconds is not None and (
             not isinstance(self.adhoc_timeout_seconds, int)
             or isinstance(self.adhoc_timeout_seconds, bool)
@@ -488,6 +498,7 @@ class RepositoryPolicyPatch:
             or self.adhoc_runners is not None
             or self.adhoc_shell_runners is not None
             or self.adhoc_timeout_seconds is not None
+            or self.execution_profiles is not None
             or self.remove_profiles
             or self.remove_diagnostics
             or self.remove_formatters
@@ -538,6 +549,11 @@ class RepositoryPolicyPatch:
                 if other.adhoc_timeout_seconds is not None
                 else self.adhoc_timeout_seconds
             ),
+            execution_profiles=(
+                other.execution_profiles
+                if other.execution_profiles is not None
+                else self.execution_profiles
+            ),
             remove_profiles=tuple(remove_profiles),
             remove_diagnostics=tuple(remove_diagnostics),
             remove_formatters=tuple(remove_formatters),
@@ -553,6 +569,8 @@ class RepositoryPolicyPatch:
             table["adhoc_shell_runners"] = list(self.adhoc_shell_runners)
         if self.adhoc_timeout_seconds is not None:
             table["adhoc_timeout_seconds"] = self.adhoc_timeout_seconds
+        if self.execution_profiles is not None:
+            table["execution_profiles"] = list(self.execution_profiles)
         if self.remove_profiles:
             table["remove_profiles"] = list(self.remove_profiles)
         if self.remove_diagnostics:
@@ -583,6 +601,7 @@ class RepositoryPolicyPatch:
                 "adhoc_runners",
                 "adhoc_shell_runners",
                 "adhoc_timeout_seconds",
+                "execution_profiles",
                 "remove_profiles",
                 "remove_diagnostics",
                 "remove_formatters",
@@ -618,6 +637,11 @@ class RepositoryPolicyPatch:
                 else None
             ),
             adhoc_timeout_seconds=raw.get("adhoc_timeout_seconds"),
+            execution_profiles=(
+                tuple(raw["execution_profiles"])
+                if isinstance(raw.get("execution_profiles"), (list, tuple))
+                else None
+            ),
             remove_profiles=tuple(raw.get("remove_profiles", ())),
             remove_diagnostics=tuple(raw.get("remove_diagnostics", ())),
             remove_formatters=tuple(raw.get("remove_formatters", ())),

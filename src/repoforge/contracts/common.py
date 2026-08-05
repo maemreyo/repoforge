@@ -343,6 +343,12 @@ class EnforcementEvidenceModel(StrictModel):
     network_bytes: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
 
 
+class ToolVersionModel(StrictModel):
+    name: str = Field(min_length=1, max_length=64)
+    version: str | None = Field(default=None, max_length=64)
+    digest: Sha256 | None = None
+
+
 class ExecutionEvidenceModel(StrictModel):
     adapter_kind: str = Field(min_length=1, max_length=80)
     identity_schema_version: int = Field(ge=1, le=100)
@@ -356,6 +362,20 @@ class ExecutionEvidenceModel(StrictModel):
     degraded: bool
     enforcement: EnforcementEvidenceModel
     warnings: tuple[str, ...] = Field(default=(), max_length=20)
+    effective_path: str = Field(
+        default="",
+        max_length=8_000,
+        description=(
+            "The constructed runtime PATH commands under this identity resolve runners "
+            "against (#380 AC2) -- directory entries, never a secret, so this is the "
+            "actual value rather than a hash."
+        ),
+    )
+    tool_versions: tuple[ToolVersionModel, ...] = Field(
+        default=(),
+        max_length=64,
+        description="Versions discovered for this run's tools (#380 AC2), secret-free by construction.",
+    )
 
 
 class RepositorySummary(StrictModel):

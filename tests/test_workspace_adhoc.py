@@ -180,6 +180,86 @@ def test_relaxed_mode_loads_with_valid_allowlist(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reviewed named execution profiles (#380)
+# ---------------------------------------------------------------------------
+
+
+def test_relaxed_mode_accepts_execution_profiles_with_no_adhoc_runners(tmp_path: Path) -> None:
+    """#380 AC1: an operator can enroll a repository in a reviewed profile without
+    listing any individual runner in adhoc_runners -- the relaxed-mode admission gate
+    must recognize a profile-only allowlist as non-empty."""
+    env = create_forge_environment(
+        tmp_path, execution_mode="relaxed", adhoc_runners=(), execution_profiles=("python",)
+    )
+    config = load_config(env.config_path)
+    repo = config.repositories["demo"]
+    assert repo.adhoc_runners == ()
+    assert repo.execution_profiles == ("python",)
+    assert "python3" in repo.effective_adhoc_runners()
+
+
+def test_relaxed_mode_still_rejects_empty_runners_and_empty_profiles(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="execution_profiles"):
+        create_forge_environment(
+            tmp_path, execution_mode="relaxed", adhoc_runners=(), execution_profiles=()
+        )
+
+
+def test_execution_profiles_rejects_unknown_profile_name(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="unknown profile"):
+        create_forge_environment(
+            tmp_path,
+            execution_mode="relaxed",
+            adhoc_runners=("python3",),
+            execution_profiles=("not-a-real-profile",),
+        )
+
+
+def test_effective_adhoc_runners_unions_flat_allowlist_and_profiles(tmp_path: Path) -> None:
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("custom-repo-tool",),
+        execution_profiles=("python",),
+    )
+    repo = load_config(env.config_path).repositories["demo"]
+    effective = repo.effective_adhoc_runners()
+    assert "custom-repo-tool" in effective
+    assert "pytest" in effective
+    # Order: adhoc_runners first, then profile-contributed runners, deduplicated.
+    assert effective[0] == "custom-repo-tool"
+
+
+def test_a_profile_enrolled_repo_runs_its_tools_without_listing_them(tmp_path: Path) -> None:
+    """#380 AC1, end to end: workspace_run_adhoc admits a profile-contributed runner
+    even though adhoc_runners never names it."""
+    env = create_forge_environment(
+        tmp_path, execution_mode="relaxed", adhoc_runners=(), execution_profiles=("python",)
+    )
+    workspace_id = env.service.workspace_create("demo", "profile-only run")["workspace_id"]
+    result = env.service.workspace_run_adhoc(workspace_id, ["python3", "--version"])
+    assert result["returncode"] == 0
+
+
+def test_missing_but_allowlisted_executable_gets_an_actionable_remedy(tmp_path: Path) -> None:
+    """#380 AC3: a NOT_FOUND failure for an allowlisted-but-absent runner must name a
+    concrete next step (install it, or enroll a profile that provides it), not a raw
+    OS-level 'not found' with no guidance."""
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("definitely-not-a-real-binary-xyz",),
+    )
+    workspace_id = env.service.workspace_create("demo", "missing cli")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(workspace_id, ["definitely-not-a-real-binary-xyz"])
+    assert exc.value.code is ErrorCode.NOT_FOUND
+    remedy = exc.value.safe_next_action or ""
+    assert "definitely-not-a-real-binary-xyz" in remedy
+    assert "execution_profiles" in remedy
+
+
+# ---------------------------------------------------------------------------
 # Strict-mode refusal
 # ---------------------------------------------------------------------------
 

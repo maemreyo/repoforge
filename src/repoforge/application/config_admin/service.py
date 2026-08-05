@@ -40,6 +40,7 @@ from ...domain.config_generation import (
     sha256_text,
 )
 from ...domain.errors import ConfigError, RepoForgeError
+from ...domain.execution_profiles import validate_execution_profiles
 from ...domain.generated_paths import parse_generated_paths
 from ...domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from ...domain.policy_patch import (
@@ -167,6 +168,7 @@ _EXECUTION_FIELDS = (
     "adhoc_runners",
     "adhoc_shell_runners",
     "adhoc_timeout_seconds",
+    "execution_profiles",
 )
 
 
@@ -206,6 +208,15 @@ def _canonical_execution(raw: dict[str, Any] | None, repo_id: str) -> dict[str, 
             raise ConfigError("repo_policy execution.adhoc_shell_runners must be a list of strings")
         canonical["adhoc_shell_runners"] = list(
             validate_adhoc_runners(tuple(shell_runners), repo_id, field_name="adhoc_shell_runners")
+        )
+    profiles = raw.get("execution_profiles")
+    if profiles is not None:
+        if not isinstance(profiles, (list, tuple)) or not all(
+            isinstance(item, str) for item in profiles
+        ):
+            raise ConfigError("repo_policy execution.execution_profiles must be a list of strings")
+        canonical["execution_profiles"] = list(
+            validate_execution_profiles(tuple(profiles), repo_id)
         )
     timeout = raw.get("adhoc_timeout_seconds")
     if timeout is not None:
@@ -338,6 +349,7 @@ class ConfigAdminService:
                 "execution_mode": entry.get("execution_mode", "strict"),
                 "adhoc_runners": entry.get("adhoc_runners", []),
                 "adhoc_timeout_seconds": entry.get("adhoc_timeout_seconds", 300),
+                "execution_profiles": entry.get("execution_profiles", []),
                 "profiles": entry.get("profiles", {}),
                 "diagnostics": sorted((entry.get("diagnostics") or {}).keys()),
                 "formatters": sorted((entry.get("formatters") or {}).keys()),
@@ -1294,6 +1306,7 @@ class ConfigAdminService:
         adhoc_runners: list[str] | None = None,
         adhoc_shell_runners: list[str] | None = None,
         adhoc_timeout_seconds: int | None = None,
+        execution_profiles: list[str] | None = None,
         policy_overrides: dict[str, str] | None = None,
         remove_policy_overrides: list[str] | None = None,
         generated_paths: list[dict[str, Any]] | None = None,
@@ -1318,6 +1331,7 @@ class ConfigAdminService:
             adhoc_runners=adhoc_runners,
             adhoc_shell_runners=adhoc_shell_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
+            execution_profiles=execution_profiles,
         )
         try:
             resolved_generated_paths = (
@@ -1640,6 +1654,7 @@ class ConfigAdminService:
         adhoc_runners: list[str] | None,
         adhoc_shell_runners: list[str] | None,
         adhoc_timeout_seconds: int | None,
+        execution_profiles: list[str] | None,
     ) -> RepositoryPolicyPatch:
         try:
             profiles = []
@@ -1658,6 +1673,9 @@ class ConfigAdminService:
                     tuple(adhoc_shell_runners) if adhoc_shell_runners is not None else None
                 ),
                 adhoc_timeout_seconds=adhoc_timeout_seconds,
+                execution_profiles=(
+                    tuple(execution_profiles) if execution_profiles is not None else None
+                ),
                 remove_profiles=tuple(remove_profiles),
                 remove_diagnostics=tuple(remove_diagnostics),
                 remove_formatters=tuple(remove_formatters),

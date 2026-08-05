@@ -136,6 +136,7 @@ class NativeReviewedAdapter:
             manifest_digests=collect_file_digests(root, manifests),
             approved_env_var_names=tuple(sorted(environment)),
             approved_env_value_hashes=collect_environment_hashes(environment),
+            effective_path=environment.get("PATH", ""),
             requested_policy_hash=requested.policy_hash,
             effective_policy_hash=effective.policy_hash,
             effective_network=effective.network,

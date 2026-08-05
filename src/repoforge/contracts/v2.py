@@ -670,6 +670,17 @@ class ExecutionPolicyDeclaration(StrictModel):
         default=None, max_length=_MAX_ADHOC_RUNNERS
     )
     adhoc_timeout_seconds: int | None = Field(default=None, ge=1, le=_MAX_ADHOC_TIMEOUT_SECONDS)
+    execution_profiles: tuple[_AdhocRunnerName, ...] | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_RUNNERS,
+        description=(
+            "Reviewed named toolchain profiles (#380) this repository is enrolled in "
+            "(e.g. 'python', 'node') -- unioned with adhoc_runners at admission time, "
+            "letting an operator select a reviewed developer environment without "
+            "manually allowlisting every individual command. Each name must be one of "
+            "the fixed, reviewed catalog; apply-time validation rejects an unknown one."
+        ),
+    )
 
 
 class GeneratedPathDeclaration(StrictModel):
