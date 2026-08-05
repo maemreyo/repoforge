@@ -1522,6 +1522,18 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
         "plugin_rediscovery_recommended": health["client_rediscovery_recommended"],
         "plugin_rediscovery_reason": health["rediscovery_reason"],
         "restart_count": record.restart_count if record else 0,
+        # `restarts_total`/`last_restart_at` are evidence, never reset for the life of the
+        # record (unlike `restart_count` above); `restart_history_provenance` distinguishes
+        # "verified zero restarts" from "the durable ledger predates this build or was
+        # otherwise unavailable" -- a bare `0` alone cannot say which (#448 Slice 4).
+        "restarts_total": record.restarts_total if record else 0,
+        "last_restart_at": record.last_restart_at if record else None,
+        "restart_history_provenance": record.restart_history_provenance if record else "unknown",
+        # A fresh, non-reused identifier for the current supervisor process lifetime --
+        # distinct from `correlation_id` below, which is also reused per-request in the
+        # control protocol and is therefore unsuitable as a lifecycle identifier on its
+        # own (#448 Slice 4).
+        "incarnation_id": record.incarnation_id if record else None,
         "last_error_code": record.last_error_code if record else None,
         "last_error": record.last_error if record else None,
         "correlation_id": record.correlation_id if record else None,

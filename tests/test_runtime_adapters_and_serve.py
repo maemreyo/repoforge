@@ -127,6 +127,154 @@ def test_runtime_store_clear_preserves_replacement(
     assert store.read() is None
 
 
+def test_record_restart_never_loses_an_update_across_overlapping_writers(
+    tmp_path: Path,
+) -> None:
+    """The exact race a bare read()/write() pair has under overlapping supervisor
+    incarnations (#448 Slice 4): two writers reading the same baseline and each
+    writing back the same incremented total, silently losing one restart's worth of
+    evidence. `record_restart()` holds an OS-level exclusive lock across the whole
+    read-modify-write, so this must not be possible even with real thread
+    concurrency (not just sequential calls that never actually race).
+    """
+    import threading
+
+    from repoforge.adapters.runtime.state_store import JsonRestartHistoryStore
+
+    store = JsonRestartHistoryStore(tmp_path / "restart-history.json")
+    threads_count = 8
+    barrier = threading.Barrier(threads_count)
+
+    def one_restart(index: int) -> None:
+        barrier.wait(timeout=5.0)  # maximize the chance every thread reads together
+        store.record_restart(
+            incarnation_id="a" * 24,
+            reason="concurrent restart test",
+            occurred_at="2026-08-05T00:00:00+00:00",
+            event_id=f"event-{index}",
+        )
+
+    threads = [threading.Thread(target=one_restart, args=(i,)) for i in range(threads_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+
+    final = store.read()
+    assert final is not None
+    assert final.restarts_total == threads_count, (
+        f"expected exactly {threads_count} restarts recorded, got {final.restarts_total} -- "
+        "an overlapping writer lost an update"
+    )
+
+
+def test_record_restart_is_idempotent_on_replayed_event_id(tmp_path: Path) -> None:
+    """A caller that replays the same logical restart event (e.g. retrying after a
+    write it could not confirm landed) must not double-count it (#448 Slice 4)."""
+    from repoforge.adapters.runtime.state_store import JsonRestartHistoryStore
+
+    store = JsonRestartHistoryStore(tmp_path / "restart-history.json")
+    first = store.record_restart(
+        incarnation_id="a" * 24,
+        reason="tunnel failed to start",
+        occurred_at="2026-08-05T00:00:00+00:00",
+        event_id="event-1",
+    )
+    assert first.restarts_total == 1
+
+    replayed = store.record_restart(
+        incarnation_id="a" * 24,
+        reason="tunnel failed to start",
+        occurred_at="2026-08-05T00:00:05+00:00",  # even with a different timestamp
+        event_id="event-1",  # same event_id: this is a replay, not a new restart
+    )
+    assert replayed.restarts_total == 1, "a replayed event_id must not increment again"
+    assert replayed == first
+
+    second = store.record_restart(
+        incarnation_id="a" * 24,
+        reason="tunnel failed to start again",
+        occurred_at="2026-08-05T00:00:10+00:00",
+        event_id="event-2",  # a genuinely new restart
+    )
+    assert second.restarts_total == 2
+
+
+def test_every_logical_restart_increments_exactly_once_across_repeated_calls(
+    tmp_path: Path,
+) -> None:
+    """Simulates one incarnation's restart loop calling `record_restart()` many times
+    (matching all three of `supervisor.py`'s call sites sharing this same operation):
+    N distinct events must produce a ledger reading exactly N, never more or less."""
+    from repoforge.adapters.runtime.state_store import JsonRestartHistoryStore
+
+    store = JsonRestartHistoryStore(tmp_path / "restart-history.json")
+    for i in range(5):
+        recorded = store.record_restart(
+            incarnation_id="b" * 24,
+            reason=f"restart {i}",
+            occurred_at=f"2026-08-05T00:00:{i:02d}+00:00",
+            event_id=f"b{'' * 24}-restart-{i}",
+        )
+        assert recorded.restarts_total == i + 1
+
+    final = store.read()
+    assert final is not None
+    assert final.restarts_total == 5
+
+
+def test_seed_if_missing_initializes_from_legacy_evidence_with_distinct_provenance(
+    tmp_path: Path,
+) -> None:
+    """Migration (#448 Slice 4): a ledger-unaware release's `RuntimeRecord` can carry
+    real `restarts_total` history with no ledger to match it. Seeding from that must
+    be marked `provenance="legacy_runtime_record"`, never silently as `"durable"`."""
+    from repoforge.adapters.runtime.state_store import JsonRestartHistoryStore
+
+    store = JsonRestartHistoryStore(tmp_path / "restart-history.json")
+    assert store.read() is None
+
+    seeded = store.seed_if_missing(
+        restarts_total=6,
+        last_restart_at="2026-08-04T00:00:00+00:00",
+        incarnation_id="c" * 24,
+        occurred_at="2026-08-05T00:00:00+00:00",
+    )
+
+    assert seeded.restarts_total == 6
+    assert seeded.provenance == "legacy_runtime_record"
+    assert store.read() == seeded
+
+
+def test_seed_if_missing_never_overwrites_an_existing_ledger(tmp_path: Path) -> None:
+    """A ledger that already exists always wins over a legacy `RuntimeRecord`
+    snapshot -- seeding must be a genuine no-op once real ledger history exists,
+    never a silent downgrade back to stale evidence (#448 Slice 4)."""
+    from repoforge.adapters.runtime.state_store import JsonRestartHistoryStore
+
+    store = JsonRestartHistoryStore(tmp_path / "restart-history.json")
+    recorded = store.record_restart(
+        incarnation_id="d" * 24,
+        reason="a genuine restart already tracked by the ledger",
+        occurred_at="2026-08-05T00:00:00+00:00",
+        event_id="event-1",
+    )
+    assert recorded.restarts_total == 1
+
+    # A stale legacy snapshot claiming 99 restarts must not clobber the real ledger.
+    seeded = store.seed_if_missing(
+        restarts_total=99,
+        last_restart_at="2000-01-01T00:00:00+00:00",
+        incarnation_id="d" * 24,
+        occurred_at="2026-08-05T00:00:05+00:00",
+    )
+
+    assert seeded == recorded
+    assert seeded.restarts_total == 1
+    assert store.read() == recorded
+
+
 def _write_fake_tunnel(path: Path) -> None:
     path.write_text(
         """#!/usr/bin/env python3

@@ -120,6 +120,7 @@ from .adapters.repository import LocalRepositoryProbe
 from .adapters.repository.discovery import LocalRepositoryDiscovery
 from .adapters.runtime import (
     InProcessOperationGate,
+    JsonRestartHistoryStore,
     JsonRuntimeStore,
     JsonTunnelProfileStore,
     SubprocessExecutionWorker,
@@ -290,6 +291,7 @@ from .ports import (
     RepositoryBindingStore,
     RepositoryDiscovery,
     RepositoryProbe,
+    RestartHistoryStore,
     RuntimeControlClient,
     RuntimeControlServer,
     RuntimeLauncher,
@@ -1108,6 +1110,10 @@ def build_task_service(
 
 def build_runtime_store(path: Path) -> RuntimeStore:
     return JsonRuntimeStore(path)
+
+
+def build_restart_history_store(path: Path) -> RestartHistoryStore:
+    return JsonRestartHistoryStore(path)
 
 
 def build_runtime_activation_store(
