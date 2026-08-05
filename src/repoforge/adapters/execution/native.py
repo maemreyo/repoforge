@@ -220,6 +220,7 @@ class NativeReviewedAdapter:
         check: bool,
         cancel_token: CancellationToken | None = None,
         stdin_text: str | None = None,
+        extra_env: tuple[tuple[str, str], ...] = (),
     ) -> CommandResult:
         _ = session
         if cancel_token is None:
@@ -230,6 +231,7 @@ class NativeReviewedAdapter:
                 check=check,
                 output_limit=output_limit,
                 input_text=stdin_text,
+                extra_env=dict(extra_env) or None,
             )
         return self._executor.run(
             argv,
@@ -239,6 +241,7 @@ class NativeReviewedAdapter:
             output_limit=output_limit,
             cancel_token=cancel_token,
             input_text=stdin_text,
+            extra_env=dict(extra_env) or None,
         )
 
     def execute_bytes_in_session(

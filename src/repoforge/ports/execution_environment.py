@@ -41,6 +41,11 @@ class ExecutionRequest:
     # a per-execute argument so it is bound to the prepared session, exactly as argv is
     # bound through `reviewed_commands`. None leaves the child on DEVNULL.
     stdin_text: str | None = None
+    #: Additional env vars this run is granted, beyond the server's global
+    #: allowed_environment baseline (#381) -- resolved from the repository's
+    #: credential_profiles at request-build time, so which vars a run can see is a
+    #: property of the reviewed request, not a runtime-mutable ambient default.
+    extra_env: tuple[tuple[str, str], ...] = ()
     lockfiles: tuple[str, ...] = (
         "uv.lock",
         "poetry.lock",
@@ -141,6 +146,7 @@ class ExecutionEnvironmentPort(Protocol):
         check: bool,
         cancel_token: CancellationToken | None = None,
         stdin_text: str | None = None,
+        extra_env: tuple[tuple[str, str], ...] = (),
     ) -> CommandResult: ...
 
     def execute_bytes_in_session(

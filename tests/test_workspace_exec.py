@@ -656,6 +656,38 @@ def test_argv_sequence_runs_every_element_in_order(tmp_path: Path) -> None:
     assert "two" in result["commands"][1]["output_excerpt"]
 
 
+def test_argv_sequence_element_receives_a_credential_profile_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#381 AC1/AC2 through the argv_sequence path specifically -- a separate call site
+    in run_adhoc.py from the single-command form, so it needs its own coverage."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+        credential_profiles=("docker",),
+    )
+    workspace_id = env.service.workspace_create("demo", "sequence credential profile")[
+        "workspace_id"
+    ]
+
+    result = _exec_sequence(
+        env,
+        workspace_id,
+        (
+            (
+                "python3",
+                "-c",
+                "import os; print('DOCKER_HOST=' + os.environ.get('DOCKER_HOST', '<absent>'))",
+            ),
+        ),
+    )
+
+    assert result["outcome"] == "passed"
+    assert "DOCKER_HOST=unix:///var/run/docker.sock" in result["commands"][0]["output_excerpt"]
+
+
 def test_argv_sequence_stops_at_the_first_failure(tmp_path: Path) -> None:
     env = _relaxed_env(tmp_path)
     workspace_id = env.service.workspace_create("demo", "sequence fail fast")["workspace_id"]

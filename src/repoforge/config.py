@@ -20,6 +20,7 @@ from .domain.command_source import (
     validate_command_source_paths,
 )
 from .domain.commit_identity import CommitIdentityPolicy, CommitSigningMode
+from .domain.credential_profiles import validate_credential_profiles
 from .domain.diagnostics import (
     DiagnosticMutability,
     DiagnosticNetworkPolicy,
@@ -243,6 +244,15 @@ class RepositoryConfig:
     #: effective_adhoc_runners(). Lets an operator select a reviewed developer environment
     #: without manually listing every individual command.
     execution_profiles: tuple[str, ...] = ()
+    #: Reviewed named credential-scoping profiles (#381) this repository is enrolled in
+    #: -- e.g. ("docker", "cloud_aws") -- each granting a fixed set of additional
+    #: environment-variable *names* (never values) to ad-hoc/exec commands, resolved
+    #: against the live host environment at run time (domain.credential_profiles).
+    #: Additive to the server's global allowed_environment baseline, never a
+    #: replacement: this is how a repository opts into credential-shaped variables the
+    #: baseline does not already carry, without widening the baseline for every
+    #: repository at once.
+    credential_profiles: tuple[str, ...] = ()
     ticket_graph: GitHubTicketGraphConfig | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
     issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
@@ -1501,6 +1511,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 f"repositories.{repo_id}.execution_mode='relaxed' requires a non-empty "
                 "adhoc_runners allowlist or at least one enrolled execution_profiles entry"
             )
+        credential_profiles = validate_credential_profiles(
+            _tuple_of_strings(
+                repo_raw.get("credential_profiles"),
+                f"repositories.{repo_id}.credential_profiles",
+            ),
+            repo_id,
+        )
         adhoc_shell_runners = validate_adhoc_runners(
             _tuple_of_strings(
                 repo_raw.get("adhoc_shell_runners"),
@@ -1594,6 +1611,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             adhoc_shell_runners=adhoc_shell_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
             execution_profiles=execution_profiles,
+            credential_profiles=credential_profiles,
             ticket_graph=ticket_graph,
             generated_paths=generated_paths,
             issue_writes=issue_writes,

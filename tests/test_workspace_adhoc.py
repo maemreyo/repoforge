@@ -260,6 +260,80 @@ def test_missing_but_allowlisted_executable_gets_an_actionable_remedy(tmp_path: 
 
 
 # ---------------------------------------------------------------------------
+# Named, opt-in credential-scoping profiles (#381)
+# ---------------------------------------------------------------------------
+
+_PRINT_DOCKER_HOST = [
+    "python3",
+    "-c",
+    "import os; print('DOCKER_HOST=' + os.environ.get('DOCKER_HOST', '<absent>'))",
+]
+
+
+def test_credential_profile_grants_its_env_var_to_ad_hoc_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#381 AC1/AC2, end to end: a repository enrolled in the 'docker' credential
+    profile sees DOCKER_HOST -- a variable the global allowed_environment baseline
+    does not grant at all -- because it opted in, not because the baseline changed."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+        credential_profiles=("docker",),
+    )
+    workspace_id = env.service.workspace_create("demo", "docker profile grant")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(workspace_id, _PRINT_DOCKER_HOST)
+
+    assert result["returncode"] == 0
+    assert "DOCKER_HOST=unix:///var/run/docker.sock" in result["stdout"]
+
+
+def test_a_repo_not_enrolled_in_the_profile_never_sees_its_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#381 AC2: a command cannot enumerate a credential that was not granted to its
+    environment -- even though the host process genuinely has DOCKER_HOST set, a repo
+    that never enrolled in the 'docker' profile must not see it."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+    )
+    workspace_id = env.service.workspace_create("demo", "no docker profile")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(workspace_id, _PRINT_DOCKER_HOST)
+
+    assert result["returncode"] == 0
+    assert "DOCKER_HOST=<absent>" in result["stdout"]
+
+
+def test_credential_profile_grants_nothing_when_the_host_var_is_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allowlist-of-names orientation: enrolling in 'docker' only makes DOCKER_HOST
+    visible if the host process actually has it set -- it never invents a value."""
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+        credential_profiles=("docker",),
+    )
+    workspace_id = env.service.workspace_create("demo", "docker profile no host var")[
+        "workspace_id"
+    ]
+
+    result = env.service.workspace_run_adhoc(workspace_id, _PRINT_DOCKER_HOST)
+
+    assert result["returncode"] == 0
+    assert "DOCKER_HOST=<absent>" in result["stdout"]
+
+
+# ---------------------------------------------------------------------------
 # Strict-mode refusal
 # ---------------------------------------------------------------------------
 
@@ -297,6 +371,47 @@ def test_relaxed_repo_runs_allowlisted_command_as_evidence_only(tmp_path: Path) 
     assert result["fingerprint_changed"] is False
     assert "fingerprint_before" in result and "fingerprint_after" in result
     assert result.get("gate_guidance")
+
+
+def test_successful_run_redacts_secret_shaped_stdout(tmp_path: Path) -> None:
+    """#381 AC3: a command that happened to print a secret-shaped string and still
+    exited 0 must not reach the caller's result unredacted. This is already true --
+    not from anything specific to the ad-hoc runner, but because every MCP tool
+    response passes through service.py's `_result()` -> `sanitize_egress_data`, which
+    recursively redacts every string value in the final payload before it is ever
+    returned. (An earlier attempt to redact one layer down, inside
+    SubprocessCommandExecutor, corrupted internal JSON-consuming callers like the
+    GitHub API adapter -- see test_command_executor_error_codes.py's
+    test_run_does_not_redact_a_successful_result_at_this_layer for why that boundary
+    must stay untouched.)"""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "secret stdout success")["workspace_id"]
+    secret = "ghp_" + "a" * 36
+
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", f"print('token={secret}'); print('ordinary diagnostic context')"],
+    )
+
+    assert result["returncode"] == 0
+    assert secret not in result["stdout"]
+    assert "<redacted" in result["stdout"]
+    assert "ordinary diagnostic context" in result["stdout"]
+
+
+def test_successful_run_redacts_secret_shaped_stderr(tmp_path: Path) -> None:
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "secret stderr success")["workspace_id"]
+    secret = "sk-" + "b" * 40
+
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", f"import sys; print('warning key={secret}', file=sys.stderr)"],
+    )
+
+    assert result["returncode"] == 0
+    assert secret not in result["stderr"]
+    assert "<redacted" in result["stderr"]
 
 
 @pytest.mark.parametrize(

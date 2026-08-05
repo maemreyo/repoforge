@@ -651,6 +651,7 @@ _REPO_RECOGNIZED = {
     "adhoc_shell_runners",
     "adhoc_timeout_seconds",
     "execution_profiles",
+    "credential_profiles",
     "trusted_external_checkouts",
 }
 _SERVER_RECOGNIZED = {
@@ -1013,6 +1014,15 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             additions=CapabilityDeltaKind.EXPANSION,
             removals=CapabilityDeltaKind.RESTRICTION,
             reason="reviewed execution-profile enrollment changed",
+        )
+        _record_set_change(
+            changes,
+            prefix + ".credential_profiles",
+            _set(left.get("credential_profiles")),
+            _set(right.get("credential_profiles")),
+            additions=CapabilityDeltaKind.EXPANSION,
+            removals=CapabilityDeltaKind.RESTRICTION,
+            reason="reviewed credential-profile enrollment changed",
         )
         _record_number(
             changes,

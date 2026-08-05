@@ -169,6 +169,8 @@ def apply_policy_patch(
         repo["adhoc_timeout_seconds"] = patch.adhoc_timeout_seconds
     if patch.execution_profiles is not None:
         repo["execution_profiles"] = list(patch.execution_profiles)
+    if patch.credential_profiles is not None:
+        repo["credential_profiles"] = list(patch.credential_profiles)
     profiles = repo.setdefault("profiles", {})
     if not isinstance(profiles, dict):
         raise ValueError(f"repositories.{repo_id}.profiles must be a table")

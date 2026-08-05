@@ -692,6 +692,7 @@ def create_forge_environment(
     adhoc_runners: tuple[str, ...] = (),
     adhoc_shell_runners: tuple[str, ...] = (),
     execution_profiles: tuple[str, ...] = (),
+    credential_profiles: tuple[str, ...] = (),
     allowed_mutation_ops: tuple[str, ...] = MUTATION_OPS,
     trusted_external_checkouts: dict[str, str] | None = None,
 ) -> ForgeEnvironment:
@@ -741,6 +742,7 @@ execution_mode = "{execution_mode}"
 adhoc_runners = {json.dumps(list(adhoc_runners))}
 adhoc_shell_runners = {json.dumps(list(adhoc_shell_runners))}
 execution_profiles = {json.dumps(list(execution_profiles))}
+credential_profiles = {json.dumps(list(credential_profiles))}
 {trusted_checkouts_section}
 
 [repositories.demo.profiles.quick]

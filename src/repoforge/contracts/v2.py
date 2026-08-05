@@ -681,6 +681,18 @@ class ExecutionPolicyDeclaration(StrictModel):
             "the fixed, reviewed catalog; apply-time validation rejects an unknown one."
         ),
     )
+    credential_profiles: tuple[_AdhocRunnerName, ...] | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_RUNNERS,
+        description=(
+            "Reviewed named credential-scoping profiles (#381) this repository is "
+            "enrolled in (e.g. 'docker', 'cloud_aws'), each granting a fixed set of "
+            "additional environment-variable names -- never values -- to ad-hoc/exec "
+            "commands, resolved against the live host environment at run time. "
+            "Additive to the server's global allowed_environment baseline, never a "
+            "replacement."
+        ),
+    )
 
 
 class GeneratedPathDeclaration(StrictModel):

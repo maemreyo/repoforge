@@ -32,6 +32,7 @@ def _request(
     artifact_paths: tuple[str, ...] = (),
     cancel_token: CancellationToken | None = None,
     stdin_text: str | None = None,
+    extra_env: tuple[tuple[str, str], ...] = (),
 ) -> ExecutionRequest:
     return ExecutionRequest(
         scope=ExecutionScope(
@@ -53,6 +54,7 @@ def _request(
         failure_mode=failure_mode,
         cancel_token=cancel_token,
         stdin_text=stdin_text,
+        extra_env=extra_env,
     )
 
 
@@ -122,6 +124,7 @@ def adhoc_execution_request(
     output_limit: int,
     cancel_token: CancellationToken | None = None,
     stdin_text: str | None = None,
+    extra_env: tuple[tuple[str, str], ...] = (),
 ) -> ExecutionRequest:
     return _request(
         workspace_id=workspace_id,
@@ -135,6 +138,7 @@ def adhoc_execution_request(
         failure_mode=CommandFailureMode.RETURN,
         cancel_token=cancel_token,
         stdin_text=stdin_text,
+        extra_env=extra_env,
     )
 
 

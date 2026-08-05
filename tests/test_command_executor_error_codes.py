@@ -671,6 +671,33 @@ def test_run_persists_every_failure_as_secret_safe_artifact(tmp_path: Path) -> N
     assert "ordinary diagnostic context" in body
 
 
+def test_run_does_not_redact_a_successful_result_at_this_layer(tmp_path: Path) -> None:
+    """CommandResult.stdout/.stderr on a successful run are deliberately NOT redacted
+    here: SubprocessCommandExecutor.run() is shared by every internal caller in the
+    codebase (git plumbing, gh API JSON responses), most of which parse this output
+    themselves and never return it verbatim to an external caller. An earlier #381
+    attempt redacted at this layer and corrupted a passing gh-API JSON payload into
+    invalid JSON on every successful call -- caught by the affected-tests run before
+    it shipped. AC3 is already satisfied one layer up, and universally: every MCP
+    tool response -- not just this one -- passes through
+    service.py's `_result()` -> `sanitize_egress_data`, which recursively redacts
+    every string value in the final payload (see
+    test_workspace_adhoc.py::test_successful_run_redacts_secret_shaped_stdout for the
+    proof, through the real workspace_run_adhoc surface). Redacting a second time,
+    earlier and only for the ad-hoc path, would have been both redundant and (as this
+    file's history shows) a source of exactly the kind of corruption that boundary
+    already avoids by running once, last, over the fully-parsed response."""
+    executor = _executor(tmp_path)
+    secret = "ghp_" + "a" * 36
+    script = tmp_path / "secret_success.py"
+    script.write_text(f"print('token={secret}')\n", encoding="utf-8")
+
+    result = executor.run(["python3", str(script)], cwd=tmp_path, check=False)
+
+    assert result.returncode == 0
+    assert secret in result.stdout
+
+
 def test_run_reports_typed_selector_unavailability_for_unrecognized_output(
     tmp_path: Path,
 ) -> None:

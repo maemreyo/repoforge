@@ -284,8 +284,9 @@ class RecordingSessionBackend:
         check: bool,
         cancel_token=None,
         stdin_text: str | None = None,
+        extra_env: tuple[tuple[str, str], ...] = (),
     ) -> CommandResult:
-        del session, timeout, output_limit, cancel_token, stdin_text
+        del session, timeout, output_limit, cancel_token, stdin_text, extra_env
         self.executed.append((argv, check))
         return CommandResult(argv, str(cwd), 0, "ok", "")
 

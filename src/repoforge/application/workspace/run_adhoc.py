@@ -34,6 +34,7 @@ from ...domain.adhoc import (
     validate_adhoc_shell_runner,
     validate_adhoc_stdin,
 )
+from ...domain.credential_profiles import resolve_credential_profile_env
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
 from ...domain.execution_profiles import available_execution_profiles
@@ -552,6 +553,7 @@ class WorkspaceAdhocRunner:
                     output_limit=self.ctx.config.server.max_tool_output_chars,
                     cancel_token=cancel_token,
                     stdin_text=stdin_text,
+                    extra_env=resolve_credential_profile_env(locked_repo.credential_profiles),
                 )
                 try:
                     with (
@@ -837,6 +839,7 @@ class WorkspaceAdhocRunner:
                         output_limit=self.ctx.config.server.max_tool_output_chars,
                         cancel_token=c.cancellation_token,
                         stdin_text=None,
+                        extra_env=resolve_credential_profile_env(locked_repo.credential_profiles),
                     )
                     try:
                         with (
