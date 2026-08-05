@@ -1,11 +1,14 @@
 # Autonomy Policy Model
 
-- Version: v4
-- Status: **DRAFT — architecture review round 4.** Policy decisions are settled where marked "settled"
-  in §13. Platform tool exposure, publication-override wiring, containment, credential handling,
-  compatibility migration, backend enforcement proof, and the outside-checkout host-effect matrix remain
-  gated by the implementing issues cited in §13, including #375, #381, #384, #395, #400, #405, #406, and
-  #407 — this document gives those issues stable terms; it does not claim their implementation evidence.
+- Version: v5
+- Status: **DRAFT — architecture review round 4, host-effect matrix added in v5.** Policy decisions are
+  settled where marked "settled" in §13. Platform tool exposure, publication-override wiring,
+  containment, credential handling, compatibility migration, and backend enforcement proof remain gated
+  by the implementing issues cited in §13, including #375, #381, #384, #395, #400, #406, and #407 — this
+  document gives those issues stable terms; it does not claim their implementation evidence. §14 (v5)
+  settles the host-effect matrix's categories and default classification #405 owned; it does not, and
+  cannot yet, prove enforcement, because the `trusted_host` lease (#383) and `sandboxed` backend (#384)
+  §14 classifies against do not exist yet — see §14's own honesty note on this.
 - Key: `autonomy-policy-model`
 - Implements: [#370](https://github.com/maemreyo/repoforge/issues/370)
 - Read by: every issue under EPIC [#369](https://github.com/maemreyo/repoforge/issues/369) that defines
@@ -13,6 +16,17 @@
 
 ## Changelog
 
+- **v5** — Added §14, closing #405: the host-effect matrix, covering filesystem-outside-checkout,
+  process, network-egress, sockets/daemons, and package-manager-hooks effect categories, each mapped to a
+  default classification (`allowed` / `denied` / `lease-gated` / `observed-only`) per #405's AC1. Settled
+  AC2 (a
+  workspace cwd is never treated as filesystem containment — already true of `FilesystemAccess`, just not
+  previously stated as settled) and AC4 (control-plane state, protected refs, credential stores, and
+  destructive remote effects stay governed by §6 regardless of §14's classification, never re-opened by
+  it). Left AC3 (the lease "cannot silently authorize... effects that were not granted") as a requirement
+  on #383's lease design, not a settled fact, because the lease #383 would check against does not exist
+  yet — appended as a new section rather than inserted, to avoid the cross-reference breakage v3's
+  changelog recorded from inserting §3 in the middle of an already-cited numbering.
 - **v4** — Review round 4 found: environment-variable wording overstated what's guaranteed present
   (§2, §4 — `SubprocessCommandExecutor.environment()` forwards allowlist vars only when present in
   `os.environ`, and always synthesizes `PATH` regardless); the mode matrix conflated **execution
@@ -44,9 +58,10 @@ who can authorize it, and how that authorization is bounded in time and scope.
 
 It does **not** design the wire schema for any tool (#376, #382, #399), the container/sandbox runtime
 (#384), the full workspace-lifecycle domain model (#371 owns that; §3 locks the policy principles it
-must satisfy), the full host-effect matrix (#405 owns that; §4 only requires it not be flattened into
-"same as workspace"), or the lease storage format in full detail (#383). Those issues implement
-decisions made here; §13 lists what remains open.
+must satisfy), proof that the host-effect matrix's classifications are actually enforced (§14 defines the
+target classification; #385/#406/#407 own proving it holds), or the lease storage format in full detail
+(#383, which §14's classification is the target contract for). Those issues implement decisions made
+here; §13 lists what remains open.
 
 ## 2. Threat model: assets, actors, trust boundaries, attacker assumptions
 
@@ -150,8 +165,8 @@ containment is not the absence of every other guarantee.
 |---|---|---|---|---|
 | Execution backend | `native_uncontained` | `native_uncontained` | `sandboxed` (required) | `native_uncontained` |
 | Shell execution (tool policy) | None (typed diagnostics/profiles only) | Allowlisted argv via `workspace_exec` | Broad, inside container | Broad, on host |
-| Filesystem — tool/path policy | Tool calls validated to workspace paths | Same | Same | Workspace by default; effects **outside the checkout** (HOME/dotfiles, system paths, other repos) require lease-granted scope and are classified by #405 as allowed, denied, lease-gated, or observed-only — never flattened to "same as the other columns" |
-| Filesystem — process containment | None (`HOST_ACCOUNT_ACCESS`) | None (`HOST_ACCOUNT_ACCESS`) | Container-isolated, no host escape | None — there is no OS containment. Lease/policy checks gate admission and #385/#405 hooks enforce where technically possible; effects that cannot be safely constrained are denied or explicitly observed-only, never represented as contained |
+| Filesystem — tool/path policy | Tool calls validated to workspace paths | Same | Same | Workspace by default; effects **outside the checkout** (HOME/dotfiles, system paths, other repos) require lease-granted scope named in `host_effect_scope` and are classified in §14 as allowed, denied, lease-gated, or observed-only — never flattened to "same as the other columns" |
+| Filesystem — process containment | None (`HOST_ACCOUNT_ACCESS`) | None (`HOST_ACCOUNT_ACCESS`) | Container-isolated, no host escape | None — there is no OS containment. Lease/policy checks gate admission per §14's categories and #385/#406/#407 hooks enforce where technically possible; effects that cannot be safely constrained are denied or explicitly observed-only, never represented as contained |
 | Network — process containment | None (`HOST_INHERITED`) | None (`HOST_INHERITED`) | Container network policy — default-deny vs. profile-based is open, §13 | Host network, operator-declared scope, not enforced by containment |
 | Credential exposure | `DEFAULT_ALLOWED_ENVIRONMENT`, when set | Same | Whether ambient credentials are denied outright or brokered per profile is open, §13 | Operator-declared, brokered per #381 |
 | Git-argv content guard | N/A | Applied to `git` argv only | Applied to `git` argv only | Applied to `git` argv only — never disabled, never a general circuit breaker (§8) |
@@ -236,7 +251,8 @@ checkout_identity
 workspace_kind            (managed_worktree | adopted_worktree | attached_shared, §3)
 branch_or_ref
 allowed_effects
-host_effect_scope         (filesystem paths, process, network, package managers — #405's classification)
+host_effect_scope         (filesystem paths, process, network, daemons, package managers — categories
+                          and default classification in §14)
 execution_environment_id
 credential_profile_ids
 granted_by
@@ -337,6 +353,9 @@ capability negotiation validated through #404 before the old surface is removed.
 - **Provenance class** — [#445](https://github.com/maemreyo/repoforge/issues/445).
 - **Exact-state binding** — head SHA + workspace fingerprint or [#440](https://github.com/maemreyo/repoforge/issues/440)'s token.
 - **One documented path per intent** — owned by `SERVER_INSTRUCTIONS`/#399; terminology owned here.
+- **Host-effect matrix** — the filesystem/process/network/daemon/package-manager categories and their
+  default `allowed` / `denied` / `lease-gated` / `observed-only` classification, for effects outside the
+  checkout (§14). Fills the `host_effect_scope` field in §7's lease record.
 
 ## 13. Decisions and open questions
 
@@ -355,6 +374,14 @@ capability negotiation validated through #404 before the old surface is removed.
    postures on an uncontained backend, not instances of `trusted_host` (§4).
 8. A `trusted_host` lease grants execution reach, not publication-override authority; the two are
    separate authorities (§6).
+9. **Outside-checkout host-effect matrix** — filesystem (non-credential, credential/secret,
+   control-plane), process (creation, persistent/daemonizing, orphan cleanup), network (declared-effect
+   egress, arbitrary egress, local sockets), daemon/container-control sockets, and package-manager
+   (project-local, global/lifecycle-hook, shared-`PATH`-executable) categories, each mapped to
+   allowed/denied/lease-gated/observed-only (§14). AC3 (a lease cannot silently authorize an
+   ungranted effect) is stated as a requirement on #383's design, not proven, since the lease and the
+   `sandboxed` backend it would be checked against (#384) don't exist yet — tracked as open item 5 below,
+   not re-opened as settled here.
 
 **Genuinely open:**
 1. **Tool-count mechanics for `workspace_exec`** (§9) — gated on #404.
@@ -366,14 +393,98 @@ capability negotiation validated through #404 before the old surface is removed.
    attached workspaces alike -- there is no kind that gets a different answer. That is not the same
    question as this item, which is about a *future* authority (an operator-only override, or a
    `trusted_host`-scoped one) that doesn't exist yet. Still gated on #385/#407.
-4. **Sandboxed network default posture** — default-deny vs. profile-based (§4 mode matrix). Gated on
-   #384/#405.
+4. **Sandboxed network default posture** — default-deny vs. profile-based, for the `sandboxed` backend's
+   own container network policy under `sandboxed_turbo` (§4 mode matrix). This is a container-config
+   decision #384 makes for the backend itself, distinct from §14's `trusted_host`/`host_effect_scope`
+   classification of effects outside the checkout — #405's contribution to this item is complete (§14);
+   what remains is gated on #384 alone.
 5. **Ambient credentials under `sandboxed_turbo`** — denied outright vs. brokered per profile (§4).
    Gated on #381/#384.
-6. **Outside-checkout host-effect schema representation** — how HOME/dotfiles/system-path/daemon
-   effects are declared and checked against a lease's `host_effect_scope` (§4, §7). #405's to own.
-7. **Backend enforcement proof** — that §6's non-bypassable list and §2's threat classes hold under
-   adversarial testing is #385/#406/#407's job, not something a policy document settles by assertion.
+6. **Backend enforcement proof** — that §6's non-bypassable list and §2's threat classes hold under
+   adversarial testing is #385/#406/#407's job, not something a policy document settles by assertion. §14
+   is the target classification that proof would be run against, not the proof itself.
 
-Issues implementing §3, §4, §7, §8 (#371, #383, #384, #385, #405) should cite this document rather than
+Issues implementing §3, §4, §7, §8, §14 (#371, #383, #384, #385) should cite this document rather than
 re-deriving mode semantics; the open questions above are theirs, or #375/#395/#399/#404's, to close.
+
+## 14. Host-effect matrix (#405): filesystem, process, network, daemon, and package-manager boundaries
+
+**Settles §13's open item 6.** This is the schema §7's `host_effect_scope` field and §4's "classified by
+#405 as allowed, denied, lease-gated, or observed-only" cells point at. It classifies each effect
+*outside the checkout* — the workspace root is never the boundary being drawn here; see the honesty note
+at the end of this section for what "classification" does and does not mean today.
+
+### 14.1 The four outcomes (unchanged from §4/§7, defined precisely here)
+
+- **allowed** — permitted under every authorization posture in §4's mode matrix, without a lease. Reserved
+  for effects that are read-only, inherently workspace-scoped, or already governed by an independent
+  control (§6) regardless of posture.
+- **denied** — blocked under every authorization posture, including `trusted_host`. No lease field in §7
+  can grant it; it is not part of `allowed_effects`'/`host_effect_scope`'s domain at all. This is how §6's
+  non-bypassable list stays independent of this matrix (AC4) — a §6 control is never re-expressed here as
+  something a lease could widen.
+- **lease-gated** — denied by default; reachable only under a `trusted_host` lease whose `host_effect_scope`
+  (§7) explicitly names the effect, scoped to the categories in 14.2. Absence from the granted scope means
+  denied, not allowed — §13 open item 6 and #383 AC3 both require the lease to fail closed on anything not
+  named.
+- **observed-only** — the action is allowed to proceed (because it cannot be safely or meaningfully
+  blocked at this layer — e.g., a child process's own internal syscalls) but must be audited per §7's audit
+  semantics: declared vs. observed effect, command digest, execution-environment identity. Observed-only is
+  not a weaker form of denied; it is a deliberate choice for effects where the only honest enforcement point
+  is "record what happened," not "block it."
+
+### 14.2 Effect categories and default classification (target policy)
+
+| Effect category | Representative effects | Default classification | Notes |
+|---|---|---|---|
+| **Filesystem — outside checkout, non-credential** | Reads/writes under the operator's `$HOME` outside dotfile/credential paths; writes to shared system paths (`/etc`, `/usr/local`, package-manager global directories); writes to sibling repositories/worktrees not named in the current workspace context; temp-directory writes outside the workspace's own temp scope | **lease-gated** | A `trusted_host` lease must name the specific path(s) or path class in `host_effect_scope`; nothing here is granted by posture alone (§4's `governed_strict`/`governed_relaxed` rows: "Workspace by default"). |
+| **Filesystem — credential/secret paths** | `~/.ssh`, `~/.aws`, `~/.docker/config.json`, cloud-CLI credential caches, shell-history files, any path a credential profile (#381) resolves to | **denied** | Independently owned by §6 point 3 (no secret export as a tool response) and #381's env-name-only design; this matrix does not create a lease path to widen it — a lease's `host_effect_scope` cannot include these paths, which is what keeps AC4 true. |
+| **Filesystem — RepoForge control-plane state** | Runtime state directories, config-generation store, audit/lease ledgers, restart-history records | **denied** | Independently owned by §6 point 4 (no mutation of control-plane state outside its typed write path); not liftable by any lease, by definition of "outside its own typed write path." |
+| **Process — creation and short-lived children** | Spawning a subprocess, a subprocess spawning its own children, ordinary process exit | **allowed** | Already the case today for admitted commands; not a new grant. Resource limits (timeout, output size) stay enforced per `EnforcementAssessment` (`domain/execution_environment.py`) regardless of this row. |
+| **Process — persistent/background services, daemonizing, signal delivery beyond the owned tree, resource-limit escapes (e.g. disabling a ulimit)** | `nohup`/`setsid`/detaching a process from RepoForge's tree; sending signals to PIDs outside the spawned tree; raising a subprocess's own resource ceiling above what the execution environment declared | **lease-gated** | Must be named in `host_effect_scope`'s process category. §406's "terminate the process tree of already-running work" revocation guarantee (§7) only holds for processes that stayed inside the tree RepoForge tracks — a lease that grants daemonizing must also accept that revocation may not reach the detached process, and that tradeoff must be visible in the grant, not silent. |
+| **Process — orphan cleanup** | RepoForge reaping a process it lost track of after a crash/restart | **observed-only** | This is RepoForge's own bookkeeping (Worker binding, issue #256), not a new host effect being authorized; recorded via the restart-history/audit path, not gated by a lease. |
+| **Network — egress to hosts already required for the declared effect** | DNS + TCP to the git remote / package registry a credential profile (#381) or execution profile (#380) already names | **allowed** | Redundant with the credential/execution-profile admission that already ran; this row does not add new reach. |
+| **Network — egress to arbitrary/undeclared hosts** | Outbound connections to a host not implied by the current git remote, execution profile, or credential profile | **lease-gated** | Must be named in `host_effect_scope`'s network category, by host or host class — never granted as "network: yes" with no scope, which is the specific silent-over-authorization failure #383 AC3 rules out. |
+| **Network — local ports and Unix domain sockets** | Binding a local listener; connecting to a local Unix socket not already required (e.g. a local dev server, a language-server socket) | **lease-gated** | Same scope requirement as above; local does not mean lower-risk — a local listener can be reachable from other host processes. |
+| **Network/daemon — container and VM control sockets** | Docker/Podman daemon sockets, `ssh-agent` sockets, cloud-provider local agent sockets (e.g. a local metadata proxy) | **lease-gated** | Named explicitly rather than folded into generic "network," because these sockets typically grant effects (start/stop containers, sign with an agent-held key) far broader than the network reachability alone would suggest; `host_effect_scope` must name the daemon/socket class, not just "network." |
+| **Package manager — project-local install (respects the checkout's own manifest/lockfile)** | `npm install`, `pip install -r requirements.txt`, `cargo build` inside the workspace | **allowed** | Already the ordinary case for an admitted execution profile (#380); writes stay under the workspace or a profile-declared cache path. |
+| **Package manager — global install, lifecycle hooks reaching outside the checkout, toolchain-manager version switches** | `npm install -g`, `pip install --user`, a package's `postinstall` script writing outside the workspace, `pyenv`/`nvm`/`rustup` global default changes | **lease-gated** | Must be named in `host_effect_scope`'s package-manager category; #385/#406/#407 own the actual enforcement hook, since the argv guard (§8) cannot see into a lifecycle hook's own behavior. |
+| **Package manager — generated executables added to a shared `PATH` location** | A global install placing a binary on a system-wide `PATH` directory the operator's other shells also see | **lease-gated** | Distinguished from the row above because its blast radius extends to processes RepoForge never spawned; treated as its own named scope, not implied by "global install: yes." |
+
+### 14.3 What this section settles, and what it does not
+
+- **AC1** (a versioned host-effect matrix maps each effect to one of the four outcomes) — settled by 14.1
+  and 14.2 above, versioned with this document (v5).
+- **AC2** (a workspace cwd is never treated as filesystem containment) — **already true in code, confirmed
+  here rather than newly built.** `ExecutionScope.__post_init__` (`domain/execution_environment.py:262-267`)
+  validates that `command_cwd` resolves inside `root` — that is an admission check on *which* command is
+  allowed to run *where*, not a containment claim about the process once it runs. The process's actual
+  filesystem reach is declared separately as `FilesystemAccess.HOST_ACCOUNT_ACCESS`
+  (`execution_environment.py:47`, wired at `native.py:67, 87-88` per §4) precisely because the
+  `native_uncontained` backend gives no OS-level filesystem boundary at the cwd or anywhere else. The two
+  facts — "this command was admitted because its cwd was inside the workspace" and "this process can reach
+  the operator's whole account" — are deliberately kept as two different fields rather than one, and 14.2's
+  categories are all effects available *despite* that cwd check, which is the point of this matrix existing
+  at all.
+- **AC4** (control-plane state, protected refs, credential stores, and destructive remote effects remain
+  independently protected) — settled by construction: 14.2 marks every §6-owned effect **denied**, never
+  **lease-gated**, and this document does not introduce a mechanism by which `host_effect_scope` could name
+  one of them. §6 is not re-opened by this matrix; it sits underneath it.
+- **AC3** (a host-bypass lease cannot silently authorize an effect that was not granted) — **not settled
+  here, and cannot be**, because the `trusted_host` lease this matrix classifies against (#383) does not
+  exist yet, nor does the `sandboxed` backend (#384) that `sandboxed_turbo`'s container-network-policy open
+  question (§13 item 4) depends on. What 14.1-14.2 do is state the *requirement* #383's implementation must
+  satisfy: `host_effect_scope` must be checked per named effect/category, absence from the grant must mean
+  denied (never a default-allow fallback), and a lease naming one category (e.g. filesystem) must not be
+  interpreted as granting another (e.g. network). This mirrors how §7 already states the lease record's
+  shape before #383 builds it, and how §6 point 6 states publication-override authority's separateness
+  before #395 builds it — a target contract, not a completed proof.
+
+**Honesty note, consistent with §4's existing framing:** on the only backend that ships today
+(`native_uncontained`), nothing in RepoForge currently *enforces* the "denied" or "lease-gated" rows in
+14.2 at the OS level — there is no lease (#383) to check a grant against, and no sandbox (#384) to make
+"denied" mean anything stronger than "not admitted through RepoForge's own tool surface." A generic-shell
+command admitted under `governed_relaxed` today reaches the operator's account exactly as described in §2's
+threat-model assumption 4 and §4's `HOST_ACCOUNT_ACCESS`/`HOST_INHERITED` rows, independent of what 14.2
+labels it. This matrix is the target classification #383's lease design and #385/#406/#407's enforcement
+hooks must conform to; it is not itself a claim that the enforcement exists today.
