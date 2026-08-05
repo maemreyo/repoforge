@@ -25,6 +25,7 @@ from ...ports.command import CommandExecutor, CommandResult
 _API_VERSION = "2022-11-28"
 _HTTP_STATUS = re.compile(r"HTTP\s+(\d{3})", re.IGNORECASE)
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_SAFE_ENVIRONMENT_KEYS = ("PATH", "LANG", "LC_ALL")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,11 +70,26 @@ def _detail_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _response_body(stdout: str) -> str:
+    """Strip the leading HTTP status/header block `_api`'s `--include` prints.
+
+    `--include` is what makes `_http_status` able to read the status line; the
+    cost is that `stdout` is the raw response with headers prepended, not bare
+    JSON. Headers end at the first blank line (CRLF- or LF-terminated) per HTTP
+    framing, so splitting there and keeping everything after is exact, not a
+    heuristic -- a JSON body never contains a literal blank line itself.
+    """
+    for separator in ("\r\n\r\n", "\n\n"):
+        if separator in stdout:
+            return stdout.split(separator, 1)[1]
+    return stdout
+
+
 def _json_value(result: CommandResult) -> object | None:
     if result.returncode != 0 or result.stdout_truncated:
         return None
     try:
-        return cast(object, json.loads(result.stdout or "null"))
+        return cast(object, json.loads(_response_body(result.stdout) or "null"))
     except json.JSONDecodeError:
         return None
 
@@ -202,6 +218,21 @@ class CommandGitHubCapabilityPreflight:
         self._server = server
         self._output_limit = min(max(server.max_tool_output_chars, 500_000), 5_000_000)
 
+    def _isolated_environment(self, auth_context: ProcessAuthContext) -> dict[str, str]:
+        # auth_context.environment_dict() carries only the broker-issued identity
+        # material (e.g. GH_TOKEN) -- never PATH -- so calling `gh` with it verbatim
+        # fails closed with "Executable not found: gh" the moment PATH isn't already
+        # ambient in the parent process. Seed from the executor's own resolved PATH
+        # (same allowlist repository_observation.py uses) before layering the
+        # reviewed identity on top.
+        environment = {
+            key: value
+            for key, value in self._executor.environment().items()
+            if key in _SAFE_ENVIRONMENT_KEYS
+        }
+        environment.update(auth_context.environment_dict())
+        return environment
+
     def _api(
         self,
         cwd: Path,
@@ -225,7 +256,7 @@ class CommandGitHubCapabilityPreflight:
                 f"X-GitHub-Api-Version: {_API_VERSION}",
             ],
             cwd=cwd,
-            environment=auth_context.environment_dict(),
+            environment=self._isolated_environment(auth_context),
             secrets=auth_context.secret_values,
             check=False,
             timeout=self._server.default_command_timeout_seconds,
@@ -257,7 +288,7 @@ class CommandGitHubCapabilityPreflight:
         cwd: Path,
         request: GitHubCapabilityPreflightRequest,
         auth_context: ProcessAuthContext,
-    ) -> tuple[str | None, tuple[GitHubCapabilityResult, ...] | None]:
+    ) -> tuple[str | None, bool, tuple[GitHubCapabilityResult, ...] | None]:
         result = self._api(
             cwd,
             request,
@@ -265,19 +296,23 @@ class CommandGitHubCapabilityPreflight:
             f"repositories/{request.repository_id}",
         )
         if result.returncode != 0:
-            return None, self._all_failed(request, result)
+            return None, False, self._all_failed(request, result)
         payload = _json_value(result)
         if not isinstance(payload, dict):
-            return None, tuple(
-                GitHubCapabilityResult(
-                    capability=capability,
-                    state=GitHubCapabilityEvidenceState.PROVIDER_UNAVAILABLE,
-                    reason_code="repository_payload_invalid",
-                    detail_digest=_detail_digest(result.stdout),
-                    error_code=ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
-                    policy_category="provider",
-                )
-                for capability in request.capability_ids
+            return (
+                None,
+                False,
+                tuple(
+                    GitHubCapabilityResult(
+                        capability=capability,
+                        state=GitHubCapabilityEvidenceState.PROVIDER_UNAVAILABLE,
+                        reason_code="repository_payload_invalid",
+                        detail_digest=_detail_digest(result.stdout),
+                        error_code=ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
+                        policy_category="provider",
+                    )
+                    for capability in request.capability_ids
+                ),
             )
         repository_id = str(payload.get("id", ""))
         slug = payload.get("full_name")
@@ -286,19 +321,32 @@ class CommandGitHubCapabilityPreflight:
             or not isinstance(slug, str)
             or _REPOSITORY.fullmatch(slug) is None
         ):
-            return None, self._all_failed(request, result, repository_mismatch=True)
+            return None, False, self._all_failed(request, result, repository_mismatch=True)
         if payload.get("archived") is True:
-            return None, tuple(
-                GitHubCapabilityResult(
-                    capability=capability,
-                    state=GitHubCapabilityEvidenceState.PROVEN_DENIED,
-                    reason_code="repository_archived",
-                    detail_digest=_detail_digest(result.stdout),
-                    error_code=ErrorCode.GITHUB_API_PERMISSION_DENIED,
-                )
-                for capability in request.capability_ids
+            return (
+                None,
+                False,
+                tuple(
+                    GitHubCapabilityResult(
+                        capability=capability,
+                        state=GitHubCapabilityEvidenceState.PROVEN_DENIED,
+                        reason_code="repository_archived",
+                        detail_digest=_detail_digest(result.stdout),
+                        error_code=ErrorCode.GITHUB_API_PERMISSION_DENIED,
+                    )
+                    for capability in request.capability_ids
+                ),
             )
-        return slug, None
+        # `permissions.push` is GitHub's own verdict on whether *this exact*
+        # authenticated caller can write to *this exact* repository -- scoped
+        # evidence a bare OAuth/PAT scope list can't give (a "repo"-scoped token
+        # says nothing about collaborator-level access to one specific repo).
+        # Stored-account grants never populate permission_ids (see
+        # GhCliStoredAccountTokenSource.issue), so this is the only real write
+        # evidence available for that credential kind; treat it as authoritative.
+        permissions = payload.get("permissions")
+        push_permission = isinstance(permissions, dict) and permissions.get("push") is True
+        return slug, push_permission, None
 
     def _probe_capability(
         self,
@@ -306,6 +354,7 @@ class CommandGitHubCapabilityPreflight:
         request: GitHubCapabilityPreflightRequest,
         auth_context: ProcessAuthContext,
         slug: str,
+        repository_push_permission: bool,
         capability: GitHubOperationCapability,
     ) -> GitHubCapabilityResult:
         unobservable = _UNOBSERVABLE_REASONS.get(capability)
@@ -337,7 +386,7 @@ class CommandGitHubCapabilityPreflight:
                 error_code=ErrorCode.GITHUB_PROVIDER_UNAVAILABLE,
                 policy_category="provider",
             )
-        if requirement.write and not has_explicit_permissions:
+        if requirement.write and not has_explicit_permissions and not repository_push_permission:
             return _unobservable_result(capability, "write_permission_evidence_absent")
 
         if capability in _RULESET_CAPABILITIES:
@@ -391,12 +440,16 @@ class CommandGitHubCapabilityPreflight:
             )
             return GitHubCapabilityPreflightReport.build(request, results)
 
-        slug, repository_failure = self._repository(cwd, request, auth_context)
+        slug, repository_push_permission, repository_failure = self._repository(
+            cwd, request, auth_context
+        )
         if repository_failure is not None:
             return GitHubCapabilityPreflightReport.build(request, repository_failure)
         assert slug is not None
         results = tuple(
-            self._probe_capability(cwd, request, auth_context, slug, capability)
+            self._probe_capability(
+                cwd, request, auth_context, slug, repository_push_permission, capability
+            )
             for capability in request.capability_ids
         )
         return GitHubCapabilityPreflightReport.build(request, results)

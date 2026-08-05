@@ -343,6 +343,14 @@ class AuthLease:
             _bounded_text(value, "provider metadata value")
         if len(set(metadata_names)) != len(metadata_names):
             raise ValueError("provider metadata names must be unique")
+        # provider_metadata is read everywhere as dict(lease.provider_metadata) --
+        # name order carries no meaning. But it's still a tuple, so `==` (used to
+        # detect a lease changing between authorization and effect) IS
+        # order-sensitive, and the durable store round-trips it sorted
+        # (json_operation_identity_store.py) while a freshly issued lease keeps
+        # construction order. Canonicalize here so every AuthLease, regardless of
+        # where it was built, compares equal when its *contents* match.
+        object.__setattr__(self, "provider_metadata", tuple(sorted(self.provider_metadata)))
 
     def payload(self) -> dict[str, object]:
         return {
