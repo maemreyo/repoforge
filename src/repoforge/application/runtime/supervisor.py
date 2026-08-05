@@ -350,8 +350,17 @@ class RuntimeSupervisor:
         # had died kept publishing `phase: healthy` while every read needing the socket
         # timed out -- and the recovery commands, which go through that same socket, could
         # not run either (#322).
-        serving = self._control.is_serving()
-        checks.append(HealthCheck("control_plane", serving, self._control.serving_diagnostic()))
+        #
+        # `is_healthy()`, not `is_serving()`, drives this boolean: an implementation
+        # backed by a fixed-size worker pool can keep `is_serving() == True` even after
+        # losing some (not all) of its workers -- it can still answer requests -- but
+        # that pool never replenishes, so the loss is permanent. Feeding `is_serving()`
+        # into this check would let a runtime running at a silent, persistent capacity
+        # loss keep publishing `healthy`, the same gap #322 closed, one layer down
+        # (#448 Slice 1 partial-worker health semantics). `serving_diagnostic()` still
+        # supplies the detail text either way.
+        healthy = self._control.is_healthy()
+        checks.append(HealthCheck("control_plane", healthy, self._control.serving_diagnostic()))
         if self._execution_worker is not None:
             worker_alive = bool(
                 self._execution_child and self._execution_worker.is_alive(self._execution_child)

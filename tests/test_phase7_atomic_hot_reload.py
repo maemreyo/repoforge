@@ -1696,6 +1696,9 @@ def test_supervisor_restarts_latest_hot_reloaded_generation_after_child_crash(
         def is_serving(self) -> bool:
             return True
 
+        def is_healthy(self) -> bool:
+            return True
+
         def serving_diagnostic(self) -> str:
             return "fake control server"
 

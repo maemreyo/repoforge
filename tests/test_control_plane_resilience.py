@@ -116,7 +116,8 @@ def test_the_serve_thread_survives_every_kind_of_peer(tmp_path: Path) -> None:
     """After a mix of abuse, the server is still the same live thread -- not restarted."""
     server = _server(tmp_path)
     path = resolve_unix_socket_path(tmp_path / "control.sock")
-    thread = server._thread
+    assert server._run is not None
+    thread = server._run.accept_thread
     assert thread is not None
     try:
         # Connect and close immediately, sending nothing at all.
@@ -224,9 +225,11 @@ def test_a_dead_serve_thread_is_reported_rather_than_assumed_alive(tmp_path: Pat
     """
     server = _server(tmp_path)
     try:
-        thread = server._thread
+        run = server._run
+        assert run is not None
+        thread = run.accept_thread
         assert thread is not None
-        server._stop.set()
+        run.stop.set()
         thread.join(timeout=5.0)
 
         assert thread.is_alive() is False
@@ -257,6 +260,9 @@ def test_runtime_health_fails_when_the_control_plane_is_not_serving(tmp_path: Pa
             return None
 
         def is_serving(self) -> bool:
+            return False
+
+        def is_healthy(self) -> bool:
             return False
 
         def serving_diagnostic(self) -> str:
@@ -319,6 +325,102 @@ def test_runtime_health_fails_when_the_control_plane_is_not_serving(tmp_path: Pa
     assert named["control_plane"][0] is False
     assert "no longer running" in named["control_plane"][1]
     assert healthy is False, "a runtime with no control plane reported itself healthy"
+
+
+def test_watchdog_degrades_when_control_pool_loses_one_worker(tmp_path: Path) -> None:
+    """A control plane that can still answer requests must not read `healthy`.
+
+    Uses a real `UnixRuntimeControlServer`, not a fake: a fixed-size worker pool that
+    has lost one (of two) workers to an unexpected exception is still `is_serving() ==
+    True` -- some capacity remains -- but that loss never self-heals, so the watchdog's
+    own health observation must feed `is_healthy()`, not `is_serving()`, into
+    `HealthCheck.ok` (#448 Slice 1 partial-worker health semantics). Conflating the two
+    at this call site would let a runtime running at a silent, persistent capacity loss
+    keep publishing `phase: healthy`, the exact gap #322 closed, one layer down.
+    """
+    from repoforge.application.runtime.supervisor import RuntimeSupervisor
+    from repoforge.domain.runtime import ChildProcess
+    from repoforge.domain.runtime import ControlResponse as _Response
+    from repoforge.testing import FixedClock, SequenceIdGenerator
+
+    class _Mcp:
+        def request(self, request: object, *, timeout_seconds: float = 10.0) -> _Response:
+            return _Response(1, True, "c" * 24, "healthy")
+
+    class _Tunnel:
+        def is_alive(self, child: object) -> bool:
+            return True
+
+    class _Store:
+        def read(self) -> None:
+            return None
+
+        def write(self, record: object) -> None:
+            return None
+
+        def clear(self, *, expected_pid: int | None = None) -> None:
+            return None
+
+    class _Configs:
+        def active(self) -> None:
+            return None
+
+        def clear_activation_target(self, *, expected_generation: int | None = None) -> None:
+            return None
+
+    class _Locks:
+        def lock(self, name: str, **kwargs: object) -> contextlib.AbstractContextManager[None]:
+            return contextlib.nullcontext()
+
+        def path_for(self, name: str) -> Path:
+            return tmp_path / name
+
+    class _Processes:
+        def identity(self, pid: int) -> str:
+            return "f" * 64
+
+    control = UnixRuntimeControlServer(tmp_path / "control.sock", max_concurrent_requests=2)
+    control.start(lambda request: ControlResponse(1, True, request.correlation_id, "ok"))
+    try:
+        run = control._run
+        assert run is not None
+
+        def bad_fn(connection: socket.socket) -> None:
+            raise RuntimeError("deliberate worker-loop failure for watchdog degrade test")
+
+        run.queue.put((bad_fn, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)))
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if sum(1 for w in run.workers if w.is_alive()) == 1:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("the worker running the bad work item never exited")
+
+        supervisor = RuntimeSupervisor(
+            store=_Store(),  # type: ignore[arg-type]
+            configs=_Configs(),  # type: ignore[arg-type]
+            locks=_Locks(),  # type: ignore[arg-type]
+            control=control,
+            mcp_control=_Mcp(),  # type: ignore[arg-type]
+            tunnel=_Tunnel(),  # type: ignore[arg-type]
+            profile_store=None,  # type: ignore[arg-type]
+            clock=FixedClock("2026-07-28T00:00:00+00:00"),
+            ids=SequenceIdGenerator(("health",)),
+            processes=_Processes(),  # type: ignore[arg-type]
+            mcp_runtime_path=tmp_path / "runtime.json",
+            log_path=tmp_path / "runtime.log",
+        )
+
+        healthy, checks = supervisor._observe_health(1, ChildProcess(222, "f" * 64, "now"))
+
+        named = {name: (ok, detail) for name, ok, detail in checks}
+        assert named["control_plane"][0] is False, "one lost worker must degrade the check"
+        assert "workers=1/2" in named["control_plane"][1], named["control_plane"][1]
+        assert "RuntimeError" in named["control_plane"][1], named["control_plane"][1]
+        assert healthy is False, "a runtime at a permanent partial capacity loss reported healthy"
+    finally:
+        control.close()
 
 
 def test_restart_evidence_survives_the_stability_reset_that_clears_restart_count() -> None:

@@ -508,6 +508,9 @@ def test_supervisor_commits_active_generation_only_after_health(tmp_path: Path) 
         def is_serving(self) -> bool:
             return True
 
+        def is_healthy(self) -> bool:
+            return True
+
         def serving_diagnostic(self) -> str:
             return "fake control server"
 
@@ -647,6 +650,9 @@ def test_supervisor_health_command_fails_when_child_is_not_healthy() -> None:
         def is_serving(self) -> bool:
             return True
 
+        def is_healthy(self) -> bool:
+            return True
+
         def serving_diagnostic(self) -> str:
             return "fake control server"
 
@@ -716,6 +722,9 @@ def test_supervisor_health_command_reports_stale_when_never_observed() -> None:
         def is_serving(self) -> bool:
             return True
 
+        def is_healthy(self) -> bool:
+            return True
+
         def serving_diagnostic(self) -> str:
             return "fake control server"
 
@@ -779,6 +788,9 @@ def test_supervisor_health_command_reports_stale_past_the_freshness_threshold() 
             pass
 
         def is_serving(self) -> bool:
+            return True
+
+        def is_healthy(self) -> bool:
             return True
 
         def serving_diagnostic(self) -> str:
@@ -860,6 +872,9 @@ def test_health_command_reads_the_watchdogs_last_snapshot_without_a_new_probe(
             pass
 
         def is_serving(self) -> bool:
+            return True
+
+        def is_healthy(self) -> bool:
             return True
 
         def serving_diagnostic(self) -> str:
@@ -985,6 +1000,9 @@ def test_supervisor_watchdog_restarts_a_live_but_unhealthy_tunnel(tmp_path: Path
             pass
 
         def is_serving(self) -> bool:
+            return True
+
+        def is_healthy(self) -> bool:
             return True
 
         def serving_diagnostic(self) -> str:
